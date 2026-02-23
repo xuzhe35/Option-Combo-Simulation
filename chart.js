@@ -143,16 +143,18 @@ class PnLChart {
         const processedLegs = group.legs.map(leg => {
             const expDateObj = new Date(leg.expDate + 'T00:00:00Z');
             const isExpired = expDateObj <= globalSimDateObj;
-            const simDTE = isExpired ? 0 : diffDays(globalSimDateStr, leg.expDate);
+            const simCalDTE = isExpired ? 0 : diffDays(globalSimDateStr, leg.expDate);
+            const simTradDTE = Math.max(0, Math.round(simCalDTE * 252 / 365));
             const simIV = Math.max(0.001, leg.iv + globalState.ivOffset);
-            const timeToMaturityYears = simDTE / 365.0;
+            const timeToMaturityYears = simTradDTE / 252.0;
             const costBasis = leg.pos * 100 * leg.cost;
 
             return {
                 type: leg.type,
                 pos: leg.pos,
                 strike: leg.strike,
-                simDTE,
+                simTradDTE,
+                simCalDTE,
                 simIV,
                 timeToMaturityYears,
                 costBasis
@@ -170,7 +172,7 @@ class PnLChart {
                 totalCostBasis += l.costBasis;
 
                 let pricePerShare = 0;
-                if (l.simDTE > 0) {
+                if (l.simCalDTE > 0) {
                     pricePerShare = calculateOptionPrice(l.type, currentS, l.strike, l.timeToMaturityYears, globalState.interestRate, l.simIV);
                 } else {
                     if (l.type === 'call') pricePerShare = Math.max(0, currentS - l.strike);

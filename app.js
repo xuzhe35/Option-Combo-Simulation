@@ -42,6 +42,11 @@ function addDays(dateStr, days) {
     return d.toISOString().slice(0, 10);
 }
 
+// Convert calendar days to approximate trading days (252 trading days per year)
+function calendarToTradingDays(calendarDays) {
+    return Math.max(0, Math.round(calendarDays * 252 / 365));
+}
+
 // Initialization
 document.addEventListener('DOMContentLoaded', () => {
     bindControlPanelEvents();
@@ -104,8 +109,9 @@ function bindControlPanelEvents() {
         }
         state.simulatedDate = newDateStr;
         const days = diffDays(state.baseDate, state.simulatedDate);
+        const tradDays = calendarToTradingDays(days);
         dpSlider.value = days;
-        dpDisplay.textContent = `+${days} Days`;
+        dpDisplay.textContent = `+${tradDays} td / +${days} cd`;
         updateDerivedValues();
     };
 
@@ -114,7 +120,8 @@ function bindControlPanelEvents() {
         const newDateStr = addDays(state.baseDate, dNum);
         state.simulatedDate = newDateStr;
         simDateInput.value = state.simulatedDate;
-        dpDisplay.textContent = `+${dNum} Days`;
+        const tradDays = calendarToTradingDays(dNum);
+        dpDisplay.textContent = `+${tradDays} td / +${dNum} cd`;
         updateDerivedValues();
     };
 
@@ -220,12 +227,14 @@ function renderGroups() {
     if (state.groups.length === 0) {
         globalEmptyState.style.display = 'block';
         document.getElementById('globalChartCard').style.display = 'none';
+        document.getElementById('probAnalysisCard').style.display = 'none';
         updateDerivedValues();
         return;
     }
 
     globalEmptyState.style.display = 'none';
     document.getElementById('globalChartCard').style.display = 'block';
+    document.getElementById('probAnalysisCard').style.display = 'block';
 
     state.groups.forEach(group => {
         const clone = groupTemplate.content.cloneNode(true);
@@ -337,12 +346,13 @@ function updateDerivedValues() {
             // Simulated attributes (Date logic)
             // If expiration is in the past compared to simulated date, DTE is 0 (expired)
             const isExpired = new Date(leg.expDate + 'T00:00:00Z') <= new Date(state.simulatedDate + 'T00:00:00Z');
-            const simDTE = isExpired ? 0 : diffDays(state.simulatedDate, leg.expDate);
+            const simCalDTE = isExpired ? 0 : diffDays(state.simulatedDate, leg.expDate);
+            const simTradDTE = calendarToTradingDays(simCalDTE);
             const simIV = Math.max(0.001, leg.iv + state.ivOffset);
-            const timeToMaturityYears = simDTE / 365.0;
+            const timeToMaturityYears = simTradDTE / 252.0;
 
             // Update displays for simulated variables
-            tr.querySelector('.simulated-dte-display').textContent = `Sim DTE: ${simDTE} d`;
+            tr.querySelector('.simulated-dte-display').textContent = `Sim DTE: ${simTradDTE} td / ${simCalDTE} cd`;
             tr.querySelector('.simulated-iv-display').textContent = `Sim IV: ${(simIV * 100).toFixed(2)}%`;
 
             // Calculate Pricing
@@ -350,7 +360,7 @@ function updateDerivedValues() {
             groupCost += costBasis;
 
             let simPricePerShare = 0;
-            if (simDTE > 0) {
+            if (simCalDTE > 0) {
                 simPricePerShare = calculateOptionPrice(leg.type, state.underlyingPrice, leg.strike, timeToMaturityYears, state.interestRate, simIV);
             } else {
                 if (leg.type === 'call') simPricePerShare = Math.max(0, state.underlyingPrice - leg.strike);
@@ -400,6 +410,9 @@ function updateDerivedValues() {
             drawGlobalChart(globalCard);
         }
     }
+
+    // Schedule probability analysis update (debounced)
+    scheduleProbChartUpdate();
 }
 
 // -------------------------------------------------------------
@@ -537,11 +550,13 @@ function setGlobalChartRangeMode(btn, mode) {
     }
 
     drawGlobalChart(card);
+    scheduleProbChartUpdate();
 }
 
 function triggerGlobalChartRedraw() {
     const card = document.getElementById('globalChartCard');
     drawGlobalChart(card);
+    scheduleProbChartUpdate();
 }
 
 function drawGlobalChart(card) {
@@ -592,7 +607,72 @@ window.addEventListener('resize', () => {
     if (globalCard && gcContainer && gcContainer.style.display !== 'none') {
         drawGlobalChart(globalCard);
     }
+
+    // Redraw prob charts from cached data (no re-simulation needed)
+    if (typeof redrawProbChartsFromCache === 'function') {
+        redrawProbChartsFromCache();
+    }
 });
+
+// -------------------------------------------------------------
+// Probability Analysis Helpers (called from prob_charts.js)
+// -------------------------------------------------------------
+
+// Return the mean simulated IV across all legs in the portfolio
+function computePortfolioMeanSimIV() {
+    const allLegs = state.groups.flatMap(g => g.legs);
+    if (allLegs.length === 0) return 0;
+    const total = allLegs.reduce((sum, leg) => sum + Math.max(0.001, leg.iv + state.ivOffset), 0);
+    return total / allLegs.length;
+}
+
+// Return { minS, maxS } using the same logic as the global P&L chart
+function getGlobalChartRange() {
+    const card = document.getElementById('globalChartCard');
+    if (!card) {
+        const pct = 0.10;
+        return { minS: state.underlyingPrice * (1 - pct), maxS: state.underlyingPrice * (1 + pct) };
+    }
+
+    const modeBtn = card.querySelector('.global-range-mode-btn.active');
+    const mode = modeBtn ? modeBtn.dataset.mode : '10';
+
+    if (mode === 'custom') {
+        let minS = parseFloat(card.querySelector('.global-chart-min-input').value) || (state.underlyingPrice * 0.9);
+        let maxS = parseFloat(card.querySelector('.global-chart-max-input').value) || (state.underlyingPrice * 1.1);
+        if (minS >= maxS) maxS = minS + 1;
+        return { minS, maxS };
+    } else {
+        const pct = parseFloat(mode) / 100.0;
+        return {
+            minS: state.underlyingPrice * (1 - pct),
+            maxS: state.underlyingPrice * (1 + pct)
+        };
+    }
+}
+
+// Toggle probability analysis panel
+function toggleProbCharts(btn) {
+    const container = document.getElementById('probAnalysisContainer');
+    if (!container) return;
+    if (container.style.display === 'none') {
+        container.style.display = 'block';
+        btn.textContent = 'Hide Analysis';
+        if (typeof updateProbCharts === 'function') updateProbCharts();
+    } else {
+        container.style.display = 'none';
+        btn.textContent = 'Show Analysis';
+    }
+}
+
+// Debounced trigger for probability chart updates
+let _probChartTimer = null;
+function scheduleProbChartUpdate() {
+    clearTimeout(_probChartTimer);
+    _probChartTimer = setTimeout(() => {
+        if (typeof updateProbCharts === 'function') updateProbCharts();
+    }, 400);
+}
 
 
 // -------------------------------------------------------------
@@ -683,8 +763,9 @@ function importFromJSON(event) {
                 simDateInput.value = state.simulatedDate;
 
                 const days = diffDays(state.baseDate, state.simulatedDate);
+                const tradDays = calendarToTradingDays(days);
                 document.getElementById('daysPassedSlider').value = days;
-                document.getElementById('daysPassedDisplay').textContent = `+${days} Days`;
+                document.getElementById('daysPassedDisplay').textContent = `+${tradDays} td / +${days} cd`;
 
                 document.getElementById('interestRate').value = (state.interestRate * 100).toFixed(2);
                 document.getElementById('interestRateDisplay').textContent = `${(state.interestRate * 100).toFixed(2)}%`;
