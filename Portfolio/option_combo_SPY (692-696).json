@@ -1,0 +1,52 @@
+{
+  "underlyingSymbol": "SPY",
+  "underlyingPrice": 689.53,
+  "baseDate": "2026-02-21",
+  "simulatedDate": "2026-02-21",
+  "interestRate": 0.03,
+  "ivOffset": 0,
+  "groups": [
+    {
+      "id": "_7nnqn0fd9",
+      "name": "Legacy Combo",
+      "legs": [
+        {
+          "id": "_2p2n78eoe",
+          "type": "call",
+          "pos": 5,
+          "strike": 696,
+          "iv": 0.1563,
+          "cost": 21.64,
+          "expDate": "2026-05-15"
+        },
+        {
+          "id": "_hg59i5rho",
+          "type": "put",
+          "pos": 5,
+          "strike": 696,
+          "iv": 0.1563,
+          "cost": 22.854,
+          "expDate": "2026-05-15"
+        },
+        {
+          "id": "_gb4j7c1rv",
+          "type": "call",
+          "pos": -4,
+          "strike": 692,
+          "iv": 0.147,
+          "cost": 10.836,
+          "expDate": "2026-03-06"
+        },
+        {
+          "id": "_dt3fqxg7d",
+          "type": "put",
+          "pos": -4,
+          "strike": 692,
+          "iv": 0.147,
+          "cost": 11.108,
+          "expDate": "2026-03-06"
+        }
+      ]
+    }
+  ]
+}

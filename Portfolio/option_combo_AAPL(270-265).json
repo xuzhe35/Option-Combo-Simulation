@@ -1,0 +1,52 @@
+{
+  "underlyingSymbol": "AAPL",
+  "underlyingPrice": 264.45,
+  "baseDate": "2026-02-21",
+  "simulatedDate": "2026-03-20",
+  "interestRate": 0.03,
+  "ivOffset": 0,
+  "groups": [
+    {
+      "id": "_44mbhbv0w",
+      "name": "Combo Group 1",
+      "legs": [
+        {
+          "id": "_yb6l4jv93",
+          "type": "call",
+          "pos": 5,
+          "strike": 270,
+          "iv": 0.265,
+          "cost": 11.554,
+          "expDate": "2026-05-15"
+        },
+        {
+          "id": "_6kdnla0cj",
+          "type": "put",
+          "pos": 5,
+          "strike": 270,
+          "iv": 0.263,
+          "cost": 16.024,
+          "expDate": "2026-05-15"
+        },
+        {
+          "id": "_vhpxpi216",
+          "type": "call",
+          "pos": -4,
+          "strike": 265,
+          "iv": 0.252,
+          "cost": 7.263,
+          "expDate": "2026-03-20"
+        },
+        {
+          "id": "_ymgfiyta2",
+          "type": "put",
+          "pos": -4,
+          "strike": 265,
+          "iv": 0.252,
+          "cost": 8.146,
+          "expDate": "2026-03-20"
+        }
+      ]
+    }
+  ]
+}

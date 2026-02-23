@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Option Combo Simulator</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <div class="header-content">
+                <div class="logo-area">
+                    <div class="logo-icon">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="12" y1="20" x2="12" y2="10"></line>
+                            <line x1="18" y1="20" x2="18" y2="4"></line>
+                            <line x1="6" y1="20" x2="6" y2="16"></line>
+                        </svg>
+                    </div>
+                    <h1>Option Combo Simulator</h1>
+                </div>
+                <div class="header-actions">
+                    <button id="importBtn" class="btn btn-secondary"
+                        onclick="document.getElementById('importFile').click()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        Import JSON
+                    </button>
+                    <input type="file" id="importFile" accept=".json" style="display: none;"
+                        onchange="importFromJSON(event)">
+                    <button id="exportBtn" class="btn btn-secondary" onclick="exportToJSON()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        Export JSON
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <main class="app-main">
+            <div class="layout-grid">
+                <!-- Control Panel (Left Sidebar) -->
+                <aside class="control-panel">
+                    <div class="panel-card">
+                        <h2>Scenario Controls</h2>
+                        <p class="section-desc">Adjust variables to simulate portfolio value.</p>
+
+                        <div class="control-group">
+                            <label for="underlyingSymbol">
+                                Underlying Symbol
+                            </label>
+                            <input type="text" id="underlyingSymbol" class="number-input" value="SPY"
+                                placeholder="e.g. SPY, AAPL" style="text-transform: uppercase;">
+                        </div>
+
+                        <div class="control-group">
+                            <label for="underlyingPrice"
+                                style="display: flex; align-items: center; justify-content: space-between;">
+                                <span>
+                                    Underlying Price
+                                    <button class="icon-btn" title="Sync Latest Price"
+                                        onclick="requestUnderlyingPriceSync()"
+                                        style="padding: 0 4px; vertical-align: middle;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                                            stroke="var(--primary-color)" stroke-width="2" stroke-linecap="round"
+                                            stroke-linejoin="round">
+                                            <polyline points="23 4 23 10 17 10"></polyline>
+                                            <polyline points="1 20 1 14 7 14"></polyline>
+                                            <path
+                                                d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15">
+                                            </path>
+                                        </svg>
+                                    </button>
+                                </span>
+                                <span class="value-display" id="underlyingPriceDisplay">$100.00</span>
+                            </label>
+                            <input type="number" id="underlyingPrice" class="number-input" value="100.00" step="0.01">
+                            <input type="range" id="underlyingPriceSlider" min="0" max="1000" value="100" step="1">
+                            <div class="quick-adjust-buttons mt-2">
+                                <button class="btn btn-secondary btn-sm" onclick="adjustUnderlying(-0.01)">-1%</button>
+                                <button class="btn btn-secondary btn-sm" onclick="adjustUnderlying(0.01)">+1%</button>
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <label for="simulatedDate">
+                                Simulated Date
+                            </label>
+                            <input type="date" id="simulatedDate" class="number-input"
+                                style="width: 100%; margin-bottom: 0.5rem;" value="">
+                            <div
+                                style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">
+                                <span>Today</span>
+                                <span id="daysPassedDisplay">+0 Days</span>
+                            </div>
+                            <input type="range" id="daysPassedSlider" min="0" max="365" value="0" step="1">
+                        </div>
+
+                        <div class="control-group">
+                            <label for="interestRate">
+                                Interest Rate (%)
+                                <span class="value-display" id="interestRateDisplay">3.0%</span>
+                            </label>
+                            <input type="number" id="interestRate" class="number-input" value="3.0" step="0.1">
+                        </div>
+
+                        <div class="control-group">
+                            <label for="ivOffset">
+                                IV Adjustment (%)
+                                <span class="value-display" id="ivOffsetDisplay">+0.0%</span>
+                            </label>
+                            <input type="number" id="ivOffset" class="number-input" value="0.00" step="0.01">
+                            <input type="range" id="ivOffsetSlider" min="-100" max="100" value="0" step="1">
+                        </div>
+                    </div>
+
+                    <div class="panel-card summary-card">
+                        <h2>Portfolio Valuation</h2>
+
+                        <div class="summary-item">
+                            <span class="label">Total Cost Basis</span>
+                            <span class="value" id="totalCost">$0.00</span>
+                        </div>
+
+                        <div class="summary-item highlight">
+                            <span class="label">Simulated Value</span>
+                            <span class="value" id="simulatedValue">$0.00</span>
+                        </div>
+
+                        <div class="summary-item">
+                            <span class="label">Unrealized P&L</span>
+                            <span class="value" id="unrealizedPnL">$0.00</span>
+                        </div>
+                    </div>
+                </aside>
+
+                <!-- Portfolio Area (Right Main Content) -->
+                <section class="portfolio-area">
+                    <div class="portfolio-header-global">
+                        <h2>Combo Groups</h2>
+                        <button class="btn btn-primary" onclick="addGroup()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="12" y1="5" x2="12" y2="19"></line>
+                                <line x1="5" y1="12" x2="19" y2="12"></line>
+                            </svg>
+                            Add New Group
+                        </button>
+                    </div>
+
+                    <!-- Global Portfolio Chart -->
+                    <div class="panel-card global-chart-card mb-4" id="globalChartCard" style="display: none;">
+                        <div class="group-header" style="border-bottom: none; padding-bottom: 0;">
+                            <div class="group-title-area">
+                                <h3 class="h3-style m-0">Global Portfolio P&L</h3>
+                            </div>
+                            <div class="group-actions">
+                                <button class="btn btn-secondary btn-sm toggle-global-chart-btn"
+                                    onclick="toggleGlobalChart(this)">Show Chart</button>
+                            </div>
+                        </div>
+
+                        <div class="chart-container mt-3" id="globalChartContainer"
+                            style="display: none; border-top: 1px solid var(--border-color); padding-top: 1rem;">
+                            <div class="chart-controls" style="display: flex; gap: 2rem; margin-bottom: 1rem;">
+                                <div class="chart-control-item">
+                                    <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Range
+                                        Mode</label>
+                                    <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn active"
+                                            data-mode="10" onclick="setGlobalChartRangeMode(this, 10)">±10%</button>
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="20"
+                                            onclick="setGlobalChartRangeMode(this, 20)">±20%</button>
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="25"
+                                            onclick="setGlobalChartRangeMode(this, 25)">±25%</button>
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn"
+                                            data-mode="custom"
+                                            onclick="setGlobalChartRangeMode(this, 'custom')">Custom</button>
+                                    </div>
+                                </div>
+                                <div class="chart-control-item global-custom-range-inputs" style="opacity: 0.5;">
+                                    <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Price
+                                        Range (From - To)</label>
+                                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                        <input type="number" class="leg-input global-chart-min-input"
+                                            style="min-width: 70px" step="1" disabled
+                                            onchange="triggerGlobalChartRedraw()">
+                                        <span class="text-muted">-</span>
+                                        <input type="number" class="leg-input global-chart-max-input"
+                                            style="min-width: 70px" step="1" disabled
+                                            onchange="triggerGlobalChartRedraw()">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="canvas-wrapper" style="width: 100%; height: 250px; position: relative;">
+                                <canvas class="global-pnl-canvas"
+                                    style="width: 100%; height: 100%; display: block;"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="groupsContainer">
+                        <!-- Group Cards will be rendered here via JS -->
+                    </div>
+
+                    <div class="empty-state" id="globalEmptyState" style="display: none;">
+                        <div class="empty-icon">📈</div>
+                        <h3>No combo groups</h3>
+                        <p>Create a group to start simulating your options strategies.</p>
+                        <button class="btn btn-primary mt-3" onclick="addGroup()">Create First Group</button>
+                    </div>
+
+                    <!-- Template for a Combo Group Card -->
+                    <template id="groupCardTemplate">
+                        <div class="panel-card group-card" data-group-id="">
+                            <div class="group-header">
+                                <div class="group-title-area">
+                                    <input type="text" class="group-name-input h3-style" value="New Combo">
+                                </div>
+                                <div class="group-actions">
+                                    <button class="btn btn-secondary btn-sm" onclick="addLegToGroup(this)">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                                            stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                            stroke-linejoin="round">
+                                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                                        </svg>
+                                        Add Leg
+                                    </button>
+                                    <button class="icon-btn text-danger ml-2 remove-group-btn" title="Remove Group">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                                            stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                            stroke-linejoin="round">
+                                            <polyline points="3 6 5 6 21 6"></polyline>
+                                            <path
+                                                d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">
+                                            </path>
+                                            <line x1="10" y1="11" x2="10" y2="17"></line>
+                                            <line x1="14" y1="11" x2="14" y2="17"></line>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="group-live-control"
+                                style="display: flex; justify-content: flex-end; align-items: center; margin-bottom: 1rem; gap: 0.5rem;">
+                                <span class="small text-muted">🔴 Offline</span>
+                                <label class="switch-toggle"
+                                    style="cursor: pointer; display: flex; align-items: center; gap: 0.5rem;">
+                                    <input type="checkbox" class="live-data-toggle"
+                                        style="accent-color: var(--primary-color);">
+                                    <span class="small font-weight-semibold">Live Market Data</span>
+                                </label>
+                            </div>
+
+                            <div class="table-container">
+                                <table class="portfolio-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Type</th>
+                                            <th>Position</th>
+                                            <th>Strike</th>
+                                            <th>Expiration</th>
+                                            <th>Vol (%)</th>
+                                            <th>Cost ($)</th>
+                                            <th>Simulated ($)</th>
+                                            <th>P&L</th>
+                                            <th>Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="legsTableBody">
+                                        <!-- Legs rendered here -->
+                                    </tbody>
+                                </table>
+                                <div class="group-empty-state" style="display: none;">
+                                    <p class="text-muted small">No legs in this combo.</p>
+                                </div>
+                            </div>
+
+                            <div class="group-summary mt-3">
+                                <div class="group-summary-item">
+                                    <span class="label">Cost:</span> <span
+                                        class="group-cost font-weight-semibold">$0.00</span>
+                                </div>
+                                <div class="group-summary-item">
+                                    <span class="label">Sim Value:</span> <span
+                                        class="group-sim-value font-weight-semibold">$0.00</span>
+                                </div>
+                                <div class="group-summary-item">
+                                    <span class="label">P&L:</span> <span
+                                        class="group-pnl font-weight-semibold">$0.00</span>
+                                </div>
+                                <div class="group-summary-item" style="margin-left: auto;">
+                                    <button class="btn btn-secondary btn-sm toggle-chart-btn"
+                                        onclick="toggleChart(this)">Show Chart</button>
+                                </div>
+                            </div>
+
+                            <div class="chart-container mt-3"
+                                style="display: none; border-top: 1px solid var(--border-color); padding-top: 1rem;">
+                                <div class="chart-controls" style="display: flex; gap: 2rem; margin-bottom: 1rem;">
+                                    <div class="chart-control-item">
+                                        <label class="small text-muted"
+                                            style="display:block; margin-bottom: 0.25rem;">Range Mode</label>
+                                        <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                            <button class="btn btn-secondary btn-sm range-mode-btn active"
+                                                data-mode="10" onclick="setChartRangeMode(this, 10)">±10%</button>
+                                            <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="20"
+                                                onclick="setChartRangeMode(this, 20)">±20%</button>
+                                            <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="25"
+                                                onclick="setChartRangeMode(this, 25)">±25%</button>
+                                            <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="custom"
+                                                onclick="setChartRangeMode(this, 'custom')">Custom</button>
+                                        </div>
+                                    </div>
+                                    <div class="chart-control-item custom-range-inputs" style="opacity: 0.5;">
+                                        <label class="small text-muted"
+                                            style="display:block; margin-bottom: 0.25rem;">Price Range (From -
+                                            To)</label>
+                                        <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                            <input type="number" class="leg-input chart-min-input"
+                                                style="min-width: 70px" step="1" disabled
+                                                onchange="triggerChartRedraw(this)">
+                                            <span class="text-muted">-</span>
+                                            <input type="number" class="leg-input chart-max-input"
+                                                style="min-width: 70px" step="1" disabled
+                                                onchange="triggerChartRedraw(this)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="canvas-wrapper" style="width: 100%; height: 250px; position: relative;">
+                                    <canvas class="pnl-canvas"
+                                        style="width: 100%; height: 100%; display: block;"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- Form template for adding/editing legs inline -->
+                    <template id="legRowTemplate">
+                        <tr class="leg-row" data-id="">
+                            <td>
+                                <select class="leg-input type-input">
+                                    <option value="call">Call</option>
+                                    <option value="put">Put</option>
+                                </select>
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input pos-input" value="1" step="1">
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input strike-input" value="100" step="0.01">
+                            </td>
+                            <td>
+                                <div class="simulated-display-wrapper">
+                                    <input type="date" class="leg-input dte-input original-dte"
+                                        style="min-width: 130px">
+                                    <div class="simulated-dte-display text-muted small simulated-text"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="simulated-display-wrapper">
+                                    <input type="number" class="leg-input iv-input original-iv" value="20.00" min="0.01"
+                                        step="0.01">
+                                    <div class="simulated-iv-display text-muted small simulated-text"></div>
+                                </div>
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input cost-input" value="0.00" step="0.01">
+                            </td>
+                            <td class="simulated-price-cell font-weight-semibold">
+                                $0.00
+                            </td>
+                            <td class="pnl-cell font-weight-semibold">
+                                $0.00
+                            </td>
+                            <td class="actions-cell">
+                                <button class="icon-btn text-danger delete-btn" title="Remove Leg">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <polyline points="3 6 5 6 21 6"></polyline>
+                                        <path
+                                            d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">
+                                        </path>
+                                        <line x1="10" y1="11" x2="10" y2="17"></line>
+                                        <line x1="14" y1="11" x2="14" y2="17"></line>
+                                    </svg>
+                                </button>
+                            </td>
+                        </tr>
+                    </template>
+
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <!-- Scripts -->
+    <script src="bsm.js"></script>
+    <script src="chart.js"></script>
+    <script src="app.js"></script>
+</body>
+
+</html>
