@@ -20,7 +20,8 @@ WS_PORT = config.getint('server', 'ws_port', fallback=8765)
 
 ib = IB()
 connected_clients = set()
-current_subscriptions = {} # Map leg_id -> Ticker
+# Map websocket -> { leg_id: Ticker }
+client_subscriptions = {}
 
 async def connect_ib():
     while not ib.isConnected():
@@ -38,42 +39,82 @@ async def connect_ib():
 def on_pending_tickers(tickers):
     """
     Callback fired by ib_insync when streaming data ticks arrive.
-    We batch process these and broadcast state to all connected WS clients.
+    We batch process these and send customized state to each connected WS client.
     """
     if not connected_clients:
         return
         
-    payload = {
-        "underlyingPrice": None,
-        "options": {}
-    }
-    
-    # We expect current_subscriptions to have 'underlying' and 'leg_X' keys mapping to Ticker objects
-    
-    if 'underlying' in current_subscriptions:
-        ticker = current_subscriptions['underlying']
-        # Use marketPrice() which attempts to find the best available price (last, or mid of bid/ask)
-        price = ticker.marketPrice()
-        if price == price and price > 0: # Check for NaN
-            payload["underlyingPrice"] = price
-
-    for sub_id, ticker in current_subscriptions.items():
-        if sub_id != 'underlying':
+    for ws in list(connected_clients):
+        # Build a custom payload for this specific client based on their subscriptions
+        subs = client_subscriptions.get(ws, {})
+        if not subs:
+            continue
+            
+        payload = {
+            "underlyingPrice": None,
+            "options": {}
+        }
+        
+        has_data = False
+        
+        if 'underlying' in subs:
+            ticker = subs['underlying']
             price = ticker.marketPrice()
-            if price == price and price > 0:
-                payload["options"][sub_id] = {
-                    "mark": price
-                }
+            if price == price and price > 0: # Check for NaN
+                payload["underlyingPrice"] = price
+                has_data = True
+
+        for sub_id, ticker in subs.items():
+            if sub_id != 'underlying':
+                price = ticker.marketPrice()
+                if price == price and price > 0:
+                    payload["options"][sub_id] = {
+                        "mark": price
+                    }
+                    has_data = True
+                    
+        # Send data only to the client that requested it
+        if has_data:
+            message = json.dumps(payload)
+            # asyncio.create_task ensures we don't block the tick event thread
+            asyncio.create_task(send_message_safe(ws, message))
+
+async def send_message_safe(ws, message):
+    try:
+        await ws.send(message)
+    except Exception as e:
+        # Ignore normal disconnect errors; the finally block in handle_ws_client will clean up
+        pass
+
+def unsubscribe_client_safely(ws):
+    """
+    Removes a client's subscriptions. If no other client is watching a specific 
+    Ticker contract anymore, we tell IB to cancel the market data stream.
+    """
+    subs = client_subscriptions.get(ws, {})
+    if not subs:
+        return
+        
+    # Count how many total clients are watching each contract ID
+    active_contracts = {}
+    for other_ws, other_subs in client_subscriptions.items():
+        if other_ws != ws:
+            for t in other_subs.values():
+                active_contracts[t.contract.conId] = True
                 
-    # Broadcast if there's any usable data
-    if payload["underlyingPrice"] is not None or payload["options"]:
-        message = json.dumps(payload)
-        websockets.broadcast(connected_clients, message)
+    # Cancel the data stream if this client was the last one watching it
+    for ticker in subs.values():
+        if ticker.contract.conId not in active_contracts:
+            ib.cancelMktData(ticker.contract)
+            
+    client_subscriptions[ws] = {}
 
 async def handle_ws_client(websocket):
     client_ip = websocket.remote_address[0] if websocket.remote_address else 'Unknown'
     logging.info(f"Client connected: {client_ip}")
     connected_clients.add(websocket)
+    client_subscriptions[websocket] = {}
+    
     try:
         async for message in websocket:
             data = json.loads(message)
@@ -82,22 +123,19 @@ async def handle_ws_client(websocket):
                 symbol = data.get('underlying')
                 options_data = data.get('options', [])
                 
-                logging.info(f"Received subscription request for {symbol} with {len(options_data)} options")
+                logging.info(f"Received subscription request from {client_ip} for {symbol} with {len(options_data)} options")
                 
-                # Try to qualify the underlying symbol (Assuming US Stocks/Indices for now)
+                # Check if the requested symbol is already being streamed by another client to avoid redundant qualification
                 contract = Stock(symbol, 'SMART', 'USD')
-                # If it's an index like SPX, we should technically use Index(), but Stock usually resolves for ETFs like SPY.
                 try:
                     await ib.qualifyContractsAsync(contract)
                     
-                    # Unsubscribe old streams
-                    for ticker in current_subscriptions.values():
-                        ib.cancelMktData(ticker.contract)
-                    current_subscriptions.clear()
+                    # Unsubscribe old streams for this specific client safely
+                    unsubscribe_client_safely(websocket)
                     
                     # Subscribe Underlying
                     ticker = ib.reqMktData(contract, '', False, False)
-                    current_subscriptions['underlying'] = ticker
+                    client_subscriptions[websocket]['underlying'] = ticker
                     
                     # Process Options
                     for opt in options_data:
@@ -107,12 +145,11 @@ async def handle_ws_client(websocket):
                         strike = float(opt['strike'])
                         right = opt['right'] # 'C' or 'P'
                         
-                        # Specify standard SPY option parameters to avoid ambiguity
                         opt_contract = Option(symbol, exp_date, strike, right, 'SMART', multiplier='100', currency='USD')
                         try:
                             await ib.qualifyContractsAsync(opt_contract)
                             opt_ticker = ib.reqMktData(opt_contract, '', False, False)
-                            current_subscriptions[leg_id] = opt_ticker
+                            client_subscriptions[websocket][leg_id] = opt_ticker
                         except Exception as e:
                             logging.error(f"Failed to qualify option {strike} {right}: {e}")
                             
@@ -134,7 +171,7 @@ async def handle_ws_client(websocket):
                             "underlyingPrice": price,
                             "options": {}
                         }
-                        await websocket.send(json.dumps(payload))
+                        await send_message_safe(websocket, json.dumps(payload))
                 except Exception as e:
                     logging.error(f"Failed to manual sync underlying {symbol}: {e}")
 
@@ -142,7 +179,11 @@ async def handle_ws_client(websocket):
         pass
     finally:
         logging.info(f"Client disconnected: {client_ip}")
-        connected_clients.remove(websocket)
+        # Clean up all tracking logic for this exact websocket
+        unsubscribe_client_safely(websocket)
+        if websocket in connected_clients:
+            connected_clients.remove(websocket)
+        client_subscriptions.pop(websocket, None)
 
 async def main():
     # Attempt IB connection

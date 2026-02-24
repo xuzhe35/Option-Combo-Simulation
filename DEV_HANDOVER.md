@@ -56,5 +56,12 @@ The `scripts/` folder now formally maintains the essential `spx_fit.py` (which f
 **Problem 2:** Importing a JSON combo template updated the frontend Symbol correctly, but failed to re-subscribe the backend WebSocket stream (it continued feeding original tickers like SPY instead of AAPL).
 **Solution 2:** Injected `handleLiveSubscriptions()` at the end of `importFromJSON(event)` inside `app.js` to dispatch the correct ticker downstream post-import.
 
+## 7. Multi-Channel IB WebSocket Server
+**Problem:** The original `ib_server.py` used a single global `current_subscriptions` dictionary. Opening a second browser tab for a different underlying symbol (e.g., AAPL) would overwrite the global subscriptions and broadcast the new AAPL data to the original SPY tab.
+**Solution:** 
+- Refactored `ib_server.py` to use a `client_subscriptions` dictionary that maps each active `websocket` connection to its specific `Ticker` objects.
+- `on_pending_tickers` now iterates over connected clients, independently packaging customized JSON payloads containing only the data that specific browser tab requested.
+- Added `unsubscribe_client_safely(ws)` to securely manage IB `cancelMktData` calls using reference counting across all active clients, ensuring we don't sever data feeds that other tabs are still relying on.
+
 ***
 *End of Protocol. The project is presently completely mathematically synchronized and highly legible for continued expansion.*
