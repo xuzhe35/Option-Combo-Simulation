@@ -15,7 +15,7 @@ class PnLChart {
 
         // Settings
         this.padding = { top: 20, right: 30, bottom: 30, left: 60 };
-        this.pointsCount = 100;
+        this.pointsCount = 500; // Increased to catch sharp 0 DTE peaks
         this.gridColor = '#E5E7EB';
         this.axisColor = '#9CA3AF';
         this.textColor = '#6B7280';
@@ -144,7 +144,7 @@ class PnLChart {
             const expDateObj = new Date(leg.expDate + 'T00:00:00Z');
             const isExpired = expDateObj <= globalSimDateObj;
             const simCalDTE = isExpired ? 0 : diffDays(globalSimDateStr, leg.expDate);
-            const simTradDTE = Math.max(0, Math.round(simCalDTE * 252 / 365));
+            const simTradDTE = isExpired ? 0 : calendarToTradingDays(globalSimDateStr, leg.expDate);
             const simIV = Math.max(0.001, leg.iv + globalState.ivOffset);
             const timeToMaturityYears = simTradDTE / 252.0;
             const costBasis = leg.pos * 100 * leg.cost;
@@ -162,8 +162,25 @@ class PnLChart {
         });
 
         const step = (maxS - minS) / (this.pointsCount - 1);
+        let evalPoints = [];
         for (let i = 0; i < this.pointsCount; i++) {
-            const currentS = minS + (i * step);
+            evalPoints.push(minS + (i * step));
+        }
+        // Force evaluation exactly at strike prices to catch absolute peaks/troughs of 0-DTE legs
+        processedLegs.forEach(l => {
+            if (l.strike >= minS && l.strike <= maxS) {
+                evalPoints.push(l.strike);
+                // Also add tiny offsets around strike to help gradient rendering near sharp V-shapes
+                evalPoints.push(l.strike - 0.01);
+                evalPoints.push(l.strike + 0.01);
+            }
+        });
+
+        // Remove duplicates and sort
+        evalPoints = [...new Set(evalPoints)].sort((a, b) => a - b);
+
+        for (let i = 0; i < evalPoints.length; i++) {
+            const currentS = evalPoints[i];
             let simValue = 0;
             let totalCostBasis = 0;
 

@@ -42,9 +42,28 @@ function addDays(dateStr, days) {
     return d.toISOString().slice(0, 10);
 }
 
-// Convert calendar days to approximate trading days (252 trading days per year)
-function calendarToTradingDays(calendarDays) {
-    return Math.max(0, Math.round(calendarDays * 252 / 365));
+// Exact calendar days to trading days logic (skipping weekends)
+function calendarToTradingDays(startDateStr, endDateStr) {
+    let start = new Date(startDateStr + 'T00:00:00Z');
+    let end = new Date(endDateStr + 'T00:00:00Z');
+
+    // Ensure start is before end
+    if (start > end) {
+        return 0; // Negative days not supported in this context
+    }
+
+    let days = 0;
+    // Iterate from start to end (exclusive of end, or inclusive conceptually depending on standard, usually inclusive of start, exclusive of end day)
+    let current = new Date(start);
+    while (current < end) {
+        const dayOfWeek = current.getUTCDay();
+        // 0 is Sunday, 6 is Saturday
+        if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+            days++;
+        }
+        current.setUTCDate(current.getUTCDate() + 1);
+    }
+    return days;
 }
 
 // Initialization
@@ -109,7 +128,7 @@ function bindControlPanelEvents() {
         }
         state.simulatedDate = newDateStr;
         const days = diffDays(state.baseDate, state.simulatedDate);
-        const tradDays = calendarToTradingDays(days);
+        const tradDays = calendarToTradingDays(state.baseDate, state.simulatedDate);
         dpSlider.value = days;
         dpDisplay.textContent = `+${tradDays} td / +${days} cd`;
         updateDerivedValues();
@@ -120,7 +139,7 @@ function bindControlPanelEvents() {
         const newDateStr = addDays(state.baseDate, dNum);
         state.simulatedDate = newDateStr;
         simDateInput.value = state.simulatedDate;
-        const tradDays = calendarToTradingDays(dNum);
+        const tradDays = calendarToTradingDays(state.baseDate, state.simulatedDate);
         dpDisplay.textContent = `+${tradDays} td / +${dNum} cd`;
         updateDerivedValues();
     };
@@ -347,8 +366,11 @@ function updateDerivedValues() {
             // If expiration is in the past compared to simulated date, DTE is 0 (expired)
             const isExpired = new Date(leg.expDate + 'T00:00:00Z') <= new Date(state.simulatedDate + 'T00:00:00Z');
             const simCalDTE = isExpired ? 0 : diffDays(state.simulatedDate, leg.expDate);
-            const simTradDTE = calendarToTradingDays(simCalDTE);
+            const simTradDTE = isExpired ? 0 : calendarToTradingDays(state.simulatedDate, leg.expDate);
             const simIV = Math.max(0.001, leg.iv + state.ivOffset);
+
+            // Precision model: exactly count trading days divided by 252. 
+            // This properly models the fact that weekends generate no variance.
             const timeToMaturityYears = simTradDTE / 252.0;
 
             // Update displays for simulated variables

@@ -73,19 +73,49 @@ function tSample(df, loc, scale) {
 }
 
 /**
+ * Fast Normal CDF using A&S polynomial
+ */
+function normalCDF(x) {
+    let sign = (x < 0) ? -1 : 1;
+    x = Math.abs(x) / 1.4142135623730951; // Math.sqrt(2.0)
+    let t = 1.0 / (1.0 + 0.3275911 * x);
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+    return 0.5 * (1.0 + sign * y);
+}
+
+/**
  * Main Worker message handler.
  *
  * Receives:
- *   { df, loc, newScale, nDays, nPaths, currentPrice, minS, maxS, bins }
+ *   { df, loc, newScale, nDays, nPaths, currentPrice, minS, maxS, bins, legs }
  *
  * Posts back (with transferable buffers):
- *   { tDensity: Float64Array, binCenters: Float64Array, binWidth: number }
+ *   { tDensity, binCenters, binWidth, exactExpectedPnL }
  */
 self.onmessage = function(e) {
-    const { df, loc, newScale, nDays, nPaths, currentPrice, minS, maxS, bins } = e.data;
+    const { df, loc, newScale, nDays, nPaths, currentPrice, minS, maxS, bins, legs } = e.data;
 
     const binWidth = (maxS - minS) / bins;
     const counts   = new Float64Array(bins);   // raw path counts per bin
+
+    // --- Precompute Leg Constants for speed ---
+    if (legs) {
+        for (let l = 0; l < legs.length; l++) {
+            const leg = legs[l];
+            leg.isExpired = (leg.T <= 0);
+            if (!leg.isExpired) {
+                let v = leg.v <= 0 ? 0.0001 : leg.v;
+                leg.v_sqrt_T = v * Math.sqrt(leg.T);
+                leg.inv_v_sqrt_T = 1.0 / leg.v_sqrt_T;
+                // Pre-log standard component log(1/K)
+                leg.d1_const = (-Math.log(leg.K) + (leg.r + 0.5 * v * v) * leg.T) / leg.v_sqrt_T;
+                leg.K_exp_rT = leg.K * Math.exp(-leg.r * leg.T);
+            }
+        }
+    }
+
+    let exactPnLSum = 0.0;
+    let pathsInRange = 0;
 
     for (let i = 0; i < nPaths; i++) {
         // Accumulate nDays daily log-returns
@@ -96,12 +126,43 @@ self.onmessage = function(e) {
         // Final price
         const finalPrice = currentPrice * Math.exp(logRet);
         const binIdx = Math.floor((finalPrice - minS) / binWidth);
-        if (binIdx >= 0 && binIdx < bins) counts[binIdx]++;
+        const inRange = (binIdx >= 0 && binIdx < bins);
+        
+        if (inRange) {
+            counts[binIdx]++;
+        }
+
+        // Exact BSM path pricing if legs provided (bounded to chart range)
+        if (legs && legs.length > 0 && finalPrice >= minS && finalPrice <= maxS) {
+            pathsInRange++;
+            let pathPnL = 0.0;
+            const s_safe = finalPrice > 0 ? finalPrice : 0.0001;
+            const log_S = Math.log(s_safe);
+            
+            for (let l = 0; l < legs.length; l++) {
+                const leg = legs[l];
+                let v_opt = 0;
+                if (leg.isExpired) {
+                    if (leg.type === 'call') v_opt = Math.max(0, finalPrice - leg.K);
+                    else                     v_opt = Math.max(0, leg.K - finalPrice);
+                } else {
+                    const d1 = log_S * leg.inv_v_sqrt_T + leg.d1_const;
+                    const d2 = d1 - leg.v_sqrt_T;
+                    if (leg.type === 'call') {
+                        v_opt = finalPrice * normalCDF(d1) - leg.K_exp_rT * normalCDF(d2);
+                    } else {
+                        v_opt = leg.K_exp_rT * normalCDF(-d2) - finalPrice * normalCDF(-d1);
+                    }
+                }
+                pathPnL += leg.posMultiplier * v_opt - leg.costBasis;
+            }
+            exactPnLSum += pathPnL;
+        }
     }
 
-    // Normalise to probability density: integral ≈ 1 over [minS, maxS]
-    // (paths outside range are excluded; density within range sums to
-    //  the fraction of mass inside the range, which is correct behaviour)
+    const exactExpectedPnL = pathsInRange > 0 ? (exactPnLSum / pathsInRange) : 0;
+
+    // Normalise to probability density
     const normFactor = nPaths * binWidth;
     const tDensity   = new Float64Array(bins);
     for (let i = 0; i < bins; i++) tDensity[i] = counts[i] / normFactor;
@@ -112,7 +173,7 @@ self.onmessage = function(e) {
 
     // Transfer typed-array ownership back to the main thread
     self.postMessage(
-        { tDensity, binCenters, binWidth },
+        { tDensity, binCenters, binWidth, exactExpectedPnL },
         [tDensity.buffer, binCenters.buffer]
     );
 };
@@ -152,7 +213,7 @@ function _calibrateScale(df, portfolioIV) {
 function _lognormalDensity(s, S0, portfolioIV, loc, nDays) {
     if (s <= 0 || S0 <= 0 || nDays <= 0) return 0;
     const sigma = (portfolioIV / Math.sqrt(252)) * Math.sqrt(nDays);
-    const mu    = loc * nDays;
+    const mu = loc * nDays;
     if (sigma <= 0) return 0;
     const z = (Math.log(s / S0) - mu) / sigma;
     return (1.0 / (s * sigma * Math.sqrt(2 * Math.PI))) * Math.exp(-0.5 * z * z);
@@ -170,18 +231,20 @@ function _computePortfolioPnLAtPrice(price) {
     const simDateObj = new Date(simDateStr + 'T00:00:00Z');
 
     let totalValue = 0;
-    let totalCost  = 0;
+    let totalCost = 0;
 
     state.groups.forEach(group => {
         group.legs.forEach(leg => {
             const expDateObj = new Date(leg.expDate + 'T00:00:00Z');
-            const isExpired  = expDateObj <= simDateObj;
-            const calDTE     = isExpired
+            const isExpired = expDateObj <= simDateObj;
+            const calDTE = isExpired
                 ? 0
                 : Math.max(0, Math.round((expDateObj - simDateObj) / 86400000));
-            const tradDTE    = Math.max(0, Math.round(calDTE * 252 / 365));
-            const T          = tradDTE / 252.0;
-            const simIV      = Math.max(0.001, leg.iv + state.ivOffset);
+            const tradDTE = isExpired
+                ? 0
+                : calendarToTradingDays(state.simulatedDate, leg.expDate);
+            const T = tradDTE / 252.0;
+            const simIV = Math.max(0.001, leg.iv + state.ivOffset);
 
             let pps = 0;
             if (calDTE > 0) {
@@ -190,11 +253,11 @@ function _computePortfolioPnLAtPrice(price) {
                 );
             } else {
                 if (leg.type === 'call') pps = Math.max(0, price - leg.strike);
-                else                     pps = Math.max(0, leg.strike - price);
+                else pps = Math.max(0, leg.strike - price);
             }
 
             totalValue += leg.pos * 100 * pps;
-            totalCost  += leg.pos * 100 * leg.cost;
+            totalCost += leg.pos * 100 * leg.cost;
         });
     });
 
@@ -207,7 +270,7 @@ function _computePortfolioPnLAtPrice(price) {
  */
 function _smooth(arr, window = 7) {
     const result = new Float64Array(arr.length);
-    const half   = Math.floor(window / 2);
+    const half = Math.floor(window / 2);
     for (let i = 0; i < arr.length; i++) {
         let sum = 0, count = 0;
         for (let j = i - half; j <= i + half; j++) {
@@ -224,13 +287,13 @@ function _smooth(arr, window = 7) {
 
 /** Standard DPR-aware canvas resize. */
 function _resizeCanvas(canvas, minH) {
-    const dpr  = window.devicePixelRatio || 1;
+    const dpr = window.devicePixelRatio || 1;
     const rect = canvas.parentElement.getBoundingClientRect();
-    const w    = rect.width;
-    const h    = Math.max(minH, rect.height);
-    canvas.width  = w * dpr;
+    const w = rect.width;
+    const h = Math.max(minH, rect.height);
+    canvas.width = w * dpr;
     canvas.height = h * dpr;
-    canvas.style.width  = `${w}px`;
+    canvas.style.width = `${w}px`;
     canvas.style.height = `${h}px`;
     const ctx = canvas.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -241,7 +304,7 @@ function _resizeCanvas(canvas, minH) {
 function _drawPlaceholder(canvas, message, minH = 220) {
     const { ctx, w, h } = _resizeCanvas(canvas, minH);
     ctx.clearRect(0, 0, w, h);
-    ctx.font      = '13px Inter, sans-serif';
+    ctx.font = '13px Inter, sans-serif';
     ctx.fillStyle = '#9CA3AF';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -254,9 +317,9 @@ function _drawPlaceholder(canvas, message, minH = 220) {
 
 class ProbabilityChart {
     constructor(canvas) {
-        this.canvas  = canvas;
+        this.canvas = canvas;
         this.padding = { top: 30, right: 30, bottom: 46, left: 18 };
-        this._cache  = null;   // last draw arguments for resize redraws
+        this._cache = null;   // last draw arguments for resize redraws
     }
 
     drawLoading() {
@@ -275,10 +338,10 @@ class ProbabilityChart {
         const { ctx, w, h } = _resizeCanvas(this.canvas, 220);
         ctx.clearRect(0, 0, w, h);
 
-        const pad   = this.padding;
+        const pad = this.padding;
         const drawW = w - pad.left - pad.right;
-        const drawH = h - pad.top  - pad.bottom;
-        const bins  = binCenters.length;
+        const drawH = h - pad.top - pad.bottom;
+        const bins = binCenters.length;
 
         // Apply visual smoothing (does NOT affect E[P&L] calculation)
         const tSmooth = _smooth(tDensity, 7);
@@ -287,29 +350,29 @@ class ProbabilityChart {
         // Y scale: max density + 10% headroom
         let maxD = 0;
         for (let i = 0; i < bins; i++) {
-            if (tSmooth[i] > maxD)  maxD = tSmooth[i];
-            if (nSmooth[i] > maxD)  maxD = nSmooth[i];
+            if (tSmooth[i] > maxD) maxD = tSmooth[i];
+            if (nSmooth[i] > maxD) maxD = nSmooth[i];
         }
         if (maxD === 0) { _drawPlaceholder(this.canvas, 'No paths landed in range', 220); return; }
         maxD *= 1.1;
 
         const mapX = v => pad.left + ((v - minS) / (maxS - minS)) * drawW;
-        const mapY = v => pad.top  + drawH - (v / maxD) * drawH;
+        const mapY = v => pad.top + drawH - (v / maxD) * drawH;
 
         // --- Grid & axes ---
         ctx.save();
         ctx.strokeStyle = '#E5E7EB';
-        ctx.lineWidth   = 1;
+        ctx.lineWidth = 1;
         ctx.strokeRect(pad.left, pad.top, drawW, drawH);
 
         // X-axis ticks + labels
         const ticksX = 10;
-        ctx.font         = '11px Inter, sans-serif';
-        ctx.textAlign    = 'center';
+        ctx.font = '11px Inter, sans-serif';
+        ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         for (let i = 0; i <= ticksX; i++) {
             const sTick = minS + (maxS - minS) * (i / ticksX);
-            const x     = mapX(sTick);
+            const x = mapX(sTick);
             ctx.beginPath();
             ctx.moveTo(x, pad.top);
             ctx.lineTo(x, pad.top + drawH);
@@ -318,7 +381,7 @@ class ProbabilityChart {
             ctx.fillStyle = '#6B7280';
             ctx.fillText(`$${sTick.toFixed(1)}`, x, pad.top + drawH + 4);
             if (currentPrice > 0) {
-                const pct   = ((sTick - currentPrice) / currentPrice) * 100;
+                const pct = ((sTick - currentPrice) / currentPrice) * 100;
                 const label = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
                 ctx.fillStyle = '#9CA3AF';
                 ctx.fillText(label, x, pad.top + drawH + 17);
@@ -329,9 +392,9 @@ class ProbabilityChart {
         ctx.save();
         ctx.translate(13, pad.top + drawH / 2);
         ctx.rotate(-Math.PI / 2);
-        ctx.font         = '10px Inter, sans-serif';
-        ctx.fillStyle    = '#9CA3AF';
-        ctx.textAlign    = 'center';
+        ctx.font = '10px Inter, sans-serif';
+        ctx.fillStyle = '#9CA3AF';
+        ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('Probability Density', 0, 0);
         ctx.restore();
@@ -357,8 +420,8 @@ class ProbabilityChart {
         ctx.moveTo(mapX(binCenters[0]), mapY(tSmooth[0]));
         for (let i = 1; i < bins; i++) ctx.lineTo(mapX(binCenters[i]), mapY(tSmooth[i]));
         ctx.strokeStyle = 'rgba(99, 102, 241, 0.9)';
-        ctx.lineWidth   = 2;
-        ctx.lineJoin    = 'round';
+        ctx.lineWidth = 2;
+        ctx.lineJoin = 'round';
         ctx.stroke();
 
         // Normal / lognormal: dashed line
@@ -367,7 +430,7 @@ class ProbabilityChart {
         ctx.moveTo(mapX(binCenters[0]), mapY(nSmooth[0]));
         for (let i = 1; i < bins; i++) ctx.lineTo(mapX(binCenters[i]), mapY(nSmooth[i]));
         ctx.strokeStyle = 'rgba(249, 115, 22, 0.9)';
-        ctx.lineWidth   = 2;
+        ctx.lineWidth = 2;
         ctx.stroke();
         ctx.setLineDash([]);
 
@@ -379,7 +442,7 @@ class ProbabilityChart {
             ctx.moveTo(px, pad.top);
             ctx.lineTo(px, pad.top + drawH);
             ctx.strokeStyle = '#6366F1';
-            ctx.lineWidth   = 1.5;
+            ctx.lineWidth = 1.5;
             ctx.stroke();
             ctx.setLineDash([]);
         }
@@ -387,28 +450,28 @@ class ProbabilityChart {
         ctx.restore();
 
         // --- Legend (top-left, inside chart) ---
-        ctx.font         = '11px Inter, sans-serif';
+        ctx.font = '11px Inter, sans-serif';
         ctx.textBaseline = 'middle';
         const lx = pad.left + 10;
-        const ly = pad.top  + 10;
+        const ly = pad.top + 10;
 
         // t-dist swatch
-        ctx.fillStyle   = 'rgba(99, 102, 241, 0.18)';
+        ctx.fillStyle = 'rgba(99, 102, 241, 0.18)';
         ctx.fillRect(lx, ly, 16, 12);
         ctx.strokeStyle = 'rgba(99, 102, 241, 0.9)';
-        ctx.lineWidth   = 2;
+        ctx.lineWidth = 2;
         ctx.strokeRect(lx, ly, 16, 12);
-        ctx.fillStyle   = '#374151';
-        ctx.textAlign   = 'left';
+        ctx.fillStyle = '#374151';
+        ctx.textAlign = 'left';
         ctx.fillText('Student-t (fat-tail, IV-scaled)', lx + 22, ly + 6);
 
         // Normal swatch
         ctx.beginPath();
         ctx.setLineDash([6, 4]);
-        ctx.moveTo(lx,      ly + 24);
+        ctx.moveTo(lx, ly + 24);
         ctx.lineTo(lx + 16, ly + 24);
         ctx.strokeStyle = 'rgba(249, 115, 22, 0.9)';
-        ctx.lineWidth   = 2;
+        ctx.lineWidth = 2;
         ctx.stroke();
         ctx.setLineDash([]);
         ctx.fillStyle = '#374151';
@@ -429,9 +492,9 @@ class ProbabilityChart {
 
 class ExpectedPnLDensityChart {
     constructor(canvas) {
-        this.canvas  = canvas;
+        this.canvas = canvas;
         this.padding = { top: 20, right: 30, bottom: 46, left: 68 };
-        this._cache  = null;
+        this._cache = null;
     }
 
     drawLoading() {
@@ -449,10 +512,10 @@ class ExpectedPnLDensityChart {
         const { ctx, w, h } = _resizeCanvas(this.canvas, 220);
         ctx.clearRect(0, 0, w, h);
 
-        const pad   = this.padding;
+        const pad = this.padding;
         const drawW = w - pad.left - pad.right;
-        const drawH = h - pad.top  - pad.bottom;
-        const bins  = binCenters.length;
+        const drawH = h - pad.top - pad.bottom;
+        const bins = binCenters.length;
 
         // Compute E[P&L] density: f_ev[i] = pnl[i] * density[i]
         const fev = new Float64Array(bins);
@@ -470,12 +533,12 @@ class ExpectedPnLDensityChart {
         maxEV += evRange * 0.1;
         minEV -= evRange * 0.1;
 
-        const mapX  = v  => pad.left + ((v - minS) / (maxS - minS)) * drawW;
-        const mapY  = v  => pad.top  + drawH - ((v - minEV) / (maxEV - minEV)) * drawH;
+        const mapX = v => pad.left + ((v - minS) / (maxS - minS)) * drawW;
+        const mapY = v => pad.top + drawH - ((v - minEV) / (maxEV - minEV)) * drawH;
         const yZero = Math.max(pad.top, Math.min(pad.top + drawH, mapY(0)));
 
         // --- Axes ---
-        ctx.font         = '11px Inter, sans-serif';
+        ctx.font = '11px Inter, sans-serif';
         ctx.textBaseline = 'top';
 
         // Y-axis ticks + grid
@@ -483,12 +546,12 @@ class ExpectedPnLDensityChart {
         ctx.textAlign = 'right';
         for (let i = 0; i <= ticksY; i++) {
             const val = minEV + (maxEV - minEV) * (i / ticksY);
-            const y   = mapY(val);
+            const y = mapY(val);
             ctx.beginPath();
             ctx.moveTo(pad.left, y);
             ctx.lineTo(pad.left + drawW, y);
             ctx.strokeStyle = '#E5E7EB';
-            ctx.lineWidth   = 1;
+            ctx.lineWidth = 1;
             ctx.stroke();
             const absV = Math.abs(val);
             let label;
@@ -497,28 +560,28 @@ class ExpectedPnLDensityChart {
             } else {
                 label = (val >= 0 ? '+' : '-') + absV.toFixed(4);
             }
-            ctx.fillStyle    = '#6B7280';
+            ctx.fillStyle = '#6B7280';
             ctx.textBaseline = 'middle';
             ctx.fillText(label, pad.left - 6, y);
         }
 
         // X-axis ticks + labels
         const ticksX = 10;
-        ctx.textAlign    = 'center';
+        ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         for (let i = 0; i <= ticksX; i++) {
             const sTick = minS + (maxS - minS) * (i / ticksX);
-            const x     = mapX(sTick);
+            const x = mapX(sTick);
             ctx.beginPath();
             ctx.moveTo(x, pad.top);
             ctx.lineTo(x, pad.top + drawH);
             ctx.strokeStyle = '#E5E7EB';
-            ctx.lineWidth   = 1;
+            ctx.lineWidth = 1;
             ctx.stroke();
             ctx.fillStyle = '#6B7280';
             ctx.fillText(`$${sTick.toFixed(1)}`, x, pad.top + drawH + 4);
             if (currentPrice > 0) {
-                const pct   = ((sTick - currentPrice) / currentPrice) * 100;
+                const pct = ((sTick - currentPrice) / currentPrice) * 100;
                 const label = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
                 ctx.fillStyle = '#9CA3AF';
                 ctx.fillText(label, x, pad.top + drawH + 17);
@@ -529,16 +592,16 @@ class ExpectedPnLDensityChart {
         ctx.save();
         ctx.translate(13, pad.top + drawH / 2);
         ctx.rotate(-Math.PI / 2);
-        ctx.font         = '10px Inter, sans-serif';
-        ctx.fillStyle    = '#9CA3AF';
-        ctx.textAlign    = 'center';
+        ctx.font = '10px Inter, sans-serif';
+        ctx.fillStyle = '#9CA3AF';
+        ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText('P&L × Probability Density', 0, 0);
         ctx.restore();
 
         // Bounding box
         ctx.strokeStyle = '#E5E7EB';
-        ctx.lineWidth   = 1;
+        ctx.lineWidth = 1;
         ctx.strokeRect(pad.left, pad.top, drawW, drawH);
 
         // --- Clip ---
@@ -552,7 +615,7 @@ class ExpectedPnLDensityChart {
         ctx.moveTo(pad.left, yZero);
         ctx.lineTo(pad.left + drawW, yZero);
         ctx.strokeStyle = '#9CA3AF';
-        ctx.lineWidth   = 1;
+        ctx.lineWidth = 1;
         ctx.stroke();
 
         // Build the curve path once, then fill positive/negative regions separately
@@ -582,10 +645,10 @@ class ExpectedPnLDensityChart {
         const zeroRatio = Math.max(0, Math.min(1, (yZero - pad.top) / drawH));
         const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + drawH);
         if (zeroRatio > 0 && zeroRatio < 1) {
-            grad.addColorStop(0,              'rgba(5, 150, 105, 0.9)');
+            grad.addColorStop(0, 'rgba(5, 150, 105, 0.9)');
             grad.addColorStop(zeroRatio - 0.001, 'rgba(5, 150, 105, 0.9)');
             grad.addColorStop(zeroRatio + 0.001, 'rgba(220, 38, 38, 0.9)');
-            grad.addColorStop(1,              'rgba(220, 38, 38, 0.9)');
+            grad.addColorStop(1, 'rgba(220, 38, 38, 0.9)');
         } else if (zeroRatio >= 1) {
             grad.addColorStop(0, 'rgba(5, 150, 105, 0.9)');
             grad.addColorStop(1, 'rgba(5, 150, 105, 0.9)');
@@ -598,8 +661,8 @@ class ExpectedPnLDensityChart {
         ctx.moveTo(mapX(binCenters[0]), mapY(fevSmooth[0]));
         for (let i = 1; i < bins; i++) ctx.lineTo(mapX(binCenters[i]), mapY(fevSmooth[i]));
         ctx.strokeStyle = grad;
-        ctx.lineWidth   = 2;
-        ctx.lineJoin    = 'round';
+        ctx.lineWidth = 2;
+        ctx.lineJoin = 'round';
         ctx.stroke();
 
         // Current price reference line
@@ -610,7 +673,7 @@ class ExpectedPnLDensityChart {
             ctx.moveTo(px, pad.top);
             ctx.lineTo(px, pad.top + drawH);
             ctx.strokeStyle = '#6366F1';
-            ctx.lineWidth   = 1.5;
+            ctx.lineWidth = 1.5;
             ctx.stroke();
             ctx.setLineDash([]);
         }
@@ -618,7 +681,7 @@ class ExpectedPnLDensityChart {
         ctx.restore();
 
         // Chart title in top-left corner
-        ctx.font      = '11px Inter, sans-serif';
+        ctx.font = '11px Inter, sans-serif';
         ctx.fillStyle = '#6B7280';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
@@ -668,8 +731,8 @@ function updateProbCharts() {
     }
 
     // Guard: need at least 1 trading day of horizon
-    const nCalDays  = diffDays(state.baseDate, state.simulatedDate);
-    const nTradDays = calendarToTradingDays(nCalDays);
+    const nCalDays = diffDays(state.baseDate, state.simulatedDate);
+    const nTradDays = calendarToTradingDays(state.baseDate, state.simulatedDate);
     if (nTradDays === 0) {
         _probChart && _probChart.drawEmpty('Advance the simulation date to see probabilities.');
         _epnlChart && _epnlChart.drawEmpty('No future days to simulate (simulation date = today).');
@@ -693,9 +756,9 @@ function updateProbCharts() {
 
     // t-distribution parameters
     const { df, loc } = T_DIST_PARAMS;
-    const newScale     = _calibrateScale(df, portfolioIV);
-    const nPaths       = 1_000_000;
-    const bins         = 500;
+    const newScale = _calibrateScale(df, portfolioIV);
+    const nPaths = 1_000_000;
+    const bins = 500;
 
     // Show loading state
     _probChart && _probChart.drawLoading();
@@ -706,6 +769,28 @@ function updateProbCharts() {
     // Terminate any previous in-flight simulation
     if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
 
+    // Assemble legs for exact MC Pricing
+    const simDateObj = new Date(state.simulatedDate + 'T00:00:00Z');
+    const workerLegs = [];
+    state.groups.forEach(group => {
+        group.legs.forEach(leg => {
+            const expDateObj = new Date(leg.expDate + 'T00:00:00Z');
+            const isExpired = expDateObj <= simDateObj;
+            const tradDTE = isExpired ? 0 : calendarToTradingDays(state.simulatedDate, leg.expDate);
+            const simIV = Math.max(0.001, leg.iv + state.ivOffset);
+
+            workerLegs.push({
+                type: leg.type,
+                K: leg.strike,
+                r: state.interestRate,
+                T: tradDTE / 252.0,
+                v: simIV,
+                posMultiplier: leg.pos * 100,
+                costBasis: leg.pos * 100 * leg.cost
+            });
+        });
+    });
+
     // Launch Worker
     _activeWorker = new Worker(_MC_WORKER_URL);
     _activeWorker.postMessage({
@@ -713,18 +798,19 @@ function updateProbCharts() {
         nDays: nTradDays,
         nPaths,
         currentPrice: state.underlyingPrice,
-        minS, maxS, bins
+        minS, maxS, bins,
+        legs: workerLegs
     });
 
     // Capture closure values for the callback
-    const _nCalDays   = nCalDays;
-    const _nTradDays  = nTradDays;
+    const _nCalDays = nCalDays;
+    const _nTradDays = nTradDays;
     const _portfolioIV = portfolioIV;
     const _currentPrice = state.underlyingPrice;
 
     _activeWorker.onmessage = (e) => {
         _activeWorker = null;
-        const { tDensity, binCenters, binWidth } = e.data;
+        const { tDensity, binCenters, binWidth, exactExpectedPnL } = e.data;
 
         // --- Normal / lognormal comparison (analytical, no sampling) ---
         const normalDensity = new Float64Array(bins);
@@ -740,12 +826,6 @@ function updateProbCharts() {
             pnlValues[i] = _computePortfolioPnLAtPrice(binCenters[i]);
         }
 
-        // --- Expected P&L  =  ∫ P&L(s) × f_t(s) ds  (trapezoidal) ---
-        let expectedPnL = 0;
-        for (let i = 0; i < bins; i++) {
-            expectedPnL += pnlValues[i] * tDensity[i] * binWidth;
-        }
-
         // --- Render Chart 2 ---
         if (_probChart) {
             _probChart.draw(binCenters, tDensity, normalDensity, minS, maxS, _currentPrice);
@@ -757,7 +837,7 @@ function updateProbCharts() {
         }
 
         // --- Update badges ---
-        _setExpectedPnLBadge(expectedPnL);
+        _setExpectedPnLBadge(exactExpectedPnL);
         _setInfoText(
             `1M paths | ${_nTradDays} td / ${_nCalDays} cd | ` +
             `Mean IV: ${(_portfolioIV * 100).toFixed(1)}%`
@@ -795,7 +875,7 @@ function _setExpectedPnLBadge(value) {
     }
     const sign = value >= 0 ? '+' : '';
     el.textContent = `Expected P&L: ${sign}${currencyFormatter.format(value)}`;
-    el.style.color  = value >= 0 ? '#059669' : '#DC2626';
+    el.style.color = value >= 0 ? '#059669' : '#DC2626';
 }
 
 function _setInfoText(text) {
