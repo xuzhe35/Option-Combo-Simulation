@@ -15,7 +15,7 @@
  *   app.js      → state, diffDays(), calendarToTradingDays(),
  *                 computePortfolioMeanSimIV(), getGlobalChartRange(),
  *                 currencyFormatter
- *   t_params.js → T_DIST_PARAMS
+ *   t_params_db.js → T_DIST_PARAMS_DB
  */
 
 'use strict';
@@ -732,8 +732,19 @@ function updateProbCharts() {
     const { minS, maxS } = getGlobalChartRange();
     if (minS >= maxS) return;
 
-    // t-distribution parameters
-    const { df, loc } = T_DIST_PARAMS;
+    // t-distribution parameters lookup
+    const underlying = state.underlyingSymbol || 'SPY';
+    const params = T_DIST_PARAMS_DB[underlying];
+
+    if (!params) {
+        _probChart && _probChart.drawEmpty(`No distribution parameters for ${underlying}. Please run backend script.`);
+        _epnlChart && _epnlChart.drawEmpty(`Run: python scripts/fit_underlying.py ${underlying}`);
+        _setExpectedPnLBadge(null);
+        _setInfoText(`Missing parameters for ${underlying}.`);
+        return;
+    }
+
+    const { df, loc } = params;
     const newScale = _calibrateScale(df, portfolioIV);
     const nPaths = 1_000_000;
     const bins = 500;

@@ -41,5 +41,20 @@ By dividing by an artificially bounded array and excluding the literal massive l
 All disposable and manual simulation scripts used to isolate the Expected P&L Riemann bug have been purged from the core directory structure.
 The `scripts/` folder now formally maintains the essential `spx_fit.py` (which fetches Yahoo Finance data and regenerates the Student-t MLE static parameters over to `t_params.js`). 
 
+## 5. Multi-Underlying Probability Distribution Expansion
+**Problem:** The Monte Carlo simulations previously hardcoded the probability distribution statistics (degrees of freedom, drift) based on purely a static `spx_fit.py` calculation of the S&P 500 index. Simulating a volatile stock like AAPL or an ETF like QQQ using the parameters of the SPY resulted in inaccurate tail probability shapes.
+**Solution:**
+- Created `scripts/fit_underlying.py` which takes an arbitrary number of ticker arguments (e.g. `python scripts/fit_underlying.py AAPL QQQ SPY`). The script will fit Student-t parameters (df, loc, scale) independently using 10 years of historical data for each ticker via Yahoo Finance.
+- Replaced the hardcoded Javascript inclusion with a dynamic dictionary database file: `t_params_db.js`. This creates a global `T_DIST_PARAMS_DB` JSON object.
+- Modified `prob_charts.js` to look up `T_DIST_PARAMS_DB` dynamically matching the `state.underlyingSymbol`.
+- If an unknown underlying is entered, the interface will automatically decline to calculate the probability and display a command-line prompt hinting the developer to execute the fit script for that specific ticker.
+
+## 6. Monte Carlo Optimization & Live Data Sync
+**Problem 1:** The Monte Carlo simulations previously triggered a million-path recalculation every time the UI sliders (underlying price, DTE) were dragged, consuming massive CPU cycles and causing UI lag.
+**Solution 1:** Decoupled `scheduleProbChartUpdate()` from standard UI updates. Added a dedicated `🔄 Recalculate` button to the Probability Analysis panel, ensuring the expensive simulation is explicitly user-triggered.
+
+**Problem 2:** Importing a JSON combo template updated the frontend Symbol correctly, but failed to re-subscribe the backend WebSocket stream (it continued feeding original tickers like SPY instead of AAPL).
+**Solution 2:** Injected `handleLiveSubscriptions()` at the end of `importFromJSON(event)` inside `app.js` to dispatch the correct ticker downstream post-import.
+
 ***
 *End of Protocol. The project is presently completely mathematically synchronized and highly legible for continued expansion.*

@@ -381,9 +381,6 @@ function updateDerivedValues() {
             drawGlobalChart(globalCard);
         }
     }
-
-    // Schedule probability analysis update (debounced)
-    scheduleProbChartUpdate();
 }
 
 // -------------------------------------------------------------
@@ -521,13 +518,11 @@ function setGlobalChartRangeMode(btn, mode) {
     }
 
     drawGlobalChart(card);
-    scheduleProbChartUpdate();
 }
 
 function triggerGlobalChartRedraw() {
     const card = document.getElementById('globalChartCard');
     drawGlobalChart(card);
-    scheduleProbChartUpdate();
 }
 
 function drawGlobalChart(card) {
@@ -636,16 +631,6 @@ function toggleProbCharts(btn) {
     }
 }
 
-// Debounced trigger for probability chart updates
-let _probChartTimer = null;
-function scheduleProbChartUpdate() {
-    clearTimeout(_probChartTimer);
-    _probChartTimer = setTimeout(() => {
-        if (typeof updateProbCharts === 'function') updateProbCharts();
-    }, 400);
-}
-
-
 // -------------------------------------------------------------
 // Import / Export JSON
 // -------------------------------------------------------------
@@ -746,6 +731,7 @@ function importFromJSON(event) {
                 document.getElementById('ivOffsetDisplay').textContent = `${(state.ivOffset * 100 > 0 ? '+' : '')}${(state.ivOffset * 100).toFixed(2)}%`;
 
                 renderGroups();
+                handleLiveSubscriptions();
             } else {
                 alert("Invalid JSON format.");
             }

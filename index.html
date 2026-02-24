@@ -222,11 +222,14 @@
                                 <span class="text-muted small" id="probSimInfoText"
                                     style="margin-left: 1rem; font-weight: normal;"></span>
                             </div>
-                            <div class="group-actions">
-                                <div id="expectedPnLBadge"
-                                    style="margin-right: 1rem; font-weight: 600; font-size: 0.95rem;"></div>
+                            <div class="group-actions" style="display: flex; align-items: center; gap: 0.75rem;">
+                                <span class="distribution-hint" style="font-size: 11px; color: #9CA3AF; cursor: help;"
+                                    title="Run: python scripts/fit_underlying.py [TICKER]">ℹ️ Params DB</span>
+                                <div id="expectedPnLBadge" style="font-weight: 600; font-size: 0.95rem;"></div>
                                 <button class="btn btn-secondary btn-sm" onclick="toggleProbCharts(this)">Show
                                     Analysis</button>
+                                <button class="btn btn-primary btn-sm" onclick="updateProbCharts()"
+                                    title="Re-run Simulation">🔄 Recalculate</button>
                             </div>
                         </div>
 
@@ -457,11 +460,11 @@
     </div>
 
     <!-- Scripts -->
+    <script src="t_params_db.js"></script>
     <script src="bsm.js"></script>
     <script src="chart.js"></script>
-    <script src="app.js"></script>
-    <script src="t_params.js"></script>
     <script src="prob_charts.js"></script>
+    <script src="app.js"></script>
 </body>
 
 </html>
