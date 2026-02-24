@@ -29,42 +29,8 @@ const state = {
     groups: []
 };
 
-// Date helper (UTC enforcement to avoid DST issues and local timezone bugs)
-function diffDays(d1Str, d2Str) {
-    const d1 = new Date(d1Str + 'T00:00:00Z');
-    const d2 = new Date(d2Str + 'T00:00:00Z');
-    const diffTime = d2 - d1;
-    return Math.max(0, Math.round(diffTime / 86400000));
-}
-function addDays(dateStr, days) {
-    const d = new Date(dateStr + 'T00:00:00Z');
-    d.setUTCDate(d.getUTCDate() + parseInt(days, 10));
-    return d.toISOString().slice(0, 10);
-}
-
-// Exact calendar days to trading days logic (skipping weekends)
-function calendarToTradingDays(startDateStr, endDateStr) {
-    let start = new Date(startDateStr + 'T00:00:00Z');
-    let end = new Date(endDateStr + 'T00:00:00Z');
-
-    // Ensure start is before end
-    if (start > end) {
-        return 0; // Negative days not supported in this context
-    }
-
-    let days = 0;
-    // Iterate from start to end (exclusive of end, or inclusive conceptually depending on standard, usually inclusive of start, exclusive of end day)
-    let current = new Date(start);
-    while (current < end) {
-        const dayOfWeek = current.getUTCDay();
-        // 0 is Sunday, 6 is Saturday
-        if (dayOfWeek !== 0 && dayOfWeek !== 6) {
-            days++;
-        }
-        current.setUTCDate(current.getUTCDate() + 1);
-    }
-    return days;
-}
+// Date helper functions such as diffDays, addDays, calendarToTradingDays 
+// have been unified globally in bsm.js
 
 // Initialization
 document.addEventListener('DOMContentLoaded', () => {
@@ -181,9 +147,7 @@ function bindControlPanelEvents() {
 // Group & Leg Management & Rendering
 // -------------------------------------------------------------
 
-function getMultiplier() {
-    return 100; // Standard option multiplier
-}
+// getMultiplier() has been unified globally in bsm.js
 
 function addGroup() {
     const newGroup = {
@@ -362,37 +326,22 @@ function updateDerivedValues() {
             const leg = group.legs.find(l => l.id === legId);
             if (!leg) return;
 
-            // Simulated attributes (Date logic)
-            // If expiration is in the past compared to simulated date, DTE is 0 (expired)
-            const isExpired = new Date(leg.expDate + 'T00:00:00Z') <= new Date(state.simulatedDate + 'T00:00:00Z');
-            const simCalDTE = isExpired ? 0 : diffDays(state.simulatedDate, leg.expDate);
-            const simTradDTE = isExpired ? 0 : calendarToTradingDays(state.simulatedDate, leg.expDate);
-            const simIV = Math.max(0.001, leg.iv + state.ivOffset);
-
-            // Precision model: exactly count trading days divided by 252. 
-            // This properly models the fact that weekends generate no variance.
-            const timeToMaturityYears = simTradDTE / 252.0;
+            // Process leg globally to ensure perfectly synced DTE and IV
+            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset);
 
             // Update displays for simulated variables
-            tr.querySelector('.simulated-dte-display').textContent = `Sim DTE: ${simTradDTE} td / ${simCalDTE} cd`;
-            tr.querySelector('.simulated-iv-display').textContent = `Sim IV: ${(simIV * 100).toFixed(2)}%`;
+            tr.querySelector('.simulated-dte-display').textContent = `Sim DTE: ${pLeg.tradDTE} td / ${pLeg.calDTE} cd`;
+            tr.querySelector('.simulated-iv-display').textContent = `Sim IV: ${(pLeg.simIV * 100).toFixed(2)}%`;
 
             // Calculate Pricing
-            const costBasis = leg.pos * getMultiplier() * leg.cost;
-            groupCost += costBasis;
+            groupCost += pLeg.costBasis;
 
-            let simPricePerShare = 0;
-            if (simCalDTE > 0) {
-                simPricePerShare = calculateOptionPrice(leg.type, state.underlyingPrice, leg.strike, timeToMaturityYears, state.interestRate, simIV);
-            } else {
-                if (leg.type === 'call') simPricePerShare = Math.max(0, state.underlyingPrice - leg.strike);
-                if (leg.type === 'put') simPricePerShare = Math.max(0, leg.strike - state.underlyingPrice);
-            }
+            const simPricePerShare = computeLegPrice(pLeg, state.underlyingPrice, state.interestRate);
+            const simValue = pLeg.posMultiplier * simPricePerShare;
 
-            const simValue = leg.pos * getMultiplier() * simPricePerShare;
             groupSimValue += simValue;
 
-            const pnl = simValue - costBasis;
+            const pnl = simValue - pLeg.costBasis;
 
             tr.querySelector('.simulated-price-cell').textContent = currencyFormatter.format(simPricePerShare);
             const pnlCell = tr.querySelector('.pnl-cell');

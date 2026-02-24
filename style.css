@@ -195,6 +195,7 @@ body {
     right: 0;
     text-align: right;
     margin-top: 0.25rem;
+    white-space: nowrap;
 }
 
 /* Slider Styling */

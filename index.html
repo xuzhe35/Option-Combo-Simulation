@@ -180,6 +180,8 @@
                                     <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Range
                                         Mode</label>
                                     <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="5"
+                                            onclick="setGlobalChartRangeMode(this, 5)">±5%</button>
                                         <button class="btn btn-secondary btn-sm global-range-mode-btn active"
                                             data-mode="10" onclick="setGlobalChartRangeMode(this, 10)">±10%</button>
                                         <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="20"
@@ -223,8 +225,8 @@
                             <div class="group-actions">
                                 <div id="expectedPnLBadge"
                                     style="margin-right: 1rem; font-weight: 600; font-size: 0.95rem;"></div>
-                                <button class="btn btn-secondary btn-sm"
-                                    onclick="toggleProbCharts(this)">Show Analysis</button>
+                                <button class="btn btn-secondary btn-sm" onclick="toggleProbCharts(this)">Show
+                                    Analysis</button>
                             </div>
                         </div>
 
@@ -232,12 +234,10 @@
                             style="display: none; border-top: 1px solid var(--border-color); padding-top: 1rem; margin-top: 0.75rem;">
 
                             <!-- Chart 2: Price Probability Density -->
-                            <div class="small text-muted"
-                                style="margin-bottom: 0.25rem; font-weight: 500;">
+                            <div class="small text-muted" style="margin-bottom: 0.25rem; font-weight: 500;">
                                 Price Probability Density at Simulation Date
                             </div>
-                            <div class="canvas-wrapper"
-                                style="width: 100%; height: 220px; position: relative;">
+                            <div class="canvas-wrapper" style="width: 100%; height: 220px; position: relative;">
                                 <canvas id="priceDensityCanvas"
                                     style="width: 100%; height: 100%; display: block;"></canvas>
                             </div>
@@ -250,8 +250,7 @@
                                     (P&amp;L × Probability — area under curve = Expected P&amp;L)
                                 </span>
                             </div>
-                            <div class="canvas-wrapper"
-                                style="width: 100%; height: 220px; position: relative;">
+                            <div class="canvas-wrapper" style="width: 100%; height: 220px; position: relative;">
                                 <canvas id="expectedPnLDensityCanvas"
                                     style="width: 100%; height: 100%; display: block;"></canvas>
                             </div>
@@ -363,6 +362,8 @@
                                         <label class="small text-muted"
                                             style="display:block; margin-bottom: 0.25rem;">Range Mode</label>
                                         <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                            <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="5"
+                                                onclick="setChartRangeMode(this, 5)">±5%</button>
                                             <button class="btn btn-secondary btn-sm range-mode-btn active"
                                                 data-mode="10" onclick="setChartRangeMode(this, 10)">±10%</button>
                                             <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="20"
@@ -421,7 +422,7 @@
                             <td>
                                 <div class="simulated-display-wrapper">
                                     <input type="number" class="leg-input iv-input original-iv" value="20.00" min="0.01"
-                                        step="0.01">
+                                        style="min-width: 90px" step="0.01">
                                     <div class="simulated-iv-display text-muted small simulated-text"></div>
                                 </div>
                             </td>

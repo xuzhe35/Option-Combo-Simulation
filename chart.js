@@ -129,37 +129,8 @@ class PnLChart {
         let trueMinPnL = Infinity;
         let trueMaxPnL = -Infinity;
 
-        const diffDays = (d1Str, d2Str) => {
-            const d1 = new Date(d1Str + 'T00:00:00Z');
-            const d2 = new Date(d2Str + 'T00:00:00Z');
-            const diffTime = d2 - d1;
-            return Math.max(0, Math.round(diffTime / 86400000));
-        };
-
-        const globalSimDateStr = globalState.simulatedDate;
-        const globalSimDateObj = new Date(globalSimDateStr + 'T00:00:00Z');
-
-        // Pre-process legs to avoid running expensive Date calculations in the loop
-        const processedLegs = group.legs.map(leg => {
-            const expDateObj = new Date(leg.expDate + 'T00:00:00Z');
-            const isExpired = expDateObj <= globalSimDateObj;
-            const simCalDTE = isExpired ? 0 : diffDays(globalSimDateStr, leg.expDate);
-            const simTradDTE = isExpired ? 0 : calendarToTradingDays(globalSimDateStr, leg.expDate);
-            const simIV = Math.max(0.001, leg.iv + globalState.ivOffset);
-            const timeToMaturityYears = simTradDTE / 252.0;
-            const costBasis = leg.pos * 100 * leg.cost;
-
-            return {
-                type: leg.type,
-                pos: leg.pos,
-                strike: leg.strike,
-                simTradDTE,
-                simCalDTE,
-                simIV,
-                timeToMaturityYears,
-                costBasis
-            };
-        });
+        // Process all legs globally before the 500-point chart array loop
+        const processedLegs = group.legs.map(leg => processLegData(leg, globalState.simulatedDate, globalState.ivOffset));
 
         const step = (maxS - minS) / (this.pointsCount - 1);
         let evalPoints = [];
@@ -188,14 +159,8 @@ class PnLChart {
                 const l = processedLegs[j];
                 totalCostBasis += l.costBasis;
 
-                let pricePerShare = 0;
-                if (l.simCalDTE > 0) {
-                    pricePerShare = calculateOptionPrice(l.type, currentS, l.strike, l.timeToMaturityYears, globalState.interestRate, l.simIV);
-                } else {
-                    if (l.type === 'call') pricePerShare = Math.max(0, currentS - l.strike);
-                    if (l.type === 'put') pricePerShare = Math.max(0, l.strike - currentS);
-                }
-                simValue += l.pos * 100 * pricePerShare;
+                const pricePerShare = computeLegPrice(l, currentS, globalState.interestRate);
+                simValue += l.posMultiplier * pricePerShare;
             }
 
             const pnl = simValue - totalCostBasis;

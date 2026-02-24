@@ -132,9 +132,8 @@ self.onmessage = function(e) {
             counts[binIdx]++;
         }
 
-        // Exact BSM path pricing if legs provided (bounded to chart range)
-        if (legs && legs.length > 0 && finalPrice >= minS && finalPrice <= maxS) {
-            pathsInRange++;
+        // Exact BSM path pricing if legs provided (calculate for ALL paths for true Expectation)
+        if (legs && legs.length > 0) {
             let pathPnL = 0.0;
             const s_safe = finalPrice > 0 ? finalPrice : 0.0001;
             const log_S = Math.log(s_safe);
@@ -160,7 +159,7 @@ self.onmessage = function(e) {
         }
     }
 
-    const exactExpectedPnL = pathsInRange > 0 ? (exactPnLSum / pathsInRange) : 0;
+    const exactExpectedPnL = nPaths > 0 ? (exactPnLSum / nPaths) : 0;
 
     // Normalise to probability density
     const normFactor = nPaths * binWidth;
@@ -227,37 +226,16 @@ function _lognormalDensity(s, S0, portfolioIV, loc, nDays) {
 function _computePortfolioPnLAtPrice(price) {
     if (!state || !state.groups) return 0;
 
-    const simDateStr = state.simulatedDate;
-    const simDateObj = new Date(simDateStr + 'T00:00:00Z');
-
     let totalValue = 0;
     let totalCost = 0;
 
     state.groups.forEach(group => {
         group.legs.forEach(leg => {
-            const expDateObj = new Date(leg.expDate + 'T00:00:00Z');
-            const isExpired = expDateObj <= simDateObj;
-            const calDTE = isExpired
-                ? 0
-                : Math.max(0, Math.round((expDateObj - simDateObj) / 86400000));
-            const tradDTE = isExpired
-                ? 0
-                : calendarToTradingDays(state.simulatedDate, leg.expDate);
-            const T = tradDTE / 252.0;
-            const simIV = Math.max(0.001, leg.iv + state.ivOffset);
+            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset);
+            const pps = computeLegPrice(pLeg, price, state.interestRate);
 
-            let pps = 0;
-            if (calDTE > 0) {
-                pps = calculateOptionPrice(
-                    leg.type, price, leg.strike, T, state.interestRate, simIV
-                );
-            } else {
-                if (leg.type === 'call') pps = Math.max(0, price - leg.strike);
-                else pps = Math.max(0, leg.strike - price);
-            }
-
-            totalValue += leg.pos * 100 * pps;
-            totalCost += leg.pos * 100 * leg.cost;
+            totalValue += pLeg.posMultiplier * pps;
+            totalCost += pLeg.costBasis;
         });
     });
 
@@ -774,19 +752,16 @@ function updateProbCharts() {
     const workerLegs = [];
     state.groups.forEach(group => {
         group.legs.forEach(leg => {
-            const expDateObj = new Date(leg.expDate + 'T00:00:00Z');
-            const isExpired = expDateObj <= simDateObj;
-            const tradDTE = isExpired ? 0 : calendarToTradingDays(state.simulatedDate, leg.expDate);
-            const simIV = Math.max(0.001, leg.iv + state.ivOffset);
+            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset);
 
             workerLegs.push({
-                type: leg.type,
-                K: leg.strike,
+                type: pLeg.type,
+                K: pLeg.strike,
                 r: state.interestRate,
-                T: tradDTE / 252.0,
-                v: simIV,
-                posMultiplier: leg.pos * 100,
-                costBasis: leg.pos * 100 * leg.cost
+                T: pLeg.T,
+                v: pLeg.simIV,
+                posMultiplier: pLeg.posMultiplier,
+                costBasis: pLeg.costBasis
             });
         });
     });
