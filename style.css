@@ -109,6 +109,15 @@ body {
     grid-template-columns: 320px 1fr;
     gap: 2rem;
     align-items: start;
+    transition: grid-template-columns 0.3s ease;
+}
+
+.layout-grid.sidebar-collapsed {
+    grid-template-columns: 1fr;
+}
+
+.layout-grid.sidebar-collapsed .control-panel {
+    display: none;
 }
 
 /* Cards */

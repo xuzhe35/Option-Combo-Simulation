@@ -67,10 +67,15 @@ def on_pending_tickers(tickers):
         for sub_id, ticker in subs.items():
             if sub_id != 'underlying':
                 price = ticker.marketPrice()
+                iv = getattr(ticker, 'impliedVolatility', None) or getattr(ticker.modelGreeks, 'impliedVol', None) if hasattr(ticker, 'modelGreeks') and ticker.modelGreeks else getattr(ticker, 'impliedVolatility', None)
+                
                 if price == price and price > 0:
                     payload["options"][sub_id] = {
                         "mark": price
                     }
+                    
+                    if iv and iv == iv and iv > 0: # Check for NaN
+                        payload["options"][sub_id]["iv"] = iv
                     has_data = True
                     
         # Send data only to the client that requested it
@@ -148,7 +153,8 @@ async def handle_ws_client(websocket):
                         opt_contract = Option(symbol, exp_date, strike, right, 'SMART', multiplier='100', currency='USD')
                         try:
                             await ib.qualifyContractsAsync(opt_contract)
-                            opt_ticker = ib.reqMktData(opt_contract, '', False, False)
+                            # genericTickList '106' explicitly requests Option Implied Volatility and Greeks
+                            opt_ticker = ib.reqMktData(opt_contract, '106', False, False)
                             client_subscriptions[websocket][leg_id] = opt_ticker
                         except Exception as e:
                             logging.error(f"Failed to qualify option {strike} {right}: {e}")

@@ -110,7 +110,7 @@ function calendarToTradingDays(startDateStr, endDateStr) {
  * Standardize leg input processing across all UI rendering and charting arrays.
  * Extracts the exact date strings & handles logic branching for expiration.
  */
-function processLegData(leg, globalSimulatedDateStr, globalIvOffset) {
+function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseDateStr = null, globalUnderlyingPrice = null, globalInterestRate = null, viewMode = 'active') {
     const simDateObj = new Date(globalSimulatedDateStr + 'T00:00:00Z');
     const expDateObj = new Date(leg.expDate + 'T00:00:00Z');
 
@@ -125,7 +125,41 @@ function processLegData(leg, globalSimulatedDateStr, globalIvOffset) {
     const T = tradDTE / 252.0;
     const simIV = Math.max(0.001, leg.iv + globalIvOffset);
     const posMultiplier = leg.pos * getMultiplier();
-    const costBasis = posMultiplier * leg.cost;
+
+    // --------------------------------------------------------------------------
+    // Trial vs Active Position Cost Logic
+    // If viewMode === 'active' AND cost > 0, it's an executed position (Fixed).
+    // If viewMode === 'trial' OR cost === 0, it's a Trial combo: price it dynamically at T=0.
+    // --------------------------------------------------------------------------
+    let effectiveCostPerShare = leg.cost;
+
+    if (viewMode === 'trial' || leg.cost === 0 || leg.cost === 0.00) {
+        if (leg.currentPrice && leg.currentPrice > 0) {
+            // Live Data Stream Active - use exact current bid/ask/mark
+            effectiveCostPerShare = leg.currentPrice;
+        } else if (globalBaseDateStr && globalUnderlyingPrice !== null && globalInterestRate !== null) {
+            // Offline - calculate the BSM theoretical value exactly at the physical BASE date (Today), ignoring simulation timeline/IV sliders
+            const baseCalDTE = diffDays(globalBaseDateStr, leg.expDate);
+            const baseTradDTE = calendarToTradingDays(globalBaseDateStr, leg.expDate);
+            const baseT = baseTradDTE / 252.0;
+
+            if (baseT <= 0) {
+                if (leg.type === 'call') effectiveCostPerShare = Math.max(0, globalUnderlyingPrice - leg.strike);
+                else effectiveCostPerShare = Math.max(0, leg.strike - globalUnderlyingPrice);
+            } else {
+                effectiveCostPerShare = calculateOptionPrice(
+                    leg.type,
+                    globalUnderlyingPrice,
+                    leg.strike,
+                    baseT,
+                    globalInterestRate,
+                    leg.iv // Theoretical cost strictly ignores the global IV offset for current base origin
+                );
+            }
+        }
+    }
+
+    const costBasis = posMultiplier * effectiveCostPerShare;
 
     return {
         type: leg.type,
@@ -137,7 +171,8 @@ function processLegData(leg, globalSimulatedDateStr, globalIvOffset) {
         T,
         simIV,
         posMultiplier,
-        costBasis
+        costBasis,
+        effectiveCostPerShare
     };
 }
 

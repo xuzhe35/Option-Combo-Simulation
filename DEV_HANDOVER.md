@@ -63,5 +63,21 @@ The `scripts/` folder now formally maintains the essential `spx_fit.py` (which f
 - `on_pending_tickers` now iterates over connected clients, independently packaging customized JSON payloads containing only the data that specific browser tab requested.
 - Added `unsubscribe_client_safely(ws)` to securely manage IB `cancelMktData` calls using reference counting across all active clients, ensuring we don't sever data feeds that other tabs are still relying on.
 
+## 8. Dual-Track Cost Basis Charting (Trial vs Active)
+**Problem:** A trader with an active/filled option (which possesses a historical, locked `Cost`) may still want to visually evaluate the Expected P&L derived from the `Current Live Price` (to decide whether to add or close a position right now). Previously, `Live Market Data` incorrectly overwrote the history `Cost`, ruining the tracking of open positions.
+**Solution:**
+- The DOM was vertically compressed to stack `DTE / Vol` and `Price / Cost` inputs, reclaiming significant horizontal space for laptop screens.
+- `state.groups[i].viewMode` (`'active'` or `'trial'`) was introduced into `app.js` governed by a toggle button inside the UI.
+- `bsm.js -> processLegData()` now dynamically branches the output `costBasis`:
+  - If `viewMode === 'active'` and a non-zero Cost exists, it binds the mathematical expected P&L charts strictly to this historical locked floor.
+  - If `viewMode === 'trial'` (or `Cost === 0`), it automatically falls back to utilizing the current leg Price (or calculates the BSM fair value for exactly *Today* if offline), granting an exact real-time snapshot of the Expected Value curve strictly for un-filled combinations.
+
+## 9. Live Market Data IV & Zero-Delta Math Drift
+**Problem:** A strict Black-Scholes-Merton model calculates theoretical option values that will always deviate slightly (by fractions of a percent) from real-world real-time bid/ask prices due to market inefficiencies. In Trial Mode at $T=Now$, bridging real-world `Cost` against BSM `Simulated Value` created instantaneous fake P&L drift. Furthermore, `ib_insync`'s default `reqMktData` stream suppresses `impliedVolatility`, blinding the simulation engine to real-time Greek crushes.
+**Solution:**
+- **Zero-Delta BSM Isolation:** `app.js` now strictly intercepts the evaluation cycle. If `viewMode === 'trial'` AND the user is simulating exactly Today ($T=0$) with no IV offsets, it bypasses BSM entirely and pins `Simulated Value` strictly to the exact ingested Live Quote `mark`, guaranteeing a secure \$0.00 P&L baseline.
+- **IBKR Generic Tick 106:** `ib_server.py` was patched to inject `genericTickList='106'` into the `reqMktData` payload, forcing Interactive Brokers to compute and stream Option Model Greeks seamlessly.
+- **Micro-Float DOM Integration:** IV parsing in frontend `app.js` was untethered from standard `0.001` dollar-value float thresholds down to `0.000001` to capture microscopic decimal shifts, formatted via `(liveIV * 100).toFixed(4) + '%'` to reveal native breathing movements directly inside the DOM.
+
 ***
 *End of Protocol. The project is presently completely mathematically synchronized and highly legible for continued expansion.*

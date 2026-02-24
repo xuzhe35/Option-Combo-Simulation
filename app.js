@@ -24,8 +24,9 @@ const state = {
     underlyingPrice: 100.00,
     baseDate: initialDateStr, // Today local YYYY-MM-DD
     simulatedDate: initialDateStr, // Initially same as baseDate
-    interestRate: 0.03, // 3%
+    interestRate: 0.03, // 3% default risk-free rate
     ivOffset: 0.0, // 0%
+    viewMode: 'active', // 'active' (Historical Entry Cost) or 'trial' (Current Live Price)
     groups: []
 };
 
@@ -167,6 +168,13 @@ function removeGroup(groupId) {
     renderGroups();
 }
 
+function toggleSidebar() {
+    const layoutGrid = document.querySelector('.layout-grid');
+    if (layoutGrid) {
+        layoutGrid.classList.toggle('sidebar-collapsed');
+    }
+}
+
 function addLegToGroupById(groupId) {
     const group = state.groups.find(g => g.id === groupId);
     if (!group) return;
@@ -178,6 +186,7 @@ function addLegToGroupById(groupId) {
         strike: state.underlyingPrice,
         expDate: addDays(state.baseDate, 30), // Default to 30 days out
         iv: 0.2,
+        currentPrice: 0.00,
         cost: 0.00
     };
     group.legs.push(newLeg);
@@ -241,6 +250,24 @@ function renderGroups() {
             handleLiveSubscriptions();
         });
 
+        // View Mode Toggle (Dual Charting)
+        const toggleActiveBtn = card.querySelector('.toggle-view-active');
+        const toggleTrialBtn = card.querySelector('.toggle-view-trial');
+        const currentMode = group.viewMode || 'active'; // support group-level override
+        if (currentMode === 'active') {
+            toggleActiveBtn.classList.add('active');
+            toggleActiveBtn.classList.remove('btn-secondary');
+            toggleActiveBtn.classList.add('btn-primary');
+            toggleTrialBtn.classList.remove('active', 'btn-primary');
+            toggleTrialBtn.classList.add('btn-secondary');
+        } else {
+            toggleTrialBtn.classList.add('active');
+            toggleTrialBtn.classList.remove('btn-secondary');
+            toggleTrialBtn.classList.add('btn-primary');
+            toggleActiveBtn.classList.remove('active', 'btn-primary');
+            toggleActiveBtn.classList.add('btn-secondary');
+        }
+
         // Remove Group Binding
         card.querySelector('.remove-group-btn').addEventListener('click', () => removeGroup(group.id));
 
@@ -282,8 +309,16 @@ function renderGroups() {
                 });
 
                 const ivInput = tr.querySelector('.iv-input');
-                ivInput.value = (leg.iv * 100).toFixed(2);
-                ivInput.addEventListener('input', (e) => { leg.iv = parseFloat(e.target.value) / 100.0 || 0.001; updateDerivedValues(); });
+                ivInput.value = (leg.iv * 100).toFixed(4) + '%';
+                ivInput.addEventListener('change', (e) => {
+                    leg.iv = parseFloat(e.target.value) / 100.0 || 0.001;
+                    e.target.value = (leg.iv * 100).toFixed(4) + '%';
+                    updateDerivedValues();
+                });
+
+                const currentPriceInput = tr.querySelector('.current-price-input');
+                currentPriceInput.value = leg.currentPrice.toFixed(2);
+                currentPriceInput.addEventListener('input', (e) => { leg.currentPrice = parseFloat(e.target.value) || 0; updateDerivedValues(); });
 
                 const costInput = tr.querySelector('.cost-input');
                 costInput.value = leg.cost.toFixed(2);
@@ -296,6 +331,28 @@ function renderGroups() {
             });
         }
 
+        // Auto-lock ViewMode to Trial if all costs are perfectly 0 to avoid confusing flatlines
+        let allZeroCost = true;
+        group.legs.forEach(leg => {
+            if (leg.cost !== 0) allZeroCost = false;
+        });
+        if (allZeroCost) {
+            group.viewMode = 'trial';
+            const toggleTrialBtn = card.querySelector('.toggle-view-trial');
+            const toggleActiveBtn = card.querySelector('.toggle-view-active');
+            if (toggleTrialBtn && toggleActiveBtn) {
+                toggleActiveBtn.disabled = true;
+                toggleActiveBtn.title = "Add a Cost to unlock Active historical tracking.";
+                toggleActiveBtn.classList.add('text-muted');
+                toggleActiveBtn.style.opacity = '0.5';
+
+                toggleTrialBtn.classList.add('active', 'btn-primary');
+                toggleTrialBtn.classList.remove('btn-secondary');
+                toggleActiveBtn.classList.remove('active', 'btn-primary');
+                toggleActiveBtn.classList.add('btn-secondary');
+            }
+        }
+
         container.appendChild(card);
     });
 
@@ -305,6 +362,22 @@ function renderGroups() {
 // -------------------------------------------------------------
 // Core Calculations
 // -------------------------------------------------------------
+
+function setGroupViewMode(btn, mode) {
+    const card = btn.closest('.group-card');
+    if (!card) return;
+    const groupId = card.dataset.groupId;
+    const group = state.groups.find(g => g.id === groupId);
+    if (!group) return;
+
+    group.viewMode = mode;
+    renderGroups(); // Refresh UI button states
+
+    // Explicitly redraw charts related to this group
+    triggerChartRedraw(btn);
+    // Refresh probability simulation globally just in case (optional, depending on load)
+    updateProbCharts();
+}
 
 function updateDerivedValues() {
     let globalTotalCost = 0;
@@ -327,16 +400,42 @@ function updateDerivedValues() {
             if (!leg) return;
 
             // Process leg globally to ensure perfectly synced DTE and IV
-            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset);
+            const activeViewMode = group.viewMode || 'active';
+            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode);
 
             // Update displays for simulated variables
             tr.querySelector('.simulated-dte-display').textContent = `Sim DTE: ${pLeg.tradDTE} td / ${pLeg.calDTE} cd`;
             tr.querySelector('.simulated-iv-display').textContent = `Sim IV: ${(pLeg.simIV * 100).toFixed(2)}%`;
 
+            // Dynamic Trial / Active Price Display
+            const currentPriceInput = tr.querySelector('.current-price-input');
+            if (activeViewMode === 'trial' && leg.currentPrice === 0) {
+                // The system is seamlessly falling back to BSM Theoretical Price (Today)
+                // We wipe the "0.00" value so the HTML placeholder can visibly expose this calculated baseline to the user
+                currentPriceInput.value = "";
+                currentPriceInput.placeholder = pLeg.effectiveCostPerShare.toFixed(2);
+                currentPriceInput.title = "Theoretical BSM Price for Today";
+            } else {
+                currentPriceInput.value = leg.currentPrice.toFixed(2);
+                currentPriceInput.placeholder = "0.00";
+                currentPriceInput.title = "Current Live Quote (or manually entered)";
+            }
+
             // Calculate Pricing
             groupCost += pLeg.costBasis;
 
-            const simPricePerShare = computeLegPrice(pLeg, state.underlyingPrice, state.interestRate);
+            let simPricePerShare = 0;
+
+            // If we are in Trial mode, calculating precisely for "Right Now" (no user slide offsets)
+            // AND we have a live quote, bypass the theoretical BSM calculation for the Displayed Sim Price
+            // to prevent annoying baseline modeling deviations that instantly generate fake P&L.
+            const isEvaluatingRightNow = (state.simulatedDate === state.baseDate) && (state.ivOffset === 0);
+            if (activeViewMode === 'trial' && isEvaluatingRightNow && leg.currentPrice > 0 && state.underlyingPrice === parseFloat(document.getElementById('underlyingPriceDisplay').textContent.replace(/[^0-9.-]+/g, ""))) {
+                simPricePerShare = leg.currentPrice;
+            } else {
+                simPricePerShare = computeLegPrice(pLeg, state.underlyingPrice, state.interestRate);
+            }
+
             const simValue = pLeg.posMultiplier * simPricePerShare;
 
             groupSimValue += simValue;
@@ -685,6 +784,9 @@ function importFromJSON(event) {
                             newLeg.expDate = addDays(state.baseDate, newLeg.dte);
                             delete newLeg.dte;
                         }
+                        if (newLeg.currentPrice === undefined) {
+                            newLeg.currentPrice = 0.00;
+                        }
                         return newLeg;
                     });
                 };
@@ -844,17 +946,48 @@ function processLiveMarketData(data) {
                 group.legs.forEach(leg => {
                     if (data.options[leg.id] !== undefined) {
                         const liveMark = data.options[leg.id].mark;
+                        const liveIV = data.options[leg.id].iv;
 
-                        // Only update if there is a realistic quote and it's different
-                        if (liveMark > 0 && Math.abs(liveMark - leg.cost) > 0.001) {
-                            leg.cost = liveMark;
+                        // Only update Price if there is a realistic quote and it's different
+                        if (liveMark > 0 && Math.abs(liveMark - leg.currentPrice) > 0.001) {
+                            leg.currentPrice = liveMark;
                             stateChanged = true;
 
-                            // Try to update the input DOM directly to reflect new live cost
+                            // Try to update the input DOM directly to reflect new live price
                             const row = document.querySelector(`tr[data-id="${leg.id}"]`);
                             if (row) {
-                                const costInput = row.querySelector('.cost-input');
-                                if (costInput) costInput.value = liveMark.toFixed(2);
+                                const currentPriceInput = row.querySelector('.current-price-input');
+                                if (currentPriceInput) {
+                                    currentPriceInput.value = liveMark.toFixed(2);
+                                    currentPriceInput.style.backgroundColor = 'rgba(74, 222, 128, 0.4)';
+                                    setTimeout(() => {
+                                        currentPriceInput.style.transition = 'background-color 0.8s ease';
+                                        currentPriceInput.style.backgroundColor = 'transparent';
+                                        setTimeout(() => currentPriceInput.style.transition = '', 800);
+                                    }, 50);
+                                }
+                            }
+                        }
+
+                        // Update Implied Volatility if the server streams model Greeks natively
+                        // Threshold pushed to virtually zero to catch any microscopic Greek movements
+                        if (liveIV && liveIV > 0 && Math.abs(liveIV - leg.iv) > 0.000001) {
+                            leg.iv = liveIV;
+                            stateChanged = true;
+
+                            const row = document.querySelector(`tr[data-id="${leg.id}"]`);
+                            if (row) {
+                                const ivInput = row.querySelector('.iv-input');
+                                if (ivInput) {
+                                    ivInput.value = (liveIV * 100).toFixed(4) + '%';
+                                    // Visual flash to confirm data is landing in the DOM
+                                    ivInput.style.backgroundColor = 'rgba(74, 222, 128, 0.4)';
+                                    setTimeout(() => {
+                                        ivInput.style.transition = 'background-color 0.8s ease';
+                                        ivInput.style.backgroundColor = 'transparent';
+                                        setTimeout(() => ivInput.style.transition = '', 800);
+                                    }, 50);
+                                }
                             }
                         }
                     }

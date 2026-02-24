@@ -1,0 +1,53 @@
+{
+  "underlyingSymbol": "SPY",
+  "underlyingPrice": 687.47,
+  "baseDate": "2026-02-24",
+  "simulatedDate": "2026-02-25",
+  "interestRate": 0.03,
+  "ivOffset": 0,
+  "groups": [
+    {
+      "id": "_wljs63the",
+      "name": "Combo Group 1",
+      "legs": [
+        {
+          "id": "_sr8j8cqjl",
+          "type": "call",
+          "pos": 5,
+          "strike": 687,
+          "expDate": "2026-02-27",
+          "iv": 0.184,
+          "cost": 5.125
+        },
+        {
+          "id": "_brc4hpbbg",
+          "type": "put",
+          "pos": 5,
+          "strike": 687,
+          "expDate": "2026-02-27",
+          "iv": 0.184,
+          "cost": 4.305
+        },
+        {
+          "id": "_bc1jt00qj",
+          "type": "call",
+          "pos": -4,
+          "strike": 687,
+          "expDate": "2026-02-25",
+          "iv": 0.162,
+          "cost": 2.75
+        },
+        {
+          "id": "_qwnaf6tjk",
+          "type": "put",
+          "pos": -4,
+          "strike": 687,
+          "expDate": "2026-02-25",
+          "iv": 0.162,
+          "cost": 2.225
+        }
+      ],
+      "liveData": true
+    }
+  ]
+}

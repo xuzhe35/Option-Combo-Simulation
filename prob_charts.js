@@ -231,7 +231,9 @@ function _computePortfolioPnLAtPrice(price) {
 
     state.groups.forEach(group => {
         group.legs.forEach(leg => {
-            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset);
+            // Use processLegData to handle unified BSM formatting (Exp, Implied Vol offset, T)
+            const activeViewMode = group.viewMode || 'active';
+            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode);
             const pps = computeLegPrice(pLeg, price, state.interestRate);
 
             totalValue += pLeg.posMultiplier * pps;
@@ -763,7 +765,8 @@ function updateProbCharts() {
     const workerLegs = [];
     state.groups.forEach(group => {
         group.legs.forEach(leg => {
-            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset);
+            const activeViewMode = group.viewMode || 'active';
+            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode);
 
             workerLegs.push({
                 type: pLeg.type,

@@ -130,7 +130,8 @@ class PnLChart {
         let trueMaxPnL = -Infinity;
 
         // Process all legs globally before the 500-point chart array loop
-        const processedLegs = group.legs.map(leg => processLegData(leg, globalState.simulatedDate, globalState.ivOffset));
+        const activeViewMode = group.viewMode || 'active';
+        const processedLegs = group.legs.map(leg => processLegData(leg, globalState.simulatedDate, globalState.ivOffset, globalState.baseDate, globalState.underlyingPrice, globalState.interestRate, activeViewMode));
 
         const step = (maxS - minS) / (this.pointsCount - 1);
         let evalPoints = [];
