@@ -1,50 +1,55 @@
 {
   "underlyingSymbol": "SPY",
-  "underlyingPrice": 687.47,
+  "underlyingPrice": 691.165,
   "baseDate": "2026-02-24",
   "simulatedDate": "2026-02-25",
   "interestRate": 0.03,
   "ivOffset": 0,
+  "viewMode": "active",
   "groups": [
     {
-      "id": "_wljs63the",
+      "id": "_90xw3a6j3",
       "name": "Combo Group 1",
       "legs": [
         {
-          "id": "_sr8j8cqjl",
+          "id": "_9jv24ad05",
           "type": "call",
           "pos": 5,
           "strike": 687,
           "expDate": "2026-02-27",
-          "iv": 0.184,
-          "cost": 5.125
+          "iv": 0.19948826676249387,
+          "cost": 5.17,
+          "currentPrice": 6.91
         },
         {
-          "id": "_brc4hpbbg",
+          "id": "_4zuwz9wmj",
           "type": "put",
           "pos": 5,
           "strike": 687,
           "expDate": "2026-02-27",
-          "iv": 0.184,
-          "cost": 4.305
+          "iv": 0.1967852073276137,
+          "cost": 4.27,
+          "currentPrice": 2.4699999999999998
         },
         {
-          "id": "_bc1jt00qj",
+          "id": "_hs2q54z4c",
           "type": "call",
           "pos": -4,
           "strike": 687,
           "expDate": "2026-02-25",
-          "iv": 0.162,
-          "cost": 2.75
+          "iv": 0.27869710422949195,
+          "cost": 2.77,
+          "currentPrice": 4.82
         },
         {
-          "id": "_qwnaf6tjk",
+          "id": "_vhfi2cq0i",
           "type": "put",
           "pos": -4,
           "strike": 687,
           "expDate": "2026-02-25",
-          "iv": 0.162,
-          "cost": 2.225
+          "iv": 0.2823269367805106,
+          "cost": 2.17,
+          "currentPrice": 0.65
         }
       ],
       "liveData": true

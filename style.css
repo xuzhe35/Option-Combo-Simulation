@@ -392,6 +392,8 @@ input[type=range]:focus {
 
 .group-summary {
     display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
     justify-content: flex-end;
     gap: 1.5rem;
     background: var(--bg-color);
@@ -402,6 +404,7 @@ input[type=range]:focus {
 
 .group-summary-item {
     font-size: 0.875rem;
+    white-space: nowrap;
 }
 
 .group-summary-item .label {

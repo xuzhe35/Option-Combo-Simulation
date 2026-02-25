@@ -94,8 +94,12 @@ function calendarToTradingDays(startDateStr, endDateStr) {
     let current = new Date(start);
     while (current < end) {
         const dayOfWeek = current.getUTCDay();
+        // Skip weekends AND NYSE holidays
         if (dayOfWeek !== 0 && dayOfWeek !== 6) {
-            days++;
+            const dateStr = current.toISOString().slice(0, 10);
+            if (typeof MARKET_HOLIDAYS === 'undefined' || !MARKET_HOLIDAYS.has(dateStr)) {
+                days++;
+            }
         }
         current.setUTCDate(current.getUTCDate() + 1);
     }
@@ -121,8 +125,8 @@ function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseD
     const calDTE = isExpired ? 0 : diffDays(globalSimulatedDateStr, leg.expDate);
     const tradDTE = isExpired ? 0 : calendarToTradingDays(globalSimulatedDateStr, leg.expDate);
 
-    // Target calculation values
-    const T = tradDTE / 252.0;
+    // Target calculation values — use calendar days / 365 to match TWS
+    const T = calDTE / 365.0;
     const simIV = Math.max(0.001, leg.iv + globalIvOffset);
     const posMultiplier = leg.pos * getMultiplier();
 
@@ -140,8 +144,7 @@ function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseD
         } else if (globalBaseDateStr && globalUnderlyingPrice !== null && globalInterestRate !== null) {
             // Offline - calculate the BSM theoretical value exactly at the physical BASE date (Today), ignoring simulation timeline/IV sliders
             const baseCalDTE = diffDays(globalBaseDateStr, leg.expDate);
-            const baseTradDTE = calendarToTradingDays(globalBaseDateStr, leg.expDate);
-            const baseT = baseTradDTE / 252.0;
+            const baseT = baseCalDTE / 365.0;
 
             if (baseT <= 0) {
                 if (leg.type === 'call') effectiveCostPerShare = Math.max(0, globalUnderlyingPrice - leg.strike);

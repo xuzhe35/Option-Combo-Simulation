@@ -77,10 +77,11 @@ def main():
     end = date.today()
     start = end - timedelta(days=365 * 10 + 10)
 
-    # Load existing database if it exists
+    # Output to project root (parent of scripts/)
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    json_path = os.path.join(script_dir, "t_params_db.json")
-    js_path = os.path.join(script_dir, "t_params_db.js")
+    project_dir = os.path.dirname(script_dir)
+    json_path = os.path.join(project_dir, "t_params_db.json")
+    js_path = os.path.join(project_dir, "t_params_db.js")
 
     db = {}
     if os.path.exists(json_path):
@@ -114,7 +115,7 @@ def main():
 // Contains Student-t MLE fit parameters to daily log-returns (last 10 years).
 // 
 // When simulating with a target portfolio IV, prob_charts.js recalculates
-// the scale so the distribution's std = IV/sqrt(252), while keeping df
+// the scale so the distribution's std = IV/sqrt(365), while keeping df
 // fixed (preserving the historically-fitted tail shape).
 
 const T_DIST_PARAMS_DB = {json.dumps(db, indent=4)};

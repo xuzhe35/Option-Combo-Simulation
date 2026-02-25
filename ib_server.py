@@ -66,8 +66,29 @@ def on_pending_tickers(tickers):
 
         for sub_id, ticker in subs.items():
             if sub_id != 'underlying':
-                price = ticker.marketPrice()
-                iv = getattr(ticker, 'impliedVolatility', None) or getattr(ticker.modelGreeks, 'impliedVol', None) if hasattr(ticker, 'modelGreeks') and ticker.modelGreeks else getattr(ticker, 'impliedVolatility', None)
+                # Use bid/ask midpoint ("mark") instead of marketPrice() which returns
+                # last trade price — that can be stale for illiquid options.
+                # TWS's "mark" column = (bid + ask) / 2, so we match that here.
+                bid = ticker.bid
+                ask = ticker.ask
+                if bid and ask and bid == bid and ask == ask and bid > 0 and ask > 0:
+                    price = round((bid + ask) / 2, 4)
+                else:
+                    # Fallback to marketPrice if bid/ask not available
+                    price = ticker.marketPrice()
+                
+                # Extract IV: prefer modelGreeks.impliedVol (from Generic Tick 106),
+                # fall back to ticker.impliedVolatility if available.
+                # Both can be NaN, so filter explicitly.
+                iv = None
+                if hasattr(ticker, 'modelGreeks') and ticker.modelGreeks:
+                    raw = getattr(ticker.modelGreeks, 'impliedVol', None)
+                    if raw is not None and raw == raw and raw > 0:  # filter NaN
+                        iv = raw
+                if iv is None:
+                    raw = getattr(ticker, 'impliedVolatility', None)
+                    if raw is not None and raw == raw and raw > 0:
+                        iv = raw
                 
                 if price == price and price > 0:
                     payload["options"][sub_id] = {

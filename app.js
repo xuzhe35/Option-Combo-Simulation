@@ -392,6 +392,8 @@ function setGroupViewMode(btn, mode) {
 function updateDerivedValues() {
     let globalTotalCost = 0;
     let globalSimulatedValue = 0;
+    let globalLivePnL = 0;
+    let hasAnyLiveData = false;
 
     const cards = document.querySelectorAll('.group-card');
 
@@ -402,6 +404,8 @@ function updateDerivedValues() {
 
         let groupCost = 0;
         let groupSimValue = 0;
+        let groupLivePnL = 0;
+        let groupHasLiveData = false;
 
         const rows = card.querySelectorAll('.leg-row');
         rows.forEach(tr => {
@@ -449,6 +453,14 @@ function updateDerivedValues() {
             tr.querySelector('.simulated-price-cell').textContent = currencyFormatter.format(simPricePerShare);
             const pnlCell = tr.querySelector('.pnl-cell');
             pnlCell.innerHTML = `<span class="${pnl >= 0 ? 'profit' : 'loss'}">${pnl >= 0 ? '+' : ''}${currencyFormatter.format(pnl)}</span>`;
+
+            // Live P&L: (currentPrice - cost) × pos × multiplier
+            // Pure market-based, no BSM simulation, directly comparable to TWS
+            if (leg.currentPrice > 0 && leg.cost > 0) {
+                const liveLegPnL = (leg.currentPrice - leg.cost) * pLeg.posMultiplier;
+                groupLivePnL += liveLegPnL;
+                groupHasLiveData = true;
+            }
         });
 
         // Update Group Summary DOM
@@ -456,6 +468,18 @@ function updateDerivedValues() {
         card.querySelector('.group-cost').textContent = currencyFormatter.format(groupCost);
         card.querySelector('.group-sim-value').textContent = currencyFormatter.format(groupSimValue);
         card.querySelector('.group-pnl').innerHTML = `<span class="${groupPnl >= 0 ? 'success-text' : 'danger-text'}">${groupPnl >= 0 ? '+' : ''}${currencyFormatter.format(groupPnl)}</span>`;
+
+        // Live P&L Group Summary
+        const livePnlItem = card.querySelector('.group-live-pnl-item');
+        if (livePnlItem) {
+            if (groupHasLiveData) {
+                livePnlItem.style.display = '';
+                const livePnlSpan = card.querySelector('.group-live-pnl');
+                livePnlSpan.innerHTML = `<span class="${groupLivePnL >= 0 ? 'success-text' : 'danger-text'}">${groupLivePnL >= 0 ? '+' : ''}${currencyFormatter.format(groupLivePnL)}</span>`;
+            } else {
+                livePnlItem.style.display = 'none';
+            }
+        }
 
         // Update Chart if visible
         const chartContainer = card.querySelector('.chart-container');
@@ -465,6 +489,10 @@ function updateDerivedValues() {
 
         globalTotalCost += groupCost;
         globalSimulatedValue += groupSimValue;
+        if (groupHasLiveData) {
+            globalLivePnL += groupLivePnL;
+            hasAnyLiveData = true;
+        }
     });
 
     // Update Global Summary Card
@@ -476,6 +504,18 @@ function updateDerivedValues() {
     const unPnlEl = document.getElementById('unrealizedPnL');
     unPnlEl.innerHTML = `<span class="${globalPnL >= 0 ? 'profit' : 'loss'}">${globalPnL >= 0 ? '+' : ''}${currencyFormatter.format(globalPnL)}</span>`;
 
+    // Global Live P&L
+    const globalLivePnLRow = document.getElementById('globalLivePnLRow');
+    if (globalLivePnLRow) {
+        if (hasAnyLiveData) {
+            globalLivePnLRow.style.display = '';
+            const globalLivePnLEl = document.getElementById('globalLivePnL');
+            globalLivePnLEl.innerHTML = `<span class="${globalLivePnL >= 0 ? 'profit' : 'loss'}">${globalLivePnL >= 0 ? '+' : ''}${currencyFormatter.format(globalLivePnL)}</span>`;
+        } else {
+            globalLivePnLRow.style.display = 'none';
+        }
+    }
+
     // Update Global Chart
     const globalCard = document.getElementById('globalChartCard');
     const gcContainer = document.getElementById('globalChartContainer');
@@ -485,6 +525,7 @@ function updateDerivedValues() {
         }
     }
 }
+
 
 // -------------------------------------------------------------
 // Chart Logic

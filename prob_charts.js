@@ -189,14 +189,14 @@ let _activeWorker = null;   // currently running Worker (or null)
 // -----------------------------------------------------------------------
 
 /**
- * Recalibrate the t-distribution scale so that its std equals IV/sqrt(252).
+ * Recalibrate the t-distribution scale so that its std equals IV/sqrt(365).
  * We keep df (tail shape) and loc (drift) from the historical SPX fit.
  *
  *   t-dist daily std = scale * sqrt(df / (df - 2))  for df > 2
- *   → new_scale = (IV / sqrt(252)) / sqrt(df / (df - 2))
+ *   → new_scale = (IV / sqrt(365)) / sqrt(df / (df - 2))
  */
 function _calibrateScale(df, portfolioIV) {
-    const targetDailyVol = portfolioIV / Math.sqrt(252);
+    const targetDailyVol = portfolioIV / Math.sqrt(365);
     if (df <= 2.001) return targetDailyVol;  // variance undefined; safe fallback
     return targetDailyVol / Math.sqrt(df / (df - 2));
 }
@@ -207,11 +207,11 @@ function _calibrateScale(df, portfolioIV) {
  *
  *   log(S_T / S0) ~ Normal(mu_total, sigma_total^2)
  *   mu_total    = loc * nDays
- *   sigma_total = (portfolioIV / sqrt(252)) * sqrt(nDays)
+ *   sigma_total = (portfolioIV / sqrt(365)) * sqrt(nDays)
  */
 function _lognormalDensity(s, S0, portfolioIV, loc, nDays) {
     if (s <= 0 || S0 <= 0 || nDays <= 0) return 0;
-    const sigma = (portfolioIV / Math.sqrt(252)) * Math.sqrt(nDays);
+    const sigma = (portfolioIV / Math.sqrt(365)) * Math.sqrt(nDays);
     const mu = loc * nDays;
     if (sigma <= 0) return 0;
     const z = (Math.log(s / S0) - mu) / sigma;
@@ -714,14 +714,13 @@ function updateProbCharts() {
         return;
     }
 
-    // Guard: need at least 1 trading day of horizon
+    // Guard: need at least 1 calendar day of horizon
     const nCalDays = diffDays(state.baseDate, state.simulatedDate);
-    const nTradDays = calendarToTradingDays(state.baseDate, state.simulatedDate);
-    if (nTradDays === 0) {
+    if (nCalDays === 0) {
         _probChart && _probChart.drawEmpty('Advance the simulation date to see probabilities.');
         _epnlChart && _epnlChart.drawEmpty('No future days to simulate (simulation date = today).');
         _setExpectedPnLBadge(null);
-        _setInfoText('Simulation date = today  (0 td).');
+        _setInfoText('Simulation date = today  (0 days).');
         return;
     }
 
@@ -758,7 +757,7 @@ function updateProbCharts() {
     // Show loading state
     _probChart && _probChart.drawLoading();
     _epnlChart && _epnlChart.drawLoading();
-    _setInfoText(`Simulating 1M paths × ${nTradDays} td  (IV ${(portfolioIV * 100).toFixed(1)}%)…`);
+    _setInfoText(`Simulating 1M paths × ${nCalDays} cd  (IV ${(portfolioIV * 100).toFixed(1)}%)…`);
     _setExpectedPnLBadge(null);
 
     // Terminate any previous in-flight simulation
@@ -788,7 +787,7 @@ function updateProbCharts() {
     _activeWorker = new Worker(_MC_WORKER_URL);
     _activeWorker.postMessage({
         df, loc, newScale,
-        nDays: nTradDays,
+        nDays: nCalDays,
         nPaths,
         currentPrice: state.underlyingPrice,
         minS, maxS, bins,
@@ -797,7 +796,6 @@ function updateProbCharts() {
 
     // Capture closure values for the callback
     const _nCalDays = nCalDays;
-    const _nTradDays = nTradDays;
     const _portfolioIV = portfolioIV;
     const _currentPrice = state.underlyingPrice;
 
@@ -809,7 +807,7 @@ function updateProbCharts() {
         const normalDensity = new Float64Array(bins);
         for (let i = 0; i < bins; i++) {
             normalDensity[i] = _lognormalDensity(
-                binCenters[i], _currentPrice, _portfolioIV, loc, _nTradDays
+                binCenters[i], _currentPrice, _portfolioIV, loc, _nCalDays
             );
         }
 
@@ -832,7 +830,7 @@ function updateProbCharts() {
         // --- Update badges ---
         _setExpectedPnLBadge(exactExpectedPnL);
         _setInfoText(
-            `1M paths | ${_nTradDays} td / ${_nCalDays} cd | ` +
+            `1M paths | ${_nCalDays} cd | ` +
             `Mean IV: ${(_portfolioIV * 100).toFixed(1)}%`
         );
     };

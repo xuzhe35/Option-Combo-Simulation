@@ -144,6 +144,13 @@
                             <span class="label">Unrealized P&L</span>
                             <span class="value" id="unrealizedPnL">$0.00</span>
                         </div>
+
+                        <div class="summary-item" id="globalLivePnLRow"
+                            style="display: none; border-top: 1px dashed var(--border-color); padding-top: 0.5rem; margin-top: 0.25rem;">
+                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🟢 Live
+                                P&L</span>
+                            <span class="value font-weight-semibold" id="globalLivePnL">$0.00</span>
+                        </div>
                     </div>
                 </aside>
 
@@ -382,6 +389,10 @@
                                     <span class="label">P&L:</span> <span
                                         class="group-pnl font-weight-semibold">$0.00</span>
                                 </div>
+                                <div class="group-summary-item group-live-pnl-item" style="display: none;">
+                                    <span class="label">🟢 Live P&L:</span>
+                                    <span class="group-live-pnl font-weight-semibold">$0.00</span>
+                                </div>
                                 <div class="group-summary-item" style="margin-left: auto;">
                                     <button class="btn btn-secondary btn-sm toggle-chart-btn"
                                         onclick="toggleChart(this)">Show Chart</button>
@@ -506,6 +517,7 @@
 
     <!-- Scripts -->
     <script src="t_params_db.js"></script>
+    <script src="market_holidays.js"></script>
     <script src="bsm.js"></script>
     <script src="chart.js"></script>
     <script src="prob_charts.js"></script>
