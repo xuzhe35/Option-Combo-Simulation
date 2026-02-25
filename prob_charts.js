@@ -230,11 +230,15 @@ function _computePortfolioPnLAtPrice(price) {
     let totalCost = 0;
 
     state.groups.forEach(group => {
+        const activeViewMode = group.viewMode || 'active';
         group.legs.forEach(leg => {
             // Use processLegData to handle unified BSM formatting (Exp, Implied Vol offset, T)
-            const activeViewMode = group.viewMode || 'active';
             const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode);
-            const pps = computeLegPrice(pLeg, price, state.interestRate);
+            // Use unified simulation price (includes Zero-Delta bypass at current price)
+            const pps = computeSimulatedPrice(
+                pLeg, leg, price, state.interestRate,
+                activeViewMode, state.simulatedDate, state.baseDate, state.ivOffset
+            );
 
             totalValue += pLeg.posMultiplier * pps;
             totalCost += pLeg.costBasis;

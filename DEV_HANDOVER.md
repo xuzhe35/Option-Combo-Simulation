@@ -79,5 +79,30 @@ The `scripts/` folder now formally maintains the essential `spx_fit.py` (which f
 - **IBKR Generic Tick 106:** `ib_server.py` was patched to inject `genericTickList='106'` into the `reqMktData` payload, forcing Interactive Brokers to compute and stream Option Model Greeks seamlessly.
 - **Micro-Float DOM Integration:** IV parsing in frontend `app.js` was untethered from standard `0.001` dollar-value float thresholds down to `0.000001` to capture microscopic decimal shifts, formatted via `(liveIV * 100).toFixed(4) + '%'` to reveal native breathing movements directly inside the DOM.
 
+---
+
+## 10. Technical Debt Audit & SSOT Enforcement (2026-02-25)
+A full-codebase audit uncovered several residual synchronization defects — the exact same category of bug that motivated the original `bsm.js` SSOT refactoring in Section 1. All items below have been resolved.
+
+### 10.1 P0 Bug: `importFromJSON` calendarToTradingDays Misuse
+**Problem:** Inside `importFromJSON()`, the trading-day display after loading a JSON file called `calendarToTradingDays(days)` — passing a single integer (calendar day count) instead of the required two date-string arguments `(startDateStr, endDateStr)`. This caused the imported state to display an incorrect trading-day count in the UI.
+**Root Cause:** When `bindControlPanelEvents()` was updated to the correct dual-argument signature, the parallel call inside `importFromJSON()` was missed — a textbook "fixed one place, forgot the other" synchronization failure.
+**Fix:** `calendarToTradingDays(days)` → `calendarToTradingDays(state.baseDate, state.simulatedDate)`.
+
+### 10.2 P1: Zero-Delta Bypass Centralized into `bsm.js`
+**Problem:** The Zero-Delta bypass logic (Section 9) only existed inside `app.js` `updateDerivedValues()`. The P&L chart (`chart.js`) and probability analysis (`prob_charts.js → _computePortfolioPnLAtPrice()`) evaluated the same Trial-mode / $T=Now$ scenario through raw `computeLegPrice()`, causing micro-deviations between the table's displayed P&L and the chart's plotted curve at the current underlying price.
+**Fix:** Introduced `computeSimulatedPrice()` in `bsm.js` — a wrapper around `computeLegPrice()` that applies the Zero-Delta bypass when conditions are met. All three consumers (`app.js`, `chart.js`, `prob_charts.js`) now call this single function. The fragile DOM-text price comparison (`parseFloat(document.getElementById(...).textContent.replace(...))`) was eliminated entirely.
+
+### 10.3 P1: Global Portfolio Chart viewMode Loss
+**Problem:** `drawGlobalChart()` flattened all groups' legs via `state.groups.flatMap(g => g.legs)` into a single virtual group object that had no `viewMode` property. `chart.js` defaulted to `group.viewMode || 'active'`, meaning the Global chart always rendered in Active mode regardless of each group's actual Trial/Active toggle.
+**Fix:** The flatMap now injects `_viewMode` per-leg: `g.legs.map(leg => ({ ...leg, _viewMode: g.viewMode || 'active' }))`. `chart.js` reads `leg._viewMode` when processing each leg, falling back to the group-level mode.
+
+### 10.4 P2: IV Calculation Duplication
+**Problem:** `computePortfolioMeanSimIV()` manually computed `Math.max(0.001, leg.iv + state.ivOffset)` — duplicating the identical logic inside `processLegData()` at `bsm.js:L126`. If IV computation rules (e.g., per-leg IV overrides, smile models) were ever modified in `processLegData`, this function would silently desynchronize.
+**Fix:** Refactored to call `processLegData()` for each leg and read `.simIV` from the returned object.
+
+### 10.5 Minor: Utility Extraction
+- Duplicated DOM flash animation code (green highlight on live data updates) extracted into reusable `flashElement(el)` in `app.js`.
+
 ***
 *End of Protocol. The project is presently completely mathematically synchronized and highly legible for continued expansion.*

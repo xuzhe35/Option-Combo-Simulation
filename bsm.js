@@ -198,3 +198,26 @@ function computeLegPrice(processedLeg, underlyingPrice, interestRate) {
         );
     }
 }
+
+/**
+ * Unified simulated price calculation with Zero-Delta bypass.
+ * When in Trial mode, evaluating "right now" (simDate === baseDate, no IV offset),
+ * AND a live quote exists, bypass BSM to avoid micro-drift fake P&L.
+ *
+ * @param {Object} processedLeg - Output from processLegData()
+ * @param {Object} rawLeg - Original leg data (needs .currentPrice)
+ * @param {number} underlyingPrice - Current underlying price
+ * @param {number} interestRate - Risk-free rate
+ * @param {string} viewMode - 'active' or 'trial'
+ * @param {string} simulatedDate - YYYY-MM-DD simulated date
+ * @param {string} baseDate - YYYY-MM-DD base date (today)
+ * @param {number} ivOffset - Global IV offset (decimal)
+ * @returns {number} Simulated price per share
+ */
+function computeSimulatedPrice(processedLeg, rawLeg, underlyingPrice, interestRate, viewMode, simulatedDate, baseDate, ivOffset) {
+    const isEvaluatingRightNow = (simulatedDate === baseDate) && (ivOffset === 0);
+    if (viewMode === 'trial' && isEvaluatingRightNow && rawLeg.currentPrice > 0) {
+        return rawLeg.currentPrice;
+    }
+    return computeLegPrice(processedLeg, underlyingPrice, interestRate);
+}

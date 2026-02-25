@@ -45,6 +45,16 @@ function generateId() {
     return '_' + Math.random().toString(36).substr(2, 9);
 }
 
+// Visual flash effect for DOM input elements (e.g. live data updates)
+function flashElement(el) {
+    el.style.backgroundColor = 'rgba(74, 222, 128, 0.4)';
+    setTimeout(() => {
+        el.style.transition = 'background-color 0.8s ease';
+        el.style.backgroundColor = 'transparent';
+        setTimeout(() => el.style.transition = '', 800);
+    }, 50);
+}
+
 // -------------------------------------------------------------
 // DOM Event Binding
 // -------------------------------------------------------------
@@ -424,17 +434,11 @@ function updateDerivedValues() {
             // Calculate Pricing
             groupCost += pLeg.costBasis;
 
-            let simPricePerShare = 0;
-
-            // If we are in Trial mode, calculating precisely for "Right Now" (no user slide offsets)
-            // AND we have a live quote, bypass the theoretical BSM calculation for the Displayed Sim Price
-            // to prevent annoying baseline modeling deviations that instantly generate fake P&L.
-            const isEvaluatingRightNow = (state.simulatedDate === state.baseDate) && (state.ivOffset === 0);
-            if (activeViewMode === 'trial' && isEvaluatingRightNow && leg.currentPrice > 0 && state.underlyingPrice === parseFloat(document.getElementById('underlyingPriceDisplay').textContent.replace(/[^0-9.-]+/g, ""))) {
-                simPricePerShare = leg.currentPrice;
-            } else {
-                simPricePerShare = computeLegPrice(pLeg, state.underlyingPrice, state.interestRate);
-            }
+            // Unified simulation price: Zero-Delta bypass handled inside bsm.js
+            const simPricePerShare = computeSimulatedPrice(
+                pLeg, leg, state.underlyingPrice, state.interestRate,
+                activeViewMode, state.simulatedDate, state.baseDate, state.ivOffset
+            );
 
             const simValue = pLeg.posMultiplier * simPricePerShare;
 
@@ -647,10 +651,13 @@ function drawGlobalChart(card) {
         card.querySelector('.global-chart-max-input').value = maxS.toFixed(0);
     }
 
-    // Combine all groups' legs into one virtual group
+    // Combine all groups' legs into one virtual group, preserving per-group viewMode
     const virtualGroup = {
         name: 'Global Portfolio',
-        legs: state.groups.flatMap(g => g.legs)
+        legs: state.groups.flatMap(g => g.legs.map(leg => ({
+            ...leg,
+            _viewMode: g.viewMode || 'active'
+        })))
     };
 
     card.chartInstance.draw(virtualGroup, state, minS, maxS);
@@ -684,10 +691,13 @@ window.addEventListener('resize', () => {
 // -------------------------------------------------------------
 
 // Return the mean simulated IV across all legs in the portfolio
+// Uses processLegData() to ensure IV calculation is in sync with bsm.js SSOT
 function computePortfolioMeanSimIV() {
-    const allLegs = state.groups.flatMap(g => g.legs);
+    const allLegs = state.groups.flatMap(g =>
+        g.legs.map(leg => processLegData(leg, state.simulatedDate, state.ivOffset))
+    );
     if (allLegs.length === 0) return 0;
-    const total = allLegs.reduce((sum, leg) => sum + Math.max(0.001, leg.iv + state.ivOffset), 0);
+    const total = allLegs.reduce((sum, pLeg) => sum + pLeg.simIV, 0);
     return total / allLegs.length;
 }
 
@@ -821,7 +831,7 @@ function importFromJSON(event) {
                 simDateInput.value = state.simulatedDate;
 
                 const days = diffDays(state.baseDate, state.simulatedDate);
-                const tradDays = calendarToTradingDays(days);
+                const tradDays = calendarToTradingDays(state.baseDate, state.simulatedDate);
                 document.getElementById('daysPassedSlider').value = days;
                 document.getElementById('daysPassedDisplay').textContent = `+${tradDays} td / +${days} cd`;
 
@@ -953,18 +963,12 @@ function processLiveMarketData(data) {
                             leg.currentPrice = liveMark;
                             stateChanged = true;
 
-                            // Try to update the input DOM directly to reflect new live price
                             const row = document.querySelector(`tr[data-id="${leg.id}"]`);
                             if (row) {
                                 const currentPriceInput = row.querySelector('.current-price-input');
                                 if (currentPriceInput) {
                                     currentPriceInput.value = liveMark.toFixed(2);
-                                    currentPriceInput.style.backgroundColor = 'rgba(74, 222, 128, 0.4)';
-                                    setTimeout(() => {
-                                        currentPriceInput.style.transition = 'background-color 0.8s ease';
-                                        currentPriceInput.style.backgroundColor = 'transparent';
-                                        setTimeout(() => currentPriceInput.style.transition = '', 800);
-                                    }, 50);
+                                    flashElement(currentPriceInput);
                                 }
                             }
                         }
@@ -980,13 +984,7 @@ function processLiveMarketData(data) {
                                 const ivInput = row.querySelector('.iv-input');
                                 if (ivInput) {
                                     ivInput.value = (liveIV * 100).toFixed(4) + '%';
-                                    // Visual flash to confirm data is landing in the DOM
-                                    ivInput.style.backgroundColor = 'rgba(74, 222, 128, 0.4)';
-                                    setTimeout(() => {
-                                        ivInput.style.transition = 'background-color 0.8s ease';
-                                        ivInput.style.backgroundColor = 'transparent';
-                                        setTimeout(() => ivInput.style.transition = '', 800);
-                                    }, 50);
+                                    flashElement(ivInput);
                                 }
                             }
                         }
