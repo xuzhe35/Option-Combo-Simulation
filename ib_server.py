@@ -74,8 +74,16 @@ def on_pending_tickers(tickers):
                 if bid and ask and bid == bid and ask == ask and bid > 0 and ask > 0:
                     price = round((bid + ask) / 2, 4)
                 else:
-                    # Fallback to marketPrice if bid/ask not available
-                    price = ticker.marketPrice()
+                    # Fallback chain for illiquid / deep OTM options:
+                    # 1. Try IB's model-computed theoretical price (from Generic Tick 106)
+                    # 2. Fall back to marketPrice() (last trade — may be stale)
+                    price = None
+                    if hasattr(ticker, 'modelGreeks') and ticker.modelGreeks:
+                        opt_price = getattr(ticker.modelGreeks, 'optPrice', None)
+                        if opt_price is not None and opt_price == opt_price and opt_price > 0:
+                            price = round(opt_price, 4)
+                    if price is None:
+                        price = ticker.marketPrice()
                 
                 # Extract IV: prefer modelGreeks.impliedVol (from Generic Tick 106),
                 # fall back to ticker.impliedVolatility if available.

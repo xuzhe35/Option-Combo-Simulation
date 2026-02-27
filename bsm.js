@@ -97,7 +97,7 @@ function calendarToTradingDays(startDateStr, endDateStr) {
         // Skip weekends AND NYSE holidays
         if (dayOfWeek !== 0 && dayOfWeek !== 6) {
             const dateStr = current.toISOString().slice(0, 10);
-            if (typeof MARKET_HOLIDAYS === 'undefined' || !MARKET_HOLIDAYS.has(dateStr)) {
+            if (typeof isMarketHoliday === 'undefined' || !isMarketHoliday(dateStr)) {
                 days++;
             }
         }
