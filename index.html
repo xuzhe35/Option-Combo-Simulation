@@ -152,6 +152,8 @@
                             <span class="value font-weight-semibold" id="globalLivePnL">$0.00</span>
                         </div>
                     </div>
+
+                    <div id="wsStatus" class="ws-status ws-disconnected">🔴 Disconnected</div>
                 </aside>
 
                 <!-- Portfolio Area (Right Main Content) -->
@@ -243,6 +245,11 @@
                             <div class="group-actions" style="display: flex; align-items: center; gap: 0.75rem;">
                                 <span class="distribution-hint" style="font-size: 11px; color: #9CA3AF; cursor: help;"
                                     title="Run: python scripts/fit_underlying.py [TICKER]">ℹ️ Params DB</span>
+                                <label class="prob-toggle"
+                                    title="Use zero drift (random walk) instead of historical drift">
+                                    <input type="checkbox" id="randomWalkToggle" onchange="updateProbCharts()">
+                                    <span>Random Walk</span>
+                                </label>
                                 <div id="expectedPnLBadge" style="font-weight: 600; font-size: 0.95rem;"></div>
                                 <button class="btn btn-secondary btn-sm" onclick="toggleProbCharts(this)">Show
                                     Analysis</button>
@@ -521,7 +528,9 @@
     <script src="bsm.js"></script>
     <script src="chart.js"></script>
     <script src="prob_charts.js"></script>
+    <script src="chart_controls.js"></script>
     <script src="app.js"></script>
+    <script src="ws_client.js"></script>
 </body>
 
 </html>

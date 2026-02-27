@@ -1,7 +1,7 @@
 # Option Combo Simulator — Development Handover Log
 
 **Target Audience:** Future Developers & AI Assistants  
-**Last Updated:** 2026-02-25
+**Last Updated:** 2026-02-26
 
 ---
 
@@ -37,10 +37,12 @@ BSM `T = calDTE / 365.0` (matching TWS and industry standard). This correctly pr
 - **IV extraction**: prioritizes `modelGreeks.impliedVol` (Generic Tick 106), falls back to `ticker.impliedVolatility`, with explicit NaN filtering at each step.
 - `sync_underlying` action for manual underlying price refresh.
 
-### Frontend (`app.js`)
+### Frontend (`ws_client.js`)
 - `processLiveMarketData()` updates `leg.currentPrice` and `leg.iv`, with `flashElement()` visual feedback.
 - IV threshold: `0.000001` to catch microscopic Greek movements.
 - Live Market Data checkbox per group; `handleLiveSubscriptions()` dispatched on import.
+- Exponential backoff reconnection: 5s → 10s → 20s → 40s → 60s cap, resets on success.
+- UI status badge (`#wsStatus`) in sidebar shows connection state in real time.
 
 ## 6. Live P&L Display (2026-02-25)
 - **Formula**: `(currentPrice - cost) × pos × 100` — pure market-based, no BSM, directly comparable to TWS.
@@ -57,7 +59,9 @@ BSM `T = calDTE / 365.0` (matching TWS and industry standard). This correctly pr
 | File | Purpose |
 |------|---------|
 | `bsm.js` | BSM pricing, date utils, SSOT engine |
-| `app.js` | State management, UI, WebSocket, Live P&L |
+| `app.js` | State management, UI rendering, core calculations, import/export |
+| `chart_controls.js` | Chart toggle/range/draw, probability analysis helpers |
+| `ws_client.js` | WebSocket connection (exponential backoff), live data processing |
 | `chart.js` | P&L curve rendering (Canvas) |
 | `prob_charts.js` | Monte Carlo simulation + probability/expected P&L charts |
 | `ib_server.py` | IB TWS WebSocket bridge (Python) |
@@ -67,6 +71,17 @@ BSM `T = calDTE / 365.0` (matching TWS and industry standard). This correctly pr
 | `scripts/gen_holidays.py` | Generate market holiday file |
 
 ## 9. Changelog
+
+### 2026-02-26
+- **Performance**: `setGroupViewMode()` now updates button CSS directly instead of calling `renderGroups()`, eliminating unnecessary DOM re-renders.
+- **Performance**: Slider inputs (`underlyingPrice`, `daysPassed`, `ivOffset`) throttled via `requestAnimationFrame` — at most one `updateDerivedValues()` per frame.
+- **WebSocket reliability**: Reconnection uses exponential backoff (5s → 10s → 20s → 40s → 60s cap), resets on successful connect. UI status badge added to sidebar.
+- **Module split**: `app.js` (1128 lines) split into 3 files for maintainability:
+  - `app.js` (~700 lines): state, UI events, group/leg management, core calculations, import/export.
+  - `chart_controls.js` (~260 lines): chart toggle/range/draw logic, probability analysis helpers.
+  - `ws_client.js` (~190 lines): WebSocket connection + live data processing.
+- **Random Walk toggle**: Checkbox in Probability Analysis panel to override historical drift (`loc`) with 0, centering the distribution on current price for risk-neutral evaluation.
+- **Script load order** updated in `index.html`: `chart_controls.js` → `app.js` → `ws_client.js`.
 
 ### 2026-02-25 (Session 2)
 - **Live P&L display**: Added `(currentPrice - cost) × pos × 100` at group and global level for TWS comparison.

@@ -749,7 +749,9 @@ function updateProbCharts() {
         return;
     }
 
-    const { df, loc } = params;
+    const { df, loc: rawLoc } = params;
+    const useRandomWalk = document.getElementById('randomWalkToggle')?.checked || false;
+    const loc = useRandomWalk ? 0 : rawLoc;
     const newScale = _calibrateScale(df, portfolioIV);
     const nPaths = 1_000_000;
     const bins = 500;
@@ -757,7 +759,8 @@ function updateProbCharts() {
     // Show loading state
     _probChart && _probChart.drawLoading();
     _epnlChart && _epnlChart.drawLoading();
-    _setInfoText(`Simulating 1M paths × ${nCalDays} cd  (IV ${(portfolioIV * 100).toFixed(1)}%)…`);
+    const driftLabel = useRandomWalk ? ', Random Walk' : '';
+    _setInfoText(`Simulating 1M paths × ${nCalDays} cd  (IV ${(portfolioIV * 100).toFixed(1)}%${driftLabel})…`);
     _setExpectedPnLBadge(null);
 
     // Terminate any previous in-flight simulation
@@ -798,6 +801,8 @@ function updateProbCharts() {
     const _nCalDays = nCalDays;
     const _portfolioIV = portfolioIV;
     const _currentPrice = state.underlyingPrice;
+    const _loc = loc;
+    const _useRandomWalk = useRandomWalk;
 
     _activeWorker.onmessage = (e) => {
         _activeWorker = null;
@@ -807,7 +812,7 @@ function updateProbCharts() {
         const normalDensity = new Float64Array(bins);
         for (let i = 0; i < bins; i++) {
             normalDensity[i] = _lognormalDensity(
-                binCenters[i], _currentPrice, _portfolioIV, loc, _nCalDays
+                binCenters[i], _currentPrice, _portfolioIV, _loc, _nCalDays
             );
         }
 
@@ -831,7 +836,8 @@ function updateProbCharts() {
         _setExpectedPnLBadge(exactExpectedPnL);
         _setInfoText(
             `1M paths | ${_nCalDays} cd | ` +
-            `Mean IV: ${(_portfolioIV * 100).toFixed(1)}%`
+            `Mean IV: ${(_portfolioIV * 100).toFixed(1)}%` +
+            (_useRandomWalk ? ' | Random Walk' : '')
         );
     };
 

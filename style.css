@@ -489,6 +489,53 @@ input[type=range]:focus {
     color: var(--text-muted);
 }
 
+/* WebSocket Status Badge */
+.ws-status {
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--radius-md);
+    text-align: center;
+    margin-top: 0.5rem;
+    border: 1px solid var(--border-color);
+    background: var(--bg-color);
+    color: var(--text-muted);
+    transition: all 0.3s ease;
+}
+
+.ws-status.ws-connected {
+    color: var(--success-text);
+    background: var(--success-bg);
+    border-color: var(--success-text);
+}
+
+.ws-status.ws-disconnected,
+.ws-status.ws-error {
+    color: var(--danger-text);
+    background: var(--danger-bg);
+    border-color: var(--danger-text);
+}
+
+/* Probability Analysis Toggle */
+.prob-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.prob-toggle input[type="checkbox"] {
+    accent-color: var(--primary-color);
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    cursor: pointer;
+}
+
 /* Responsive */
 @media (max-width: 1024px) {
     .layout-grid {

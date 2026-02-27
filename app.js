@@ -30,6 +30,18 @@ const state = {
     groups: []
 };
 
+// Throttle flag for slider-driven updates (one rAF per frame max)
+let _sliderRafPending = false;
+function throttledUpdate() {
+    if (!_sliderRafPending) {
+        _sliderRafPending = true;
+        requestAnimationFrame(() => {
+            updateDerivedValues();
+            _sliderRafPending = false;
+        });
+    }
+}
+
 // Date helper functions such as diffDays, addDays, calendarToTradingDays 
 // have been unified globally in bsm.js
 
@@ -81,7 +93,12 @@ function bindControlPanelEvents() {
         updateDerivedValues();
     };
     upInput.addEventListener('input', (e) => updateUp(e.target.value));
-    upSlider.addEventListener('input', (e) => updateUp(e.target.value));
+    upSlider.addEventListener('input', (e) => {
+        state.underlyingPrice = parseFloat(e.target.value);
+        upInput.value = state.underlyingPrice;
+        upDisplay.textContent = currencyFormatter.format(state.underlyingPrice);
+        throttledUpdate();
+    });
 
     // Expose a method to quickly adjust the price (e.g. +/- 1%)
     window.adjustUnderlying = (percentChange) => {
@@ -122,7 +139,15 @@ function bindControlPanelEvents() {
     };
 
     simDateInput.addEventListener('change', (e) => updateSimDate(e.target.value));
-    dpSlider.addEventListener('input', (e) => updateDaysSlider(e.target.value));
+    dpSlider.addEventListener('input', (e) => {
+        const dNum = parseInt(e.target.value, 10);
+        const newDateStr = addDays(state.baseDate, dNum);
+        state.simulatedDate = newDateStr;
+        simDateInput.value = state.simulatedDate;
+        const tradDays = calendarToTradingDays(state.baseDate, state.simulatedDate);
+        dpDisplay.textContent = `+${tradDays} td / +${dNum} cd`;
+        throttledUpdate();
+    });
 
     // Interest Rate
     const irInput = document.getElementById('interestRate');
@@ -151,7 +176,14 @@ function bindControlPanelEvents() {
         updateDerivedValues();
     };
     ivInput.addEventListener('input', (e) => updateIv(e.target.value));
-    ivSlider.addEventListener('input', (e) => updateIv(e.target.value));
+    ivSlider.addEventListener('input', (e) => {
+        const pct = parseFloat(e.target.value);
+        state.ivOffset = pct / 100.0;
+        ivInput.value = pct;
+        const sign = pct > 0 ? '+' : '';
+        ivDisplay.textContent = `${sign}${pct.toFixed(2)}%`;
+        throttledUpdate();
+    });
 }
 
 // -------------------------------------------------------------
@@ -381,7 +413,23 @@ function setGroupViewMode(btn, mode) {
     if (!group) return;
 
     group.viewMode = mode;
-    renderGroups(); // Refresh UI button states
+
+    // Update button styles in-place (no DOM rebuild needed)
+    const toggleActiveBtn = card.querySelector('.toggle-view-active');
+    const toggleTrialBtn = card.querySelector('.toggle-view-trial');
+    if (mode === 'active') {
+        toggleActiveBtn.classList.add('active', 'btn-primary');
+        toggleActiveBtn.classList.remove('btn-secondary');
+        toggleTrialBtn.classList.remove('active', 'btn-primary');
+        toggleTrialBtn.classList.add('btn-secondary');
+    } else {
+        toggleTrialBtn.classList.add('active', 'btn-primary');
+        toggleTrialBtn.classList.remove('btn-secondary');
+        toggleActiveBtn.classList.remove('active', 'btn-primary');
+        toggleActiveBtn.classList.add('btn-secondary');
+    }
+
+    updateDerivedValues();
 
     // Explicitly redraw charts related to this group
     triggerChartRedraw(btn);
@@ -527,259 +575,7 @@ function updateDerivedValues() {
 }
 
 
-// -------------------------------------------------------------
-// Chart Logic
-// -------------------------------------------------------------
-
-function toggleChart(btn) {
-    const card = btn.closest('.group-card');
-    const chartContainer = card.querySelector('.chart-container');
-    if (chartContainer.style.display === 'none') {
-        chartContainer.style.display = 'block';
-        btn.textContent = 'Hide Chart';
-
-        // Initialize ChartInstance if not exists
-        if (!card.chartInstance) {
-            const canvas = card.querySelector('.pnl-canvas');
-            card.chartInstance = new PnLChart(canvas);
-        }
-
-        const groupId = card.dataset.groupId;
-        const group = state.groups.find(g => g.id === groupId);
-        drawGroupChart(card, group);
-    } else {
-        chartContainer.style.display = 'none';
-        btn.textContent = 'Show Chart';
-    }
-}
-
-function setChartRangeMode(btn, mode) {
-    const card = btn.closest('.group-card');
-
-    // Update active button state
-    card.querySelectorAll('.range-mode-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-
-    // Update inputs state
-    const customInputsContainer = card.querySelector('.custom-range-inputs');
-    const minInput = card.querySelector('.chart-min-input');
-    const maxInput = card.querySelector('.chart-max-input');
-
-    if (mode === 'custom') {
-        customInputsContainer.style.opacity = '1';
-        minInput.disabled = false;
-        maxInput.disabled = false;
-        // Seed with current values if empty
-        if (!minInput.value) minInput.value = (state.underlyingPrice * 0.9).toFixed(0);
-        if (!maxInput.value) maxInput.value = (state.underlyingPrice * 1.1).toFixed(0);
-    } else {
-        customInputsContainer.style.opacity = '0.5';
-        minInput.disabled = true;
-        maxInput.disabled = true;
-    }
-
-    const groupId = card.dataset.groupId;
-    const group = state.groups.find(g => g.id === groupId);
-    // Redraw
-    drawGroupChart(card, group);
-}
-
-function triggerChartRedraw(inputEl) {
-    const card = inputEl.closest('.group-card');
-    const groupId = card.dataset.groupId;
-    const group = state.groups.find(g => g.id === groupId);
-    drawGroupChart(card, group);
-}
-
-function drawGroupChart(card, group) {
-    if (!card.chartInstance) return;
-
-    const modeBtn = card.querySelector('.range-mode-btn.active');
-    const mode = modeBtn ? modeBtn.dataset.mode : '10';
-
-    let minS, maxS;
-
-    if (mode === 'custom') {
-        minS = parseFloat(card.querySelector('.chart-min-input').value) || (state.underlyingPrice * 0.9);
-        maxS = parseFloat(card.querySelector('.chart-max-input').value) || (state.underlyingPrice * 1.1);
-        if (minS >= maxS) {
-            maxS = minS + 1; // Prevent crash on bad inputs
-        }
-    } else {
-        const pct = parseFloat(mode) / 100.0;
-        minS = state.underlyingPrice * (1 - pct);
-        maxS = state.underlyingPrice * (1 + pct);
-
-        // Update display inputs just for visibility, without triggering redraw
-        card.querySelector('.chart-min-input').value = minS.toFixed(0);
-        card.querySelector('.chart-max-input').value = maxS.toFixed(0);
-    }
-
-    card.chartInstance.draw(group, state, minS, maxS);
-}
-
-// Global Chart Functions
-function toggleGlobalChart(btn) {
-    const card = document.getElementById('globalChartCard');
-    const chartContainer = document.getElementById('globalChartContainer');
-    if (chartContainer.style.display === 'none') {
-        chartContainer.style.display = 'block';
-        btn.textContent = 'Hide Chart';
-
-        // Initialize ChartInstance if not exists
-        if (!card.chartInstance) {
-            const canvas = card.querySelector('.global-pnl-canvas');
-            card.chartInstance = new PnLChart(canvas);
-        }
-
-        drawGlobalChart(card);
-    } else {
-        chartContainer.style.display = 'none';
-        btn.textContent = 'Show Chart';
-    }
-}
-
-function setGlobalChartRangeMode(btn, mode) {
-    const card = document.getElementById('globalChartCard');
-
-    card.querySelectorAll('.global-range-mode-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-
-    const customInputsContainer = card.querySelector('.global-custom-range-inputs');
-    const minInput = card.querySelector('.global-chart-min-input');
-    const maxInput = card.querySelector('.global-chart-max-input');
-
-    if (mode === 'custom') {
-        customInputsContainer.style.opacity = '1';
-        minInput.disabled = false;
-        maxInput.disabled = false;
-        if (!minInput.value) minInput.value = (state.underlyingPrice * 0.9).toFixed(0);
-        if (!maxInput.value) maxInput.value = (state.underlyingPrice * 1.1).toFixed(0);
-    } else {
-        customInputsContainer.style.opacity = '0.5';
-        minInput.disabled = true;
-        maxInput.disabled = true;
-    }
-
-    drawGlobalChart(card);
-}
-
-function triggerGlobalChartRedraw() {
-    const card = document.getElementById('globalChartCard');
-    drawGlobalChart(card);
-}
-
-function drawGlobalChart(card) {
-    if (!card.chartInstance) return;
-
-    const modeBtn = card.querySelector('.global-range-mode-btn.active');
-    const mode = modeBtn ? modeBtn.dataset.mode : '10';
-
-    let minS, maxS;
-
-    if (mode === 'custom') {
-        minS = parseFloat(card.querySelector('.global-chart-min-input').value) || (state.underlyingPrice * 0.9);
-        maxS = parseFloat(card.querySelector('.global-chart-max-input').value) || (state.underlyingPrice * 1.1);
-        if (minS >= maxS) {
-            maxS = minS + 1; // Prevent crash on bad inputs
-        }
-    } else {
-        const pct = parseFloat(mode) / 100.0;
-        minS = state.underlyingPrice * (1 - pct);
-        maxS = state.underlyingPrice * (1 + pct);
-
-        card.querySelector('.global-chart-min-input').value = minS.toFixed(0);
-        card.querySelector('.global-chart-max-input').value = maxS.toFixed(0);
-    }
-
-    // Combine all groups' legs into one virtual group, preserving per-group viewMode
-    const virtualGroup = {
-        name: 'Global Portfolio',
-        legs: state.groups.flatMap(g => g.legs.map(leg => ({
-            ...leg,
-            _viewMode: g.viewMode || 'active'
-        })))
-    };
-
-    card.chartInstance.draw(virtualGroup, state, minS, maxS);
-}
-
-// Global window resize listener to update all visible charts
-window.addEventListener('resize', () => {
-    document.querySelectorAll('.group-card').forEach(card => {
-        const chartContainer = card.querySelector('.chart-container');
-        if (chartContainer && chartContainer.style.display !== 'none') {
-            const groupId = card.dataset.groupId;
-            const group = state.groups.find(g => g.id === groupId);
-            drawGroupChart(card, group);
-        }
-    });
-
-    const globalCard = document.getElementById('globalChartCard');
-    const gcContainer = document.getElementById('globalChartContainer');
-    if (globalCard && gcContainer && gcContainer.style.display !== 'none') {
-        drawGlobalChart(globalCard);
-    }
-
-    // Redraw prob charts from cached data (no re-simulation needed)
-    if (typeof redrawProbChartsFromCache === 'function') {
-        redrawProbChartsFromCache();
-    }
-});
-
-// -------------------------------------------------------------
-// Probability Analysis Helpers (called from prob_charts.js)
-// -------------------------------------------------------------
-
-// Return the mean simulated IV across all legs in the portfolio
-// Uses processLegData() to ensure IV calculation is in sync with bsm.js SSOT
-function computePortfolioMeanSimIV() {
-    const allLegs = state.groups.flatMap(g =>
-        g.legs.map(leg => processLegData(leg, state.simulatedDate, state.ivOffset))
-    );
-    if (allLegs.length === 0) return 0;
-    const total = allLegs.reduce((sum, pLeg) => sum + pLeg.simIV, 0);
-    return total / allLegs.length;
-}
-
-// Return { minS, maxS } using the same logic as the global P&L chart
-function getGlobalChartRange() {
-    const card = document.getElementById('globalChartCard');
-    if (!card) {
-        const pct = 0.10;
-        return { minS: state.underlyingPrice * (1 - pct), maxS: state.underlyingPrice * (1 + pct) };
-    }
-
-    const modeBtn = card.querySelector('.global-range-mode-btn.active');
-    const mode = modeBtn ? modeBtn.dataset.mode : '10';
-
-    if (mode === 'custom') {
-        let minS = parseFloat(card.querySelector('.global-chart-min-input').value) || (state.underlyingPrice * 0.9);
-        let maxS = parseFloat(card.querySelector('.global-chart-max-input').value) || (state.underlyingPrice * 1.1);
-        if (minS >= maxS) maxS = minS + 1;
-        return { minS, maxS };
-    } else {
-        const pct = parseFloat(mode) / 100.0;
-        return {
-            minS: state.underlyingPrice * (1 - pct),
-            maxS: state.underlyingPrice * (1 + pct)
-        };
-    }
-}
-
-// Toggle probability analysis panel
-function toggleProbCharts(btn) {
-    const container = document.getElementById('probAnalysisContainer');
-    if (!container) return;
-    if (container.style.display === 'none') {
-        container.style.display = 'block';
-        btn.textContent = 'Hide Analysis';
-        if (typeof updateProbCharts === 'function') updateProbCharts();
-    } else {
-        container.style.display = 'none';
-        btn.textContent = 'Show Analysis';
-    }
-}
+// Chart Logic, Probability Analysis Helpers → see chart_controls.js
 
 // -------------------------------------------------------------
 // Import / Export JSON
@@ -898,153 +694,4 @@ function importFromJSON(event) {
     event.target.value = '';
 }
 
-// -------------------------------------------------------------
-// WebSocket & Live Data Integration
-// -------------------------------------------------------------
-
-let ws = null;
-let isWsConnected = false;
-
-function connectWebSocket() {
-    // Default config assuming Python server on localhost:8765
-    ws = new WebSocket('ws://localhost:8765');
-
-    ws.onopen = () => {
-        isWsConnected = true;
-        console.log("WebSocket Connected to IB Gateway Backend");
-        handleLiveSubscriptions();
-    };
-
-    ws.onclose = () => {
-        isWsConnected = false;
-        console.log("WebSocket Disconnected. Reconnecting in 5s...");
-        setTimeout(connectWebSocket, 5000);
-    };
-
-    ws.onerror = (error) => {
-        console.error("WebSocket Error:", error);
-    };
-
-    ws.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            processLiveMarketData(data);
-        } catch (e) {
-            console.error("Error parsing WS message:", e);
-        }
-    };
-}
-
-function handleLiveSubscriptions() {
-    if (!isWsConnected || !ws) return;
-
-    const payload = {
-        action: 'subscribe',
-        underlying: state.underlyingSymbol,
-        options: []
-    };
-
-    // Collect all options from groups that have Live Data == true
-    state.groups.forEach(group => {
-        if (group.liveData) {
-            group.legs.forEach(leg => {
-                payload.options.push({
-                    id: leg.id,
-                    right: leg.type.charAt(0).toUpperCase(), // 'C' or 'P'
-                    strike: leg.strike,
-                    expDate: leg.expDate
-                });
-            });
-        }
-    });
-
-    ws.send(JSON.stringify(payload));
-}
-
-function requestUnderlyingPriceSync() {
-    if (!isWsConnected || !ws) {
-        alert("Live Market Data WebSocket is not connected.");
-        return;
-    }
-
-    // Create a special sync request just for the underlying
-    const payload = {
-        action: 'sync_underlying',
-        underlying: state.underlyingSymbol
-    };
-
-    ws.send(JSON.stringify(payload));
-}
-
-let renderScheduled = false;
-
-function processLiveMarketData(data) {
-    let stateChanged = false;
-
-    // Update Underlying Price if present
-    if (data.underlyingPrice) {
-        state.underlyingPrice = data.underlyingPrice;
-        document.getElementById('underlyingPrice').value = state.underlyingPrice.toFixed(2);
-        document.getElementById('underlyingPriceSlider').value = state.underlyingPrice;
-        document.getElementById('underlyingPriceDisplay').textContent = currencyFormatter.format(state.underlyingPrice);
-        stateChanged = true;
-    }
-
-    // Update Option Legs
-    if (data.options) {
-        state.groups.forEach(group => {
-            if (group.liveData) {
-                group.legs.forEach(leg => {
-                    if (data.options[leg.id] !== undefined) {
-                        const liveMark = data.options[leg.id].mark;
-                        const liveIV = data.options[leg.id].iv;
-
-                        // Only update Price if there is a realistic quote and it's different
-                        if (liveMark > 0 && Math.abs(liveMark - leg.currentPrice) > 0.001) {
-                            leg.currentPrice = liveMark;
-                            stateChanged = true;
-
-                            const row = document.querySelector(`tr[data-id="${leg.id}"]`);
-                            if (row) {
-                                const currentPriceInput = row.querySelector('.current-price-input');
-                                if (currentPriceInput) {
-                                    currentPriceInput.value = liveMark.toFixed(2);
-                                    flashElement(currentPriceInput);
-                                }
-                            }
-                        }
-
-                        // Update Implied Volatility if the server streams model Greeks natively
-                        // Threshold pushed to virtually zero to catch any microscopic Greek movements
-                        if (liveIV && liveIV > 0 && Math.abs(liveIV - leg.iv) > 0.000001) {
-                            leg.iv = liveIV;
-                            stateChanged = true;
-
-                            const row = document.querySelector(`tr[data-id="${leg.id}"]`);
-                            if (row) {
-                                const ivInput = row.querySelector('.iv-input');
-                                if (ivInput) {
-                                    ivInput.value = (liveIV * 100).toFixed(4) + '%';
-                                    flashElement(ivInput);
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        });
-    }
-
-    // Throttle rendering request
-    if (stateChanged && !renderScheduled) {
-        renderScheduled = true;
-        requestAnimationFrame(() => {
-            updateDerivedValues();
-            renderScheduled = false;
-        });
-    }
-}
-
-// Connect immediately on load
-connectWebSocket();
-
+// WebSocket & Live Data Integration → see ws_client.js
