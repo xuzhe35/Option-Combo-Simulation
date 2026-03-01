@@ -74,7 +74,7 @@ This downloads the last 10 years of SPX (`^GSPC`) daily data, fits a Student-t d
 
 ### Backend (Live IBKR Integration)
 1. Ensure IB TWS or Gateway is running. Enable API: *Settings → API → Settings → "Enable ActiveX and Socket Clients"*.
-2. Install dependencies: `pip install ib_insync websockets`
+2. Install dependencies: `pip install ib_async websockets`
 3. Start: `python ib_server.py`
 4. Refresh `index.html`. Toggle **"Live Market Data"** on any Combo Group to stream live quotes into the Cost fields. Use the **Sync** button next to Underlying Price for a snapshot when the market is closed.
 

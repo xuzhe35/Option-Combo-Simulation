@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import random
+import signal
 import configparser
-from ib_insync import *
+from ib_async import *
 import websockets
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -24,21 +26,42 @@ connected_clients = set()
 client_subscriptions = {}
 
 async def connect_ib():
+    """Connect to IB TWS/Gateway. Retries indefinitely — one connection per session.
+
+    If Error 326 (client ID already in use) is received during the handshake,
+    automatically picks a new random client ID and retries immediately.
+    """
+    client_id = TWS_CLIENT_ID
+
     while not ib.isConnected():
+        # Temporary listener to capture any error codes emitted during the handshake.
+        error_codes: list[int] = []
+        def _capture_error(reqId, errorCode, errorString, contract):
+            error_codes.append(errorCode)
+
+        ib.errorEvent += _capture_error
         try:
-            logging.info(f"Connecting to IB TWS/Gateway at {TWS_HOST}:{TWS_PORT} (Client ID: {TWS_CLIENT_ID})...")
-            # Use connectAsync so it doesn't block the asyncio event loop
-            await ib.connectAsync(TWS_HOST, TWS_PORT, clientId=TWS_CLIENT_ID)
-            logging.info("Successfully connected to IB.")
+            logging.info(f"Connecting to IB TWS/Gateway at {TWS_HOST}:{TWS_PORT} (Client ID: {client_id})...")
+            await ib.connectAsync(TWS_HOST, TWS_PORT, clientId=client_id)
+            logging.info(f"Successfully connected to IB (Client ID: {client_id}).")
             # Set market data type to delayed if live is not available, useful for dev
-            ib.reqMarketDataType(3) 
+            ib.reqMarketDataType(3)
         except Exception as e:
-            logging.error(f"Connection failed: {e}. Retrying in 5 seconds...")
-            await asyncio.sleep(5)
+            if 326 in error_codes:
+                # Error 326: "Client ID already in use" — pick a random ID and retry immediately
+                client_id = random.randint(1, 998)
+                logging.warning(f"Client ID already in use (Error 326). Retrying with Client ID: {client_id}...")
+                await asyncio.sleep(1)
+            else:
+                logging.error(f"Connection failed: {e}. Retrying in 5 seconds...")
+                await asyncio.sleep(5)
+        finally:
+            # Always remove the temporary listener so it doesn't fire during normal operation
+            ib.errorEvent -= _capture_error
 
 def on_pending_tickers(tickers):
     """
-    Callback fired by ib_insync when streaming data ticks arrive.
+    Callback fired by ib_async when streaming data ticks arrive.
     We batch process these and send customized state to each connected WS client.
     """
     if not connected_clients:
@@ -156,21 +179,23 @@ async def handle_ws_client(websocket):
             if data.get('action') == 'subscribe':
                 symbol = data.get('underlying')
                 options_data = data.get('options', [])
-                
+
                 logging.info(f"Received subscription request from {client_ip} for {symbol} with {len(options_data)} options")
-                
-                # Check if the requested symbol is already being streamed by another client to avoid redundant qualification
+
                 contract = Stock(symbol, 'SMART', 'USD')
-                try:
-                    await ib.qualifyContractsAsync(contract)
-                    
+                # ib_async v2.0+: qualifyContractsAsync returns None for failures
+                # instead of raising, so we check the result explicitly.
+                results = await ib.qualifyContractsAsync(contract)
+                if not results or results[0] is None:
+                    logging.error(f"Failed to qualify underlying {symbol}")
+                else:
                     # Unsubscribe old streams for this specific client safely
                     unsubscribe_client_safely(websocket)
-                    
+
                     # Subscribe Underlying
                     ticker = ib.reqMktData(contract, '', False, False)
                     client_subscriptions[websocket]['underlying'] = ticker
-                    
+
                     # Process Options
                     for opt in options_data:
                         leg_id = opt['id']
@@ -178,37 +203,34 @@ async def handle_ws_client(websocket):
                         exp_date = opt['expDate'].replace('-', '')
                         strike = float(opt['strike'])
                         right = opt['right'] # 'C' or 'P'
-                        
+
                         opt_contract = Option(symbol, exp_date, strike, right, 'SMART', multiplier='100', currency='USD')
-                        try:
-                            await ib.qualifyContractsAsync(opt_contract)
+                        opt_results = await ib.qualifyContractsAsync(opt_contract)
+                        if not opt_results or opt_results[0] is None:
+                            logging.error(f"Failed to qualify option {strike} {right}")
+                        else:
                             # genericTickList '106' explicitly requests Option Implied Volatility and Greeks
                             opt_ticker = ib.reqMktData(opt_contract, '106', False, False)
                             client_subscriptions[websocket][leg_id] = opt_ticker
-                        except Exception as e:
-                            logging.error(f"Failed to qualify option {strike} {right}: {e}")
-                            
-                except Exception as e:
-                    logging.error(f"Failed to qualify underlying {symbol}: {e}")
-                    
+
             elif data.get('action') == 'sync_underlying':
                 symbol = data.get('underlying')
                 contract = Stock(symbol, 'SMART', 'USD')
-                try:
-                    await ib.qualifyContractsAsync(contract)
+                results = await ib.qualifyContractsAsync(contract)
+                if not results or results[0] is None:
+                    logging.error(f"Failed to manual sync underlying {symbol}")
+                else:
                     ticker = ib.reqMktData(contract, '', False, False)
                     # wait momentarily for IB to fetch the snapshot
                     await asyncio.sleep(0.5)
                     price = ticker.marketPrice()
-                    
+
                     if price == price and price > 0:
                         payload = {
                             "underlyingPrice": price,
                             "options": {}
                         }
                         await send_message_safe(websocket, json.dumps(payload))
-                except Exception as e:
-                    logging.error(f"Failed to manual sync underlying {symbol}: {e}")
 
     except websockets.exceptions.ConnectionClosed:
         pass
@@ -221,23 +243,42 @@ async def handle_ws_client(websocket):
         client_subscriptions.pop(websocket, None)
 
 async def main():
-    # Attempt IB connection
-    await connect_ib()
-    
-    # Register the tick callback
-    ib.pendingTickersEvent += on_pending_tickers
-    
-    # Start the WebSocket server
-    logging.info(f"Starting WebSocket server on ws://{WS_HOST}:{WS_PORT}")
-    async with websockets.serve(handle_ws_client, WS_HOST, WS_PORT):
-        # Keep the event loop running forever, yielding to ib_insync's network operations
-        while True:
-            await asyncio.sleep(1)
+    try:
+        # Attempt IB connection (one connection for the lifetime of this process)
+        await connect_ib()
+
+        # Register the tick callback
+        ib.pendingTickersEvent += on_pending_tickers
+
+        # Start the WebSocket server
+        logging.info(f"Starting WebSocket server on ws://{WS_HOST}:{WS_PORT}")
+        try:
+            ws_server = await websockets.serve(handle_ws_client, WS_HOST, WS_PORT)
+        except OSError as e:
+            logging.error(
+                f"Cannot bind WebSocket server on port {WS_PORT}: {e}\n"
+                f"  A previous ib_server.py session is likely still running.\n"
+                f"  Fix: run  Stop-Process -Name python -Force  in PowerShell, then restart."
+            )
+            return
+
+        async with ws_server:
+            # Keep the event loop running forever, yielding to ib_async's network operations
+            while True:
+                await asyncio.sleep(1)
+    finally:
+        # Guaranteed cleanup: runs on Ctrl+C, SIGTERM, or any unhandled exception
+        if ib.isConnected():
+            logging.info("Disconnecting from IB...")
+            ib.disconnect()
+            logging.info("Disconnected from IB.")
 
 if __name__ == "__main__":
+    # Treat SIGTERM (e.g. `kill`, service stop, terminal closure) identically to
+    # Ctrl+C so the finally block in main() always fires and IB is cleanly disconnected.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Server stopped by user.")
-        if ib.isConnected():
-            ib.disconnect()
