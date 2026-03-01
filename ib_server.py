@@ -252,7 +252,17 @@ async def main():
 
         # Start the WebSocket server
         logging.info(f"Starting WebSocket server on ws://{WS_HOST}:{WS_PORT}")
-        async with websockets.serve(handle_ws_client, WS_HOST, WS_PORT):
+        try:
+            ws_server = await websockets.serve(handle_ws_client, WS_HOST, WS_PORT)
+        except OSError as e:
+            logging.error(
+                f"Cannot bind WebSocket server on port {WS_PORT}: {e}\n"
+                f"  A previous ib_server.py session is likely still running.\n"
+                f"  Fix: run  Stop-Process -Name python -Force  in PowerShell, then restart."
+            )
+            return
+
+        async with ws_server:
             # Keep the event loop running forever, yielding to ib_async's network operations
             while True:
                 await asyncio.sleep(1)
