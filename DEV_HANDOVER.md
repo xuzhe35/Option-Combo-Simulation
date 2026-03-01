@@ -32,6 +32,11 @@ BSM `T = calDTE / 365.0` (matching TWS and industry standard). This correctly pr
 
 ## 5. Live Market Data (IB Integration)
 ### Backend (`ib_server.py`)
+- **IB library**: uses `ib_async` (`pip install ib_async`) — the actively maintained fork of the unmaintained `ib_insync`. Import: `from ib_async import *`. All APIs (`IB`, `connectAsync`, `reqMktData`, `cancelMktData`, `Stock`, `Option`, `pendingTickersEvent`) are identical; only breaking change is `qualifyContractsAsync()` now returns `None` (not an exception) on failure — handled with explicit `if not results or results[0] is None` checks.
+- **One connection per session**: `connect_ib()` establishes exactly one IB connection for the lifetime of the process. Never calls `connectAsync` again after success.
+- **Dynamic client ID (Error 326)**: a temporary `ib.errorEvent` listener captures error codes during the handshake only. If error 326 ("client ID already in use") is received, picks `random.randint(1, 998)` and retries after 1 s. Removed from event bus immediately after each attempt via `finally`.
+- **Guaranteed IB disconnect**: `main()` wraps the entire server loop in `try/finally` — `ib.disconnect()` always runs on Ctrl+C, SIGTERM, or unhandled exception. `SIGTERM` handler raises `KeyboardInterrupt` so all exits share the same cleanup path.
+- **Port 8765 note**: the WebSocket port is released when the Python process exits, not when IB disconnects. On Windows, closing the terminal can orphan the process. If port 8765 is busy on restart, run `Stop-Process -Name python -Force` in PowerShell.
 - Multi-client WebSocket: per-connection subscription isolation with reference-counted `cancelMktData`.
 - **Option price = `(bid + ask) / 2`** (mark), not `marketPrice()` which returns stale last-trade.
 - **IV extraction**: prioritizes `modelGreeks.impliedVol` (Generic Tick 106), falls back to `ticker.impliedVolatility`, with explicit NaN filtering at each step.
@@ -72,6 +77,12 @@ BSM `T = calDTE / 365.0` (matching TWS and industry standard). This correctly pr
 | `scripts/gen_holidays.py` | Generate market holiday file |
 
 ## 9. Changelog
+
+### 2026-03-01
+- **Migration**: `ib_server.py` migrated from unmaintained `ib_insync` to `ib_async` (`pip install ib_async`). Drop-in for all APIs; `qualifyContractsAsync()` now returns `None` on failure instead of raising — callers updated to check return value.
+- **Auto-disconnect**: `main()` `try/finally` guarantees `ib.disconnect()` on any exit path. `SIGTERM` mapped to `KeyboardInterrupt` so terminal closure and `kill` clean up correctly.
+- **Dynamic client ID**: Error 326 (duplicate client ID) triggers automatic retry with a random client ID. Temporary error listener added/removed per connection attempt — zero risk of it firing during normal streaming.
+- **Port-in-use error**: `OSError` on WebSocket bind now logs an actionable message (`Stop-Process -Name python -Force`) instead of a raw traceback.
 
 ### 2026-02-27
 - **Tech Debt Fix**: `market_holidays.js` rewritten as a rule-based engine — dynamically computes NYSE holidays for any year using Easter algorithm + nth-weekday logic. No more annual regeneration needed.
