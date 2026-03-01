@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import random
+import signal
 import configparser
 from ib_async import *
 import websockets
@@ -24,17 +26,38 @@ connected_clients = set()
 client_subscriptions = {}
 
 async def connect_ib():
+    """Connect to IB TWS/Gateway. Retries indefinitely — one connection per session.
+
+    If Error 326 (client ID already in use) is received during the handshake,
+    automatically picks a new random client ID and retries immediately.
+    """
+    client_id = TWS_CLIENT_ID
+
     while not ib.isConnected():
+        # Temporary listener to capture any error codes emitted during the handshake.
+        error_codes: list[int] = []
+        def _capture_error(reqId, errorCode, errorString, contract):
+            error_codes.append(errorCode)
+
+        ib.errorEvent += _capture_error
         try:
-            logging.info(f"Connecting to IB TWS/Gateway at {TWS_HOST}:{TWS_PORT} (Client ID: {TWS_CLIENT_ID})...")
-            # Use connectAsync so it doesn't block the asyncio event loop
-            await ib.connectAsync(TWS_HOST, TWS_PORT, clientId=TWS_CLIENT_ID)
-            logging.info("Successfully connected to IB.")
+            logging.info(f"Connecting to IB TWS/Gateway at {TWS_HOST}:{TWS_PORT} (Client ID: {client_id})...")
+            await ib.connectAsync(TWS_HOST, TWS_PORT, clientId=client_id)
+            logging.info(f"Successfully connected to IB (Client ID: {client_id}).")
             # Set market data type to delayed if live is not available, useful for dev
-            ib.reqMarketDataType(3) 
+            ib.reqMarketDataType(3)
         except Exception as e:
-            logging.error(f"Connection failed: {e}. Retrying in 5 seconds...")
-            await asyncio.sleep(5)
+            if 326 in error_codes:
+                # Error 326: "Client ID already in use" — pick a random ID and retry immediately
+                client_id = random.randint(1, 998)
+                logging.warning(f"Client ID already in use (Error 326). Retrying with Client ID: {client_id}...")
+                await asyncio.sleep(1)
+            else:
+                logging.error(f"Connection failed: {e}. Retrying in 5 seconds...")
+                await asyncio.sleep(5)
+        finally:
+            # Always remove the temporary listener so it doesn't fire during normal operation
+            ib.errorEvent -= _capture_error
 
 def on_pending_tickers(tickers):
     """
@@ -220,23 +243,32 @@ async def handle_ws_client(websocket):
         client_subscriptions.pop(websocket, None)
 
 async def main():
-    # Attempt IB connection
-    await connect_ib()
-    
-    # Register the tick callback
-    ib.pendingTickersEvent += on_pending_tickers
-    
-    # Start the WebSocket server
-    logging.info(f"Starting WebSocket server on ws://{WS_HOST}:{WS_PORT}")
-    async with websockets.serve(handle_ws_client, WS_HOST, WS_PORT):
-        # Keep the event loop running forever, yielding to ib_async's network operations
-        while True:
-            await asyncio.sleep(1)
+    try:
+        # Attempt IB connection (one connection for the lifetime of this process)
+        await connect_ib()
+
+        # Register the tick callback
+        ib.pendingTickersEvent += on_pending_tickers
+
+        # Start the WebSocket server
+        logging.info(f"Starting WebSocket server on ws://{WS_HOST}:{WS_PORT}")
+        async with websockets.serve(handle_ws_client, WS_HOST, WS_PORT):
+            # Keep the event loop running forever, yielding to ib_async's network operations
+            while True:
+                await asyncio.sleep(1)
+    finally:
+        # Guaranteed cleanup: runs on Ctrl+C, SIGTERM, or any unhandled exception
+        if ib.isConnected():
+            logging.info("Disconnecting from IB...")
+            ib.disconnect()
+            logging.info("Disconnected from IB.")
 
 if __name__ == "__main__":
+    # Treat SIGTERM (e.g. `kill`, service stop, terminal closure) identically to
+    # Ctrl+C so the finally block in main() always fires and IB is cleanly disconnected.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Server stopped by user.")
-        if ib.isConnected():
-            ib.disconnect()
