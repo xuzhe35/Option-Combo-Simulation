@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import configparser
-from ib_insync import *
+from ib_async import *
 import websockets
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -38,7 +38,7 @@ async def connect_ib():
 
 def on_pending_tickers(tickers):
     """
-    Callback fired by ib_insync when streaming data ticks arrive.
+    Callback fired by ib_async when streaming data ticks arrive.
     We batch process these and send customized state to each connected WS client.
     """
     if not connected_clients:
@@ -156,21 +156,23 @@ async def handle_ws_client(websocket):
             if data.get('action') == 'subscribe':
                 symbol = data.get('underlying')
                 options_data = data.get('options', [])
-                
+
                 logging.info(f"Received subscription request from {client_ip} for {symbol} with {len(options_data)} options")
-                
-                # Check if the requested symbol is already being streamed by another client to avoid redundant qualification
+
                 contract = Stock(symbol, 'SMART', 'USD')
-                try:
-                    await ib.qualifyContractsAsync(contract)
-                    
+                # ib_async v2.0+: qualifyContractsAsync returns None for failures
+                # instead of raising, so we check the result explicitly.
+                results = await ib.qualifyContractsAsync(contract)
+                if not results or results[0] is None:
+                    logging.error(f"Failed to qualify underlying {symbol}")
+                else:
                     # Unsubscribe old streams for this specific client safely
                     unsubscribe_client_safely(websocket)
-                    
+
                     # Subscribe Underlying
                     ticker = ib.reqMktData(contract, '', False, False)
                     client_subscriptions[websocket]['underlying'] = ticker
-                    
+
                     # Process Options
                     for opt in options_data:
                         leg_id = opt['id']
@@ -178,37 +180,34 @@ async def handle_ws_client(websocket):
                         exp_date = opt['expDate'].replace('-', '')
                         strike = float(opt['strike'])
                         right = opt['right'] # 'C' or 'P'
-                        
+
                         opt_contract = Option(symbol, exp_date, strike, right, 'SMART', multiplier='100', currency='USD')
-                        try:
-                            await ib.qualifyContractsAsync(opt_contract)
+                        opt_results = await ib.qualifyContractsAsync(opt_contract)
+                        if not opt_results or opt_results[0] is None:
+                            logging.error(f"Failed to qualify option {strike} {right}")
+                        else:
                             # genericTickList '106' explicitly requests Option Implied Volatility and Greeks
                             opt_ticker = ib.reqMktData(opt_contract, '106', False, False)
                             client_subscriptions[websocket][leg_id] = opt_ticker
-                        except Exception as e:
-                            logging.error(f"Failed to qualify option {strike} {right}: {e}")
-                            
-                except Exception as e:
-                    logging.error(f"Failed to qualify underlying {symbol}: {e}")
-                    
+
             elif data.get('action') == 'sync_underlying':
                 symbol = data.get('underlying')
                 contract = Stock(symbol, 'SMART', 'USD')
-                try:
-                    await ib.qualifyContractsAsync(contract)
+                results = await ib.qualifyContractsAsync(contract)
+                if not results or results[0] is None:
+                    logging.error(f"Failed to manual sync underlying {symbol}")
+                else:
                     ticker = ib.reqMktData(contract, '', False, False)
                     # wait momentarily for IB to fetch the snapshot
                     await asyncio.sleep(0.5)
                     price = ticker.marketPrice()
-                    
+
                     if price == price and price > 0:
                         payload = {
                             "underlyingPrice": price,
                             "options": {}
                         }
                         await send_message_safe(websocket, json.dumps(payload))
-                except Exception as e:
-                    logging.error(f"Failed to manual sync underlying {symbol}: {e}")
 
     except websockets.exceptions.ConnectionClosed:
         pass
@@ -230,7 +229,7 @@ async def main():
     # Start the WebSocket server
     logging.info(f"Starting WebSocket server on ws://{WS_HOST}:{WS_PORT}")
     async with websockets.serve(handle_ws_client, WS_HOST, WS_PORT):
-        # Keep the event loop running forever, yielding to ib_insync's network operations
+        # Keep the event loop running forever, yielding to ib_async's network operations
         while True:
             await asyncio.sleep(1)
 
