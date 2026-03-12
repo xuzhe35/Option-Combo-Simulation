@@ -102,6 +102,11 @@ self.onmessage = function(e) {
     if (legs) {
         for (let l = 0; l < legs.length; l++) {
             const leg = legs[l];
+            if (leg.type === 'stock') {
+                leg.isStock = true;
+                continue;  // No BSM constants needed for stocks
+            }
+            leg.isStock = false;
             leg.isExpired = (leg.T <= 0);
             if (!leg.isExpired) {
                 let v = leg.v <= 0 ? 0.0001 : leg.v;
@@ -141,7 +146,10 @@ self.onmessage = function(e) {
             for (let l = 0; l < legs.length; l++) {
                 const leg = legs[l];
                 let v_opt = 0;
-                if (leg.isExpired) {
+                if (leg.isStock) {
+                    // Stock: price IS the underlying price, no BSM
+                    v_opt = finalPrice;
+                } else if (leg.isExpired) {
                     if (leg.type === 'call') v_opt = Math.max(0, finalPrice - leg.K);
                     else                     v_opt = Math.max(0, leg.K - finalPrice);
                 } else {

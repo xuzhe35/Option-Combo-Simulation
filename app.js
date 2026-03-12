@@ -27,7 +27,8 @@ const state = {
     interestRate: 0.03, // 3% default risk-free rate
     ivOffset: 0.0, // 0%
     viewMode: 'active', // 'active' (Historical Entry Cost) or 'trial' (Current Live Price)
-    groups: []
+    groups: [],
+    hedges: [] // {id, symbol, currentPrice, pos, cost, liveData}
 };
 
 // Throttle flag for slider-driven updates (one rAF per frame max)
@@ -45,10 +46,10 @@ function throttledUpdate() {
 // Date helper functions such as diffDays, addDays, calendarToTradingDays 
 // have been unified globally in bsm.js
 
-// Initialization
 document.addEventListener('DOMContentLoaded', () => {
     bindControlPanelEvents();
     renderGroups();
+    renderHedges();
     updateDerivedValues();
 });
 
@@ -196,6 +197,7 @@ function addGroup() {
     const newGroup = {
         id: generateId(),
         name: `Combo Group ${state.groups.length + 1}`,
+        settleUnderlyingPrice: null,
         legs: []
     };
     state.groups.push(newGroup);
@@ -208,6 +210,106 @@ function removeGroup(groupId) {
     state.groups = state.groups.filter(g => g.id !== groupId);
     handleLiveSubscriptions();
     renderGroups();
+}
+
+// -------------------------------------------------------------
+// Hedge Management & Rendering
+// -------------------------------------------------------------
+function addHedge() {
+    const newHedge = {
+        id: generateId(),
+        symbol: 'UVXY',
+        pos: -100,
+        cost: 25.00,
+        currentPrice: 0.00,
+        liveData: false
+    };
+    state.hedges.push(newHedge);
+    renderHedges();
+}
+
+function removeHedge(btn) {
+    const row = btn.closest('.hedge-row');
+    if (!row) return;
+    const id = row.dataset.id;
+    state.hedges = state.hedges.filter(h => h.id !== id);
+    handleLiveSubscriptions();
+    renderHedges();
+}
+
+// We expose globally so index.html templates can call it
+window.addHedge = addHedge;
+window.removeHedge = removeHedge;
+
+function renderHedges() {
+    const tbody = document.getElementById('hedgesTableBody');
+    const emptyState = document.getElementById('hedgeEmptyState');
+    const template = document.getElementById('hedgeRowTemplate');
+    if (!tbody || !emptyState || !template) return;
+
+    tbody.innerHTML = '';
+
+    if (state.hedges.length === 0) {
+        tbody.parentElement.style.display = 'none';
+        emptyState.style.display = 'block';
+        updateDerivedValues();
+        return;
+    }
+
+    tbody.parentElement.style.display = 'table';
+    emptyState.style.display = 'none';
+
+    state.hedges.forEach(hedge => {
+        const clone = template.content.cloneNode(true);
+        const tr = clone.querySelector('.hedge-row');
+        tr.dataset.id = hedge.id;
+
+        // Bind Symbol
+        const symInput = tr.querySelector('.symbol-input');
+        symInput.value = hedge.symbol;
+        symInput.addEventListener('change', (e) => {
+            hedge.symbol = e.target.value.toUpperCase();
+            e.target.value = hedge.symbol;
+            handleLiveSubscriptions();
+            updateDerivedValues();
+        });
+
+        // Bind Current Price
+        const cpInput = tr.querySelector('.current-price-input');
+        cpInput.value = hedge.currentPrice > 0 ? hedge.currentPrice.toFixed(2) : '';
+        cpInput.addEventListener('input', (e) => {
+            hedge.currentPrice = parseFloat(e.target.value) || 0;
+            updateDerivedValues();
+        });
+
+        // Bind Position
+        const posInput = tr.querySelector('.pos-input');
+        posInput.value = hedge.pos;
+        posInput.addEventListener('input', (e) => {
+            hedge.pos = parseInt(e.target.value) || 0;
+            updateDerivedValues();
+        });
+
+        // Bind Cost Base
+        const costInput = tr.querySelector('.cost-input');
+        costInput.value = hedge.cost.toFixed(2);
+        costInput.addEventListener('input', (e) => {
+            hedge.cost = parseFloat(e.target.value) || 0;
+            updateDerivedValues();
+        });
+
+        // Bind Live Data Toggle
+        const liveToggle = tr.querySelector('.live-data-toggle');
+        liveToggle.checked = hedge.liveData;
+        liveToggle.addEventListener('change', (e) => {
+            hedge.liveData = e.target.checked;
+            handleLiveSubscriptions();
+        });
+
+        tbody.appendChild(tr);
+    });
+
+    updateDerivedValues();
 }
 
 function toggleSidebar() {
@@ -229,7 +331,8 @@ function addLegToGroupById(groupId) {
         expDate: addDays(state.baseDate, 30), // Default to 30 days out
         iv: 0.2,
         currentPrice: 0.00,
-        cost: 0.00
+        cost: 0.00,
+        closePrice: null
     };
     group.legs.push(newLeg);
     renderGroups();
@@ -292,22 +395,43 @@ function renderGroups() {
             handleLiveSubscriptions();
         });
 
-        // View Mode Toggle (Dual Charting)
+        // View Mode Toggle (3-way)
         const toggleActiveBtn = card.querySelector('.toggle-view-active');
         const toggleTrialBtn = card.querySelector('.toggle-view-trial');
+        const toggleSettlementBtn = card.querySelector('.toggle-view-settlement');
+        const settlementControls = card.querySelector('.settlement-controls');
+        
         const currentMode = group.viewMode || 'active'; // support group-level override
-        if (currentMode === 'active') {
-            toggleActiveBtn.classList.add('active');
+        
+        [toggleActiveBtn, toggleTrialBtn, toggleSettlementBtn].forEach(btn => {
+            if (!btn) return;
+            btn.classList.remove('active', 'btn-primary');
+            btn.classList.add('btn-secondary');
+        });
+        
+        if (currentMode === 'active' && toggleActiveBtn) {
             toggleActiveBtn.classList.remove('btn-secondary');
-            toggleActiveBtn.classList.add('btn-primary');
-            toggleTrialBtn.classList.remove('active', 'btn-primary');
-            toggleTrialBtn.classList.add('btn-secondary');
-        } else {
-            toggleTrialBtn.classList.add('active');
+            toggleActiveBtn.classList.add('active', 'btn-primary');
+            if (settlementControls) settlementControls.style.display = 'none';
+        } else if (currentMode === 'settlement' && toggleSettlementBtn) {
+            toggleSettlementBtn.classList.remove('btn-secondary');
+            toggleSettlementBtn.classList.add('active', 'btn-primary');
+            if (settlementControls) settlementControls.style.display = 'flex';
+        } else if (toggleTrialBtn) {
             toggleTrialBtn.classList.remove('btn-secondary');
-            toggleTrialBtn.classList.add('btn-primary');
-            toggleActiveBtn.classList.remove('active', 'btn-primary');
-            toggleActiveBtn.classList.add('btn-secondary');
+            toggleTrialBtn.classList.add('active', 'btn-primary');
+            if (settlementControls) settlementControls.style.display = 'none';
+        }
+
+        // Settlement Underlying Price Binding
+        const settleUldInput = card.querySelector('.group-settle-underlying-input');
+        if (settleUldInput) {
+            settleUldInput.value = (group.settleUnderlyingPrice !== null && group.settleUnderlyingPrice !== undefined) ? group.settleUnderlyingPrice.toFixed(2) : '';
+            settleUldInput.addEventListener('input', (e) => {
+                const val = parseFloat(e.target.value);
+                group.settleUnderlyingPrice = isNaN(val) ? null : val;
+                updateDerivedValues();
+            });
         }
 
         // Remove Group Binding
@@ -330,41 +454,86 @@ function renderGroups() {
                 const tr = legClone.querySelector('tr');
                 tr.dataset.id = leg.id;
 
+                const isStock = leg.type === 'stock';
+
                 // Populate values
                 const typeInput = tr.querySelector('.type-input');
                 typeInput.value = leg.type;
-                typeInput.addEventListener('change', (e) => { leg.type = e.target.value; updateDerivedValues(); });
+                typeInput.addEventListener('change', (e) => {
+                    const wasStock = leg.type === 'stock';
+                    const nowStock = e.target.value === 'stock';
+                    leg.type = e.target.value;
+                    // Reset fields when switching to/from stock
+                    if (nowStock && !wasStock) {
+                        leg.strike = 0;
+                        leg.expDate = '';
+                        leg.iv = 0;
+                    } else if (!nowStock && wasStock) {
+                        leg.strike = state.underlyingPrice;
+                        leg.expDate = addDays(state.baseDate, 30);
+                        leg.iv = 0.2;
+                    }
+                    handleLiveSubscriptions();
+                    renderGroups();
+                });
 
                 const posInput = tr.querySelector('.pos-input');
                 posInput.value = leg.pos;
                 posInput.addEventListener('input', (e) => { leg.pos = parseInt(e.target.value) || 0; updateDerivedValues(); });
 
                 const strikeInput = tr.querySelector('.strike-input');
-                strikeInput.value = leg.strike;
-                strikeInput.addEventListener('input', (e) => { leg.strike = parseFloat(e.target.value) || 0; updateDerivedValues(); });
-
                 const dteInput = tr.querySelector('.dte-input');
-                dteInput.value = leg.expDate;
-                dteInput.addEventListener('change', (e) => {
-                    leg.expDate = e.target.value;
-                    updateDerivedValues();
-                });
-
                 const ivInput = tr.querySelector('.iv-input');
-                ivInput.value = (leg.iv * 100).toFixed(4) + '%';
-                ivInput.addEventListener('change', (e) => {
-                    leg.iv = parseFloat(e.target.value) / 100.0 || 0.001;
-                    e.target.value = (leg.iv * 100).toFixed(4) + '%';
-                    updateDerivedValues();
-                });
+
+                if (isStock) {
+                    // Hide option-specific fields for stock legs
+                    strikeInput.parentElement.style.display = 'none';
+                    dteInput.closest('td').style.display = 'none';
+                    tr.querySelector('.simulated-dte-display')?.closest('td')?.remove(); // already in same td
+                } else {
+                    strikeInput.value = leg.strike;
+                    strikeInput.addEventListener('input', (e) => { leg.strike = parseFloat(e.target.value) || 0; updateDerivedValues(); });
+
+                    dteInput.value = leg.expDate;
+                    dteInput.addEventListener('change', (e) => {
+                        leg.expDate = e.target.value;
+                        updateDerivedValues();
+                    });
+
+                    ivInput.value = (leg.iv * 100).toFixed(4) + '%';
+                    ivInput.addEventListener('change', (e) => {
+                        leg.iv = parseFloat(e.target.value) / 100.0 || 0.001;
+                        e.target.value = (leg.iv * 100).toFixed(4) + '%';
+                        updateDerivedValues();
+                    });
+                }
 
                 const currentPriceInput = tr.querySelector('.current-price-input');
-                currentPriceInput.value = leg.currentPrice.toFixed(2);
+                currentPriceInput.value = leg.currentPrice > 0 ? leg.currentPrice.toFixed(2) : '';
                 currentPriceInput.addEventListener('input', (e) => { leg.currentPrice = parseFloat(e.target.value) || 0; updateDerivedValues(); });
 
                 const costInput = tr.querySelector('.cost-input');
-                costInput.value = leg.cost.toFixed(2);
+                costInput.value = leg.cost > 0 ? leg.cost.toFixed(2) : '';
                 costInput.addEventListener('input', (e) => { leg.cost = parseFloat(e.target.value) || 0; updateDerivedValues(); });
+
+                // Close Price Binding & Visibility
+                const closePriceInput = tr.querySelector('.close-price-input');
+                const closeLabel = tr.querySelector('.close-label');
+                if (closePriceInput && closeLabel) {
+                    if (currentMode === 'settlement') {
+                        closePriceInput.style.display = 'block';
+                        closeLabel.style.display = 'block';
+                    } else {
+                        closePriceInput.style.display = 'none';
+                        closeLabel.style.display = 'none';
+                    }
+                    closePriceInput.value = (leg.closePrice !== null && leg.closePrice !== undefined) ? leg.closePrice.toFixed(2) : '';
+                    closePriceInput.addEventListener('input', (e) => {
+                        const val = parseFloat(e.target.value);
+                        leg.closePrice = isNaN(val) ? null : val;
+                        updateDerivedValues();
+                    });
+                }
 
                 // Delete button
                 tr.querySelector('.delete-btn').addEventListener('click', () => removeLeg(group.id, leg.id));
@@ -378,13 +547,13 @@ function renderGroups() {
         group.legs.forEach(leg => {
             if (leg.cost !== 0) allZeroCost = false;
         });
-        if (allZeroCost) {
+        if (allZeroCost && currentMode !== 'settlement') {
             group.viewMode = 'trial';
             const toggleTrialBtn = card.querySelector('.toggle-view-trial');
             const toggleActiveBtn = card.querySelector('.toggle-view-active');
             if (toggleTrialBtn && toggleActiveBtn) {
                 toggleActiveBtn.disabled = true;
-                toggleActiveBtn.title = "Add a Cost to unlock Active historical tracking.";
+                toggleActiveBtn.title = "Add a Cost to unlock Active tracking.";
                 toggleActiveBtn.classList.add('text-muted');
                 toggleActiveBtn.style.opacity = '0.5';
 
@@ -414,22 +583,8 @@ function setGroupViewMode(btn, mode) {
 
     group.viewMode = mode;
 
-    // Update button styles in-place (no DOM rebuild needed)
-    const toggleActiveBtn = card.querySelector('.toggle-view-active');
-    const toggleTrialBtn = card.querySelector('.toggle-view-trial');
-    if (mode === 'active') {
-        toggleActiveBtn.classList.add('active', 'btn-primary');
-        toggleActiveBtn.classList.remove('btn-secondary');
-        toggleTrialBtn.classList.remove('active', 'btn-primary');
-        toggleTrialBtn.classList.add('btn-secondary');
-    } else {
-        toggleTrialBtn.classList.add('active', 'btn-primary');
-        toggleTrialBtn.classList.remove('btn-secondary');
-        toggleActiveBtn.classList.remove('active', 'btn-primary');
-        toggleActiveBtn.classList.add('btn-secondary');
-    }
-
-    updateDerivedValues();
+    // Trigger a full re-render of the group to handle complex visibility toggles (Close inputs, settlement controls)
+    renderGroups();
 
     // Explicitly redraw charts related to this group
     triggerChartRedraw(btn);
@@ -443,6 +598,31 @@ function updateDerivedValues() {
     let globalLivePnL = 0;
     let hasAnyLiveData = false;
 
+    let globalHedgePnL = 0;
+    let hasAnyHedgeLivePnL = false;
+
+    // ----- Hedges -----
+    const hedgeRows = document.querySelectorAll('.hedge-row');
+    hedgeRows.forEach(tr => {
+        const id = tr.dataset.id;
+        const hedge = state.hedges.find(h => h.id === id);
+        if (!hedge) return;
+
+        let pnl = 0;
+        if (hedge.currentPrice > 0) {
+            // Live P&L = (Current - Cost) * Pos
+            pnl = (hedge.currentPrice - hedge.cost) * hedge.pos;
+            globalHedgePnL += pnl;
+            hasAnyHedgeLivePnL = true;
+        }
+
+        const pnlCell = tr.querySelector('.pnl-cell');
+        if (pnlCell) {
+            pnlCell.innerHTML = `<span class="${pnl >= 0 ? 'success-text' : 'danger-text'}">${pnl >= 0 ? '+' : ''}${currencyFormatter.format(pnl)}</span>`;
+        }
+    });
+
+    // ----- Options Combo Groups -----
     const cards = document.querySelectorAll('.group-card');
 
     cards.forEach(card => {
@@ -455,6 +635,12 @@ function updateDerivedValues() {
         let groupLivePnL = 0;
         let groupHasLiveData = false;
 
+        const activeViewMode = group.viewMode || 'active';
+        // Settlement mode underlying override
+        const evalUnderlyingPrice = (activeViewMode === 'settlement' && group.settleUnderlyingPrice !== null) 
+                                    ? group.settleUnderlyingPrice 
+                                    : state.underlyingPrice;
+
         const rows = card.querySelectorAll('.leg-row');
         rows.forEach(tr => {
             const legId = tr.dataset.id;
@@ -462,16 +648,30 @@ function updateDerivedValues() {
             if (!leg) return;
 
             // Process leg globally to ensure perfectly synced DTE and IV
-            const activeViewMode = group.viewMode || 'active';
-            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode);
+            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, evalUnderlyingPrice, state.interestRate, activeViewMode);
 
-            // Update displays for simulated variables
-            tr.querySelector('.simulated-dte-display').textContent = `Sim DTE: ${pLeg.tradDTE} td / ${pLeg.calDTE} cd`;
-            tr.querySelector('.simulated-iv-display').textContent = `Sim IV: ${(pLeg.simIV * 100).toFixed(2)}%`;
+            // Update displays for simulated variables (skip for stock legs — fields are hidden)
+            if (leg.type !== 'stock') {
+                const dteDisplay = tr.querySelector('.simulated-dte-display');
+                const ivDisplay = tr.querySelector('.simulated-iv-display');
+                if (dteDisplay) dteDisplay.textContent = `Sim DTE: ${pLeg.tradDTE} td / ${pLeg.calDTE} cd`;
+                if (ivDisplay) ivDisplay.textContent = `Sim IV: ${(pLeg.simIV * 100).toFixed(2)}%`;
+            }
 
             // Dynamic Trial / Active Price Display
             const currentPriceInput = tr.querySelector('.current-price-input');
-            if (activeViewMode === 'trial' && leg.currentPrice === 0) {
+            if (leg.type === 'stock') {
+                // Stock legs: show underlying price as placeholder when no live price
+                if (leg.currentPrice === 0) {
+                    currentPriceInput.value = "";
+                    currentPriceInput.placeholder = evalUnderlyingPrice.toFixed(2);
+                    currentPriceInput.title = "Current Stock Price (defaults to underlying)";
+                } else {
+                    currentPriceInput.value = leg.currentPrice.toFixed(2);
+                    currentPriceInput.placeholder = "0.00";
+                    currentPriceInput.title = "Current Stock Price";
+                }
+            } else if (activeViewMode === 'trial' && leg.currentPrice === 0) {
                 // The system is seamlessly falling back to BSM Theoretical Price (Today)
                 // We wipe the "0.00" value so the HTML placeholder can visibly expose this calculated baseline to the user
                 currentPriceInput.value = "";
@@ -488,7 +688,7 @@ function updateDerivedValues() {
 
             // Unified simulation price: Zero-Delta bypass handled inside bsm.js
             const simPricePerShare = computeSimulatedPrice(
-                pLeg, leg, state.underlyingPrice, state.interestRate,
+                pLeg, leg, evalUnderlyingPrice, state.interestRate,
                 activeViewMode, state.simulatedDate, state.baseDate, state.ivOffset
             );
 
@@ -498,16 +698,40 @@ function updateDerivedValues() {
 
             const pnl = simValue - pLeg.costBasis;
 
-            tr.querySelector('.simulated-price-cell').textContent = currencyFormatter.format(simPricePerShare);
+            let simPriceHtml = currencyFormatter.format(simPricePerShare);
+            if (activeViewMode === 'settlement') {
+                if (leg.closePrice !== null && leg.closePrice !== '') {
+                    simPriceHtml += ` <span class="badge" style="background: var(--primary-color); font-size: 0.65rem; vertical-align: middle;">Closed</span>`;
+                } else if (pLeg.isExpired) {
+                    if (simPricePerShare > 0) {
+                        simPriceHtml += ` <span class="badge" style="background: var(--success-color); font-size: 0.65rem; vertical-align: middle;">Exercised</span>`;
+                    } else {
+                        simPriceHtml += ` <span class="badge bg-secondary" style="font-size: 0.65rem; vertical-align: middle;">Expired</span>`;
+                    }
+                } else {
+                    simPriceHtml += ` <span class="badge" style="background: var(--warning-color); font-size: 0.65rem; vertical-align: middle;">Active</span>`;
+                }
+            }
+
+            tr.querySelector('.simulated-price-cell').innerHTML = simPriceHtml;
             const pnlCell = tr.querySelector('.pnl-cell');
             pnlCell.innerHTML = `<span class="${pnl >= 0 ? 'profit' : 'loss'}">${pnl >= 0 ? '+' : ''}${currencyFormatter.format(pnl)}</span>`;
 
+            const livePnlCell = tr.querySelector('.live-pnl-cell');
+
             // Live P&L: (currentPrice - cost) × pos × multiplier
             // Pure market-based, no BSM simulation, directly comparable to TWS
-            if (leg.currentPrice > 0 && leg.cost > 0) {
+            if (leg.cost !== 0 || leg.currentPrice !== 0) {
                 const liveLegPnL = (leg.currentPrice - leg.cost) * pLeg.posMultiplier;
                 groupLivePnL += liveLegPnL;
                 groupHasLiveData = true;
+
+                if (livePnlCell) {
+                    livePnlCell.innerHTML = `<span class="${liveLegPnL >= 0 ? 'success-text' : 'danger-text'}">${liveLegPnL >= 0 ? '+' : ''}${currencyFormatter.format(liveLegPnL)}</span>`;
+                    livePnlCell.style.display = 'block';
+                }
+            } else if (livePnlCell) {
+                livePnlCell.style.display = 'none';
             }
         });
 
@@ -516,6 +740,89 @@ function updateDerivedValues() {
         card.querySelector('.group-cost').textContent = currencyFormatter.format(groupCost);
         card.querySelector('.group-sim-value').textContent = currencyFormatter.format(groupSimValue);
         card.querySelector('.group-pnl').innerHTML = `<span class="${groupPnl >= 0 ? 'success-text' : 'danger-text'}">${groupPnl >= 0 ? '+' : ''}${currencyFormatter.format(groupPnl)}</span>`;
+
+        // --------------------------------------------------------------------------
+        // Calculate & Layout Amortized Stock Cost Basis Automatically in Settlement
+        // --------------------------------------------------------------------------
+        const amContainer = card.querySelector('.amortization-container');
+        if (amContainer) {
+            if (activeViewMode === 'settlement') {
+                let netShares = 0;
+                let stockCashPaid = 0;
+                let nocf = -groupCost; // Net Options Cash Flow starts as the initial net cash paid (negative cost)
+                
+                group.legs.forEach(leg => {
+                    if (leg.type === 'Stock') return;
+                    
+                    const pos = leg.pos;
+                    const multiplier = 100;
+                    
+                    if (leg.closePrice !== null && leg.closePrice !== '') {
+                        nocf += parseFloat(leg.closePrice) * pos * multiplier;
+                    } else {
+                        const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, evalUnderlyingPrice, state.interestRate, activeViewMode);
+                        const simPricePerShare = computeSimulatedPrice(
+                            pLeg, leg, evalUnderlyingPrice, state.interestRate,
+                            activeViewMode, state.simulatedDate, state.baseDate, state.ivOffset
+                        );
+                        
+                        if (pLeg.isExpired && simPricePerShare > 0) {
+                            let legShares = 0;
+                            const lowerType = leg.type.toLowerCase();
+                            if (lowerType === 'call') {
+                                legShares = pos * multiplier;
+                            } else if (lowerType === 'put') {
+                                legShares = -pos * multiplier;
+                            }
+                            netShares += legShares;
+                            stockCashPaid += legShares * leg.strike;
+                        }
+                    }
+                });
+
+                const amText = card.querySelector('.amortization-text');
+                if (netShares !== 0 && amText) {
+                    const basis = (stockCashPaid - nocf) / Math.abs(netShares);
+                    const action = netShares > 0 ? 'Assigned' : 'Delivered';
+                    amText.textContent = `${action} ${Math.abs(netShares)} shares with effective basis of ${currencyFormatter.format(basis)}`;
+                    amContainer.style.display = 'block';
+                } else {
+                    amContainer.style.display = 'none';
+                }
+            } else {
+                amContainer.style.display = 'none';
+            }
+        }
+
+        // Highlight P&L in Settlement Mode
+        const pnlContainer = card.querySelector('.pnl-container');
+        const pnlLabel = card.querySelector('.group-pnl-label');
+        if (pnlContainer && pnlLabel) {
+            if (activeViewMode === 'settlement') {
+                pnlLabel.textContent = 'Settlement P&L:';
+                pnlContainer.classList.add('settlement-highlight');
+            } else {
+                pnlLabel.textContent = 'P&L:';
+                pnlContainer.classList.remove('settlement-highlight');
+            }
+        }
+
+        // Update Table Headers and Button Visibility
+        const simPnlHeader = card.querySelector('.sim-pnl-header-text');
+        const livePnlHeader = card.querySelector('.live-pnl-header-text');
+        const showChartBtn = card.querySelector('.toggle-chart-btn');
+
+        if (simPnlHeader && livePnlHeader) {
+            if (activeViewMode === 'settlement') {
+                simPnlHeader.textContent = 'SETTLEMENT P&L';
+                livePnlHeader.style.display = 'none';
+                if (showChartBtn) showChartBtn.style.display = 'none';
+            } else {
+                simPnlHeader.textContent = 'Sim P&L';
+                if (groupHasLiveData) livePnlHeader.style.display = 'inline';
+                if (showChartBtn) showChartBtn.style.display = 'inline-block';
+            }
+        }
 
         // Live P&L Group Summary
         const livePnlItem = card.querySelector('.group-live-pnl-item');
@@ -552,15 +859,40 @@ function updateDerivedValues() {
     const unPnlEl = document.getElementById('unrealizedPnL');
     unPnlEl.innerHTML = `<span class="${globalPnL >= 0 ? 'profit' : 'loss'}">${globalPnL >= 0 ? '+' : ''}${currencyFormatter.format(globalPnL)}</span>`;
 
-    // Global Live P&L
+    // Global Live P&L (Options)
     const globalLivePnLRow = document.getElementById('globalLivePnLRow');
     if (globalLivePnLRow) {
         if (hasAnyLiveData) {
             globalLivePnLRow.style.display = '';
             const globalLivePnLEl = document.getElementById('globalLivePnL');
-            globalLivePnLEl.innerHTML = `<span class="${globalLivePnL >= 0 ? 'profit' : 'loss'}">${globalLivePnL >= 0 ? '+' : ''}${currencyFormatter.format(globalLivePnL)}</span>`;
+            globalLivePnLEl.innerHTML = `<span class="${globalLivePnL >= 0 ? 'success-text' : 'danger-text'}">${globalLivePnL >= 0 ? '+' : ''}${currencyFormatter.format(globalLivePnL)}</span>`;
         } else {
             globalLivePnLRow.style.display = 'none';
+        }
+    }
+
+    // Hedge Live P&L
+    const hedgeLivePnLRow = document.getElementById('hedgeLivePnLRow');
+    if (hedgeLivePnLRow) {
+        if (hasAnyHedgeLivePnL) {
+            hedgeLivePnLRow.style.display = '';
+            const hedgeLivePnLEl = document.getElementById('hedgeLivePnL');
+            hedgeLivePnLEl.innerHTML = `<span class="${globalHedgePnL >= 0 ? 'success-text' : 'danger-text'}">${globalHedgePnL >= 0 ? '+' : ''}${currencyFormatter.format(globalHedgePnL)}</span>`;
+        } else {
+            hedgeLivePnLRow.style.display = 'none';
+        }
+    }
+
+    // Total Live P&L (Options + Hedges)
+    const totalLivePnLRow = document.getElementById('totalLivePnLRow');
+    if (totalLivePnLRow) {
+        if (hasAnyLiveData || hasAnyHedgeLivePnL) {
+            totalLivePnLRow.style.display = '';
+            const combinedLivePnL = globalLivePnL + globalHedgePnL;
+            const totalLivePnLEl = document.getElementById('totalLivePnL');
+            totalLivePnLEl.innerHTML = `<span class="${combinedLivePnL >= 0 ? 'success-text' : 'danger-text'}">${combinedLivePnL >= 0 ? '+' : ''}${currencyFormatter.format(combinedLivePnL)}</span>`;
+        } else {
+            totalLivePnLRow.style.display = 'none';
         }
     }
 
@@ -634,6 +966,9 @@ function importFromJSON(event) {
                         if (newLeg.currentPrice === undefined) {
                             newLeg.currentPrice = 0.00;
                         }
+                        if (newLeg.closePrice === undefined) {
+                            newLeg.closePrice = null;
+                        }
                         return newLeg;
                     });
                 };
@@ -643,6 +978,7 @@ function importFromJSON(event) {
                     importedGroups = [{
                         id: generateId(),
                         name: 'Legacy Combo',
+                        settleUnderlyingPrice: null,
                         legs: migrateLegs(importedState.legs)
                     }];
                 } else {
@@ -650,12 +986,22 @@ function importFromJSON(event) {
                     importedGroups = parsedGroups.map(g => ({
                         ...g,
                         id: generateId(),
+                        settleUnderlyingPrice: g.settleUnderlyingPrice !== undefined ? g.settleUnderlyingPrice : null,
                         legs: migrateLegs(Array.isArray(g.legs) ? g.legs : [])
                     }));
                 }
 
-                // Append instead of overwrite
+                // Append instead of overwrite for Groups
                 state.groups.push(...importedGroups);
+
+                // Import tracking hedges
+                if (importedState.hedges && Array.isArray(importedState.hedges)) {
+                    const parsedHedges = importedState.hedges.map(h => ({
+                        ...h,
+                        id: generateId()
+                    }));
+                    state.hedges.push(...parsedHedges);
+                }
 
                 // Synchronize global controls DOM
                 document.getElementById('underlyingSymbol').value = state.underlyingSymbol;
@@ -680,13 +1026,14 @@ function importFromJSON(event) {
                 document.getElementById('ivOffsetDisplay').textContent = `${(state.ivOffset * 100 > 0 ? '+' : '')}${(state.ivOffset * 100).toFixed(2)}%`;
 
                 renderGroups();
+                renderHedges();
                 handleLiveSubscriptions();
             } else {
                 alert("Invalid JSON format.");
             }
         } catch (error) {
-            console.error(error);
-            alert("Error parsing JSON file.");
+            console.error("JSON Import Error:", error);
+            alert("Error parsing JSON file or loading state. Check the console for details.");
         }
     };
     reader.readAsText(file);

@@ -147,9 +147,22 @@
 
                         <div class="summary-item" id="globalLivePnLRow"
                             style="display: none; border-top: 1px dashed var(--border-color); padding-top: 0.5rem; margin-top: 0.25rem;">
-                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🟢 Live
-                                P&L</span>
+                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🟢 Options
+                                Live P&L</span>
                             <span class="value font-weight-semibold" id="globalLivePnL">$0.00</span>
+                        </div>
+
+                        <div class="summary-item" id="hedgeLivePnLRow" style="display: none; padding-top: 0.25rem;">
+                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🛡️ Hedge Live
+                                P&L</span>
+                            <span class="value font-weight-semibold" id="hedgeLivePnL">$0.00</span>
+                        </div>
+
+                        <div class="summary-item" id="totalLivePnLRow"
+                            style="display: none; border-top: 1px solid var(--border-color); padding-top: 0.5rem; margin-top: 0.25rem;">
+                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🔥 Total Live
+                                P&L</span>
+                            <span class="value font-weight-semibold" id="totalLivePnL">$0.00</span>
                         </div>
                     </div>
 
@@ -297,6 +310,50 @@
                         <button class="btn btn-primary mt-3" onclick="addGroup()">Create First Group</button>
                     </div>
 
+                    <!-- Hedge Group (VIX/Stocks) -->
+                    <div class="panel-card mt-4 mb-4" id="hedgeGroupCard">
+                        <div class="group-header">
+                            <div class="group-title-area">
+                                <h3 class="h3-style m-0">🛡️ Stock / ETF Hedges (Live P&L Tracking)</h3>
+                                <p class="text-muted small" style="margin-left: 1rem; margin-bottom: 0;">These positions
+                                    only track Live P&L and do not affect simulated BSM charts.</p>
+                            </div>
+                            <div class="group-actions">
+                                <button class="btn btn-secondary btn-sm" onclick="addHedge()">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    </svg>
+                                    Add Hedge
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="table-container mt-2">
+                            <table class="portfolio-table">
+                                <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Live Price</th>
+                                        <th>Pos</th>
+                                        <th>Cost Base</th>
+                                        <th>Live P&L</th>
+                                        <th>Data</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="hedgesTableBody">
+                                    <!-- Hedge rows rendered here -->
+                                </tbody>
+                            </table>
+                            <div class="group-empty-state" id="hedgeEmptyState" style="display: none;">
+                                <p class="text-muted small">No active hedge positions. Add one to track its live impact
+                                    on your overall P&L.</p>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Template for a Combo Group Card -->
                     <template id="groupCardTemplate">
                         <div class="panel-card group-card" data-group-id="">
@@ -347,6 +404,12 @@
                                         title="Calculate using your filled Entry Cost">
                                         🔒 Active (Entry Cost)
                                     </button>
+                                    <button class="btn btn-sm btn-secondary toggle-view-settlement"
+                                        style="border: none; box-shadow: none;"
+                                        onclick="setGroupViewMode(this, 'settlement')"
+                                        title="Settle expired/closed combos">
+                                        💰 Settlement
+                                    </button>
                                 </div>
 
                                 <div style="display: flex; align-items: center; gap: 0.5rem;">
@@ -360,6 +423,12 @@
                                 </div>
                             </div>
 
+                            <div class="settlement-controls" style="display: none; align-items: center; gap: 0.5rem; margin-bottom: 1rem; padding: 0.5rem; background: rgba(var(--primary-rgb), 0.05); border: 1px solid rgba(var(--primary-rgb), 0.2); border-radius: 0.5rem;">
+                                <span class="small font-weight-semibold">Expiry Underlying Price:</span>
+                                <input type="number" class="group-settle-underlying-input" step="0.01" placeholder="Auto" style="max-width: 100px; font-size: 0.8rem; padding: 0.25rem; border: 1px solid var(--border-color); border-radius: 4px;" title="Price of the underlying at expiration (leave empty to use current global price)">
+                                <span class="small text-muted" style="margin-left: auto;">For expired options without early close.</span>
+                            </div>
+
                             <div class="table-container">
                                 <table class="portfolio-table">
                                     <thead>
@@ -370,7 +439,10 @@
                                             <th>DTE & Vol (%)</th>
                                             <th>Price / Cost</th>
                                             <th>Simulated</th>
-                                            <th>P&L</th>
+                                            <th style="min-width: 80px; text-align: right;">
+                                                <span class="sim-pnl-header-text">Sim P&L</span><br>
+                                                <span class="text-muted small live-pnl-header-text">Live P&L</span>
+                                            </th>
                                             <th>Actions</th>
                                         </tr>
                                     </thead>
@@ -383,6 +455,23 @@
                                 </div>
                             </div>
 
+                            <style>
+                                .settlement-highlight {
+                                    background: linear-gradient(135deg, rgba(var(--primary-rgb), 0.1), rgba(var(--primary-rgb), 0.2));
+                                    border: 2px dashed var(--primary-color);
+                                    border-radius: 0.5rem;
+                                    padding: 0.5rem 1rem !important;
+                                    font-size: 1.1rem;
+                                    box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.15);
+                                    transform: translateY(-2px);
+                                }
+                                .settlement-highlight .group-pnl-label {
+                                    color: var(--primary-color);
+                                }
+                                .settlement-highlight .group-pnl {
+                                    font-size: 1.5rem;
+                                }
+                            </style>
                             <div class="group-summary mt-3">
                                 <div class="group-summary-item">
                                     <span class="label">Cost:</span> <span
@@ -392,9 +481,8 @@
                                     <span class="label">Sim Value:</span> <span
                                         class="group-sim-value font-weight-semibold">$0.00</span>
                                 </div>
-                                <div class="group-summary-item">
-                                    <span class="label">P&L:</span> <span
-                                        class="group-pnl font-weight-semibold">$0.00</span>
+                                <div class="group-summary-item pnl-container" style="transition: all 0.3s ease;">
+                                    <span class="label group-pnl-label">P&L:</span> <span class="group-pnl font-weight-bold">+$0.00</span>
                                 </div>
                                 <div class="group-summary-item group-live-pnl-item" style="display: none;">
                                     <span class="label">🟢 Live P&L:</span>
@@ -404,6 +492,11 @@
                                     <button class="btn btn-secondary btn-sm toggle-chart-btn"
                                         onclick="toggleChart(this)">Show Chart</button>
                                 </div>
+                            </div>
+                            
+                            <!-- Amortization Banner (Outside flex flow) -->
+                            <div class="amortization-container mt-3" style="display: none; padding: 1rem; border-radius: 0.5rem; color: #856404; background-color: #fff3cd; border: 2px dashed #ffeeba; font-weight: 600; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.05); font-size: 1.15rem;">
+                                👉 <span class="amortization-text"></span>
                             </div>
 
                             <div class="chart-container mt-3"
@@ -455,6 +548,7 @@
                                 <select class="leg-input type-input">
                                     <option value="call">Call</option>
                                     <option value="put">Put</option>
+                                    <option value="stock">Stock</option>
                                 </select>
                             </td>
                             <td>
@@ -480,7 +574,7 @@
                                 </div>
                             </td>
                             <td>
-                                <div
+                                <div class="price-cost-grid"
                                     style="display: grid; grid-template-columns: 35px 75px; gap: 0.25rem; align-items: center;">
                                     <span class="text-muted small"
                                         style="font-size: 0.7rem; font-weight: 500; text-align: right;">Pri:</span>
@@ -493,16 +587,72 @@
                                     <input type="number" class="leg-input cost-input" value="0.00" step="0.01"
                                         style="width: 100%; font-size: 0.8rem; padding: 0.25rem;" placeholder="0.00"
                                         title="Your Executed Entry Cost">
+
+                                    <span class="text-muted small close-label"
+                                        style="display: none; font-size: 0.7rem; font-weight: 500; text-align: right; color: var(--danger-color) !important;">Close:</span>
+                                    <input type="number" class="leg-input close-price-input" step="0.01"
+                                        style="display: none; width: 100%; font-size: 0.8rem; padding: 0.25rem; border-color: rgba(var(--danger-rgb), 0.5);" placeholder="Auto"
+                                        title="Early Close Price (overrides simulation)">
                                 </div>
                             </td>
                             <td class="simulated-price-cell font-weight-semibold">
                                 $0.00
                             </td>
-                            <td class="pnl-cell font-weight-semibold">
-                                $0.00
+                            <td style="text-align: right; vertical-align: middle;">
+                                <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                                    <div class="pnl-cell font-weight-semibold" title="Simulated P&L">$0.00</div>
+                                    <div class="live-pnl-cell small font-weight-semibold" style="display: none;"
+                                        title="Live P&L">$0.00</div>
+                                </div>
                             </td>
                             <td class="actions-cell">
                                 <button class="icon-btn text-danger delete-btn" title="Remove Leg">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <polyline points="3 6 5 6 21 6"></polyline>
+                                        <path
+                                            d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">
+                                        </path>
+                                        <line x1="10" y1="11" x2="10" y2="17"></line>
+                                        <line x1="14" y1="11" x2="14" y2="17"></line>
+                                    </svg>
+                                </button>
+                            </td>
+                        </tr>
+                    </template>
+
+                    <!-- Template for a Hedge Row -->
+                    <template id="hedgeRowTemplate">
+                        <tr class="hedge-row" data-id="">
+                            <td>
+                                <input type="text" class="leg-input symbol-input" value="UVXY"
+                                    style="min-width: 80px; text-transform: uppercase;">
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input current-price-input" value="0.00" step="0.01"
+                                    style="min-width: 80px;" placeholder="0.00">
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input pos-input" value="-100" step="1"
+                                    style="min-width: 60px;">
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input cost-input" value="25.00" step="0.01"
+                                    style="min-width: 80px;" placeholder="0.00">
+                            </td>
+                            <td class="pnl-cell font-weight-semibold">
+                                $0.00
+                            </td>
+                            <td>
+                                <label class="switch-toggle"
+                                    style="cursor: pointer; display: flex; align-items: center; justify-content: center;">
+                                    <input type="checkbox" class="live-data-toggle"
+                                        style="accent-color: var(--primary-color);">
+                                </label>
+                            </td>
+                            <td class="actions-cell">
+                                <button class="icon-btn text-danger delete-btn" title="Remove Hedge"
+                                    onclick="removeHedge(this)">
                                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                         <polyline points="3 6 5 6 21 6"></polyline>

@@ -84,20 +84,36 @@ function handleLiveSubscriptions() {
     const payload = {
         action: 'subscribe',
         underlying: state.underlyingSymbol,
-        options: []
+        options: [],
+        stocks: []
     };
 
-    // Collect all options from groups that have Live Data == true
+    // Collect all legs from groups that have Live Data == true
     state.groups.forEach(group => {
         if (group.liveData) {
             group.legs.forEach(leg => {
-                payload.options.push({
-                    id: leg.id,
-                    right: leg.type.charAt(0).toUpperCase(), // 'C' or 'P'
-                    strike: leg.strike,
-                    expDate: leg.expDate
-                });
+                if (leg.type === 'stock') {
+                    // Stock legs subscribe as stocks, not options
+                    // Use the group's underlying symbol
+                    if (!payload.stocks.includes(state.underlyingSymbol)) {
+                        payload.stocks.push(state.underlyingSymbol);
+                    }
+                } else {
+                    payload.options.push({
+                        id: leg.id,
+                        right: leg.type.charAt(0).toUpperCase(), // 'C' or 'P'
+                        strike: leg.strike,
+                        expDate: leg.expDate
+                    });
+                }
             });
+        }
+    });
+
+    // Collect all hedge stocks that have Live Data == true
+    state.hedges.forEach(hedge => {
+        if (hedge.liveData && hedge.symbol) {
+            payload.stocks.push(hedge.symbol);
         }
     });
 
@@ -173,6 +189,53 @@ function processLiveMarketData(data) {
                                 if (ivInput) {
                                     ivInput.value = (liveIV * 100).toFixed(4) + '%';
                                     flashElement(ivInput);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    // Update Hedge Stocks + Stock-type legs in groups
+    if (data.stocks) {
+        // Update hedge positions
+        state.hedges.forEach(hedge => {
+            if (hedge.liveData && data.stocks[hedge.symbol] !== undefined) {
+                const liveMark = data.stocks[hedge.symbol].mark;
+                if (liveMark > 0 && Math.abs(liveMark - hedge.currentPrice) > 0.001) {
+                    hedge.currentPrice = liveMark;
+                    stateChanged = true;
+
+                    const row = document.querySelector(`tr.hedge-row[data-id="${hedge.id}"]`);
+                    if (row) {
+                        const currentPriceInput = row.querySelector('.current-price-input');
+                        if (currentPriceInput) {
+                            currentPriceInput.value = liveMark.toFixed(2);
+                            flashElement(currentPriceInput);
+                        }
+                    }
+                }
+            }
+        });
+
+        // Update stock-type legs in combo groups
+        state.groups.forEach(group => {
+            if (group.liveData) {
+                group.legs.forEach(leg => {
+                    if (leg.type === 'stock' && data.stocks[state.underlyingSymbol] !== undefined) {
+                        const liveMark = data.stocks[state.underlyingSymbol].mark;
+                        if (liveMark > 0 && Math.abs(liveMark - leg.currentPrice) > 0.001) {
+                            leg.currentPrice = liveMark;
+                            stateChanged = true;
+
+                            const row = document.querySelector(`tr[data-id="${leg.id}"]`);
+                            if (row) {
+                                const currentPriceInput = row.querySelector('.current-price-input');
+                                if (currentPriceInput) {
+                                    currentPriceInput.value = liveMark.toFixed(2);
+                                    flashElement(currentPriceInput);
                                 }
                             }
                         }

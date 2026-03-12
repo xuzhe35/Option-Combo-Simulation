@@ -222,7 +222,9 @@ window.addEventListener('resize', () => {
 // Uses processLegData() to ensure IV calculation is in sync with bsm.js SSOT
 function computePortfolioMeanSimIV() {
     const allLegs = state.groups.flatMap(g =>
-        g.legs.map(leg => processLegData(leg, state.simulatedDate, state.ivOffset))
+        g.legs
+            .filter(leg => leg.type !== 'stock')  // Stock legs have no IV
+            .map(leg => processLegData(leg, state.simulatedDate, state.ivOffset))
     );
     if (allLegs.length === 0) return 0;
     const total = allLegs.reduce((sum, pLeg) => sum + pLeg.simIV, 0);

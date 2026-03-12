@@ -44,8 +44,8 @@ async def connect_ib():
             logging.info(f"Connecting to IB TWS/Gateway at {TWS_HOST}:{TWS_PORT} (Client ID: {client_id})...")
             await ib.connectAsync(TWS_HOST, TWS_PORT, clientId=client_id)
             logging.info(f"Successfully connected to IB (Client ID: {client_id}).")
-            # Set market data type to delayed if live is not available, useful for dev
-            ib.reqMarketDataType(3)
+            # Enforce Real-Time Data (1)
+            ib.reqMarketDataType(1)
         except Exception as e:
             if 326 in error_codes:
                 # Error 326: "Client ID already in use" — pick a random ID and retry immediately
@@ -58,6 +58,21 @@ async def connect_ib():
         finally:
             # Always remove the temporary listener so it doesn't fire during normal operation
             ib.errorEvent -= _capture_error
+
+def _extract_stock_price(ticker):
+    """Extract the best available price from a stock ticker.
+    Fallback chain: marketPrice() → last → close.
+    Returns the price (float) or None if no valid price is available.
+    """
+    price = ticker.marketPrice()
+    if not (price == price and price > 0):  # NaN check
+        if ticker.last == ticker.last and ticker.last > 0:
+            price = ticker.last
+        elif ticker.close == ticker.close and ticker.close > 0:
+            price = ticker.close
+        else:
+            return None
+    return price
 
 def on_pending_tickers(tickers):
     """
@@ -75,7 +90,8 @@ def on_pending_tickers(tickers):
             
         payload = {
             "underlyingPrice": None,
-            "options": {}
+            "options": {},
+            "stocks": {}
         }
         
         has_data = False
@@ -88,7 +104,21 @@ def on_pending_tickers(tickers):
                 has_data = True
 
         for sub_id, ticker in subs.items():
-            if sub_id != 'underlying':
+            if sub_id == 'underlying':
+                continue  # already handled above
+
+            elif sub_id.startswith('stock_'):
+                # --- Stock / ETF hedge ---
+                stock_sym = sub_id.replace('stock_', '')
+                price = _extract_stock_price(ticker)
+                if price is not None:
+                    payload["stocks"][stock_sym] = {
+                        "mark": price
+                    }
+                    has_data = True
+
+            else:
+                # --- Option leg ---
                 # Use bid/ask midpoint ("mark") instead of marketPrice() which returns
                 # last trade price — that can be stale for illiquid options.
                 # TWS's "mark" column = (bid + ask) / 2, so we match that here.
@@ -179,8 +209,9 @@ async def handle_ws_client(websocket):
             if data.get('action') == 'subscribe':
                 symbol = data.get('underlying')
                 options_data = data.get('options', [])
+                stocks_data = data.get('stocks', [])
 
-                logging.info(f"Received subscription request from {client_ip} for {symbol} with {len(options_data)} options")
+                logging.info(f"Received subscription request from {client_ip} for underlying {symbol}, {len(options_data)} options, and {len(stocks_data)} stocks")
 
                 contract = Stock(symbol, 'SMART', 'USD')
                 # ib_async v2.0+: qualifyContractsAsync returns None for failures
@@ -212,6 +243,27 @@ async def handle_ws_client(websocket):
                             # genericTickList '106' explicitly requests Option Implied Volatility and Greeks
                             opt_ticker = ib.reqMktData(opt_contract, '106', False, False)
                             client_subscriptions[websocket][leg_id] = opt_ticker
+
+                    # Process Stocks (Hedges)
+                    for stock_sym in stocks_data:
+                        stock_contract = Stock(stock_sym, 'SMART', 'USD')
+                        stock_results = await ib.qualifyContractsAsync(stock_contract)
+                        if not stock_results or stock_results[0] is None:
+                            logging.error(f"Failed to qualify hedge stock {stock_sym}")
+                        else:
+                            stock_ticker = ib.reqMktData(stock_contract, '', False, False)
+                            
+                            def make_stock_tick_handler(s, ws):
+                                def _on_stock_tick(t):
+                                    price = _extract_stock_price(t)
+                                    if price is not None:
+                                        payload = {"options": {}, "stocks": {s: {"mark": price}}}
+                                        asyncio.create_task(send_message_safe(ws, json.dumps(payload)))
+                                return _on_stock_tick
+                            
+                            stock_ticker.updateEvent += make_stock_tick_handler(stock_sym, websocket)
+                            client_subscriptions[websocket][f"stock_{stock_sym}"] = stock_ticker
+                            logging.info(f"Subscribed to stock: {stock_sym}")
 
             elif data.get('action') == 'sync_underlying':
                 symbol = data.get('underlying')

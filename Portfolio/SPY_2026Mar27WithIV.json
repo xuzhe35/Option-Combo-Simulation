@@ -1,0 +1,117 @@
+{
+  "underlyingSymbol": "SPY",
+  "underlyingPrice": 680.88,
+  "baseDate": "2026-03-03",
+  "simulatedDate": "2026-03-27",
+  "interestRate": 0.03,
+  "ivOffset": 0,
+  "viewMode": "active",
+  "groups": [
+    {
+      "id": "_l2zreopyy",
+      "name": "Combo Group 1",
+      "legs": [
+        {
+          "id": "_gbqdvfxiy",
+          "type": "call",
+          "pos": -4,
+          "strike": 685,
+          "expDate": "2026-03-27",
+          "iv": 0.17620639994344067,
+          "currentPrice": 9.855,
+          "cost": 12.381
+        },
+        {
+          "id": "_3vug5ufle",
+          "type": "put",
+          "pos": -4,
+          "strike": 685,
+          "expDate": "2026-03-27",
+          "iv": 0.17620639994344067,
+          "currentPrice": 14.12,
+          "cost": 12.586
+        },
+        {
+          "id": "_7z4g3qnml",
+          "type": "call",
+          "pos": 5,
+          "strike": 689,
+          "expDate": "2026-05-29",
+          "iv": 0.17083945243741896,
+          "currentPrice": 20.655,
+          "cost": 22.694
+        },
+        {
+          "id": "_ikovgpdyb",
+          "type": "put",
+          "pos": 5,
+          "strike": 689,
+          "expDate": "2026-05-29",
+          "iv": 0.17083945243741896,
+          "currentPrice": 24.915,
+          "cost": 22.804
+        }
+      ],
+      "viewMode": "active",
+      "liveData": true
+    },
+    {
+      "id": "_005121dyi",
+      "name": "Combo Group 1",
+      "legs": [
+        {
+          "id": "_5shu8877e",
+          "type": "call",
+          "pos": -4,
+          "strike": 673,
+          "expDate": "2026-03-27",
+          "iv": 0.20515194118226374,
+          "currentPrice": 17.975,
+          "cost": 15.138
+        },
+        {
+          "id": "_xvql3f353",
+          "type": "put",
+          "pos": -4,
+          "strike": 673,
+          "expDate": "2026-03-27",
+          "iv": 0.20515194118226374,
+          "currentPrice": 10.08,
+          "cost": 15.036
+        },
+        {
+          "id": "_f0jhlo7nn",
+          "type": "call",
+          "pos": 5,
+          "strike": 679,
+          "expDate": "2026-05-29",
+          "iv": 0.1824323238085668,
+          "currentPrice": 27.025,
+          "cost": 23.884
+        },
+        {
+          "id": "_s3ak77ok6",
+          "type": "put",
+          "pos": 5,
+          "strike": 679,
+          "expDate": "2026-05-29",
+          "iv": 0.1824323238085668,
+          "currentPrice": 21.18,
+          "cost": 25.934
+        }
+      ],
+      "viewMode": "active",
+      "liveData": true
+    }
+  ],
+  "hedges": [
+    {
+      "id": "_uv2zr1yse",
+      "symbol": "UVXY",
+      "pos": -100,
+      "cost": 42.249,
+      "currentPrice": 44.56,
+      "liveData": true
+    }
+  ]
+}

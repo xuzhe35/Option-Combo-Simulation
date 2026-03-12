@@ -1,0 +1,58 @@
+{
+  "underlyingSymbol": "TLT",
+  "underlyingPrice": 89.12,
+  "baseDate": "2026-03-09",
+  "simulatedDate": "2026-04-10",
+  "interestRate": 0.03,
+  "ivOffset": 0,
+  "viewMode": "active",
+  "groups": [
+    {
+      "id": "_hd2i8qloo",
+      "name": "Combo Group 1",
+      "legs": [
+        {
+          "id": "_7jcpuo9nv",
+          "type": "put",
+          "pos": -4,
+          "strike": 89,
+          "expDate": "2026-04-10",
+          "iv": 0.11657096950389696,
+          "currentPrice": 1.195,
+          "cost": 1.156
+        },
+        {
+          "id": "_w9w78e8yv",
+          "type": "put",
+          "pos": 5,
+          "strike": 89,
+          "expDate": "2026-06-18",
+          "iv": 0.12192148387872218,
+          "currentPrice": 2.23,
+          "cost": 2.204
+        }
+      ],
+      "viewMode": "active",
+      "liveData": true
+    },
+    {
+      "id": "_mcqb4ued8",
+      "name": "Combo Group 2",
+      "legs": [
+        {
+          "id": "_9gwgy51es",
+          "type": "call",
+          "pos": 1,
+          "strike": 79,
+          "expDate": "2026-12-18",
+          "iv": 0.1352192832213044,
+          "currentPrice": 10.775,
+          "cost": 10.757
+        }
+      ],
+      "viewMode": "trial",
+      "liveData": true
+    }
+  ],
+  "hedges": []
+}

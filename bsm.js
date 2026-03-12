@@ -73,21 +73,26 @@ function getMultiplier() {
 }
 
 function diffDays(d1Str, d2Str) {
-    const d1 = new Date(d1Str + 'T00:00:00Z');
-    const d2 = new Date(d2Str + 'T00:00:00Z');
+    const safeD1 = d1Str.replace(/\//g, '-');
+    const safeD2 = d2Str.replace(/\//g, '-');
+    const d1 = new Date(safeD1 + 'T00:00:00Z');
+    const d2 = new Date(safeD2 + 'T00:00:00Z');
     const Math_round = Math.round((d2 - d1) / 86400000);
     return Math.max(0, Math_round);
 }
 
 function addDays(dateStr, days) {
-    const d = new Date(dateStr + 'T00:00:00Z');
+    const safeDate = dateStr.replace(/\//g, '-');
+    const d = new Date(safeDate + 'T00:00:00Z');
     d.setUTCDate(d.getUTCDate() + parseInt(days, 10));
     return d.toISOString().slice(0, 10);
 }
 
 function calendarToTradingDays(startDateStr, endDateStr) {
-    let start = new Date(startDateStr + 'T00:00:00Z');
-    let end = new Date(endDateStr + 'T00:00:00Z');
+    const safeStart = startDateStr.replace(/\//g, '-');
+    const safeEnd = endDateStr.replace(/\//g, '-');
+    let start = new Date(safeStart + 'T00:00:00Z');
+    let end = new Date(safeEnd + 'T00:00:00Z');
     if (start > end) return 0;
 
     let days = 0;
@@ -115,8 +120,33 @@ function calendarToTradingDays(startDateStr, endDateStr) {
  * Extracts the exact date strings & handles logic branching for expiration.
  */
 function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseDateStr = null, globalUnderlyingPrice = null, globalInterestRate = null, viewMode = 'active') {
+    // --- Stock type: no BSM, no expiration, multiplier = 1 (shares, not contracts) ---
+    if (leg.type === 'stock') {
+        const posMultiplier = leg.pos * 1; // shares, not contracts
+        let effectiveCostPerShare = leg.cost;
+        if (viewMode === 'trial' || leg.cost === 0) {
+            effectiveCostPerShare = (leg.currentPrice && leg.currentPrice > 0)
+                ? leg.currentPrice
+                : (globalUnderlyingPrice || 0);
+        }
+        return {
+            type: 'stock',
+            strike: 0,
+            pos: leg.pos,
+            isExpired: false,
+            calDTE: 0,
+            tradDTE: 0,
+            T: 0,
+            simIV: 0,
+            posMultiplier,
+            costBasis: posMultiplier * effectiveCostPerShare,
+            effectiveCostPerShare
+        };
+    }
+
     const simDateObj = new Date(globalSimulatedDateStr + 'T00:00:00Z');
-    const expDateObj = new Date(leg.expDate + 'T00:00:00Z');
+    const safeExpDate = leg.expDate.replace(/\//g, '-');
+    const expDateObj = new Date(safeExpDate + 'T00:00:00Z');
 
     // Check if relative to SIMULATION it has expired
     const isExpired = expDateObj <= simDateObj;
@@ -165,7 +195,7 @@ function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseD
     const costBasis = posMultiplier * effectiveCostPerShare;
 
     return {
-        type: leg.type,
+        type: leg.type.toLowerCase(),
         strike: leg.strike,
         pos: leg.pos,
         isExpired,
@@ -184,6 +214,9 @@ function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseD
  * @returns {number} The absolute option price (Premium), unaffected by position size/sign.
  */
 function computeLegPrice(processedLeg, underlyingPrice, interestRate) {
+    if (processedLeg.type === 'stock') {
+        return underlyingPrice;
+    }
     if (processedLeg.isExpired) {
         if (processedLeg.type === 'call') {
             return Math.max(0, underlyingPrice - processedLeg.strike);
@@ -218,6 +251,20 @@ function computeLegPrice(processedLeg, underlyingPrice, interestRate) {
  * @returns {number} Simulated price per share
  */
 function computeSimulatedPrice(processedLeg, rawLeg, underlyingPrice, interestRate, viewMode, simulatedDate, baseDate, ivOffset) {
+    // 1. Settlement Mode: Hard Override via User Closed Price
+    if (viewMode === 'settlement' && rawLeg.closePrice !== null && rawLeg.closePrice !== '') {
+        const parsedClose = parseFloat(rawLeg.closePrice);
+        if (!isNaN(parsedClose) && parsedClose >= 0) {
+            return parsedClose;
+        }
+    }
+
+    // 2. Stock legs: always use underlying price directly (no BSM, no Zero-Delta bypass)
+    if (processedLeg.type === 'stock') {
+        return underlyingPrice;
+    }
+    
+    // 3. Optional Trial Mode Override
     const isEvaluatingRightNow = (simulatedDate === baseDate) && (ivOffset === 0);
     if (viewMode === 'trial' && isEvaluatingRightNow && rawLeg.currentPrice > 0) {
         return rawLeg.currentPrice;

@@ -1,8 +1,8 @@
 {
   "underlyingSymbol": "SPY",
   "underlyingPrice": 689.59,
-  "baseDate": "2026-02-21",
-  "simulatedDate": "2026-02-21",
+  "baseDate": "2026-02-05",
+  "simulatedDate": "2026-03-06",
   "interestRate": 0.03,
   "ivOffset": 0,
   "groups": [
