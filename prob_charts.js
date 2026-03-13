@@ -146,7 +146,9 @@ self.onmessage = function(e) {
             for (let l = 0; l < legs.length; l++) {
                 const leg = legs[l];
                 let v_opt = 0;
-                if (leg.isStock) {
+                if (leg.fixedPrice !== undefined) {
+                    v_opt = leg.fixedPrice;
+                } else if (leg.isStock) {
                     // Stock: price IS the underlying price, no BSM
                     v_opt = finalPrice;
                 } else if (leg.isExpired) {
@@ -782,6 +784,14 @@ function updateProbCharts() {
             const activeViewMode = group.viewMode || 'active';
             const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode);
 
+            let fixedPrice = undefined;
+            if (leg.closePrice !== null && leg.closePrice !== '') {
+                const parsedClose = parseFloat(leg.closePrice);
+                if (!isNaN(parsedClose) && parsedClose >= 0) {
+                    fixedPrice = parsedClose;
+                }
+            }
+
             workerLegs.push({
                 type: pLeg.type,
                 K: pLeg.strike,
@@ -789,7 +799,8 @@ function updateProbCharts() {
                 T: pLeg.T,
                 v: pLeg.simIV,
                 posMultiplier: pLeg.posMultiplier,
-                costBasis: pLeg.costBasis
+                costBasis: pLeg.costBasis,
+                fixedPrice: fixedPrice
             });
         });
     });

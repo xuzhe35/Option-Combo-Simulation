@@ -162,9 +162,15 @@ class PnLChart {
 
             for (let j = 0; j < processedLegs.length; j++) {
                 const l = processedLegs[j];
+                const rawLeg = group.legs[j];
+                const legViewMode = rawLeg._viewMode || activeViewMode;
+                
                 totalCostBasis += l.costBasis;
 
-                const pricePerShare = computeLegPrice(l, currentS, globalState.interestRate);
+                const pricePerShare = computeSimulatedPrice(
+                    l, rawLeg, currentS, globalState.interestRate,
+                    legViewMode, globalState.simulatedDate, globalState.baseDate, globalState.ivOffset
+                );
                 simValue += l.posMultiplier * pricePerShare;
             }
 
@@ -534,5 +540,451 @@ class PnLChart {
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'middle';
         this.ctx.fillText("Not enough data to calculate P&L curve.", this.width / 2, this.height / 2);
+    }
+}
+
+/**
+ * AmortizationChart specializes PnLChart to show the effective cost basis 
+ * of assigned shares at different underlying expiration prices.
+ */
+class AmortizationChart extends PnLChart {
+    constructor(canvas, marginCanvas) {
+        super(canvas);
+        this.basisColor = '#8B5CF6'; // Violet
+        this.emptyColor = '#9CA3AF'; // Gray
+        
+        this.handleMarginMouseMove = this.handleMarginMouseMove.bind(this);
+        this.marginCanvas = marginCanvas;
+        if (this.marginCanvas) {
+            this.marginCtx = marginCanvas.getContext('2d');
+            this.marginCanvas.addEventListener('mousemove', this.handleMarginMouseMove);
+            this.marginCanvas.addEventListener('mouseleave', this.handleMouseLeave);
+        }
+    }
+
+    setMarginCanvas(canvas) {
+        if (this.marginCanvas) {
+            this.marginCanvas.removeEventListener('mousemove', this.handleMarginMouseMove);
+            this.marginCanvas.removeEventListener('mouseleave', this.handleMouseLeave);
+        }
+        this.marginCanvas = canvas;
+        if (this.marginCanvas) {
+            this.marginCtx = canvas.getContext('2d');
+            this.marginCanvas.addEventListener('mousemove', this.handleMarginMouseMove);
+            this.marginCanvas.addEventListener('mouseleave', this.handleMouseLeave);
+        }
+    }
+
+    handleMarginMouseMove(e) {
+        if (!this.lastRenderData || this.lastRenderData.data.length === 0) return;
+        const rect = this.marginCanvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const { minS, maxS, drawW, padding } = this.lastRenderData;
+        
+        if (mouseX < padding.left || mouseX > padding.left + drawW) {
+            this.handleMouseLeave();
+            return;
+        }
+
+        const priceAtMouse = minS + ((mouseX - padding.left) / drawW) * (maxS - minS);
+        
+        let closestPt = this.lastRenderData.data[0];
+        let minDiff = Math.abs(closestPt.x - priceAtMouse);
+        for (let i = 1; i < this.lastRenderData.data.length; i++) {
+            const px = this.lastRenderData.data[i];
+            const diff = Math.abs(px.x - priceAtMouse);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestPt = px;
+            }
+        }
+
+        this.hoverData = closestPt;
+        this.hoverX = mouseX;
+        // Keep the main tooltip at the bottom edge of the main chart when hovering the sub-chart
+        this.hoverY = this.height - 25; 
+        
+        this.drawWithTooltip();
+    }
+
+    draw(group, globalState, minS, maxS) {
+        this.resize();
+        this.ctx.clearRect(0, 0, this.width, this.height);
+        
+        if (this.marginCanvas) {
+            const marginRect = this.marginCanvas.parentElement.getBoundingClientRect();
+            this.marginCanvas.width = marginRect.width * this.dpr;
+            this.marginCanvas.height = Math.max(80, marginRect.height) * this.dpr;
+            this.marginCanvas.style.width = `${marginRect.width}px`;
+            this.marginCanvas.style.height = `${Math.max(80, marginRect.height)}px`;
+            this.marginCtx.setTransform(1, 0, 0, 1, 0, 0);
+            this.marginCtx.scale(this.dpr, this.dpr);
+            this.marginCtx.clearRect(0, 0, marginRect.width, Math.max(80, marginRect.height));
+        }
+
+        if (!group || group.legs.length === 0 || minS >= maxS) {
+            this.drawEmptyState();
+            this.lastRenderData = null;
+            return;
+        }
+
+        const data = [];
+        let minBasis = Infinity;
+        let maxBasis = -Infinity;
+
+        const step = (maxS - minS) / (this.pointsCount - 1);
+        
+        for (let i = 0; i < this.pointsCount; i++) {
+            const currentS = minS + (i * step);
+            // Use the helper we're about to define in app.js
+            const result = calculateAmortizedCost(group, currentS, globalState);
+            
+            if (result.netShares !== 0) {
+                const basis = result.basis;
+                data.push({ 
+                    x: currentS, y: basis, netShares: result.netShares, 
+                    nocf: result.nocf, residualValue: result.residualValue, 
+                    assignmentCash: result.assignmentCash 
+                });
+                if (basis < minBasis) minBasis = basis;
+                if (basis > maxBasis) maxBasis = basis;
+            } else {
+                data.push({ 
+                    x: currentS, y: null, netShares: 0, 
+                    nocf: result.nocf, residualValue: result.residualValue, 
+                    assignmentCash: result.assignmentCash 
+                });
+            }
+        }
+
+        if (minBasis === Infinity) {
+            this.drawNoAssignmentState(data);
+            this.lastRenderData = { data, minS, maxS, minPnL: 0, maxPnL: 100, drawW: this.width - this.padding.left - this.padding.right, drawH: this.height - this.padding.top - this.padding.bottom, padding: this.padding, globalState };
+            return;
+        }
+
+        // Vertical padding
+        const basisRange = maxBasis - minBasis;
+        if (basisRange === 0) {
+            maxBasis += 10;
+            minBasis -= 10;
+        } else {
+            maxBasis += basisRange * 0.1;
+            minBasis -= basisRange * 0.1;
+        }
+
+        const drawW = this.width - this.padding.left - this.padding.right;
+        const drawH = this.height - this.padding.top - this.padding.bottom;
+
+        const mapX = val => this.padding.left + ((val - minS) / (maxS - minS)) * drawW;
+        const mapY = val => this.padding.top + drawH - (((val - minBasis) / (maxBasis - minBasis)) * drawH);
+
+        this.drawAxes(minS, maxS, minBasis, maxBasis, mapX, mapY, drawW, drawH, globalState);
+
+        // Draw curve with breaks where y is null
+        this.ctx.save();
+        this.ctx.beginPath();
+        this.ctx.rect(this.padding.left, this.padding.top, drawW, drawH);
+        this.ctx.clip();
+
+        this.ctx.beginPath();
+        let started = false;
+        data.forEach(pt => {
+            if (pt.y !== null) {
+                if (!started) {
+                    this.ctx.moveTo(mapX(pt.x), mapY(pt.y));
+                    started = true;
+                } else {
+                    this.ctx.lineTo(mapX(pt.x), mapY(pt.y));
+                }
+            } else {
+                started = false;
+            }
+        });
+
+        this.ctx.strokeStyle = this.basisColor;
+        this.ctx.lineWidth = 3;
+        this.ctx.lineJoin = 'round';
+        this.ctx.stroke();
+        this.ctx.restore();
+
+        this.ctx.restore();
+
+        // Labels in top-left
+        this.ctx.font = '12px Inter, sans-serif';
+        this.ctx.textAlign = 'left';
+        this.ctx.textBaseline = 'top';
+        this.ctx.fillStyle = this.basisColor;
+        this.ctx.fillText(`Amortized Cost Basis Simulation (Settlement)`, this.padding.left + 10, this.padding.top + 10);
+
+        this.lastRenderData = {
+            data, minS, maxS, minPnL: minBasis, maxPnL: maxBasis, drawW, drawH, padding: this.padding, mapX, mapY, globalState
+        };
+
+        if (!this.offscreenCanvas) this.offscreenCanvas = document.createElement('canvas');
+        this.offscreenCanvas.width = this.canvas.width;
+        this.offscreenCanvas.height = this.canvas.height;
+        this.offscreenCanvas.getContext('2d').drawImage(this.canvas, 0, 0);
+
+        this.drawMarginChart();
+        this.drawWithTooltip();
+    }
+
+    drawMarginChart() {
+        if (!this.marginCtx || !this.lastRenderData) return;
+        
+        const { data, minS, maxS, drawW, padding } = this.lastRenderData;
+        const rect = this.marginCanvas.parentElement.getBoundingClientRect();
+        const mWidth = rect.width;
+        const mHeight = Math.max(80, rect.height);
+        
+        this.marginCtx.clearRect(0, 0, mWidth, mHeight);
+
+        // We use the exact same padding.left and padding.right as the main chart so X-axes align perfectly
+        const mDrawW = drawW; // Same width
+        const padL = padding.left;
+        const mTop = 10;
+        const mDrawH = mHeight - mTop - 10;
+        const mapX = val => padL + ((val - minS) / (maxS - minS)) * mDrawW;
+
+        // 1. Find max absolute margin to scale the Y axis
+        let maxAbsMargin = 0;
+        data.forEach(pt => {
+            if (pt.y !== null) {
+                const margin = pt.netShares > 0 ? (pt.x - pt.y) : (pt.y - pt.x);
+                if (Math.abs(margin) > maxAbsMargin) {
+                    maxAbsMargin = Math.abs(margin);
+                }
+            }
+        });
+        
+        if (maxAbsMargin === 0) maxAbsMargin = 1; // Prevent div by zero
+        maxAbsMargin *= 1.1; // 10% headroom
+
+        // Y=0 line is perfectly in the vertical middle of the sub-chart
+        const mZeroY = mTop + (mDrawH / 2);
+        
+        // Map Y margin (-maxAbsMargin to +maxAbsMargin) to (mTop+mDrawH to mTop)
+        const mapMY = val => mZeroY - (val / maxAbsMargin) * (mDrawH / 2);
+
+        // Draw bounding box / zero line
+        this.marginCtx.beginPath();
+        this.marginCtx.moveTo(padL, mZeroY);
+        this.marginCtx.lineTo(padL + mDrawW, mZeroY);
+        this.marginCtx.strokeStyle = '#9CA3AF';
+        this.marginCtx.lineWidth = 1;
+        this.marginCtx.stroke();
+        
+        this.marginCtx.strokeRect(padL, mTop, mDrawW, mDrawH);
+
+        // Draw the margin bars
+        // For performance and clarity, we group into visual vertical bands if there are many points
+        const binCount = Math.min(data.length, mDrawW / 2); // Max 1 bar every 2 pixels
+        const binStep = (maxS - minS) / binCount;
+        
+        for (let i = 0; i < binCount; i++) {
+            const binMinS = minS + (i * binStep);
+            const binMaxS = binMinS + binStep;
+            
+            // Find representative point in this bin
+            let reprPt = null;
+            for (let j = 0; j < data.length; j++) {
+                if (data[j].x >= binMinS && data[j].x <= binMaxS && data[j].y !== null) {
+                    reprPt = data[j];
+                    break;
+                }
+            }
+            
+            if (reprPt) {
+                const margin = reprPt.netShares > 0 ? (reprPt.x - reprPt.y) : (reprPt.y - reprPt.x);
+                const x = mapX(reprPt.x);
+                const y = mapMY(margin);
+                
+                this.marginCtx.beginPath();
+                this.marginCtx.moveTo(x, mZeroY);
+                this.marginCtx.lineTo(x, y);
+                this.marginCtx.strokeStyle = margin >= 0 ? 'rgba(16, 185, 129, 0.7)' : 'rgba(239, 68, 68, 0.7)'; // Emerald/Red
+                this.marginCtx.lineWidth = Math.max(1, (mDrawW / binCount) * 0.8);
+                this.marginCtx.stroke();
+            }
+        }
+        
+        // Draw labels
+        this.marginCtx.font = '10px Inter, sans-serif';
+        this.marginCtx.textAlign = 'right';
+        this.marginCtx.textBaseline = 'middle';
+        this.marginCtx.fillStyle = '#6B7280';
+        this.marginCtx.fillText('Margin', padL - 8, mZeroY);
+        this.marginCtx.fillText(`+$${maxAbsMargin.toFixed(1)}`, padL - 8, mTop + 5);
+        this.marginCtx.fillText(`-$${maxAbsMargin.toFixed(1)}`, padL - 8, mTop + mDrawH - 5);
+        
+        // Save clean offscreen state for hover crosshair
+        if (!this.marginOffscreen) this.marginOffscreen = document.createElement('canvas');
+        this.marginOffscreen.width = this.marginCanvas.width;
+        this.marginOffscreen.height = this.marginCanvas.height;
+        this.marginOffscreen.getContext('2d').drawImage(this.marginCanvas, 0, 0);
+    }
+
+    drawWithTooltip() {
+        if (!this.offscreenCanvas) return;
+
+        this.ctx.clearRect(0, 0, this.width, this.height);
+        this.ctx.save();
+        this.ctx.scale(1 / this.dpr, 1 / this.dpr);
+        this.ctx.drawImage(this.offscreenCanvas, 0, 0);
+        this.ctx.restore();
+
+        if (this.hoverData && this.lastRenderData) {
+            const { mapX, mapY, padding, drawH, globalState } = this.lastRenderData;
+            const px = mapX(this.hoverData.x);
+            
+            // Vertical crosshair on main chart
+            this.ctx.beginPath();
+            this.ctx.moveTo(px, padding.top);
+            this.ctx.lineTo(px, padding.top + drawH);
+            this.ctx.strokeStyle = 'rgba(0, 0, 0, 0.15)';
+            this.ctx.lineWidth = 1;
+            this.ctx.stroke();
+
+            // Sync vertical crosshair on margin chart
+            if (this.marginCtx && this.marginOffscreen) {
+                this.marginCtx.clearRect(0, 0, this.marginCanvas.width, this.marginCanvas.height);
+                this.marginCtx.save();
+                this.marginCtx.scale(1 / this.dpr, 1 / this.dpr);
+                this.marginCtx.drawImage(this.marginOffscreen, 0, 0);
+                this.marginCtx.restore();
+                
+                const mRect = this.marginCanvas.parentElement.getBoundingClientRect();
+                const mHeight = Math.max(80, mRect.height);
+                this.marginCtx.beginPath();
+                this.marginCtx.moveTo(px, 10);
+                this.marginCtx.lineTo(px, 10 + mHeight - 20);
+                this.marginCtx.strokeStyle = 'rgba(0, 0, 0, 0.25)';
+                this.marginCtx.lineWidth = 1;
+                this.marginCtx.stroke();
+
+                if (this.hoverData.y !== null) {
+                    const currentPrice = this.hoverData.x;
+                    const basis = this.hoverData.y;
+                    const isLong = this.hoverData.netShares > 0;
+                    const margin = isLong ? (currentPrice - basis) : (basis - currentPrice);
+                    
+                    const text = `${margin >= 0 ? '+' : '-'}$${Math.abs(margin).toFixed(2)}`;
+                    this.marginCtx.font = 'bold 11px Inter, sans-serif';
+                    const tw = this.marginCtx.measureText(text).width;
+                    
+                    const tipW = tw + 12;
+                    const tipH = 20;
+                    let tipX = px + 8;
+                    let tipY = 10 + (mHeight - 20) / 2 - tipH / 2; // Center vertically on the sub-chart
+                    
+                    if (tipX + tipW > this.marginCanvas.width / this.dpr - 5) {
+                        tipX = px - tipW - 8;
+                    }
+
+                    // Background box
+                    this.marginCtx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                    this.marginCtx.strokeStyle = margin >= 0 ? '#10B981' : '#EF4444';
+                    this.marginCtx.lineWidth = 1;
+                    
+                    this.marginCtx.beginPath();
+                    this.marginCtx.roundRect(tipX, tipY, tipW, tipH, 4);
+                    this.marginCtx.fill();
+                    this.marginCtx.stroke();
+                    
+                    // Text
+                    this.marginCtx.fillStyle = margin >= 0 ? '#10B981' : '#EF4444';
+                    this.marginCtx.textAlign = 'center';
+                    this.marginCtx.textBaseline = 'middle';
+                    this.marginCtx.fillText(text, tipX + tipW / 2, tipY + tipH / 2);
+                }
+            }
+
+            if (this.hoverData.y !== null) {
+                const py = mapY(this.hoverData.y);
+                this.ctx.beginPath();
+                this.ctx.arc(px, py, 5, 0, Math.PI * 2);
+                this.ctx.fillStyle = this.basisColor;
+                this.ctx.fill();
+                this.ctx.strokeStyle = '#fff';
+                this.ctx.lineWidth = 2;
+                this.ctx.stroke();
+            }
+
+            // Tooltip Customization
+            const lines = [];
+            lines.push(`Price: $${this.hoverData.x.toFixed(2)}`);
+            
+            if (this.hoverData.y !== null) {
+                const side = this.hoverData.netShares > 0 ? "Long" : "Short";
+                lines.push(`Net Shares: ${this.hoverData.netShares} (${side})`);
+                lines.push(`Basis: $${this.hoverData.y.toFixed(2)}`);
+                if (this.hoverData.residualValue !== 0) {
+                    lines.push(`Residual Value: ${this.hoverData.residualValue >= 0 ? '+' : ''}$${this.hoverData.residualValue.toFixed(2)}`);
+                }
+            } else {
+                lines.push(`Net Shares: 0`);
+                lines.push(`Cash Flow: ${this.hoverData.nocf >= 0 ? '+' : ''}$${this.hoverData.nocf.toFixed(2)}`);
+                if (this.hoverData.residualValue !== 0) {
+                    lines.push(`Incl. Residual: ${this.hoverData.residualValue >= 0 ? '+' : ''}$${this.hoverData.residualValue.toFixed(2)}`);
+                }
+            }
+
+            this.ctx.font = '12px Inter, sans-serif';
+            let maxWidth = 0;
+            lines.forEach(line => {
+                const w = this.ctx.measureText(line).width;
+                if (w > maxWidth) maxWidth = w;
+            });
+
+            const tipW = maxWidth + 16;
+            const tipH = 10 + lines.length * 16;
+            let tipX = px + 10;
+            let tipY = this.hoverY - 20;
+
+            if (tipX + tipW > this.width - 5) tipX = px - tipW - 10;
+            if (tipY < 5) tipY = 5;
+            if (tipY + tipH > this.height - 5) tipY = this.height - tipH - 5;
+
+            this.ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+            this.ctx.strokeStyle = '#E5E7EB';
+            this.ctx.lineWidth = 1;
+            this.ctx.beginPath();
+            this.ctx.roundRect(tipX, tipY, tipW, tipH, 4);
+            this.ctx.fill();
+            this.ctx.stroke();
+
+            this.ctx.fillStyle = '#111827';
+            this.ctx.textAlign = 'left';
+            this.ctx.textBaseline = 'top';
+            lines.forEach((line, idx) => {
+                if (idx === lines.length - 1 && this.hoverData.y !== null) {
+                    this.ctx.fillStyle = this.basisColor;
+                    this.ctx.font = 'bold 12px Inter, sans-serif';
+                }
+                this.ctx.fillText(line, tipX + 8, tipY + 6 + idx * 16);
+            });
+
+        } else if (this.marginCtx && this.marginOffscreen) {
+            // Clear crosshair on mouse out
+            this.marginCtx.clearRect(0, 0, this.marginCanvas.width, this.marginCanvas.height);
+            this.marginCtx.save();
+            this.marginCtx.scale(1 / this.dpr, 1 / this.dpr);
+            this.marginCtx.drawImage(this.marginOffscreen, 0, 0);
+            this.marginCtx.restore();
+        }
+    }
+
+    drawNoAssignmentState(data) {
+        this.ctx.font = '14px Inter, sans-serif';
+        this.ctx.fillStyle = this.emptyColor;
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'middle';
+        
+        // Find if there's any cash flow
+        const firstNocf = data.length > 0 ? data[0].nocf : 0;
+        this.ctx.fillText(`No Underlying assigned in this price range.`, this.width / 2, this.height / 2 - 10);
+        this.ctx.font = '12px Inter, sans-serif';
+        this.ctx.fillText(`Net Options Cash Flow: ${firstNocf >= 0 ? '+' : ''}$${firstNocf.toFixed(2)}`, this.width / 2, this.height / 2 + 10);
     }
 }

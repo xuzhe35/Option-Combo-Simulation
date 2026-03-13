@@ -486,11 +486,12 @@ function renderGroups() {
                 const ivInput = tr.querySelector('.iv-input');
 
                 if (isStock) {
-                    // Hide option-specific fields for stock legs
-                    strikeInput.parentElement.style.display = 'none';
-                    dteInput.closest('td').style.display = 'none';
-                    tr.querySelector('.simulated-dte-display')?.closest('td')?.remove(); // already in same td
+                    // Hide option-specific fields for stock legs without breaking table columns
+                    strikeInput.style.visibility = 'hidden';
+                    dteInput.closest('div').style.visibility = 'hidden';
                 } else {
+                    strikeInput.style.visibility = 'visible';
+                    dteInput.closest('div').style.visibility = 'visible';
                     strikeInput.value = leg.strike;
                     strikeInput.addEventListener('input', (e) => { leg.strike = parseFloat(e.target.value) || 0; updateDerivedValues(); });
 
@@ -520,13 +521,9 @@ function renderGroups() {
                 const closePriceInput = tr.querySelector('.close-price-input');
                 const closeLabel = tr.querySelector('.close-label');
                 if (closePriceInput && closeLabel) {
-                    if (currentMode === 'settlement') {
-                        closePriceInput.style.display = 'block';
-                        closeLabel.style.display = 'block';
-                    } else {
-                        closePriceInput.style.display = 'none';
-                        closeLabel.style.display = 'none';
-                    }
+                    // Always show the close price input since it now applies universally
+                    closePriceInput.style.display = 'block';
+                    closeLabel.style.display = 'block';
                     closePriceInput.value = (leg.closePrice !== null && leg.closePrice !== undefined) ? leg.closePrice.toFixed(2) : '';
                     closePriceInput.addEventListener('input', (e) => {
                         const val = parseFloat(e.target.value);
@@ -699,10 +696,12 @@ function updateDerivedValues() {
             const pnl = simValue - pLeg.costBasis;
 
             let simPriceHtml = currencyFormatter.format(simPricePerShare);
-            if (activeViewMode === 'settlement') {
-                if (leg.closePrice !== null && leg.closePrice !== '') {
-                    simPriceHtml += ` <span class="badge" style="background: var(--primary-color); font-size: 0.65rem; vertical-align: middle;">Closed</span>`;
-                } else if (pLeg.isExpired) {
+            
+            // Show "Closed" universally
+            if (leg.closePrice !== null && leg.closePrice !== '') {
+                simPriceHtml += ` <span class="badge" style="background: var(--primary-color); font-size: 0.65rem; vertical-align: middle;">Closed</span>`;
+            } else if (activeViewMode === 'settlement') {
+                if (pLeg.isExpired) {
                     if (simPricePerShare > 0) {
                         simPriceHtml += ` <span class="badge" style="background: var(--success-color); font-size: 0.65rem; vertical-align: middle;">Exercised</span>`;
                     } else {
@@ -715,20 +714,32 @@ function updateDerivedValues() {
 
             tr.querySelector('.simulated-price-cell').innerHTML = simPriceHtml;
             const pnlCell = tr.querySelector('.pnl-cell');
-            pnlCell.innerHTML = `<span class="${pnl >= 0 ? 'profit' : 'loss'}">${pnl >= 0 ? '+' : ''}${currencyFormatter.format(pnl)}</span>`;
+            const isClosedGlobally = (leg.closePrice !== null && leg.closePrice !== '');
+            
+            if (isClosedGlobally) {
+                pnlCell.innerHTML = `<span class="badge ${pnl >= 0 ? 'bg-success' : 'bg-danger'}" style="font-size: 0.85rem; padding: 4px 6px;">Realized: <br/>${pnl >= 0 ? '+' : ''}${currencyFormatter.format(pnl)}</span>`;
+            } else {
+                pnlCell.innerHTML = `<span class="${pnl >= 0 ? 'profit' : 'loss'}">${pnl >= 0 ? '+' : ''}${currencyFormatter.format(pnl)}</span>`;
+            }
 
             const livePnlCell = tr.querySelector('.live-pnl-cell');
 
             // Live P&L: (currentPrice - cost) × pos × multiplier
-            // Pure market-based, no BSM simulation, directly comparable to TWS
-            if (leg.cost !== 0 || leg.currentPrice !== 0) {
+            // If the leg is closed, its live P&L is locked to its realized PnL.
+            if (leg.cost !== 0 || leg.currentPrice !== 0 || isClosedGlobally) {
                 const liveLegPnL = (leg.currentPrice - leg.cost) * pLeg.posMultiplier;
-                groupLivePnL += liveLegPnL;
+                const effectiveLivePnL = isClosedGlobally ? pnl : liveLegPnL;
+                
+                groupLivePnL += effectiveLivePnL;
                 groupHasLiveData = true;
 
                 if (livePnlCell) {
-                    livePnlCell.innerHTML = `<span class="${liveLegPnL >= 0 ? 'success-text' : 'danger-text'}">${liveLegPnL >= 0 ? '+' : ''}${currencyFormatter.format(liveLegPnL)}</span>`;
-                    livePnlCell.style.display = 'block';
+                    if (isClosedGlobally) {
+                        livePnlCell.style.display = 'none';
+                    } else {
+                        livePnlCell.innerHTML = `<span class="${liveLegPnL >= 0 ? 'success-text' : 'danger-text'}">${liveLegPnL >= 0 ? '+' : ''}${currencyFormatter.format(liveLegPnL)}</span>`;
+                        livePnlCell.style.display = 'block';
+                    }
                 }
             } else if (livePnlCell) {
                 livePnlCell.style.display = 'none';
@@ -745,52 +756,41 @@ function updateDerivedValues() {
         // Calculate & Layout Amortized Stock Cost Basis Automatically in Settlement
         // --------------------------------------------------------------------------
         const amContainer = card.querySelector('.amortization-container');
-        if (amContainer) {
-            if (activeViewMode === 'settlement') {
-                let netShares = 0;
-                let stockCashPaid = 0;
-                let nocf = -groupCost; // Net Options Cash Flow starts as the initial net cash paid (negative cost)
-                
-                group.legs.forEach(leg => {
-                    if (leg.type === 'Stock') return;
-                    
-                    const pos = leg.pos;
-                    const multiplier = 100;
-                    
-                    if (leg.closePrice !== null && leg.closePrice !== '') {
-                        nocf += parseFloat(leg.closePrice) * pos * multiplier;
-                    } else {
-                        const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, evalUnderlyingPrice, state.interestRate, activeViewMode);
-                        const simPricePerShare = computeSimulatedPrice(
-                            pLeg, leg, evalUnderlyingPrice, state.interestRate,
-                            activeViewMode, state.simulatedDate, state.baseDate, state.ivOffset
-                        );
-                        
-                        if (pLeg.isExpired && simPricePerShare > 0) {
-                            let legShares = 0;
-                            const lowerType = leg.type.toLowerCase();
-                            if (lowerType === 'call') {
-                                legShares = pos * multiplier;
-                            } else if (lowerType === 'put') {
-                                legShares = -pos * multiplier;
-                            }
-                            netShares += legShares;
-                            stockCashPaid += legShares * leg.strike;
-                        }
-                    }
-                });
-
+        const settleControls = card.querySelector('.settlement-controls');
+        
+        if (activeViewMode === 'settlement') {
+            if (settleControls) settleControls.style.display = 'flex';
+            
+            if (amContainer) {
+                const result = calculateAmortizedCost(group, evalUnderlyingPrice, state);
                 const amText = card.querySelector('.amortization-text');
-                if (netShares !== 0 && amText) {
-                    const basis = (stockCashPaid - nocf) / Math.abs(netShares);
-                    const action = netShares > 0 ? 'Assigned' : 'Delivered';
-                    amText.textContent = `${action} ${Math.abs(netShares)} shares with effective basis of ${currencyFormatter.format(basis)}`;
+                
+                if (result.netShares !== 0 && amText) {
+                    const action = result.netShares > 0 ? 'Assigned' : 'Delivered';
+                    amText.textContent = `${action} ${Math.abs(result.netShares)} shares with effective basis of ${currencyFormatter.format(result.basis)}`;
                     amContainer.style.display = 'block';
                 } else {
                     amContainer.style.display = 'none';
                 }
-            } else {
-                amContainer.style.display = 'none';
+            }
+        } else {
+            if (settleControls) settleControls.style.display = 'none';
+            if (amContainer) amContainer.style.display = 'none';
+            // Also hide the amort chart if we leave settlement mode
+            const amortChartContainer = card.querySelector('.amortization-chart-container');
+            if (amortChartContainer) {
+                amortChartContainer.style.display = 'none';
+                const simulateBtn = card.querySelector('.btn-simulate-settlement');
+                if (simulateBtn) {
+                    simulateBtn.innerHTML = `
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
+                            <line x1="18" y1="20" x2="18" y2="10"></line>
+                            <line x1="12" y1="20" x2="12" y2="4"></line>
+                            <line x1="6" y1="20" x2="6" y2="14"></line>
+                        </svg>
+                        Simulate Settlement
+                    `;
+                }
             }
         }
 
@@ -840,6 +840,13 @@ function updateDerivedValues() {
         const chartContainer = card.querySelector('.chart-container');
         if (chartContainer && chartContainer.style.display !== 'none') {
             drawGroupChart(card, group);
+        }
+
+        const amortChartContainer = card.querySelector('.amortization-chart-container');
+        if (amortChartContainer && amortChartContainer.style.display !== 'none') {
+            const amortCanvas = amortChartContainer.querySelector('.amortization-canvas');
+            const marginCanvas = amortChartContainer.querySelector('.margin-canvas');
+            if (amortCanvas) drawAmortizationChart(card, group, amortCanvas, marginCanvas);
         }
 
         globalTotalCost += groupCost;
@@ -913,6 +920,64 @@ function updateDerivedValues() {
 // Import / Export JSON
 // -------------------------------------------------------------
 
+let currentFileHandle = null;
+
+async function handleImportBtnClick() {
+    if (window.showOpenFilePicker) {
+        try {
+            const [fileHandle] = await window.showOpenFilePicker({
+                types: [{
+                    description: 'JSON Files',
+                    accept: {
+                        'application/json': ['.json'],
+                    },
+                }],
+                multiple: false
+            });
+            currentFileHandle = fileHandle;
+            const file = await fileHandle.getFile();
+            document.getElementById('saveBtn').style.display = 'inline-flex';
+            processImportedFile(file);
+        } catch (error) {
+            if (error.name !== 'AbortError') {
+                console.error("Error opening file picker:", error);
+                document.getElementById('importFile').click();
+            }
+        }
+    } else {
+        document.getElementById('importFile').click();
+    }
+}
+
+async function saveToJSON() {
+    const dataStr = JSON.stringify(state, null, 2);
+    const saveBtn = document.getElementById('saveBtn');
+    
+    if (currentFileHandle && saveBtn) {
+        try {
+            const writable = await currentFileHandle.createWritable();
+            await writable.write(dataStr);
+            await writable.close();
+            
+            // Visual feedback
+            const originalHTML = saveBtn.innerHTML;
+            saveBtn.innerHTML = `
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+                Saved!`;
+            setTimeout(() => {
+                saveBtn.innerHTML = originalHTML;
+            }, 2000);
+            return;
+        } catch (error) {
+            console.error("Error saving directly to file:", error);
+        }
+    }
+    
+    exportToJSON();
+}
+
 function exportToJSON() {
     const dataStr = JSON.stringify(state, null, 2);
     const dataBlob = new Blob([dataStr], { type: 'application/json' });
@@ -931,6 +996,15 @@ function importFromJSON(event) {
     const file = event.target.files[0];
     if (!file) return;
 
+    currentFileHandle = null;
+    const saveBtn = document.getElementById('saveBtn');
+    if (saveBtn) saveBtn.style.display = 'none';
+
+    processImportedFile(file);
+    event.target.value = '';
+}
+
+function processImportedFile(file) {
     const reader = new FileReader();
     reader.onload = function (e) {
         try {
@@ -1037,8 +1111,83 @@ function importFromJSON(event) {
         }
     };
     reader.readAsText(file);
-    // Reset input so the same file can be loaded again if needed
-    event.target.value = '';
 }
 
 // WebSocket & Live Data Integration → see ws_client.js
+/**
+ * Common Logic for Amortized Cost Calculation
+ * Used by UI banner, simulation chart, and tooltips.
+ */
+function calculateAmortizedCost(group, evalUnderlyingPrice, globalState) {
+    let netShares = 0;
+    let initialCashOutflow = 0;
+    let residualValue = 0;
+    let assignmentCash = 0;
+
+    // 1. Calculate the real initial net cash spent on ALL positions (Stock + Options)
+    group.legs.forEach(leg => {
+        const pLeg = processLegData(leg, globalState.simulatedDate, globalState.ivOffset, globalState.baseDate, evalUnderlyingPrice, globalState.interestRate, group.viewMode || 'active');
+        initialCashOutflow += pLeg.costBasis;
+        if (leg.type.toLowerCase() === 'stock') {
+            netShares += leg.pos * 1; 
+        }
+    });
+
+    let currentCash = -initialCashOutflow; // Start with debt
+    
+    // 2. Adjust cash flow for options being closed or assigned
+    group.legs.forEach(leg => {
+        if (leg.type.toLowerCase() === 'stock') return;
+        
+        const pos = leg.pos;
+        const multiplier = 100;
+        const activeViewMode = leg._viewMode || group.viewMode || 'active';
+        
+        if (leg.closePrice !== null && leg.closePrice !== '') {
+            currentCash += parseFloat(leg.closePrice) * pos * multiplier;
+        } else {
+            const pLeg = processLegData(leg, globalState.simulatedDate, globalState.ivOffset, globalState.baseDate, evalUnderlyingPrice, globalState.interestRate, activeViewMode);
+            const simPricePerShare = computeSimulatedPrice(
+                pLeg, leg, evalUnderlyingPrice, globalState.interestRate,
+                activeViewMode, globalState.simulatedDate, globalState.baseDate, globalState.ivOffset
+            );
+            
+            if (!pLeg.isExpired) {
+                // Premature close (cashing out the option's residual value)
+                const value = simPricePerShare * pos * multiplier;
+                currentCash += value;
+                residualValue += value;
+            } else if (simPricePerShare > 0) {
+                // Expired ITM -> Assignment
+                let assignmentShares = 0;
+                if (leg.type.toLowerCase() === 'call') assignmentShares = pos * multiplier;
+                else if (leg.type.toLowerCase() === 'put') assignmentShares = -pos * multiplier;
+                
+                netShares += assignmentShares;
+                const flow = -assignmentShares * leg.strike;
+                currentCash += flow; 
+                assignmentCash += flow;
+            }
+        }
+    });
+
+    // 3. Final metrics
+    let basis = 0;
+    if (netShares !== 0) {
+        if (netShares > 0) {
+            basis = (-currentCash) / netShares;
+        } else {
+            basis = currentCash / Math.abs(netShares);
+        }
+    }
+
+    return { 
+        netShares, 
+        basis, 
+        nocf: currentCash, 
+        totalCash: currentCash,
+        residualValue,
+        assignmentCash,
+        initialCost: initialCashOutflow
+    };
+}

@@ -121,7 +121,8 @@ function calendarToTradingDays(startDateStr, endDateStr) {
  */
 function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseDateStr = null, globalUnderlyingPrice = null, globalInterestRate = null, viewMode = 'active') {
     // --- Stock type: no BSM, no expiration, multiplier = 1 (shares, not contracts) ---
-    if (leg.type === 'stock') {
+    const lowerType = leg.type.toLowerCase();
+    if (lowerType === 'stock') {
         const posMultiplier = leg.pos * 1; // shares, not contracts
         let effectiveCostPerShare = leg.cost;
         if (viewMode === 'trial' || leg.cost === 0) {
@@ -195,7 +196,7 @@ function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseD
     const costBasis = posMultiplier * effectiveCostPerShare;
 
     return {
-        type: leg.type.toLowerCase(),
+        type: lowerType,
         strike: leg.strike,
         pos: leg.pos,
         isExpired,
@@ -251,8 +252,8 @@ function computeLegPrice(processedLeg, underlyingPrice, interestRate) {
  * @returns {number} Simulated price per share
  */
 function computeSimulatedPrice(processedLeg, rawLeg, underlyingPrice, interestRate, viewMode, simulatedDate, baseDate, ivOffset) {
-    // 1. Settlement Mode: Hard Override via User Closed Price
-    if (viewMode === 'settlement' && rawLeg.closePrice !== null && rawLeg.closePrice !== '') {
+    // 1. Hard Override via User Closed Price (Applies to all modes)
+    if (rawLeg.closePrice !== null && rawLeg.closePrice !== '') {
         const parsedClose = parseFloat(rawLeg.closePrice);
         if (!isNaN(parsedClose) && parsedClose >= 0) {
             return parsedClose;

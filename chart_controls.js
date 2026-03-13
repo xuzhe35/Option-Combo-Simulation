@@ -103,6 +103,120 @@ function drawGroupChart(card, group) {
 }
 
 // -------------------------------------------------------------
+// Amortization Chart Functions (Settlement Mode Only)
+// -------------------------------------------------------------
+
+function toggleAmortizationChart(btn) {
+    const card = btn.closest('.group-card');
+    const chartContainer = card.querySelector('.amortization-chart-container');
+    if (!chartContainer) return;
+
+    if (chartContainer.style.display === 'none') {
+        chartContainer.style.display = 'block';
+        btn.innerHTML = `
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+            Hide Settlement Simulation
+        `;
+
+        // Initialize AmortChartInstance if not exists
+        if (!card.amortChartInstance) {
+            const canvas = card.querySelector('.amortization-canvas');
+            const marginCanvas = card.querySelector('.margin-canvas');
+            if (typeof AmortizationChart !== 'undefined') {
+                card.amortChartInstance = new AmortizationChart(canvas, marginCanvas);
+            } else {
+                console.error("AmortizationChart class not found! Make sure chart.js is updated.");
+                return;
+            }
+        } else {
+            // Hot swap check if DOM changed
+            const marginCanvas = card.querySelector('.margin-canvas');
+            card.amortChartInstance.marginCanvas = marginCanvas;
+            if (marginCanvas) {
+                card.amortChartInstance.marginCtx = marginCanvas.getContext('2d');
+            }
+        }
+
+        const groupId = card.dataset.groupId;
+        const group = state.groups.find(g => g.id === groupId);
+        drawAmortizationChart(card, group);
+    } else {
+        chartContainer.style.display = 'none';
+        btn.innerHTML = `
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
+                <line x1="18" y1="20" x2="18" y2="10"></line>
+                <line x1="12" y1="20" x2="12" y2="4"></line>
+                <line x1="6" y1="20" x2="6" y2="14"></line>
+            </svg>
+            Simulate Settlement
+        `;
+    }
+}
+
+function setAmortChartRangeMode(btn, mode) {
+    const card = btn.closest('.group-card');
+
+    card.querySelectorAll('.amort-range-mode-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    const customInputsContainer = card.querySelector('.amort-custom-range-inputs');
+    const minInput = card.querySelector('.amort-chart-min-input');
+    const maxInput = card.querySelector('.amort-chart-max-input');
+
+    if (mode === 'custom') {
+        customInputsContainer.style.opacity = '1';
+        minInput.disabled = false;
+        maxInput.disabled = false;
+        if (!minInput.value) minInput.value = (state.underlyingPrice * 0.9).toFixed(0);
+        if (!maxInput.value) maxInput.value = (state.underlyingPrice * 1.1).toFixed(0);
+    } else {
+        customInputsContainer.style.opacity = '0.5';
+        minInput.disabled = true;
+        maxInput.disabled = true;
+    }
+
+    const groupId = card.dataset.groupId;
+    const group = state.groups.find(g => g.id === groupId);
+    drawAmortizationChart(card, group);
+}
+
+function triggerAmortChartRedraw(inputEl) {
+    const card = inputEl.closest('.group-card');
+    const groupId = card.dataset.groupId;
+    const group = state.groups.find(g => g.id === groupId);
+    drawAmortizationChart(card, group);
+}
+
+function drawAmortizationChart(card, group) {
+    if (!card.amortChartInstance) return;
+
+    const modeBtn = card.querySelector('.amort-range-mode-btn.active');
+    const mode = modeBtn ? modeBtn.dataset.mode : '10';
+
+    let minS, maxS;
+
+    if (mode === 'custom') {
+        minS = parseFloat(card.querySelector('.amort-chart-min-input').value) || (state.underlyingPrice * 0.9);
+        maxS = parseFloat(card.querySelector('.amort-chart-max-input').value) || (state.underlyingPrice * 1.1);
+        if (minS >= maxS) {
+            maxS = minS + 1;
+        }
+    } else {
+        const pct = parseFloat(mode) / 100.0;
+        minS = state.underlyingPrice * (1 - pct);
+        maxS = state.underlyingPrice * (1 + pct);
+
+        card.querySelector('.amort-chart-min-input').value = minS.toFixed(0);
+        card.querySelector('.amort-chart-max-input').value = maxS.toFixed(0);
+    }
+
+    card.amortChartInstance.draw(group, state, minS, maxS);
+}
+
+// -------------------------------------------------------------
 // Global Chart Functions
 // -------------------------------------------------------------
 
@@ -199,6 +313,13 @@ window.addEventListener('resize', () => {
             const groupId = card.dataset.groupId;
             const group = state.groups.find(g => g.id === groupId);
             drawGroupChart(card, group);
+        }
+
+        const amortContainer = card.querySelector('.amortization-chart-container');
+        if (amortContainer && amortContainer.style.display !== 'none') {
+            const groupId = card.dataset.groupId;
+            const group = state.groups.find(g => g.id === groupId);
+            drawAmortizationChart(card, group);
         }
     });
 
