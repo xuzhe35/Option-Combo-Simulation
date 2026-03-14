@@ -15,37 +15,92 @@
 let ws = null;
 let isWsConnected = false;
 
+const DEFAULT_WS_HOST = 'localhost';
+const DEFAULT_WS_PORT = 8765;
+const WS_PORT_STORAGE_KEY = 'optionComboWsPort';
+
 // Exponential backoff state
 const WS_BASE_DELAY = 5000;   // 5s initial
 const WS_MAX_DELAY = 60000;   // 60s cap
 let _wsReconnectDelay = WS_BASE_DELAY;
 let _wsReconnectTimer = null;
 
+function _normalizeWsPort(rawValue) {
+    const parsed = parseInt(rawValue, 10);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+        return DEFAULT_WS_PORT;
+    }
+    return parsed;
+}
+
+function _getSavedWsPort() {
+    try {
+        return _normalizeWsPort(localStorage.getItem(WS_PORT_STORAGE_KEY));
+    } catch (e) {
+        return DEFAULT_WS_PORT;
+    }
+}
+
+function _setSavedWsPort(port) {
+    const safePort = _normalizeWsPort(port);
+    try {
+        localStorage.setItem(WS_PORT_STORAGE_KEY, String(safePort));
+    } catch (e) {
+        // Ignore localStorage failures and keep using the runtime value.
+    }
+    return safePort;
+}
+
+function _syncWsPortInput(port) {
+    const input = document.getElementById('wsPortInput');
+    if (input) input.value = String(_normalizeWsPort(port));
+}
+
+function _getCurrentWsPort() {
+    const input = document.getElementById('wsPortInput');
+    if (input && input.value) return _normalizeWsPort(input.value);
+    return _getSavedWsPort();
+}
+
+function _getWsUrl() {
+    return `ws://${DEFAULT_WS_HOST}:${_getCurrentWsPort()}`;
+}
+
+function _clearWsReconnectTimer() {
+    if (_wsReconnectTimer) {
+        clearTimeout(_wsReconnectTimer);
+        _wsReconnectTimer = null;
+    }
+}
+
 function updateWsStatusUI(status, nextRetrySec) {
     const el = document.getElementById('wsStatus');
     if (!el) return;
+
+    const port = _getCurrentWsPort();
     if (status === 'connected') {
-        el.textContent = '🟢 Connected';
+        el.textContent = `Connected :${port}`;
         el.className = 'ws-status ws-connected';
     } else if (status === 'error') {
-        el.textContent = '🔴 Error';
+        el.textContent = `Error :${port}`;
         el.className = 'ws-status ws-error';
     } else {
-        // disconnected
-        const suffix = nextRetrySec != null ? ` — Retry in ${nextRetrySec}s` : '';
-        el.textContent = `🔴 Disconnected${suffix}`;
+        const suffix = nextRetrySec != null ? ` - Retry in ${nextRetrySec}s` : '';
+        el.textContent = `Disconnected :${port}${suffix}`;
         el.className = 'ws-status ws-disconnected';
     }
 }
 
 function connectWebSocket() {
-    // Default config assuming Python server on localhost:8765
-    ws = new WebSocket('ws://localhost:8765');
+    _clearWsReconnectTimer();
+
+    const wsUrl = _getWsUrl();
+    ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
         isWsConnected = true;
-        _wsReconnectDelay = WS_BASE_DELAY; // reset backoff on success
-        console.log("WebSocket Connected to IB Gateway Backend");
+        _wsReconnectDelay = WS_BASE_DELAY;
+        console.log(`WebSocket Connected to IB Gateway Backend at ${wsUrl}`);
         updateWsStatusUI('connected');
         handleLiveSubscriptions();
     };
@@ -56,7 +111,7 @@ function connectWebSocket() {
         console.log(`WebSocket Disconnected. Reconnecting in ${delaySec}s...`);
         updateWsStatusUI('disconnected', delaySec);
         _wsReconnectTimer = setTimeout(connectWebSocket, _wsReconnectDelay);
-        _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, WS_MAX_DELAY); // exponential backoff
+        _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, WS_MAX_DELAY);
     };
 
     ws.onerror = (error) => {
@@ -73,6 +128,59 @@ function connectWebSocket() {
         }
     };
 }
+
+function reconnectWebSocket() {
+    _clearWsReconnectTimer();
+    isWsConnected = false;
+
+    if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        try {
+            ws.close();
+        } catch (e) {
+            // Ignore close errors and reconnect below.
+        }
+        ws = null;
+    }
+
+    updateWsStatusUI('disconnected');
+    connectWebSocket();
+}
+
+function toggleWsPortControls() {
+    const controls = document.getElementById('wsPortControls');
+    if (!controls) return;
+    controls.style.display = controls.style.display === 'none' ? 'block' : 'none';
+}
+
+function applyWsPort() {
+    const input = document.getElementById('wsPortInput');
+    if (!input) return;
+
+    const safePort = _normalizeWsPort(input.value);
+    input.value = String(safePort);
+    _setSavedWsPort(safePort);
+    reconnectWebSocket();
+}
+
+function resetWsPort() {
+    _setSavedWsPort(DEFAULT_WS_PORT);
+    _syncWsPortInput(DEFAULT_WS_PORT);
+    reconnectWebSocket();
+}
+
+function initWsPortControls() {
+    const savedPort = _getSavedWsPort();
+    _syncWsPortInput(savedPort);
+    updateWsStatusUI('disconnected');
+}
+
+window.toggleWsPortControls = toggleWsPortControls;
+window.applyWsPort = applyWsPort;
+window.resetWsPort = resetWsPort;
 
 // -------------------------------------------------------------
 // Subscription Management
@@ -93,8 +201,7 @@ function handleLiveSubscriptions() {
         if (group.liveData) {
             group.legs.forEach(leg => {
                 if (leg.type === 'stock') {
-                    // Stock legs subscribe as stocks, not options
-                    // Use the group's underlying symbol
+                    // Stock legs subscribe as stocks, not options.
                     if (!payload.stocks.includes(state.underlyingSymbol)) {
                         payload.stocks.push(state.underlyingSymbol);
                     }
@@ -126,7 +233,6 @@ function requestUnderlyingPriceSync() {
         return;
     }
 
-    // Create a special sync request just for the underlying
     const payload = {
         action: 'sync_underlying',
         underlying: state.underlyingSymbol
@@ -162,7 +268,6 @@ function processLiveMarketData(data) {
                         const liveMark = data.options[leg.id].mark;
                         const liveIV = data.options[leg.id].iv;
 
-                        // Only update Price if there is a realistic quote and it's different
                         if (liveMark > 0 && Math.abs(liveMark - leg.currentPrice) > 0.001) {
                             leg.currentPrice = liveMark;
                             stateChanged = true;
@@ -177,8 +282,6 @@ function processLiveMarketData(data) {
                             }
                         }
 
-                        // Update Implied Volatility if the server streams model Greeks natively
-                        // Threshold pushed to virtually zero to catch any microscopic Greek movements
                         if (liveIV && liveIV > 0 && Math.abs(liveIV - leg.iv) > 0.000001) {
                             leg.iv = liveIV;
                             stateChanged = true;
@@ -200,7 +303,6 @@ function processLiveMarketData(data) {
 
     // Update Hedge Stocks + Stock-type legs in groups
     if (data.stocks) {
-        // Update hedge positions
         state.hedges.forEach(hedge => {
             if (hedge.liveData && data.stocks[hedge.symbol] !== undefined) {
                 const liveMark = data.stocks[hedge.symbol].mark;
@@ -220,7 +322,6 @@ function processLiveMarketData(data) {
             }
         });
 
-        // Update stock-type legs in combo groups
         state.groups.forEach(group => {
             if (group.liveData) {
                 group.legs.forEach(leg => {
@@ -245,7 +346,6 @@ function processLiveMarketData(data) {
         });
     }
 
-    // Throttle rendering request
     if (stateChanged && !renderScheduled) {
         renderScheduled = true;
         requestAnimationFrame(() => {
@@ -256,4 +356,5 @@ function processLiveMarketData(data) {
 }
 
 // Connect immediately on load
+initWsPortControls();
 connectWebSocket();

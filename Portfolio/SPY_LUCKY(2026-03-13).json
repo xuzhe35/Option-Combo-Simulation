@@ -1,0 +1,242 @@
+{
+  "underlyingSymbol": "SPY",
+  "underlyingPrice": 664.08,
+  "baseDate": "2026-03-03",
+  "simulatedDate": "2026-03-27",
+  "interestRate": 0.03,
+  "ivOffset": 0,
+  "viewMode": "active",
+  "groups": [
+    {
+      "id": "_ba7m0g5c2",
+      "name": "664 Strangle-3rd",
+      "settleUnderlyingPrice": null,
+      "legs": [
+        {
+          "id": "_n79bxukbv",
+          "type": "call",
+          "pos": -4,
+          "strike": 664,
+          "expDate": "2026-03-27",
+          "iv": 0.24277976840364995,
+          "currentPrice": 12.265,
+          "cost": 12.463,
+          "closePrice": null
+        },
+        {
+          "id": "_krg9brmd0",
+          "type": "put",
+          "pos": -4,
+          "strike": 664,
+          "expDate": "2026-03-27",
+          "iv": 0.24277976840364995,
+          "currentPrice": 13.09,
+          "cost": 13.486,
+          "closePrice": null
+        },
+        {
+          "id": "_5zdvzd2rn",
+          "type": "call",
+          "pos": 5,
+          "strike": 666,
+          "expDate": "2026-04-24",
+          "iv": 0.21591253194972795,
+          "currentPrice": 19.005,
+          "cost": 19.044,
+          "closePrice": null
+        },
+        {
+          "id": "_3fe8oez8i",
+          "type": "put",
+          "pos": 5,
+          "strike": 666,
+          "expDate": "2026-04-24",
+          "iv": 0.21591253194972795,
+          "currentPrice": 20.03,
+          "cost": 20.3,
+          "closePrice": null
+        }
+      ],
+      "viewMode": "active",
+      "liveData": true
+    },
+    {
+      "id": "_d8lyl4t49",
+      "name": "685 Strangle-1st",
+      "legs": [
+        {
+          "id": "_fsoun29wf",
+          "type": "call",
+          "pos": -4,
+          "strike": 685,
+          "expDate": "2026-03-27",
+          "iv": 0.19360298934184605,
+          "currentPrice": 2.815,
+          "cost": 12.381,
+          "closePrice": null
+        },
+        {
+          "id": "_4hb1ees9l",
+          "type": "put",
+          "pos": -4,
+          "strike": 685,
+          "expDate": "2026-03-27",
+          "iv": 0.19360298934184605,
+          "currentPrice": 24.76,
+          "cost": 12.586,
+          "closePrice": null
+        },
+        {
+          "id": "_36irv9xko",
+          "type": "call",
+          "pos": 5,
+          "strike": 689,
+          "expDate": "2026-05-29",
+          "iv": 0.18315583296719445,
+          "currentPrice": 13.59,
+          "cost": 22.694,
+          "closePrice": null
+        },
+        {
+          "id": "_o28tgnrgf",
+          "type": "put",
+          "pos": 5,
+          "strike": 689,
+          "expDate": "2026-05-29",
+          "iv": 0.18315583296719445,
+          "currentPrice": 35.75,
+          "cost": 22.804,
+          "closePrice": null
+        }
+      ],
+      "viewMode": "active",
+      "liveData": true,
+      "settleUnderlyingPrice": null
+    },
+    {
+      "id": "_2sveck8vp",
+      "name": "673 Strangle-2nd",
+      "legs": [
+        {
+          "id": "_j4l1y6vns",
+          "type": "call",
+          "pos": -4,
+          "strike": 673,
+          "expDate": "2026-03-27",
+          "iv": 0.22310056762160985,
+          "currentPrice": 7.45,
+          "cost": 15.138,
+          "closePrice": null
+        },
+        {
+          "id": "_8lunhikhd",
+          "type": "put",
+          "pos": -4,
+          "strike": 673,
+          "expDate": "2026-03-27",
+          "iv": 0.22310056762160985,
+          "currentPrice": 17.285,
+          "cost": 15.036,
+          "closePrice": null
+        },
+        {
+          "id": "_9w11092t1",
+          "type": "call",
+          "pos": 5,
+          "strike": 679,
+          "expDate": "2026-05-29",
+          "iv": 0.1946658211449018,
+          "currentPrice": 18.66,
+          "cost": 23.884,
+          "closePrice": null
+        },
+        {
+          "id": "_01waysopf",
+          "type": "put",
+          "pos": 5,
+          "strike": 679,
+          "expDate": "2026-05-29",
+          "iv": 0.1946658211449018,
+          "currentPrice": 30.605,
+          "cost": 25.934,
+          "closePrice": null
+        }
+      ],
+      "viewMode": "active",
+      "liveData": true,
+      "settleUnderlyingPrice": null
+    },
+    {
+      "id": "_rtlxvdbkt",
+      "name": "Call Spread 685-715",
+      "settleUnderlyingPrice": null,
+      "legs": [
+        {
+          "id": "_rmddi296g",
+          "type": "call",
+          "pos": 12,
+          "strike": 685,
+          "expDate": "2026-04-30",
+          "iv": 0.1870708682740245,
+          "currentPrice": 10.175,
+          "cost": 9.909,
+          "closePrice": null
+        },
+        {
+          "id": "_qpihmd3yc",
+          "type": "call",
+          "pos": -12,
+          "strike": 715,
+          "expDate": "2026-04-30",
+          "iv": 0.14944054309135363,
+          "currentPrice": 1.61,
+          "cost": 1.581,
+          "closePrice": null
+        }
+      ],
+      "viewMode": "active",
+      "liveData": true
+    },
+    {
+      "id": "_f9etejds2",
+      "name": "Bear Spread 665-645",
+      "settleUnderlyingPrice": null,
+      "legs": [
+        {
+          "id": "_zum89qf2o",
+          "type": "put",
+          "pos": 16,
+          "strike": 665,
+          "expDate": "2026-04-02",
+          "iv": 0.23442485263656102,
+          "currentPrice": 15.295,
+          "cost": 16.056,
+          "closePrice": null
+        },
+        {
+          "id": "_j8mltsnrz",
+          "type": "put",
+          "pos": -16,
+          "strike": 645,
+          "expDate": "2026-04-02",
+          "iv": 0.2703121241012528,
+          "currentPrice": 8.84,
+          "cost": 9.354,
+          "closePrice": null
+        }
+      ],
+      "viewMode": "active",
+      "liveData": true
+    }
+  ],
+  "hedges": [
+    {
+      "id": "_gm0wdmfhv",
+      "symbol": "UVXY",
+      "pos": -100,
+      "cost": 42.249,
+      "currentPrice": 51.43,
+      "liveData": true
+    }
+  ]
+}

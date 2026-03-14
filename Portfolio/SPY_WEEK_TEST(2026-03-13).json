@@ -1,0 +1,65 @@
+{
+  "underlyingSymbol": "SPY",
+  "underlyingPrice": 662.07,
+  "baseDate": "2026-03-13",
+  "simulatedDate": "2026-03-20",
+  "interestRate": 0.03,
+  "ivOffset": 0,
+  "viewMode": "active",
+  "groups": [
+    {
+      "id": "_it2ty9tcd",
+      "name": "Combo Group 1",
+      "settleUnderlyingPrice": null,
+      "legs": [
+        {
+          "id": "_bp30ch4yx",
+          "type": "call",
+          "pos": -4,
+          "strike": 662,
+          "expDate": "2026-03-20",
+          "iv": 0.2573754510873832,
+          "currentPrice": 9.39,
+          "cost": 9.521,
+          "closePrice": null
+        },
+        {
+          "id": "_631so5k6w",
+          "type": "put",
+          "pos": -4,
+          "strike": 662,
+          "expDate": "2026-03-20",
+          "iv": 0.2573754510873832,
+          "currentPrice": 10.155,
+          "cost": 10,
+          "closePrice": null
+        },
+        {
+          "id": "_bpe5npa7z",
+          "type": "call",
+          "pos": 5,
+          "strike": 662,
+          "expDate": "2026-04-02",
+          "iv": 0.24084508814869948,
+          "currentPrice": 14.785,
+          "cost": 14.924,
+          "closePrice": null
+        },
+        {
+          "id": "_kgkwryrk3",
+          "type": "put",
+          "pos": 5,
+          "strike": 662,
+          "expDate": "2026-04-02",
+          "iv": 0.24084508814869948,
+          "currentPrice": 15.075,
+          "cost": 14.934,
+          "closePrice": null
+        }
+      ],
+      "viewMode": "trial",
+      "liveData": true
+    }
+  ],
+  "hedges": []
+}
