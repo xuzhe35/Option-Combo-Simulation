@@ -68,6 +68,14 @@ function flashElement(el) {
     }, 50);
 }
 
+function isSettlementScenarioMode(viewMode) {
+    return viewMode === 'amortized' || viewMode === 'settlement';
+}
+
+function groupHasDeterministicCost(group) {
+    return group.legs.some(leg => Math.abs(parseFloat(leg.cost) || 0) > 0);
+}
+
 // -------------------------------------------------------------
 // DOM Event Binding
 // -------------------------------------------------------------
@@ -364,6 +372,7 @@ function renderGroups() {
     if (state.groups.length === 0) {
         globalEmptyState.style.display = 'block';
         document.getElementById('globalChartCard').style.display = 'none';
+        document.getElementById('globalAmortizedCard').style.display = 'none';
         document.getElementById('probAnalysisCard').style.display = 'none';
         updateDerivedValues();
         return;
@@ -371,6 +380,7 @@ function renderGroups() {
 
     globalEmptyState.style.display = 'none';
     document.getElementById('globalChartCard').style.display = 'block';
+    document.getElementById('globalAmortizedCard').style.display = 'block';
     document.getElementById('probAnalysisCard').style.display = 'block';
 
     state.groups.forEach(group => {
@@ -395,15 +405,16 @@ function renderGroups() {
             handleLiveSubscriptions();
         });
 
-        // View Mode Toggle (3-way)
+        // View Mode Toggle (4-way)
         const toggleActiveBtn = card.querySelector('.toggle-view-active');
         const toggleTrialBtn = card.querySelector('.toggle-view-trial');
+        const toggleAmortizedBtn = card.querySelector('.toggle-view-amortized');
         const toggleSettlementBtn = card.querySelector('.toggle-view-settlement');
         const settlementControls = card.querySelector('.settlement-controls');
         
         const currentMode = group.viewMode || 'active'; // support group-level override
         
-        [toggleActiveBtn, toggleTrialBtn, toggleSettlementBtn].forEach(btn => {
+        [toggleActiveBtn, toggleTrialBtn, toggleAmortizedBtn, toggleSettlementBtn].forEach(btn => {
             if (!btn) return;
             btn.classList.remove('active', 'btn-primary');
             btn.classList.add('btn-secondary');
@@ -413,6 +424,10 @@ function renderGroups() {
             toggleActiveBtn.classList.remove('btn-secondary');
             toggleActiveBtn.classList.add('active', 'btn-primary');
             if (settlementControls) settlementControls.style.display = 'none';
+        } else if (currentMode === 'amortized' && toggleAmortizedBtn) {
+            toggleAmortizedBtn.classList.remove('btn-secondary');
+            toggleAmortizedBtn.classList.add('active', 'btn-primary');
+            if (settlementControls) settlementControls.style.display = 'flex';
         } else if (currentMode === 'settlement' && toggleSettlementBtn) {
             toggleSettlementBtn.classList.remove('btn-secondary');
             toggleSettlementBtn.classList.add('active', 'btn-primary');
@@ -539,25 +554,30 @@ function renderGroups() {
             });
         }
 
-        // Auto-lock ViewMode to Trial if all costs are perfectly 0 to avoid confusing flatlines
-        let allZeroCost = true;
-        group.legs.forEach(leg => {
-            if (leg.cost !== 0) allZeroCost = false;
-        });
+        // Auto-lock ViewMode to Trial if all costs are perfectly 0 to avoid confusing flatlines.
+        // Amortized mode requires deterministic costs, but settlement is still allowed.
+        const allZeroCost = !groupHasDeterministicCost(group);
         if (allZeroCost && currentMode !== 'settlement') {
             group.viewMode = 'trial';
             const toggleTrialBtn = card.querySelector('.toggle-view-trial');
             const toggleActiveBtn = card.querySelector('.toggle-view-active');
-            if (toggleTrialBtn && toggleActiveBtn) {
+            const toggleAmortizedBtn = card.querySelector('.toggle-view-amortized');
+            if (toggleTrialBtn && toggleActiveBtn && toggleAmortizedBtn) {
                 toggleActiveBtn.disabled = true;
                 toggleActiveBtn.title = "Add a Cost to unlock Active tracking.";
                 toggleActiveBtn.classList.add('text-muted');
                 toggleActiveBtn.style.opacity = '0.5';
+                toggleAmortizedBtn.disabled = true;
+                toggleAmortizedBtn.title = "Add a Cost to unlock Amortized analysis.";
+                toggleAmortizedBtn.classList.add('text-muted');
+                toggleAmortizedBtn.style.opacity = '0.5';
 
                 toggleTrialBtn.classList.add('active', 'btn-primary');
                 toggleTrialBtn.classList.remove('btn-secondary');
                 toggleActiveBtn.classList.remove('active', 'btn-primary');
                 toggleActiveBtn.classList.add('btn-secondary');
+                toggleAmortizedBtn.classList.remove('active', 'btn-primary');
+                toggleAmortizedBtn.classList.add('btn-secondary');
             }
         }
 
@@ -577,6 +597,10 @@ function setGroupViewMode(btn, mode) {
     const groupId = card.dataset.groupId;
     const group = state.groups.find(g => g.id === groupId);
     if (!group) return;
+
+    if (mode === 'amortized' && !groupHasDeterministicCost(group)) {
+        return;
+    }
 
     group.viewMode = mode;
 
@@ -633,8 +657,11 @@ function updateDerivedValues() {
         let groupHasLiveData = false;
 
         const activeViewMode = group.viewMode || 'active';
-        // Settlement mode underlying override
-        const evalUnderlyingPrice = (activeViewMode === 'settlement' && group.settleUnderlyingPrice !== null) 
+        const usesScenarioUnderlying = isSettlementScenarioMode(activeViewMode);
+        const isAmortizedMode = activeViewMode === 'amortized';
+
+        // Scenario mode underlying override
+        const evalUnderlyingPrice = (usesScenarioUnderlying && group.settleUnderlyingPrice !== null) 
                                     ? group.settleUnderlyingPrice 
                                     : state.underlyingPrice;
 
@@ -700,7 +727,7 @@ function updateDerivedValues() {
             // Show "Closed" universally
             if (leg.closePrice !== null && leg.closePrice !== '') {
                 simPriceHtml += ` <span class="badge" style="background: var(--primary-color); font-size: 0.65rem; vertical-align: middle;">Closed</span>`;
-            } else if (activeViewMode === 'settlement') {
+            } else if (usesScenarioUnderlying) {
                 if (pLeg.isExpired) {
                     if (simPricePerShare > 0) {
                         simPriceHtml += ` <span class="badge" style="background: var(--success-color); font-size: 0.65rem; vertical-align: middle;">Exercised</span>`;
@@ -753,14 +780,22 @@ function updateDerivedValues() {
         card.querySelector('.group-pnl').innerHTML = `<span class="${groupPnl >= 0 ? 'success-text' : 'danger-text'}">${groupPnl >= 0 ? '+' : ''}${currencyFormatter.format(groupPnl)}</span>`;
 
         // --------------------------------------------------------------------------
-        // Calculate & Layout Amortized Stock Cost Basis Automatically in Settlement
+        // Calculate & Layout Amortized Stock Cost Basis Automatically in Amortized mode
         // --------------------------------------------------------------------------
         const amContainer = card.querySelector('.amortization-container');
         const settleControls = card.querySelector('.settlement-controls');
-        
-        if (activeViewMode === 'settlement') {
+
+        const simulateBtn = card.querySelector('.btn-simulate-amortized');
+
+        if (usesScenarioUnderlying) {
             if (settleControls) settleControls.style.display = 'flex';
-            
+            if (simulateBtn) simulateBtn.style.display = isAmortizedMode ? 'inline-flex' : 'none';
+        } else {
+            if (settleControls) settleControls.style.display = 'none';
+            if (simulateBtn) simulateBtn.style.display = 'none';
+        }
+
+        if (isAmortizedMode) {
             if (amContainer) {
                 const result = calculateAmortizedCost(group, evalUnderlyingPrice, state);
                 const amText = card.querySelector('.amortization-text');
@@ -774,13 +809,11 @@ function updateDerivedValues() {
                 }
             }
         } else {
-            if (settleControls) settleControls.style.display = 'none';
             if (amContainer) amContainer.style.display = 'none';
-            // Also hide the amort chart if we leave settlement mode
+            // Also hide the amort chart if we leave amortized mode
             const amortChartContainer = card.querySelector('.amortization-chart-container');
             if (amortChartContainer) {
                 amortChartContainer.style.display = 'none';
-                const simulateBtn = card.querySelector('.btn-simulate-settlement');
                 if (simulateBtn) {
                     simulateBtn.innerHTML = `
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
@@ -788,7 +821,7 @@ function updateDerivedValues() {
                             <line x1="12" y1="20" x2="12" y2="4"></line>
                             <line x1="6" y1="20" x2="6" y2="14"></line>
                         </svg>
-                        Simulate Settlement
+                        Simulate Amortized Price
                     `;
                 }
             }
@@ -813,8 +846,8 @@ function updateDerivedValues() {
         const showChartBtn = card.querySelector('.toggle-chart-btn');
 
         if (simPnlHeader && livePnlHeader) {
-            if (activeViewMode === 'settlement') {
-                simPnlHeader.textContent = 'SETTLEMENT P&L';
+            if (usesScenarioUnderlying) {
+                simPnlHeader.textContent = isAmortizedMode ? 'AMORTIZED P&L' : 'SETTLEMENT P&L';
                 livePnlHeader.style.display = 'none';
                 if (showChartBtn) showChartBtn.style.display = 'none';
             } else {
@@ -900,6 +933,47 @@ function updateDerivedValues() {
             totalLivePnLEl.innerHTML = `<span class="${combinedLivePnL >= 0 ? 'success-text' : 'danger-text'}">${combinedLivePnL >= 0 ? '+' : ''}${currencyFormatter.format(combinedLivePnL)}</span>`;
         } else {
             totalLivePnLRow.style.display = 'none';
+        }
+    }
+
+    // Global Amortized Result (combines groups currently in Amortized mode)
+    const globalAmortizedCard = document.getElementById('globalAmortizedCard');
+    const globalAmortizedBanner = document.getElementById('globalAmortizedBanner');
+    const globalAmortizedText = document.getElementById('globalAmortizedText');
+    const globalAmortizedInfoText = document.getElementById('globalAmortizedInfoText');
+
+    if (globalAmortizedCard && globalAmortizedBanner && globalAmortizedText && globalAmortizedInfoText) {
+        const amortizedGroups = state.groups.filter(g => (g.viewMode || 'active') === 'amortized');
+
+        if (amortizedGroups.length > 0) {
+            const result = calculateCombinedAmortizedCost(amortizedGroups, state);
+            globalAmortizedCard.style.display = 'block';
+            globalAmortizedBanner.style.display = 'block';
+            globalAmortizedInfoText.textContent = `Banner uses each amortized group's scenario override when set. Chart uses a shared global scenario price axis.`;
+
+            if (result.netShares > 0) {
+                globalAmortizedText.textContent = `Assigned ${result.netShares} shares with combined effective basis of ${currencyFormatter.format(result.basis)}`;
+            } else if (result.netShares < 0) {
+                globalAmortizedText.textContent = `Delivered ${Math.abs(result.netShares)} shares with combined effective basis of ${currencyFormatter.format(result.basis)}`;
+            } else {
+                globalAmortizedText.textContent = 'No net assigned or delivered shares across the current amortized groups.';
+            }
+        } else {
+            globalAmortizedCard.style.display = 'none';
+            globalAmortizedBanner.style.display = 'none';
+            globalAmortizedText.textContent = '';
+            globalAmortizedInfoText.textContent = '';
+            const globalAmortizedChartContainer = document.getElementById('globalAmortizedChartContainer');
+            if (globalAmortizedChartContainer) globalAmortizedChartContainer.style.display = 'none';
+            const globalAmortizedToggleBtn = globalAmortizedCard.querySelector('.toggle-global-amortized-chart-btn');
+            if (globalAmortizedToggleBtn) globalAmortizedToggleBtn.textContent = 'Show Chart';
+        }
+
+        const globalAmortizedChartContainer = document.getElementById('globalAmortizedChartContainer');
+        if (globalAmortizedChartContainer && globalAmortizedChartContainer.style.display !== 'none'
+            && globalAmortizedCard.style.display !== 'none'
+            && typeof drawGlobalAmortizedChart === 'function') {
+            drawGlobalAmortizedChart(globalAmortizedCard);
         }
     }
 
@@ -1189,5 +1263,41 @@ function calculateAmortizedCost(group, evalUnderlyingPrice, globalState) {
         residualValue,
         assignmentCash,
         initialCost: initialCashOutflow
+    };
+}
+
+function calculateCombinedAmortizedCost(groups, globalState) {
+    let netShares = 0;
+    let totalCash = 0;
+    let residualValue = 0;
+    let assignmentCash = 0;
+    let initialCost = 0;
+
+    groups.forEach(group => {
+        const evalUnderlyingPrice = (group.settleUnderlyingPrice !== null && group.settleUnderlyingPrice !== undefined)
+            ? group.settleUnderlyingPrice
+            : globalState.underlyingPrice;
+        const result = calculateAmortizedCost(group, evalUnderlyingPrice, globalState);
+        netShares += result.netShares;
+        totalCash += result.totalCash;
+        residualValue += result.residualValue;
+        assignmentCash += result.assignmentCash;
+        initialCost += result.initialCost;
+    });
+
+    let basis = 0;
+    if (netShares > 0) {
+        basis = (-totalCash) / netShares;
+    } else if (netShares < 0) {
+        basis = totalCash / Math.abs(netShares);
+    }
+
+    return {
+        netShares,
+        basis,
+        totalCash,
+        residualValue,
+        assignmentCash,
+        initialCost
     };
 }
