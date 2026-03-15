@@ -103,7 +103,7 @@ function drawGroupChart(card, group) {
 }
 
 // -------------------------------------------------------------
-// Amortization Chart Functions (Settlement Mode Only)
+// Amortization Chart Functions (Amortized Mode Only)
 // -------------------------------------------------------------
 
 function toggleAmortizationChart(btn) {
@@ -118,7 +118,7 @@ function toggleAmortizationChart(btn) {
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
             </svg>
-            Hide Settlement Simulation
+            Hide Amortized Simulation
         `;
 
         // Initialize AmortChartInstance if not exists
@@ -151,7 +151,7 @@ function toggleAmortizationChart(btn) {
                 <line x1="12" y1="20" x2="12" y2="4"></line>
                 <line x1="6" y1="20" x2="6" y2="14"></line>
             </svg>
-            Simulate Settlement
+            Simulate Amortized Price
         `;
     }
 }
@@ -305,6 +305,99 @@ function drawGlobalChart(card) {
     card.chartInstance.draw(virtualGroup, state, minS, maxS);
 }
 
+function _getGlobalAmortizedVirtualGroup() {
+    const amortizedGroups = state.groups.filter(g => (g.viewMode || 'active') === 'amortized');
+    return {
+        name: 'Global Amortized Portfolio',
+        viewMode: 'amortized',
+        legs: amortizedGroups.flatMap(g => g.legs.map(leg => ({
+            ...leg,
+            _viewMode: 'amortized'
+        })))
+    };
+}
+
+function toggleGlobalAmortizedChart(btn) {
+    const card = document.getElementById('globalAmortizedCard');
+    const chartContainer = document.getElementById('globalAmortizedChartContainer');
+    if (!card || !chartContainer) return;
+
+    if (chartContainer.style.display === 'none') {
+        chartContainer.style.display = 'block';
+        btn.textContent = 'Hide Chart';
+
+        if (!card.amortChartInstance) {
+            const canvas = card.querySelector('.global-amortization-canvas');
+            const marginCanvas = card.querySelector('.global-amort-margin-canvas');
+            card.amortChartInstance = new AmortizationChart(canvas, marginCanvas);
+        }
+
+        drawGlobalAmortizedChart(card);
+    } else {
+        chartContainer.style.display = 'none';
+        btn.textContent = 'Show Chart';
+    }
+}
+
+function setGlobalAmortizedChartRangeMode(btn, mode) {
+    const card = document.getElementById('globalAmortizedCard');
+    if (!card) return;
+
+    card.querySelectorAll('.global-amort-range-mode-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    const customInputsContainer = card.querySelector('.global-amort-custom-range-inputs');
+    const minInput = card.querySelector('.global-amort-chart-min-input');
+    const maxInput = card.querySelector('.global-amort-chart-max-input');
+
+    if (mode === 'custom') {
+        customInputsContainer.style.opacity = '1';
+        minInput.disabled = false;
+        maxInput.disabled = false;
+        if (!minInput.value) minInput.value = (state.underlyingPrice * 0.9).toFixed(0);
+        if (!maxInput.value) maxInput.value = (state.underlyingPrice * 1.1).toFixed(0);
+    } else {
+        customInputsContainer.style.opacity = '0.5';
+        minInput.disabled = true;
+        maxInput.disabled = true;
+    }
+
+    drawGlobalAmortizedChart(card);
+}
+
+function triggerGlobalAmortizedChartRedraw() {
+    const card = document.getElementById('globalAmortizedCard');
+    if (!card) return;
+    drawGlobalAmortizedChart(card);
+}
+
+function drawGlobalAmortizedChart(card) {
+    if (!card || !card.amortChartInstance) return;
+
+    const virtualGroup = _getGlobalAmortizedVirtualGroup();
+    if (!virtualGroup.legs.length) return;
+
+    const modeBtn = card.querySelector('.global-amort-range-mode-btn.active');
+    const mode = modeBtn ? modeBtn.dataset.mode : '10';
+
+    let minS, maxS;
+
+    if (mode === 'custom') {
+        minS = parseFloat(card.querySelector('.global-amort-chart-min-input').value) || (state.underlyingPrice * 0.9);
+        maxS = parseFloat(card.querySelector('.global-amort-chart-max-input').value) || (state.underlyingPrice * 1.1);
+        if (minS >= maxS) maxS = minS + 1;
+    } else {
+        const pct = parseFloat(mode) / 100.0;
+        minS = state.underlyingPrice * (1 - pct);
+        maxS = state.underlyingPrice * (1 + pct);
+
+        card.querySelector('.global-amort-chart-min-input').value = minS.toFixed(0);
+        card.querySelector('.global-amort-chart-max-input').value = maxS.toFixed(0);
+    }
+
+    card.amortChartInstance.draw(virtualGroup, state, minS, maxS);
+}
+
 // Global window resize listener to update all visible charts
 window.addEventListener('resize', () => {
     document.querySelectorAll('.group-card').forEach(card => {
@@ -327,6 +420,12 @@ window.addEventListener('resize', () => {
     const gcContainer = document.getElementById('globalChartContainer');
     if (globalCard && gcContainer && gcContainer.style.display !== 'none') {
         drawGlobalChart(globalCard);
+    }
+
+    const globalAmortizedCard = document.getElementById('globalAmortizedCard');
+    const gacContainer = document.getElementById('globalAmortizedChartContainer');
+    if (globalAmortizedCard && gacContainer && gacContainer.style.display !== 'none') {
+        drawGlobalAmortizedChart(globalAmortizedCard);
     }
 
     // Redraw prob charts from cached data (no re-simulation needed)

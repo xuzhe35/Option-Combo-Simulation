@@ -1,25 +1,27 @@
 # Option Combo Simulator - Developer Handover
 
-**Audience:** future maintainers and coding agents  
-**Updated:** 2026-03-14
+**Updated:** 2026-03-15
 
-## 1. What This App Actually Is
+## 1. Current Product Shape
 
-This is a local, browser-run analysis tool for multi-leg option portfolios with optional IBKR live data.
+This is a local browser app for options-combo scenario analysis with optional IBKR live data.
 
-The current product surface is broader than a simple option payoff graph:
+The current product includes:
 
-- combo groups can contain options and stock legs
-- each group supports `trial`, `active`, and `settlement` modes
-- the app tracks both simulated P&L and live market P&L
-- the probability module estimates price distribution and expected P&L using a Student-t return model
-- separate hedge rows track stock or ETF live P&L outside the simulated option engine
+- option legs and stock legs inside combo groups
+- separate hedge rows for live stock or ETF tracking
+- four combo-group modes: `trial`, `active`, `amortized`, `settlement`
+- group-level P&L charts
+- group-level amortized-basis charts
+- global portfolio P&L chart
+- global amortized banner and global amortized chart
+- probability analysis charts
 
-## 2. Frontend Architecture
+## 2. Script Model
 
-The frontend is intentionally framework-free.
+The frontend still depends on ordered global scripts in `index.html`.
 
-Everything is loaded through global script tags in `index.html` in this order:
+Current order:
 
 1. `t_params_db.js`
 2. `market_holidays.js`
@@ -30,50 +32,36 @@ Everything is loaded through global script tags in `index.html` in this order:
 7. `app.js`
 8. `ws_client.js`
 
-That order matters. There is no module loader protecting against missing globals.
+## 3. Pricing Source of Truth
 
-## 3. Single Source of Truth for Pricing
+`bsm.js` remains the math authority.
 
-`bsm.js` is the math authority.
-
-Important functions:
+Do not duplicate pricing logic outside:
 
 - `processLegData(...)`
 - `computeLegPrice(...)`
 - `computeSimulatedPrice(...)`
 
-The rest of the app should not re-implement cost-basis or valuation math.
+Important implementation facts:
 
-Current rules implemented there:
-
-- option pricing uses calendar-day time to expiry: `T = calDTE / 365`
-- trading-day counts are display-only
-- `stock` legs bypass BSM and price directly from the underlying
-- `closePrice` overrides simulated valuation when present
-- trial mode can use live current price as the effective "entered" price when evaluating the current date with zero IV offset
+- option pricing time uses `calendar days / 365`
+- trading-day counts are informational only
+- `closePrice` can override simulated pricing
+- stock legs bypass BSM and use the scenario underlying directly
 
 ## 4. State Model
 
-`app.js` owns global state.
+`app.js` owns the session state.
 
-High-level structure:
+Important group fields:
 
-- global scenario inputs: symbol, underlying price, base date, simulated date, interest rate, IV offset
-- `groups[]`: combo groups
-- `hedges[]`: standalone stock or ETF live-P&L rows
-
-Group shape:
-
-- `id`
-- `name`
 - `viewMode`
 - `liveData`
 - `settleUnderlyingPrice`
 - `legs[]`
 
-Leg shape:
+Important leg fields:
 
-- `id`
 - `type`
 - `pos`
 - `strike`
@@ -83,157 +71,132 @@ Leg shape:
 - `cost`
 - `closePrice`
 
-## 5. Rendering Flow
-
-`renderGroups()` and `renderHedges()` build the DOM from state.
-
-`updateDerivedValues()` is the main recalculation loop. It:
-
-- normalizes every leg through `processLegData(...)`
-- computes simulated value and simulated P&L
-- computes live P&L where live prices exist
-- updates summary cards
-- redraws any visible charts
-
-When debugging valuation bugs, this function is usually the fastest place to trace the end-to-end effect.
-
-## 6. View Modes
-
-Each group has three modes:
+## 5. The Four Modes
 
 ### `trial`
 
-Use this for idea evaluation or currently open trades tracked off live quotes.
-
-Behavior:
-
-- if `currentPrice` exists, it can become the effective base-date cost
-- if `currentPrice` does not exist, the app falls back to a base-date theoretical price
-- at "right now" with zero IV offset, simulated pricing may bypass BSM and use `currentPrice` directly
+- live idea mode
+- current price can act as effective starting cost
 
 ### `active`
 
-Use this for entered positions with fixed historical cost.
+- deterministic entry-cost mode
+- focuses on expected P&L from stored costs
 
-Behavior:
+### `amortized`
 
-- `cost` remains the reference basis
-- simulated value changes, but the stored entry basis does not
+- deterministic-cost scenario mode
+- intended for pre-settlement effective-basis analysis
+- uses `Scenario Underlying Price` when set
+- owns the yellow amortized banner
+- owns the group-level amortized chart
 
 ### `settlement`
 
-Use this to evaluate closed or expired outcomes.
+- final settlement-style scenario mode
+- shares the scenario-underlying concept
+- does not show amortized banner or amortized chart
 
-Behavior:
+Helper functions added around this split:
 
-- a group-level settlement underlying price can override the global underlying
-- expired ITM options can translate into assigned or delivered stock
-- the UI shows an amortized effective basis banner and a settlement simulation chart when applicable
+- `isSettlementScenarioMode(viewMode)`
+- `groupHasDeterministicCost(group)`
 
-## 7. Chart System
+## 6. Amortized Calculations
 
-### Standard P&L
+### Group-level
 
-`chart.js` contains:
+`calculateAmortizedCost(group, evalUnderlyingPrice, globalState)` in `app.js` is the canonical amortized basis calculation.
+
+It computes:
+
+- initial cash outflow
+- residual option value
+- assignment or delivery cash
+- resulting net shares
+- effective basis
+
+This feeds both:
+
+- the group-level yellow amortized banner
+- `AmortizationChart` in `chart.js`
+
+### Global-level
+
+`calculateCombinedAmortizedCost(groups, globalState)` combines all groups currently in `amortized` mode.
+
+This powers the global amortized banner.
+
+Important semantic detail:
+
+- the global amortized banner uses each amortized group's own scenario-price override when present
+
+## 7. Global Amortized Chart
+
+The global amortized chart was added after amortized mode became independent from settlement.
+
+Implementation details:
+
+- UI lives in `index.html` under `#globalAmortizedCard`
+- control logic lives in `chart_controls.js`
+- rendering reuses `AmortizationChart`
+- the chart combines all groups currently in `amortized` mode into one virtual portfolio
+
+Important semantic detail:
+
+- unlike the banner, the global amortized chart uses a shared global scenario-price x-axis
+
+So the two outputs answer related but different questions:
+
+- banner: combined effective basis using each group's own override
+- chart: combined amortized portfolio behavior across a common scenario-price range
+
+## 8. Chart Ownership
+
+### `chart.js`
+
+Owns:
 
 - `PnLChart`
 - `AmortizationChart`
 
-The standard chart:
+### `chart_controls.js`
 
-- samples across a configurable price range
-- injects exact strike prices and tiny strike offsets into the evaluation grid to catch sharp 0DTE structures
-- annotates break-even points
-- supports tooltip hover without re-running the full chart draw
+Owns:
 
-### Global Chart
+- group P&L chart controls
+- group amortized chart controls
+- global P&L chart controls
+- global amortized chart controls
 
-The global chart is not a separate data model.
+New global amortized functions:
 
-`chart_controls.js` flattens all group legs into one virtual group and preserves per-group `viewMode` by injecting `_viewMode` onto each copied leg before drawing.
+- `toggleGlobalAmortizedChart(...)`
+- `setGlobalAmortizedChartRangeMode(...)`
+- `triggerGlobalAmortizedChartRedraw()`
+- `drawGlobalAmortizedChart(...)`
 
-### Probability Charts
+## 9. Live Data Notes
 
-`prob_charts.js` contains:
+`ws_client.js` now supports a local browser-side port override.
 
-- an inline Monte Carlo worker blob
-- `ProbabilityChart`
-- `ExpectedPnLDensityChart`
+Current behavior:
 
-Current probability engine behavior:
+- default is `localhost:8765`
+- the override UI is hidden unless expanded
+- the chosen port is stored in browser local storage
+- the backend still reads its bind port from `config.ini`
 
-- looks up parameters in `t_params_db.js`
-- uses calendar days from `baseDate` to `simulatedDate`
-- rescales volatility so daily std matches `portfolio mean IV / sqrt(365)`
-- simulates 1,000,000 paths
-- computes exact expected P&L from path-level pricing in the worker
-- only reruns when the user clicks `Recalculate` or toggles the probability panel and explicitly triggers it
+## 10. What To Trust
 
-## 8. Live Data Path
+If future docs and code disagree, trust:
 
-### Browser
+1. `bsm.js` for pricing behavior
+2. `app.js` for mode behavior and amortized aggregation
+3. `chart_controls.js` and `chart.js` for chart behavior
 
-`ws_client.js`:
+## 11. Current Caveats
 
-- opens `ws://localhost:8765`
-- sends one subscription payload containing the current underlying, option legs, and hedge stocks
-- resends subscriptions on reconnect
-- writes mark and IV updates back into state and visible inputs
-
-### Backend
-
-`ib_server.py`:
-
-- uses `ib_async`
-- keeps exactly one IB connection for the server process
-- retries with a random client id if it hits IB error 326
-- maintains per-websocket subscription ownership
-- cancels IB market data only when no remaining browser client needs a contract
-
-Important implementation details:
-
-- option mark prefers bid/ask midpoint
-- deep OTM fallback prefers `modelGreeks.optPrice` before `marketPrice()`
-- manual underlying sync is exposed as `sync_underlying`
-
-## 9. File Roles
-
-| File | Purpose |
-| --- | --- |
-| `index.html` | Shell, controls, templates, canvases |
-| `style.css` | Layout and visual design |
-| `bsm.js` | Pricing SSOT and date helpers |
-| `app.js` | App state, DOM events, rendering, import/export |
-| `chart.js` | Canvas renderers |
-| `chart_controls.js` | Chart orchestration and range controls |
-| `prob_charts.js` | Monte Carlo orchestration and probability charts |
-| `ws_client.js` | Browser WebSocket client |
-| `ib_server.py` | IBKR bridge server |
-| `t_params_db.js` | Fitted Student-t parameters by symbol |
-| `market_holidays.js` | Rule-based NYSE holiday logic |
-| `scripts/fit_underlying.py` | Current parameter-generation script |
-
-## 10. Import and Persistence Notes
-
-Import is append-based, not replace-based.
-
-That means:
-
-- importing a JSON file adds groups and hedges into the current session
-- imported ids are regenerated
-- legacy date formats and fields are migrated where possible
-
-This behavior is useful for combining saved structures, but it can surprise someone expecting a full session replacement.
-
-## 11. Current Developer Guidance
-
-If you need to change:
-
-- pricing logic: edit `bsm.js`
-- session state or UI behavior: edit `app.js`
-- standard or settlement charts: edit `chart.js`
-- chart controls or global chart behavior: edit `chart_controls.js`
-- probability behavior: edit `prob_charts.js`
-- live data behavior: edit `ws_client.js` and `ib_server.py`
-
-If a document conflicts with the code, trust the code.
+- only groups in `amortized` mode contribute to the global amortized result
+- `amortized` requires deterministic costs, so zero-cost groups are forced away from it
+- the global amortized banner and global amortized chart do not use identical scenario semantics by design
