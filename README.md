@@ -16,16 +16,28 @@ It is designed for direct use from `index.html` and supports:
 
 ## Runtime Model
 
-The frontend is plain HTML/CSS/JavaScript with ordered global scripts:
+The frontend is plain HTML/CSS/JavaScript with ordered global scripts under `js/`:
 
-1. `t_params_db.js`
-2. `market_holidays.js`
-3. `bsm.js`
-4. `chart.js`
-5. `prob_charts.js`
-6. `chart_controls.js`
-7. `app.js`
-8. `ws_client.js`
+1. `js/t_params_db.js`
+2. `js/market_holidays.js`
+3. `js/date_utils.js`
+4. `js/pricing_core.js`
+5. `js/bsm.js`
+6. `js/chart.js`
+7. `js/prob_charts.js`
+8. `js/chart_controls.js`
+9. `js/amortized.js`
+10. `js/valuation.js`
+11. `js/session_logic.js`
+12. `js/session_ui.js`
+13. `js/control_panel_ui.js`
+14. `js/hedge_editor_ui.js`
+15. `js/group_editor_ui.js`
+16. `js/hedge_ui.js`
+17. `js/group_ui.js`
+18. `js/global_ui.js`
+19. `js/app.js`
+20. `js/ws_client.js`
 
 There is no build step or module system.
 
@@ -35,18 +47,30 @@ There is no build step or module system.
 | --- | --- |
 | `index.html` | App shell, templates, global cards, canvases, controls |
 | `style.css` | Layout and styling |
-| `bsm.js` | Pricing helpers, date helpers, leg normalization, simulated pricing |
-| `chart.js` | P&L chart and amortized-basis chart rendering |
-| `chart_controls.js` | Group chart controls, global chart controls, global amortized chart controls |
-| `app.js` | State, rendering, valuation loop, import/export, amortized calculations |
-| `prob_charts.js` | Probability analysis worker and charts |
-| `ws_client.js` | Browser WebSocket client for IBKR live data |
+| `js/date_utils.js` | Pure date and trading-day helpers |
+| `js/pricing_core.js` | Pure pricing helpers, leg normalization, simulated pricing |
+| `js/bsm.js` | Backward-compatible browser bridge for pricing globals |
+| `js/chart.js` | P&L chart and amortized-basis chart rendering |
+| `js/chart_controls.js` | Group chart controls, global chart controls, global amortized chart controls |
+| `js/amortized.js` | Pure amortized-cost calculations |
+| `js/valuation.js` | Pure portfolio state-derivation and aggregation helpers |
+| `js/session_logic.js` | Pure import/export and mode-selection helpers |
+| `js/session_ui.js` | Control-panel DOM sync after session-level state changes |
+| `js/control_panel_ui.js` | Control-panel event binding and sidebar interactions |
+| `js/hedge_editor_ui.js` | Hedge editor rendering and event binding |
+| `js/group_editor_ui.js` | Group and leg editor rendering and event binding |
+| `js/hedge_ui.js` | Hedge DOM write layer |
+| `js/group_ui.js` | Group DOM write layer |
+| `js/global_ui.js` | Global summary DOM write layer |
+| `js/app.js` | State container and top-level orchestration bridge |
+| `js/prob_charts.js` | Probability analysis worker and charts |
+| `js/ws_client.js` | Browser WebSocket client for IBKR live data |
 | `ib_server.py` | Python WebSocket bridge to IBKR |
 | `config.ini` | TWS and WebSocket server configuration |
 
 ## Pricing Rules
 
-`bsm.js` is the pricing single source of truth.
+`pricing_core.js` is the pure pricing single source of truth, with `bsm.js` retained as a compatibility bridge.
 
 Important helpers:
 
@@ -166,7 +190,7 @@ The current chart set includes:
 
 Current behavior:
 
-- Student-t parameters come from `t_params_db.js`
+- Student-t parameters come from `js/t_params_db.js`
 - volatility is scaled from portfolio mean IV using `IV / sqrt(365)`
 - the horizon uses calendar days from `baseDate` to `simulatedDate`
 - simulation runs in a Web Worker
@@ -205,9 +229,66 @@ Imported groups are appended into the current in-memory session.
 
 ## Running the Project
 
-### Frontend only
+### Recommended local startup
 
-Open `index.html` in a modern browser.
+Using a local HTTP server is recommended over opening `index.html` via `file://`, because browsers apply stricter security rules to local file origins.
+
+#### Frontend only
+
+Start a static server from the project root:
+
+```bash
+python -m http.server 8000
+```
+
+Then open:
+
+```text
+http://localhost:8000/index.html
+```
+
+On macOS, `python3 -m http.server 8000` may be required instead.
+
+#### Frontend + IBKR live bridge
+
+1. Start TWS or Gateway with API access enabled.
+2. Install Python dependencies:
+
+```bash
+pip install ib_async websockets
+```
+
+3. In one terminal, start the static frontend server:
+
+```bash
+python -m http.server 8000
+```
+
+4. In a second terminal, start the IB bridge:
+
+```bash
+python ib_server.py
+```
+
+5. Open:
+
+```text
+http://localhost:8000/index.html
+```
+
+6. If needed, match the frontend's local WS port override to the port in `config.ini`.
+
+#### One-click startup scripts
+
+The project root includes convenience launchers:
+
+- Windows: `start_option_combo.bat`
+- macOS: `start_option_combo_mac.command`
+
+They start both:
+
+- the static frontend server on `http://localhost:8000/index.html`
+- the IB WebSocket bridge on `ws://localhost:8765`
 
 ### Refresh probability parameters
 
@@ -219,24 +300,7 @@ python scripts/fit_underlying.py SPY QQQ AAPL
 This updates:
 
 - `t_params_db.json`
-- `t_params_db.js`
-
-### Live IBKR bridge
-
-1. Start TWS or Gateway with API access enabled.
-2. Install Python dependencies:
-
-```bash
-pip install ib_async websockets
-```
-
-3. Start the bridge:
-
-```bash
-python ib_server.py
-```
-
-4. If needed, match the frontend's local WS port override to the port in `config.ini`.
+- `js/t_params_db.js`
 
 ## Current Notes
 

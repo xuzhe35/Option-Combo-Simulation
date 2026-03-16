@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<contract-catalog version="1">
+  <contract id="ES" file="es.xml" />
+  <contract id="NQ" file="nq.xml" />
+  <contract id="SPX" file="spx.xml" />
+  <contract id="NDX" file="ndx.xml" />
+  <contract id="CL" file="cl.xml" />
+  <contract id="GC" file="gc.xml" />
+  <contract id="SI" file="si.xml" />
+  <contract id="HG" file="hg.xml" />
+</contract-catalog>

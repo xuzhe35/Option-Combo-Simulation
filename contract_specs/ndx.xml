@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<contract-spec id="NDX" version="1" status="provisional">
+  <identity>
+    <code>NDX</code>
+    <display-name>Nasdaq-100 index option</display-name>
+    <instrument-group>equity-index</instrument-group>
+    <product-type>index-option</product-type>
+    <ib-product-type>Equity Index</ib-product-type>
+  </identity>
+  <ib-contract>
+    <sec-type>OPT</sec-type>
+    <symbol>NDXP</symbol>
+    <exchange>SMART</exchange>
+    <routing-exchange>SMART</routing-exchange>
+    <currency>USD</currency>
+    <multiplier>100</multiplier>
+    <trading-class status="verified-from-tws-image">NDXP</trading-class>
+    <contract-month-format>YYYYMM</contract-month-format>
+    <expiry-format>YYYYMMDD</expiry-format>
+    <local-symbol-example status="verified-from-tws-image">NDXP 260316P24370000</local-symbol-example>
+  </ib-contract>
+  <underlying>
+    <sec-type>IND</sec-type>
+    <symbol>NDX</symbol>
+    <currency>USD</currency>
+  </underlying>
+  <variable-fields>
+    <contract-month format="YYYYMM" required="true" />
+    <expiry format="YYYYMMDD" required="true" />
+    <last-trading-datetime format="YYYYMMDD HH:mm:ss" timezone="America/New_York" required="false" />
+    <right allowed-values="C,P" required="true" />
+    <strike format="decimal" required="true" />
+    <underlying-expiry required="false" />
+    <local-symbol required="false" />
+    <con-id required="false" />
+  </variable-fields>
+  <settlement>
+    <exercise-style status="verified-from-tws-image">European</exercise-style>
+    <settlement-method status="verified-from-tws-image">Cash</settlement-method>
+    <delivery-type status="verified-from-tws-image">cash</delivery-type>
+    <unit>index-points</unit>
+    <min-tick status="verified-from-tws-image">0.10</min-tick>
+  </settlement>
+  <notes>
+    <note>Updated from a TWS contract description screenshot for a specific NDXP put series.</note>
+    <note>Underlying sec-type is IND, so no underlying exchange is stored here.</note>
+    <note>Keep contract month, expiry, right, strike, local symbol, and conId as runtime selectors when locking a concrete contract.</note>
+  </notes>
+</contract-spec>

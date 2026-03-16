@@ -132,9 +132,21 @@ class PnLChart {
         // Process all legs globally before the 500-point chart array loop
         // Use per-leg _viewMode (injected by Global Chart flattener) if available, else group-level
         const activeViewMode = group.viewMode || 'active';
+        const underlyingProfile = typeof OptionComboProductRegistry === 'undefined'
+            ? null
+            : OptionComboProductRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol);
         const processedLegs = group.legs.map(leg => {
             const legViewMode = leg._viewMode || activeViewMode;
-            return processLegData(leg, globalState.simulatedDate, globalState.ivOffset, globalState.baseDate, globalState.underlyingPrice, globalState.interestRate, legViewMode);
+            return processLegData(
+                leg,
+                globalState.simulatedDate,
+                globalState.ivOffset,
+                globalState.baseDate,
+                globalState.underlyingPrice,
+                globalState.interestRate,
+                legViewMode,
+                underlyingProfile
+            );
         });
 
         const step = (maxS - minS) / (this.pointsCount - 1);

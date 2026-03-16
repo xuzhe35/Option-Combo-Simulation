@@ -20,6 +20,10 @@
 
 'use strict';
 
+function _isGroupIncludedInGlobal(group) {
+    return group.includedInGlobal !== false;
+}
+
 // -----------------------------------------------------------------------
 // 1.  Monte Carlo Web Worker  (inline blob — works under file:// protocol)
 // -----------------------------------------------------------------------
@@ -238,12 +242,15 @@ function _computePortfolioPnLAtPrice(price) {
 
     let totalValue = 0;
     let totalCost = 0;
+    const underlyingProfile = typeof OptionComboProductRegistry === 'undefined'
+        ? null
+        : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
 
-    state.groups.forEach(group => {
+    state.groups.filter(_isGroupIncludedInGlobal).forEach(group => {
         const activeViewMode = group.viewMode || 'active';
         group.legs.forEach(leg => {
             // Use processLegData to handle unified BSM formatting (Exp, Implied Vol offset, T)
-            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode);
+            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode, underlyingProfile);
             // Use unified simulation price (includes Zero-Delta bypass at current price)
             const pps = computeSimulatedPrice(
                 pLeg, leg, price, state.interestRate,
@@ -715,12 +722,13 @@ function updateProbCharts() {
     _ensureCharts();
 
     // Guard: need at least one leg
-    const allLegs = state.groups.flatMap(g => g.legs);
+    const includedGroups = state.groups.filter(_isGroupIncludedInGlobal);
+    const allLegs = includedGroups.flatMap(g => g.legs);
     if (allLegs.length === 0) {
-        _probChart && _probChart.drawEmpty('Add option legs to see probability analysis.');
-        _epnlChart && _epnlChart.drawEmpty('Add option legs to see expected P&L density.');
+        _probChart && _probChart.drawEmpty('Select at least one included group to see probability analysis.');
+        _epnlChart && _epnlChart.drawEmpty('Select at least one included group to see expected P&L density.');
         _setExpectedPnLBadge(null);
-        _setInfoText('No legs in portfolio.');
+        _setInfoText('No globally included legs in portfolio.');
         return;
     }
 
@@ -747,15 +755,25 @@ function updateProbCharts() {
     const { minS, maxS } = getGlobalChartRange();
     if (minS >= maxS) return;
 
+    const underlyingProfile = typeof OptionComboProductRegistry === 'undefined'
+        ? null
+        : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
+
     // t-distribution parameters lookup
     const underlying = state.underlyingSymbol || 'SPY';
-    const params = T_DIST_PARAMS_DB[underlying];
+    const distributionSymbol = typeof OptionComboDistributionProxyConfig === 'undefined'
+        ? underlying
+        : OptionComboDistributionProxyConfig.resolveDistributionSymbol(underlying, underlyingProfile);
+    const params = T_DIST_PARAMS_DB[distributionSymbol];
 
     if (!params) {
-        _probChart && _probChart.drawEmpty(`No distribution parameters for ${underlying}. Please run backend script.`);
-        _epnlChart && _epnlChart.drawEmpty(`Run: python scripts/fit_underlying.py ${underlying}`);
+        const distributionLabel = distributionSymbol === underlying
+            ? distributionSymbol
+            : `${distributionSymbol} (proxy for ${underlying})`;
+        _probChart && _probChart.drawEmpty(`No distribution parameters for ${distributionLabel}. Please run backend script.`);
+        _epnlChart && _epnlChart.drawEmpty(`Run: python scripts/fit_underlying.py ${distributionSymbol}`);
         _setExpectedPnLBadge(null);
-        _setInfoText(`Missing parameters for ${underlying}.`);
+        _setInfoText(`Missing distribution parameters for ${distributionLabel}.`);
         return;
     }
 
@@ -770,7 +788,8 @@ function updateProbCharts() {
     _probChart && _probChart.drawLoading();
     _epnlChart && _epnlChart.drawLoading();
     const driftLabel = useRandomWalk ? ', Random Walk' : '';
-    _setInfoText(`Simulating 1M paths × ${nCalDays} cd  (IV ${(portfolioIV * 100).toFixed(1)}%${driftLabel})…`);
+    const proxyInfoText = distributionSymbol === underlying ? '' : ` | Dist Proxy: ${distributionSymbol}`;
+    _setInfoText(`Simulating 1M paths × ${nCalDays} cd  (IV ${(portfolioIV * 100).toFixed(1)}%${driftLabel})${proxyInfoText}…`);
     _setExpectedPnLBadge(null);
 
     // Terminate any previous in-flight simulation
@@ -779,10 +798,10 @@ function updateProbCharts() {
     // Assemble legs for exact MC Pricing
     const simDateObj = new Date(state.simulatedDate + 'T00:00:00Z');
     const workerLegs = [];
-    state.groups.forEach(group => {
+    includedGroups.forEach(group => {
         group.legs.forEach(leg => {
             const activeViewMode = group.viewMode || 'active';
-            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode);
+            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode, underlyingProfile);
 
             let fixedPrice = undefined;
             if (leg.closePrice !== null && leg.closePrice !== '') {
@@ -822,6 +841,8 @@ function updateProbCharts() {
     const _currentPrice = state.underlyingPrice;
     const _loc = loc;
     const _useRandomWalk = useRandomWalk;
+    const _underlying = underlying;
+    const _distributionSymbol = distributionSymbol;
 
     _activeWorker.onmessage = (e) => {
         _activeWorker = null;
@@ -856,7 +877,8 @@ function updateProbCharts() {
         _setInfoText(
             `1M paths | ${_nCalDays} cd | ` +
             `Mean IV: ${(_portfolioIV * 100).toFixed(1)}%` +
-            (_useRandomWalk ? ' | Random Walk' : '')
+            (_useRandomWalk ? ' | Random Walk' : '') +
+            (_distributionSymbol !== _underlying ? ` | Dist Proxy: ${_distributionSymbol}` : '')
         );
     };
 

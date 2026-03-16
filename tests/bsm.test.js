@@ -163,6 +163,37 @@ module.exports = {
             },
         },
         {
+            name: 'uses product-family multipliers for non-equity option symbols',
+            run() {
+                const ctx = loadPricingContext();
+                const profile = ctx.OptionComboProductRegistry.resolveUnderlyingProfile('ES');
+                const processed = ctx.processLegData(
+                    {
+                        type: 'call',
+                        pos: 1,
+                        strike: 6000,
+                        expDate: '2026-04-13',
+                        iv: 0.25,
+                        cost: 12.5,
+                        currentPrice: 13.1,
+                    },
+                    '2026-03-14',
+                    0,
+                    '2026-03-14',
+                    6100,
+                    0.03,
+                    'active',
+                    profile
+                );
+
+                assert.equal(ctx.getMultiplier(profile), 50);
+                assert.equal(ctx.getSettlementUnitsPerContract(profile), 1);
+                assert.equal(processed.contractMultiplier, 50);
+                assert.equal(processed.posMultiplier, 50);
+                assert.equal(processed.costBasis, 625);
+            },
+        },
+        {
             name: 'computes leg prices for stock, expired options, and live trial bypass',
             run() {
                 const ctx = loadPricingContext();
