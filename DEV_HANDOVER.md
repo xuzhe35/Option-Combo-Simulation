@@ -6,35 +6,175 @@
 
 This is a local browser app for options-combo scenario analysis with optional IBKR live data.
 
-The current product includes:
+It started as a stock/ETF option analyzer and has now been partially generalized to support:
 
-- option legs and stock legs inside combo groups
-- separate hedge rows for live stock or ETF tracking
-- four combo-group modes: `trial`, `active`, `amortized`, `settlement`
-- group-level P&L charts
-- group-level amortized-basis charts
-- global portfolio P&L chart
-- global amortized banner and global amortized chart
-- probability analysis charts
+- equity / ETF options
+- ES and NQ futures options (`FOP`) for live-data testing
+- SPX and NDX index options
+- contract metadata for CL / GC / SI / HG futures options
+
+Important status:
+
+- equity / ETF flow is still the most mature path
+- ES / NQ live option subscriptions now work well enough for active testing
+- SPX / NDX option legs can stream even if the underlying index quote is not updating
+- FOP analytics still use the current app framework and are not yet a true futures-option analytics engine
 
 ## 2. Script Model
 
 The frontend still depends on ordered global scripts in `index.html`.
+All browser-side JavaScript lives under `js/`.
 
 Current order:
 
-1. `t_params_db.js`
-2. `market_holidays.js`
-3. `bsm.js`
-4. `chart.js`
-5. `prob_charts.js`
-6. `chart_controls.js`
-7. `app.js`
-8. `ws_client.js`
+1. `js/t_params_db.js`
+2. `js/market_holidays.js`
+3. `js/date_utils.js`
+4. `js/product_registry.js`
+5. `js/distribution_proxy_config.js`
+6. `js/pricing_core.js`
+7. `js/bsm.js`
+8. `js/chart.js`
+9. `js/prob_charts.js`
+10. `js/chart_controls.js`
+11. `js/amortized.js`
+12. `js/valuation.js`
+13. `js/session_logic.js`
+14. `js/session_ui.js`
+15. `js/control_panel_ui.js`
+16. `js/hedge_editor_ui.js`
+17. `js/group_editor_ui.js`
+18. `js/hedge_ui.js`
+19. `js/group_ui.js`
+20. `js/global_ui.js`
+21. `js/app.js`
+22. `js/ws_client.js`
 
-## 3. Pricing Source of Truth
+If something suddenly becomes `undefined` in the browser, check `index.html` script order first.
 
-`bsm.js` remains the math authority.
+## 3. Product Abstraction Layer
+
+The biggest recent change is `js/product_registry.js`.
+
+This file centralizes the non-equity assumptions that used to be scattered across pricing, valuation, UI, and live-data code.
+
+It currently defines family profiles for:
+
+- default equity / ETF
+- `ES`
+- `NQ`
+- `CL`
+- `GC`
+- `SI`
+- `HG`
+- `SPX`
+- `NDX`
+
+Key fields carried by the registry:
+
+- option security type
+- underlying security type
+- default option and underlying symbol
+- exchange
+- currency
+- trading class
+- option multiplier
+- settlement kind
+- pricing-model label
+- whether amortized mode is allowed
+- whether current live-data path is supported
+- whether stock-style underlying legs are allowed
+
+Current important behavior:
+
+- premium multiplier is no longer hard-coded to `100`
+- `SPXW` resolves to family `SPX`
+- `NDXP` resolves to family `NDX`
+- FOP families expose `underlyingSecType = FUT`
+- SPX / NDX expose `underlyingSecType = IND`
+
+## 4. Supported Instrument Families
+
+### Equity / ETF options
+
+This is still the reference path.
+
+- pricing uses spot-style BSM within current app assumptions
+- stock legs are supported
+- amortized mode is supported
+- live data uses the legacy stock / option flow
+
+### ES / NQ futures options
+
+These are the most advanced non-equity additions so far.
+
+- live data path is enabled
+- global `Underlying Contract Month` control is used to lock the underlying futures month
+- option pricing still uses the current app framework, not a dedicated Black-76 style futures-option model
+- amortized mode is disabled
+- stock-style underlying legs are disabled
+
+### SPX / NDX index options
+
+- live option subscriptions are enabled
+- underlying is treated as `IND`
+- cash-settled semantics are recognized
+- amortized mode is disabled
+- stock-style underlying legs are disabled
+
+Current caveat:
+
+- option quotes may stream while the underlying index quote itself is still absent or stale
+
+### CL / GC / SI / HG futures options
+
+Metadata has been added, but these are not fully operational in the browser yet.
+
+- family profiles exist in `js/product_registry.js`
+- XML descriptors exist in `contract_specs/`
+- live-data support is not fully validated end-to-end yet
+
+## 5. Contract Metadata
+
+Root folder:
+
+- `contract_specs/`
+
+This folder stores family-level XML descriptors for instruments whose IBKR contract identity is more complex than stock / ETF options.
+
+Current files include:
+
+- `catalog.xml`
+- `es.xml`
+- `nq.xml`
+- `spx.xml`
+- `ndx.xml`
+- `cl.xml`
+- `gc.xml`
+- `si.xml`
+- `hg.xml`
+
+What these XML files contain:
+
+- product identity
+- IB contract defaults
+- settlement method
+- multiplier
+- trading class
+- example local symbols
+- notes on fields that vary per expiry / strike / series
+
+Important status:
+
+- these XML files are meant to become the long-term metadata source of truth
+- they are **not yet wired into runtime loading**
+- current runtime still uses `js/product_registry.js` as the active product metadata source
+
+## 6. Pricing Source of Truth
+
+`pricing_core.js` holds the pure pricing authority.
+`valuation.js` holds pure portfolio aggregation.
+`bsm.js` preserves the legacy global API used by older app code and tests.
 
 Do not duplicate pricing logic outside:
 
@@ -48,10 +188,43 @@ Important implementation facts:
 - trading-day counts are informational only
 - `closePrice` can override simulated pricing
 - stock legs bypass BSM and use the scenario underlying directly
+- option multiplier now comes from the product registry, not a global `100`
 
-## 4. State Model
+Important limitation:
 
-`app.js` owns the session state.
+- FOP families are currently carried by the same overall pricing framework, so analytics are still approximate
+- live market marks are useful; theoretical FOP modeling is still unfinished
+
+## 7. Settlement and Amortized Semantics
+
+`amortized.js` and related UI were originally written for equity-style deliverable options.
+
+That is still true in spirit, so recent work deliberately prevents incorrect behavior from being shown for products that do not fit that model.
+
+Current behavior:
+
+- equity / ETF combos can use amortized mode
+- FOP families cannot use amortized mode
+- SPX / NDX cannot use amortized mode
+
+Reason:
+
+- FOPs deliver into futures, not shares
+- SPX / NDX are cash-settled index options
+- the current amortized engine assumes share-like delivery semantics
+
+## 8. State Model
+
+`app.js` owns the session state and top-level orchestration.
+Pure session helpers live in `js/session_logic.js`.
+
+Current state also includes:
+
+- `underlyingContractMonth`
+
+This field was added for FOP live-data qualification and is currently a **global combo-wide control**, not a per-leg field.
+
+That design is intentional for now because P&L charts assume a single aligned underlying x-axis per combo.
 
 Important group fields:
 
@@ -71,132 +244,165 @@ Important leg fields:
 - `cost`
 - `closePrice`
 
-## 5. The Four Modes
+## 9. Control-Panel and UI Notes
 
-### `trial`
+Relevant files:
 
-- live idea mode
-- current price can act as effective starting cost
+- `js/control_panel_ui.js`
+- `js/session_ui.js`
+- `js/group_editor_ui.js`
 
-### `active`
+Recent UI behavior:
 
-- deterministic entry-cost mode
-- focuses on expected P&L from stored costs
+- the control panel shows `Underlying Contract Month` only when the selected symbol resolves to a product whose underlying security type is `FUT`
+- the field is disabled and marked `N/A for STK / IND` for equity / ETF and cash-settled index options
+- default values for ES / NQ are generated by `OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(...)`
 
-### `amortized`
+Default interpretation:
 
-- deterministic-cost scenario mode
-- intended for pre-settlement effective-basis analysis
-- uses `Scenario Underlying Price` when set
-- owns the yellow amortized banner
-- owns the group-level amortized chart
+- the field is meant to specify the underlying futures month used for live FOP qualification
+- format is `YYYYMM`
 
-### `settlement`
+## 10. Probability Analysis
 
-- final settlement-style scenario mode
-- shares the scenario-underlying concept
-- does not show amortized banner or amortized chart
+Probability analysis now has a separate proxy-mapping layer:
 
-Helper functions added around this split:
+- `js/distribution_proxy_config.js`
 
-- `isSettlementScenarioMode(viewMode)`
-- `groupHasDeterministicCost(group)`
+Reason:
 
-## 6. Amortized Calculations
+- front futures contracts like `ES` do not have a stable long-lived return history suitable for the existing Student-t fit workflow
 
-### Group-level
+Current mapping:
 
-`calculateAmortizedCost(group, evalUnderlyingPrice, globalState)` in `app.js` is the canonical amortized basis calculation.
+- `ES -> SPY`
+- `SPX -> SPY`
+- `SPXW -> SPY`
+- `NQ -> QQQ`
+- `NDX -> QQQ`
+- `NDXP -> QQQ`
+- `GC -> GLD`
+- `SI -> SLV`
 
-It computes:
+`js/prob_charts.js` now resolves a distribution symbol through this config before consulting `T_DIST_PARAMS_DB`.
 
-- initial cash outflow
-- residual option value
-- assignment or delivery cash
-- resulting net shares
-- effective basis
+This logic is intentionally configurable and should be extended here rather than hard-coded elsewhere.
 
-This feeds both:
+## 11. Live Data Architecture
 
-- the group-level yellow amortized banner
-- `AmortizationChart` in `chart.js`
+### Frontend
 
-### Global-level
+`js/ws_client.js` now sends a more structured contract payload.
 
-`calculateCombinedAmortizedCost(groups, globalState)` combines all groups currently in `amortized` mode.
+The payload can include:
 
-This powers the global amortized banner.
+- `secType`
+- `symbol`
+- `exchange`
+- `currency`
+- `multiplier`
+- `tradingClass`
+- `contractMonth`
+- `underlyingContractMonth`
+- `strike`
+- `right`
+- `expDate`
 
-Important semantic detail:
+### Backend
 
-- the global amortized banner uses each amortized group's own scenario-price override when present
+`ib_server.py` now dynamically builds IB contracts instead of assuming everything is `Stock(...)` or stock-style `Option(...)`.
 
-## 7. Global Amortized Chart
+It now handles:
 
-The global amortized chart was added after amortized mode became independent from settlement.
+- `STK`
+- `IND`
+- `FUT`
+- `OPT`
+- `FOP`
 
-Implementation details:
+Important FOP behavior:
 
-- UI lives in `index.html` under `#globalAmortizedCard`
-- control logic lives in `chart_controls.js`
-- rendering reuses `AmortizationChart`
-- the chart combines all groups currently in `amortized` mode into one virtual portfolio
+- the server can qualify the underlying future first
+- if that succeeds, it uses `underConId` to help qualify the option
+- if a first FOP attempt fails with a populated `tradingClass`, it may retry without `tradingClass`
 
-Important semantic detail:
+Important SPX / NDX behavior:
 
-- unlike the banner, the global amortized chart uses a shared global scenario-price x-axis
+- option subscriptions are allowed even if the underlying `IND` contract does not qualify or does not stream
+- this was needed because the option legs themselves can still be useful for live testing
 
-So the two outputs answer related but different questions:
+## 12. IBKR Runtime Notes
 
-- banner: combined effective basis using each group's own override
-- chart: combined amortized portfolio behavior across a common scenario-price range
+Useful runtime files:
 
-## 8. Chart Ownership
+- `ib_server.py`
+- `ib_server.codex.log`
+- `ib_server.codex.err.log`
+- `ib_server.codex.pid`
 
-### `chart.js`
+The local server binds to `127.0.0.1:8765` by default unless changed through config.
 
-Owns:
+When testing locally on this machine, Python has been available at:
 
-- `PnLChart`
-- `AmortizationChart`
+- `C:\Users\xuzhe\AppData\Local\Programs\Python\Python313\python.exe`
 
-### `chart_controls.js`
+Recommended manual startup:
 
-Owns:
+1. `python -m http.server 8000`
+2. `python ib_server.py`
+3. open `http://localhost:8000/index.html`
 
-- group P&L chart controls
-- group amortized chart controls
-- global P&L chart controls
-- global amortized chart controls
+Current Windows helper entry point still exists:
 
-New global amortized functions:
+- `start_option_combo.bat`
 
-- `toggleGlobalAmortizedChart(...)`
-- `setGlobalAmortizedChartRangeMode(...)`
-- `triggerGlobalAmortizedChartRedraw()`
-- `drawGlobalAmortizedChart(...)`
+## 13. What To Trust
 
-## 9. Live Data Notes
+If future notes and code disagree, trust in this order:
 
-`ws_client.js` now supports a local browser-side port override.
+1. `js/product_registry.js` for current instrument-family assumptions
+2. `js/pricing_core.js` for pricing behavior
+3. `js/valuation.js` and `js/session_logic.js` for pure aggregation and session behavior
+4. `js/ws_client.js` and `ib_server.py` for live-data contract resolution
+5. UI modules for browser rendering behavior
+6. `contract_specs/*.xml` for family-level IB metadata reference, but remember runtime does not yet load them
 
-Current behavior:
+## 14. Current Caveats
 
-- default is `localhost:8765`
-- the override UI is hidden unless expanded
-- the chosen port is stored in browser local storage
-- the backend still reads its bind port from `config.ini`
+- the app is no longer stock-only, but it is also not yet a general-purpose derivatives engine
+- FOP pricing is still approximate within the existing framework
+- ES / NQ live data assumes the whole combo shares one `underlyingContractMonth`
+- if a combo truly mixes different underlying futures months, current chart semantics do not support that cleanly
+- SPX / NDX option legs can stream while the underlying index quote is still missing
+- CL / GC / SI / HG metadata exists, but live and analytics support is not fully finished
+- `contract_specs/` and `js/product_registry.js` currently duplicate some truth and should eventually be unified
 
-## 10. What To Trust
+## 15. Recommended Next Steps
 
-If future docs and code disagree, trust:
+If work resumes from here, the most useful next steps are:
 
-1. `bsm.js` for pricing behavior
-2. `app.js` for mode behavior and amortized aggregation
-3. `chart_controls.js` and `chart.js` for chart behavior
+1. Load `contract_specs/*.xml` into runtime metadata so `js/product_registry.js` stops being a hand-maintained mirror.
+2. Strengthen FOP contract qualification around weekly / monthly series and underlying futures month resolution.
+3. Add validated live-data support for CL / GC / SI / HG.
+4. Decide whether FOP analytics should remain approximate or move to a proper futures-option model.
+5. Revisit SPX / NDX underlying index handling only if underlying live sync becomes necessary for the UI.
 
-## 11. Current Caveats
+## 16. Current Test Coverage
 
-- only groups in `amortized` mode contribute to the global amortized result
-- `amortized` requires deterministic costs, so zero-cost groups are forced away from it
-- the global amortized banner and global amortized chart do not use identical scenario semantics by design
+Node-side regression coverage currently exists for:
+
+- `market_holidays.js`
+- `product_registry.js`
+- `distribution_proxy_config.js`
+- `bsm.js` compatibility behavior
+- `amortized.js`
+- `valuation.js`
+- `session_logic.js`
+- `session_ui.js`
+- `control_panel_ui.js`
+- `group_editor_ui.js`
+- `hedge_editor_ui.js`
+
+Current suite count:
+
+- `45 passed, 0 failed`

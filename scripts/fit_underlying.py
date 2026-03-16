@@ -4,7 +4,7 @@ Underlying Student-t Distribution Fitting Script
 ==========================================
 Downloads historical daily data for specified tickers for the last 10 years,
 fits a Student-t distribution to the log-returns using MLE for each ticker,
-and updates t_params_db.json and t_params_db.js for use by the browser Monte Carlo engine.
+and updates t_params_db.json and js/t_params_db.js for use by the browser Monte Carlo engine.
 
 Usage:
     python fit_underlying.py [TICKER1] [TICKER2] ...
@@ -81,7 +81,8 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_dir = os.path.dirname(script_dir)
     json_path = os.path.join(project_dir, "t_params_db.json")
-    js_path = os.path.join(project_dir, "t_params_db.js")
+    js_path = os.path.join(project_dir, "js", "t_params_db.js")
+    os.makedirs(os.path.dirname(js_path), exist_ok=True)
 
     db = {}
     if os.path.exists(json_path):

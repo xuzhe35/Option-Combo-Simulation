@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<contract-spec id="ES" version="1" status="provisional">
+  <identity>
+    <code>ES</code>
+    <display-name>E-mini S&amp;P 500 futures option</display-name>
+    <instrument-group>equity-index</instrument-group>
+    <product-type>futures-option</product-type>
+    <ib-product-type>Equity Index</ib-product-type>
+  </identity>
+  <ib-contract>
+    <sec-type>FOP</sec-type>
+    <symbol>ES</symbol>
+    <exchange>CME</exchange>
+    <routing-exchange>CME</routing-exchange>
+    <currency>USD</currency>
+    <multiplier>50</multiplier>
+    <trading-class status="verified-from-tws-image">E3A</trading-class>
+    <contract-month-format>YYYYMM</contract-month-format>
+    <expiry-format>YYYYMMDD</expiry-format>
+    <local-symbol-example status="verified-from-tws-image">E3AH6 P6620</local-symbol-example>
+  </ib-contract>
+  <underlying>
+    <sec-type>FUT</sec-type>
+    <symbol>ES</symbol>
+    <exchange>CME</exchange>
+    <currency>USD</currency>
+    <multiplier>50</multiplier>
+    <contract-month-example status="verified-from-tws-image">202603</contract-month-example>
+    <local-symbol-example status="verified-from-tws-image">ESH6</local-symbol-example>
+  </underlying>
+  <variable-fields>
+    <contract-month format="YYYYMM" required="true" />
+    <expiry format="YYYYMMDD" required="true" />
+    <last-trading-datetime format="YYYYMMDD HH:mm:ss" timezone="America/Chicago" required="false" />
+    <right allowed-values="C,P" required="true" />
+    <strike format="decimal" required="true" />
+    <underlying-expiry format="YYYYMM" required="false" />
+    <local-symbol required="false" />
+    <con-id required="false" />
+  </variable-fields>
+  <settlement>
+    <exercise-style status="verified-from-tws-image">European</exercise-style>
+    <settlement-method status="verified-from-tws-image">Physical Delivery</settlement-method>
+    <delivery-type status="verified-from-tws-image">futures-position</delivery-type>
+    <unit>index-points</unit>
+    <min-tick status="verified-from-tws-image">0.25</min-tick>
+  </settlement>
+  <notes>
+    <note>Updated from a TWS contract description screenshot for a specific ES put series.</note>
+    <note>Family-level symbol remains ES, while the IB local symbol varies by contract instance.</note>
+    <note>Keep contract month, expiry, right, strike, local symbol, and conId as runtime selectors when locking a concrete contract.</note>
+  </notes>
+</contract-spec>

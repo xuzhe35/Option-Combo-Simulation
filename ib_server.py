@@ -4,6 +4,7 @@ import logging
 import random
 import signal
 import configparser
+from datetime import datetime
 from ib_async import *
 import websockets
 
@@ -24,6 +25,30 @@ ib = IB()
 connected_clients = set()
 # Map websocket -> { leg_id: Ticker }
 client_subscriptions = {}
+qualified_underlyings = {}
+
+SUPPORTED_LIVE_FAMILIES = {
+    'ES': {
+        'underlying_sec_type': 'FUT',
+        'option_sec_type': 'FOP',
+        'underlying_symbol': 'ES',
+        'option_symbol': 'ES',
+        'exchange': 'CME',
+        'currency': 'USD',
+        'multiplier': '50',
+        'trading_class': 'E3A',
+    },
+    'NQ': {
+        'underlying_sec_type': 'FUT',
+        'option_sec_type': 'FOP',
+        'underlying_symbol': 'NQ',
+        'option_symbol': 'NQ',
+        'exchange': 'CME',
+        'currency': 'USD',
+        'multiplier': '20',
+        'trading_class': 'Q3A',
+    },
+}
 
 async def connect_ib():
     """Connect to IB TWS/Gateway. Retries indefinitely — one connection per session.
@@ -59,8 +84,8 @@ async def connect_ib():
             # Always remove the temporary listener so it doesn't fire during normal operation
             ib.errorEvent -= _capture_error
 
-def _extract_stock_price(ticker):
-    """Extract the best available price from a stock ticker.
+def _extract_market_price(ticker):
+    """Extract the best available price from a market-data ticker.
     Fallback chain: marketPrice() → last → close.
     Returns the price (float) or None if no valid price is available.
     """
@@ -73,6 +98,209 @@ def _extract_stock_price(ticker):
         else:
             return None
     return price
+
+def _normalize_symbol(value):
+    return str(value or '').strip().upper()
+
+def _to_contract_month(value):
+    cleaned = str(value or '').replace('-', '')
+    return cleaned[:6]
+
+def _to_expiry(value):
+    return str(value or '').replace('-', '')
+
+def _resolve_family_defaults(symbol):
+    normalized = _normalize_symbol(symbol)
+    return SUPPORTED_LIVE_FAMILIES.get(normalized)
+
+def _resolve_weekly_fop_trading_class(symbol, expiry, current_trading_class):
+    defaults = _resolve_family_defaults(symbol)
+    if not defaults:
+        return current_trading_class
+
+    base_trading_class = current_trading_class or defaults.get('trading_class') or ''
+    if not base_trading_class or len(base_trading_class) < 2:
+        return base_trading_class
+
+    try:
+        expiry_date = datetime.strptime(expiry, '%Y%m%d')
+    except (TypeError, ValueError):
+        return base_trading_class
+
+    weekday_suffix = {
+        0: 'A',  # Monday
+        1: 'B',  # Tuesday
+        2: 'C',  # Wednesday
+        3: 'D',  # Thursday
+    }.get(expiry_date.weekday())
+
+    if weekday_suffix:
+        return f"{base_trading_class[:-1]}{weekday_suffix}"
+    return base_trading_class
+
+async def _qualify_underlying_future(symbol, contract_month, exchange, currency, multiplier):
+    cache_key = (
+        _normalize_symbol(symbol),
+        _to_contract_month(contract_month),
+        exchange or '',
+        currency or 'USD',
+        str(multiplier or ''),
+    )
+    if cache_key in qualified_underlyings:
+        return qualified_underlyings[cache_key]
+
+    future_contract = Contract(
+        secType='FUT',
+        symbol=cache_key[0],
+        lastTradeDateOrContractMonth=cache_key[1],
+        exchange=cache_key[2],
+        currency=cache_key[3],
+        multiplier=cache_key[4],
+    )
+    results = await ib.qualifyContractsAsync(future_contract)
+    if not results or results[0] is None:
+        return None
+
+    qualified_underlyings[cache_key] = results[0]
+    return results[0]
+
+def _build_contract_from_request(contract_data):
+    if not isinstance(contract_data, dict):
+        symbol = _normalize_symbol(contract_data)
+        return Stock(symbol, 'SMART', 'USD')
+
+    sec_type = _normalize_symbol(contract_data.get('secType') or contract_data.get('sec_type'))
+    symbol = _normalize_symbol(contract_data.get('symbol'))
+    exchange = contract_data.get('exchange') or ''
+    currency = contract_data.get('currency') or 'USD'
+    multiplier = str(contract_data.get('multiplier') or '')
+    trading_class = contract_data.get('tradingClass') or contract_data.get('trading_class') or ''
+    strike = contract_data.get('strike')
+    right = _normalize_symbol(contract_data.get('right'))
+    expiry = _to_expiry(contract_data.get('expDate') or contract_data.get('expiry'))
+    contract_month = _to_contract_month(contract_data.get('contractMonth'))
+    trading_class = _resolve_weekly_fop_trading_class(symbol, expiry, trading_class)
+
+    if sec_type == 'STK':
+        return Stock(symbol, exchange or 'SMART', currency)
+
+    if sec_type == 'IND':
+        return Contract(secType='IND', symbol=symbol, exchange=exchange, currency=currency)
+
+    if sec_type == 'FUT':
+        return Contract(
+            secType='FUT',
+            symbol=symbol,
+            lastTradeDateOrContractMonth=contract_month,
+            exchange=exchange,
+            currency=currency,
+            multiplier=multiplier,
+        )
+
+    if sec_type in ('OPT', 'FOP'):
+        return Contract(
+            secType=sec_type,
+            symbol=symbol,
+            lastTradeDateOrContractMonth=expiry or contract_month,
+            strike=float(strike),
+            right=right,
+            exchange=exchange,
+            currency=currency,
+            multiplier=multiplier,
+            tradingClass=trading_class,
+        )
+
+    raise ValueError(f"Unsupported secType in request: {sec_type!r}")
+
+async def _qualify_one(contract, contract_request=None):
+    sec_type = ''
+    underlying_contract_month = ''
+    if isinstance(contract_request, dict):
+        sec_type = _normalize_symbol(contract_request.get('secType') or contract_request.get('sec_type'))
+        if sec_type == 'FOP':
+            underlying_contract_month = _to_contract_month(contract_request.get('underlyingContractMonth'))
+            if underlying_contract_month:
+                defaults = _resolve_family_defaults(contract_request.get('symbol'))
+                underlying_symbol = _normalize_symbol(
+                    contract_request.get('underlyingSymbol')
+                    or (defaults or {}).get('underlying_symbol')
+                    or contract_request.get('symbol')
+                )
+                underlying_exchange = (
+                    contract_request.get('underlyingExchange')
+                    or (defaults or {}).get('exchange')
+                    or contract_request.get('exchange')
+                    or ''
+                )
+                underlying_currency = (
+                    contract_request.get('underlyingCurrency')
+                    or contract_request.get('currency')
+                    or (defaults or {}).get('currency')
+                    or 'USD'
+                )
+                underlying_multiplier = str(
+                    contract_request.get('underlyingMultiplier')
+                    or (defaults or {}).get('multiplier')
+                    or contract_request.get('multiplier')
+                    or ''
+                )
+                qualified_underlying = await _qualify_underlying_future(
+                    underlying_symbol,
+                    underlying_contract_month,
+                    underlying_exchange,
+                    underlying_currency,
+                    underlying_multiplier,
+                )
+                if qualified_underlying is None:
+                    logging.error(
+                        f"Failed to qualify underlying FUT {underlying_symbol} {underlying_contract_month} "
+                        f"for option {_describe_contract_request(contract_request)}"
+                    )
+                    return None
+                contract.underConId = qualified_underlying.conId
+
+    results = await ib.qualifyContractsAsync(contract)
+    if (not results or results[0] is None) and sec_type == 'FOP' and underlying_contract_month and getattr(contract, 'tradingClass', ''):
+        original_trading_class = contract.tradingClass
+        contract.tradingClass = ''
+        results = await ib.qualifyContractsAsync(contract)
+        if results and results[0] is not None:
+            logging.info(
+                f"Qualified {_describe_contract_request(contract_request)} using underConId fallback "
+                f"without tradingClass {original_trading_class}"
+            )
+    if not results or results[0] is None:
+        return None
+    return results[0]
+
+def _build_underlying_request(raw_underlying, options_data):
+    if isinstance(raw_underlying, dict):
+        return raw_underlying
+
+    symbol = _normalize_symbol(raw_underlying)
+    defaults = _resolve_family_defaults(symbol)
+    if not defaults:
+        return raw_underlying
+
+    option_contract_month = ''
+    if options_data:
+        option_contract_month = _to_contract_month(options_data[0].get('contractMonth') or options_data[0].get('expDate'))
+
+    return {
+        'secType': defaults['underlying_sec_type'],
+        'symbol': defaults['underlying_symbol'],
+        'exchange': defaults['exchange'],
+        'currency': defaults['currency'],
+        'multiplier': defaults['multiplier'],
+        'contractMonth': option_contract_month,
+    }
+
+def _describe_contract_request(contract_data):
+    if isinstance(contract_data, dict):
+        sec_type = _normalize_symbol(contract_data.get('secType') or contract_data.get('sec_type'))
+        symbol = _normalize_symbol(contract_data.get('symbol'))
+        return f"{sec_type or 'UNKNOWN'} {symbol or '<missing>'}".strip()
+    return _normalize_symbol(contract_data) or '<missing>'
 
 def on_pending_tickers(tickers):
     """
@@ -98,8 +326,8 @@ def on_pending_tickers(tickers):
         
         if 'underlying' in subs:
             ticker = subs['underlying']
-            price = ticker.marketPrice()
-            if price == price and price > 0: # Check for NaN
+            price = _extract_market_price(ticker)
+            if price is not None:
                 payload["underlyingPrice"] = price
                 has_data = True
 
@@ -110,7 +338,7 @@ def on_pending_tickers(tickers):
             elif sub_id.startswith('stock_'):
                 # --- Stock / ETF hedge ---
                 stock_sym = sub_id.replace('stock_', '')
-                price = _extract_stock_price(ticker)
+                price = _extract_market_price(ticker)
                 if price is not None:
                     payload["stocks"][stock_sym] = {
                         "mark": price
@@ -207,77 +435,96 @@ async def handle_ws_client(websocket):
             data = json.loads(message)
             
             if data.get('action') == 'subscribe':
-                symbol = data.get('underlying')
+                raw_underlying = data.get('underlying')
                 options_data = data.get('options', [])
                 stocks_data = data.get('stocks', [])
+                underlying_request = _build_underlying_request(raw_underlying, options_data)
 
-                logging.info(f"Received subscription request from {client_ip} for underlying {symbol}, {len(options_data)} options, and {len(stocks_data)} stocks")
+                logging.info(
+                    f"Received subscription request from {client_ip} "
+                    f"for underlying {_describe_contract_request(underlying_request)}, "
+                    f"{len(options_data)} options, and {len(stocks_data)} stocks"
+                )
 
-                contract = Stock(symbol, 'SMART', 'USD')
-                # ib_async v2.0+: qualifyContractsAsync returns None for failures
-                # instead of raising, so we check the result explicitly.
-                results = await ib.qualifyContractsAsync(contract)
-                if not results or results[0] is None:
-                    logging.error(f"Failed to qualify underlying {symbol}")
+                try:
+                    underlying_contract = _build_contract_from_request(underlying_request)
+                except Exception as e:
+                    logging.error(f"Invalid underlying request from {client_ip}: {underlying_request!r} ({e})")
+                    continue
+
+                # Unsubscribe old streams for this specific client safely
+                unsubscribe_client_safely(websocket)
+
+                qualified_underlying = await _qualify_one(underlying_contract, underlying_request)
+                if qualified_underlying is None:
+                    logging.warning(
+                        f"Failed to qualify underlying {_describe_contract_request(underlying_request)}; "
+                        f"continuing with option subscriptions only"
+                    )
                 else:
-                    # Unsubscribe old streams for this specific client safely
-                    unsubscribe_client_safely(websocket)
-
-                    # Subscribe Underlying
-                    ticker = ib.reqMktData(contract, '', False, False)
+                    # Subscribe underlying price stream.
+                    ticker = ib.reqMktData(qualified_underlying, '', False, False)
                     client_subscriptions[websocket]['underlying'] = ticker
 
-                    # Process Options
-                    for opt in options_data:
-                        leg_id = opt['id']
-                        # Format YYYYMMDD
-                        exp_date = opt['expDate'].replace('-', '')
-                        strike = float(opt['strike'])
-                        right = opt['right'] # 'C' or 'P'
+                # Process options / FOP legs.
+                for opt in options_data:
+                    leg_id = opt['id']
+                    try:
+                        opt_contract = _build_contract_from_request(opt)
+                    except Exception as e:
+                        logging.error(f"Invalid option request for leg {leg_id}: {opt!r} ({e})")
+                        continue
 
-                        opt_contract = Option(symbol, exp_date, strike, right, 'SMART', multiplier='100', currency='USD')
-                        opt_results = await ib.qualifyContractsAsync(opt_contract)
-                        if not opt_results or opt_results[0] is None:
-                            logging.error(f"Failed to qualify option {strike} {right}")
-                        else:
-                            # genericTickList '106' explicitly requests Option Implied Volatility and Greeks
-                            opt_ticker = ib.reqMktData(opt_contract, '106', False, False)
-                            client_subscriptions[websocket][leg_id] = opt_ticker
+                    qualified_option = await _qualify_one(opt_contract, opt)
+                    if qualified_option is None:
+                        logging.error(f"Failed to qualify option leg {leg_id}: {_describe_contract_request(opt)}")
+                        continue
 
-                    # Process Stocks (Hedges)
-                    for stock_sym in stocks_data:
-                        stock_contract = Stock(stock_sym, 'SMART', 'USD')
-                        stock_results = await ib.qualifyContractsAsync(stock_contract)
-                        if not stock_results or stock_results[0] is None:
-                            logging.error(f"Failed to qualify hedge stock {stock_sym}")
-                        else:
-                            stock_ticker = ib.reqMktData(stock_contract, '', False, False)
-                            
-                            def make_stock_tick_handler(s, ws):
-                                def _on_stock_tick(t):
-                                    price = _extract_stock_price(t)
-                                    if price is not None:
-                                        payload = {"options": {}, "stocks": {s: {"mark": price}}}
-                                        asyncio.create_task(send_message_safe(ws, json.dumps(payload)))
-                                return _on_stock_tick
-                            
-                            stock_ticker.updateEvent += make_stock_tick_handler(stock_sym, websocket)
-                            client_subscriptions[websocket][f"stock_{stock_sym}"] = stock_ticker
-                            logging.info(f"Subscribed to stock: {stock_sym}")
+                    # Generic tick 106 requests option IV/model data; IB also serves it for FOP.
+                    opt_ticker = ib.reqMktData(qualified_option, '106', False, False)
+                    client_subscriptions[websocket][leg_id] = opt_ticker
+
+                # Process stock hedges.
+                for stock_sym in stocks_data:
+                    stock_contract = Stock(stock_sym, 'SMART', 'USD')
+                    qualified_stock = await _qualify_one(stock_contract)
+                    if qualified_stock is None:
+                        logging.error(f"Failed to qualify hedge stock {stock_sym}")
+                        continue
+
+                    stock_ticker = ib.reqMktData(qualified_stock, '', False, False)
+                    
+                    def make_stock_tick_handler(s, ws):
+                        def _on_stock_tick(t):
+                            price = _extract_market_price(t)
+                            if price is not None:
+                                payload = {"options": {}, "stocks": {s: {"mark": price}}}
+                                asyncio.create_task(send_message_safe(ws, json.dumps(payload)))
+                        return _on_stock_tick
+                    
+                    stock_ticker.updateEvent += make_stock_tick_handler(stock_sym, websocket)
+                    client_subscriptions[websocket][f"stock_{stock_sym}"] = stock_ticker
+                    logging.info(f"Subscribed to stock: {stock_sym}")
 
             elif data.get('action') == 'sync_underlying':
-                symbol = data.get('underlying')
-                contract = Stock(symbol, 'SMART', 'USD')
-                results = await ib.qualifyContractsAsync(contract)
-                if not results or results[0] is None:
-                    logging.error(f"Failed to manual sync underlying {symbol}")
-                else:
-                    ticker = ib.reqMktData(contract, '', False, False)
-                    # wait momentarily for IB to fetch the snapshot
-                    await asyncio.sleep(0.5)
-                    price = ticker.marketPrice()
+                raw_underlying = data.get('underlying')
+                underlying_request = _build_underlying_request(raw_underlying, [])
+                try:
+                    contract = _build_contract_from_request(underlying_request)
+                except Exception as e:
+                    logging.error(f"Invalid manual sync request: {underlying_request!r} ({e})")
+                    continue
 
-                    if price == price and price > 0:
+                qualified_underlying = await _qualify_one(contract, underlying_request)
+                if qualified_underlying is None:
+                    logging.error(f"Failed to manual sync underlying {_describe_contract_request(underlying_request)}")
+                else:
+                    ticker = ib.reqMktData(qualified_underlying, '', False, False)
+                    # Wait momentarily for IB to populate a snapshot-like first tick.
+                    await asyncio.sleep(0.5)
+                    price = _extract_market_price(ticker)
+
+                    if price is not None:
                         payload = {
                             "underlyingPrice": price,
                             "options": {}

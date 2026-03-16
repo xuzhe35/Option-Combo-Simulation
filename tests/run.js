@@ -1,6 +1,15 @@
 const suites = [
     require('./market_holidays.test'),
+    require('./product_registry.test'),
+    require('./distribution_proxy_config.test'),
     require('./bsm.test'),
+    require('./amortized.test'),
+    require('./valuation.test'),
+    require('./session_logic.test'),
+    require('./session_ui.test'),
+    require('./control_panel_ui.test'),
+    require('./group_editor_ui.test'),
+    require('./hedge_editor_ui.test'),
 ];
 
 let passed = 0;

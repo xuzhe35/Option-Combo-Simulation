@@ -8,7 +8,7 @@ module.exports = {
         {
             name: 'computes Easter Sunday and Good Friday for 2026 correctly',
             run() {
-                const ctx = loadBrowserScripts(['market_holidays.js']);
+                const ctx = loadBrowserScripts(['js/market_holidays.js']);
 
                 assert.equal(ctx._fmtDate(ctx._easterSunday(2026)), '2026-04-05');
                 assert.equal(ctx.isMarketHoliday('2026-04-03'), true);
@@ -18,7 +18,7 @@ module.exports = {
         {
             name: 'applies NYSE weekend observance rules for fixed-date holidays',
             run() {
-                const ctx = loadBrowserScripts(['market_holidays.js']);
+                const ctx = loadBrowserScripts(['js/market_holidays.js']);
 
                 assert.equal(
                     ctx._fmtDate(ctx._observe(new Date(Date.UTC(2021, 11, 25)))),
@@ -33,7 +33,7 @@ module.exports = {
         {
             name: 'computes nth and last weekday helpers in UTC',
             run() {
-                const ctx = loadBrowserScripts(['market_holidays.js']);
+                const ctx = loadBrowserScripts(['js/market_holidays.js']);
 
                 assert.equal(
                     ctx._fmtDate(ctx._nthWeekday(2026, 0, 1, 3)),
@@ -48,7 +48,7 @@ module.exports = {
         {
             name: 'marks known NYSE holidays and excludes nearby trading days',
             run() {
-                const ctx = loadBrowserScripts(['market_holidays.js']);
+                const ctx = loadBrowserScripts(['js/market_holidays.js']);
                 const holidays2026 = ctx._computeHolidaysForYear(2026);
 
                 assert.equal(holidays2026.length, 10);
@@ -61,7 +61,7 @@ module.exports = {
         {
             name: 'caches holiday sets by year',
             run() {
-                const ctx = loadBrowserScripts(['market_holidays.js']);
+                const ctx = loadBrowserScripts(['js/market_holidays.js']);
                 const first = ctx._getHolidaysForYear(2026);
                 const second = ctx._getHolidaysForYear(2026);
 

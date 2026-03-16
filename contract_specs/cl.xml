@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<contract-spec id="CL" version="1" status="provisional">
+  <identity>
+    <code>CL</code>
+    <display-name>WTI crude oil futures option</display-name>
+    <instrument-group>energy</instrument-group>
+    <product-type>futures-option</product-type>
+    <ib-product-type>Energy</ib-product-type>
+  </identity>
+  <ib-contract>
+    <sec-type>FOP</sec-type>
+    <symbol>CL</symbol>
+    <exchange>NYMEX</exchange>
+    <routing-exchange>NYMEX</routing-exchange>
+    <currency>USD</currency>
+    <multiplier>1000</multiplier>
+    <trading-class status="verified-from-tws-image">ML3</trading-class>
+    <contract-month-format>YYYYMM</contract-month-format>
+    <expiry-format>YYYYMMDD</expiry-format>
+    <local-symbol-example status="verified-from-tws-image">ML3H6 P10125</local-symbol-example>
+  </ib-contract>
+  <underlying>
+    <sec-type>FUT</sec-type>
+    <symbol>CL</symbol>
+    <exchange>NYMEX</exchange>
+    <currency>USD</currency>
+    <multiplier>1000</multiplier>
+    <contract-month-example status="verified-from-tws-image">202604</contract-month-example>
+    <local-symbol-example status="verified-from-tws-image">CLJ6</local-symbol-example>
+  </underlying>
+  <variable-fields>
+    <contract-month format="YYYYMM" required="true" />
+    <expiry format="YYYYMMDD" required="true" />
+    <last-trading-datetime format="YYYYMMDD HH:mm:ss" timezone="America/New_York" required="false" />
+    <right allowed-values="C,P" required="true" />
+    <strike format="decimal" required="true" />
+    <underlying-expiry format="YYYYMM" required="true" />
+    <local-symbol required="false" />
+    <con-id required="false" />
+  </variable-fields>
+  <settlement>
+    <exercise-style status="verified-from-tws-image">American</exercise-style>
+    <settlement-method status="verified-from-tws-image">Physical Delivery</settlement-method>
+    <delivery-type status="verified-from-tws-image">futures-position</delivery-type>
+    <unit>barrels</unit>
+    <min-tick status="verified-from-tws-image">0.01</min-tick>
+  </settlement>
+  <notes>
+    <note>Updated from a TWS contract description screenshot for a specific CL put series.</note>
+    <note>Underlying future example is CLJ6, which differs from the option contract month.</note>
+    <note>Keep contract month, expiry, right, strike, underlying expiry, local symbol, and conId as runtime selectors when locking a concrete contract.</note>
+  </notes>
+</contract-spec>

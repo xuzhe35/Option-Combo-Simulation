@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<contract-spec id="HG" version="1" status="provisional">
+  <identity>
+    <code>HG</code>
+    <display-name>Copper futures option</display-name>
+    <instrument-group>metals</instrument-group>
+    <product-type>futures-option</product-type>
+    <ib-product-type>Metal</ib-product-type>
+  </identity>
+  <ib-contract>
+    <sec-type>FOP</sec-type>
+    <symbol>HG</symbol>
+    <exchange>COMEX</exchange>
+    <routing-exchange>COMEX</routing-exchange>
+    <currency>USD</currency>
+    <multiplier>25000</multiplier>
+    <trading-class status="verified-from-tws-image">H3T</trading-class>
+    <contract-month-format>YYYYMM</contract-month-format>
+    <expiry-format>YYYYMMDD</expiry-format>
+    <local-symbol-example status="verified-from-tws-image">H3TH6 P563</local-symbol-example>
+  </ib-contract>
+  <underlying>
+    <sec-type>FUT</sec-type>
+    <symbol>HG</symbol>
+    <exchange>COMEX</exchange>
+    <currency>USD</currency>
+    <multiplier>25000</multiplier>
+    <contract-month-example status="verified-from-tws-image">202605</contract-month-example>
+    <local-symbol-example status="verified-from-tws-image">HGK6</local-symbol-example>
+  </underlying>
+  <variable-fields>
+    <contract-month format="YYYYMM" required="true" />
+    <expiry format="YYYYMMDD" required="true" />
+    <last-trading-datetime format="YYYYMMDD HH:mm:ss" timezone="America/New_York" required="false" />
+    <right allowed-values="C,P" required="true" />
+    <strike format="decimal" required="true" />
+    <underlying-expiry format="YYYYMM" required="true" />
+    <local-symbol required="false" />
+    <con-id required="false" />
+  </variable-fields>
+  <settlement>
+    <exercise-style status="verified-from-tws-image">American</exercise-style>
+    <settlement-method status="verified-from-tws-image">Physical Delivery</settlement-method>
+    <delivery-type status="verified-from-tws-image">futures-position</delivery-type>
+    <unit>pounds</unit>
+    <min-tick status="verified-from-tws-image">0.0005</min-tick>
+  </settlement>
+  <notes>
+    <note>Updated from a TWS contract description screenshot for a specific HG put series.</note>
+    <note>Underlying future example is HGK6, which differs from the option contract month.</note>
+    <note>Keep contract month, expiry, right, strike, underlying expiry, local symbol, and conId as runtime selectors when locking a concrete contract.</note>
+  </notes>
+</contract-spec>

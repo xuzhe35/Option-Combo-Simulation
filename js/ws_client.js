@@ -24,6 +24,7 @@ const WS_BASE_DELAY = 5000;   // 5s initial
 const WS_MAX_DELAY = 60000;   // 60s cap
 let _wsReconnectDelay = WS_BASE_DELAY;
 let _wsReconnectTimer = null;
+let _legacyLiveDataWarningShown = false;
 
 function _normalizeWsPort(rawValue) {
     const parsed = parseInt(rawValue, 10);
@@ -186,13 +187,61 @@ window.resetWsPort = resetWsPort;
 // Subscription Management
 // -------------------------------------------------------------
 
+function _toContractMonth(dateStr) {
+    if (!dateStr) return '';
+    return String(dateStr).replace(/-/g, '').slice(0, 6);
+}
+
+function _buildUnderlyingRequest(profile, optionRequests) {
+    const defaultUnderlyingContractMonth = profile?.underlyingSecType === 'FUT'
+        && typeof OptionComboProductRegistry !== 'undefined'
+        && typeof OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth === 'function'
+        ? OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(
+            state.underlyingSymbol,
+            state.simulatedDate || state.baseDate
+        )
+        : '';
+    const request = {
+        enteredSymbol: state.underlyingSymbol,
+        family: profile.family,
+        secType: profile.underlyingSecType,
+        symbol: profile.underlyingSymbol,
+        exchange: profile.underlyingExchange,
+        currency: profile.currency || 'USD',
+    };
+
+    if (profile.underlyingSecType === 'FUT') {
+        request.contractMonth = state.underlyingContractMonth
+            || defaultUnderlyingContractMonth
+            || optionRequests[0]?.underlyingContractMonth
+            || optionRequests[0]?.contractMonth
+            || _toContractMonth(state.simulatedDate)
+            || _toContractMonth(state.baseDate);
+        request.multiplier = String(profile.optionMultiplier || '');
+    }
+
+    return request;
+}
+
 function handleLiveSubscriptions() {
     if (!isWsConnected || !ws) return;
+    const profile = typeof OptionComboProductRegistry === 'undefined'
+        ? null
+        : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
+    if (typeof OptionComboProductRegistry !== 'undefined'
+        && !OptionComboProductRegistry.supportsLegacyLiveData(state.underlyingSymbol)) {
+        if (!_legacyLiveDataWarningShown) {
+            console.warn(`Legacy live-data subscriptions are not implemented for ${state.underlyingSymbol}. Use manual prices for now.`);
+            _legacyLiveDataWarningShown = true;
+        }
+        return;
+    }
 
+    const optionRequests = [];
     const payload = {
         action: 'subscribe',
-        underlying: state.underlyingSymbol,
-        options: [],
+        underlying: null,
+        options: optionRequests,
         stocks: []
     };
 
@@ -206,16 +255,45 @@ function handleLiveSubscriptions() {
                         payload.stocks.push(state.underlyingSymbol);
                     }
                 } else {
-                    payload.options.push({
+                    optionRequests.push({
                         id: leg.id,
+                        secType: profile?.optionSecType || 'OPT',
+                        symbol: profile?.optionSymbol || state.underlyingSymbol,
+                        underlyingSymbol: profile?.underlyingSymbol || state.underlyingSymbol,
+                        exchange: profile?.optionExchange || 'SMART',
+                        underlyingExchange: profile?.underlyingExchange || profile?.optionExchange || 'SMART',
+                        currency: profile?.currency || 'USD',
+                        multiplier: String(profile?.optionMultiplier || 100),
+                        underlyingMultiplier: String(profile?.optionMultiplier || 100),
+                        tradingClass: typeof OptionComboProductRegistry !== 'undefined'
+                            && typeof OptionComboProductRegistry.resolveTradingClass === 'function'
+                            ? OptionComboProductRegistry.resolveTradingClass(state.underlyingSymbol, leg.expDate)
+                            : (profile?.tradingClass || undefined),
                         right: leg.type.charAt(0).toUpperCase(), // 'C' or 'P'
                         strike: leg.strike,
-                        expDate: leg.expDate
+                        expDate: leg.expDate.replace(/-/g, ''),
+                        contractMonth: _toContractMonth(leg.expDate),
+                        underlyingContractMonth: state.underlyingContractMonth
+                            || (typeof OptionComboProductRegistry !== 'undefined'
+                                && typeof OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth === 'function'
+                                ? OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(
+                                    state.underlyingSymbol,
+                                    state.simulatedDate || state.baseDate
+                                )
+                                : ''),
                     });
                 }
             });
         }
     });
+
+    payload.underlying = _buildUnderlyingRequest(profile || {
+        family: 'DEFAULT_EQUITY',
+        underlyingSecType: 'STK',
+        underlyingSymbol: state.underlyingSymbol,
+        underlyingExchange: 'SMART',
+        currency: 'USD',
+    }, optionRequests);
 
     // Collect all hedge stocks that have Live Data == true
     state.hedges.forEach(hedge => {
@@ -233,9 +311,26 @@ function requestUnderlyingPriceSync() {
         return;
     }
 
+    if (typeof OptionComboProductRegistry !== 'undefined'
+        && !OptionComboProductRegistry.supportsLegacyLiveData(state.underlyingSymbol)) {
+        alert(`Live underlying sync is not implemented yet for ${state.underlyingSymbol}. Please enter the underlying price manually.`);
+        return;
+    }
+
     const payload = {
         action: 'sync_underlying',
-        underlying: state.underlyingSymbol
+        underlying: _buildUnderlyingRequest(
+            typeof OptionComboProductRegistry === 'undefined'
+                ? {
+                    family: 'DEFAULT_EQUITY',
+                    underlyingSecType: 'STK',
+                    underlyingSymbol: state.underlyingSymbol,
+                    underlyingExchange: 'SMART',
+                    currency: 'USD',
+                }
+                : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol),
+            []
+        )
     };
 
     ws.send(JSON.stringify(payload));

@@ -15,6 +15,10 @@
 // Group Chart Functions
 // -------------------------------------------------------------
 
+function _isGroupIncludedInGlobal(group) {
+    return group.includedInGlobal !== false;
+}
+
 function toggleChart(btn) {
     const card = btn.closest('.group-card');
     const chartContainer = card.querySelector('.chart-container');
@@ -296,7 +300,9 @@ function drawGlobalChart(card) {
     // Combine all groups' legs into one virtual group, preserving per-group viewMode
     const virtualGroup = {
         name: 'Global Portfolio',
-        legs: state.groups.flatMap(g => g.legs.map(leg => ({
+        legs: state.groups
+            .filter(_isGroupIncludedInGlobal)
+            .flatMap(g => g.legs.map(leg => ({
             ...leg,
             _viewMode: g.viewMode || 'active'
         })))
@@ -306,7 +312,7 @@ function drawGlobalChart(card) {
 }
 
 function _getGlobalAmortizedVirtualGroup() {
-    const amortizedGroups = state.groups.filter(g => (g.viewMode || 'active') === 'amortized');
+    const amortizedGroups = state.groups.filter(g => _isGroupIncludedInGlobal(g) && (g.viewMode || 'active') === 'amortized');
     return {
         name: 'Global Amortized Portfolio',
         viewMode: 'amortized',
@@ -441,7 +447,9 @@ window.addEventListener('resize', () => {
 // Return the mean simulated IV across all legs in the portfolio
 // Uses processLegData() to ensure IV calculation is in sync with bsm.js SSOT
 function computePortfolioMeanSimIV() {
-    const allLegs = state.groups.flatMap(g =>
+    const allLegs = state.groups
+        .filter(_isGroupIncludedInGlobal)
+        .flatMap(g =>
         g.legs
             .filter(leg => leg.type !== 'stock')  // Stock legs have no IV
             .map(leg => processLegData(leg, state.simulatedDate, state.ivOffset))

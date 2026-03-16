@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function loadBrowserScripts(relativePaths) {
+function loadBrowserScripts(relativePaths, overrides = {}) {
     const projectRoot = path.resolve(__dirname, '..', '..');
     const context = vm.createContext({
         console,
@@ -11,6 +11,7 @@ function loadBrowserScripts(relativePaths) {
         Intl,
         setTimeout,
         clearTimeout,
+        ...overrides,
     });
 
     context.window = context;
@@ -29,12 +30,52 @@ function loadBrowserScripts(relativePaths) {
 
 function loadPricingContext() {
     return loadBrowserScripts([
-        'market_holidays.js',
-        'bsm.js',
+        'js/market_holidays.js',
+        'js/date_utils.js',
+        'js/product_registry.js',
+        'js/pricing_core.js',
+        'js/bsm.js',
     ]);
+}
+
+function loadAmortizedContext() {
+    return loadBrowserScripts([
+        'js/market_holidays.js',
+        'js/date_utils.js',
+        'js/product_registry.js',
+        'js/pricing_core.js',
+        'js/amortized.js',
+    ]);
+}
+
+function loadValuationContext() {
+    return loadBrowserScripts([
+        'js/market_holidays.js',
+        'js/date_utils.js',
+        'js/product_registry.js',
+        'js/pricing_core.js',
+        'js/amortized.js',
+        'js/valuation.js',
+    ]);
+}
+
+function loadSessionLogicContext() {
+    return loadBrowserScripts([
+        'js/session_logic.js',
+    ]);
+}
+
+function loadSessionUIContext(overrides = {}) {
+    return loadBrowserScripts([
+        'js/session_ui.js',
+    ], overrides);
 }
 
 module.exports = {
     loadBrowserScripts,
     loadPricingContext,
+    loadAmortizedContext,
+    loadValuationContext,
+    loadSessionLogicContext,
+    loadSessionUIContext,
 };
