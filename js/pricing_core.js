@@ -52,6 +52,49 @@
         return 0;
     }
 
+    /**
+     * Black-76 model for pricing options on forwards/futures.
+     * F = forward/futures price (used directly; no cost-of-carry drift).
+     * d1 = [ln(F/K) + (σ²/2)T] / σ√T
+     * Call = e^(-rT) [F·N(d1) − K·N(d2)]
+     * Put  = e^(-rT) [K·N(−d2) − F·N(−d1)]
+     */
+    function calculateBlack76Price(type, F, K, T, r, v) {
+        if (T <= 0) {
+            if (type === 'call') return Math.max(0, F - K);
+            if (type === 'put') return Math.max(0, K - F);
+            return 0;
+        }
+
+        if (v <= 0) v = 0.0001;
+        if (F <= 0) F = 0.0001;
+
+        const sqrtT = Math.sqrt(T);
+        const d1 = (Math.log(F / K) + (v * v / 2) * T) / (v * sqrtT);
+        const d2 = d1 - v * sqrtT;
+        const discount = Math.exp(-r * T);
+
+        if (type === 'call') {
+            return discount * (F * normalCDF(d1) - K * normalCDF(d2));
+        }
+        if (type === 'put') {
+            return discount * (K * normalCDF(-d2) - F * normalCDF(-d1));
+        }
+
+        return 0;
+    }
+
+    /**
+     * Dispatch to the appropriate pricing model.
+     * @param {string} pricingModel - 'bsm-spot' or 'black76'
+     */
+    function calculatePrice(pricingModel, type, S, K, T, r, v) {
+        if (pricingModel === 'black76') {
+            return calculateBlack76Price(type, S, K, T, r, v);
+        }
+        return calculateOptionPrice(type, S, K, T, r, v);
+    }
+
     function resolveInstrumentProfile(profileOrSymbol) {
         if (!profileOrSymbol) return null;
 
@@ -148,6 +191,7 @@
 
     function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseDateStr = null, globalUnderlyingPrice = null, globalInterestRate = null, viewMode = 'active', instrumentProfile = null) {
         const resolvedProfile = resolveInstrumentProfile(instrumentProfile);
+        const pricingModel = (resolvedProfile && resolvedProfile.pricingModel) || 'bsm-spot';
         const lowerType = leg.type.toLowerCase();
         if (isUnderlyingLeg(leg)) {
             const contractMultiplier = getUnderlyingLegMultiplier(resolvedProfile);
@@ -168,6 +212,7 @@
                 T: 0,
                 simIV: 0,
                 isUnderlyingLeg: true,
+                pricingModel,
                 contractMultiplier,
                 settlementUnitsPerContract: 1,
                 posMultiplier,
@@ -205,7 +250,8 @@
                     if (leg.type === 'call') effectiveCostPerShare = Math.max(0, globalUnderlyingPrice - leg.strike);
                     else effectiveCostPerShare = Math.max(0, leg.strike - globalUnderlyingPrice);
                 } else if (baseIv !== null) {
-                    effectiveCostPerShare = calculateOptionPrice(
+                    effectiveCostPerShare = calculatePrice(
+                        pricingModel,
                         leg.type,
                         globalUnderlyingPrice,
                         leg.strike,
@@ -229,6 +275,7 @@
             simIV,
             simIVAvailable: isExpired || simIV !== null,
             simIVSource: isLiveIvMissing(leg) ? 'missing' : (leg.ivSource || 'manual'),
+            pricingModel,
             contractMultiplier,
             settlementUnitsPerContract,
             posMultiplier,
@@ -250,7 +297,8 @@
         if (!Number.isFinite(processedLeg.simIV) || processedLeg.simIV <= 0) {
             return null;
         }
-        return calculateOptionPrice(
+        return calculatePrice(
+            processedLeg.pricingModel || 'bsm-spot',
             processedLeg.type,
             underlyingPrice,
             processedLeg.strike,
@@ -285,6 +333,8 @@
         calculateD1,
         calculateD2,
         calculateOptionPrice,
+        calculateBlack76Price,
+        calculatePrice,
         resolveInstrumentProfile,
         isUnderlyingLeg,
         getMultiplier,
