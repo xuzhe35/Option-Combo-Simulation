@@ -148,6 +148,14 @@ class PnLChart {
                 underlyingProfile
             );
         });
+        const hasUnavailableSimulation = processedLegs.some(leg =>
+            !leg.isUnderlyingLeg && !leg.isExpired && !Number.isFinite(leg.simIV)
+        );
+        if (hasUnavailableSimulation) {
+            this.drawEmptyState('Simulation unavailable because IV is missing for one or more option legs.');
+            this.lastRenderData = null;
+            return;
+        }
 
         const step = (maxS - minS) / (this.pointsCount - 1);
         let evalPoints = [];
@@ -437,7 +445,7 @@ class PnLChart {
 
             const lines = [
                 `Price: $${this.hoverData.x.toFixed(2)} (${percentChange > 0 ? '+' : ''}${percentChange.toFixed(1)}%)`,
-                `P&L: ${this.hoverData.y >= 0 ? '+' : ''}$${this.hoverData.y.toFixed(2)}`
+                `Theo P&L: ${this.hoverData.y >= 0 ? '+' : ''}$${this.hoverData.y.toFixed(2)}`
             ];
 
             this.ctx.font = '12px Inter, sans-serif';
@@ -546,12 +554,12 @@ class PnLChart {
         this.ctx.strokeRect(this.padding.left, this.padding.top, drawW, drawH);
     }
 
-    drawEmptyState() {
+    drawEmptyState(message = 'Not enough data to calculate P&L curve.') {
         this.ctx.font = '14px Inter, sans-serif';
         this.ctx.fillStyle = this.textColor;
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'middle';
-        this.ctx.fillText("Not enough data to calculate P&L curve.", this.width / 2, this.height / 2);
+        this.ctx.fillText(message, this.width / 2, this.height / 2);
     }
 }
 

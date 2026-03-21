@@ -29,10 +29,11 @@ module.exports = {
             },
         },
         {
-            name: 'computes group totals and live pnl with trial fallback display state',
+            name: 'computes trial-group totals without exposing fake live pnl from zero-cost legs',
             run() {
                 const ctx = loadValuationContext();
                 const globalState = {
+                    underlyingSymbol: 'SPY',
                     underlyingPrice: 102,
                     baseDate: '2026-03-14',
                     simulatedDate: '2026-03-14',
@@ -73,11 +74,14 @@ module.exports = {
 
                 assert.equal(result.groupCost > 0, true);
                 assert.equal(result.groupSimValue > 0, true);
-                assert.equal(result.groupHasLiveData, true);
+                assert.equal(result.groupHasLiveData, false);
+                assert.equal(result.groupLivePnL, 0);
                 assert.equal(result.legResults.length, 2);
                 assert.equal(result.legResults[0].currentPriceDisplay.value, '');
                 assert.equal(result.legResults[0].currentPriceDisplay.title, 'Theoretical model price for today');
                 assert.equal(result.legResults[1].currentPriceDisplay.value, '101.00');
+                assert.equal(result.legResults[0].hasLivePnl, false);
+                assert.equal(result.legResults[1].hasLivePnl, false);
             },
         },
         {
@@ -85,6 +89,7 @@ module.exports = {
             run() {
                 const ctx = loadValuationContext();
                 const globalState = {
+                    underlyingSymbol: 'SPY',
                     underlyingPrice: 95,
                     baseDate: '2026-03-01',
                     simulatedDate: '2026-03-14',
@@ -142,10 +147,55 @@ module.exports = {
             },
         },
         {
+            name: 'marks simulations unavailable when an option leg has missing live IV',
+            run() {
+                const ctx = loadValuationContext();
+                const globalState = {
+                    underlyingSymbol: 'SLV',
+                    underlyingPrice: 28,
+                    baseDate: '2026-03-19',
+                    simulatedDate: '2026-04-01',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_missing_iv',
+                    viewMode: 'trial',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'l_missing',
+                            type: 'call',
+                            pos: 1,
+                            strike: 61,
+                            expDate: '2026-04-17',
+                            iv: 0.2,
+                            ivSource: 'missing',
+                            currentPrice: 1.23,
+                            cost: 0,
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                assert.equal(result.groupSimulationAvailable, false);
+                assert.equal(result.groupSimValue, null);
+                assert.equal(result.groupPnL, null);
+                assert.equal(result.legResults[0].simPricePerShare, null);
+                assert.equal(result.legResults[0].ivText, 'Sim IV: N/A (TWS unavailable)');
+            },
+        },
+        {
             name: 'excludes unchecked groups from global totals and amortized aggregation',
             run() {
                 const ctx = loadValuationContext();
                 const globalState = {
+                    underlyingSymbol: 'SPY',
                     underlyingPrice: 100,
                     baseDate: '2026-03-01',
                     simulatedDate: '2026-03-01',
@@ -199,6 +249,46 @@ module.exports = {
                 assert.equal(result.globalPnL, 100);
                 assert.equal(result.amortizedGroups.length, 0);
                 assert.equal(result.combinedAmortizedResult, null);
+            },
+        },
+        {
+            name: 'scales futures underlying legs using futures multipliers',
+            run() {
+                const ctx = loadValuationContext();
+                const globalState = {
+                    underlyingSymbol: 'ES',
+                    underlyingPrice: 6000,
+                    baseDate: '2026-03-14',
+                    simulatedDate: '2026-03-14',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_es',
+                    viewMode: 'active',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'l_future',
+                            type: 'stock',
+                            pos: 1,
+                            cost: 5900,
+                            currentPrice: 5980,
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                assert.equal(result.groupCost, 295000);
+                assert.equal(result.groupSimValue, 300000);
+                assert.equal(result.groupPnL, 5000);
+                assert.equal(result.groupLivePnL, 4000);
+                assert.equal(result.legResults[0].currentPriceDisplay.title, 'Current Underlying Future Price');
             },
         },
     ],

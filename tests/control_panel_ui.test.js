@@ -7,9 +7,13 @@ function createElement(initial = {}) {
         value: '',
         textContent: '',
         min: '',
+        blurCalls: 0,
         listeners: {},
         addEventListener(type, handler) {
             this.listeners[type] = handler;
+        },
+        blur() {
+            this.blurCalls += 1;
         },
         ...initial,
     };
@@ -36,6 +40,7 @@ module.exports = {
                     ivOffset: createElement({ value: '0' }),
                     ivOffsetSlider: createElement({ value: '0' }),
                     ivOffsetDisplay: createElement({ textContent: '0.00%' }),
+                    allowLiveComboOrders: createElement({ checked: false }),
                 };
 
                 let updateCalls = 0;
@@ -67,6 +72,7 @@ module.exports = {
                     simulatedDate: '2026-03-15',
                     interestRate: 0.03,
                     ivOffset: 0,
+                    allowLiveComboOrders: false,
                     groups: [],
                 };
 
@@ -96,6 +102,23 @@ module.exports = {
                 assert.equal(state.underlyingContractMonth, '');
                 assert.equal(subscriptionCalls, 1);
 
+                let prevented = false;
+                elements.underlyingSymbol.listeners.keydown({
+                    key: 'Enter',
+                    target: { value: 'slv' },
+                    preventDefault() {
+                        prevented = true;
+                    },
+                });
+                assert.equal(prevented, true);
+                assert.equal(state.underlyingSymbol, 'SLV');
+                assert.equal(elements.underlyingSymbol.blurCalls, 1);
+                assert.equal(subscriptionCalls, 2);
+
+                elements.underlyingSymbol.listeners.blur({ target: { value: 'slv' } });
+                assert.equal(state.underlyingSymbol, 'SLV');
+                assert.equal(subscriptionCalls, 3);
+
                 elements.underlyingSymbol.listeners.change({ target: { value: 'es' } });
                 assert.equal(state.underlyingSymbol, 'ES');
                 assert.equal(state.underlyingContractMonth, '202603');
@@ -120,6 +143,9 @@ module.exports = {
                 elements.ivOffset.listeners.input({ target: { value: '2.50' } });
                 assert.equal(state.ivOffset, 0.025);
                 assert.equal(elements.ivOffsetDisplay.textContent, '+2.50%');
+
+                elements.allowLiveComboOrders.listeners.change({ target: { checked: true } });
+                assert.equal(state.allowLiveComboOrders, true);
                 assert.ok(updateCalls >= 3);
             },
         },

@@ -2,3 +2,4 @@ Portfolio/
 server_log.txt
 ib_server.codex*.log
 *.pid
+*PLANE*

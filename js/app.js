@@ -27,9 +27,16 @@ const state = {
     simulatedDate: initialDateStr, // Initially same as baseDate
     interestRate: 0.03, // 3% default risk-free rate
     ivOffset: 0.0, // 0%
+    allowLiveComboOrders: false,
     viewMode: 'active', // 'active' (Historical Entry Cost) or 'trial' (Current Live Price)
     groups: [],
     hedges: [] // {id, symbol, currentPrice, pos, cost, liveData}
+};
+
+window.__optionComboApp = {
+    getState: () => state,
+    renderGroups: () => renderGroups(),
+    renderHedges: () => renderHedges(),
 };
 
 // Throttle flag for slider-driven updates (one rAF per frame max)
@@ -75,6 +82,10 @@ function isSettlementScenarioMode(viewMode) {
 
 function groupHasDeterministicCost(group) {
     return OptionComboSessionLogic.groupHasDeterministicCost(group);
+}
+
+function groupHasOpenPosition(group) {
+    return OptionComboSessionLogic.groupHasOpenPosition(group);
 }
 
 function getUnderlyingProfile() {
@@ -176,6 +187,7 @@ function renderGroups() {
         updateProbCharts,
         handleLiveSubscriptions,
         groupHasDeterministicCost,
+        groupHasOpenPosition,
         getRenderableGroupViewMode: OptionComboSessionLogic.getRenderableGroupViewMode,
         isGroupIncludedInGlobal: OptionComboSessionLogic.isGroupIncludedInGlobal,
         supportsAmortizedMode(symbol) {
@@ -188,6 +200,11 @@ function renderGroups() {
                 ? true
                 : OptionComboProductRegistry.supportsUnderlyingLegs(symbol);
         },
+        requestPortfolioAvgCostSnapshot,
+        requestContinueManagedComboOrder,
+        requestConcedeManagedComboOrder,
+        requestCancelManagedComboOrder,
+        requestCloseGroupComboOrder,
         getUnderlyingProfile,
         renderGroups,
     });
@@ -345,6 +362,7 @@ function applyImportedState(normalizedState) {
     state.simulatedDate = normalizedState.simulatedDate;
     state.interestRate = normalizedState.interestRate;
     state.ivOffset = normalizedState.ivOffset;
+    state.allowLiveComboOrders = normalizedState.allowLiveComboOrders === true;
     state.groups = normalizedState.groups;
     state.hedges = normalizedState.hedges;
 
@@ -401,3 +419,5 @@ function calculateAmortizedCost(group, evalUnderlyingPrice, globalState) {
 function calculateCombinedAmortizedCost(groups, globalState) {
     return OptionComboAmortized.calculateCombinedAmortizedCost(groups, globalState);
 }
+
+window.toggleGroupCollapse = OptionComboGroupEditorUI.toggleGroupCollapse;

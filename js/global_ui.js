@@ -4,12 +4,17 @@
 
 (function attachGlobalUi(globalScope) {
     function formatSignedCurrencyValue(currencyFormatter, value, positiveClass, negativeClass) {
+        if (!Number.isFinite(value)) {
+            return '<span class="text-muted">N/A</span>';
+        }
         return `<span class="${value >= 0 ? positiveClass : negativeClass}">${value >= 0 ? '+' : ''}${currencyFormatter.format(value)}</span>`;
     }
 
     function applyGlobalDerivedData(derivedData, currencyFormatter, chartApi) {
         document.getElementById('totalCost').textContent = currencyFormatter.format(derivedData.globalTotalCost);
-        document.getElementById('simulatedValue').textContent = currencyFormatter.format(derivedData.globalSimulatedValue);
+        document.getElementById('simulatedValue').textContent = Number.isFinite(derivedData.globalSimulatedValue)
+            ? currencyFormatter.format(derivedData.globalSimulatedValue)
+            : 'N/A';
         document.getElementById('unrealizedPnL').innerHTML = formatSignedCurrencyValue(currencyFormatter, derivedData.globalPnL, 'profit', 'loss');
 
         const globalLivePnLRow = document.getElementById('globalLivePnLRow');

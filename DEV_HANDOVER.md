@@ -1,64 +1,202 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-03-15
+**Updated:** 2026-03-17
 
 ## 1. Current Product Shape
 
-This is a local browser app for options-combo scenario analysis with optional IBKR live data.
+This is a local browser app for building and evaluating multi-leg option structures, with optional IBKR live data and live combo execution.
 
-It started as a stock/ETF option analyzer and has now been partially generalized to support:
+The codebase is no longer just a pricing sandbox. It now has three distinct responsibilities:
 
-- equity / ETF options
-- ES and NQ futures options (`FOP`) for live-data testing
-- SPX and NDX index options
-- contract metadata for CL / GC / SI / HG futures options
+- scenario analysis and charting
+- session persistence and cost-basis tracking
+- IBKR combo preview / test-submit / real submit with managed repricing
 
-Important status:
+## 2. Current Frontend Shape
 
-- equity / ETF flow is still the most mature path
-- ES / NQ live option subscriptions now work well enough for active testing
-- SPX / NDX option legs can stream even if the underlying index quote is not updating
-- FOP analytics still use the current app framework and are not yet a true futures-option analytics engine
+The frontend still runs as ordered global scripts from `index.html`.
 
-## 2. Script Model
-
-The frontend still depends on ordered global scripts in `index.html`.
-All browser-side JavaScript lives under `js/`.
-
-Current order:
+Current actual order:
 
 1. `js/t_params_db.js`
 2. `js/market_holidays.js`
 3. `js/date_utils.js`
 4. `js/product_registry.js`
-5. `js/distribution_proxy_config.js`
-6. `js/pricing_core.js`
-7. `js/bsm.js`
-8. `js/chart.js`
-9. `js/prob_charts.js`
-10. `js/chart_controls.js`
-11. `js/amortized.js`
-12. `js/valuation.js`
-13. `js/session_logic.js`
-14. `js/session_ui.js`
-15. `js/control_panel_ui.js`
-16. `js/hedge_editor_ui.js`
-17. `js/group_editor_ui.js`
-18. `js/hedge_ui.js`
-19. `js/group_ui.js`
-20. `js/global_ui.js`
-21. `js/app.js`
-22. `js/ws_client.js`
+5. `js/trade_trigger_logic.js`
+6. `js/distribution_proxy_config.js`
+7. `js/pricing_core.js`
+8. `js/bsm.js`
+9. `js/chart.js`
+10. `js/prob_charts.js`
+11. `js/chart_controls.js`
+12. `js/amortized.js`
+13. `js/valuation.js`
+14. `js/session_logic.js`
+15. `js/session_ui.js`
+16. `js/control_panel_ui.js`
+17. `js/hedge_editor_ui.js`
+18. `js/group_editor_ui.js`
+19. `js/hedge_ui.js`
+20. `js/group_ui.js`
+21. `js/global_ui.js`
+22. `js/app.js`
+23. `js/ws_client.js`
 
-If something suddenly becomes `undefined` in the browser, check `index.html` script order first.
+If something becomes `undefined` in the browser, script order is still the first thing to check.
 
-## 3. Product Abstraction Layer
+## 3. Current Architecture Split
 
-The biggest recent change is `js/product_registry.js`.
+### State and orchestration
 
-This file centralizes the non-equity assumptions that used to be scattered across pricing, valuation, UI, and live-data code.
+- `js/app.js`
 
-It currently defines family profiles for:
+Owns session state and drives rendering.
+
+### Pure domain logic
+
+- `js/pricing_core.js`
+- `js/amortized.js`
+- `js/valuation.js`
+- `js/session_logic.js`
+- `js/trade_trigger_logic.js`
+- `js/product_registry.js`
+
+These files are the most stable and should stay free of DOM concerns.
+
+### UI rendering and binding
+
+- `js/control_panel_ui.js`
+- `js/session_ui.js`
+- `js/group_editor_ui.js`
+- `js/hedge_editor_ui.js`
+- `js/group_ui.js`
+- `js/hedge_ui.js`
+- `js/global_ui.js`
+
+### Execution stack
+
+- `js/ws_client.js`
+- `ib_server.py`
+- `trade_execution/engine.py`
+- `trade_execution/models.py`
+- `trade_execution/adapters/base.py`
+- `trade_execution/adapters/ibkr.py`
+
+This is the most important architectural shift versus earlier versions.
+
+`ib_server.py` is now mainly:
+
+- IB connection
+- WebSocket endpoint
+- market-data subscription bridge
+- execution-report / order-status broadcaster
+
+Actual combo execution behavior lives in `trade_execution/adapters/ibkr.py`.
+
+## 4. Trial Trigger and Live Execution
+
+The yellow Trial Trigger block is now a real execution feature, not just UI decoration.
+
+Supported execution modes:
+
+- `preview`
+- `test_submit`
+- `submit`
+
+Meaning:
+
+- `Preview Only`
+  - build a combo preview only
+- `Send to TWS (Test Only)`
+  - send a real BAG order to TWS with a deliberately unfillable guardrail price
+- `Send to TWS`
+  - place a real `LMT @ MID` combo and enter managed repricing
+
+The managed repricing path currently supports:
+
+- live combo-mid recomputation from leg quotes
+- configurable drift threshold
+- configurable time-in-force (`DAY` / `GTC`)
+- max retry budget
+- timeout window
+- continue monitoring / continue retries
+- manual cancel
+- optional exit condition that cancels the live order if the underlying reverses
+
+## 5. Current Runtime Config
+
+`config.ini` now contains execution defaults:
+
+```ini
+[execution]
+managed_reprice_threshold_default = 0.01
+managed_reprice_interval_seconds = 2.0
+managed_reprice_max_updates = 12
+managed_reprice_timeout_seconds = 600
+```
+
+These are backend defaults. Per-group UI still overrides:
+
+- drift threshold
+- time-in-force
+
+If execution behavior changes in `config.ini`, restart `ib_server.py`.
+
+## 6. Cost Fill Behavior
+
+There are now two different cost-fill sources:
+
+### Portfolio avg cost fallback
+
+- source: IB `updatePortfolio`
+- frontend message: `portfolio_avg_cost_update`
+
+This remains useful for general account sync, but it is account-level and can blend identical contracts across groups.
+
+### Exact trigger fill attribution
+
+- source: IB `execDetails`
+- frontend message: `combo_order_fill_cost_update`
+
+For real Trigger-submitted combo orders, the backend now attributes each leg fill by:
+
+- `orderId / permId`
+- `conId`
+- expected execution side
+
+The frontend applies those leg prices only to the originating group and marks them as `costSource = execution_report`.
+
+Important consequence:
+
+- later `portfolio_avg_cost_update` messages will no longer overwrite those execution-report costs
+
+This fixed the earlier problem where identical contracts in different groups contaminated each other’s cost basis.
+
+## 7. Session Persistence Rules
+
+This changed recently and matters a lot for cleanup.
+
+Session export now keeps Trigger configuration but strips Trigger runtime state.
+
+Export/import no longer preserves:
+
+- broker status
+- order ID / perm ID
+- repricing counts
+- last preview payload
+- last trigger time
+- pending request flags
+- runtime errors
+
+It also resets `enabled` to `false`.
+
+So a saved JSON no longer reopens with stale `Filled` or stale live-order supervision metadata.
+
+## 8. Current Product Family Layer
+
+`js/product_registry.js` is still the runtime product source of truth.
+
+Current families include:
 
 - default equity / ETF
 - `ES`
@@ -70,339 +208,46 @@ It currently defines family profiles for:
 - `SPX`
 - `NDX`
 
-Key fields carried by the registry:
+It controls:
 
-- option security type
-- underlying security type
-- default option and underlying symbol
-- exchange
-- currency
-- trading class
-- option multiplier
-- settlement kind
-- pricing-model label
-- whether amortized mode is allowed
-- whether current live-data path is supported
-- whether stock-style underlying legs are allowed
-
-Current important behavior:
-
-- premium multiplier is no longer hard-coded to `100`
-- `SPXW` resolves to family `SPX`
-- `NDXP` resolves to family `NDX`
-- FOP families expose `underlyingSecType = FUT`
-- SPX / NDX expose `underlyingSecType = IND`
-
-## 4. Supported Instrument Families
-
-### Equity / ETF options
-
-This is still the reference path.
-
-- pricing uses spot-style BSM within current app assumptions
-- stock legs are supported
-- amortized mode is supported
-- live data uses the legacy stock / option flow
-
-### ES / NQ futures options
-
-These are the most advanced non-equity additions so far.
-
-- live data path is enabled
-- global `Underlying Contract Month` control is used to lock the underlying futures month
-- option pricing still uses the current app framework, not a dedicated Black-76 style futures-option model
-- amortized mode is disabled
-- stock-style underlying legs are disabled
-
-### SPX / NDX index options
-
-- live option subscriptions are enabled
-- underlying is treated as `IND`
-- cash-settled semantics are recognized
-- amortized mode is disabled
-- stock-style underlying legs are disabled
-
-Current caveat:
-
-- option quotes may stream while the underlying index quote itself is still absent or stale
-
-### CL / GC / SI / HG futures options
-
-Metadata has been added, but these are not fully operational in the browser yet.
-
-- family profiles exist in `js/product_registry.js`
-- XML descriptors exist in `contract_specs/`
-- live-data support is not fully validated end-to-end yet
-
-## 5. Contract Metadata
-
-Root folder:
-
-- `contract_specs/`
-
-This folder stores family-level XML descriptors for instruments whose IBKR contract identity is more complex than stock / ETF options.
-
-Current files include:
-
-- `catalog.xml`
-- `es.xml`
-- `nq.xml`
-- `spx.xml`
-- `ndx.xml`
-- `cl.xml`
-- `gc.xml`
-- `si.xml`
-- `hg.xml`
-
-What these XML files contain:
-
-- product identity
-- IB contract defaults
-- settlement method
+- secType and underlying type
 - multiplier
-- trading class
-- example local symbols
-- notes on fields that vary per expiry / strike / series
+- settlement style
+- amortized support
+- live-data support
+- whether underlying stock-style legs are allowed
 
-Important status:
+`contract_specs/*.xml` still exist but are not yet loaded at runtime.
 
-- these XML files are meant to become the long-term metadata source of truth
-- they are **not yet wired into runtime loading**
-- current runtime still uses `js/product_registry.js` as the active product metadata source
+## 9. Current Known Boundaries
 
-## 6. Pricing Source of Truth
+- Managed repricing is abstracted away from `ib_server.py`, but it still lives inside the IBKR adapter rather than a broker-neutral strategy module.
+- `Exit Condition` is currently evaluated on the frontend from live underlying updates, then forwarded to backend cancel logic.
+- Page reload does not reconstruct old managed execution context.
+- `contract_specs/` is still reference metadata only.
 
-`pricing_core.js` holds the pure pricing authority.
-`valuation.js` holds pure portfolio aggregation.
-`bsm.js` preserves the legacy global API used by older app code and tests.
+## 10. What To Trust If Notes and Code Drift
 
-Do not duplicate pricing logic outside:
+Trust in this order:
 
-- `processLegData(...)`
-- `computeLegPrice(...)`
-- `computeSimulatedPrice(...)`
+1. `js/product_registry.js`
+2. `js/pricing_core.js`
+3. `js/session_logic.js`
+4. `js/trade_trigger_logic.js`
+5. `trade_execution/adapters/ibkr.py`
+6. `ib_server.py`
+7. `js/ws_client.js`
 
-Important implementation facts:
+## 11. Current Test Status
 
-- option pricing time uses `calendar days / 365`
-- trading-day counts are informational only
-- `closePrice` can override simulated pricing
-- stock legs bypass BSM and use the scenario underlying directly
-- option multiplier now comes from the product registry, not a global `100`
+The current Node regression suite covers:
 
-Important limitation:
+- pricing and valuation
+- session logic
+- UI rendering/binding
+- Trigger logic
+- WebSocket message handling
 
-- FOP families are currently carried by the same overall pricing framework, so analytics are still approximate
-- live market marks are useful; theoretical FOP modeling is still unfinished
+Current suite status at handover:
 
-## 7. Settlement and Amortized Semantics
-
-`amortized.js` and related UI were originally written for equity-style deliverable options.
-
-That is still true in spirit, so recent work deliberately prevents incorrect behavior from being shown for products that do not fit that model.
-
-Current behavior:
-
-- equity / ETF combos can use amortized mode
-- FOP families cannot use amortized mode
-- SPX / NDX cannot use amortized mode
-
-Reason:
-
-- FOPs deliver into futures, not shares
-- SPX / NDX are cash-settled index options
-- the current amortized engine assumes share-like delivery semantics
-
-## 8. State Model
-
-`app.js` owns the session state and top-level orchestration.
-Pure session helpers live in `js/session_logic.js`.
-
-Current state also includes:
-
-- `underlyingContractMonth`
-
-This field was added for FOP live-data qualification and is currently a **global combo-wide control**, not a per-leg field.
-
-That design is intentional for now because P&L charts assume a single aligned underlying x-axis per combo.
-
-Important group fields:
-
-- `viewMode`
-- `liveData`
-- `settleUnderlyingPrice`
-- `legs[]`
-
-Important leg fields:
-
-- `type`
-- `pos`
-- `strike`
-- `expDate`
-- `iv`
-- `currentPrice`
-- `cost`
-- `closePrice`
-
-## 9. Control-Panel and UI Notes
-
-Relevant files:
-
-- `js/control_panel_ui.js`
-- `js/session_ui.js`
-- `js/group_editor_ui.js`
-
-Recent UI behavior:
-
-- the control panel shows `Underlying Contract Month` only when the selected symbol resolves to a product whose underlying security type is `FUT`
-- the field is disabled and marked `N/A for STK / IND` for equity / ETF and cash-settled index options
-- default values for ES / NQ are generated by `OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(...)`
-
-Default interpretation:
-
-- the field is meant to specify the underlying futures month used for live FOP qualification
-- format is `YYYYMM`
-
-## 10. Probability Analysis
-
-Probability analysis now has a separate proxy-mapping layer:
-
-- `js/distribution_proxy_config.js`
-
-Reason:
-
-- front futures contracts like `ES` do not have a stable long-lived return history suitable for the existing Student-t fit workflow
-
-Current mapping:
-
-- `ES -> SPY`
-- `SPX -> SPY`
-- `SPXW -> SPY`
-- `NQ -> QQQ`
-- `NDX -> QQQ`
-- `NDXP -> QQQ`
-- `GC -> GLD`
-- `SI -> SLV`
-
-`js/prob_charts.js` now resolves a distribution symbol through this config before consulting `T_DIST_PARAMS_DB`.
-
-This logic is intentionally configurable and should be extended here rather than hard-coded elsewhere.
-
-## 11. Live Data Architecture
-
-### Frontend
-
-`js/ws_client.js` now sends a more structured contract payload.
-
-The payload can include:
-
-- `secType`
-- `symbol`
-- `exchange`
-- `currency`
-- `multiplier`
-- `tradingClass`
-- `contractMonth`
-- `underlyingContractMonth`
-- `strike`
-- `right`
-- `expDate`
-
-### Backend
-
-`ib_server.py` now dynamically builds IB contracts instead of assuming everything is `Stock(...)` or stock-style `Option(...)`.
-
-It now handles:
-
-- `STK`
-- `IND`
-- `FUT`
-- `OPT`
-- `FOP`
-
-Important FOP behavior:
-
-- the server can qualify the underlying future first
-- if that succeeds, it uses `underConId` to help qualify the option
-- if a first FOP attempt fails with a populated `tradingClass`, it may retry without `tradingClass`
-
-Important SPX / NDX behavior:
-
-- option subscriptions are allowed even if the underlying `IND` contract does not qualify or does not stream
-- this was needed because the option legs themselves can still be useful for live testing
-
-## 12. IBKR Runtime Notes
-
-Useful runtime files:
-
-- `ib_server.py`
-- `ib_server.codex.log`
-- `ib_server.codex.err.log`
-- `ib_server.codex.pid`
-
-The local server binds to `127.0.0.1:8765` by default unless changed through config.
-
-When testing locally on this machine, Python has been available at:
-
-- `C:\Users\xuzhe\AppData\Local\Programs\Python\Python313\python.exe`
-
-Recommended manual startup:
-
-1. `python -m http.server 8000`
-2. `python ib_server.py`
-3. open `http://localhost:8000/index.html`
-
-Current Windows helper entry point still exists:
-
-- `start_option_combo.bat`
-
-## 13. What To Trust
-
-If future notes and code disagree, trust in this order:
-
-1. `js/product_registry.js` for current instrument-family assumptions
-2. `js/pricing_core.js` for pricing behavior
-3. `js/valuation.js` and `js/session_logic.js` for pure aggregation and session behavior
-4. `js/ws_client.js` and `ib_server.py` for live-data contract resolution
-5. UI modules for browser rendering behavior
-6. `contract_specs/*.xml` for family-level IB metadata reference, but remember runtime does not yet load them
-
-## 14. Current Caveats
-
-- the app is no longer stock-only, but it is also not yet a general-purpose derivatives engine
-- FOP pricing is still approximate within the existing framework
-- ES / NQ live data assumes the whole combo shares one `underlyingContractMonth`
-- if a combo truly mixes different underlying futures months, current chart semantics do not support that cleanly
-- SPX / NDX option legs can stream while the underlying index quote is still missing
-- CL / GC / SI / HG metadata exists, but live and analytics support is not fully finished
-- `contract_specs/` and `js/product_registry.js` currently duplicate some truth and should eventually be unified
-
-## 15. Recommended Next Steps
-
-If work resumes from here, the most useful next steps are:
-
-1. Load `contract_specs/*.xml` into runtime metadata so `js/product_registry.js` stops being a hand-maintained mirror.
-2. Strengthen FOP contract qualification around weekly / monthly series and underlying futures month resolution.
-3. Add validated live-data support for CL / GC / SI / HG.
-4. Decide whether FOP analytics should remain approximate or move to a proper futures-option model.
-5. Revisit SPX / NDX underlying index handling only if underlying live sync becomes necessary for the UI.
-
-## 16. Current Test Coverage
-
-Node-side regression coverage currently exists for:
-
-- `market_holidays.js`
-- `product_registry.js`
-- `distribution_proxy_config.js`
-- `bsm.js` compatibility behavior
-- `amortized.js`
-- `valuation.js`
-- `session_logic.js`
-- `session_ui.js`
-- `control_panel_ui.js`
-- `group_editor_ui.js`
-- `hedge_editor_ui.js`
-
-Current suite count:
-
-- `45 passed, 0 failed`
+- `75 passed, 0 failed`

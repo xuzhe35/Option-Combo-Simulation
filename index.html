@@ -8,7 +8,7 @@
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=20260316-collapse">
 </head>
 
 <body>
@@ -159,7 +159,7 @@
                         </div>
 
                         <div class="summary-item">
-                            <span class="label">Unrealized P&L</span>
+                            <span class="label">Theo P&L</span>
                             <span class="value" id="unrealizedPnL">$0.00</span>
                         </div>
 
@@ -181,6 +181,16 @@
                             <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🔥 Total Live
                                 P&L</span>
                             <span class="value font-weight-semibold" id="totalLivePnL">$0.00</span>
+                        </div>
+                    </div>
+
+                    <div class="panel-card" style="padding: 0.875rem 1rem;">
+                        <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                            <input type="checkbox" id="allowLiveComboOrders" style="accent-color: var(--danger-color);">
+                            <span style="font-size: 0.9rem; font-weight: 600;">Enable Live Combo Orders</span>
+                        </label>
+                        <div class="text-muted small mt-2">
+                            Off by default. Trial triggers can always preview instructions, but real combo orders are only sent to TWS when this switch is enabled.
                         </div>
                     </div>
 
@@ -407,7 +417,14 @@
                     <div class="panel-card mt-4 mb-4" id="hedgeGroupCard">
                         <div class="group-header">
                             <div class="group-title-area">
-                                <h3 class="h3-style m-0">🛡️ Hedges (Live P&amp;L Tracking)</h3>
+                                <h3 class="h3-style m-0" style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <button class="icon-btn collapse-toggle-btn" onclick="OptionComboGroupEditorUI.toggleGroupCollapse(this)" title="Toggle Collapse">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="chevron-icon">
+                                            <polyline points="6 9 12 15 18 9"></polyline>
+                                        </svg>
+                                    </button>
+                                    🛡️ Hedges (Live P&amp;L Tracking)
+                                </h3>
                                 <p class="text-muted small" style="margin-left: 1rem; margin-bottom: 0;">These positions
                                     only track Live P&L and do not affect simulated BSM charts.</p>
                             </div>
@@ -423,7 +440,8 @@
                             </div>
                         </div>
 
-                        <div class="table-container mt-2">
+                        <div class="group-body">
+                            <div class="table-container mt-2">
                             <table class="portfolio-table">
                                 <thead>
                                     <tr>
@@ -444,6 +462,7 @@
                                 <p class="text-muted small">No active hedge positions. Add one to track its live impact
                                     on your overall P&L.</p>
                             </div>
+                            </div>
                         </div>
                     </div>
 
@@ -452,10 +471,26 @@
                         <div class="panel-card group-card" data-group-id="">
                             <div class="group-header">
                                 <div class="group-title-area">
-                                    <label style="display: inline-flex; align-items: center; gap: 0.35rem; margin-right: 0.5rem;" title="Include this group in global totals, global charts, and probability analysis">
+                                    <button class="icon-btn collapse-toggle-btn" onclick="OptionComboGroupEditorUI.toggleGroupCollapse(this)" title="Toggle Collapse">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="chevron-icon">
+                                            <polyline points="6 9 12 15 18 9"></polyline>
+                                        </svg>
+                                    </button>
+                                    <label style="display: inline-flex; align-items: center; gap: 0.35rem; margin-right: 0.15rem;" title="Include this group in global totals, global charts, and probability analysis">
                                         <input type="checkbox" class="group-global-toggle" checked>
                                     </label>
                                     <input type="text" class="group-name-input h3-style" value="New Combo">
+                                    <button class="btn btn-secondary btn-sm trial-trigger-toggle-btn" type="button" style="display: none;">
+                                        Trial Trigger
+                                    </button>
+                                    <button class="btn btn-secondary btn-sm close-group-toggle-btn" type="button" style="display: none;">
+                                        Close Group
+                                    </button>
+                                    <div class="group-header-live-pnl-item" style="display: none;">
+                                        <span class="group-header-live-pnl-dot"></span>
+                                        <span class="label group-header-live-pnl-label">Live P&amp;L:</span>
+                                        <span class="group-header-live-pnl font-weight-semibold">$0.00</span>
+                                    </div>
                                 </div>
                                 <div class="group-actions">
                                     <button class="btn btn-secondary btn-sm" onclick="addLegToGroup(this)">
@@ -482,6 +517,7 @@
                                 </div>
                             </div>
 
+                            <div class="group-body">
                             <div class="group-live-control"
                                 style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
 
@@ -514,7 +550,7 @@
                                     </button>
                                 </div>
 
-                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;">
                                     <span class="small text-muted">🔴 Offline</span>
                                     <label class="switch-toggle"
                                         style="cursor: pointer; display: flex; align-items: center; gap: 0.5rem;">
@@ -522,6 +558,98 @@
                                             style="accent-color: var(--primary-color);">
                                         <span class="small font-weight-semibold">Live Market Data</span>
                                     </label>
+                                    <label class="small text-muted" style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
+                                        <input type="checkbox" class="avg-cost-sync-toggle" style="accent-color: var(--success-color);">
+                                        <span>Fill Cost From TWS Avg Cost</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="trial-trigger-container" style="display: none; margin-bottom: 1rem; padding: 0.75rem; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 0.5rem;">
+                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.6rem;">
+                                    <div style="display: inline-flex; align-items: center; gap: 0.5rem;">
+                                        <button class="icon-btn trial-trigger-collapse-btn" type="button" title="Collapse Trial Trigger" style="padding: 0 2px;">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="trial-trigger-chevron">
+                                                <polyline points="6 9 12 15 18 9"></polyline>
+                                            </svg>
+                                        </button>
+                                        <label style="display: inline-flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.9rem; font-weight: 600;">
+                                        <input type="checkbox" class="trial-trigger-enabled" style="accent-color: var(--warning-color);">
+                                        <span>Trial Trigger</span>
+                                        </label>
+                                    </div>
+                                    <span class="trial-trigger-status small text-muted">Idle</span>
+                                </div>
+                                <div class="trial-trigger-body">
+                                <div style="display: grid; grid-template-columns: 176px 96px 150px 120px 92px max-content; gap: 0.5rem; align-items: center; justify-content: start;">
+                                    <select class="leg-input trial-trigger-condition" style="width: 176px;">
+                                        <option value="gte">Price ≥ Trigger</option>
+                                        <option value="lte">Price ≤ Trigger</option>
+                                    </select>
+                                    <input type="number" class="leg-input trial-trigger-price" step="0.01" placeholder="Trigger">
+                                    <select class="leg-input trial-trigger-execution-mode" style="width: 150px;">
+                                        <option value="preview">Preview Only</option>
+                                        <option value="test_submit">Send to TWS (Test Only)</option>
+                                        <option value="submit">Send to TWS</option>
+                                    </select>
+                                    <select class="leg-input trial-trigger-reprice-threshold" style="width: 120px;" title="Auto-reprice when combo middle drifts by at least this amount.">
+                                        <option value="0.01">Drift 0.01</option>
+                                        <option value="0.02">Drift 0.02</option>
+                                        <option value="0.05">Drift 0.05</option>
+                                    </select>
+                                    <select class="leg-input trial-trigger-tif" style="width: 92px;" title="Broker time-in-force for the combo order.">
+                                        <option value="DAY">DAY</option>
+                                        <option value="GTC">GTC</option>
+                                    </select>
+                                    <button class="btn btn-secondary btn-sm trial-trigger-reset-btn" type="button" style="min-width: 68px; padding-inline: 0.85rem;">Reset</button>
+                                </div>
+                                <div class="trial-trigger-help text-muted small" style="margin-top: 0.55rem;">
+                                    Only works when this group is in Trial mode and Live Market Data is enabled. Preview mode never sends orders.
+                                </div>
+                                <div style="display: grid; grid-template-columns: max-content 150px 96px; gap: 0.5rem; align-items: center; justify-content: start; margin-top: 0.6rem;">
+                                    <label class="small text-muted" style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
+                                        <input type="checkbox" class="trial-trigger-exit-enabled" style="accent-color: var(--danger-color, #ef4444);">
+                                        <span>Exit Condition</span>
+                                    </label>
+                                    <select class="leg-input trial-trigger-exit-condition" style="width: 150px;">
+                                        <option value="lte">Price ≤ Exit</option>
+                                        <option value="gte">Price ≥ Exit</option>
+                                    </select>
+                                    <input type="number" class="leg-input trial-trigger-exit-price" step="0.01" placeholder="Exit">
+                                </div>
+                                <div class="trial-trigger-actions" style="display: none; margin-top: 0.6rem;"></div>
+                                <div class="trial-trigger-preview small" style="display: none; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed rgba(245, 158, 11, 0.35);"></div>
+                                </div>
+                            </div>
+
+                            <div class="close-group-container" style="display: none; margin-bottom: 1rem; padding: 0.75rem; background: rgba(59, 130, 246, 0.07); border: 1px solid rgba(59, 130, 246, 0.22); border-radius: 0.5rem;">
+                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.6rem;">
+                                    <div style="font-size: 0.9rem; font-weight: 600;">Close Group</div>
+                                    <span class="close-group-status small text-muted">Idle</span>
+                                </div>
+                                <div class="close-group-body">
+                                    <div style="display: grid; grid-template-columns: 160px 120px 92px max-content; gap: 0.5rem; align-items: center; justify-content: start;">
+                                        <select class="leg-input close-group-execution-mode" style="width: 160px;" title="Preview first, or send a closing combo to TWS.">
+                                            <option value="preview">Preview Only</option>
+                                            <option value="test_submit">Send to TWS (Test Only)</option>
+                                            <option value="submit">Send to TWS</option>
+                                        </select>
+                                        <select class="leg-input close-group-reprice-threshold" style="width: 120px;" title="Auto-reprice the close order when combo middle drifts by at least this amount.">
+                                            <option value="0.01">Drift 0.01</option>
+                                            <option value="0.02">Drift 0.02</option>
+                                            <option value="0.05">Drift 0.05</option>
+                                        </select>
+                                        <select class="leg-input close-group-tif" style="width: 92px;" title="Broker time-in-force for the closing combo order.">
+                                            <option value="DAY">DAY</option>
+                                            <option value="GTC">GTC</option>
+                                        </select>
+                                        <button class="btn btn-secondary btn-sm close-group-submit-btn" type="button" style="min-width: 96px; padding-inline: 0.85rem;">Close Group</button>
+                                    </div>
+                                    <div class="close-group-help text-muted small" style="margin-top: 0.55rem;">
+                                        Sends the reverse combo for all non-zero legs and reuses the managed middle-price negotiation flow.
+                                    </div>
+                                    <div class="close-group-actions" style="display: none; margin-top: 0.6rem;"></div>
+                                    <div class="close-group-preview small" style="display: none; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed rgba(59, 130, 246, 0.3);"></div>
                                 </div>
                             </div>
 
@@ -550,7 +678,7 @@
                                             <th>Price / Cost</th>
                                             <th>Simulated</th>
                                             <th style="min-width: 80px; text-align: right;">
-                                                <span class="sim-pnl-header-text">Sim P&L</span><br>
+                                                <span class="sim-pnl-header-text">Theo P&L</span><br>
                                                 <span class="text-muted small live-pnl-header-text">Live P&L</span>
                                             </th>
                                             <th>Actions</th>
@@ -592,7 +720,7 @@
                                         class="group-sim-value font-weight-semibold">$0.00</span>
                                 </div>
                                 <div class="group-summary-item pnl-container" style="transition: all 0.3s ease;">
-                                    <span class="label group-pnl-label">P&L:</span> <span class="group-pnl font-weight-bold">+$0.00</span>
+                                    <span class="label group-pnl-label">Theo P&L:</span> <span class="group-pnl font-weight-bold">+$0.00</span>
                                 </div>
                                 <div class="group-summary-item group-live-pnl-item" style="display: none;">
                                     <span class="label">🟢 Live P&L:</span>
@@ -691,6 +819,7 @@
                                     <canvas class="pnl-canvas"
                                         style="width: 100%; height: 100%; display: block;"></canvas>
                                 </div>
+                                                            </div>
                             </div>
                         </div>
                     </template>
@@ -702,7 +831,7 @@
                                 <select class="leg-input type-input">
                                     <option value="call">Call</option>
                                     <option value="put">Put</option>
-                                    <option value="stock">Underlying (Equity Only)</option>
+                                    <option value="stock">Underlying</option>
                                 </select>
                             </td>
                             <td>
@@ -754,7 +883,7 @@
                             </td>
                             <td style="text-align: right; vertical-align: middle;">
                                 <div style="display: flex; flex-direction: column; gap: 0.25rem;">
-                                    <div class="pnl-cell font-weight-semibold" title="Simulated P&L">$0.00</div>
+                                    <div class="pnl-cell font-weight-semibold" title="Theoretical P&L">$0.00</div>
                                     <div class="live-pnl-cell font-weight-semibold" style="display: none;"
                                         title="Live P&L">$0.00</div>
                                 </div>
@@ -831,6 +960,8 @@
     <script src="js/market_holidays.js"></script>
     <script src="js/date_utils.js"></script>
     <script src="js/product_registry.js"></script>
+    <script src="js/group_order_builder.js"></script>
+    <script src="js/trade_trigger_logic.js"></script>
     <script src="js/distribution_proxy_config.js"></script>
     <script src="js/pricing_core.js"></script>
     <script src="js/bsm.js"></script>
@@ -843,11 +974,11 @@
     <script src="js/session_ui.js"></script>
     <script src="js/control_panel_ui.js"></script>
     <script src="js/hedge_editor_ui.js"></script>
-    <script src="js/group_editor_ui.js"></script>
+    <script src="js/group_editor_ui.js?v=20260316-collapse"></script>
     <script src="js/hedge_ui.js"></script>
     <script src="js/group_ui.js"></script>
     <script src="js/global_ui.js"></script>
-    <script src="js/app.js"></script>
+    <script src="js/app.js?v=20260316-collapse"></script>
     <script src="js/ws_client.js"></script>
 </body>
 

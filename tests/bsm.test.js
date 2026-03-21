@@ -138,7 +138,7 @@ module.exports = {
             },
         },
         {
-            name: 'processes stock legs without option multiplier inflation',
+            name: 'processes equity underlying legs without option multiplier inflation',
             run() {
                 const ctx = loadPricingContext();
                 const processed = ctx.processLegData(
@@ -156,10 +156,38 @@ module.exports = {
                     'active'
                 );
 
-                assert.equal(processed.type, 'stock');
+                assert.equal(processed.type, 'underlying');
+                assert.equal(processed.isUnderlyingLeg, true);
                 assert.equal(processed.posMultiplier, -50);
                 assert.equal(processed.effectiveCostPerShare, 12.34);
                 assert.equal(processed.costBasis, -617);
+            },
+        },
+        {
+            name: 'uses futures point multiplier for futures underlying legs',
+            run() {
+                const ctx = loadPricingContext();
+                const profile = ctx.OptionComboProductRegistry.resolveUnderlyingProfile('ES');
+                const processed = ctx.processLegData(
+                    {
+                        type: 'stock',
+                        pos: 2,
+                        cost: 5900,
+                        currentPrice: 5980,
+                    },
+                    '2026-03-14',
+                    0,
+                    '2026-03-14',
+                    6000,
+                    0.03,
+                    'active',
+                    profile
+                );
+
+                assert.equal(processed.type, 'underlying');
+                assert.equal(processed.contractMultiplier, 50);
+                assert.equal(processed.posMultiplier, 100);
+                assert.equal(processed.costBasis, 590000);
             },
         },
         {

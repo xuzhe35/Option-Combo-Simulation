@@ -23,6 +23,7 @@ module.exports = {
                     ivOffset: { value: '' },
                     ivOffsetSlider: { value: '' },
                     ivOffsetDisplay: { textContent: '' },
+                    allowLiveComboOrders: { checked: false },
                 };
 
                 const ctx = loadBrowserScripts([
@@ -51,6 +52,7 @@ module.exports = {
                         simulatedDate: '2026-03-06',
                         interestRate: 0.0375,
                         ivOffset: 0.0125,
+                        allowLiveComboOrders: true,
                     },
                     currencyFormatter,
                     {
@@ -78,6 +80,7 @@ module.exports = {
                 assert.equal(elements.ivOffset.value, '1.25');
                 assert.equal(elements.ivOffsetSlider.value, 1.25);
                 assert.equal(elements.ivOffsetDisplay.textContent, '+1.25%');
+                assert.equal(elements.allowLiveComboOrders.checked, true);
             },
         },
     ],
