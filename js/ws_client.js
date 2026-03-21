@@ -63,15 +63,7 @@ function _reportLocalOnlyWsRestriction() {
 }
 
 function _isUnderlyingLeg(legOrType) {
-    if (typeof OptionComboProductRegistry !== 'undefined'
-        && typeof OptionComboProductRegistry.isUnderlyingLeg === 'function') {
-        return OptionComboProductRegistry.isUnderlyingLeg(legOrType);
-    }
-
-    const legType = typeof legOrType === 'string'
-        ? legOrType
-        : (legOrType && legOrType.type);
-    return String(legType || '').trim().toLowerCase() === 'stock';
+    return OptionComboProductRegistry.isUnderlyingLeg(legOrType);
 }
 
 function _normalizeWsPort(rawValue) {
@@ -781,32 +773,12 @@ function _groupHasCostForAllPositionedLegs(group) {
 
 function _getTradeTrigger(group) {
     if (!group) return null;
-    if (typeof OptionComboTradeTriggerLogic !== 'undefined'
-        && typeof OptionComboTradeTriggerLogic.ensureGroupTradeTrigger === 'function') {
-        return OptionComboTradeTriggerLogic.ensureGroupTradeTrigger(group);
-    }
-    return group.tradeTrigger || null;
+    return OptionComboTradeTriggerLogic.ensureGroupTradeTrigger(group);
 }
 
 function _getCloseExecution(group) {
     if (!group) return null;
-    if (typeof OptionComboSessionLogic !== 'undefined'
-        && typeof OptionComboSessionLogic.normalizeCloseExecution === 'function') {
-        group.closeExecution = OptionComboSessionLogic.normalizeCloseExecution(group.closeExecution);
-        return group.closeExecution;
-    }
-
-    if (!group.closeExecution || typeof group.closeExecution !== 'object') {
-        group.closeExecution = {
-            repriceThreshold: 0.01,
-            timeInForce: 'DAY',
-            status: 'idle',
-            pendingRequest: false,
-            lastPreview: null,
-            lastError: '',
-        };
-    }
-
+    group.closeExecution = OptionComboSessionLogic.normalizeCloseExecution(group.closeExecution);
     return group.closeExecution;
 }
 

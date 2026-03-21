@@ -25,10 +25,7 @@
     }
 
     function _isUnderlyingLeg(leg) {
-        return typeof OptionComboProductRegistry !== 'undefined'
-            && typeof OptionComboProductRegistry.isUnderlyingLeg === 'function'
-            ? OptionComboProductRegistry.isUnderlyingLeg(leg)
-            : String(leg && leg.type || '').toLowerCase() === 'stock';
+        return OptionComboProductRegistry.isUnderlyingLeg(leg);
     }
 
     function _resolveDefaultUnderlyingContractMonth(globalState) {

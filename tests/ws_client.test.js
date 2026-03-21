@@ -36,6 +36,7 @@ module.exports = {
                 let updateCalls = 0;
                 const ctx = loadBrowserScripts(
                     [
+                        'js/trade_trigger_logic.js',
                         'js/session_logic.js',
                         'js/product_registry.js',
                         'js/ws_client.js',
@@ -196,6 +197,7 @@ module.exports = {
 
                 const ctx = loadBrowserScripts(
                     [
+                        'js/trade_trigger_logic.js',
                         'js/session_logic.js',
                         'js/product_registry.js',
                         'js/ws_client.js',
@@ -269,6 +271,8 @@ module.exports = {
                         'js/date_utils.js',
                         'js/product_registry.js',
                         'js/pricing_core.js',
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
                         'js/ws_client.js',
                     ],
                     {
@@ -518,6 +522,7 @@ module.exports = {
                 let renderCalls = 0;
                 const ctx = loadBrowserScripts(
                     [
+                        'js/trade_trigger_logic.js',
                         'js/session_logic.js',
                         'js/product_registry.js',
                         'js/ws_client.js',
@@ -600,6 +605,7 @@ module.exports = {
 
                 const ctx = loadBrowserScripts(
                     [
+                        'js/trade_trigger_logic.js',
                         'js/session_logic.js',
                         'js/product_registry.js',
                         'js/ws_client.js',
@@ -663,6 +669,8 @@ module.exports = {
                 let updateCalls = 0;
                 const ctx = loadBrowserScripts(
                     [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
                         'js/ws_client.js',
                     ],
                     {
@@ -732,6 +740,8 @@ module.exports = {
                 let updateCalls = 0;
                 const ctx = loadBrowserScripts(
                     [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
                         'js/ws_client.js',
                     ],
                     {
@@ -803,6 +813,8 @@ module.exports = {
                 let updateCalls = 0;
                 const ctx = loadBrowserScripts(
                     [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
                         'js/ws_client.js',
                     ],
                     {
@@ -874,7 +886,7 @@ module.exports = {
                 };
 
                 const ctx = loadBrowserScripts(
-                    ['js/ws_client.js'],
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/ws_client.js'],
                     {
                         state,
                         renderGroups() {},
@@ -939,7 +951,7 @@ module.exports = {
                 let renderCalls = 0;
                 let updateCalls = 0;
                 const ctx = loadBrowserScripts(
-                    ['js/ws_client.js'],
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/ws_client.js'],
                     {
                         state,
                         renderGroups() { renderCalls += 1; },
@@ -1008,7 +1020,7 @@ module.exports = {
                 let renderCalls = 0;
                 let updateCalls = 0;
                 const ctx = loadBrowserScripts(
-                    ['js/ws_client.js'],
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/ws_client.js'],
                     {
                         state,
                         renderGroups() { renderCalls += 1; },
@@ -1079,7 +1091,7 @@ module.exports = {
                 let renderCalls = 0;
                 let updateCalls = 0;
                 const ctx = loadBrowserScripts(
-                    ['js/ws_client.js'],
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/ws_client.js'],
                     {
                         state,
                         renderGroups() { renderCalls += 1; },
@@ -1161,7 +1173,7 @@ module.exports = {
                 }
 
                 const ctx = loadBrowserScripts(
-                    ['js/session_logic.js', 'js/group_order_builder.js', 'js/ws_client.js'],
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/product_registry.js', 'js/group_order_builder.js', 'js/ws_client.js'],
                     {
                         state,
                         renderGroups() {},
@@ -1229,7 +1241,7 @@ module.exports = {
                 };
 
                 const ctx = loadBrowserScripts(
-                    ['js/session_logic.js', 'js/ws_client.js'],
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/ws_client.js'],
                     {
                         state,
                         renderGroups() {},
@@ -1299,7 +1311,7 @@ module.exports = {
                 };
 
                 const ctx = loadBrowserScripts(
-                    ['js/session_logic.js', 'js/ws_client.js'],
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/ws_client.js'],
                     {
                         state,
                         renderGroups() {},
@@ -1368,7 +1380,7 @@ module.exports = {
                 };
 
                 const ctx = loadBrowserScripts(
-                    ['js/session_logic.js', 'js/ws_client.js'],
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/ws_client.js'],
                     {
                         state,
                         renderGroups() {},
@@ -1434,7 +1446,7 @@ module.exports = {
                 };
 
                 const ctx = loadBrowserScripts(
-                    ['js/session_logic.js', 'js/ws_client.js'],
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/ws_client.js'],
                     {
                         state,
                         renderGroups() {},
@@ -1505,7 +1517,7 @@ module.exports = {
                 };
 
                 const ctx = loadBrowserScripts(
-                    ['js/session_logic.js', 'js/ws_client.js'],
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/ws_client.js'],
                     {
                         state,
                         renderGroups() {},

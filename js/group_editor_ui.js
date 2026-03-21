@@ -14,9 +14,7 @@
     }
 
     function isUnderlyingLeg(leg) {
-        return productRegistry && typeof productRegistry.isUnderlyingLeg === 'function'
-            ? productRegistry.isUnderlyingLeg(leg)
-            : String(leg && leg.type || '').toLowerCase() === 'stock';
+        return productRegistry.isUnderlyingLeg(leg);
     }
 
     function getUnderlyingLegLabel(symbol) {
@@ -26,49 +24,14 @@
     }
 
     function _ensureTradeTrigger(group) {
-        if (typeof OptionComboTradeTriggerLogic !== 'undefined'
-            && typeof OptionComboTradeTriggerLogic.ensureGroupTradeTrigger === 'function') {
-            return OptionComboTradeTriggerLogic.ensureGroupTradeTrigger(group);
-        }
-
-        if (!group.tradeTrigger || typeof group.tradeTrigger !== 'object') {
-            group.tradeTrigger = {
-                enabled: false,
-                condition: 'gte',
-                price: null,
-                executionMode: 'preview',
-                repriceThreshold: 0.01,
-                timeInForce: 'DAY',
-                exitEnabled: false,
-                exitCondition: 'lte',
-                exitPrice: null,
-                isExpanded: false,
-                status: 'idle',
-                pendingRequest: false,
-                lastTriggeredAt: null,
-                lastTriggerPrice: null,
-                lastPreview: null,
-                lastError: '',
-            };
-        }
-
-        return group.tradeTrigger;
+        return OptionComboTradeTriggerLogic.ensureGroupTradeTrigger(group);
     }
 
     function _ensurePortfolioAvgCostSync(group) {
         if (!group || typeof group !== 'object') {
             return false;
         }
-
-        if (typeof OptionComboSessionLogic !== 'undefined'
-            && typeof OptionComboSessionLogic.normalizePortfolioAvgCostSync === 'function') {
-            group.syncAvgCostFromPortfolio = OptionComboSessionLogic.normalizePortfolioAvgCostSync(group);
-            return group.syncAvgCostFromPortfolio;
-        }
-
-        if (typeof group.syncAvgCostFromPortfolio !== 'boolean') {
-            group.syncAvgCostFromPortfolio = false;
-        }
+        group.syncAvgCostFromPortfolio = OptionComboSessionLogic.normalizePortfolioAvgCostSync(group);
         return group.syncAvgCostFromPortfolio;
     }
 
@@ -76,26 +39,7 @@
         if (!group || typeof group !== 'object') {
             return null;
         }
-
-        if (typeof OptionComboSessionLogic !== 'undefined'
-            && typeof OptionComboSessionLogic.normalizeCloseExecution === 'function') {
-            group.closeExecution = OptionComboSessionLogic.normalizeCloseExecution(group.closeExecution);
-            return group.closeExecution;
-        }
-
-        if (!group.closeExecution || typeof group.closeExecution !== 'object') {
-            group.closeExecution = {
-                executionMode: 'preview',
-                repriceThreshold: 0.01,
-                timeInForce: 'DAY',
-                isExpanded: false,
-                status: 'idle',
-                pendingRequest: false,
-                lastPreview: null,
-                lastError: '',
-            };
-        }
-
+        group.closeExecution = OptionComboSessionLogic.normalizeCloseExecution(group.closeExecution);
         return group.closeExecution;
     }
 

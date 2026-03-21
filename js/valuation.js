@@ -23,9 +23,7 @@
     }
 
     function isUnderlyingLeg(leg) {
-        return productRegistry && typeof productRegistry.isUnderlyingLeg === 'function'
-            ? productRegistry.isUnderlyingLeg(leg)
-            : String(leg && leg.type || '').toLowerCase() === 'stock';
+        return productRegistry.isUnderlyingLeg(leg);
     }
 
     function buildCurrentPriceDisplayState(leg, activeViewMode, evalUnderlyingPrice, processedLeg, underlyingProfile) {

@@ -91,14 +91,7 @@
     }
 
     function isUnderlyingLeg(legOrType) {
-        if (productRegistry && typeof productRegistry.isUnderlyingLeg === 'function') {
-            return productRegistry.isUnderlyingLeg(legOrType);
-        }
-
-        const legType = typeof legOrType === 'string'
-            ? legOrType
-            : (legOrType && legOrType.type);
-        return String(legType || '').trim().toLowerCase() === 'stock';
+        return productRegistry.isUnderlyingLeg(legOrType);
     }
 
     function isLiveIvMissing(leg) {

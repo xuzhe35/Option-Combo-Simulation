@@ -17,7 +17,7 @@ module.exports = {
         {
             name: 'adds a group with one default leg and triggers a re-render',
             run() {
-                const ctx = loadBrowserScripts(['js/group_order_builder.js', 'js/trade_trigger_logic.js', 'js/group_editor_ui.js']);
+                const ctx = loadBrowserScripts(['js/group_order_builder.js', 'js/trade_trigger_logic.js', 'js/session_logic.js', 'js/group_editor_ui.js']);
                 const state = {
                     underlyingPrice: 432.1,
                     baseDate: '2026-03-15',
