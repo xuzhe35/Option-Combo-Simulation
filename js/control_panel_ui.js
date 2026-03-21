@@ -64,6 +64,36 @@
 
         syncUnderlyingContractMonthUI(false);
 
+        function syncInterestRateUI() {
+            const irInput = document.getElementById('interestRate');
+            const irDisplay = document.getElementById('interestRateDisplay');
+            if (!irInput) return;
+
+            const profile = typeof OptionComboProductRegistry === 'undefined'
+                ? null
+                : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
+            const usesBlack76 = profile && profile.pricingModel === 'black76';
+
+            irInput.disabled = usesBlack76;
+            const controlGroup = typeof irInput.closest === 'function' ? irInput.closest('.control-group') : null;
+            if (controlGroup) {
+                controlGroup.style.opacity = usesBlack76 ? '0.45' : '';
+            }
+            if (usesBlack76) {
+                irInput.title = 'Interest rate has no effect on Black-76 forward pricing (futures / index options).';
+                if (irDisplay) {
+                    irDisplay.title = irInput.title;
+                }
+            } else {
+                irInput.title = '';
+                if (irDisplay) {
+                    irDisplay.title = '';
+                }
+            }
+        }
+
+        syncInterestRateUI();
+
         function applyUnderlyingSymbol(rawValue, forceResubscribe) {
             const normalizedSymbol = String(rawValue || '').trim().toUpperCase();
             if (!normalizedSymbol) {
@@ -75,6 +105,7 @@
             state.underlyingSymbol = normalizedSymbol;
             symInput.value = state.underlyingSymbol;
             syncUnderlyingContractMonthUI(symbolChanged);
+            syncInterestRateUI();
 
             if (typeof renderGroups === 'function') {
                 renderGroups();
