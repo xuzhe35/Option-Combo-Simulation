@@ -25,6 +25,22 @@ module.exports = {
                     }),
                     'settlement'
                 );
+
+                assert.equal(
+                    ctx.OptionComboSessionLogic.isPortfolioAvgCostSyncEnabled({
+                        viewMode: 'active',
+                        legs: [{ cost: 0 }],
+                    }),
+                    true
+                );
+
+                assert.equal(
+                    ctx.OptionComboSessionLogic.isPortfolioAvgCostSyncEnabled({
+                        viewMode: 'active',
+                        legs: [{ cost: 2.5 }],
+                    }),
+                    false
+                );
             },
         },
         {
@@ -137,6 +153,8 @@ module.exports = {
                 assert.equal(result.hedges.length, 2);
                 assert.equal(result.groups[1].name, 'Legacy Combo');
                 assert.equal(result.groups[1].includedInGlobal, true);
+                assert.equal(result.groups[1].isCollapsed, false);
+                assert.equal(result.groups[1].syncAvgCostFromPortfolio, false);
                 assert.equal(result.groups[1].legs[0].expDate, '2026-04-13');
                 assert.equal(result.groups[1].legs[0].closePrice, null);
                 assert.equal(result.hedges[1].id, 'id_3');
@@ -170,8 +188,40 @@ module.exports = {
                                 id: 'legacy_group',
                                 name: 'Imported Group',
                                 includedInGlobal: false,
+                                isCollapsed: true,
                                 viewMode: 'settlement',
                                 settleUnderlyingPrice: 205,
+                                tradeTrigger: {
+                                    enabled: true,
+                                    condition: 'gte',
+                                    price: 671.01,
+                                    executionMode: 'submit',
+                                    repriceThreshold: 0.01,
+                                    timeInForce: 'DAY',
+                                    exitEnabled: true,
+                                    exitCondition: 'lte',
+                                    exitPrice: 670.5,
+                                    status: 'submitted',
+                                    pendingRequest: true,
+                                    lastTriggeredAt: '2026-03-17T18:53:49Z',
+                                    lastTriggerPrice: 671.01,
+                                    lastPreview: {
+                                        status: 'Filled',
+                                        orderId: 2360,
+                                    },
+                                    lastError: 'old error',
+                                },
+                                closeExecution: {
+                                    repriceThreshold: 0.02,
+                                    timeInForce: 'GTC',
+                                    status: 'submitted',
+                                    pendingRequest: true,
+                                    lastPreview: {
+                                        status: 'Submitted',
+                                        orderId: 991,
+                                    },
+                                    lastError: 'stale close error',
+                                },
                                 legs: [
                                     { id: 'legacy_leg', type: 'put', strike: 210, expDate: '2026-04-17', iv: 0.24, cost: 3.1 },
                                 ],
@@ -188,20 +238,76 @@ module.exports = {
                 assert.equal(result.groups.length, 1);
                 assert.equal(result.groups[0].id, 'gid_1');
                 assert.equal(result.groups[0].includedInGlobal, false);
+                assert.equal(result.groups[0].isCollapsed, true);
+                assert.equal(result.groups[0].syncAvgCostFromPortfolio, false);
                 assert.equal(result.groups[0].viewMode, 'settlement');
                 assert.equal(result.groups[0].settleUnderlyingPrice, 205);
+                assert.equal(result.groups[0].tradeTrigger.enabled, false);
+                assert.equal(result.groups[0].tradeTrigger.condition, 'gte');
+                assert.equal(result.groups[0].tradeTrigger.price, 671.01);
+                assert.equal(result.groups[0].tradeTrigger.executionMode, 'submit');
+                assert.equal(result.groups[0].tradeTrigger.exitEnabled, true);
+                assert.equal(result.groups[0].tradeTrigger.exitPrice, 670.5);
+                assert.equal(result.groups[0].tradeTrigger.isExpanded, false);
+                assert.equal(result.groups[0].tradeTrigger.status, 'idle');
+                assert.equal(result.groups[0].tradeTrigger.pendingRequest, false);
+                assert.equal(result.groups[0].tradeTrigger.lastPreview, null);
+                assert.equal(result.groups[0].tradeTrigger.lastError, '');
+                assert.equal(result.groups[0].closeExecution.repriceThreshold, 0.02);
+                assert.equal(result.groups[0].closeExecution.executionMode, 'preview');
+                assert.equal(result.groups[0].closeExecution.timeInForce, 'GTC');
+                assert.equal(result.groups[0].closeExecution.isExpanded, false);
+                assert.equal(result.groups[0].closeExecution.status, 'idle');
+                assert.equal(result.groups[0].closeExecution.pendingRequest, false);
+                assert.equal(result.groups[0].closeExecution.lastPreview, null);
+                assert.equal(result.groups[0].closeExecution.lastError, '');
                 assert.equal(result.groups[0].legs[0].id, 'gid_2');
                 assert.equal(result.groups[0].legs[0].currentPrice, 0);
                 assert.equal(result.groups[0].legs[0].closePrice, null);
             },
         },
         {
-            name: 'builds export state as a detached snapshot',
+            name: 'builds export state as a detached snapshot and strips runtime trade trigger state',
             run() {
                 const ctx = loadSessionLogicContext();
                 const original = {
                     underlyingSymbol: 'SPY',
-                    groups: [{ id: 'g1', name: 'Test' }],
+                    groups: [{
+                        id: 'g1',
+                        name: 'Test',
+                        tradeTrigger: {
+                            enabled: true,
+                            condition: 'gte',
+                            price: 671.01,
+                            executionMode: 'submit',
+                            repriceThreshold: 0.01,
+                            timeInForce: 'DAY',
+                            exitEnabled: true,
+                            exitCondition: 'lte',
+                            exitPrice: 670.5,
+                            status: 'submitted',
+                            pendingRequest: true,
+                            lastTriggeredAt: '2026-03-17T18:53:49Z',
+                            lastTriggerPrice: 671.01,
+                            lastPreview: {
+                                status: 'Filled',
+                                orderId: 2360,
+                            },
+                            lastError: 'old error',
+                        },
+                        closeExecution: {
+                            executionMode: 'test_submit',
+                            repriceThreshold: 0.02,
+                            timeInForce: 'GTC',
+                            status: 'submitted',
+                            pendingRequest: true,
+                            lastPreview: {
+                                status: 'Filled',
+                                orderId: 991,
+                            },
+                            lastError: 'stale close error',
+                        },
+                    }],
                 };
 
                 const snapshot = ctx.OptionComboSessionLogic.buildExportState(original);
@@ -209,6 +315,26 @@ module.exports = {
 
                 assert.equal(original.groups[0].name, 'Test');
                 assert.equal(snapshot.groups[0].name, 'Changed');
+                assert.equal(snapshot.groups[0].tradeTrigger.enabled, false);
+                assert.equal(snapshot.groups[0].tradeTrigger.condition, 'gte');
+                assert.equal(snapshot.groups[0].tradeTrigger.price, 671.01);
+                assert.equal(snapshot.groups[0].tradeTrigger.executionMode, 'submit');
+                assert.equal(snapshot.groups[0].tradeTrigger.exitEnabled, true);
+                assert.equal(snapshot.groups[0].tradeTrigger.exitPrice, 670.5);
+                assert.equal(snapshot.groups[0].tradeTrigger.isExpanded, false);
+                assert.equal(snapshot.groups[0].tradeTrigger.status, 'idle');
+                assert.equal(snapshot.groups[0].tradeTrigger.pendingRequest, false);
+                assert.equal(snapshot.groups[0].tradeTrigger.lastTriggeredAt, null);
+                assert.equal(snapshot.groups[0].tradeTrigger.lastPreview, null);
+                assert.equal(snapshot.groups[0].tradeTrigger.lastError, '');
+                assert.equal(snapshot.groups[0].closeExecution.repriceThreshold, 0.02);
+                assert.equal(snapshot.groups[0].closeExecution.executionMode, 'test_submit');
+                assert.equal(snapshot.groups[0].closeExecution.timeInForce, 'GTC');
+                assert.equal(snapshot.groups[0].closeExecution.isExpanded, false);
+                assert.equal(snapshot.groups[0].closeExecution.status, 'idle');
+                assert.equal(snapshot.groups[0].closeExecution.pendingRequest, false);
+                assert.equal(snapshot.groups[0].closeExecution.lastPreview, null);
+                assert.equal(snapshot.groups[0].closeExecution.lastError, '');
             },
         },
     ],

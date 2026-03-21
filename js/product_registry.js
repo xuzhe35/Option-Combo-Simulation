@@ -21,6 +21,7 @@
         currency: 'USD',
         tradingClass: null,
         optionMultiplier: 100,
+        underlyingLegMultiplier: 1,
         settlementUnitsPerContract: 100,
         settlementKind: 'equity-deliverable',
         pricingModel: 'bsm-spot',
@@ -43,12 +44,13 @@
             underlyingExchange: 'CME',
             tradingClass: 'E3A',
             optionMultiplier: 50,
+            underlyingLegMultiplier: 50,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'futures-option-pending',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
-            supportsUnderlyingLegs: false,
+            supportsUnderlyingLegs: true,
             deliverableUnitSingular: 'futures contract',
             deliverableUnitPlural: 'futures contracts',
         },
@@ -61,12 +63,13 @@
             underlyingExchange: 'CME',
             tradingClass: 'Q3A',
             optionMultiplier: 20,
+            underlyingLegMultiplier: 20,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'futures-option-pending',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
-            supportsUnderlyingLegs: false,
+            supportsUnderlyingLegs: true,
             deliverableUnitSingular: 'futures contract',
             deliverableUnitPlural: 'futures contracts',
         },
@@ -79,12 +82,13 @@
             underlyingExchange: 'NYMEX',
             tradingClass: 'ML3',
             optionMultiplier: 1000,
+            underlyingLegMultiplier: 1000,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'futures-option-pending',
             supportsAmortizedMode: false,
-            supportsLegacyLiveData: false,
-            supportsUnderlyingLegs: false,
+            supportsLegacyLiveData: true,
+            supportsUnderlyingLegs: true,
             deliverableUnitSingular: 'futures contract',
             deliverableUnitPlural: 'futures contracts',
         },
@@ -97,12 +101,13 @@
             underlyingExchange: 'COMEX',
             tradingClass: 'G3T',
             optionMultiplier: 100,
+            underlyingLegMultiplier: 100,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'futures-option-pending',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: false,
-            supportsUnderlyingLegs: false,
+            supportsUnderlyingLegs: true,
             deliverableUnitSingular: 'futures contract',
             deliverableUnitPlural: 'futures contracts',
         },
@@ -115,12 +120,13 @@
             underlyingExchange: 'COMEX',
             tradingClass: 'S3T',
             optionMultiplier: 5000,
+            underlyingLegMultiplier: 5000,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'futures-option-pending',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: false,
-            supportsUnderlyingLegs: false,
+            supportsUnderlyingLegs: true,
             deliverableUnitSingular: 'futures contract',
             deliverableUnitPlural: 'futures contracts',
         },
@@ -133,12 +139,13 @@
             underlyingExchange: 'COMEX',
             tradingClass: 'H3T',
             optionMultiplier: 25000,
+            underlyingLegMultiplier: 25000,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'futures-option-pending',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: false,
-            supportsUnderlyingLegs: false,
+            supportsUnderlyingLegs: true,
             deliverableUnitSingular: 'futures contract',
             deliverableUnitPlural: 'futures contracts',
         },
@@ -150,6 +157,7 @@
             optionSymbol: 'SPXW',
             underlyingSymbol: 'SPX',
             optionExchange: 'SMART',
+            underlyingExchange: 'CBOE',
             tradingClass: 'SPXW',
             optionMultiplier: 100,
             settlementUnitsPerContract: 0,
@@ -171,6 +179,7 @@
             optionSymbol: 'NDXP',
             underlyingSymbol: 'NDX',
             optionExchange: 'SMART',
+            underlyingExchange: 'NASDAQ',
             tradingClass: 'NDXP',
             optionMultiplier: 100,
             settlementUnitsPerContract: 0,
@@ -220,8 +229,37 @@
         return resolveUnderlyingProfile(symbol).optionMultiplier;
     }
 
+    function getUnderlyingLegMultiplier(symbol) {
+        const profile = resolveUnderlyingProfile(symbol);
+        return Number.isFinite(profile.underlyingLegMultiplier)
+            ? profile.underlyingLegMultiplier
+            : 1;
+    }
+
     function getSettlementUnitsPerContract(symbol) {
         return resolveUnderlyingProfile(symbol).settlementUnitsPerContract;
+    }
+
+    function normalizeLegType(legOrType) {
+        if (typeof legOrType === 'string') {
+            return legOrType.trim().toLowerCase();
+        }
+
+        if (legOrType && typeof legOrType.type === 'string') {
+            return legOrType.type.trim().toLowerCase();
+        }
+
+        return '';
+    }
+
+    function isUnderlyingLeg(legOrType) {
+        const legType = normalizeLegType(legOrType);
+        return legType === 'stock' || legType === 'underlying';
+    }
+
+    function isOptionLeg(legOrType) {
+        const legType = normalizeLegType(legOrType);
+        return legType === 'call' || legType === 'put';
     }
 
     function _parseIsoDateParts(dateText) {
@@ -311,6 +349,28 @@
         return resolveUnderlyingProfile(symbol).supportsUnderlyingLegs !== false;
     }
 
+    function getUnderlyingLegLabel(symbol) {
+        const profile = resolveUnderlyingProfile(symbol);
+        if (profile.underlyingSecType === 'FUT') {
+            return 'Underlying (Future)';
+        }
+        if (profile.underlyingSecType === 'STK') {
+            return 'Underlying (Equity)';
+        }
+        return 'Underlying';
+    }
+
+    function getUnderlyingLegPriceTitle(symbol) {
+        const profile = resolveUnderlyingProfile(symbol);
+        if (profile.underlyingSecType === 'FUT') {
+            return 'Current Underlying Future Price';
+        }
+        if (profile.underlyingSecType === 'STK') {
+            return 'Current Underlying Equity Price';
+        }
+        return 'Current Underlying Leg Price';
+    }
+
     function getDeliverableLabel(symbol, count) {
         const profile = resolveUnderlyingProfile(symbol);
         return Math.abs(count) === 1
@@ -323,11 +383,17 @@
         resolveUnderlyingProfile,
         resolveTradingClass,
         resolveDefaultUnderlyingContractMonth,
+        normalizeLegType,
+        isUnderlyingLeg,
+        isOptionLeg,
         getOptionMultiplier,
+        getUnderlyingLegMultiplier,
         getSettlementUnitsPerContract,
         supportsAmortizedMode,
         supportsLegacyLiveData,
         supportsUnderlyingLegs,
+        getUnderlyingLegLabel,
+        getUnderlyingLegPriceTitle,
         getDeliverableLabel,
     };
 

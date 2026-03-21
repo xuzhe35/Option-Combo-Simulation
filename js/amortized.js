@@ -13,6 +13,7 @@
         processLegData,
         computeSimulatedPrice,
         resolveInstrumentProfile,
+        isUnderlyingLeg,
     } = pricingCore;
 
     function buildUnsupportedResult(profile, reason) {
@@ -62,7 +63,7 @@
                 profile
             );
             initialCashOutflow += pLeg.costBasis;
-            if (leg.type.toLowerCase() === 'stock') {
+            if (isUnderlyingLeg(leg)) {
                 netShares += leg.pos;
             }
         });
@@ -70,7 +71,7 @@
         let currentCash = -initialCashOutflow;
 
         group.legs.forEach(leg => {
-            if (leg.type.toLowerCase() === 'stock') return;
+            if (isUnderlyingLeg(leg)) return;
 
             const pos = leg.pos;
             const activeViewMode = leg._viewMode || group.viewMode || 'active';

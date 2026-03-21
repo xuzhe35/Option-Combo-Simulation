@@ -1,242 +1,202 @@
 # Option Combo Simulator 架构说明
 
-## 1. 一句话总结
+## 1. 当前一句话总结
 
-这是一个**无构建步骤、无模块系统**的本地浏览器应用：
+这是一个不经过构建步骤、依赖 `index.html` 顺序加载全局脚本的本地浏览器应用。
 
-- `index.html` 提供页面壳和模板
-- `app.js` 维护全局状态、驱动渲染和估值循环
-- `pricing_core.js` 是纯定价单一事实来源
-- `valuation.js` 是纯组合估值与聚合层
-- `session_logic.js` 是纯会话导入/导出与 mode 规则层
-- `bsm.js` 是兼容层
-- `chart.js` + `chart_controls.js` 负责图表
-- `prob_charts.js` 负责概率分析与 Monte Carlo Worker
-- `ws_client.js` + `ib_server.py` 提供可选的 IBKR 实时行情
+当前真实架构已经不是“一个巨大的 `app.js`”，而是：
 
-项目本质上是一个“**全局状态 + 全局函数 + Canvas 图表 + 可选本地 WebSocket 后端**”的单体前端应用。
+- `index.html` 负责页面骨架、模板和脚本装配
+- `app.js` 持有全局 `state`，负责顶层编排
+- `pricing_core.js` / `amortized.js` / `valuation.js` / `session_logic.js` 提供纯计算和纯规则
+- `control_panel_ui.js` / `session_ui.js` / `group_editor_ui.js` / `hedge_editor_ui.js` 负责编辑器与交互绑定
+- `group_ui.js` / `hedge_ui.js` / `global_ui.js` 负责把派生结果写回 DOM
+- `trade_trigger_logic.js` 负责 Trial Trigger 状态与请求构造
+- `ws_client.js` + `ib_server.py` + `trade_execution/*` 负责 IBKR 实盘桥接与订单执行
 
-## 2. 总体架构图
+## 2. 运行时分层
 
-```mermaid
-flowchart LR
-    U["用户<br/>浏览器交互"] --> H["index.html<br/>页面壳 / 模板 / 控件"]
-    H --> A["app.js<br/>状态中心 + 渲染编排 + 估值循环"]
+### 2.1 页面与模板层
 
-    A --> B["pricing_core.js<br/>定价核心<br/>processLegData / computeSimulatedPrice"]
-    A --> V["valuation.js<br/>组合估值聚合<br/>computePortfolioDerivedData"]
-    A --> SL["session_logic.js<br/>导入导出 / mode 规则"]
-    A --> BC["bsm.js<br/>兼容层"]
-    A --> CC["chart_controls.js<br/>图表控制层"]
-    CC --> C["chart.js<br/>PnLChart / AmortizationChart"]
-    A --> GU["group_ui.js<br/>Group DOM 写入"]
-    A --> HU["hedge_ui.js<br/>Hedge DOM 写入"]
-    A --> GLU["global_ui.js<br/>Global DOM 写入"]
+- `index.html`
+- `style.css`
 
-    A --> P["prob_charts.js<br/>概率分析控制器"]
-    P --> W["Web Worker Blob<br/>1M Monte Carlo 路径模拟"]
-    P --> T["t_params_db.js<br/>Student-t 参数库"]
+负责：
 
-    A --> WS["ws_client.js<br/>浏览器 WebSocket 客户端"]
-    WS --> PY["ib_server.py<br/>Python WebSocket 桥"]
-    PY --> IB["IBKR TWS / Gateway"]
+- 左侧 Scenario Controls
+- Group / Leg / Hedge 模板
+- 全局卡片、图表容器、WebSocket 控件
+- Trial Trigger 控件区
 
-    S["scripts/fit_underlying.py"] --> J["t_params_db.json"]
-    S --> T
+### 2.2 顶层状态与编排层
 
-    X["tests/*.test.js"] --> B
-    X --> M["market_holidays.js"]
-```
+- `js/app.js`
 
-## 3. 运行分层
-
-### 3.1 UI 壳层
-
-由 `index.html` + `style.css` 组成，负责：
-
-- 左侧场景控制面板
-- 全局估值卡片
-- 全局 P&L / 全局 amortized / 概率分析卡片
-- Combo Group 模板、Leg 行模板、Hedge 行模板
-
-特点：
-
-- 大量 DOM 结构直接写在 HTML 中
-- 通过 `template` 节点让 `app.js` 动态克隆
-- 通过内联 `onclick` 调用全局函数
-
-### 3.2 状态与编排层
-
-由 `app.js` 主导，负责：
+负责：
 
 - 持有全局 `state`
-- 初始化页面事件
-- 渲染 `groups` 和 `hedges`
-- 响应输入变化并触发 `updateDerivedValues()`
-- 计算全局汇总、group 汇总、amortized 结果
-- 导入/导出 JSON
+- 初始化页面
+- 调度渲染
+- 调用 valuation 计算
+- 导入导出会话
+- 连接 UI 模块和 WebSocket 模块
 
-这是整个系统的“应用服务层”。
+`app.js` 现在是 orchestration bridge，不再承担大部分细节逻辑。
 
-### 3.3 定价核心层
+### 2.3 纯计算与纯规则层
 
-由 `pricing_core.js` 主导，负责：
+- `js/pricing_core.js`
+- `js/amortized.js`
+- `js/valuation.js`
+- `js/session_logic.js`
+- `js/product_registry.js`
+- `js/trade_trigger_logic.js`
 
-- 日期与交易日计算
-- leg 标准化
-- BSM 定价
-- stock leg 与 closed leg 的特殊处理
-- `trial / active / amortized / settlement` 模式下的统一价格语义
+职责：
 
-这部分是最接近“领域核心”的代码。
+- 期权定价、股票腿/FUT/FOP/IND 乘数与语义
+- amortized 成本计算
+- group / portfolio 派生结果聚合
+- session 导入导出、mode 规则
+- 品种族元数据与能力开关
+- Trial Trigger 的默认值、触发条件、退出条件、请求 payload
 
-### 3.4 图表层
+### 2.4 UI 编辑层
 
-分成两层：
+- `js/control_panel_ui.js`
+- `js/session_ui.js`
+- `js/group_editor_ui.js`
+- `js/hedge_editor_ui.js`
 
-- `chart_controls.js`: 决定画什么、用什么范围、何时重绘
-- `chart.js`: 真正执行 Canvas 绘制
+职责：
 
-这里把“控制逻辑”和“绘制逻辑”做了一个弱分层，但两者仍然依赖全局对象和全局函数。
+- 绑定输入事件
+- 渲染和更新 editor 行
+- 控制 Trial / Active / Amortized / Settlement 切换
+- 管理 Trial Trigger 控件、继续重试、取消订单等动作入口
 
-### 3.5 概率分析层
+### 2.5 DOM 写回层
 
-由 `prob_charts.js` 实现，负责：
+- `js/group_ui.js`
+- `js/hedge_ui.js`
+- `js/global_ui.js`
 
-- 从 `t_params_db.js` 读取 Student-t 参数
-- 计算组合平均模拟 IV
-- 启动 Worker 做 Monte Carlo
-- 把 Worker 返回的密度结果和主线程重算的 P&L 曲线组合成两张图
+职责：
 
-特点：
+- 把 valuation 结果写回页面
+- 渲染黄色 Trial Trigger 预览区
+- 显示 broker status、managed execution 状态、重试次数等
 
-- 路径模拟在 Worker 中
-- 组合 P&L 曲线仍在主线程上重算
-- 因此这部分是“半异步、半主线程”的混合结构
+### 2.6 图表与概率分析层
 
-### 3.6 状态计算层
+- `js/chart.js`
+- `js/chart_controls.js`
+- `js/prob_charts.js`
+- `js/distribution_proxy_config.js`
+- `js/t_params_db.js`
 
-由 `valuation.js` 实现，负责：
+职责：
 
-- hedge、leg、group、portfolio 的派生结果计算
-- live P&L、simulated value、global total 的纯聚合
-- 为 `app.js` 提供可直接写入 DOM 的派生视图数据
+- Group / Global PnL 图
+- Group / Global amortized 图
+- 概率密度与 expected PnL density
+- Student-t 参数数据库
+- futures/index family 的分布代理映射
 
-这让 `app.js` 逐步从“又算又写”转成“计算层 + DOM 写入层”的结构。
+### 2.7 实盘桥接与执行层
 
-### 3.7 Amortized 计算层
+- `js/ws_client.js`
+- `ib_server.py`
+- `trade_execution/engine.py`
+- `trade_execution/models.py`
+- `trade_execution/adapters/base.py`
+- `trade_execution/adapters/ibkr.py`
 
-由 `amortized.js` 实现，负责：
+职责分工：
 
-- group-level amortized 成本计算
-- global combined amortized 聚合
-- 给 UI banner 和 amortized 图表提供统一结果
+- `ws_client.js`
+  - 维护浏览器 WebSocket
+  - 发送 `preview` / `validate` / `submit` / `resume` / `cancel`
+  - 接收 live quote、order status、execution-report fill cost
+- `ib_server.py`
+  - 连接 TWS / Gateway
+  - 作为 WebSocket 入口与消息路由层
+  - 广播 `orderStatus`
+  - 监听 `execDetails`，把成交腿价格按订单归因后回推给前端
+- `trade_execution/engine.py`
+  - 把外部消息路由到具体执行适配器
+- `trade_execution/adapters/ibkr.py`
+  - IBKR `BAG + LMT` 订单构造
+  - combo validate / preview / submit
+  - managed repricing
+  - continue monitoring / continue retries / cancel live order
 
-这部分已经被抽成纯函数模块，由 `app.js` 做兼容转调。
+## 3. 真实脚本加载顺序
 
-### 3.8 会话逻辑层
+当前 `index.html` 中的真实顺序是：
 
-由 `session_logic.js` 实现，负责：
+1. `js/t_params_db.js`
+2. `js/market_holidays.js`
+3. `js/date_utils.js`
+4. `js/product_registry.js`
+5. `js/trade_trigger_logic.js`
+6. `js/distribution_proxy_config.js`
+7. `js/pricing_core.js`
+8. `js/bsm.js`
+9. `js/chart.js`
+10. `js/prob_charts.js`
+11. `js/chart_controls.js`
+12. `js/amortized.js`
+13. `js/valuation.js`
+14. `js/session_logic.js`
+15. `js/session_ui.js`
+16. `js/control_panel_ui.js`
+17. `js/hedge_editor_ui.js`
+18. `js/group_editor_ui.js`
+19. `js/hedge_ui.js`
+20. `js/group_ui.js`
+21. `js/global_ui.js`
+22. `js/app.js`
+23. `js/ws_client.js`
 
-- import/export 的纯逻辑
-- legacy JSON 迁移
-- group view mode 规则与约束
+这仍然是运行时约定，不是编译期约束。
 
-### 3.9 UI 写入层
+## 4. 当前核心状态模型
 
-由三个文件组成：
+全局 `state` 由 `app.js` 持有，关键字段包括：
 
-- `hedge_ui.js`
-- `group_ui.js`
-- `global_ui.js`
+- `underlyingSymbol`
+- `underlyingContractMonth`
+- `underlyingPrice`
+- `baseDate`
+- `simulatedDate`
+- `interestRate`
+- `ivOffset`
+- `allowLiveComboOrders`
+- `groups`
+- `hedges`
 
-它们只负责把派生结果写回 DOM，不负责定价和聚合。
+### 4.1 Group
 
-### 3.10 实时数据接入层
-
-分成浏览器端和 Python 端：
-
-- `ws_client.js`: 浏览器连接 `ws://localhost:<port>`
-- `ib_server.py`: 连接 IBKR TWS / Gateway，转发期权和股票行情
-
-浏览器端只知道 localhost WebSocket；Python 后端负责：
-
-- 订阅合约
-- 从 IB 取 bid/ask midpoint、理论价、IV
-- 按客户端订阅关系回推增量数据
-
-### 3.11 离线参数生成链
-
-`scripts/fit_underlying.py` 会：
-
-- 下载历史价格
-- 拟合 Student-t 分布
-- 生成 `t_params_db.json`
-- 同步生成浏览器可直接加载的 `t_params_db.js`
-
-这是概率分析的“离线数据准备链”，不参与日常交互运行时。
-
-## 4. 真实脚本依赖顺序
-
-项目没有 ES Modules，也没有 bundler，完全依赖 `index.html` 中的脚本顺序：
-
-1. `t_params_db.js`
-2. `market_holidays.js`
-3. `date_utils.js`
-4. `pricing_core.js`
-5. `bsm.js`
-6. `chart.js`
-7. `prob_charts.js`
-8. `chart_controls.js`
-9. `amortized.js`
-10. `valuation.js`
-11. `session_logic.js`
-12. `app.js`
-13. `hedge_ui.js`
-14. `group_ui.js`
-15. `global_ui.js`
-16. `ws_client.js`
-
-这意味着：
-
-- 依赖关系是“运行时约定”，不是编译时约束
-- 改动文件顺序或把函数挪走，容易造成页面加载后才报错
-- `pricing_core.js` 是纯计算中心，`app.js` 是运行时编排中心
-
-## 5. 核心数据模型
-
-全局状态在 `app.js` 中，核心结构如下：
-
-```js
-state = {
-  underlyingSymbol,
-  underlyingPrice,
-  baseDate,
-  simulatedDate,
-  interestRate,
-  ivOffset,
-  groups: [],
-  hedges: []
-}
-```
-
-### 5.1 Group
-
-每个组合组大致包含：
+关键字段包括：
 
 - `id`
 - `name`
 - `viewMode`
+- `includedInGlobal`
+- `isCollapsed`
 - `liveData`
+- `syncAvgCostFromPortfolio`
 - `settleUnderlyingPrice`
-- `legs[]`
+- `tradeTrigger`
+- `legs`
 
-### 5.2 Leg
+### 4.2 Leg
 
-每条腿大致包含：
+关键字段包括：
 
 - `id`
-- `type` (`call` / `put` / `stock`)
+- `type`
 - `pos`
 - `strike`
 - `expDate`
@@ -245,152 +205,178 @@ state = {
 - `cost`
 - `closePrice`
 
-### 5.3 Hedge
+运行时还可能附加：
 
-独立于组合组，用于 live P&L 跟踪：
+- `costSource`
+- `executionReportedCost`
+- `executionReportOrderId`
+- `executionReportPermId`
 
-- `id`
-- `symbol`
-- `pos`
-- `cost`
-- `currentPrice`
-- `liveData`
+### 4.3 Trade Trigger
 
-## 6. 最关键的运行主链
+当前 `tradeTrigger` 既有配置字段，也有运行时字段。
 
-### 6.1 用户交互链
+配置字段：
 
-```mermaid
-flowchart TD
-    UI["用户修改输入 / 点击按钮"] --> E["app.js 事件处理"]
-    E --> S["更新全局 state"]
-    S --> U["updateDerivedValues()"]
-    U --> P["processLegData()"]
-    P --> SP["computeSimulatedPrice()"]
-    SP --> D["回写 DOM 汇总 / 行级结果"]
-    U --> GC["按需重绘图表"]
-    U --> PA["按需刷新概率分析"]
+- `condition`
+- `price`
+- `executionMode`
+- `repriceThreshold`
+- `timeInForce`
+- `exitEnabled`
+- `exitCondition`
+- `exitPrice`
+
+运行时字段：
+
+- `enabled`
+- `status`
+- `pendingRequest`
+- `lastTriggeredAt`
+- `lastTriggerPrice`
+- `lastPreview`
+- `lastError`
+
+注意：
+
+- `session_logic.js` 现在在导出和重新导入时会清掉这些运行时字段
+- 也就是说，Trigger 配置会保留，但旧的 `Filled / Order ID / lastPreview` 不会再被带进 JSON
+
+## 5. Trial Trigger 与订单执行
+
+### 5.1 三种执行模式
+
+当前支持：
+
+- `preview`
+- `test_submit`
+- `submit`
+
+语义：
+
+- `Preview Only`
+  - 只生成组合单预览，不送到 TWS
+- `Send to TWS (Test Only)`
+  - 真实送到 TWS，但使用保护性离谱价格，目标是让你在 TWS 里检查订单结构后手工丢弃
+- `Send to TWS`
+  - 真实 `LMT @ MID` 下单，并进入 managed repricing
+
+### 5.2 正式下单的 managed repricing
+
+正式 `submit` 模式的执行逻辑现在是：
+
+- 初始按组合 middle price 提交 `BAG + LMT`
+- 后端持续用各腿 live bid/ask 自己合成最新 combo mid
+- 只有当 `|latest mid - working limit| >= threshold` 时才改价
+- 如果达到最大自动改价次数，会停在 `stopped_max_reprices`
+- 如果到达监控时限，会停在 `stopped_timeout`
+- `Continue` 可以继续追加重试预算或继续监控
+- `Cancel Order` 可以显式撤掉 TWS 里的 live order
+
+这些参数现在由两部分控制：
+
+- 每个 Group 的 UI 配置
+  - `Drift 0.01 / 0.02 / 0.05`
+  - `DAY / GTC`
+- 全局默认执行配置
+  - 来自 `config.ini` 的 `[execution]`
+
+### 5.3 Exit Condition
+
+`Exit Condition` 是当前真实存在的功能。
+
+语义：
+
+- 只在订单已经触发并且仍未终态时生效
+- 如果 underlying 反向回到退出条件，则直接取消正在讨价还价的 live order
+
+这条逻辑目前由前端在 live underlying 更新时判断，并通过 `cancel_managed_combo_order` 请求后端撤单。
+
+## 6. 成本回填的两条来源
+
+### 6.1 账户级兜底来源
+
+- `updatePortfolio avgCost`
+
+这是账户级的聚合均价，适合：
+
+- 手工持仓同步
+- 非 Trigger 订单的兜底回填
+
+局限：
+
+- 如果多个 Group 有完全相同的合约，会混成账户综合成本
+
+### 6.2 Trigger 实单的精确来源
+
+- `execDetails`
+
+当前真实 `Send to TWS` 的 Trigger 订单，在成交后会：
+
+- 通过 `orderId / permId`
+- 结合每条腿的 `conId / expected side`
+- 把这笔订单自己的腿成交均价回推给对应 Group
+
+这条消息是：
+
+- `combo_order_fill_cost_update`
+
+前端收到后会：
+
+- 只更新对应 Group 的对应腿
+- 给腿标记 `costSource = 'execution_report'`
+- 后续不再允许账户级 `portfolio avg cost` 覆盖这条更精确的成本
+
+## 7. 当前 session 持久化规则
+
+导出 JSON 时：
+
+- 保留 group / leg / hedge 的静态配置
+- 保留 Trigger 的配置部分
+- 清掉 Trigger 的运行时订单状态
+
+因此，重新导入后不会再看到：
+
+- `Combo order: Filled`
+- `Order ID / Perm ID`
+- `Reprices 60 / 60`
+- 黄色预览区中的旧订单详情
+
+## 8. 配置文件
+
+当前 `config.ini` 除了 TWS 和 WebSocket 配置，还支持执行默认值：
+
+```ini
+[execution]
+managed_reprice_threshold_default = 0.01
+managed_reprice_interval_seconds = 2.0
+managed_reprice_max_updates = 12
+managed_reprice_timeout_seconds = 600
 ```
 
-### 6.2 实时行情链
+说明：
 
-```mermaid
-sequenceDiagram
-    participant Browser as ws_client.js
-    participant Bridge as ib_server.py
-    participant IB as IBKR
-    participant App as app.js
+- 这些是后端默认执行策略参数
+- 每个 Group 的 `repriceThreshold` 和 `timeInForce` 仍可在前端单独配置
+- 改完 `config.ini` 后需要重启 `ib_server.py`
 
-    Browser->>Bridge: subscribe(underlying/options/stocks)
-    Bridge->>IB: reqMktData / qualifyContracts
-    IB-->>Bridge: ticks / Greeks / IV
-    Bridge-->>Browser: JSON payload
-    Browser->>App: 更新 state.groups / hedges / underlyingPrice
-    App->>App: requestAnimationFrame(updateDerivedValues)
-    App-->>Browser: 更新 DOM 与图表
-```
+## 9. 当前已知边界
 
-### 6.3 概率分析链
+- Managed repricing 目前实现位于 `trade_execution/adapters/ibkr.py`，还没有进一步抽成 broker-agnostic 的独立策略模块
+- `Exit Condition` 的触发判断目前在前端，语义正确，但从长期演进看，未来可进一步下沉到后端执行层
+- 页面刷新后，旧订单的 live 执行上下文不会自动恢复到新页面
+- `contract_specs/*.xml` 仍未接入运行时，真实运行时元数据仍以 `product_registry.js` 为准
 
-```mermaid
-flowchart TD
-    A["prob_charts.js"] --> R["读取 t_params_db.js 参数"]
-    A --> I["读取组合平均 sim IV"]
-    A --> W["启动 Worker 进行 1M Monte Carlo"]
-    W --> D["返回价格密度 / exactExpectedPnL"]
-    A --> P["主线程按 bin 中心重算组合 P&L"]
-    D --> C["绘制 Price Density Chart"]
-    P --> E["绘制 Expected P&L Density Chart"]
-```
+## 10. 当前最值得信任的文件
 
-## 7. 每个核心文件的角色
+如果文档和代码不一致，优先相信：
 
-| 文件 | 角色 | 在架构中的定位 |
-| --- | --- | --- |
-| `index.html` | 页面骨架、模板、入口脚本顺序 | UI 壳层 |
-| `style.css` | 视觉与布局 | UI 壳层 |
-| `app.js` | 状态容器、渲染、估值循环、JSON 持久化 | 编排层 |
-| `date_utils.js` | 纯日期与交易日计算 | 领域辅助 |
-| `pricing_core.js` | 纯定价与 leg 标准化单一事实来源 | 领域核心 |
-| `bsm.js` | 旧全局 API 兼容层 | 兼容层 |
-| `chart_controls.js` | 图表显示/范围/重绘控制 | 图表控制层 |
-| `chart.js` | Canvas 图表引擎 | 图表渲染层 |
-| `amortized.js` | 纯 amortized 成本计算 | 领域核心 |
-| `valuation.js` | 纯组合估值与聚合计算 | 应用计算层 |
-| `session_logic.js` | 纯导入导出与 mode 规则 | 会话逻辑层 |
-| `hedge_ui.js` | Hedge DOM 写入 | UI 写入层 |
-| `group_ui.js` | Group DOM 写入 | UI 写入层 |
-| `global_ui.js` | Global DOM 写入 | UI 写入层 |
-| `prob_charts.js` | 概率分析控制器 + Worker | 分析层 |
-| `ws_client.js` | 浏览器端实时行情接入 | 传输适配层 |
-| `ib_server.py` | Python 行情桥接后端 | 基础设施层 |
-| `market_holidays.js` | 交易日历支持 | 领域辅助 |
-| `scripts/fit_underlying.py` | Student-t 参数生成 | 离线数据流水线 |
+1. `js/product_registry.js`
+2. `js/pricing_core.js`
+3. `js/valuation.js`
+4. `js/session_logic.js`
+5. `js/trade_trigger_logic.js`
+6. `trade_execution/adapters/ibkr.py`
+7. `ib_server.py`
+8. `js/ws_client.js`
 
-## 8. 为什么 `app.js` 是真正的架构中心
-
-虽然纯定价现在在 `pricing_core.js`，但真正把系统串起来的是 `app.js`：
-
-- 它拥有全局状态
-- 它创建和销毁组/腿/hedge
-- 它负责 DOM 重建
-- 它调用定价逻辑
-- 它决定何时显示 global chart / amortized / probability card
-- 它在导入 JSON 后重建整个前端会话
-
-所以从架构角度看，`app.js` 更像：
-
-- Controller
-- Store
-- Application Service
-- ViewModel Builder
-
-这些角色的混合体。
-
-## 9. 这个项目当前采用的设计风格
-
-这是一个典型的“**脚本式单体前端**”：
-
-- 优点
-  - 启动简单，直接打开 `index.html` 即可
-  - 功能集中，问题定位通常很直接
-  - 本地工具型应用非常合适
-
-- 代价
-  - 全局作用域耦合较强
-  - DOM 更新和估值逻辑混在同一个刷新循环
-  - 图表、概率分析、实时数据都通过全局状态耦合
-  - 缺少模块边界与类型约束
-
-## 10. 最值得记住的 5 个架构结论
-
-1. **`pricing_core.js` 是定价真相源**，不要在别处复制定价规则。
-2. **`app.js` 是系统编排中心**，几乎所有用户动作最终都会汇入 `updateDerivedValues()`。
-3. **图表层不是独立数据源**，它只是读取 `state` 并复用 `bsm.js` 的计算结果。
-4. **概率分析是“Worker 做分布，主线程做 P&L 曲线”的混合模型**，不是完全后台化。
-5. **实时数据是可选增强能力**，断开 WebSocket 后，系统仍可作为纯本地模拟器运行。
-
-## 11. 推荐阅读顺序
-
-如果要最快理解代码，建议按这个顺序读：
-
-1. `README.md`
-2. `index.html`
-3. `app.js`
-4. `pricing_core.js`
-5. `amortized.js`
-6. `chart_controls.js`
-7. `chart.js`
-8. `prob_charts.js`
-9. `ws_client.js`
-10. `ib_server.py`
-
-## 12. 后续如果要继续演进
-
-最自然的演进方向会是：
-
-1. 先把 `bsm.js`、日期工具、amortized 计算提成更清晰的纯函数模块
-2. 再把 `app.js` 的 `state` 管理和 DOM 写入拆开
-3. 最后再考虑 ES Modules 或轻量状态管理
-
-这样改动风险最小，也最符合当前代码结构。

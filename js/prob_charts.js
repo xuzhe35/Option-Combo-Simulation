@@ -106,11 +106,9 @@ self.onmessage = function(e) {
     if (legs) {
         for (let l = 0; l < legs.length; l++) {
             const leg = legs[l];
-            if (leg.type === 'stock') {
-                leg.isStock = true;
-                continue;  // No BSM constants needed for stocks
+            if (leg.isUnderlyingLeg) {
+                continue;  // No BSM constants needed for delta-one underlying legs
             }
-            leg.isStock = false;
             leg.isExpired = (leg.T <= 0);
             if (!leg.isExpired) {
                 let v = leg.v <= 0 ? 0.0001 : leg.v;
@@ -152,8 +150,8 @@ self.onmessage = function(e) {
                 let v_opt = 0;
                 if (leg.fixedPrice !== undefined) {
                     v_opt = leg.fixedPrice;
-                } else if (leg.isStock) {
-                    // Stock: price IS the underlying price, no BSM
+                } else if (leg.isUnderlyingLeg) {
+                    // Underlying leg: price IS the simulated underlying price, no BSM
                     v_opt = finalPrice;
                 } else if (leg.isExpired) {
                     if (leg.type === 'call') v_opt = Math.max(0, finalPrice - leg.K);
@@ -813,6 +811,7 @@ function updateProbCharts() {
 
             workerLegs.push({
                 type: pLeg.type,
+                isUnderlyingLeg: !!pLeg.isUnderlyingLeg,
                 K: pLeg.strike,
                 r: state.interestRate,
                 T: pLeg.T,

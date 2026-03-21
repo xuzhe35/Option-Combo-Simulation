@@ -74,6 +74,14 @@
         return 100;
     }
 
+    function getUnderlyingLegMultiplier(profileOrSymbol) {
+        const profile = resolveInstrumentProfile(profileOrSymbol);
+        if (profile && Number.isFinite(profile.underlyingLegMultiplier)) {
+            return profile.underlyingLegMultiplier;
+        }
+        return 1;
+    }
+
     function getSettlementUnitsPerContract(profileOrSymbol) {
         const profile = resolveInstrumentProfile(profileOrSymbol);
         if (profile && Number.isFinite(profile.settlementUnitsPerContract)) {
@@ -82,19 +90,83 @@
         return 100;
     }
 
+    function isUnderlyingLeg(legOrType) {
+        if (productRegistry && typeof productRegistry.isUnderlyingLeg === 'function') {
+            return productRegistry.isUnderlyingLeg(legOrType);
+        }
+
+        const legType = typeof legOrType === 'string'
+            ? legOrType
+            : (legOrType && legOrType.type);
+        return String(legType || '').trim().toLowerCase() === 'stock';
+    }
+
+    function isLiveIvMissing(leg) {
+        return !!(leg && leg.ivSource === 'missing');
+    }
+
+    function hasUsableLegIv(leg) {
+        return !isLiveIvMissing(leg) && Number.isFinite(leg && leg.iv) && leg.iv > 0;
+    }
+
+    function formatLegIvInputValue(leg) {
+        if (isLiveIvMissing(leg)) {
+            return 'N/A';
+        }
+
+        const iv = Number.isFinite(leg && leg.iv) ? leg.iv : 0;
+        return `${(iv * 100).toFixed(4)}%`;
+    }
+
+    function describeLegIvInput(leg) {
+        if (isUnderlyingLeg(leg)) {
+            return {
+                value: '',
+                title: '',
+            };
+        }
+
+        if (isLiveIvMissing(leg)) {
+            return {
+                value: 'N/A',
+                title: 'Live IV is unavailable from TWS for this contract. Future simulations are disabled until a live or manual IV is available.',
+            };
+        }
+
+        if (leg && leg.ivSource === 'live') {
+            return {
+                value: formatLegIvInputValue(leg),
+                title: 'Live IV from TWS',
+            };
+        }
+
+        if (leg && leg.ivSource === 'estimated') {
+            return {
+                value: formatLegIvInputValue(leg),
+                title: 'Estimated IV (not from TWS)',
+            };
+        }
+
+        return {
+            value: formatLegIvInputValue(leg),
+            title: 'Manual IV',
+        };
+    }
+
     function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseDateStr = null, globalUnderlyingPrice = null, globalInterestRate = null, viewMode = 'active', instrumentProfile = null) {
         const resolvedProfile = resolveInstrumentProfile(instrumentProfile);
         const lowerType = leg.type.toLowerCase();
-        if (lowerType === 'stock') {
-            const posMultiplier = leg.pos * 1;
-            let effectiveCostPerShare = leg.cost;
+        if (isUnderlyingLeg(leg)) {
+            const contractMultiplier = getUnderlyingLegMultiplier(resolvedProfile);
+            const posMultiplier = leg.pos * contractMultiplier;
+            let effectiveCostPerUnit = leg.cost;
             if (viewMode === 'trial' || leg.cost === 0) {
-                effectiveCostPerShare = (leg.currentPrice && leg.currentPrice > 0)
+                effectiveCostPerUnit = (leg.currentPrice && leg.currentPrice > 0)
                     ? leg.currentPrice
                     : (globalUnderlyingPrice || 0);
             }
             return {
-                type: 'stock',
+                type: 'underlying',
                 strike: 0,
                 pos: leg.pos,
                 isExpired: false,
@@ -102,11 +174,13 @@
                 tradDTE: 0,
                 T: 0,
                 simIV: 0,
-                contractMultiplier: 1,
+                isUnderlyingLeg: true,
+                contractMultiplier,
                 settlementUnitsPerContract: 1,
                 posMultiplier,
-                costBasis: posMultiplier * effectiveCostPerShare,
-                effectiveCostPerShare
+                costBasis: posMultiplier * effectiveCostPerUnit,
+                effectiveCostPerShare: effectiveCostPerUnit,
+                effectiveCostPerUnit
             };
         }
 
@@ -117,7 +191,10 @@
         const calDTE = isExpired ? 0 : diffDays(globalSimulatedDateStr, leg.expDate);
         const tradDTE = isExpired ? 0 : calendarToTradingDays(globalSimulatedDateStr, leg.expDate);
         const T = calDTE / 365.0;
-        const simIV = Math.max(0.001, leg.iv + globalIvOffset);
+        const baseIv = hasUsableLegIv(leg) ? leg.iv : null;
+        const simIV = isExpired
+            ? 0
+            : (baseIv !== null ? Math.max(0.001, baseIv + globalIvOffset) : null);
         const contractMultiplier = getMultiplier(resolvedProfile);
         const settlementUnitsPerContract = getSettlementUnitsPerContract(resolvedProfile);
         const posMultiplier = leg.pos * contractMultiplier;
@@ -134,7 +211,7 @@
                 if (baseT <= 0) {
                     if (leg.type === 'call') effectiveCostPerShare = Math.max(0, globalUnderlyingPrice - leg.strike);
                     else effectiveCostPerShare = Math.max(0, leg.strike - globalUnderlyingPrice);
-                } else {
+                } else if (baseIv !== null) {
                     effectiveCostPerShare = calculateOptionPrice(
                         leg.type,
                         globalUnderlyingPrice,
@@ -151,11 +228,14 @@
             type: lowerType,
             strike: leg.strike,
             pos: leg.pos,
+            isUnderlyingLeg: false,
             isExpired,
             calDTE,
             tradDTE,
             T,
             simIV,
+            simIVAvailable: isExpired || simIV !== null,
+            simIVSource: isLiveIvMissing(leg) ? 'missing' : (leg.ivSource || 'manual'),
             contractMultiplier,
             settlementUnitsPerContract,
             posMultiplier,
@@ -165,7 +245,7 @@
     }
 
     function computeLegPrice(processedLeg, underlyingPrice, interestRate) {
-        if (processedLeg.type === 'stock') {
+        if (processedLeg.isUnderlyingLeg || isUnderlyingLeg(processedLeg.type)) {
             return underlyingPrice;
         }
         if (processedLeg.isExpired) {
@@ -173,6 +253,9 @@
                 return Math.max(0, underlyingPrice - processedLeg.strike);
             }
             return Math.max(0, processedLeg.strike - underlyingPrice);
+        }
+        if (!Number.isFinite(processedLeg.simIV) || processedLeg.simIV <= 0) {
+            return null;
         }
         return calculateOptionPrice(
             processedLeg.type,
@@ -192,7 +275,7 @@
             }
         }
 
-        if (processedLeg.type === 'stock') {
+        if (processedLeg.isUnderlyingLeg || isUnderlyingLeg(processedLeg.type)) {
             return underlyingPrice;
         }
 
@@ -210,11 +293,17 @@
         calculateD2,
         calculateOptionPrice,
         resolveInstrumentProfile,
+        isUnderlyingLeg,
         getMultiplier,
+        getUnderlyingLegMultiplier,
         getSettlementUnitsPerContract,
         processLegData,
         computeLegPrice,
         computeSimulatedPrice,
+        isLiveIvMissing,
+        hasUsableLegIv,
+        formatLegIvInputValue,
+        describeLegIvInput,
     };
 
     globalScope.OptionComboPricingCore = api;

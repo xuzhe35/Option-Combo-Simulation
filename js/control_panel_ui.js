@@ -64,16 +64,44 @@
 
         syncUnderlyingContractMonthUI(false);
 
-        symInput.addEventListener('change', (e) => {
-            state.underlyingSymbol = e.target.value.toUpperCase();
+        function applyUnderlyingSymbol(rawValue, forceResubscribe) {
+            const normalizedSymbol = String(rawValue || '').trim().toUpperCase();
+            if (!normalizedSymbol) {
+                symInput.value = state.underlyingSymbol;
+                return;
+            }
+
+            const symbolChanged = normalizedSymbol !== state.underlyingSymbol;
+            state.underlyingSymbol = normalizedSymbol;
             symInput.value = state.underlyingSymbol;
-            syncUnderlyingContractMonthUI(true);
+            syncUnderlyingContractMonthUI(symbolChanged);
+
             if (typeof renderGroups === 'function') {
                 renderGroups();
             } else {
                 updateDerivedValues();
             }
-            handleLiveSubscriptions();
+
+            if (symbolChanged || forceResubscribe) {
+                handleLiveSubscriptions();
+            }
+        }
+
+        symInput.addEventListener('change', (e) => {
+            applyUnderlyingSymbol(e.target.value, true);
+        });
+        symInput.addEventListener('blur', (e) => {
+            applyUnderlyingSymbol(e.target.value, true);
+        });
+        symInput.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter') return;
+            if (typeof e.preventDefault === 'function') {
+                e.preventDefault();
+            }
+            applyUnderlyingSymbol(e.target.value, true);
+            if (typeof symInput.blur === 'function') {
+                symInput.blur();
+            }
         });
 
         if (underlyingContractMonthInput) {
@@ -156,6 +184,7 @@
         const ivInput = document.getElementById('ivOffset');
         const ivSlider = document.getElementById('ivOffsetSlider');
         const ivDisplay = document.getElementById('ivOffsetDisplay');
+        const allowLiveComboOrdersInput = document.getElementById('allowLiveComboOrders');
 
         function updateIv(val) {
             const pct = parseFloat(val);
@@ -174,6 +203,13 @@
             ivDisplay.textContent = `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`;
             throttledUpdate();
         });
+
+        if (allowLiveComboOrdersInput) {
+            allowLiveComboOrdersInput.checked = state.allowLiveComboOrders === true;
+            allowLiveComboOrdersInput.addEventListener('change', (e) => {
+                state.allowLiveComboOrders = e.target.checked === true;
+            });
+        }
     }
 
     function toggleSidebar() {

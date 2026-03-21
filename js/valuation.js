@@ -22,11 +22,19 @@
         return group.includedInGlobal !== false;
     }
 
+    function isUnderlyingLeg(leg) {
+        return productRegistry && typeof productRegistry.isUnderlyingLeg === 'function'
+            ? productRegistry.isUnderlyingLeg(leg)
+            : String(leg && leg.type || '').toLowerCase() === 'stock';
+    }
+
     function buildCurrentPriceDisplayState(leg, activeViewMode, evalUnderlyingPrice, processedLeg, underlyingProfile) {
-        if (leg.type === 'stock') {
-            const titleLabel = (underlyingProfile && underlyingProfile.supportsUnderlyingLegs === false)
-                ? 'Current Underlying Leg Price'
-                : 'Current Stock Price';
+        if (isUnderlyingLeg(leg)) {
+            const titleLabel = productRegistry && typeof productRegistry.getUnderlyingLegPriceTitle === 'function'
+                ? productRegistry.getUnderlyingLegPriceTitle(
+                    (underlyingProfile && (underlyingProfile.enteredSymbol || underlyingProfile.underlyingSymbol)) || ''
+                )
+                : 'Current Underlying Leg Price';
             if (leg.currentPrice === 0) {
                 return {
                     value: '',
@@ -89,12 +97,18 @@
             globalState.baseDate,
             globalState.ivOffset
         );
-        const simValue = processedLeg.posMultiplier * simPricePerShare;
-        const pnl = simValue - processedLeg.costBasis;
+        const simulationAvailable = Number.isFinite(simPricePerShare);
+        const simValue = simulationAvailable ? processedLeg.posMultiplier * simPricePerShare : null;
+        const pnl = simulationAvailable ? (simValue - processedLeg.costBasis) : null;
         const isClosed = (leg.closePrice !== null && leg.closePrice !== '');
-        const hasLivePnl = leg.cost !== 0 || leg.currentPrice !== 0 || isClosed;
+        const hasLivePnl = activeViewMode === 'active' && (leg.cost !== 0 || leg.currentPrice !== 0 || isClosed);
         const liveLegPnL = (leg.currentPrice - leg.cost) * processedLeg.posMultiplier;
         const effectiveLivePnL = isClosed ? pnl : liveLegPnL;
+        const ivText = processedLeg.isUnderlyingLeg
+            ? ''
+            : (processedLeg.simIVAvailable
+                ? `Sim IV: ${(processedLeg.simIV * 100).toFixed(2)}%${processedLeg.simIVSource === 'estimated' ? ' (Estimated)' : ''}`
+                : 'Sim IV: N/A (TWS unavailable)');
 
         return {
             id: leg.id,
@@ -103,12 +117,13 @@
             simPricePerShare,
             simValue,
             pnl,
+            simulationAvailable,
             isClosed,
             hasLivePnl,
             liveLegPnL,
             effectiveLivePnL,
             dteText: `Sim DTE: ${processedLeg.tradDTE} td / ${processedLeg.calDTE} cd`,
-            ivText: `Sim IV: ${(processedLeg.simIV * 100).toFixed(2)}%`,
+            ivText,
             currentPriceDisplay: buildCurrentPriceDisplayState(leg, activeViewMode, evalUnderlyingPrice, processedLeg, underlyingProfile),
         };
     }
@@ -129,11 +144,16 @@
         let groupSimValue = 0;
         let groupLivePnL = 0;
         let groupHasLiveData = false;
+        let groupSimulationAvailable = true;
 
         const legResults = group.legs.map((leg) => {
             const legResult = computeLegDerivedData(group, leg, globalState, activeViewMode, evalUnderlyingPrice, underlyingProfile);
             groupCost += legResult.processedLeg.costBasis;
-            groupSimValue += legResult.simValue;
+            if (legResult.simulationAvailable) {
+                groupSimValue += legResult.simValue;
+            } else {
+                groupSimulationAvailable = false;
+            }
 
             if (legResult.hasLivePnl) {
                 groupLivePnL += legResult.effectiveLivePnL;
@@ -155,8 +175,9 @@
             legResults,
             legResultsById: new Map(legResults.map(result => [result.id, result])),
             groupCost,
-            groupSimValue,
-            groupPnL: groupSimValue - groupCost,
+            groupSimulationAvailable,
+            groupSimValue: groupSimulationAvailable ? groupSimValue : null,
+            groupPnL: groupSimulationAvailable ? (groupSimValue - groupCost) : null,
             groupLivePnL,
             groupHasLiveData,
             amortizedResult: isAmortizedMode ? calculateAmortizedCost(group, evalUnderlyingPrice, globalState) : null,
@@ -172,7 +193,10 @@
         const includedGroupResults = groupResults.filter(result => result.isIncludedInGlobal);
 
         const globalTotalCost = includedGroupResults.reduce((sum, result) => sum + result.groupCost, 0);
-        const globalSimulatedValue = includedGroupResults.reduce((sum, result) => sum + result.groupSimValue, 0);
+        const globalSimulationAvailable = includedGroupResults.every(result => result.groupSimulationAvailable !== false);
+        const globalSimulatedValue = globalSimulationAvailable
+            ? includedGroupResults.reduce((sum, result) => sum + result.groupSimValue, 0)
+            : null;
         const globalLivePnL = includedGroupResults.reduce((sum, result) => sum + (result.groupHasLiveData ? result.groupLivePnL : 0), 0);
         const hasAnyLiveData = includedGroupResults.some(result => result.groupHasLiveData);
 
@@ -193,8 +217,9 @@
             groupResults,
             groupResultsById: new Map(groupResults.map(result => [result.id, result])),
             globalTotalCost,
+            globalSimulationAvailable,
             globalSimulatedValue,
-            globalPnL: globalSimulatedValue - globalTotalCost,
+            globalPnL: globalSimulationAvailable ? (globalSimulatedValue - globalTotalCost) : null,
             globalLivePnL,
             hasAnyLiveData,
             globalHedgePnL,

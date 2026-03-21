@@ -447,15 +447,23 @@ window.addEventListener('resize', () => {
 // Return the mean simulated IV across all legs in the portfolio
 // Uses processLegData() to ensure IV calculation is in sync with bsm.js SSOT
 function computePortfolioMeanSimIV() {
+    const isOptionLeg = typeof OptionComboProductRegistry !== 'undefined'
+        && typeof OptionComboProductRegistry.isOptionLeg === 'function'
+        ? OptionComboProductRegistry.isOptionLeg
+        : (leg => ['call', 'put'].includes(String(leg && leg.type || '').toLowerCase()));
+
     const allLegs = state.groups
         .filter(_isGroupIncludedInGlobal)
         .flatMap(g =>
         g.legs
-            .filter(leg => leg.type !== 'stock')  // Stock legs have no IV
+            .filter(leg => isOptionLeg(leg))
             .map(leg => processLegData(leg, state.simulatedDate, state.ivOffset))
     );
     if (allLegs.length === 0) return 0;
-    const total = allLegs.reduce((sum, pLeg) => sum + pLeg.simIV, 0);
+    if (allLegs.some(pLeg => !pLeg.isExpired && !Number.isFinite(pLeg.simIV))) {
+        return null;
+    }
+    const total = allLegs.reduce((sum, pLeg) => sum + (Number.isFinite(pLeg.simIV) ? pLeg.simIV : 0), 0);
     return total / allLegs.length;
 }
 

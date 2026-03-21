@@ -3,12 +3,139 @@
  */
 
 (function attachGroupEditorUI(globalScope) {
+    const productRegistry = globalScope.OptionComboProductRegistry;
+    const pricingCore = globalScope.OptionComboPricingCore;
+
+    function parseIvPercentInput(rawValue) {
+        const normalized = String(rawValue || '')
+            .replace(/[^0-9.+-]/g, '');
+        const parsed = parseFloat(normalized);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function isUnderlyingLeg(leg) {
+        return productRegistry && typeof productRegistry.isUnderlyingLeg === 'function'
+            ? productRegistry.isUnderlyingLeg(leg)
+            : String(leg && leg.type || '').toLowerCase() === 'stock';
+    }
+
+    function getUnderlyingLegLabel(symbol) {
+        return productRegistry && typeof productRegistry.getUnderlyingLegLabel === 'function'
+            ? productRegistry.getUnderlyingLegLabel(symbol)
+            : 'Underlying';
+    }
+
+    function _ensureTradeTrigger(group) {
+        if (typeof OptionComboTradeTriggerLogic !== 'undefined'
+            && typeof OptionComboTradeTriggerLogic.ensureGroupTradeTrigger === 'function') {
+            return OptionComboTradeTriggerLogic.ensureGroupTradeTrigger(group);
+        }
+
+        if (!group.tradeTrigger || typeof group.tradeTrigger !== 'object') {
+            group.tradeTrigger = {
+                enabled: false,
+                condition: 'gte',
+                price: null,
+                executionMode: 'preview',
+                repriceThreshold: 0.01,
+                timeInForce: 'DAY',
+                exitEnabled: false,
+                exitCondition: 'lte',
+                exitPrice: null,
+                isExpanded: false,
+                status: 'idle',
+                pendingRequest: false,
+                lastTriggeredAt: null,
+                lastTriggerPrice: null,
+                lastPreview: null,
+                lastError: '',
+            };
+        }
+
+        return group.tradeTrigger;
+    }
+
+    function _ensurePortfolioAvgCostSync(group) {
+        if (!group || typeof group !== 'object') {
+            return false;
+        }
+
+        if (typeof OptionComboSessionLogic !== 'undefined'
+            && typeof OptionComboSessionLogic.normalizePortfolioAvgCostSync === 'function') {
+            group.syncAvgCostFromPortfolio = OptionComboSessionLogic.normalizePortfolioAvgCostSync(group);
+            return group.syncAvgCostFromPortfolio;
+        }
+
+        if (typeof group.syncAvgCostFromPortfolio !== 'boolean') {
+            group.syncAvgCostFromPortfolio = false;
+        }
+        return group.syncAvgCostFromPortfolio;
+    }
+
+    function _ensureCloseExecution(group) {
+        if (!group || typeof group !== 'object') {
+            return null;
+        }
+
+        if (typeof OptionComboSessionLogic !== 'undefined'
+            && typeof OptionComboSessionLogic.normalizeCloseExecution === 'function') {
+            group.closeExecution = OptionComboSessionLogic.normalizeCloseExecution(group.closeExecution);
+            return group.closeExecution;
+        }
+
+        if (!group.closeExecution || typeof group.closeExecution !== 'object') {
+            group.closeExecution = {
+                executionMode: 'preview',
+                repriceThreshold: 0.01,
+                timeInForce: 'DAY',
+                isExpanded: false,
+                status: 'idle',
+                pendingRequest: false,
+                lastPreview: null,
+                lastError: '',
+            };
+        }
+
+        return group.closeExecution;
+    }
+
+    function toggleGroupCollapse(btn) {
+        const appBridge = globalScope.__optionComboApp;
+        const groupCard = btn.closest('.group-card');
+
+        if (groupCard && appBridge && typeof appBridge.getState === 'function' && typeof appBridge.renderGroups === 'function') {
+            const state = appBridge.getState();
+            const group = state.groups.find(entry => entry.id === groupCard.dataset.groupId);
+            if (group) {
+                group.isCollapsed = !group.isCollapsed;
+                appBridge.renderGroups();
+                return;
+            }
+        }
+
+        const card = btn.closest('.panel-card');
+        if (!card) return;
+
+        const isCollapsed = card.classList.toggle('collapsed');
+        const body = card.querySelector('.group-body');
+        if (body) {
+            body.hidden = isCollapsed;
+        }
+
+        btn.title = isCollapsed ? 'Expand Group' : 'Collapse Group';
+        btn.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+    }
+
     function addGroup(state, generateId, deps) {
         const newGroup = {
             id: generateId(),
             name: `Combo Group ${state.groups.length + 1}`,
             includedInGlobal: true,
+            isCollapsed: false,
             settleUnderlyingPrice: null,
+            tradeTrigger: _ensureTradeTrigger({}),
+            closeExecution: _ensureCloseExecution({}),
+            syncAvgCostFromPortfolio: true,
             legs: []
         };
 
@@ -33,6 +160,8 @@
             strike: state.underlyingPrice,
             expDate: deps.addDays(state.baseDate, 30),
             iv: 0.2,
+            ivSource: 'manual',
+            ivManualOverride: false,
             currentPrice: 0.00,
             cost: 0.00,
             closePrice: null
@@ -81,12 +210,18 @@
         document.getElementById('probAnalysisCard').style.display = 'block';
 
         state.groups.forEach(group => {
+            _ensureTradeTrigger(group);
+            _ensureCloseExecution(group);
+            _ensurePortfolioAvgCostSync(group);
             const clone = groupTemplate.content.cloneNode(true);
-            const card = clone.querySelector('.group-card');
-            card.dataset.groupId = group.id;
+        const card = clone.querySelector('.group-card');
+        card.dataset.groupId = group.id;
 
+            applyCollapsedState(card, group);
             bindGroupHeader(card, group, state, deps);
             bindGroupLegs(card, group, state, legTemplate, deps);
+            bindTrialTriggerControls(card, group, state, deps);
+            bindCloseGroupControls(card, group, state, deps);
             applyModeLockState(card, group, state, deps);
 
             container.appendChild(card);
@@ -108,6 +243,32 @@
             group.name = e.target.value;
         });
 
+        const trialTriggerToggleBtn = card.querySelector('.trial-trigger-toggle-btn');
+        if (trialTriggerToggleBtn) {
+            trialTriggerToggleBtn.addEventListener('click', () => {
+                const trigger = _ensureTradeTrigger(group);
+                if (!trigger) return;
+                trigger.isExpanded = !trigger.isExpanded;
+                deps.renderGroups();
+            });
+        }
+
+        const closeGroupToggleBtn = card.querySelector('.close-group-toggle-btn');
+        if (closeGroupToggleBtn) {
+            closeGroupToggleBtn.addEventListener('click', () => {
+                const closeExecution = _ensureCloseExecution(group);
+                if (!closeExecution) return;
+                closeExecution.isExpanded = !closeExecution.isExpanded;
+                deps.renderGroups();
+            });
+        }
+
+        const collapseToggleBtn = card.querySelector('.collapse-toggle-btn');
+        if (collapseToggleBtn) {
+            collapseToggleBtn.title = group.isCollapsed ? 'Expand Group' : 'Collapse Group';
+            collapseToggleBtn.setAttribute('aria-expanded', group.isCollapsed ? 'false' : 'true');
+        }
+
         const globalToggle = card.querySelector('.group-global-toggle');
         if (globalToggle) {
             globalToggle.checked = deps.isGroupIncludedInGlobal(group);
@@ -122,6 +283,7 @@
 
         const liveToggle = card.querySelector('.live-data-toggle');
         const statusSpan = liveToggle.parentElement.previousElementSibling;
+        const avgCostSyncToggle = card.querySelector('.avg-cost-sync-toggle');
         liveToggle.checked = !!group.liveData;
         statusSpan.textContent = group.liveData ? 'Live' : 'Offline';
         liveToggle.addEventListener('change', (e) => {
@@ -129,6 +291,16 @@
             statusSpan.textContent = group.liveData ? 'Live' : 'Offline';
             deps.handleLiveSubscriptions();
         });
+
+        if (avgCostSyncToggle) {
+            avgCostSyncToggle.checked = _ensurePortfolioAvgCostSync(group);
+            avgCostSyncToggle.addEventListener('change', (e) => {
+                group.syncAvgCostFromPortfolio = e.target.checked === true;
+                if (group.syncAvgCostFromPortfolio && typeof deps.requestPortfolioAvgCostSnapshot === 'function') {
+                    deps.requestPortfolioAvgCostSnapshot();
+                }
+            });
+        }
 
         applyViewModeState(card, group, deps.getRenderableGroupViewMode(group));
 
@@ -173,30 +345,319 @@
         });
     }
 
+    function bindTrialTriggerControls(card, group, state, deps) {
+        const trigger = _ensureTradeTrigger(group);
+        const container = card.querySelector('.trial-trigger-container');
+        if (!container) return;
+
+        const enabledInput = container.querySelector('.trial-trigger-enabled');
+        const collapseBtn = container.querySelector('.trial-trigger-collapse-btn');
+        const conditionInput = container.querySelector('.trial-trigger-condition');
+        const priceInput = container.querySelector('.trial-trigger-price');
+        const executionModeInput = container.querySelector('.trial-trigger-execution-mode');
+        const repriceThresholdInput = container.querySelector('.trial-trigger-reprice-threshold');
+        const timeInForceInput = container.querySelector('.trial-trigger-tif');
+        const exitEnabledInput = container.querySelector('.trial-trigger-exit-enabled');
+        const exitConditionInput = container.querySelector('.trial-trigger-exit-condition');
+        const exitPriceInput = container.querySelector('.trial-trigger-exit-price');
+        const resetBtn = container.querySelector('.trial-trigger-reset-btn');
+        const body = container.querySelector('.trial-trigger-body');
+
+        if (!enabledInput || !collapseBtn || !conditionInput || !priceInput || !executionModeInput || !repriceThresholdInput || !timeInForceInput || !exitEnabledInput || !exitConditionInput || !exitPriceInput || !resetBtn || !body) {
+            return;
+        }
+
+        enabledInput.checked = trigger.enabled;
+        conditionInput.value = trigger.condition;
+        priceInput.value = trigger.price !== null && trigger.price !== undefined
+            ? Number(trigger.price).toFixed(2)
+            : '';
+        priceInput.disabled = trigger.enabled === true;
+        priceInput.title = trigger.enabled
+            ? 'Disable Trial Trigger before editing the trigger price.'
+            : '';
+        executionModeInput.value = trigger.executionMode;
+        repriceThresholdInput.value = Number(trigger.repriceThreshold || 0.01).toFixed(2);
+        timeInForceInput.value = String(trigger.timeInForce || 'DAY').toUpperCase();
+        exitEnabledInput.checked = trigger.exitEnabled === true;
+        exitEnabledInput.disabled = trigger.enabled === true;
+        exitConditionInput.value = trigger.exitCondition || 'lte';
+        exitConditionInput.disabled = trigger.enabled === true || trigger.exitEnabled !== true;
+        exitPriceInput.value = trigger.exitPrice !== null && trigger.exitPrice !== undefined
+            ? Number(trigger.exitPrice).toFixed(2)
+            : '';
+        exitPriceInput.disabled = trigger.enabled === true || trigger.exitEnabled !== true;
+        exitPriceInput.title = trigger.enabled
+            ? 'Disable Trial Trigger before editing the exit condition.'
+            : '';
+        executionModeInput.title = state.allowLiveComboOrders
+            ? ''
+            : 'Global live combo order switch is OFF. TWS submit modes will not send orders until enabled.';
+        body.style.display = trigger.isCollapsed ? 'none' : 'block';
+        collapseBtn.title = trigger.isCollapsed ? 'Expand Trial Trigger' : 'Collapse Trial Trigger';
+        collapseBtn.setAttribute('aria-expanded', trigger.isCollapsed ? 'false' : 'true');
+
+        collapseBtn.addEventListener('click', () => {
+            trigger.isCollapsed = !trigger.isCollapsed;
+            deps.renderGroups();
+        });
+
+        enabledInput.addEventListener('change', (e) => {
+            trigger.enabled = e.target.checked === true;
+            trigger.pendingRequest = false;
+            trigger.status = trigger.enabled ? 'armed' : 'idle';
+            trigger.lastError = '';
+            deps.renderGroups();
+        });
+
+        conditionInput.addEventListener('change', (e) => {
+            trigger.condition = e.target.value === 'lte' ? 'lte' : 'gte';
+        });
+
+        priceInput.addEventListener('input', (e) => {
+            const parsed = parseFloat(e.target.value);
+            trigger.price = Number.isFinite(parsed) ? parsed : null;
+        });
+
+        executionModeInput.addEventListener('change', (e) => {
+            if (e.target.value === 'submit' || e.target.value === 'test_submit') {
+                trigger.executionMode = e.target.value;
+            } else {
+                trigger.executionMode = 'preview';
+            }
+        });
+
+        repriceThresholdInput.addEventListener('change', (e) => {
+            const parsed = parseFloat(e.target.value);
+            const validThresholds = (typeof OptionComboTradeTriggerLogic !== 'undefined'
+                && Array.isArray(OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS))
+                ? OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS
+                : [0.01, 0.02, 0.05];
+            trigger.repriceThreshold = validThresholds.some(value => Math.abs(value - parsed) < 0.0001)
+                ? parsed
+                : 0.01;
+            e.target.value = Number(trigger.repriceThreshold).toFixed(2);
+        });
+
+        timeInForceInput.addEventListener('change', (e) => {
+            const nextTif = String(e.target.value || '').trim().toUpperCase();
+            const validTifs = (typeof OptionComboTradeTriggerLogic !== 'undefined'
+                && Array.isArray(OptionComboTradeTriggerLogic.VALID_TIME_IN_FORCE))
+                ? OptionComboTradeTriggerLogic.VALID_TIME_IN_FORCE
+                : ['DAY', 'GTC'];
+            trigger.timeInForce = validTifs.includes(nextTif) ? nextTif : 'DAY';
+            e.target.value = trigger.timeInForce;
+        });
+
+        exitEnabledInput.addEventListener('change', (e) => {
+            trigger.exitEnabled = e.target.checked === true;
+            deps.renderGroups();
+        });
+
+        exitConditionInput.addEventListener('change', (e) => {
+            trigger.exitCondition = e.target.value === 'gte' ? 'gte' : 'lte';
+        });
+
+        exitPriceInput.addEventListener('input', (e) => {
+            const parsed = parseFloat(e.target.value);
+            trigger.exitPrice = Number.isFinite(parsed) ? parsed : null;
+        });
+
+        resetBtn.addEventListener('click', () => {
+            trigger.pendingRequest = false;
+            trigger.enabled = false;
+            trigger.status = 'idle';
+            trigger.lastTriggeredAt = null;
+            trigger.lastTriggerPrice = null;
+            trigger.lastPreview = null;
+            trigger.lastError = '';
+            deps.renderGroups();
+        });
+
+        const handleContinueRepricing = (e) => {
+            const continueBtn = e.target.closest('.trial-trigger-continue-repricing-btn');
+            const concedeBtn = e.target.closest('.trial-trigger-concede-btn');
+            const cancelBtn = e.target.closest('.trial-trigger-cancel-order-btn');
+            if (!continueBtn && !concedeBtn && !cancelBtn) {
+                return;
+            }
+            if (typeof e.preventDefault === 'function') {
+                e.preventDefault();
+            }
+            if (continueBtn && typeof deps.requestContinueManagedComboOrder === 'function') {
+                deps.requestContinueManagedComboOrder(group);
+            } else if (concedeBtn && typeof deps.requestConcedeManagedComboOrder === 'function') {
+                const concedeContainer = concedeBtn.closest('.trial-trigger-concede-group');
+                const concedeSelect = concedeContainer
+                    ? concedeContainer.querySelector('.trial-trigger-concede-select')
+                    : null;
+                const concedeValue = concedeSelect ? concedeSelect.value : concedeBtn.dataset.value;
+                deps.requestConcedeManagedComboOrder(group, concedeValue);
+            } else if (cancelBtn && typeof deps.requestCancelManagedComboOrder === 'function') {
+                deps.requestCancelManagedComboOrder(group, 'manual_cancel');
+            }
+        };
+
+        container.addEventListener('pointerdown', handleContinueRepricing);
+        container.addEventListener('click', handleContinueRepricing);
+    }
+
+    function bindCloseGroupControls(card, group, state, deps) {
+        const closeExecution = _ensureCloseExecution(group);
+        const container = card.querySelector('.close-group-container');
+        if (!container || !closeExecution) return;
+
+        const executionModeInput = container.querySelector('.close-group-execution-mode');
+        const thresholdInput = container.querySelector('.close-group-reprice-threshold');
+        const timeInForceInput = container.querySelector('.close-group-tif');
+        const submitBtn = container.querySelector('.close-group-submit-btn');
+        if (!executionModeInput || !thresholdInput || !timeInForceInput || !submitBtn) {
+            return;
+        }
+
+        const renderMode = deps.getRenderableGroupViewMode(group);
+        const hasOpenPosition = typeof deps.groupHasOpenPosition === 'function'
+            ? deps.groupHasOpenPosition(group)
+            : (group.legs || []).some(leg => Math.abs(parseFloat(leg && leg.pos) || 0) > 0.0001);
+        const brokerStatus = String(closeExecution.lastPreview && closeExecution.lastPreview.status || '').trim();
+        const isCompleted = brokerStatus === 'Filled';
+
+        executionModeInput.value = String(closeExecution.executionMode || 'preview');
+        thresholdInput.value = Number(closeExecution.repriceThreshold || 0.01).toFixed(2);
+        timeInForceInput.value = String(closeExecution.timeInForce || 'DAY').toUpperCase();
+
+        executionModeInput.disabled = closeExecution.pendingRequest === true || isCompleted;
+        thresholdInput.disabled = closeExecution.pendingRequest === true || isCompleted;
+        timeInForceInput.disabled = closeExecution.pendingRequest === true || isCompleted;
+
+        if (isCompleted) {
+            submitBtn.style.display = 'none';
+            submitBtn.disabled = true;
+            submitBtn.title = 'This group is already fully closed.';
+        } else {
+            submitBtn.style.display = '';
+        }
+
+        if (isCompleted) {
+            // Keep the filled summary visible, but remove any further close action affordance.
+        } else if (renderMode !== 'active') {
+            submitBtn.disabled = true;
+            submitBtn.title = 'Close Group is only available when this group is in Active mode.';
+        } else if (!hasOpenPosition) {
+            submitBtn.disabled = true;
+            submitBtn.title = 'This group has no open position to close.';
+        } else if (closeExecution.pendingRequest === true) {
+            submitBtn.disabled = true;
+            submitBtn.title = 'A close-group order request is already in progress.';
+        } else {
+            submitBtn.disabled = false;
+            submitBtn.title = closeExecution.executionMode === 'preview'
+                ? 'Preview the reverse combo for all non-zero legs in this group.'
+                : 'Submit a managed combo order that reverses all non-zero legs in this group.';
+        }
+
+        submitBtn.textContent = closeExecution.executionMode === 'preview'
+            ? 'Preview Close'
+            : (closeExecution.executionMode === 'test_submit' ? 'Send Test Close' : 'Close Group');
+
+        executionModeInput.addEventListener('change', (e) => {
+            const nextMode = String(e.target.value || '').trim();
+            closeExecution.executionMode = ['preview', 'test_submit', 'submit'].includes(nextMode)
+                ? nextMode
+                : 'preview';
+            e.target.value = closeExecution.executionMode;
+            deps.renderGroups();
+        });
+
+        thresholdInput.addEventListener('change', (e) => {
+            const parsed = parseFloat(e.target.value);
+            const validThresholds = (typeof OptionComboTradeTriggerLogic !== 'undefined'
+                && Array.isArray(OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS))
+                ? OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS
+                : [0.01, 0.02, 0.05];
+            closeExecution.repriceThreshold = validThresholds.some(value => Math.abs(value - parsed) < 0.0001)
+                ? parsed
+                : 0.01;
+            e.target.value = Number(closeExecution.repriceThreshold).toFixed(2);
+        });
+
+        timeInForceInput.addEventListener('change', (e) => {
+            const nextTif = String(e.target.value || '').trim().toUpperCase();
+            const validTifs = (typeof OptionComboTradeTriggerLogic !== 'undefined'
+                && Array.isArray(OptionComboTradeTriggerLogic.VALID_TIME_IN_FORCE))
+                ? OptionComboTradeTriggerLogic.VALID_TIME_IN_FORCE
+                : ['DAY', 'GTC'];
+            closeExecution.timeInForce = validTifs.includes(nextTif) ? nextTif : 'DAY';
+            e.target.value = closeExecution.timeInForce;
+        });
+
+        submitBtn.addEventListener('click', () => {
+            if (typeof deps.requestCloseGroupComboOrder === 'function') {
+                deps.requestCloseGroupComboOrder(group);
+            }
+        });
+
+        const handleCloseGroupAction = (e) => {
+            const continueBtn = e.target.closest('.trial-trigger-continue-repricing-btn');
+            const concedeBtn = e.target.closest('.trial-trigger-concede-btn');
+            const cancelBtn = e.target.closest('.trial-trigger-cancel-order-btn');
+            if (!continueBtn && !concedeBtn && !cancelBtn) {
+                return;
+            }
+
+            if (typeof e.preventDefault === 'function') {
+                e.preventDefault();
+            }
+
+            if (continueBtn && typeof deps.requestContinueManagedComboOrder === 'function') {
+                deps.requestContinueManagedComboOrder(group, 'closeExecution');
+            } else if (concedeBtn && typeof deps.requestConcedeManagedComboOrder === 'function') {
+                const concedeContainer = concedeBtn.closest('.trial-trigger-concede-group');
+                const concedeSelect = concedeContainer
+                    ? concedeContainer.querySelector('.trial-trigger-concede-select')
+                    : null;
+                const concedeValue = concedeSelect ? concedeSelect.value : concedeBtn.dataset.value;
+                deps.requestConcedeManagedComboOrder(group, concedeValue, 'closeExecution');
+            } else if (cancelBtn && typeof deps.requestCancelManagedComboOrder === 'function') {
+                deps.requestCancelManagedComboOrder(group, 'manual_cancel', 'closeExecution');
+            }
+        };
+
+        container.addEventListener('pointerdown', handleCloseGroupAction);
+        container.addEventListener('click', handleCloseGroupAction);
+    }
+
     function bindLegRow(tr, leg, group, state, deps) {
-        const isStock = leg.type === 'stock';
+        const isStock = isUnderlyingLeg(leg);
         const supportsUnderlyingLegs = !deps.supportsUnderlyingLegs || deps.supportsUnderlyingLegs(state.underlyingSymbol);
 
         const typeInput = tr.querySelector('.type-input');
         typeInput.value = leg.type;
         const stockOption = Array.from(typeInput.options || []).find(option => option.value === 'stock');
+        if (stockOption) {
+            stockOption.textContent = getUnderlyingLegLabel(state.underlyingSymbol);
+        }
         if (stockOption && !supportsUnderlyingLegs && leg.type !== 'stock') {
             stockOption.disabled = true;
             stockOption.hidden = true;
         }
         typeInput.addEventListener('change', (e) => {
-            const wasStock = leg.type === 'stock';
-            const nowStock = e.target.value === 'stock';
+            const wasStock = isUnderlyingLeg(leg);
+            const nowStock = isUnderlyingLeg(e.target.value);
             leg.type = e.target.value;
 
             if (nowStock && !wasStock) {
                 leg.strike = 0;
                 leg.expDate = '';
                 leg.iv = 0;
+                leg.ivSource = 'manual';
+                leg.ivManualOverride = false;
             } else if (!nowStock && wasStock) {
                 leg.strike = state.underlyingPrice;
                 leg.expDate = deps.addDays(state.baseDate, 30);
                 leg.iv = 0.2;
+                leg.ivSource = 'manual';
+                leg.ivManualOverride = false;
             }
 
             deps.handleLiveSubscriptions();
@@ -233,10 +694,49 @@
                 deps.updateDerivedValues();
             });
 
-            ivInput.value = (leg.iv * 100).toFixed(4) + '%';
+            const ivDisplay = pricingCore && typeof pricingCore.describeLegIvInput === 'function'
+                ? pricingCore.describeLegIvInput(leg)
+                : {
+                    value: `${(leg.iv * 100).toFixed(4)}%`,
+                    title: 'Manual IV',
+                };
+            ivInput.value = ivDisplay.value;
+            ivInput.title = ivDisplay.title;
+            ivInput.addEventListener('focus', (e) => {
+                if (leg.ivSource === 'missing' && String(e.target.value || '').trim().toUpperCase() === 'N/A') {
+                    e.target.value = '';
+                }
+            });
+            ivInput.addEventListener('input', (e) => {
+                const parsed = parseIvPercentInput(e.target.value);
+                if (!Number.isFinite(parsed)) {
+                    return;
+                }
+
+                leg.iv = Math.max(parsed / 100.0, 0.001);
+                leg.ivSource = 'manual';
+                leg.ivManualOverride = true;
+                deps.updateDerivedValues();
+            });
             ivInput.addEventListener('change', (e) => {
-                leg.iv = parseFloat(e.target.value) / 100.0 || 0.001;
-                e.target.value = (leg.iv * 100).toFixed(4) + '%';
+                const parsed = parseIvPercentInput(e.target.value);
+                if (!Number.isFinite(parsed)) {
+                    const resetDisplay = pricingCore && typeof pricingCore.describeLegIvInput === 'function'
+                        ? pricingCore.describeLegIvInput(leg)
+                        : { value: `${(leg.iv * 100).toFixed(4)}%`, title: 'Manual IV' };
+                    e.target.value = resetDisplay.value;
+                    e.target.title = resetDisplay.title;
+                    return;
+                }
+
+                leg.iv = Math.max(parsed / 100.0, 0.001);
+                leg.ivSource = 'manual';
+                leg.ivManualOverride = true;
+                const nextDisplay = pricingCore && typeof pricingCore.describeLegIvInput === 'function'
+                    ? pricingCore.describeLegIvInput(leg)
+                    : { value: `${(leg.iv * 100).toFixed(4)}%`, title: 'Manual IV' };
+                e.target.value = nextDisplay.value;
+                e.target.title = nextDisplay.title;
                 deps.updateDerivedValues();
             });
         }
@@ -252,6 +752,10 @@
         costInput.value = leg.cost > 0 ? leg.cost.toFixed(2) : '';
         costInput.addEventListener('input', (e) => {
             leg.cost = parseFloat(e.target.value) || 0;
+            leg.costSource = 'manual';
+            leg.executionReportedCost = false;
+            delete leg.executionReportOrderId;
+            delete leg.executionReportPermId;
             deps.updateDerivedValues();
         });
 
@@ -318,10 +822,35 @@
         }
     }
 
+    function applyCollapsedState(card, group) {
+        card.classList.toggle('collapsed', !!group.isCollapsed);
+        const body = card.querySelector('.group-body');
+        if (body) {
+            body.hidden = !!group.isCollapsed;
+        }
+
+        const collapseToggleBtn = card.querySelector('.collapse-toggle-btn');
+        if (collapseToggleBtn) {
+            collapseToggleBtn.title = group.isCollapsed ? 'Expand Group' : 'Collapse Group';
+            collapseToggleBtn.setAttribute('aria-expanded', group.isCollapsed ? 'false' : 'true');
+        }
+    }
+
     function applyModeLockState(card, group, state, deps) {
         const currentMode = deps.getRenderableGroupViewMode(group);
         const supportsAmortizedMode = !deps.supportsAmortizedMode || deps.supportsAmortizedMode(state.underlyingSymbol);
+        const toggleActiveBtn = card.querySelector('.toggle-view-active');
+        const toggleTrialBtn = card.querySelector('.toggle-view-trial');
         const toggleAmortizedBtn = card.querySelector('.toggle-view-amortized');
+        const toggleSettlementBtn = card.querySelector('.toggle-view-settlement');
+
+        [toggleActiveBtn, toggleTrialBtn, toggleAmortizedBtn, toggleSettlementBtn].forEach(btn => {
+            if (!btn) return;
+            btn.disabled = false;
+            btn.title = '';
+            btn.classList.remove('text-muted');
+            btn.style.opacity = '';
+        });
 
         if (!supportsAmortizedMode && toggleAmortizedBtn) {
             toggleAmortizedBtn.disabled = true;
@@ -335,8 +864,6 @@
         }
 
         group.viewMode = 'trial';
-        const toggleTrialBtn = card.querySelector('.toggle-view-trial');
-        const toggleActiveBtn = card.querySelector('.toggle-view-active');
 
         if (!toggleTrialBtn || !toggleActiveBtn || !toggleAmortizedBtn) return;
 
@@ -359,11 +886,16 @@
     }
 
     globalScope.OptionComboGroupEditorUI = {
+        toggleGroupCollapse,
         addGroup,
         removeGroup,
         addLegToGroupById,
         addLegToGroup,
         removeLeg,
         renderGroups,
+        applyModeLockState,
+        bindTrialTriggerControls,
+        bindCloseGroupControls,
     };
+    globalScope.toggleGroupCollapse = toggleGroupCollapse;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

@@ -8,6 +8,9 @@ from datetime import datetime
 from ib_async import *
 import websockets
 
+from trade_execution.engine import ExecutionEngine
+from trade_execution.adapters.ibkr import IbkrExecutionAdapter
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Load Config
@@ -18,14 +21,34 @@ TWS_HOST = config.get('tws', 'host', fallback='127.0.0.1')
 TWS_PORT = config.getint('tws', 'port', fallback=7496)
 TWS_CLIENT_ID = config.getint('tws', 'client_id', fallback=999)
 
-WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1')
+CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
+WS_HOST = '127.0.0.1'
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
+MANAGED_REPRICE_THRESHOLD_DEFAULT = config.getfloat('execution', 'managed_reprice_threshold_default', fallback=0.01)
+MANAGED_REPRICE_INTERVAL_SECONDS = config.getfloat('execution', 'managed_reprice_interval_seconds', fallback=2.0)
+MANAGED_REPRICE_MAX_UPDATES = config.getint('execution', 'managed_reprice_max_updates', fallback=12)
+MANAGED_REPRICE_TIMEOUT_SECONDS = config.getfloat('execution', 'managed_reprice_timeout_seconds', fallback=600.0)
+
+if CONFIGURED_WS_HOST not in ('127.0.0.1', 'localhost'):
+    logging.warning(
+        "Ignoring configured server.ws_host=%r and binding WebSocket server to 127.0.0.1 only.",
+        CONFIGURED_WS_HOST,
+    )
+elif CONFIGURED_WS_HOST != WS_HOST:
+    logging.info(
+        "Normalizing configured server.ws_host=%r to 127.0.0.1.",
+        CONFIGURED_WS_HOST,
+    )
 
 ib = IB()
 connected_clients = set()
 # Map websocket -> { leg_id: Ticker }
 client_subscriptions = {}
 qualified_underlyings = {}
+portfolio_avg_cost_cache = {}
+combo_order_tracking_by_order_id = {}
+combo_order_tracking_by_perm_id = {}
+option_iv_debug_last_logged = {}
 
 SUPPORTED_LIVE_FAMILIES = {
     'ES': {
@@ -48,7 +71,398 @@ SUPPORTED_LIVE_FAMILIES = {
         'multiplier': '20',
         'trading_class': 'Q3A',
     },
+    'CL': {
+        'underlying_sec_type': 'FUT',
+        'option_sec_type': 'FOP',
+        'underlying_symbol': 'CL',
+        'option_symbol': 'CL',
+        'exchange': 'NYMEX',
+        'currency': 'USD',
+        'multiplier': '1000',
+        'trading_class': 'ML3',
+    },
 }
+
+INDEX_EXCHANGE_FALLBACKS = {
+    'SPX': ('CBOE', 'SMART', ''),
+    'NDX': ('NASDAQ', 'SMART', ''),
+}
+
+
+def _record_combo_order_submission(websocket, request, result):
+    tracking = {
+        'websocket': websocket,
+        'groupId': request.group_id,
+        'groupName': request.group_name,
+        'executionMode': request.execution_mode,
+        'executionIntent': request.execution_intent,
+        'requestSource': request.request_source,
+        'legs': list(getattr(result, 'tracking_legs', []) or []),
+        'fillTotals': {},
+        'seenExecIds': set(),
+    }
+    if result.order_id is not None:
+        combo_order_tracking_by_order_id[result.order_id] = tracking
+    if result.perm_id is not None:
+        combo_order_tracking_by_perm_id[result.perm_id] = tracking
+
+
+async def _emit_combo_order_update(websocket, payload):
+    await send_message_safe(websocket, json.dumps(payload))
+
+
+execution_adapter = IbkrExecutionAdapter(
+    ib=ib,
+    client_subscriptions=client_subscriptions,
+    qualified_underlyings=qualified_underlyings,
+    supported_live_families=SUPPORTED_LIVE_FAMILIES,
+    index_exchange_fallbacks=INDEX_EXCHANGE_FALLBACKS,
+    managed_reprice_threshold=MANAGED_REPRICE_THRESHOLD_DEFAULT,
+    managed_reprice_interval_seconds=MANAGED_REPRICE_INTERVAL_SECONDS,
+    managed_reprice_max_updates=MANAGED_REPRICE_MAX_UPDATES,
+    managed_reprice_timeout_seconds=MANAGED_REPRICE_TIMEOUT_SECONDS,
+    logger=logging.getLogger('trade_execution.ibkr'),
+    emit_order_update=_emit_combo_order_update,
+)
+
+execution_engine = ExecutionEngine(
+    execution_adapter,
+    logger=logging.getLogger('trade_execution.engine'),
+    on_submit_result=_record_combo_order_submission,
+)
+
+
+def _normalize_contract_date(value):
+    return str(value or '').replace('-', '').strip()
+
+
+def _portfolio_avg_cost_cache_key(item_payload):
+    return (
+        str(item_payload.get('account') or '').strip(),
+        str(item_payload.get('secType') or '').strip().upper(),
+        str(item_payload.get('symbol') or '').strip().upper(),
+        _normalize_contract_date(item_payload.get('expDate')),
+        str(item_payload.get('right') or '').strip().upper(),
+        str(item_payload.get('strike')),
+        str(item_payload.get('localSymbol') or '').strip(),
+    )
+
+
+def _serialize_portfolio_avg_cost_item(portfolio_item):
+    contract = getattr(portfolio_item, 'contract', None)
+    if contract is None:
+        return None
+
+    position = getattr(portfolio_item, 'position', None)
+    average_cost = getattr(portfolio_item, 'averageCost', None)
+    if position in (None, 0) or average_cost in (None, 0):
+        return None
+
+    try:
+        position_value = float(position)
+        average_cost_value = float(average_cost)
+    except (TypeError, ValueError):
+        return None
+
+    if position_value == 0 or average_cost_value == 0:
+        return None
+
+    sec_type = str(getattr(contract, 'secType', '') or '').upper()
+    multiplier_raw = getattr(contract, 'multiplier', '') or ''
+    try:
+        multiplier_value = float(multiplier_raw) if multiplier_raw not in ('', None) else 1.0
+    except (TypeError, ValueError):
+        multiplier_value = 1.0
+
+    avg_cost_per_unit = abs(average_cost_value)
+    if sec_type in ('OPT', 'FOP', 'FUT') and multiplier_value > 0:
+        avg_cost_per_unit = abs(average_cost_value) / multiplier_value
+
+    if not (avg_cost_per_unit == avg_cost_per_unit and avg_cost_per_unit > 0):
+        return None
+
+    return {
+        'account': getattr(portfolio_item, 'account', '') or '',
+        'secType': sec_type,
+        'symbol': getattr(contract, 'symbol', '') or '',
+        'localSymbol': getattr(contract, 'localSymbol', '') or '',
+        'expDate': _normalize_contract_date(getattr(contract, 'lastTradeDateOrContractMonth', '') or ''),
+        'right': getattr(contract, 'right', '') or '',
+        'strike': getattr(contract, 'strike', None),
+        'multiplier': str(multiplier_raw or ''),
+        'position': position_value,
+        'averageCost': average_cost_value,
+        'avgCostPerUnit': round(avg_cost_per_unit, 4),
+    }
+
+
+def _build_portfolio_avg_cost_payload(items):
+    return {
+        'action': 'portfolio_avg_cost_update',
+        'items': items,
+    }
+
+
+def _broadcast_portfolio_avg_cost_items(items):
+    if not items or not connected_clients:
+        return
+
+    message = json.dumps(_build_portfolio_avg_cost_payload(items))
+    for ws in list(connected_clients):
+        asyncio.create_task(send_message_safe(ws, message))
+
+
+def _send_portfolio_avg_cost_snapshot(websocket):
+    if not portfolio_avg_cost_cache:
+        return
+    message = json.dumps(_build_portfolio_avg_cost_payload(list(portfolio_avg_cost_cache.values())))
+    asyncio.create_task(send_message_safe(websocket, message))
+
+
+def on_update_portfolio_item(portfolio_item):
+    item = _serialize_portfolio_avg_cost_item(portfolio_item)
+    if not item:
+        return
+
+    portfolio_avg_cost_cache[_portfolio_avg_cost_cache_key(item)] = item
+    logging.info(
+        f"Broadcasting portfolio avg cost update: "
+        f"{item.get('secType')} {item.get('localSymbol') or item.get('symbol')} "
+        f"position={item.get('position')} avgCostPerUnit={item.get('avgCostPerUnit')}"
+    )
+    _broadcast_portfolio_avg_cost_items([item])
+
+
+ib.updatePortfolioEvent += on_update_portfolio_item
+
+
+def _resolve_combo_order_tracking(order_id, perm_id):
+    tracking = None
+    if order_id is not None:
+        tracking = combo_order_tracking_by_order_id.get(order_id)
+    if tracking is None and perm_id is not None:
+        tracking = combo_order_tracking_by_perm_id.get(perm_id)
+    if tracking is not None and order_id is not None:
+        combo_order_tracking_by_order_id[order_id] = tracking
+    if tracking is not None and perm_id is not None:
+        combo_order_tracking_by_perm_id[perm_id] = tracking
+    return tracking
+
+
+def _normalize_execution_side(value):
+    return str(value or '').strip().upper()
+
+
+def _resolve_tracking_leg_for_fill(tracking, con_id, execution_side):
+    legs = list(tracking.get('legs') or [])
+    if not legs or con_id is None:
+        return None
+
+    side_matches = [
+        leg for leg in legs
+        if leg.get('conId') == con_id
+        and _normalize_execution_side(leg.get('expectedExecutionSide')) == execution_side
+    ]
+    if len(side_matches) == 1:
+        return side_matches[0]
+    if len(side_matches) > 1:
+        return None
+
+    conid_matches = [leg for leg in legs if leg.get('conId') == con_id]
+    if len(conid_matches) == 1:
+        return conid_matches[0]
+    return None
+
+
+def _build_combo_order_fill_cost_payload(tracking, order_id, perm_id):
+    fill_totals = tracking.get('fillTotals') or {}
+    legs = []
+    for leg in tracking.get('legs') or []:
+        leg_id = leg.get('id')
+        fill_total = fill_totals.get(leg_id)
+        if not fill_total:
+            continue
+        filled_quantity = float(fill_total.get('filledQuantity') or 0)
+        filled_notional = float(fill_total.get('filledNotional') or 0)
+        if filled_quantity <= 0 or filled_notional <= 0:
+            continue
+
+        avg_fill_price = round(filled_notional / filled_quantity, 4)
+        legs.append({
+            'id': leg_id,
+            'conId': leg.get('conId'),
+            'localSymbol': leg.get('localSymbol') or '',
+            'symbol': leg.get('symbol') or '',
+            'secType': leg.get('secType') or '',
+            'right': leg.get('right') or '',
+            'strike': leg.get('strike'),
+            'expDate': leg.get('expDate') or '',
+            'targetPosition': leg.get('targetPosition'),
+            'executionSide': leg.get('expectedExecutionSide'),
+            'filledQuantity': round(filled_quantity, 8),
+            'avgFillPrice': avg_fill_price,
+            'costSource': 'execution_report',
+        })
+
+    return {
+        'action': 'combo_order_fill_cost_update',
+        'groupId': tracking.get('groupId'),
+        'orderFill': {
+            'groupId': tracking.get('groupId'),
+            'groupName': tracking.get('groupName'),
+            'executionMode': tracking.get('executionMode'),
+            'executionIntent': tracking.get('executionIntent'),
+            'requestSource': tracking.get('requestSource'),
+            'orderId': order_id,
+            'permId': perm_id,
+            'costSource': 'execution_report',
+            'legs': legs,
+        },
+    }
+
+
+def _build_combo_order_status_payload(trade, tracking):
+    order = getattr(trade, 'order', None)
+    order_status = getattr(trade, 'orderStatus', None)
+    trade_log = getattr(trade, 'log', None) or []
+    last_message = ''
+    if trade_log:
+        last_message = getattr(trade_log[-1], 'message', '') or ''
+
+    payload = {
+        'action': 'combo_order_status_update',
+        'groupId': tracking.get('groupId'),
+        'orderStatus': {
+            'groupId': tracking.get('groupId'),
+            'groupName': tracking.get('groupName'),
+            'executionMode': tracking.get('executionMode'),
+            'executionIntent': tracking.get('executionIntent'),
+            'requestSource': tracking.get('requestSource'),
+            'orderId': getattr(order, 'orderId', None),
+            'permId': getattr(order_status, 'permId', None),
+            'status': getattr(order_status, 'status', None),
+            'filled': getattr(order_status, 'filled', None),
+            'remaining': getattr(order_status, 'remaining', None),
+            'avgFillPrice': getattr(order_status, 'avgFillPrice', None),
+            'lastFillPrice': getattr(order_status, 'lastFillPrice', None),
+            'whyHeld': getattr(order_status, 'whyHeld', None),
+            'mktCapPrice': getattr(order_status, 'mktCapPrice', None),
+            'statusMessage': last_message or None,
+        },
+    }
+    managed_snapshot = execution_engine.get_managed_order_snapshot(
+        payload['orderStatus'].get('orderId'),
+        payload['orderStatus'].get('permId'),
+    )
+    if managed_snapshot:
+        payload['orderStatus'].update(managed_snapshot)
+    return payload
+
+
+def on_combo_order_status(trade):
+    order = getattr(trade, 'order', None)
+    order_status = getattr(trade, 'orderStatus', None)
+    if order is None or order_status is None:
+        return
+
+    order_id = getattr(order, 'orderId', None)
+    perm_id = getattr(order_status, 'permId', None)
+    tracking = _resolve_combo_order_tracking(order_id, perm_id)
+    if tracking is None:
+        return
+
+    websocket = tracking.get('websocket')
+    if websocket is None:
+        return
+
+    payload = _build_combo_order_status_payload(trade, tracking)
+    logging.info(
+        f"Broadcasting combo order status update: groupId={tracking.get('groupId')} "
+        f"orderId={payload['orderStatus'].get('orderId')} permId={payload['orderStatus'].get('permId')} "
+        f"status={payload['orderStatus'].get('status')} "
+        f"filled={payload['orderStatus'].get('filled')} remaining={payload['orderStatus'].get('remaining')}"
+    )
+    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
+
+
+ib.orderStatusEvent += on_combo_order_status
+
+
+def on_combo_order_exec_details(trade, fill):
+    execution = getattr(fill, 'execution', None)
+    contract = getattr(fill, 'contract', None) or getattr(trade, 'contract', None)
+    if execution is None or contract is None:
+        return
+
+    if str(getattr(contract, 'secType', '') or '').upper() == 'BAG':
+        return
+
+    order_id = getattr(execution, 'orderId', None)
+    perm_id = getattr(execution, 'permId', None)
+    if order_id is None:
+        order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
+    if perm_id is None:
+        perm_id = getattr(getattr(trade, 'orderStatus', None), 'permId', None)
+
+    tracking = _resolve_combo_order_tracking(order_id, perm_id)
+    if tracking is None or tracking.get('executionMode') != 'submit':
+        return
+
+    websocket = tracking.get('websocket')
+    if websocket is None:
+        return
+
+    exec_id = str(getattr(execution, 'execId', '') or '').strip()
+    seen_exec_ids = tracking.setdefault('seenExecIds', set())
+    if exec_id and exec_id in seen_exec_ids:
+        return
+
+    con_id = getattr(contract, 'conId', None)
+    execution_side = _normalize_execution_side(getattr(execution, 'side', None))
+    leg = _resolve_tracking_leg_for_fill(tracking, con_id, execution_side)
+    if leg is None:
+        logging.warning(
+            f"Unable to attribute combo fill leg for groupId={tracking.get('groupId')} "
+            f"orderId={order_id} permId={perm_id} conId={con_id} side={execution_side}"
+        )
+        return
+
+    try:
+        filled_quantity = abs(float(getattr(execution, 'shares', 0) or 0))
+        fill_price = abs(float(getattr(execution, 'price', 0) or 0))
+    except (TypeError, ValueError):
+        return
+
+    if filled_quantity <= 0 or fill_price <= 0:
+        return
+
+    if exec_id:
+        seen_exec_ids.add(exec_id)
+
+    leg_id = leg.get('id')
+    if not leg_id:
+        return
+
+    fill_totals = tracking.setdefault('fillTotals', {})
+    fill_total = fill_totals.setdefault(leg_id, {
+        'filledQuantity': 0.0,
+        'filledNotional': 0.0,
+    })
+    fill_total['filledQuantity'] += filled_quantity
+    fill_total['filledNotional'] += filled_quantity * fill_price
+
+    avg_fill_price = round(fill_total['filledNotional'] / fill_total['filledQuantity'], 4)
+    logging.info(
+        f"Broadcasting combo execution fill cost: groupId={tracking.get('groupId')} "
+        f"orderId={order_id} permId={perm_id} legId={leg_id} "
+        f"localSymbol={leg.get('localSymbol')} side={execution_side} "
+        f"qty={fill_total['filledQuantity']} avgFillPrice={avg_fill_price}"
+    )
+    payload = _build_combo_order_fill_cost_payload(tracking, order_id, perm_id)
+    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
+
+
+ib.execDetailsEvent += on_combo_order_exec_details
 
 async def connect_ib():
     """Connect to IB TWS/Gateway. Retries indefinitely — one connection per session.
@@ -112,6 +526,23 @@ def _to_expiry(value):
 def _resolve_family_defaults(symbol):
     normalized = _normalize_symbol(symbol)
     return SUPPORTED_LIVE_FAMILIES.get(normalized)
+
+def _resolve_index_exchange_candidates(symbol, requested_exchange):
+    normalized_symbol = _normalize_symbol(symbol)
+    requested = str(requested_exchange or '').strip()
+    candidates = []
+
+    if requested:
+        candidates.append(requested)
+
+    for exchange in INDEX_EXCHANGE_FALLBACKS.get(normalized_symbol, ()):
+        if exchange not in candidates:
+            candidates.append(exchange)
+
+    if '' not in candidates:
+        candidates.append('')
+
+    return candidates
 
 def _resolve_weekly_fop_trading_class(symbol, expiry, current_trading_class):
     defaults = _resolve_family_defaults(symbol)
@@ -260,6 +691,21 @@ async def _qualify_one(contract, contract_request=None):
                 contract.underConId = qualified_underlying.conId
 
     results = await ib.qualifyContractsAsync(contract)
+    if (not results or results[0] is None) and sec_type == 'IND' and isinstance(contract_request, dict):
+        original_exchange = contract.exchange
+        for candidate_exchange in _resolve_index_exchange_candidates(contract.symbol, original_exchange):
+            if candidate_exchange == original_exchange:
+                continue
+
+            contract.exchange = candidate_exchange
+            results = await ib.qualifyContractsAsync(contract)
+            if results and results[0] is not None:
+                logging.info(
+                    f"Qualified {_describe_contract_request(contract_request)} using IND exchange fallback "
+                    f"{candidate_exchange or '<blank>'} instead of {original_exchange or '<blank>'}"
+                )
+                break
+
     if (not results or results[0] is None) and sec_type == 'FOP' and underlying_contract_month and getattr(contract, 'tradingClass', ''):
         original_trading_class = contract.tradingClass
         contract.tradingClass = ''
@@ -301,6 +747,73 @@ def _describe_contract_request(contract_data):
         symbol = _normalize_symbol(contract_data.get('symbol'))
         return f"{sec_type or 'UNKNOWN'} {symbol or '<missing>'}".strip()
     return _normalize_symbol(contract_data) or '<missing>'
+
+
+def _extract_option_mark(ticker):
+    bid = getattr(ticker, 'bid', None)
+    ask = getattr(ticker, 'ask', None)
+    if bid and ask and bid == bid and ask == ask and bid > 0 and ask > 0:
+        return round((bid + ask) / 2, 4)
+
+    if hasattr(ticker, 'modelGreeks') and ticker.modelGreeks:
+        opt_price = getattr(ticker.modelGreeks, 'optPrice', None)
+        if opt_price is not None and opt_price == opt_price and opt_price > 0:
+            return round(opt_price, 4)
+
+    fallback = ticker.marketPrice()
+    if fallback == fallback and fallback > 0:
+        return round(fallback, 4)
+    return None
+
+
+def _extract_option_iv(ticker):
+    for attr_name in ('modelGreeks', 'bidGreeks', 'askGreeks', 'lastGreeks'):
+        greeks = getattr(ticker, attr_name, None)
+        if not greeks:
+            continue
+        raw = getattr(greeks, 'impliedVol', None)
+        if raw is not None and raw == raw and raw > 0:
+            return raw
+
+    raw = getattr(ticker, 'impliedVolatility', None)
+    if raw is not None and raw == raw and raw > 0:
+        return raw
+    return None
+
+
+def _log_option_iv_debug_if_needed(sub_id, ticker, iv):
+    contract = getattr(ticker, 'contract', None)
+    symbol = str(getattr(contract, 'symbol', '') or '').upper()
+    if symbol != 'SLV':
+        return
+
+    con_id = getattr(contract, 'conId', None) or sub_id
+    now = datetime.utcnow().timestamp()
+    last_logged_at = option_iv_debug_last_logged.get(con_id, 0)
+    if now - last_logged_at < 15:
+        return
+    option_iv_debug_last_logged[con_id] = now
+
+    def _extract_greek_iv(attr_name):
+        greeks = getattr(ticker, attr_name, None)
+        if not greeks:
+            return None
+        return getattr(greeks, 'impliedVol', None)
+
+    logging.info(
+        "SLV IV debug: subId=%s localSymbol=%s iv=%s bid=%s ask=%s "
+        "modelIV=%s bidIV=%s askIV=%s lastIV=%s impliedVolatility=%s",
+        sub_id,
+        getattr(contract, 'localSymbol', None),
+        iv,
+        getattr(ticker, 'bid', None),
+        getattr(ticker, 'ask', None),
+        _extract_greek_iv('modelGreeks'),
+        _extract_greek_iv('bidGreeks'),
+        _extract_greek_iv('askGreeks'),
+        _extract_greek_iv('lastGreeks'),
+        getattr(ticker, 'impliedVolatility', None),
+    )
 
 def on_pending_tickers(tickers):
     """
@@ -378,6 +891,9 @@ def on_pending_tickers(tickers):
                     raw = getattr(ticker, 'impliedVolatility', None)
                     if raw is not None and raw == raw and raw > 0:
                         iv = raw
+                if iv is None:
+                    iv = _extract_option_iv(ticker)
+                _log_option_iv_debug_if_needed(sub_id, ticker, iv)
                 
                 if price == price and price > 0:
                     payload["options"][sub_id] = {
@@ -424,11 +940,28 @@ def unsubscribe_client_safely(ws):
             
     client_subscriptions[ws] = {}
 
+
+def _purge_combo_order_tracking_for_websocket(ws):
+    stale_order_ids = [
+        order_id for order_id, tracking in combo_order_tracking_by_order_id.items()
+        if tracking.get('websocket') is ws
+    ]
+    for order_id in stale_order_ids:
+        combo_order_tracking_by_order_id.pop(order_id, None)
+
+    stale_perm_ids = [
+        perm_id for perm_id, tracking in combo_order_tracking_by_perm_id.items()
+        if tracking.get('websocket') is ws
+    ]
+    for perm_id in stale_perm_ids:
+        combo_order_tracking_by_perm_id.pop(perm_id, None)
+
 async def handle_ws_client(websocket):
     client_ip = websocket.remote_address[0] if websocket.remote_address else 'Unknown'
     logging.info(f"Client connected: {client_ip}")
     connected_clients.add(websocket)
     client_subscriptions[websocket] = {}
+    _send_portfolio_avg_cost_snapshot(websocket)
     
     try:
         async for message in websocket:
@@ -531,12 +1064,27 @@ async def handle_ws_client(websocket):
                         }
                         await send_message_safe(websocket, json.dumps(payload))
 
+            elif data.get('action') == 'request_portfolio_avg_cost_snapshot':
+                logging.info(f"Received portfolio avg cost snapshot request from {client_ip}")
+                _send_portfolio_avg_cost_snapshot(websocket)
+
+            else:
+                payload = await execution_engine.handle_combo_action(
+                    websocket,
+                    data,
+                    client_ip=client_ip,
+                )
+                if payload is not None:
+                    await send_message_safe(websocket, json.dumps(payload))
+
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
         logging.info(f"Client disconnected: {client_ip}")
         # Clean up all tracking logic for this exact websocket
         unsubscribe_client_safely(websocket)
+        _purge_combo_order_tracking_for_websocket(websocket)
+        execution_engine.cancel_managed_for_websocket(websocket)
         if websocket in connected_clients:
             connected_clients.remove(websocket)
         client_subscriptions.pop(websocket, None)

@@ -28,10 +28,27 @@ module.exports = {
                 assert.equal(profile.optionSecType, 'FOP');
                 assert.equal(profile.underlyingSecType, 'FUT');
                 assert.equal(profile.optionMultiplier, 50);
+                assert.equal(profile.underlyingLegMultiplier, 50);
                 assert.equal(profile.settlementUnitsPerContract, 1);
                 assert.equal(profile.supportsAmortizedMode, false);
                 assert.equal(profile.supportsLegacyLiveData, true);
-                assert.equal(profile.supportsUnderlyingLegs, false);
+                assert.equal(profile.supportsUnderlyingLegs, true);
+            },
+        },
+        {
+            name: 'resolves CL as a live-enabled futures-option family',
+            run() {
+                const ctx = loadBrowserScripts(['js/product_registry.js']);
+                const profile = ctx.OptionComboProductRegistry.resolveUnderlyingProfile('CL');
+
+                assert.equal(profile.optionSecType, 'FOP');
+                assert.equal(profile.underlyingSecType, 'FUT');
+                assert.equal(profile.optionExchange, 'NYMEX');
+                assert.equal(profile.underlyingExchange, 'NYMEX');
+                assert.equal(profile.optionMultiplier, 1000);
+                assert.equal(profile.tradingClass, 'ML3');
+                assert.equal(profile.supportsLegacyLiveData, true);
+                assert.equal(profile.supportsUnderlyingLegs, true);
             },
         },
         {
@@ -68,8 +85,23 @@ module.exports = {
                 assert.equal(profile.optionSymbol, 'SPXW');
                 assert.equal(profile.underlyingSymbol, 'SPX');
                 assert.equal(profile.underlyingSecType, 'IND');
+                assert.equal(profile.underlyingExchange, 'CBOE');
                 assert.equal(profile.settlementKind, 'cash-settled');
                 assert.equal(profile.supportsLegacyLiveData, true);
+            },
+        },
+        {
+            name: 'returns product-aware underlying leg labels and multipliers',
+            run() {
+                const ctx = loadBrowserScripts(['js/product_registry.js']);
+                const registry = ctx.OptionComboProductRegistry;
+
+                assert.equal(registry.getUnderlyingLegLabel('SPY'), 'Underlying (Equity)');
+                assert.equal(registry.getUnderlyingLegLabel('ES'), 'Underlying (Future)');
+                assert.equal(registry.getUnderlyingLegMultiplier('SPY'), 1);
+                assert.equal(registry.getUnderlyingLegMultiplier('NQ'), 20);
+                assert.equal(registry.isUnderlyingLeg({ type: 'stock' }), true);
+                assert.equal(registry.isOptionLeg({ type: 'put' }), true);
             },
         },
     ],

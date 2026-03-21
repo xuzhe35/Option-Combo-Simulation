@@ -57,6 +57,11 @@
         document.getElementById('ivOffset').value = ivOffsetPercent.toFixed(2);
         document.getElementById('ivOffsetSlider').value = ivOffsetPercent;
         document.getElementById('ivOffsetDisplay').textContent = `${ivOffsetSign}${ivOffsetPercent.toFixed(2)}%`;
+
+        const allowLiveComboOrdersInput = document.getElementById('allowLiveComboOrders');
+        if (allowLiveComboOrdersInput) {
+            allowLiveComboOrdersInput.checked = state.allowLiveComboOrders === true;
+        }
     }
 
     globalScope.OptionComboSessionUI = {
