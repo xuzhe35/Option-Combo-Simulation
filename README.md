@@ -2,33 +2,38 @@
 
 ## What This Repo Is
 
-Option Combo Simulator is a local browser app for building, pricing, replaying, and tracking multi-leg option structures.
+Option Combo Simulator is a local browser app for building, pricing, replaying, and tracking multi-leg option structures. Recent extensive refactoring has matured it into a comprehensive analysis and execution workspace.
 
 Current shipped capabilities include:
 
-- live and manual scenario analysis for multi-group option portfolios
-- `trial`, `active`, `amortized`, and `settlement` group modes
-- global portfolio P&L and global amortized aggregation
-- historical replay / backtest against SQLite option history
-- optional IBKR live quotes, IV, combo preview, and managed live execution
-- an experimental `Chart Lab` page that projects option payoff shapes onto a daily candle chart
+- **Live & Scenario Analysis**: Multi-group option portfolios supporting `trial`, `active`, `amortized`, and `settlement` view modes.
+- **Advanced Workspace Management**: Collapsible combo and hedge groups for efficient vertical space utilization.
+- **Global Aggregation**: Global portfolio P&L tracking, global amortized aggregation, and probability analysis.
+- **Enhanced Visualization**:
+  - Per-group and global P&L charts.
+  - Dedicated **P/L margin sub-charts** for continuous profit margin tracking.
+  - Assigned-shares cost basis banners in settlement mode.
+- **Session Continuity**: Full Import/Export of workspace state via JSON files, preserving simulated dates and timeline settings.
+- **Historical Replay / Backtest**: A dedicated workspace mode to step through SQLite historical option chains, preview triggers, and simulate executions.
+- **Live Trading Bridge**: Optional Python IBKR bridge offering live quotes, IV tracking, and managed live execution of combo orders.
+- **Chart Lab**: An experimental sandbox projecting multi-leg payoff structures directly onto daily candle charts.
 
 There is no frontend build step. The app runs from plain HTML/CSS/JavaScript files loaded in order.
 
 ## Main Entry Points
 
-### Shared app shell
+### Shared App Shell
 
 - `index.html`
 
 This is the main portfolio workspace. It supports:
 
-- live workspace mode
-- historical replay workspace mode
-- import / export / save-back session flow
-- group editing, charts, probability analysis, and execution controls
+- **Live Workspace Mode**: Connect to IBKR for real-time data and execution.
+- **Historical Replay Mode**: Connect to SQLite to replay historical market conditions.
+- Group editing, charting, custom dual-view probability analysis, and execution controls.
+- Session import / export flow.
 
-### Experimental projection page
+### Experimental Projection Page
 
 - `chart_lab.html`
 
@@ -36,11 +41,10 @@ This is a sandbox page for the daily K-line payoff projection experiment.
 
 Current state:
 
-- reuses the same in-memory app state as the main page
-- can project either one group or the included global portfolio
-- uses the same `Simulated Date` as the portfolio page
-- uses IBKR historical daily bars when available, with SQLite fallback
-- aligns price on the candle chart, but the horizontal projection width is still normalized P&L, not true time
+- Reuses the same in-memory app state and `Simulated Date` as the main page.
+- Projects either one group or the included global portfolio onto a price chart.
+- Uses IBKR historical daily bars when available, falling back to SQLite.
+- Aligns price on the candle chart (horizontal projection width is currently normalized P&L, not strict time paths).
 
 ## Startup
 
@@ -163,17 +167,16 @@ Current behavior:
 
 ## Historical Replay / Backtest
 
-Historical replay is implemented and no longer just a plan.
+Historical replay is implemented as a first-class execution environment.
 
 Current behavior includes:
 
-- historical mode split from live mode
-- replay-day quote loading from SQLite
-- replay timeline stepping
-- historical trigger preview / test submit / submit simulation
-- `Enter @ Replay Day`
-- close simulation
-- expiry auto-settlement controls
+- historical mode cleanly split from live mode
+- replay-day quote snapshots loaded directly from SQLite
+- deterministic replay timeline stepping
+- historical trigger preview, test submit, and simulated fills
+- `"Enter @ Replay Day"` workflow to lock past quotes as entry prices
+- close simulation and expiry auto-settlement controls
 
 Main files:
 
@@ -185,49 +188,48 @@ Main files:
 
 | File | Responsibility |
 | --- | --- |
-| `index.html` | Main app shell, templates, shared controls, cards, charts |
+| `index.html` | Main app shell, templates, shared controls, UI layouts |
 | `chart_lab.html` | Experimental daily candle projection page |
 | `style.css` | Main app styles |
 | `chart_lab.css` | Chart Lab styles |
 | `js/product_registry.js` | Product-family metadata and capability flags |
 | `js/pricing_context.js` | Underlying anchor logic, futures-pool and forward-rate context |
-| `js/pricing_core.js` | Core pricing helpers and simulated pricing |
+| `js/pricing_core.js` | Core pricing helpers and simulated pricing logic |
 | `js/valuation.js` | Portfolio/group derived values |
-| `js/chart.js` | P&L and amortized chart renderers |
+| `js/chart.js` | P&L, amortized, and margin sub-chart renderers |
 | `js/chart_controls.js` | Group/global chart control plumbing |
 | `js/prob_charts.js` | Probability analysis charts and worker logic |
 | `js/ws_client.js` | Browser WebSocket client for live and historical backends |
 | `js/chart_lab.js` | Daily K projection lab |
 | `ib_server.py` | IBKR live market data and execution bridge |
 | `historical_server.py` | SQLite historical replay backend |
-| `historical_data.py` | SQLite data access |
+| `historical_data.py` | SQLite data access module |
 | `historical_replay_service.py` | Historical replay payload assembly |
-| `trade_execution/` | Execution engine and IBKR adapter |
+| `trade_execution/` | Execution engine routing structure |
 
 ## Current Known Boundaries
 
 - `chart_lab.html` is still experimental.
 - The daily K projection currently aligns the price axis only; horizontal projection width is normalized P&L, not time.
 - Mixed-expiry payoff projection still needs a more explicit path assumption if you want a financially rigorous later-expiry overlay.
-- `contract_specs/*.xml` exist as reference material, but runtime product behavior currently comes from `js/product_registry.js`.
-- Reloading the page does not reconstruct an old live managed-order supervision session.
+- `contract_specs/*.xml` exist as reference material; runtime product behavior is strictly defined in `js/product_registry.js`.
+- Reloading the page does not currently reconstruct an older managed-order supervision session.
 
 ## Tests
 
 Tests live under `tests/`.
 
-They currently cover the key shared logic areas, including:
+They currently cover key shared logic areas, including:
 
 - product registry
 - pricing core / BSM / Black-76 behavior
-- valuation
-- session logic
-- WebSocket client behavior
-- pricing-context logic
+- valuation and session logic
+- WebSocket client payload assembly
+- pricing-context functionality
 - UI helpers
 
 ## Related Docs
 
-- `ARCHITECTURE.md` for the current runtime design
-- `DEV_HANDOVER.md` for operational developer notes
-- `AGENTS.md` for repo-specific agent guidance
+- `ARCHITECTURE.md` - Core runtime design, lifecycle events, and exact module responsibilities.
+- `DEV_HANDOVER.md` - Operational developer notes, including the precise state of live features vs. experimental work.
+- `AGENTS.md` - Repo-specific workflow guidelines and script resolution advice for automated agents.
