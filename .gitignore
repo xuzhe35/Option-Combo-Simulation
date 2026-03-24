@@ -1,5 +1,8 @@
 Portfolio/
+sqlite_spy/
 server_log.txt
 ib_server.codex*.log
+http_server.codex*.log
+config.local.ini
 *.pid
 *PLANE*

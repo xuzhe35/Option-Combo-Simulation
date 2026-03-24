@@ -23,6 +23,41 @@
             : 'Underlying';
     }
 
+    function getPricingInputMode(symbol) {
+        return productRegistry && typeof productRegistry.resolvePricingInputMode === 'function'
+            ? productRegistry.resolvePricingInputMode(symbol)
+            : 'STK';
+    }
+
+    function getLegAnchorDate(state) {
+        if (state && state.marketDataMode === 'historical' && state.historicalQuoteDate) {
+            return state.historicalQuoteDate;
+        }
+        return state.baseDate;
+    }
+
+    function applyMarketDataToggleUi(state, group, liveToggle) {
+        if (!liveToggle) return;
+
+        const statusSpan = liveToggle.parentElement && liveToggle.parentElement.previousElementSibling;
+        const labelSpan = liveToggle.parentElement
+            ? liveToggle.parentElement.querySelector('.market-data-toggle-label')
+            : null;
+        const isHistoricalMode = !!(state && state.marketDataMode === 'historical');
+
+        if (statusSpan) {
+            statusSpan.textContent = group.liveData
+                ? (isHistoricalMode ? 'Replay' : 'Live')
+                : 'Offline';
+        }
+
+        if (labelSpan) {
+            labelSpan.textContent = isHistoricalMode
+                ? 'Historical Replay'
+                : 'Market Data Feed';
+        }
+    }
+
     function _ensureTradeTrigger(group) {
         return OptionComboTradeTriggerLogic.ensureGroupTradeTrigger(group);
     }
@@ -41,6 +76,158 @@
         }
         group.closeExecution = OptionComboSessionLogic.normalizeCloseExecution(group.closeExecution);
         return group.closeExecution;
+    }
+
+    function _ensureHistoricalAutoCloseAtExpiry(group) {
+        if (!group || typeof group !== 'object') {
+            return true;
+        }
+        if (typeof OptionComboSessionLogic !== 'undefined'
+            && typeof OptionComboSessionLogic.normalizeHistoricalAutoCloseAtExpiry === 'function') {
+            group.historicalAutoCloseAtExpiry = OptionComboSessionLogic.normalizeHistoricalAutoCloseAtExpiry(
+                group.historicalAutoCloseAtExpiry
+            );
+        } else {
+            group.historicalAutoCloseAtExpiry = group.historicalAutoCloseAtExpiry !== false;
+        }
+        return group.historicalAutoCloseAtExpiry;
+    }
+
+    function _groupHasCostForAllPositionedLegs(group) {
+        return (group && Array.isArray(group.legs) ? group.legs : []).every((leg) => {
+            const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
+            if (pos < 0.0001) {
+                return true;
+            }
+            return Math.abs(parseFloat(leg && leg.cost) || 0) > 0;
+        });
+    }
+
+    function _getSettlementUnitsPerContract(state, deps) {
+        if (pricingCore && typeof pricingCore.getSettlementUnitsPerContract === 'function') {
+            return pricingCore.getSettlementUnitsPerContract(
+                deps && typeof deps.getUnderlyingProfile === 'function'
+                    ? deps.getUnderlyingProfile()
+                    : (state && state.underlyingSymbol)
+            );
+        }
+        return 100;
+    }
+
+    function _getAssignmentShareDelta(leg, state, deps) {
+        const pos = parseFloat(leg && leg.pos) || 0;
+        if (Math.abs(pos) < 0.0001) {
+            return 0;
+        }
+
+        const settlementUnitsPerContract = _getSettlementUnitsPerContract(state, deps);
+        const lowerType = String(leg && leg.type || '').trim().toLowerCase();
+        if (lowerType === 'call') {
+            return pos * settlementUnitsPerContract;
+        }
+        if (lowerType === 'put') {
+            return -pos * settlementUnitsPerContract;
+        }
+        return 0;
+    }
+
+    function _resolveAssignmentActionLabel(leg) {
+        if (!leg || isUnderlyingLeg(leg)) {
+            return '';
+        }
+
+        if (leg.closePriceSource === 'assignment_conversion') {
+            return 'Undo';
+        }
+
+        return (parseFloat(leg.pos) || 0) < 0 ? 'Assign' : 'Exercise';
+    }
+
+    function _isAssignmentConvertible(group, leg, state, deps) {
+        if (!group || !leg || isUnderlyingLeg(leg)) {
+            return false;
+        }
+
+        const pos = Math.abs(parseFloat(leg.pos) || 0);
+        if (pos < 0.0001) {
+            return false;
+        }
+
+        const renderMode = deps && typeof deps.getRenderableGroupViewMode === 'function'
+            ? deps.getRenderableGroupViewMode(group)
+            : (group.viewMode || 'active');
+        if (renderMode !== 'active' && renderMode !== 'settlement') {
+            return false;
+        }
+
+        if (deps && typeof deps.supportsUnderlyingLegs === 'function' && !deps.supportsUnderlyingLegs(state.underlyingSymbol)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function applyOptionAssignmentConversion(group, leg, state, deps) {
+        if (!_isAssignmentConvertible(group, leg, state, deps)) {
+            return false;
+        }
+
+        const linkedLegId = String(leg.assignmentUnderlyingLegId || '').trim();
+        if (leg.closePriceSource === 'assignment_conversion' && linkedLegId) {
+            group.legs = (group.legs || []).filter((entry) => entry.id !== linkedLegId);
+            leg.closePrice = null;
+            leg.closePriceSource = '';
+            leg.assignmentUnderlyingLegId = '';
+            leg.assignmentUnderlyingQuantity = 0;
+            if (deps && typeof deps.handleLiveSubscriptions === 'function') {
+                deps.handleLiveSubscriptions();
+            }
+            if (deps && typeof deps.renderGroups === 'function') {
+                deps.renderGroups();
+            }
+            return true;
+        }
+
+        const shareDelta = _getAssignmentShareDelta(leg, state, deps);
+        if (Math.abs(shareDelta) < 0.0001) {
+            return false;
+        }
+
+        const strike = parseFloat(leg.strike) || 0;
+        const nextId = deps && typeof deps.generateId === 'function'
+            ? deps.generateId()
+            : ('_assignment_' + Math.random().toString(36).slice(2, 11));
+
+        group.legs.push({
+            id: nextId,
+            type: 'stock',
+            pos: shareDelta,
+            strike: 0,
+            expDate: '',
+            iv: 0,
+            ivSource: 'manual',
+            ivManualOverride: false,
+            currentPrice: 0.00,
+            currentPriceSource: '',
+            cost: strike,
+            costSource: 'assignment_conversion',
+            closePrice: null,
+            underlyingFutureId: leg.underlyingFutureId || '',
+            assignmentSourceLegId: leg.id,
+        });
+
+        leg.closePrice = 0;
+        leg.closePriceSource = 'assignment_conversion';
+        leg.assignmentUnderlyingLegId = nextId;
+        leg.assignmentUnderlyingQuantity = shareDelta;
+
+        if (deps && typeof deps.handleLiveSubscriptions === 'function') {
+            deps.handleLiveSubscriptions();
+        }
+        if (deps && typeof deps.renderGroups === 'function') {
+            deps.renderGroups();
+        }
+        return true;
     }
 
     function toggleGroupCollapse(btn) {
@@ -77,6 +264,7 @@
             includedInGlobal: true,
             isCollapsed: false,
             settleUnderlyingPrice: null,
+            historicalAutoCloseAtExpiry: true,
             tradeTrigger: _ensureTradeTrigger({}),
             closeExecution: _ensureCloseExecution({}),
             syncAvgCostFromPortfolio: true,
@@ -102,13 +290,15 @@
             type: 'call',
             pos: 1,
             strike: state.underlyingPrice,
-            expDate: deps.addDays(state.baseDate, 30),
+            expDate: deps.addDays(getLegAnchorDate(state), 30),
             iv: 0.2,
             ivSource: 'manual',
             ivManualOverride: false,
             currentPrice: 0.00,
+            currentPriceSource: '',
             cost: 0.00,
-            closePrice: null
+            closePrice: null,
+            underlyingFutureId: ''
         });
 
         deps.renderGroups();
@@ -226,13 +416,20 @@
         }
 
         const liveToggle = card.querySelector('.live-data-toggle');
-        const statusSpan = liveToggle.parentElement.previousElementSibling;
         const avgCostSyncToggle = card.querySelector('.avg-cost-sync-toggle');
+        const historicalEntryBtn = card.querySelector('.historical-entry-btn');
+        const historicalEntryHint = card.querySelector('.historical-entry-hint');
+        const isHistoricalMode = !!(state && state.marketDataMode === 'historical');
+        const autoCloseExpiredAtExpiry = _ensureHistoricalAutoCloseAtExpiry(group);
+        const hasOpenPosition = typeof deps.groupHasOpenPosition === 'function'
+            ? deps.groupHasOpenPosition(group)
+            : (group.legs || []).some((leg) => Math.abs(parseFloat(leg && leg.pos) || 0) > 0.0001);
+        const hasLockedEntryCosts = _groupHasCostForAllPositionedLegs(group);
         liveToggle.checked = !!group.liveData;
-        statusSpan.textContent = group.liveData ? 'Live' : 'Offline';
+        applyMarketDataToggleUi(state, group, liveToggle);
         liveToggle.addEventListener('change', (e) => {
             group.liveData = e.target.checked;
-            statusSpan.textContent = group.liveData ? 'Live' : 'Offline';
+            applyMarketDataToggleUi(state, group, liveToggle);
             deps.handleLiveSubscriptions();
         });
 
@@ -246,18 +443,70 @@
             });
         }
 
+        if (historicalEntryBtn) {
+            const showHistoricalEntry = isHistoricalMode && hasOpenPosition && !hasLockedEntryCosts;
+            historicalEntryBtn.style.display = showHistoricalEntry ? 'inline-flex' : 'none';
+            historicalEntryBtn.disabled = !showHistoricalEntry;
+            historicalEntryBtn.title = showHistoricalEntry
+                ? 'Lock the current replay-day prices into Cost and move this group into Active mode.'
+                : '';
+            historicalEntryBtn.addEventListener('click', () => {
+                if (typeof deps.enterHistoricalReplayGroup === 'function') {
+                    deps.enterHistoricalReplayGroup(group);
+                }
+            });
+        }
+
+        if (historicalEntryHint) {
+            const showHistoricalEntryHint = isHistoricalMode && !hasLockedEntryCosts;
+            historicalEntryHint.style.display = showHistoricalEntryHint ? 'block' : 'none';
+            historicalEntryHint.textContent = hasOpenPosition
+                ? 'Lock the replay-day prices into Cost when you want this historical position to be considered opened.'
+                : 'Add a non-zero leg to enable historical entry locking.';
+        }
+
         applyViewModeState(card, group, deps.getRenderableGroupViewMode(group));
 
         const settleInput = card.querySelector('.group-settle-underlying-input');
+        const historicalExpiryAutoCloseLabel = card.querySelector('.historical-expiry-auto-close-toggle');
+        const historicalExpiryAutoCloseInput = card.querySelector('.group-historical-expiry-auto-close');
+        const scenarioModeNote = card.querySelector('.scenario-mode-note');
         if (settleInput) {
             settleInput.value = group.settleUnderlyingPrice !== null && group.settleUnderlyingPrice !== undefined
                 ? group.settleUnderlyingPrice.toFixed(2)
                 : '';
+            settleInput.disabled = isHistoricalMode && autoCloseExpiredAtExpiry;
+            settleInput.title = isHistoricalMode && autoCloseExpiredAtExpiry
+                ? 'Disable auto-close at expiry to enter a scenario underlying price for deliverable settlement analysis.'
+                : 'Price of the underlying at expiration (leave empty to use current global price)';
             settleInput.addEventListener('input', (e) => {
                 const val = parseFloat(e.target.value);
                 group.settleUnderlyingPrice = isNaN(val) ? null : val;
                 deps.updateDerivedValues();
             });
+        }
+
+        if (historicalExpiryAutoCloseLabel) {
+            historicalExpiryAutoCloseLabel.style.display = isHistoricalMode ? 'inline-flex' : 'none';
+        }
+
+        if (historicalExpiryAutoCloseInput) {
+            historicalExpiryAutoCloseInput.checked = autoCloseExpiredAtExpiry;
+            historicalExpiryAutoCloseInput.addEventListener('change', (e) => {
+                group.historicalAutoCloseAtExpiry = e.target.checked;
+                if (typeof deps.syncHistoricalReplayExpirySettlement === 'function') {
+                    deps.syncHistoricalReplayExpirySettlement(group);
+                    return;
+                }
+                deps.renderGroups();
+                deps.updateDerivedValues();
+            });
+        }
+
+        if (scenarioModeNote) {
+            scenarioModeNote.textContent = isHistoricalMode && autoCloseExpiredAtExpiry
+                ? 'Expired historical legs will default to Close at the expiry-day replay price. Uncheck to model deliverable exercise/assignment with Scenario Underlying Price.'
+                : 'Used by Amortized and Settlement modes for expired options without early close.';
         }
 
         card.querySelector('.remove-group-btn').addEventListener('click', () => {
@@ -306,9 +555,30 @@
         const exitPriceInput = container.querySelector('.trial-trigger-exit-price');
         const resetBtn = container.querySelector('.trial-trigger-reset-btn');
         const body = container.querySelector('.trial-trigger-body');
+        const helpText = container.querySelector('.trial-trigger-help');
 
         if (!enabledInput || !collapseBtn || !conditionInput || !priceInput || !executionModeInput || !repriceThresholdInput || !timeInForceInput || !exitEnabledInput || !exitConditionInput || !exitPriceInput || !resetBtn || !body) {
             return;
+        }
+
+        const isHistoricalMode = !!(state && state.marketDataMode === 'historical');
+        const executionOptions = Array.from(executionModeInput.options || []);
+        const previewOption = executionOptions.find((option) => option.value === 'preview');
+        const testSubmitOption = executionOptions.find((option) => option.value === 'test_submit');
+        const submitOption = executionOptions.find((option) => option.value === 'submit');
+
+        if (previewOption) {
+            previewOption.textContent = 'Preview Only';
+        }
+        if (testSubmitOption) {
+            testSubmitOption.textContent = isHistoricalMode
+                ? 'Simulated Test Submit'
+                : 'Send to TWS (Test Only)';
+        }
+        if (submitOption) {
+            submitOption.textContent = isHistoricalMode
+                ? 'Simulated Submit'
+                : 'Send to TWS';
         }
 
         enabledInput.checked = trigger.enabled;
@@ -334,9 +604,16 @@
         exitPriceInput.title = trigger.enabled
             ? 'Disable Trial Trigger before editing the exit condition.'
             : '';
-        executionModeInput.title = state.allowLiveComboOrders
-            ? ''
-            : 'Global live combo order switch is OFF. TWS submit modes will not send orders until enabled.';
+        executionModeInput.title = isHistoricalMode
+            ? 'Historical replay never routes orders to TWS. Submit modes only create a simulated order runtime from replay-day quotes.'
+            : (state.allowLiveComboOrders
+                ? ''
+                : 'Global live combo order switch is OFF. TWS submit modes will not send orders until enabled.');
+        if (helpText) {
+            helpText.textContent = isHistoricalMode
+                ? 'Only works when this group is in Trial mode and Historical Replay is enabled. Preview mode stays local, and submit modes only create a simulated order runtime from replay-day quotes.'
+                : 'Only works when this group is in Trial mode and Live Market Data is enabled. Preview mode never sends orders.';
+        }
         body.style.display = trigger.isCollapsed ? 'none' : 'block';
         collapseBtn.title = trigger.isCollapsed ? 'Expand Trial Trigger' : 'Collapse Trial Trigger';
         collapseBtn.setAttribute('aria-expanded', trigger.isCollapsed ? 'false' : 'true');
@@ -455,24 +732,35 @@
         const thresholdInput = container.querySelector('.close-group-reprice-threshold');
         const timeInForceInput = container.querySelector('.close-group-tif');
         const submitBtn = container.querySelector('.close-group-submit-btn');
+        const helpText = container.querySelector('.close-group-help');
         if (!executionModeInput || !thresholdInput || !timeInForceInput || !submitBtn) {
             return;
         }
 
+        const isHistoricalMode = state && state.marketDataMode === 'historical';
         const renderMode = deps.getRenderableGroupViewMode(group);
         const hasOpenPosition = typeof deps.groupHasOpenPosition === 'function'
             ? deps.groupHasOpenPosition(group)
             : (group.legs || []).some(leg => Math.abs(parseFloat(leg && leg.pos) || 0) > 0.0001);
+        const hasLockedEntryCosts = _groupHasCostForAllPositionedLegs(group);
         const brokerStatus = String(closeExecution.lastPreview && closeExecution.lastPreview.status || '').trim();
         const isCompleted = brokerStatus === 'Filled';
 
+        if (isHistoricalMode) {
+            closeExecution.executionMode = 'preview';
+        }
         executionModeInput.value = String(closeExecution.executionMode || 'preview');
         thresholdInput.value = Number(closeExecution.repriceThreshold || 0.01).toFixed(2);
         timeInForceInput.value = String(closeExecution.timeInForce || 'DAY').toUpperCase();
 
-        executionModeInput.disabled = closeExecution.pendingRequest === true || isCompleted;
-        thresholdInput.disabled = closeExecution.pendingRequest === true || isCompleted;
-        timeInForceInput.disabled = closeExecution.pendingRequest === true || isCompleted;
+        executionModeInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
+        thresholdInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
+        timeInForceInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
+        if (helpText) {
+            helpText.textContent = isHistoricalMode
+                ? 'Snapshots every open leg at the current replay day, writes those prices into Close, and switches the group into Settlement mode.'
+                : 'Sends the reverse combo for all non-zero legs and reuses the managed middle-price negotiation flow.';
+        }
 
         if (isCompleted) {
             submitBtn.style.display = 'none';
@@ -484,9 +772,12 @@
 
         if (isCompleted) {
             // Keep the filled summary visible, but remove any further close action affordance.
-        } else if (renderMode !== 'active') {
+        } else if (!isHistoricalMode && renderMode !== 'active') {
             submitBtn.disabled = true;
             submitBtn.title = 'Close Group is only available when this group is in Active mode.';
+        } else if (isHistoricalMode && !hasLockedEntryCosts) {
+            submitBtn.disabled = true;
+            submitBtn.title = 'Lock entry costs first with Enter @ Replay Day before settling this group.';
         } else if (!hasOpenPosition) {
             submitBtn.disabled = true;
             submitBtn.title = 'This group has no open position to close.';
@@ -495,14 +786,18 @@
             submitBtn.title = 'A close-group order request is already in progress.';
         } else {
             submitBtn.disabled = false;
-            submitBtn.title = closeExecution.executionMode === 'preview'
-                ? 'Preview the reverse combo for all non-zero legs in this group.'
-                : 'Submit a managed combo order that reverses all non-zero legs in this group.';
+            submitBtn.title = isHistoricalMode
+                ? 'Close every open leg at the current historical replay price.'
+                : (closeExecution.executionMode === 'preview'
+                    ? 'Preview the reverse combo for all non-zero legs in this group.'
+                    : 'Submit a managed combo order that reverses all non-zero legs in this group.');
         }
 
-        submitBtn.textContent = closeExecution.executionMode === 'preview'
-            ? 'Preview Close'
-            : (closeExecution.executionMode === 'test_submit' ? 'Send Test Close' : 'Close Group');
+        submitBtn.textContent = isHistoricalMode
+            ? 'Settle @ Replay Day'
+            : (closeExecution.executionMode === 'preview'
+                ? 'Preview Close'
+                : (closeExecution.executionMode === 'test_submit' ? 'Send Test Close' : 'Close Group'));
 
         executionModeInput.addEventListener('change', (e) => {
             const nextMode = String(e.target.value || '').trim();
@@ -574,6 +869,8 @@
     function bindLegRow(tr, leg, group, state, deps) {
         const isStock = isUnderlyingLeg(leg);
         const supportsUnderlyingLegs = !deps.supportsUnderlyingLegs || deps.supportsUnderlyingLegs(state.underlyingSymbol);
+        const pricingInputMode = getPricingInputMode(state.underlyingSymbol);
+        const requiresPerLegFuture = pricingInputMode === 'FOP';
 
         const typeInput = tr.querySelector('.type-input');
         typeInput.value = leg.type;
@@ -598,7 +895,7 @@
                 leg.ivManualOverride = false;
             } else if (!nowStock && wasStock) {
                 leg.strike = state.underlyingPrice;
-                leg.expDate = deps.addDays(state.baseDate, 30);
+                leg.expDate = deps.addDays(getLegAnchorDate(state), 30);
                 leg.iv = 0.2;
                 leg.ivSource = 'manual';
                 leg.ivManualOverride = false;
@@ -618,6 +915,55 @@
         const strikeInput = tr.querySelector('.strike-input');
         const dteInput = tr.querySelector('.dte-input');
         const ivInput = tr.querySelector('.iv-input');
+        const underlyingFutureField = tr.querySelector('.fop-underlying-field');
+        const underlyingFutureSelect = tr.querySelector('.fop-underlying-select');
+        const underlyingFutureHint = tr.querySelector('.fop-underlying-hint');
+
+        if (underlyingFutureField && underlyingFutureSelect) {
+            const availableFutures = Array.isArray(state.futuresPool) ? state.futuresPool : [];
+            const shouldShowFutureSelector = requiresPerLegFuture;
+
+            underlyingFutureField.style.display = shouldShowFutureSelector ? 'block' : 'none';
+
+            if (shouldShowFutureSelector) {
+                underlyingFutureSelect.innerHTML = '';
+
+                const placeholderOption = document.createElement('option');
+                placeholderOption.value = '';
+                placeholderOption.textContent = availableFutures.length > 0
+                    ? 'Select future'
+                    : 'Add future in Futures Pool first';
+                underlyingFutureSelect.appendChild(placeholderOption);
+
+                availableFutures.forEach((entry) => {
+                    const option = document.createElement('option');
+                    option.value = entry.id;
+                    option.textContent = entry.contractMonth
+                        ? `${state.underlyingSymbol} ${entry.contractMonth}`
+                        : `${state.underlyingSymbol} (pending month)`;
+                    underlyingFutureSelect.appendChild(option);
+                });
+
+                underlyingFutureSelect.disabled = availableFutures.length === 0;
+                underlyingFutureSelect.value = leg.underlyingFutureId || '';
+                if (!availableFutures.some(entry => entry.id === leg.underlyingFutureId)) {
+                    leg.underlyingFutureId = '';
+                    underlyingFutureSelect.value = '';
+                }
+
+                if (underlyingFutureHint) {
+                    underlyingFutureHint.textContent = availableFutures.length > 0
+                        ? 'Required for FOP legs.'
+                        : 'Required for FOP legs. Add futures above first.';
+                }
+
+                underlyingFutureSelect.addEventListener('change', (e) => {
+                    leg.underlyingFutureId = e.target.value || '';
+                    deps.updateDerivedValues();
+                    deps.handleLiveSubscriptions();
+                });
+            }
+        }
 
         if (isStock) {
             strikeInput.style.visibility = 'hidden';
@@ -689,6 +1035,7 @@
         currentPriceInput.value = leg.currentPrice > 0 ? leg.currentPrice.toFixed(2) : '';
         currentPriceInput.addEventListener('input', (e) => {
             leg.currentPrice = parseFloat(e.target.value) || 0;
+            leg.currentPriceSource = leg.currentPrice > 0 ? 'manual' : '';
             deps.updateDerivedValues();
         });
 
@@ -705,6 +1052,7 @@
 
         const closePriceInput = tr.querySelector('.close-price-input');
         const closeLabel = tr.querySelector('.close-label');
+        const assignmentBtn = tr.querySelector('.assignment-convert-btn');
         if (closePriceInput && closeLabel) {
             closePriceInput.style.display = 'block';
             closeLabel.style.display = 'block';
@@ -716,6 +1064,23 @@
                 leg.closePrice = isNaN(val) ? null : val;
                 deps.updateDerivedValues();
             });
+        }
+
+        if (assignmentBtn) {
+            const canConvert = _isAssignmentConvertible(group, leg, state, deps);
+            assignmentBtn.style.visibility = canConvert ? 'visible' : 'hidden';
+            assignmentBtn.disabled = !canConvert;
+            if (canConvert) {
+                assignmentBtn.textContent = _resolveAssignmentActionLabel(leg);
+                assignmentBtn.title = leg.closePriceSource === 'assignment_conversion'
+                    ? 'Undo this manual assignment/exercise conversion.'
+                    : 'Convert this option leg into a deliverable underlying position at the strike, while preserving the option premium as realized cash flow.';
+                assignmentBtn.addEventListener('click', () => {
+                    applyOptionAssignmentConversion(group, leg, state, deps);
+                });
+            } else {
+                assignmentBtn.title = '';
+            }
         }
 
         tr.querySelector('.delete-btn').addEventListener('click', () => {
@@ -838,6 +1203,7 @@
         removeLeg,
         renderGroups,
         applyModeLockState,
+        applyOptionAssignmentConversion,
         bindTrialTriggerControls,
         bindCloseGroupControls,
     };

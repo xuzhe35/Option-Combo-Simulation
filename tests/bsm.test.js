@@ -263,6 +263,27 @@ module.exports = {
             },
         },
         {
+            name: 'freezes expired option intrinsic at the historical expiry underlying anchor',
+            run() {
+                const ctx = loadPricingContext();
+
+                assert.ok(
+                    Math.abs(
+                        ctx.computeLegPrice(
+                            {
+                                type: 'call',
+                                isExpired: true,
+                                strike: 381,
+                                expiryUnderlyingPrice: 402.13,
+                            },
+                            415.19,
+                            0.03
+                        ) - 21.13
+                    ) < 1e-9
+                );
+            },
+        },
+        {
             name: 'prefers explicit close price overrides over all other pricing logic',
             run() {
                 const ctx = loadPricingContext();

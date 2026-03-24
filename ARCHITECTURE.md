@@ -1,199 +1,268 @@
-# Option Combo Simulator 架构说明
+# Option Combo Simulator Architecture
 
-## 1. 当前一句话总结
+## 1. System Shape
 
-这是一个不经过构建步骤、依赖 `index.html` 顺序加载全局脚本的本地浏览器应用。
+This repo now contains three related surfaces:
 
-当前真实架构已经不是“一个巨大的 `app.js`”，而是：
+1. `index.html`
+   - the main portfolio workspace
+   - supports live mode and historical replay mode
 
-- `index.html` 负责页面骨架、模板和脚本装配
-- `app.js` 持有全局 `state`，负责顶层编排
-- `pricing_core.js` / `amortized.js` / `valuation.js` / `session_logic.js` 提供纯计算和纯规则
-- `control_panel_ui.js` / `session_ui.js` / `group_editor_ui.js` / `hedge_editor_ui.js` 负责编辑器与交互绑定
-- `group_ui.js` / `hedge_ui.js` / `global_ui.js` 负责把派生结果写回 DOM
-- `trade_trigger_logic.js` 负责 Trial Trigger 状态与请求构造
-- `ws_client.js` + `ib_server.py` + `trade_execution/*` 负责 IBKR 实盘桥接与订单执行
+2. `chart_lab.html`
+   - an experimental projection surface
+   - overlays payoff shapes onto a daily candle chart
 
-## 2. 运行时分层
+3. Python backends
+   - `ib_server.py` for live IBKR market data and execution
+   - `historical_server.py` for SQLite-based historical replay
 
-### 2.1 页面与模板层
+The frontend is still a plain ordered-global-script app. There is no bundler and no module loader.
+
+## 2. Frontend Entry Surfaces
+
+### `index.html`
+
+The main app shell owns:
+
+- control panel
+- combo-group editor
+- hedge editor
+- global cards
+- group/global P&L charts
+- global amortized chart
+- probability analysis
+- Trial Trigger and live execution controls
+
+### `chart_lab.html`
+
+The projection lab is intentionally separate from the main shell.
+
+It currently:
+
+- reuses the same frontend state bridge as `index.html`
+- opens its own WebSocket connection for bars and live underlying price
+- draws a custom daily candle canvas
+- projects either a single group or the included global portfolio
+
+The chart-lab overlay is currently a visualization layer, not a mathematically complete time-path model.
+
+## 3. Ordered Script Runtime
+
+Current `index.html` load order:
+
+1. `js/t_params_db.js`
+2. `js/market_holidays.js`
+3. `js/date_utils.js`
+4. `js/product_registry.js`
+5. `js/index_forward_rate.js`
+6. `js/pricing_context.js`
+7. `js/group_order_builder.js`
+8. `js/trade_trigger_logic.js`
+9. `js/distribution_proxy_config.js`
+10. `js/pricing_core.js`
+11. `js/bsm.js`
+12. `js/chart.js`
+13. `js/prob_charts.js`
+14. `js/chart_controls.js`
+15. `js/amortized.js`
+16. `js/valuation.js`
+17. `js/session_logic.js`
+18. `js/session_ui.js`
+19. `js/control_panel_ui.js`
+20. `js/hedge_editor_ui.js`
+21. `js/group_editor_ui.js`
+22. `js/hedge_ui.js`
+23. `js/group_ui.js`
+24. `js/global_ui.js`
+25. `js/app.js`
+26. `js/ws_client.js`
+
+If browser runtime behavior suddenly becomes `undefined`, load order is still the first thing to check.
+
+## 4. Layer Breakdown
+
+### 4.1 Static shell and styles
 
 - `index.html`
+- `chart_lab.html`
 - `style.css`
+- `chart_lab.css`
 
-负责：
+Responsibilities:
 
-- 左侧 Scenario Controls
-- Group / Leg / Hedge 模板
-- 全局卡片、图表容器、WebSocket 控件
-- Trial Trigger 控件区
+- page layout
+- templates
+- containers for charts and summaries
+- workspace-specific copy and affordances
 
-### 2.2 顶层状态与编排层
+### 4.2 Product and pricing metadata
 
-- `js/app.js`
+- `js/product_registry.js`
+- `js/index_forward_rate.js`
+- `js/distribution_proxy_config.js`
 
-负责：
+Responsibilities:
 
-- 持有全局 `state`
-- 初始化页面
-- 调度渲染
-- 调用 valuation 计算
-- 导入导出会话
-- 连接 UI 模块和 WebSocket 模块
+- product-family metadata
+- option and underlying security types
+- multipliers
+- trading classes
+- default underlying futures month logic
+- forward-rate usage rules
+- probability-distribution proxy selection
 
-`app.js` 现在是 orchestration bridge，不再承担大部分细节逻辑。
+This layer is the runtime source of truth for supported families today.
 
-### 2.3 纯计算与纯规则层
+### 4.3 Pricing and scenario context
 
+- `js/pricing_context.js`
 - `js/pricing_core.js`
+- `js/bsm.js`
 - `js/amortized.js`
+
+Responsibilities:
+
+- anchor underlying interpretation
+- futures-pool / forward-rate mapping
+- BSM and Black-76 pricing
+- underlying-leg handling
+- amortized-cost math
+
+Notes:
+
+- `pricing_core.js` is the real pricing SSOT.
+- `bsm.js` remains as a compatibility bridge for older global call sites.
+
+### 4.4 Derived portfolio state
+
 - `js/valuation.js`
 - `js/session_logic.js`
-- `js/product_registry.js`
 - `js/trade_trigger_logic.js`
+- `js/group_order_builder.js`
 
-职责：
+Responsibilities:
 
-- 期权定价、股票腿/FUT/FOP/IND 乘数与语义
-- amortized 成本计算
-- group / portfolio 派生结果聚合
-- session 导入导出、mode 规则
-- 品种族元数据与能力开关
-- Trial Trigger 的默认值、触发条件、退出条件、请求 payload
+- group and portfolio derived values
+- global aggregation
+- session import/export normalization
+- Trigger configuration and state rules
+- combo order payload assembly
 
-### 2.4 UI 编辑层
+### 4.5 UI binding and DOM writes
 
-- `js/control_panel_ui.js`
 - `js/session_ui.js`
+- `js/control_panel_ui.js`
 - `js/group_editor_ui.js`
 - `js/hedge_editor_ui.js`
-
-职责：
-
-- 绑定输入事件
-- 渲染和更新 editor 行
-- 控制 Trial / Active / Amortized / Settlement 切换
-- 管理 Trial Trigger 控件、继续重试、取消订单等动作入口
-
-### 2.5 DOM 写回层
-
 - `js/group_ui.js`
 - `js/hedge_ui.js`
 - `js/global_ui.js`
 
-职责：
+Responsibilities:
 
-- 把 valuation 结果写回页面
-- 渲染黄色 Trial Trigger 预览区
-- 显示 broker status、managed execution 状态、重试次数等
+- control binding
+- group and hedge editor rendering
+- mode toggles
+- live status rendering
+- derived-value writes back into the DOM
 
-### 2.6 图表与概率分析层
+### 4.6 Charts and analysis
 
 - `js/chart.js`
 - `js/chart_controls.js`
 - `js/prob_charts.js`
-- `js/distribution_proxy_config.js`
-- `js/t_params_db.js`
+- `js/chart_lab.js`
 
-职责：
+Responsibilities:
 
-- Group / Global PnL 图
-- Group / Global amortized 图
-- 概率密度与 expected PnL density
-- Student-t 参数数据库
-- futures/index family 的分布代理映射
+- per-group P&L charts
+- global P&L chart
+- per-group and global amortized charts
+- probability charts
+- daily K projection lab
 
-### 2.7 实盘桥接与执行层
+Important distinction:
 
-- `js/ws_client.js`
+- `chart.js` / `chart_controls.js` own the core payoff charting already used by the main app
+- `chart_lab.js` is an experimental consumer of the same underlying pricing pipeline, but renders onto a price chart instead of the standard P&L axes
+
+### 4.7 State container and orchestration
+
+- `js/app.js`
+
+Responsibilities:
+
+- owns the in-memory `state`
+- initializes UI
+- coordinates render passes
+- exposes `window.__optionComboApp`
+
+This file is now an orchestration bridge, not the main place for every piece of business logic.
+
+### 4.8 Live backend stack
+
 - `ib_server.py`
 - `trade_execution/engine.py`
 - `trade_execution/models.py`
 - `trade_execution/adapters/base.py`
 - `trade_execution/adapters/ibkr.py`
 
-职责分工：
+Responsibilities:
 
-- `ws_client.js`
-  - 维护浏览器 WebSocket
-  - 发送 `preview` / `validate` / `submit` / `resume` / `cancel`
-  - 接收 live quote、order status、execution-report fill cost
-- `ib_server.py`
-  - 连接 TWS / Gateway
-  - 作为 WebSocket 入口与消息路由层
-  - 广播 `orderStatus`
-  - 监听 `execDetails`，把成交腿价格按订单归因后回推给前端
-- `trade_execution/engine.py`
-  - 把外部消息路由到具体执行适配器
-- `trade_execution/adapters/ibkr.py`
-  - IBKR `BAG + LMT` 订单构造
-  - combo validate / preview / submit
-  - managed repricing
-  - continue monitoring / continue retries / cancel live order
+- live market data subscriptions
+- product-aware IBKR contract qualification
+- historical daily bars for Chart Lab
+- combo preview / test submit / live submit
+- managed repricing and order supervision
+- execution-report attribution back into group legs
 
-## 3. 真实脚本加载顺序
+### 4.9 Historical replay stack
 
-当前 `index.html` 中的真实顺序是：
+- `historical_server.py`
+- `historical_data.py`
+- `historical_replay_service.py`
 
-1. `js/t_params_db.js`
-2. `js/market_holidays.js`
-3. `js/date_utils.js`
-4. `js/product_registry.js`
-5. `js/trade_trigger_logic.js`
-6. `js/distribution_proxy_config.js`
-7. `js/pricing_core.js`
-8. `js/bsm.js`
-9. `js/chart.js`
-10. `js/prob_charts.js`
-11. `js/chart_controls.js`
-12. `js/amortized.js`
-13. `js/valuation.js`
-14. `js/session_logic.js`
-15. `js/session_ui.js`
-16. `js/control_panel_ui.js`
-17. `js/hedge_editor_ui.js`
-18. `js/group_editor_ui.js`
-19. `js/hedge_ui.js`
-20. `js/group_ui.js`
-21. `js/global_ui.js`
-22. `js/app.js`
-23. `js/ws_client.js`
+Responsibilities:
 
-这仍然是运行时约定，不是编译期约束。
+- SQLite historical quote reads
+- replay-day underlying snapshot and option snapshot payloads
+- replay-date normalization
+- historical mode WebSocket responses
 
-## 4. 当前核心状态模型
+## 5. Shared State Model
 
-全局 `state` 由 `app.js` 持有，关键字段包括：
+`js/app.js` owns a single in-memory state object. Important top-level fields include:
 
 - `underlyingSymbol`
 - `underlyingContractMonth`
 - `underlyingPrice`
 - `baseDate`
 - `simulatedDate`
+- `marketDataMode`
 - `interestRate`
 - `ivOffset`
-- `allowLiveComboOrders`
+- `forwardRateSamples`
+- `futuresPool`
 - `groups`
 - `hedges`
 
-### 4.1 Group
+### Group shape
 
-关键字段包括：
+Important group fields include:
 
 - `id`
 - `name`
 - `viewMode`
 - `includedInGlobal`
 - `isCollapsed`
-- `liveData`
-- `syncAvgCostFromPortfolio`
-- `settleUnderlyingPrice`
 - `tradeTrigger`
+- `settleUnderlyingPrice`
+- `syncAvgCostFromPortfolio`
 - `legs`
 
-### 4.2 Leg
+### Leg shape
 
-关键字段包括：
+Important leg fields include:
 
 - `id`
 - `type`
@@ -205,178 +274,124 @@
 - `cost`
 - `closePrice`
 
-运行时还可能附加：
+Runtime-only fields may also be attached during broker sync and historical replay.
 
-- `costSource`
-- `executionReportedCost`
-- `executionReportOrderId`
-- `executionReportPermId`
+## 6. Product Support Model
 
-### 4.3 Trade Trigger
+### Equity / ETF flow
 
-当前 `tradeTrigger` 既有配置字段，也有运行时字段。
+- default profile
+- equity-style underlying legs
+- amortized mode supported
 
-配置字段：
+### Cash-settled index options
 
-- `condition`
-- `price`
-- `executionMode`
-- `repriceThreshold`
-- `timeInForce`
-- `exitEnabled`
-- `exitCondition`
-- `exitPrice`
+- `SPX`
+- `NDX`
 
-运行时字段：
+### Futures options
 
-- `enabled`
-- `status`
-- `pendingRequest`
-- `lastTriggeredAt`
-- `lastTriggerPrice`
-- `lastPreview`
-- `lastError`
+- `ES`
+- `NQ`
+- `CL`
+- `GC`
+- `SI`
+- `HG`
 
-注意：
+Current architecture already includes:
 
-- `session_logic.js` 现在在导出和重新导入时会清掉这些运行时字段
-- 也就是说，Trigger 配置会保留，但旧的 `Filled / Order ID / lastPreview` 不会再被带进 JSON
+- family-aware secType and exchange resolution
+- Black-76 pricing support
+- product-aware multipliers
+- futures underlying-leg support
+- IBKR live-data contract building for non-stock families
 
-## 5. Trial Trigger 与订单执行
+## 7. Historical Replay Architecture
 
-### 5.1 三种执行模式
+Historical replay is implemented as a first-class runtime mode.
 
-当前支持：
+### Main flow
 
-- `preview`
-- `test_submit`
-- `submit`
+1. frontend sets `marketDataMode = historical`
+2. `ws_client.js` requests historical snapshots
+3. `historical_server.py` routes to `HistoricalReplayService`
+4. `historical_replay_service.py` pulls data through `historical_data.py`
+5. frontend writes replayed quotes into the same state fields used by live mode
+6. existing valuation and charts update through the same render pipeline
 
-语义：
+### Historical execution behavior
 
-- `Preview Only`
-  - 只生成组合单预览，不送到 TWS
-- `Send to TWS (Test Only)`
-  - 真实送到 TWS，但使用保护性离谱价格，目标是让你在 TWS 里检查订单结构后手工丢弃
-- `Send to TWS`
-  - 真实 `LMT @ MID` 下单，并进入 managed repricing
+Historical replay also supports:
 
-### 5.2 正式下单的 managed repricing
+- trigger preview
+- simulated submit
+- deterministic replay fills
+- replay-day entry locking
+- close simulation
+- expiry auto-settlement
 
-正式 `submit` 模式的执行逻辑现在是：
+## 8. Chart Lab Architecture
 
-- 初始按组合 middle price 提交 `BAG + LMT`
-- 后端持续用各腿 live bid/ask 自己合成最新 combo mid
-- 只有当 `|latest mid - working limit| >= threshold` 时才改价
-- 如果达到最大自动改价次数，会停在 `stopped_max_reprices`
-- 如果到达监控时限，会停在 `stopped_timeout`
-- `Continue` 可以继续追加重试预算或继续监控
-- `Cancel Order` 可以显式撤掉 TWS 里的 live order
+`chart_lab.html` is intentionally isolated from `index.html`.
 
-这些参数现在由两部分控制：
+### Current data flow
 
-- 每个 Group 的 UI 配置
-  - `Drift 0.01 / 0.02 / 0.05`
-  - `DAY / GTC`
-- 全局默认执行配置
-  - 来自 `config.ini` 的 `[execution]`
+1. read current frontend state through `window.__optionComboApp.getState()`
+2. request daily bars from `ib_server.py`
+3. fall back to SQLite daily bars when IB bars are unavailable
+4. read selected projection source:
+   - one group
+   - included global portfolio
+5. compute a `price -> pnl` curve through the same pricing helpers used by the main charting pipeline
+6. project that curve onto a daily candle canvas
 
-### 5.3 Exit Condition
+### Current boundaries
 
-`Exit Condition` 是当前真实存在的功能。
+- price-axis alignment is real
+- horizontal projection width is normalized P&L magnitude
+- the overlay is a visual aid, not a full time-path model
+- mixed-expiry projections still need more explicit later-date semantics if strict financial correctness is required
 
-语义：
+## 9. Startup and Process Model
 
-- 只在订单已经触发并且仍未终态时生效
-- 如果 underlying 反向回到退出条件，则直接取消正在讨价还价的 live order
+### Live workspace
 
-这条逻辑目前由前端在 live underlying 更新时判断，并通过 `cancel_managed_combo_order` 请求后端撤单。
+- frontend served by `python -m http.server 8000`
+- backend served by `ib_server.py`
+- locked route:
+  - `index.html?entry=live&marketDataMode=live&lockMarketDataMode=1`
 
-## 6. 成本回填的两条来源
+### Historical replay workspace
 
-### 6.1 账户级兜底来源
+- frontend served by `python -m http.server 8000`
+- backend served by `historical_server.py`
+- locked route:
+  - `index.html?entry=historical&marketDataMode=historical&lockMarketDataMode=1`
 
-- `updatePortfolio avgCost`
+### Experimental projection lab
 
-这是账户级的聚合均价，适合：
+- served by the same frontend HTTP server
+- route:
+  - `chart_lab.html`
 
-- 手工持仓同步
-- 非 Trigger 订单的兜底回填
+## 10. Current Known Boundaries
 
-局限：
+- `contract_specs/*.xml` are still reference assets rather than runtime truth.
+- Page reload does not reconstruct a previous managed execution session.
+- Chart Lab is still experimental.
+- The projection lab currently uses daily bars only.
+- The projection lab aligns price, but not true future time.
 
-- 如果多个 Group 有完全相同的合约，会混成账户综合成本
+## 11. If Notes and Code Drift
 
-### 6.2 Trigger 实单的精确来源
-
-- `execDetails`
-
-当前真实 `Send to TWS` 的 Trigger 订单，在成交后会：
-
-- 通过 `orderId / permId`
-- 结合每条腿的 `conId / expected side`
-- 把这笔订单自己的腿成交均价回推给对应 Group
-
-这条消息是：
-
-- `combo_order_fill_cost_update`
-
-前端收到后会：
-
-- 只更新对应 Group 的对应腿
-- 给腿标记 `costSource = 'execution_report'`
-- 后续不再允许账户级 `portfolio avg cost` 覆盖这条更精确的成本
-
-## 7. 当前 session 持久化规则
-
-导出 JSON 时：
-
-- 保留 group / leg / hedge 的静态配置
-- 保留 Trigger 的配置部分
-- 清掉 Trigger 的运行时订单状态
-
-因此，重新导入后不会再看到：
-
-- `Combo order: Filled`
-- `Order ID / Perm ID`
-- `Reprices 60 / 60`
-- 黄色预览区中的旧订单详情
-
-## 8. 配置文件
-
-当前 `config.ini` 除了 TWS 和 WebSocket 配置，还支持执行默认值：
-
-```ini
-[execution]
-managed_reprice_threshold_default = 0.01
-managed_reprice_interval_seconds = 2.0
-managed_reprice_max_updates = 12
-managed_reprice_timeout_seconds = 600
-```
-
-说明：
-
-- 这些是后端默认执行策略参数
-- 每个 Group 的 `repriceThreshold` 和 `timeInForce` 仍可在前端单独配置
-- 改完 `config.ini` 后需要重启 `ib_server.py`
-
-## 9. 当前已知边界
-
-- Managed repricing 目前实现位于 `trade_execution/adapters/ibkr.py`，还没有进一步抽成 broker-agnostic 的独立策略模块
-- `Exit Condition` 的触发判断目前在前端，语义正确，但从长期演进看，未来可进一步下沉到后端执行层
-- 页面刷新后，旧订单的 live 执行上下文不会自动恢复到新页面
-- `contract_specs/*.xml` 仍未接入运行时，真实运行时元数据仍以 `product_registry.js` 为准
-
-## 10. 当前最值得信任的文件
-
-如果文档和代码不一致，优先相信：
+Trust in this order:
 
 1. `js/product_registry.js`
-2. `js/pricing_core.js`
-3. `js/valuation.js`
-4. `js/session_logic.js`
-5. `js/trade_trigger_logic.js`
-6. `trade_execution/adapters/ibkr.py`
+2. `js/pricing_context.js`
+3. `js/pricing_core.js`
+4. `js/valuation.js`
+5. `js/session_logic.js`
+6. `js/ws_client.js`
 7. `ib_server.py`
-8. `js/ws_client.js`
-
+8. `historical_replay_service.py`
+9. `trade_execution/adapters/ibkr.py`

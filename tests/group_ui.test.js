@@ -271,6 +271,30 @@ module.exports = {
             },
         },
         {
+            name: 'shows close-group header button in historical trial mode once costs are locked',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_ui.js',
+                ]);
+
+                const uiState = ctx.OptionComboGroupUI.resolveCloseGroupUiState(
+                    'trial',
+                    true,
+                    {
+                        isExpanded: false,
+                        pendingRequest: false,
+                        lastPreview: null,
+                        lastError: '',
+                    },
+                    true
+                );
+
+                assert.equal(uiState.showToggle, true);
+                assert.equal(uiState.showPanel, false);
+            },
+        },
+        {
             name: 'shows broker status metadata for submitted orders',
             run() {
                 const ctx = loadBrowserScripts([

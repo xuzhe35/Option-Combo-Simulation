@@ -1,253 +1,217 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-03-17
+**Updated:** 2026-03-24
 
-## 1. Current Product Shape
+## 1. Current Product State
 
-This is a local browser app for building and evaluating multi-leg option structures, with optional IBKR live data and live combo execution.
+This repo is no longer just a single-page option sandbox.
 
-The codebase is no longer just a pricing sandbox. It now has three distinct responsibilities:
+Current shipped surface area:
 
-- scenario analysis and charting
-- session persistence and cost-basis tracking
-- IBKR combo preview / test-submit / real submit with managed repricing
+- live portfolio workspace in `index.html`
+- historical replay / backtest workspace in `index.html`
+- experimental projection surface in `chart_lab.html`
+- optional IBKR live quotes and combo execution through `ib_server.py`
 
-## 2. Current Frontend Shape
+## 2. What Is Actually Implemented
 
-The frontend still runs as ordered global scripts from `index.html`.
+### Portfolio / charting
 
-Current actual order:
+- per-group P&L chart
+- global portfolio P&L chart
+- per-group amortized chart
+- global amortized chart
+- probability analysis
 
-1. `js/t_params_db.js`
-2. `js/market_holidays.js`
-3. `js/date_utils.js`
-4. `js/product_registry.js`
-5. `js/trade_trigger_logic.js`
-6. `js/distribution_proxy_config.js`
-7. `js/pricing_core.js`
-8. `js/bsm.js`
-9. `js/chart.js`
-10. `js/prob_charts.js`
-11. `js/chart_controls.js`
-12. `js/amortized.js`
-13. `js/valuation.js`
-14. `js/session_logic.js`
-15. `js/session_ui.js`
-16. `js/control_panel_ui.js`
-17. `js/hedge_editor_ui.js`
-18. `js/group_editor_ui.js`
-19. `js/hedge_ui.js`
-20. `js/group_ui.js`
-21. `js/global_ui.js`
-22. `js/app.js`
-23. `js/ws_client.js`
+### Mode system
 
-If something becomes `undefined` in the browser, script order is still the first thing to check.
+- `trial`
+- `active`
+- `amortized`
+- `settlement`
 
-## 3. Current Architecture Split
+### Product families
 
-### State and orchestration
+- equity / ETF default flow
+- index options: `SPX`, `NDX`
+- futures options: `ES`, `NQ`, `CL`, `GC`, `SI`, `HG`
+- futures underlying legs for supported futures-option families
 
-- `js/app.js`
+### Historical replay
 
-Owns session state and drives rendering.
+- historical quote loading from SQLite
+- replay-day stepping
+- historical trigger preview / submit simulation
+- replay-day entry locking
+- historical close simulation
+- expiry auto-settlement controls
 
-### Pure domain logic
+### Live execution
 
-- `js/pricing_core.js`
-- `js/amortized.js`
-- `js/valuation.js`
-- `js/session_logic.js`
-- `js/trade_trigger_logic.js`
-- `js/product_registry.js`
+- combo preview
+- test submit
+- real submit
+- managed repricing
+- execution-report cost attribution
 
-These files are the most stable and should stay free of DOM concerns.
+### Chart Lab
 
-### UI rendering and binding
+- custom daily candle chart
+- live latest-price overlay
+- single-group projection
+- included-global-portfolio projection
+- same simulated date as the main portfolio page
+- IB historical daily bars with SQLite fallback
 
-- `js/control_panel_ui.js`
-- `js/session_ui.js`
-- `js/group_editor_ui.js`
-- `js/hedge_editor_ui.js`
-- `js/group_ui.js`
-- `js/hedge_ui.js`
-- `js/global_ui.js`
+## 3. Important Entry Points
 
-### Execution stack
+### Main frontend pages
 
-- `js/ws_client.js`
+- `index.html`
+- `chart_lab.html`
+
+### Python backends
+
 - `ib_server.py`
-- `trade_execution/engine.py`
-- `trade_execution/models.py`
-- `trade_execution/adapters/base.py`
-- `trade_execution/adapters/ibkr.py`
+- `historical_server.py`
 
-This is the most important architectural shift versus earlier versions.
+### Startup scripts
 
-`ib_server.py` is now mainly:
+Windows:
 
-- IB connection
-- WebSocket endpoint
-- market-data subscription bridge
-- execution-report / order-status broadcaster
+- `start_option_combo.bat`
+- `start_historical_replay.bat`
+- `install_ib_bridge_deps.bat`
+- `powershell_scripts/start_option_combo_codex.ps1`
 
-Actual combo execution behavior lives in `trade_execution/adapters/ibkr.py`.
+macOS:
 
-## 4. Trial Trigger and Live Execution
+- `start_option_combo_mac.command`
+- `install_ib_bridge_deps_mac.command`
 
-The yellow Trial Trigger block is now a real execution feature, not just UI decoration.
+## 4. Where To Look First
 
-Supported execution modes:
+If you need the current architecture:
 
-- `preview`
-- `test_submit`
-- `submit`
+- `ARCHITECTURE.md`
 
-Meaning:
+If you need user-facing startup and feature notes:
 
-- `Preview Only`
-  - build a combo preview only
-- `Send to TWS (Test Only)`
-  - send a real BAG order to TWS with a deliberately unfillable guardrail price
-- `Send to TWS`
-  - place a real `LMT @ MID` combo and enter managed repricing
+- `README.md`
 
-The managed repricing path currently supports:
+If you need repo-specific agent / automation guidance:
 
-- live combo-mid recomputation from leg quotes
-- configurable drift threshold
-- configurable time-in-force (`DAY` / `GTC`)
-- max retry budget
-- timeout window
-- continue monitoring / continue retries
-- manual cancel
-- optional exit condition that cancels the live order if the underlying reverses
+- `AGENTS.md`
 
-## 5. Current Runtime Config
-
-`config.ini` now contains execution defaults:
-
-```ini
-[execution]
-managed_reprice_threshold_default = 0.01
-managed_reprice_interval_seconds = 2.0
-managed_reprice_max_updates = 12
-managed_reprice_timeout_seconds = 600
-```
-
-These are backend defaults. Per-group UI still overrides:
-
-- drift threshold
-- time-in-force
-
-If execution behavior changes in `config.ini`, restart `ib_server.py`.
-
-## 6. Cost Fill Behavior
-
-There are now two different cost-fill sources:
-
-### Portfolio avg cost fallback
-
-- source: IB `updatePortfolio`
-- frontend message: `portfolio_avg_cost_update`
-
-This remains useful for general account sync, but it is account-level and can blend identical contracts across groups.
-
-### Exact trigger fill attribution
-
-- source: IB `execDetails`
-- frontend message: `combo_order_fill_cost_update`
-
-For real Trigger-submitted combo orders, the backend now attributes each leg fill by:
-
-- `orderId / permId`
-- `conId`
-- expected execution side
-
-The frontend applies those leg prices only to the originating group and marks them as `costSource = execution_report`.
-
-Important consequence:
-
-- later `portfolio_avg_cost_update` messages will no longer overwrite those execution-report costs
-
-This fixed the earlier problem where identical contracts in different groups contaminated each other’s cost basis.
-
-## 7. Session Persistence Rules
-
-This changed recently and matters a lot for cleanup.
-
-Session export now keeps Trigger configuration but strips Trigger runtime state.
-
-Export/import no longer preserves:
-
-- broker status
-- order ID / perm ID
-- repricing counts
-- last preview payload
-- last trigger time
-- pending request flags
-- runtime errors
-
-It also resets `enabled` to `false`.
-
-So a saved JSON no longer reopens with stale `Filled` or stale live-order supervision metadata.
-
-## 8. Current Product Family Layer
-
-`js/product_registry.js` is still the runtime product source of truth.
-
-Current families include:
-
-- default equity / ETF
-- `ES`
-- `NQ`
-- `CL`
-- `GC`
-- `SI`
-- `HG`
-- `SPX`
-- `NDX`
-
-It controls:
-
-- secType and underlying type
-- multiplier
-- settlement style
-- amortized support
-- live-data support
-- whether underlying stock-style legs are allowed
-
-`contract_specs/*.xml` still exist but are not yet loaded at runtime.
-
-## 9. Current Known Boundaries
-
-- Managed repricing is abstracted away from `ib_server.py`, but it still lives inside the IBKR adapter rather than a broker-neutral strategy module.
-- `Exit Condition` is currently evaluated on the frontend from live underlying updates, then forwarded to backend cancel logic.
-- Page reload does not reconstruct old managed execution context.
-- `contract_specs/` is still reference metadata only.
-
-## 10. What To Trust If Notes and Code Drift
-
-Trust in this order:
+If docs drift from behavior, trust:
 
 1. `js/product_registry.js`
-2. `js/pricing_core.js`
-3. `js/session_logic.js`
-4. `js/trade_trigger_logic.js`
-5. `trade_execution/adapters/ibkr.py`
-6. `ib_server.py`
-7. `js/ws_client.js`
+2. `js/pricing_context.js`
+3. `js/pricing_core.js`
+4. `js/valuation.js`
+5. `js/session_logic.js`
+6. `js/ws_client.js`
+7. `ib_server.py`
+8. `historical_replay_service.py`
+9. `trade_execution/adapters/ibkr.py`
 
-## 11. Current Test Status
+## 5. Architectural Hotspots
 
-The current Node regression suite covers:
+### `js/product_registry.js`
 
-- pricing and valuation
-- session logic
-- UI rendering/binding
-- Trigger logic
-- WebSocket message handling
+Runtime source of truth for:
 
-Current suite status at handover:
+- family metadata
+- secType
+- multipliers
+- trading classes
+- underlying-leg support
+- amortized support
 
-- `75 passed, 0 failed`
+### `js/pricing_context.js`
+
+This is where the modern anchor logic lives:
+
+- futures-pool mapping
+- forward-rate sample handling
+- anchor display text
+- scenario price mapping
+
+### `js/pricing_core.js`
+
+Pricing SSOT:
+
+- BSM
+- Black-76
+- underlying-leg normalization
+- simulated price dispatch
+
+### `js/valuation.js`
+
+Portfolio aggregation and group derived values.
+
+### `js/ws_client.js`
+
+This file is large, but it is the real frontend transport layer for:
+
+- live subscriptions
+- historical replay requests
+- Trigger execution messages
+- broker sync messages
+
+### `ib_server.py`
+
+Not just a quote streamer anymore.
+
+It now also owns:
+
+- product-aware IB contract qualification
+- historical daily-bar responses for Chart Lab
+- execution routing bridge into `trade_execution/`
+
+## 6. Current Known Rough Edges
+
+- `chart_lab.html` is still experimental.
+- The daily K projection aligns the price axis only; projection width is still normalized P&L, not time.
+- Mixed-expiry projection semantics in Chart Lab still need a more explicit path assumption for later-expiry overlays.
+- `contract_specs/*.xml` are still reference metadata, not runtime truth.
+- Reloading the page does not restore old live managed-order supervision state.
+
+## 7. Practical Maintenance Notes
+
+- On Windows, do not assume bare `python` will work; use `powershell_scripts/resolve_python.ps1`.
+- Script order in `index.html` still matters.
+- The main app and Chart Lab now share frontend state, but Chart Lab keeps its own canvas rendering and WebSocket lifecycle.
+- If a tab switch causes missing visuals, check redraw timing before assuming data loss.
+
+## 8. Suggested Next-Trust Areas
+
+If you are changing these features, read these files together:
+
+### Product / pricing changes
+
+- `js/product_registry.js`
+- `js/pricing_context.js`
+- `js/pricing_core.js`
+- `js/valuation.js`
+
+### Historical replay changes
+
+- `historical_server.py`
+- `historical_data.py`
+- `historical_replay_service.py`
+- `js/ws_client.js`
+
+### Chart Lab changes
+
+- `chart_lab.html`
+- `chart_lab.css`
+- `js/chart_lab.js`
+
+### Execution changes
+
+- `js/group_order_builder.js`
+- `js/trade_trigger_logic.js`
+- `js/ws_client.js`
+- `ib_server.py`
+- `trade_execution/adapters/ibkr.py`

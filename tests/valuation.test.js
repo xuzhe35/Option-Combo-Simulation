@@ -191,6 +191,53 @@ module.exports = {
             },
         },
         {
+            name: 'freezes expired historical option value at expiry instead of replay-day underlying',
+            run() {
+                const ctx = loadValuationContext();
+                const globalState = {
+                    marketDataMode: 'historical',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 415.19,
+                    baseDate: '2023-01-03',
+                    simulatedDate: '2023-02-07',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_expired_hist',
+                    viewMode: 'trial',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'l_expired_hist',
+                            type: 'call',
+                            pos: 1,
+                            strike: 381,
+                            expDate: '2023-01-27',
+                            iv: 0.2,
+                            ivSource: 'historical',
+                            currentPrice: 35.3007,
+                            currentPriceSource: 'manual',
+                            cost: 0,
+                            closePrice: null,
+                            historicalExpiryUnderlyingPrice: 402.13,
+                            historicalExpiryUnderlyingDate: '2023-01-27',
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                almostEqual(result.legResults[0].simPricePerShare, 21.13);
+                almostEqual(result.groupSimValue, 2113);
+                almostEqual(result.groupCost, 3530.07);
+                almostEqual(result.groupPnL, -1417.07);
+            },
+        },
+        {
             name: 'excludes unchecked groups from global totals and amortized aggregation',
             run() {
                 const ctx = loadValuationContext();
@@ -289,6 +336,156 @@ module.exports = {
                 assert.equal(result.groupPnL, 5000);
                 assert.equal(result.groupLivePnL, 4000);
                 assert.equal(result.legResults[0].currentPriceDisplay.title, 'Current Underlying Future Price');
+            },
+        },
+        {
+            name: 'uses the bound futures-pool quote for FOP underlying legs',
+            run() {
+                const ctx = loadValuationContext();
+                const globalState = {
+                    underlyingSymbol: 'CL',
+                    underlyingPrice: 72.5,
+                    baseDate: '2026-03-14',
+                    simulatedDate: '2026-03-14',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    futuresPool: [
+                        {
+                            id: 'future_jul',
+                            contractMonth: '202607',
+                            mark: 74.2,
+                        },
+                    ],
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_cl_future',
+                    viewMode: 'active',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'l_future',
+                            type: 'stock',
+                            pos: 1,
+                            cost: 73,
+                            currentPrice: 0,
+                            closePrice: null,
+                            underlyingFutureId: 'future_jul',
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                assert.equal(result.groupCost, 73000);
+                assert.equal(result.groupSimValue, 74200);
+                assert.equal(result.groupPnL, 1200);
+                assert.equal(result.legResults[0].currentPriceDisplay.placeholder, '74.20');
+            },
+        },
+        {
+            name: 'keeps assigned short-put premium realized while tracking resulting stock leg',
+            run() {
+                const ctx = loadValuationContext();
+                const globalState = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 660.67,
+                    baseDate: '2026-03-23',
+                    simulatedDate: '2026-03-23',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_assigned_put',
+                    viewMode: 'active',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'short_put',
+                            type: 'put',
+                            pos: -4,
+                            strike: 685,
+                            expDate: '2026-03-27',
+                            iv: 0.2,
+                            cost: 12.59,
+                            currentPrice: 25.12,
+                            closePrice: 0,
+                            closePriceSource: 'assignment_conversion',
+                        },
+                        {
+                            id: 'assigned_stock',
+                            type: 'stock',
+                            pos: 400,
+                            cost: 685,
+                            currentPrice: 660.67,
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                almostEqual(result.groupCost, 268964);
+                almostEqual(result.groupSimValue, 264268);
+                almostEqual(result.groupPnL, -4696);
+                almostEqual(result.groupLivePnL, -4696);
+                assert.equal(result.legResults[0].isClosed, true);
+                almostEqual(result.legResults[0].pnl, 5036);
+                almostEqual(result.legResults[1].liveLegPnL, -9732);
+            },
+        },
+        {
+            name: 'uses index forward-rate samples when pricing Black-76 index options',
+            run() {
+                const ctx = loadValuationContext();
+                const globalState = {
+                    underlyingSymbol: 'SPX',
+                    underlyingPrice: 5800,
+                    baseDate: '2026-03-17',
+                    simulatedDate: '2026-03-17',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    forwardRateSamples: [
+                        {
+                            id: 'sample_30d',
+                            daysToExpiry: 30,
+                            dailyCarry: 0.0003,
+                        },
+                    ],
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_spx',
+                    viewMode: 'active',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'l_call',
+                            type: 'call',
+                            pos: 1,
+                            strike: 5800,
+                            expDate: '2026-04-16',
+                            iv: 0.2,
+                            cost: 0,
+                            currentPrice: 0,
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+                const expectedForward = 5800 * Math.exp(0.0003 * 30);
+                const expectedRate = 0.0003 * 365;
+                const expectedPrice = ctx.calculateBlack76Price('call', expectedForward, 5800, 30 / 365, expectedRate, 0.2);
+
+                almostEqual(result.legResults[0].simPricePerShare, expectedPrice, 1e-6);
             },
         },
     ],

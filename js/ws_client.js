@@ -26,6 +26,128 @@ let _wsReconnectDelay = WS_BASE_DELAY;
 let _wsReconnectTimer = null;
 let _legacyLiveDataWarningShown = false;
 let _wsLocalOriginWarningShown = false;
+let _historicalReplayOrderCounter = 900000;
+const _liveQuoteRuntime = {
+    underlyingQuote: null,
+    optionQuotesById: new Map(),
+    futureQuotesById: new Map(),
+    stockQuotesBySymbol: new Map(),
+};
+
+function _cloneLiveQuoteSnapshot(rawQuote) {
+    if (!rawQuote || typeof rawQuote !== 'object') {
+        return null;
+    }
+
+    const snapshot = {};
+    ['bid', 'ask', 'mark', 'iv'].forEach((field) => {
+        const parsed = parseFloat(rawQuote[field]);
+        if (Number.isFinite(parsed) && parsed > 0) {
+            snapshot[field] = parsed;
+        }
+    });
+
+    return Object.keys(snapshot).length > 0 ? snapshot : null;
+}
+
+function _resetLiveQuoteRuntime() {
+    _liveQuoteRuntime.underlyingQuote = null;
+    _liveQuoteRuntime.optionQuotesById.clear();
+    _liveQuoteRuntime.futureQuotesById.clear();
+    _liveQuoteRuntime.stockQuotesBySymbol.clear();
+}
+
+function _setUnderlyingQuoteSnapshot(rawQuote) {
+    _liveQuoteRuntime.underlyingQuote = _cloneLiveQuoteSnapshot(rawQuote);
+}
+
+function _setOptionQuoteSnapshot(subId, rawQuote) {
+    if (!subId) return;
+    const snapshot = _cloneLiveQuoteSnapshot(rawQuote);
+    if (!snapshot) return;
+    _liveQuoteRuntime.optionQuotesById.set(subId, snapshot);
+}
+
+function _setFutureQuoteSnapshot(subId, rawQuote) {
+    if (!subId) return;
+    const snapshot = _cloneLiveQuoteSnapshot(rawQuote);
+    if (!snapshot) return;
+    _liveQuoteRuntime.futureQuotesById.set(subId, snapshot);
+}
+
+function _setStockQuoteSnapshot(symbol, rawQuote) {
+    if (!symbol) return;
+    const snapshot = _cloneLiveQuoteSnapshot(rawQuote);
+    if (!snapshot) return;
+    _liveQuoteRuntime.stockQuotesBySymbol.set(symbol, snapshot);
+}
+
+function getLiveOptionQuote(subId) {
+    const snapshot = _liveQuoteRuntime.optionQuotesById.get(subId);
+    return snapshot ? { ...snapshot } : null;
+}
+
+function getLiveStockQuote(symbol) {
+    const snapshot = _liveQuoteRuntime.stockQuotesBySymbol.get(symbol);
+    return snapshot ? { ...snapshot } : null;
+}
+
+function getLiveFutureQuote(subId) {
+    const snapshot = _liveQuoteRuntime.futureQuotesById.get(subId);
+    return snapshot ? { ...snapshot } : null;
+}
+
+function getUnderlyingQuote() {
+    return _liveQuoteRuntime.underlyingQuote
+        ? { ..._liveQuoteRuntime.underlyingQuote }
+        : null;
+}
+
+window.OptionComboWsLiveQuotes = {
+    getOptionQuote: getLiveOptionQuote,
+    getFutureQuote: getLiveFutureQuote,
+    getStockQuote: getLiveStockQuote,
+    getUnderlyingQuote,
+    clear: _resetLiveQuoteRuntime,
+};
+
+function _getMarketDataMode() {
+    return state && state.marketDataMode === 'historical' ? 'historical' : 'live';
+}
+
+function _isHistoricalMode() {
+    return _getMarketDataMode() === 'historical';
+}
+
+function _getHistoricalReplayDate() {
+    const rawValue = state && typeof state.historicalQuoteDate === 'string' && state.historicalQuoteDate
+        ? state.historicalQuoteDate
+        : (state && typeof state.baseDate === 'string'
+            ? state.baseDate
+            : '');
+    return _normalizeHistoricalDateKey(rawValue);
+}
+
+function _getHistoricalEntryDate() {
+    const rawValue = state && typeof state.baseDate === 'string'
+        ? state.baseDate
+        : '';
+    return _normalizeHistoricalDateKey(rawValue);
+}
+
+function _getQuoteSourceKind(data) {
+    return data && data.historicalReplay ? 'historical' : 'live';
+}
+
+function _getQuoteReferenceDate() {
+    if (typeof OptionComboPricingContext !== 'undefined'
+        && typeof OptionComboPricingContext.resolveQuoteDate === 'function') {
+        return OptionComboPricingContext.resolveQuoteDate(state);
+    }
+    return _isHistoricalMode()
+        ? (_getHistoricalReplayDate() || state.baseDate || '')
+        : (state.baseDate || state.simulatedDate || '');
+}
 
 function _isLoopbackHostname(hostname) {
     const normalized = String(hostname || '').trim().toLowerCase();
@@ -152,7 +274,7 @@ function connectWebSocket() {
     ws.onopen = () => {
         isWsConnected = true;
         _wsReconnectDelay = WS_BASE_DELAY;
-        console.log(`WebSocket Connected to IB Gateway Backend at ${wsUrl}`);
+        console.log(`WebSocket Connected to local backend at ${wsUrl}`);
         updateWsStatusUI('connected');
         handleLiveSubscriptions();
     };
@@ -178,6 +300,9 @@ function connectWebSocket() {
                 return;
             }
             if (_handleComboOrderMessage(data)) {
+                return;
+            }
+            if (_handleHistoricalReplayMessage(data)) {
                 return;
             }
             processLiveMarketData(data);
@@ -297,7 +422,7 @@ function requestConcedeManagedComboOrder(group, concessionRatio, runtimeKind = '
 }
 
 function requestCancelManagedComboOrder(group, reason = 'manual_cancel', runtimeKind = 'tradeTrigger') {
-    if (!group || !isWsConnected || !ws) {
+    if (!group) {
         return false;
     }
 
@@ -310,6 +435,37 @@ function requestCancelManagedComboOrder(group, reason = 'manual_cancel', runtime
     }
 
     if (executionRuntime.pendingRequest) {
+        return false;
+    }
+
+    if (_isHistoricalMode()) {
+        const brokerStatus = String(preview.status || '').trim();
+        if (['Filled', 'Cancelled', 'ApiCancelled', 'Inactive'].includes(brokerStatus)) {
+            _markExecutionError(group, 'This historical replay order is already closed.', runtimeKind);
+            renderGroups();
+            return false;
+        }
+
+        executionRuntime.pendingRequest = false;
+        executionRuntime.lastError = '';
+        executionRuntime.lastPreview = {
+            ...preview,
+            status: 'Cancelled',
+            remaining: 0,
+            filled: Number.isFinite(preview.filled) ? preview.filled : 0,
+            managedMode: false,
+            managedState: 'cancelled',
+            statusMessage: `Historical replay simulated order cancelled on ${_getHistoricalReplayDate() || 'the selected day'} (${reason}).`,
+        };
+        executionRuntime.status = preview.executionMode === 'test_submit'
+            ? 'test_submitted'
+            : (preview.executionMode === 'preview' ? 'previewed' : 'submitted');
+        renderGroups();
+        updateDerivedValues();
+        return true;
+    }
+
+    if (!isWsConnected || !ws) {
         return false;
     }
 
@@ -349,8 +505,425 @@ function _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode 
     });
 }
 
+function _roundHistoricalReplayPrice(value) {
+    const parsed = parseFloat(value);
+    return Number.isFinite(parsed) ? Math.round(parsed * 10000) / 10000 : null;
+}
+
+function _nextHistoricalReplayOrderIds() {
+    _historicalReplayOrderCounter += 1;
+    return {
+        orderId: _historicalReplayOrderCounter,
+        permId: 800000000 + _historicalReplayOrderCounter,
+    };
+}
+
+function _buildHistoricalReplayLocalSymbol(leg) {
+    if (_isUnderlyingLeg(leg)) {
+        return state.underlyingSymbol || 'Underlying';
+    }
+
+    return `${state.underlyingSymbol} ${String(leg.expDate || '')} ${String(leg.type || '').toUpperCase()} ${leg.strike}`;
+}
+
+function _resolveHistoricalReplayClosePrice(leg, allowIntrinsicFallback = true) {
+    if (!leg) {
+        return null;
+    }
+
+    const replayDate = _normalizeHistoricalDateKey(_getHistoricalReplayDate());
+    const expiryDate = _normalizeHistoricalDateKey(leg.expDate);
+    const isExpiredOption = !_isUnderlyingLeg(leg)
+        && !!replayDate
+        && !!expiryDate
+        && expiryDate <= replayDate;
+
+    if (_isUnderlyingLeg(leg)) {
+        return _roundHistoricalReplayPrice(state.underlyingPrice);
+    }
+
+    if (isExpiredOption) {
+        if (!allowIntrinsicFallback || !Number.isFinite(state.underlyingPrice)) {
+            return null;
+        }
+
+        const settlementUnderlyingPrice = Number.isFinite(parseFloat(leg.historicalExpiryUnderlyingPrice))
+            ? parseFloat(leg.historicalExpiryUnderlyingPrice)
+            : state.underlyingPrice;
+        if (String(leg.type || '').toLowerCase() === 'call') {
+            return _roundHistoricalReplayPrice(Math.max(0, settlementUnderlyingPrice - (parseFloat(leg.strike) || 0)));
+        }
+        if (String(leg.type || '').toLowerCase() === 'put') {
+            return _roundHistoricalReplayPrice(Math.max(0, (parseFloat(leg.strike) || 0) - settlementUnderlyingPrice));
+        }
+        return null;
+    }
+
+    if (leg.currentPriceSource !== 'missing'
+        && Number.isFinite(leg.currentPrice)
+        && leg.currentPrice > 0) {
+        return _roundHistoricalReplayPrice(leg.currentPrice);
+    }
+
+    if (!allowIntrinsicFallback || !replayDate || !expiryDate || expiryDate > replayDate || !Number.isFinite(state.underlyingPrice)) {
+        return null;
+    }
+
+    return null;
+}
+
+function _resolveHistoricalReplayEntryPrice(leg) {
+    if (!leg) {
+        return null;
+    }
+
+    if (_isUnderlyingLeg(leg)) {
+        if (leg.currentPriceSource !== 'missing'
+            && Number.isFinite(leg.currentPrice)
+            && leg.currentPrice > 0) {
+            return _roundHistoricalReplayPrice(leg.currentPrice);
+        }
+        return Number.isFinite(state.underlyingPrice)
+            ? _roundHistoricalReplayPrice(state.underlyingPrice)
+            : null;
+    }
+
+    if (leg.currentPriceSource !== 'missing'
+        && Number.isFinite(leg.currentPrice)
+        && leg.currentPrice > 0) {
+        return _roundHistoricalReplayPrice(leg.currentPrice);
+    }
+
+    return null;
+}
+
+function _buildHistoricalClosePreview(group, settledLegs) {
+    const netMark = settledLegs.reduce((sum, leg) => sum + ((leg.closePrice || 0) * (parseFloat(leg.pos) || 0)), 0);
+
+    return {
+        executionIntent: 'close',
+        executionMode: 'historical_replay',
+        status: 'Filled',
+        comboSymbol: group && group.name ? group.name : 'Historical Replay',
+        orderAction: 'CLOSE',
+        totalQuantity: 1,
+        limitPrice: _roundHistoricalReplayPrice(netMark),
+        pricingSource: 'historical_replay',
+        statusMessage: `Settled using replay quotes from ${_getHistoricalReplayDate() || 'the selected day'}.`,
+        legs: settledLegs.map((leg) => ({
+            executionAction: (parseFloat(leg.pos) || 0) > 0 ? 'SELL' : 'BUY',
+            ratio: Math.abs(parseInt(leg.pos, 10) || 0),
+            localSymbol: _buildHistoricalReplayLocalSymbol(leg),
+            mark: leg.closePrice,
+        })),
+    };
+}
+
+function _buildHistoricalOrderStatusUpdate(preview, status) {
+    return {
+        ...preview,
+        status,
+        filled: status === 'Filled' ? 1 : (preview.filled || 0),
+        remaining: status === 'Filled' ? 0 : (preview.remaining || 1),
+        avgFillPrice: Number.isFinite(preview.limitPrice) ? preview.limitPrice : null,
+    };
+}
+
+function _buildHistoricalFillCostPayload(group, runtimeKind, preview) {
+    if (!group || !preview || !Array.isArray(preview.legs)) {
+        return null;
+    }
+
+    const legs = preview.legs
+        .map((previewLeg) => {
+            const groupLeg = (group.legs || []).find((leg) => leg.id === previewLeg.id);
+            if (!groupLeg) {
+                return null;
+            }
+
+            const avgFillPrice = runtimeKind === 'closeExecution'
+                ? _resolveHistoricalReplayClosePrice(groupLeg, true)
+                : _resolveHistoricalReplayEntryPrice(groupLeg);
+            if (!Number.isFinite(avgFillPrice) || avgFillPrice < 0) {
+                return null;
+            }
+
+            return {
+                id: groupLeg.id,
+                avgFillPrice,
+            };
+        })
+        .filter(Boolean);
+
+    if (legs.length === 0) {
+        return null;
+    }
+
+    return {
+        action: 'combo_order_fill_cost_update',
+        groupId: group.id,
+        orderFill: {
+            orderId: preview.orderId || null,
+            permId: preview.permId || null,
+            requestSource: preview.requestSource || '',
+            executionIntent: preview.executionIntent || '',
+            executionMode: preview.executionMode || '',
+            status: 'Filled',
+            avgFillPrice: Number.isFinite(preview.limitPrice) ? preview.limitPrice : null,
+            legs,
+        },
+    };
+}
+
+function _applyHistoricalComboFill(group, runtimeKind, preview) {
+    if (!group || !preview || String(preview.executionMode || '').trim() !== 'submit') {
+        return false;
+    }
+
+    _applyComboOrderStatusUpdate({
+        action: 'combo_order_status_update',
+        groupId: group.id,
+        orderStatus: _buildHistoricalOrderStatusUpdate(preview, 'Filled'),
+    });
+
+    const fillPayload = _buildHistoricalFillCostPayload(group, runtimeKind, preview);
+    if (fillPayload) {
+        _applyComboOrderFillCostUpdate(fillPayload);
+    }
+
+    if (runtimeKind === 'closeExecution' && !_groupHasOpenPositions(group)) {
+        group.viewMode = 'settlement';
+        renderGroups();
+        updateDerivedValues();
+    }
+
+    return true;
+}
+
+function _markHistoricalReplayEntryError(message) {
+    if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert(message);
+    } else {
+        console.error(message);
+    }
+}
+
+function _lockHistoricalReplayEntryCosts(group) {
+    if (!group) {
+        return false;
+    }
+
+    if (!_groupHasOpenPositions(group)) {
+        _markHistoricalReplayEntryError('This group has no open legs to enter.');
+        return false;
+    }
+
+    const missingLegs = [];
+    (group.legs || []).forEach((leg) => {
+        const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
+        const hasClosePrice = leg && leg.closePrice !== null && leg.closePrice !== '' && leg.closePrice !== undefined;
+        if (pos < 0.0001 || hasClosePrice) {
+            return;
+        }
+
+        const entryPrice = _resolveHistoricalReplayEntryPrice(leg);
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+            missingLegs.push(leg);
+            return;
+        }
+
+        leg.cost = entryPrice;
+        leg.costSource = 'historical_replay_entry';
+        leg.entryReplayDate = _getHistoricalReplayDate() || state.simulatedDate || '';
+        leg.executionReportedCost = false;
+        delete leg.executionReportOrderId;
+        delete leg.executionReportPermId;
+    });
+
+    if (missingLegs.length > 0) {
+        _markHistoricalReplayEntryError(`Historical entry price is unavailable for ${missingLegs.length} leg(s) on ${_getHistoricalReplayDate() || 'the selected day'}.`);
+        return false;
+    }
+
+    const trigger = _getTradeTrigger(group);
+    if (trigger) {
+        trigger.enabled = false;
+        trigger.pendingRequest = false;
+        trigger.status = 'idle';
+        trigger.lastError = '';
+    }
+
+    group.viewMode = 'active';
+    renderGroups();
+    updateDerivedValues();
+    return true;
+}
+
+function _buildHistoricalTriggerOrderPreview(group, executionMode) {
+    const trigger = _getTradeTrigger(group);
+    const replayDate = _getHistoricalReplayDate() || 'the selected day';
+    const missingLegs = [];
+    const previewLegs = [];
+    let netMark = 0;
+
+    (group.legs || []).forEach((leg) => {
+        const pos = parseFloat(leg && leg.pos) || 0;
+        if (Math.abs(pos) < 0.0001) {
+            return;
+        }
+
+        const mark = _resolveHistoricalReplayEntryPrice(leg);
+        if (!Number.isFinite(mark) || mark < 0) {
+            missingLegs.push(leg);
+            return;
+        }
+
+        netMark += mark * pos;
+        previewLegs.push({
+            id: leg.id,
+            executionAction: pos > 0 ? 'BUY' : 'SELL',
+            ratio: Math.abs(parseInt(pos, 10) || 0),
+            localSymbol: _buildHistoricalReplayLocalSymbol(leg),
+            symbol: state.underlyingSymbol || '',
+            mark,
+        });
+    });
+
+    if (missingLegs.length > 0) {
+        return {
+            error: `Historical replay quote is unavailable for ${missingLegs.length} leg(s) on ${replayDate}.`,
+        };
+    }
+
+    if (previewLegs.length === 0) {
+        return {
+            error: 'This group has no non-zero legs to simulate.',
+        };
+    }
+
+    const limitPrice = _roundHistoricalReplayPrice(Math.abs(netMark));
+    const preview = {
+        executionIntent: 'open',
+        executionMode,
+        requestSource: 'trial_trigger',
+        comboSymbol: group && group.name ? group.name : 'Historical Replay',
+        orderAction: netMark >= 0 ? 'BUY' : 'SELL',
+        totalQuantity: 1,
+        limitPrice,
+        timeInForce: trigger && trigger.timeInForce ? trigger.timeInForce : 'DAY',
+        pricingSource: 'historical_replay',
+        pricingNote: 'Built from replay-day leg quotes. No live TWS order was sent.',
+        statusMessage: executionMode === 'preview'
+            ? `Historical replay preview created from ${replayDate}.`
+            : `Historical replay simulated ${executionMode === 'test_submit' ? 'test submit' : 'submit'} created from ${replayDate}. No live TWS order was sent.`,
+        legs: previewLegs,
+    };
+
+    if (executionMode !== 'preview') {
+        const orderIds = _nextHistoricalReplayOrderIds();
+        preview.status = 'Submitted';
+        preview.orderId = orderIds.orderId;
+        preview.permId = orderIds.permId;
+        preview.filled = 0;
+        preview.remaining = 1;
+        preview.managedMode = false;
+        preview.managedState = 'simulated';
+    }
+
+    return { preview };
+}
+
+function _applyHistoricalTriggerOrderPreview(group, executionMode) {
+    const trigger = _getTradeTrigger(group);
+    if (!trigger) {
+        return false;
+    }
+
+    const result = _buildHistoricalTriggerOrderPreview(group, executionMode);
+    if (!result || !result.preview) {
+        _markTradeTriggerError(group, result && result.error
+            ? result.error
+            : 'Unable to build a historical replay combo order preview.');
+        renderGroups();
+        return false;
+    }
+
+    const applyResult = _applyComboOrderResult({
+        action: executionMode === 'preview' ? 'combo_order_preview_result' : 'combo_order_submit_result',
+        groupId: group.id,
+        preview: executionMode === 'preview' ? result.preview : undefined,
+        order: executionMode === 'preview' ? undefined : result.preview,
+    });
+    if (executionMode === 'submit') {
+        _applyHistoricalComboFill(group, 'tradeTrigger', result.preview);
+    }
+    return applyResult;
+}
+
+function _settleHistoricalReplayGroup(group) {
+    const closeExecution = _getCloseExecution(group);
+    if (!closeExecution) {
+        return false;
+    }
+
+    if (!_groupHasOpenPositions(group)) {
+        _markCloseExecutionError(group, 'This group has no open position to close.');
+        return false;
+    }
+
+    if (!_groupHasCostForAllPositionedLegs(group)) {
+        _markCloseExecutionError(group, 'Historical settlement needs a locked entry cost for every open leg. Use Enter @ Replay Day or let base-day quotes seed the costs first.');
+        return false;
+    }
+
+    const missingLegs = [];
+    const settledLegs = [];
+
+    (group.legs || []).forEach((leg) => {
+        const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
+        if (pos < 0.0001 || (leg.closePrice !== null && leg.closePrice !== '' && leg.closePrice !== undefined)) {
+            return;
+        }
+
+        const closePrice = _resolveHistoricalReplayClosePrice(leg, true);
+        if (!Number.isFinite(closePrice) || closePrice < 0) {
+            missingLegs.push(leg);
+            return;
+        }
+
+        leg.closePrice = closePrice;
+        settledLegs.push(leg);
+    });
+
+    if (missingLegs.length > 0) {
+        _markCloseExecutionError(group, `Historical close price is unavailable for ${missingLegs.length} leg(s) on ${_getHistoricalReplayDate() || 'the selected day'}.`);
+        return false;
+    }
+
+    group.settleUnderlyingPrice = Number.isFinite(state.underlyingPrice) ? state.underlyingPrice : group.settleUnderlyingPrice;
+    group.viewMode = 'settlement';
+
+    closeExecution.pendingRequest = false;
+    closeExecution.lastError = '';
+    closeExecution.status = 'submitted';
+    closeExecution.lastPreview = _buildHistoricalClosePreview(group, settledLegs);
+
+    renderGroups();
+    if (typeof updateDerivedValues === 'function') {
+        updateDerivedValues();
+    }
+    return true;
+}
+
 function requestCloseGroupComboOrder(group) {
     if (!group) return false;
+    if (_isHistoricalMode()) {
+        const didSettle = _settleHistoricalReplayGroup(group);
+        if (!didSettle) {
+            renderGroups();
+        }
+        return didSettle;
+    }
     if (!isWsConnected || !ws) {
         _markCloseExecutionError(group, 'WebSocket is not connected.');
         renderGroups();
@@ -404,6 +977,29 @@ function requestCloseGroupComboOrder(group) {
     return true;
 }
 
+function requestHistoricalReplayEntryGroup(group) {
+    if (!_isHistoricalMode()) {
+        return false;
+    }
+
+    const didLock = _lockHistoricalReplayEntryCosts(group);
+    if (!didLock) {
+        renderGroups();
+    }
+    return didLock;
+}
+
+function requestHistoricalReplayExpirySettlementSync(group) {
+    if (!_isHistoricalMode()) {
+        return false;
+    }
+
+    const didSync = _applyHistoricalAutoExpirySettlement(group);
+    renderGroups();
+    updateDerivedValues();
+    return didSync;
+}
+
 function toggleWsPortControls() {
     const controls = document.getElementById('wsPortControls');
     if (!controls) return;
@@ -440,23 +1036,75 @@ window.requestContinueManagedComboOrder = requestContinueManagedComboOrder;
 window.requestConcedeManagedComboOrder = requestConcedeManagedComboOrder;
 window.requestCancelManagedComboOrder = requestCancelManagedComboOrder;
 window.requestCloseGroupComboOrder = requestCloseGroupComboOrder;
+window.requestHistoricalReplayEntryGroup = requestHistoricalReplayEntryGroup;
+window.requestHistoricalReplayExpirySettlementSync = requestHistoricalReplayExpirySettlementSync;
 
 // -------------------------------------------------------------
 // Subscription Management
 // -------------------------------------------------------------
 
 function _toContractMonth(dateStr) {
-    if (!dateStr) return '';
-    return String(dateStr).replace(/-/g, '').slice(0, 6);
+    const normalizedDate = _normalizeHistoricalDateKey(dateStr);
+    if (normalizedDate) return normalizedDate.replace(/-/g, '').slice(0, 6);
+    return String(dateStr || '').replace(/\D/g, '').slice(0, 6);
 }
 
-function _buildUnderlyingRequest(profile, optionRequests) {
+function _normalizeHistoricalDateKey(value) {
+    const rawValue = String(value || '').trim();
+    if (!rawValue) return '';
+
+    if (typeof OptionComboDateUtils !== 'undefined'
+        && typeof OptionComboDateUtils.normalizeDateInput === 'function') {
+        const normalized = String(OptionComboDateUtils.normalizeDateInput(rawValue) || '').trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+            return normalized;
+        }
+    }
+
+    const digitsOnly = rawValue.replace(/\D/g, '');
+    if (digitsOnly.length === 8) {
+        return `${digitsOnly.slice(0, 4)}-${digitsOnly.slice(4, 6)}-${digitsOnly.slice(6, 8)}`;
+    }
+
+    return '';
+}
+
+function _toContractDateCode(dateStr) {
+    const normalizedDate = _normalizeHistoricalDateKey(dateStr);
+    if (normalizedDate) return normalizedDate.replace(/-/g, '');
+    return String(dateStr || '').replace(/\D/g, '').slice(0, 8);
+}
+
+function _resolveFuturesPoolEntryById(entryId) {
+    if (!entryId) return null;
+    return (state.futuresPool || []).find(entry => entry.id === entryId) || null;
+}
+
+function _buildFuturesPoolRequests(profile) {
+    if (!profile || profile.underlyingSecType !== 'FUT') {
+        return [];
+    }
+
+    return (state.futuresPool || [])
+        .filter(entry => /^\d{6}$/.test(String(entry && entry.contractMonth || '')))
+        .map(entry => ({
+            id: entry.id,
+            secType: 'FUT',
+            symbol: profile.underlyingSymbol,
+            exchange: profile.underlyingExchange,
+            currency: profile.currency || 'USD',
+            multiplier: String(profile.optionMultiplier || ''),
+            contractMonth: entry.contractMonth,
+        }));
+}
+
+function _buildUnderlyingRequest(profile, optionRequests, futuresRequests) {
     const defaultUnderlyingContractMonth = profile?.underlyingSecType === 'FUT'
         && typeof OptionComboProductRegistry !== 'undefined'
         && typeof OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth === 'function'
         ? OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(
             state.underlyingSymbol,
-            state.simulatedDate || state.baseDate
+            _getQuoteReferenceDate()
         )
         : '';
     const request = {
@@ -469,11 +1117,15 @@ function _buildUnderlyingRequest(profile, optionRequests) {
     };
 
     if (profile.underlyingSecType === 'FUT') {
+        const anchorFuture = Array.isArray(futuresRequests) && futuresRequests.length > 0
+            ? futuresRequests.slice().sort((left, right) => String(left.contractMonth || '').localeCompare(String(right.contractMonth || '')))[0]
+            : null;
         request.contractMonth = state.underlyingContractMonth
+            || anchorFuture?.contractMonth
             || defaultUnderlyingContractMonth
             || optionRequests[0]?.underlyingContractMonth
             || optionRequests[0]?.contractMonth
-            || _toContractMonth(state.simulatedDate)
+            || _toContractMonth(_getQuoteReferenceDate())
             || _toContractMonth(state.baseDate);
         request.multiplier = String(profile.optionMultiplier || '');
     }
@@ -481,12 +1133,25 @@ function _buildUnderlyingRequest(profile, optionRequests) {
     return request;
 }
 
+function _buildHistoricalSnapshotPayload(underlyingRequest, optionRequests, futuresRequests) {
+    return {
+        action: 'request_historical_snapshot',
+        replayDate: _getHistoricalReplayDate(),
+        underlying: underlyingRequest,
+        options: optionRequests,
+        futures: futuresRequests,
+        stocks: [],
+    };
+}
+
 function handleLiveSubscriptions() {
     if (!isWsConnected || !ws) return;
+    _resetLiveQuoteRuntime();
     const profile = typeof OptionComboProductRegistry === 'undefined'
         ? null
         : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
-    if (typeof OptionComboProductRegistry !== 'undefined'
+    if (!_isHistoricalMode()
+        && typeof OptionComboProductRegistry !== 'undefined'
         && !OptionComboProductRegistry.supportsLegacyLiveData(state.underlyingSymbol)) {
         if (!_legacyLiveDataWarningShown) {
             console.warn(`Legacy live-data subscriptions are not implemented for ${state.underlyingSymbol}. Use manual prices for now.`);
@@ -496,42 +1161,83 @@ function handleLiveSubscriptions() {
     }
 
     const optionRequests = [];
+    const futuresRequests = _buildFuturesPoolRequests(profile || {});
     const payload = {
         action: 'subscribe',
         underlying: null,
         options: optionRequests,
+        futures: futuresRequests,
         stocks: []
     };
+
+    if (profile?.underlyingSecType === 'IND'
+        && typeof OptionComboIndexForwardRate !== 'undefined'
+        && typeof OptionComboIndexForwardRate.buildSampleSubscriptionId === 'function') {
+        (state.forwardRateSamples || []).forEach((sample) => {
+            if (!sample || !sample.expDate || !Number.isFinite(parseFloat(sample.strike))) {
+                return;
+            }
+
+            const optionContractSpec = typeof OptionComboProductRegistry !== 'undefined'
+                && typeof OptionComboProductRegistry.resolveOptionContractSpec === 'function'
+                ? OptionComboProductRegistry.resolveOptionContractSpec(state.underlyingSymbol, sample.expDate)
+                : null;
+
+            ['call', 'put'].forEach((rightLabel) => {
+                optionRequests.push({
+                    id: OptionComboIndexForwardRate.buildSampleSubscriptionId(sample, rightLabel),
+                    secType: profile?.optionSecType || 'OPT',
+                    symbol: optionContractSpec?.symbol || profile?.optionSymbol || state.underlyingSymbol,
+                    underlyingSymbol: profile?.underlyingSymbol || state.underlyingSymbol,
+                    exchange: profile?.optionExchange || 'SMART',
+                    underlyingExchange: profile?.underlyingExchange || profile?.optionExchange || 'SMART',
+                    currency: profile?.currency || 'USD',
+                    multiplier: String(profile?.optionMultiplier || 100),
+                    underlyingMultiplier: String(profile?.optionMultiplier || 100),
+                    tradingClass: optionContractSpec?.tradingClass
+                        || (profile?.tradingClass || undefined),
+                    right: rightLabel === 'put' ? 'P' : 'C',
+                    strike: parseFloat(sample.strike),
+                        expDate: _toContractDateCode(sample.expDate),
+                    contractMonth: _toContractMonth(sample.expDate),
+                });
+            });
+        });
+    }
 
     // Collect all legs from groups that have Live Data == true
     state.groups.forEach(group => {
         if (group.liveData) {
             group.legs.forEach(leg => {
                 if (!_isUnderlyingLeg(leg)) {
+                    const selectedFuture = _resolveFuturesPoolEntryById(leg.underlyingFutureId);
+                    const optionContractSpec = typeof OptionComboProductRegistry !== 'undefined'
+                        && typeof OptionComboProductRegistry.resolveOptionContractSpec === 'function'
+                        ? OptionComboProductRegistry.resolveOptionContractSpec(state.underlyingSymbol, leg.expDate)
+                        : null;
                     optionRequests.push({
                         id: leg.id,
                         secType: profile?.optionSecType || 'OPT',
-                        symbol: profile?.optionSymbol || state.underlyingSymbol,
+                        symbol: optionContractSpec?.symbol || profile?.optionSymbol || state.underlyingSymbol,
                         underlyingSymbol: profile?.underlyingSymbol || state.underlyingSymbol,
                         exchange: profile?.optionExchange || 'SMART',
                         underlyingExchange: profile?.underlyingExchange || profile?.optionExchange || 'SMART',
                         currency: profile?.currency || 'USD',
                         multiplier: String(profile?.optionMultiplier || 100),
                         underlyingMultiplier: String(profile?.optionMultiplier || 100),
-                        tradingClass: typeof OptionComboProductRegistry !== 'undefined'
-                            && typeof OptionComboProductRegistry.resolveTradingClass === 'function'
-                            ? OptionComboProductRegistry.resolveTradingClass(state.underlyingSymbol, leg.expDate)
-                            : (profile?.tradingClass || undefined),
+                        tradingClass: optionContractSpec?.tradingClass
+                            || (profile?.tradingClass || undefined),
                         right: leg.type.charAt(0).toUpperCase(), // 'C' or 'P'
                         strike: leg.strike,
-                        expDate: leg.expDate.replace(/-/g, ''),
+                        expDate: _toContractDateCode(leg.expDate),
                         contractMonth: _toContractMonth(leg.expDate),
-                        underlyingContractMonth: state.underlyingContractMonth
+                        underlyingContractMonth: selectedFuture?.contractMonth
+                            || state.underlyingContractMonth
                             || (typeof OptionComboProductRegistry !== 'undefined'
                                 && typeof OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth === 'function'
                                 ? OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(
                                     state.underlyingSymbol,
-                                    state.simulatedDate || state.baseDate
+                                    _getQuoteReferenceDate()
                                 )
                                 : ''),
                     });
@@ -546,7 +1252,7 @@ function handleLiveSubscriptions() {
         underlyingSymbol: state.underlyingSymbol,
         underlyingExchange: 'SMART',
         currency: 'USD',
-    }, optionRequests);
+    }, optionRequests, futuresRequests);
 
     // Collect all hedge stocks that have Live Data == true
     state.hedges.forEach(hedge => {
@@ -555,12 +1261,22 @@ function handleLiveSubscriptions() {
         }
     });
 
+    if (_isHistoricalMode()) {
+        ws.send(JSON.stringify(_buildHistoricalSnapshotPayload(payload.underlying, optionRequests, futuresRequests)));
+        return;
+    }
+
     ws.send(JSON.stringify(payload));
 }
 
 function requestUnderlyingPriceSync() {
     if (!isWsConnected || !ws) {
         alert("Live Market Data WebSocket is not connected.");
+        return;
+    }
+
+    if (_isHistoricalMode()) {
+        handleLiveSubscriptions();
         return;
     }
 
@@ -582,7 +1298,12 @@ function requestUnderlyingPriceSync() {
                     currency: 'USD',
                 }
                 : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol),
-            []
+            [],
+            _buildFuturesPoolRequests(
+                typeof OptionComboProductRegistry === 'undefined'
+                    ? { underlyingSecType: 'STK' }
+                    : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
+            )
         )
     };
 
@@ -624,6 +1345,11 @@ function _resolveLegContractDescriptor(leg) {
             underlyingSymbol: state.underlyingSymbol,
         };
 
+    const optionContractSpec = typeof OptionComboProductRegistry !== 'undefined'
+        && typeof OptionComboProductRegistry.resolveOptionContractSpec === 'function'
+        ? OptionComboProductRegistry.resolveOptionContractSpec(state.underlyingSymbol, leg && leg.expDate)
+        : null;
+
     if (_isUnderlyingLeg(leg)) {
         return {
             secType: _normalizeSecType(profile.underlyingSecType || 'STK'),
@@ -636,7 +1362,12 @@ function _resolveLegContractDescriptor(leg) {
 
     return {
         secType: _normalizeSecType(profile.optionSecType || 'OPT'),
-        symbol: String(profile.optionSymbol || state.underlyingSymbol || '').trim().toUpperCase(),
+        symbol: String(
+            optionContractSpec?.symbol
+            || profile.optionSymbol
+            || state.underlyingSymbol
+            || ''
+        ).trim().toUpperCase(),
         right: _normalizeRightCode(leg.type),
         expDate: _normalizeContractDate(leg.expDate),
         strike: parseFloat(leg.strike),
@@ -771,6 +1502,24 @@ function _groupHasCostForAllPositionedLegs(group) {
     });
 }
 
+function _shouldHistoricalAutoCloseAtExpiry(group) {
+    if (group && typeof group === 'object'
+        && typeof OptionComboSessionLogic !== 'undefined'
+        && typeof OptionComboSessionLogic.normalizeHistoricalAutoCloseAtExpiry === 'function') {
+        group.historicalAutoCloseAtExpiry = OptionComboSessionLogic.normalizeHistoricalAutoCloseAtExpiry(
+            group.historicalAutoCloseAtExpiry
+        );
+        return group.historicalAutoCloseAtExpiry;
+    }
+
+    if (group && typeof group === 'object') {
+        group.historicalAutoCloseAtExpiry = group.historicalAutoCloseAtExpiry !== false;
+        return group.historicalAutoCloseAtExpiry;
+    }
+
+    return true;
+}
+
 function _getTradeTrigger(group) {
     if (!group) return null;
     return OptionComboTradeTriggerLogic.ensureGroupTradeTrigger(group);
@@ -903,7 +1652,23 @@ function _maybePromoteFilledTrialGroupToActive(group, runtime) {
 }
 
 function _sendValidatedComboSubmit(group, executionMode) {
-    if (!group || !isWsConnected || !ws) {
+    if (!group) {
+        return false;
+    }
+
+    if (_isHistoricalMode()) {
+        const trigger = _getTradeTrigger(group);
+        if (!trigger) {
+            return false;
+        }
+
+        trigger.pendingRequest = true;
+        trigger.lastError = '';
+        trigger.status = executionMode === 'test_submit' ? 'pending_test_submit' : 'pending_submit';
+        return _applyHistoricalTriggerOrderPreview(group, executionMode);
+    }
+
+    if (!isWsConnected || !ws) {
         return false;
     }
 
@@ -933,18 +1698,31 @@ function _sendValidatedComboSubmit(group, executionMode) {
 
 function _requestTrialGroupComboOrder(group) {
     if (!group) return;
-    if (!isWsConnected || !ws) {
-        _markTradeTriggerError(group, 'WebSocket is not connected.');
-        renderGroups();
-        return;
-    }
-
     const trigger = _getTradeTrigger(group);
     if (!trigger) return;
 
     const executionMode = trigger.executionMode === 'submit' || trigger.executionMode === 'test_submit'
         ? trigger.executionMode
         : 'preview';
+
+    if (_isHistoricalMode()) {
+        trigger.pendingRequest = true;
+        trigger.status = executionMode === 'submit'
+            ? 'pending_submit'
+            : (executionMode === 'test_submit' ? 'pending_test_submit' : 'pending_preview');
+        trigger.lastError = '';
+        trigger.lastTriggeredAt = new Date().toISOString();
+        trigger.lastTriggerPrice = state.underlyingPrice;
+        _applyHistoricalTriggerOrderPreview(group, executionMode);
+        return;
+    }
+
+    if (!isWsConnected || !ws) {
+        _markTradeTriggerError(group, 'WebSocket is not connected.');
+        renderGroups();
+        return;
+    }
+
     if ((executionMode === 'submit' || executionMode === 'test_submit') && state.allowLiveComboOrders !== true) {
         _markTradeTriggerError(group, 'Global live combo order switch is OFF.');
         renderGroups();
@@ -998,6 +1776,15 @@ function _applyComboOrderValidationResult(data) {
     }
 
     const nextMode = validation.executionMode === 'test_submit' ? 'test_submit' : 'submit';
+    if (_isHistoricalMode()) {
+        if (runtimeKind === 'closeExecution') {
+            requestCloseGroupComboOrder(group);
+            return true;
+        }
+        runtime.pendingRequest = false;
+        _sendValidatedComboSubmit(group, nextMode);
+        return true;
+    }
     if (state.allowLiveComboOrders !== true) {
         _markExecutionError(group, 'Global live combo order switch is OFF.', runtimeKind);
         renderGroups();
@@ -1379,6 +2166,10 @@ function _collectLiveIvNeighbors(targetLeg) {
 }
 
 function _applyEstimatedOptionIvFallback() {
+    if (_isHistoricalMode()) {
+        return false;
+    }
+
     let changed = false;
 
     state.groups.forEach(group => {
@@ -1424,10 +2215,360 @@ function _applyEstimatedOptionIvFallback() {
 // Live Market Data Processing
 // -------------------------------------------------------------
 
+function _applyHistoricalReplayMetadata(data) {
+    if (!data || !data.historicalReplay || typeof data.historicalReplay !== 'object') {
+        return false;
+    }
+
+    let stateChanged = false;
+    const availableStartDate = String(data.historicalReplay.availableStartDate || '').trim();
+    const availableEndDate = String(data.historicalReplay.availableEndDate || '').trim();
+    const effectiveDate = String(data.historicalReplay.effectiveDate || '').trim();
+    const riskFreeRate = parseFloat(data.riskFreeRate);
+    if (_isHistoricalMode() && effectiveDate) {
+        if (availableStartDate && state.historicalAvailableStartDate !== availableStartDate) {
+            state.historicalAvailableStartDate = availableStartDate;
+            stateChanged = true;
+        }
+        if (availableEndDate && state.historicalAvailableEndDate !== availableEndDate) {
+            state.historicalAvailableEndDate = availableEndDate;
+            stateChanged = true;
+        }
+        if ((!state.baseDate)
+            || (availableStartDate && state.baseDate < availableStartDate)
+            || (availableEndDate && state.baseDate > availableEndDate)) {
+            state.baseDate = effectiveDate;
+            stateChanged = true;
+        }
+        if (state.historicalQuoteDate !== effectiveDate) {
+            state.historicalQuoteDate = effectiveDate;
+            stateChanged = true;
+        }
+        if (!state.simulatedDate || state.simulatedDate < effectiveDate) {
+            state.simulatedDate = effectiveDate;
+            stateChanged = true;
+        }
+        if (Number.isFinite(riskFreeRate) && riskFreeRate >= 0) {
+            const currentRate = parseFloat(state.interestRate);
+            if (!Number.isFinite(currentRate) || Math.abs(currentRate - riskFreeRate) > 0.0000001) {
+                state.interestRate = riskFreeRate;
+                stateChanged = true;
+            }
+        }
+        if (typeof OptionComboControlPanelUI !== 'undefined'
+            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
+            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        }
+    }
+
+    return stateChanged;
+}
+
+function _clearHistoricalExpiryUnderlyingAnchor(leg) {
+    let changed = false;
+
+    if (leg.historicalExpiryUnderlyingPrice !== null && leg.historicalExpiryUnderlyingPrice !== undefined) {
+        leg.historicalExpiryUnderlyingPrice = null;
+        changed = true;
+    }
+
+    if (leg.historicalExpiryUnderlyingDate) {
+        leg.historicalExpiryUnderlyingDate = '';
+        changed = true;
+    }
+
+    return changed;
+}
+
+function _applyHistoricalExpiryUnderlyingAnchors(data) {
+    if (!_isHistoricalMode() || !data || !data.historicalReplay || typeof data.historicalReplay !== 'object') {
+        return false;
+    }
+
+    const effectiveDate = _normalizeHistoricalDateKey(data.historicalReplay.effectiveDate);
+    const expiryUnderlyingQuotes = data.historicalReplay.expiryUnderlyingQuotes
+        && typeof data.historicalReplay.expiryUnderlyingQuotes === 'object'
+        ? data.historicalReplay.expiryUnderlyingQuotes
+        : {};
+    const normalizedExpiryUnderlyingQuotes = {};
+    Object.entries(expiryUnderlyingQuotes).forEach(([dateKey, snapshot]) => {
+        const normalizedDateKey = _normalizeHistoricalDateKey(dateKey)
+            || _normalizeHistoricalDateKey(snapshot && (snapshot.requestedDate || snapshot.effectiveDate));
+        if (!normalizedDateKey) {
+            return;
+        }
+        normalizedExpiryUnderlyingQuotes[normalizedDateKey] = snapshot;
+    });
+    let stateChanged = false;
+
+    (state.groups || []).forEach((group) => {
+        (group.legs || []).forEach((leg) => {
+            if (_isUnderlyingLeg(leg)) {
+                return;
+            }
+
+            const expiryDate = _normalizeHistoricalDateKey(leg && leg.expDate);
+            if (!expiryDate || !effectiveDate || expiryDate > effectiveDate) {
+                stateChanged = _clearHistoricalExpiryUnderlyingAnchor(leg) || stateChanged;
+                return;
+            }
+
+            const expirySnapshot = normalizedExpiryUnderlyingQuotes[expiryDate];
+            const nextPrice = expirySnapshot ? parseFloat(expirySnapshot.price) : null;
+            const nextEffectiveDate = expirySnapshot ? String(expirySnapshot.effectiveDate || '').trim() : '';
+            if (!Number.isFinite(nextPrice)) {
+                stateChanged = _clearHistoricalExpiryUnderlyingAnchor(leg) || stateChanged;
+                return;
+            }
+
+            if (Math.abs((parseFloat(leg.historicalExpiryUnderlyingPrice) || 0) - nextPrice) > 0.000001
+                || String(leg.historicalExpiryUnderlyingDate || '') !== nextEffectiveDate) {
+                leg.historicalExpiryUnderlyingPrice = nextPrice;
+                leg.historicalExpiryUnderlyingDate = nextEffectiveDate;
+                stateChanged = true;
+            }
+        });
+    });
+
+    return stateChanged;
+}
+
+function _markOptionQuoteMissing(leg) {
+    let stateChanged = false;
+
+    if (leg.currentPriceSource !== 'missing') {
+        leg.currentPriceSource = 'missing';
+        stateChanged = true;
+    }
+
+    if (leg.ivManualOverride !== true && leg.ivSource !== 'missing') {
+        leg.ivSource = 'missing';
+        stateChanged = true;
+    }
+
+    return stateChanged;
+}
+
+function _applyHistoricalBaseDateCosts() {
+    if (!_isHistoricalMode() || _getHistoricalReplayDate() !== _getHistoricalEntryDate()) {
+        return false;
+    }
+
+    let stateChanged = false;
+
+    (state.groups || []).forEach((group) => {
+        if (!group || group.liveData !== true) {
+            return;
+        }
+
+        const trigger = _getTradeTrigger(group);
+        if ((group.viewMode || 'trial') === 'trial' && trigger && trigger.enabled === true) {
+            return;
+        }
+
+        let capturedEveryOpenLeg = true;
+        (group.legs || []).forEach((leg) => {
+            const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
+            if (pos < 0.0001 || (leg.closePrice !== null && leg.closePrice !== '' && leg.closePrice !== undefined)) {
+                return;
+            }
+
+            const hasLockedManualCost = Number.isFinite(parseFloat(leg.cost))
+                && parseFloat(leg.cost) > 0
+                && leg.costSource
+                && leg.costSource !== 'historical_base';
+            if (hasLockedManualCost) {
+                return;
+            }
+
+            const baseCost = _resolveHistoricalReplayClosePrice(leg, false);
+            if (!Number.isFinite(baseCost) || baseCost <= 0) {
+                capturedEveryOpenLeg = false;
+                return;
+            }
+
+            if (Math.abs((parseFloat(leg.cost) || 0) - baseCost) > 0.000001 || leg.costSource !== 'historical_base') {
+                leg.cost = baseCost;
+                leg.costSource = 'historical_base';
+                stateChanged = true;
+            }
+        });
+
+        if (capturedEveryOpenLeg
+            && _groupHasCostForAllPositionedLegs(group)
+            && (group.viewMode || 'trial') === 'trial') {
+            group.viewMode = 'active';
+            stateChanged = true;
+        }
+    });
+
+    return stateChanged;
+}
+
+function _applyHistoricalAutoExpirySettlement(targetGroup = null) {
+    if (!_isHistoricalMode()) {
+        return false;
+    }
+
+    const replayDate = _normalizeHistoricalDateKey(_getHistoricalReplayDate());
+    if (!replayDate) {
+        return false;
+    }
+
+    let stateChanged = false;
+
+    const groupsToSync = targetGroup ? [targetGroup] : (state.groups || []);
+    groupsToSync.forEach((group) => {
+        if (!group || !_groupHasCostForAllPositionedLegs(group)) {
+            return;
+        }
+
+        const autoCloseAtExpiry = _shouldHistoricalAutoCloseAtExpiry(group);
+        let autoSettledAnyLeg = false;
+        (group.legs || []).forEach((leg) => {
+            const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
+            const hasClosePrice = leg && leg.closePrice !== null && leg.closePrice !== '' && leg.closePrice !== undefined;
+            const isAutoSettledClose = leg && leg.closePriceSource === 'historical_expiry_auto';
+            const expiryDate = _normalizeHistoricalDateKey(leg && leg.expDate);
+
+            if (_isUnderlyingLeg(leg) || pos < 0.0001 || !expiryDate) {
+                return;
+            }
+
+            if (isAutoSettledClose && (!autoCloseAtExpiry || expiryDate > replayDate)) {
+                leg.closePrice = null;
+                leg.closePriceSource = '';
+                leg.autoSettledAtReplayDate = null;
+                stateChanged = true;
+                return;
+            }
+
+            if (!autoCloseAtExpiry || hasClosePrice || expiryDate > replayDate) {
+                return;
+            }
+
+            const closePrice = _resolveHistoricalReplayClosePrice(leg, true);
+            if (!Number.isFinite(closePrice) || closePrice < 0) {
+                return;
+            }
+
+            if (Math.abs((parseFloat(leg.closePrice) || 0) - closePrice) > 0.000001
+                || leg.closePriceSource !== 'historical_expiry_auto') {
+                leg.closePrice = closePrice;
+                leg.closePriceSource = 'historical_expiry_auto';
+                leg.autoSettledAtReplayDate = replayDate;
+                autoSettledAnyLeg = true;
+                stateChanged = true;
+            }
+        });
+
+        if (autoSettledAnyLeg && !_groupHasOpenPositions(group) && group.viewMode !== 'settlement') {
+            group.viewMode = 'settlement';
+            stateChanged = true;
+        }
+    });
+
+    return stateChanged;
+}
+
+function _handleHistoricalReplayMessage(data) {
+    if (!data || typeof data !== 'object' || data.action !== 'historical_replay_error') {
+        return false;
+    }
+
+    console.error(data.message || 'Historical replay request failed.');
+    return true;
+}
+
 let renderScheduled = false;
 
 function processLiveMarketData(data) {
-    let stateChanged = false;
+    let stateChanged = _applyHistoricalReplayMetadata(data);
+    stateChanged = _applyHistoricalExpiryUnderlyingAnchors(data) || stateChanged;
+    const quoteSourceKind = _getQuoteSourceKind(data);
+
+    if (data.underlyingQuote && typeof data.underlyingQuote === 'object') {
+        _setUnderlyingQuoteSnapshot(data.underlyingQuote);
+    } else if (data.underlyingPrice) {
+        _setUnderlyingQuoteSnapshot({ mark: data.underlyingPrice });
+    }
+
+    if (data.options) {
+        Object.entries(data.options).forEach(([subId, quote]) => {
+            _setOptionQuoteSnapshot(subId, quote);
+        });
+
+        if ((state.forwardRateSamples || []).length > 0
+            && typeof OptionComboControlPanelUI !== 'undefined'
+            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
+            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        }
+    }
+
+    if (data.futures) {
+        Object.entries(data.futures).forEach(([subId, quote]) => {
+            _setFutureQuoteSnapshot(subId, quote);
+        });
+    }
+
+    if (data.stocks) {
+        Object.entries(data.stocks).forEach(([symbol, quote]) => {
+            _setStockQuoteSnapshot(symbol, quote);
+        });
+    }
+
+    if (data.futures) {
+        (state.futuresPool || []).forEach((entry) => {
+            const quote = data.futures[entry.id];
+            if (!quote) return;
+
+            entry.bid = quote.bid !== undefined ? quote.bid : entry.bid;
+            entry.ask = quote.ask !== undefined ? quote.ask : entry.ask;
+            entry.mark = quote.mark !== undefined ? quote.mark : entry.mark;
+            entry.lastQuotedAt = new Date().toISOString();
+        });
+
+        state.groups.forEach(group => {
+            if (!group.liveData) {
+                return;
+            }
+
+            group.legs.forEach(leg => {
+                if (!_isUnderlyingLeg(leg) || !leg.underlyingFutureId || data.futures[leg.underlyingFutureId] === undefined) {
+                    return;
+                }
+
+                const liveMark = data.futures[leg.underlyingFutureId].mark;
+                if (!(liveMark > 0)) {
+                    return;
+                }
+
+                const markChanged = Math.abs(liveMark - leg.currentPrice) > 0.001;
+                const sourceChanged = leg.currentPriceSource !== quoteSourceKind;
+                if (!markChanged && !sourceChanged) {
+                    return;
+                }
+
+                leg.currentPrice = liveMark;
+                leg.currentPriceSource = quoteSourceKind;
+                stateChanged = true;
+
+                const row = document.querySelector(`tr[data-id="${leg.id}"]`);
+                if (row) {
+                    const currentPriceInput = row.querySelector('.current-price-input');
+                    if (currentPriceInput) {
+                        currentPriceInput.value = liveMark.toFixed(2);
+                        flashElement(currentPriceInput);
+                    }
+                }
+            });
+        });
+
+        if (typeof OptionComboControlPanelUI !== 'undefined'
+            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
+            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        }
+    }
 
     // Update Underlying Price if present
     if (data.underlyingPrice) {
@@ -1435,8 +2576,10 @@ function processLiveMarketData(data) {
         document.getElementById('underlyingPrice').value = state.underlyingPrice.toFixed(2);
         document.getElementById('underlyingPriceSlider').value = state.underlyingPrice;
         document.getElementById('underlyingPriceDisplay').textContent = currencyFormatter.format(state.underlyingPrice);
-        evaluateTrialTradeTriggers();
-        evaluateTriggeredOrderExitConditions();
+        if (!_isHistoricalMode()) {
+            evaluateTrialTradeTriggers();
+            evaluateTriggeredOrderExitConditions();
+        }
         stateChanged = true;
     }
 
@@ -1446,19 +2589,30 @@ function processLiveMarketData(data) {
             if (group.liveData) {
                 group.legs.forEach(leg => {
                     if (data.options[leg.id] !== undefined) {
-                        const liveMark = data.options[leg.id].mark;
-                        const liveIV = data.options[leg.id].iv;
+                        const replayQuote = data.options[leg.id] || {};
+                        const liveMark = replayQuote.mark;
+                        const liveIV = replayQuote.iv;
 
-                        if (liveMark > 0 && Math.abs(liveMark - leg.currentPrice) > 0.001) {
-                            leg.currentPrice = liveMark;
-                            stateChanged = true;
+                        if (replayQuote.missing === true) {
+                            stateChanged = _markOptionQuoteMissing(leg) || stateChanged;
+                            return;
+                        }
 
-                            const row = document.querySelector(`tr[data-id="${leg.id}"]`);
-                            if (row) {
-                                const currentPriceInput = row.querySelector('.current-price-input');
-                                if (currentPriceInput) {
-                                    currentPriceInput.value = liveMark.toFixed(2);
-                                    flashElement(currentPriceInput);
+                        if (liveMark > 0) {
+                            const markChanged = Math.abs(liveMark - leg.currentPrice) > 0.001;
+                            const sourceChanged = leg.currentPriceSource !== quoteSourceKind;
+                            if (markChanged || sourceChanged) {
+                                leg.currentPrice = liveMark;
+                                leg.currentPriceSource = quoteSourceKind;
+                                stateChanged = true;
+
+                                const row = document.querySelector(`tr[data-id="${leg.id}"]`);
+                                if (row) {
+                                    const currentPriceInput = row.querySelector('.current-price-input');
+                                    if (currentPriceInput) {
+                                        currentPriceInput.value = liveMark.toFixed(2);
+                                        flashElement(currentPriceInput);
+                                    }
                                 }
                             }
                         }
@@ -1466,9 +2620,10 @@ function processLiveMarketData(data) {
                         const ivManuallyOverridden = leg.ivManualOverride === true;
 
                         if (liveIV && liveIV > 0 && !ivManuallyOverridden) {
-                            const ivChanged = Math.abs(liveIV - leg.iv) > 0.000001 || leg.ivSource !== 'live' || leg.ivManualOverride === true;
+                            const nextIvSource = quoteSourceKind === 'historical' ? 'historical' : 'live';
+                            const ivChanged = Math.abs(liveIV - leg.iv) > 0.000001 || leg.ivSource !== nextIvSource || leg.ivManualOverride === true;
                             leg.iv = liveIV;
-                            leg.ivSource = 'live';
+                            leg.ivSource = nextIvSource;
                             leg.ivManualOverride = false;
                             stateChanged = stateChanged || ivChanged;
 
@@ -1523,8 +2678,11 @@ function processLiveMarketData(data) {
         state.hedges.forEach(hedge => {
             if (hedge.liveData && data.stocks[hedge.symbol] !== undefined) {
                 const liveMark = data.stocks[hedge.symbol].mark;
-                if (liveMark > 0 && Math.abs(liveMark - hedge.currentPrice) > 0.001) {
+                const markChanged = liveMark > 0 && Math.abs(liveMark - hedge.currentPrice) > 0.001;
+                const sourceChanged = liveMark > 0 && hedge.currentPriceSource !== quoteSourceKind;
+                if (liveMark > 0 && (markChanged || sourceChanged)) {
                     hedge.currentPrice = liveMark;
+                    hedge.currentPriceSource = quoteSourceKind;
                     stateChanged = true;
 
                     const row = document.querySelector(`tr.hedge-row[data-id="${hedge.id}"]`);
@@ -1542,11 +2700,21 @@ function processLiveMarketData(data) {
     }
 
     if (data.underlyingPrice) {
+        const usesFuturesPool = typeof OptionComboProductRegistry !== 'undefined'
+            && typeof OptionComboProductRegistry.usesFuturesPool === 'function'
+            && OptionComboProductRegistry.usesFuturesPool(state.underlyingSymbol);
         state.groups.forEach(group => {
             if (group.liveData) {
                 group.legs.forEach(leg => {
-                    if (_isUnderlyingLeg(leg) && Math.abs(data.underlyingPrice - leg.currentPrice) > 0.001) {
+                    if (usesFuturesPool && leg.underlyingFutureId) {
+                        return;
+                    }
+                    if (_isUnderlyingLeg(leg) && (
+                        Math.abs(data.underlyingPrice - leg.currentPrice) > 0.001
+                        || leg.currentPriceSource !== quoteSourceKind
+                    )) {
                         leg.currentPrice = data.underlyingPrice;
+                        leg.currentPriceSource = quoteSourceKind;
                         stateChanged = true;
 
                         const row = document.querySelector(`tr[data-id="${leg.id}"]`);
@@ -1565,6 +2733,19 @@ function processLiveMarketData(data) {
         if (_applyEstimatedOptionIvFallback()) {
             stateChanged = true;
         }
+    }
+
+    if (_applyHistoricalBaseDateCosts()) {
+        stateChanged = true;
+    }
+
+    if (_applyHistoricalAutoExpirySettlement()) {
+        stateChanged = true;
+    }
+
+    if (_isHistoricalMode() && data.underlyingPrice) {
+        evaluateTrialTradeTriggers();
+        evaluateTriggeredOrderExitConditions();
     }
 
     if (stateChanged && !renderScheduled) {

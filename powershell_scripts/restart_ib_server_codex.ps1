@@ -1,4 +1,5 @@
-$workdir = 'C:\Users\xuzhe\OneDrive\projects\Option Combo Simulation'
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$workdir = $projectRoot
 $pidFile = Join-Path $workdir 'ib_server.codex.pid'
 
 if (Test-Path $pidFile) {
@@ -10,4 +11,4 @@ if (Test-Path $pidFile) {
     }
 }
 
-& (Join-Path $workdir 'launch_ib_server_codex.ps1')
+& (Join-Path $PSScriptRoot 'launch_ib_server_codex.ps1')

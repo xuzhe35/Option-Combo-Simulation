@@ -145,6 +145,15 @@
         return !isLiveIvMissing(leg) && Number.isFinite(leg && leg.iv) && leg.iv > 0;
     }
 
+    function hasUsableCurrentQuote(leg) {
+        return !!(
+            leg
+            && leg.currentPriceSource !== 'missing'
+            && Number.isFinite(leg.currentPrice)
+            && leg.currentPrice > 0
+        );
+    }
+
     function formatLegIvInputValue(leg) {
         if (isLiveIvMissing(leg)) {
             return 'N/A';
@@ -176,6 +185,13 @@
             };
         }
 
+        if (leg && leg.ivSource === 'historical') {
+            return {
+                value: formatLegIvInputValue(leg),
+                title: 'Historical IV from SQLite replay data',
+            };
+        }
+
         if (leg && leg.ivSource === 'estimated') {
             return {
                 value: formatLegIvInputValue(leg),
@@ -189,7 +205,7 @@
         };
     }
 
-    function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseDateStr = null, globalUnderlyingPrice = null, globalInterestRate = null, viewMode = 'active', instrumentProfile = null) {
+    function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalBaseDateStr = null, globalUnderlyingPrice = null, globalInterestRate = null, viewMode = 'active', instrumentProfile = null, marketDataMode = 'live') {
         const resolvedProfile = resolveInstrumentProfile(instrumentProfile);
         const pricingModel = (resolvedProfile && resolvedProfile.pricingModel) || 'bsm-spot';
         const lowerType = leg.type.toLowerCase();
@@ -198,7 +214,7 @@
             const posMultiplier = leg.pos * contractMultiplier;
             let effectiveCostPerUnit = leg.cost;
             if (viewMode === 'trial' || leg.cost === 0) {
-                effectiveCostPerUnit = (leg.currentPrice && leg.currentPrice > 0)
+                effectiveCostPerUnit = hasUsableCurrentQuote(leg)
                     ? leg.currentPrice
                     : (globalUnderlyingPrice || 0);
             }
@@ -236,11 +252,16 @@
         const contractMultiplier = getMultiplier(resolvedProfile);
         const settlementUnitsPerContract = getSettlementUnitsPerContract(resolvedProfile);
         const posMultiplier = leg.pos * contractMultiplier;
+        const expiryUnderlyingPrice = marketDataMode === 'historical' && isExpired
+            ? (Number.isFinite(parseFloat(leg.historicalExpiryUnderlyingPrice))
+                ? parseFloat(leg.historicalExpiryUnderlyingPrice)
+                : null)
+            : null;
 
         let effectiveCostPerShare = leg.cost;
 
         if (viewMode === 'trial' || leg.cost === 0 || leg.cost === 0.00) {
-            if (leg.currentPrice && leg.currentPrice > 0) {
+            if (hasUsableCurrentQuote(leg)) {
                 effectiveCostPerShare = leg.currentPrice;
             } else if (globalBaseDateStr && globalUnderlyingPrice !== null && globalInterestRate !== null) {
                 const baseCalDTE = diffDays(globalBaseDateStr, leg.expDate);
@@ -280,7 +301,8 @@
             settlementUnitsPerContract,
             posMultiplier,
             costBasis: posMultiplier * effectiveCostPerShare,
-            effectiveCostPerShare
+            effectiveCostPerShare,
+            expiryUnderlyingPrice
         };
     }
 
@@ -289,10 +311,13 @@
             return underlyingPrice;
         }
         if (processedLeg.isExpired) {
+            const settlementUnderlyingPrice = Number.isFinite(processedLeg.expiryUnderlyingPrice)
+                ? processedLeg.expiryUnderlyingPrice
+                : underlyingPrice;
             if (processedLeg.type === 'call') {
-                return Math.max(0, underlyingPrice - processedLeg.strike);
+                return Math.max(0, settlementUnderlyingPrice - processedLeg.strike);
             }
-            return Math.max(0, processedLeg.strike - underlyingPrice);
+            return Math.max(0, processedLeg.strike - settlementUnderlyingPrice);
         }
         if (!Number.isFinite(processedLeg.simIV) || processedLeg.simIV <= 0) {
             return null;
@@ -321,7 +346,7 @@
         }
 
         const isEvaluatingRightNow = (simulatedDate === baseDate) && (ivOffset === 0);
-        if (viewMode === 'trial' && isEvaluatingRightNow && rawLeg.currentPrice > 0) {
+        if (viewMode === 'trial' && isEvaluatingRightNow && hasUsableCurrentQuote(rawLeg)) {
             return rawLeg.currentPrice;
         }
 
@@ -345,6 +370,7 @@
         computeSimulatedPrice,
         isLiveIvMissing,
         hasUsableLegIv,
+        hasUsableCurrentQuote,
         formatLegIvInputValue,
         describeLegIvInput,
     };

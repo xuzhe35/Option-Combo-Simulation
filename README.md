@@ -1,309 +1,233 @@
 # Option Combo Simulator
 
-## Overview
+## What This Repo Is
 
-Option Combo Simulator is a local browser app for building, analyzing, and recording multi-leg option combinations.
+Option Combo Simulator is a local browser app for building, pricing, replaying, and tracking multi-leg option structures.
 
-It is designed for direct use from `index.html` and supports:
+Current shipped capabilities include:
 
-- option and stock legs inside combo groups
-- live idea evaluation and entered-cost tracking
-- amortized-basis analysis before final settlement
-- settlement-style scenario evaluation
+- live and manual scenario analysis for multi-group option portfolios
+- `trial`, `active`, `amortized`, and `settlement` group modes
 - global portfolio P&L and global amortized aggregation
-- optional IBKR live quotes and IV
-- JSON import, export, and direct save-back when supported by the browser
+- historical replay / backtest against SQLite option history
+- optional IBKR live quotes, IV, combo preview, and managed live execution
+- an experimental `Chart Lab` page that projects option payoff shapes onto a daily candle chart
 
-## Runtime Model
+There is no frontend build step. The app runs from plain HTML/CSS/JavaScript files loaded in order.
 
-The frontend is plain HTML/CSS/JavaScript with ordered global scripts under `js/`:
+## Main Entry Points
 
-1. `js/t_params_db.js`
-2. `js/market_holidays.js`
-3. `js/date_utils.js`
-4. `js/pricing_core.js`
-5. `js/bsm.js`
-6. `js/chart.js`
-7. `js/prob_charts.js`
-8. `js/chart_controls.js`
-9. `js/amortized.js`
-10. `js/valuation.js`
-11. `js/session_logic.js`
-12. `js/session_ui.js`
-13. `js/control_panel_ui.js`
-14. `js/hedge_editor_ui.js`
-15. `js/group_editor_ui.js`
-16. `js/hedge_ui.js`
-17. `js/group_ui.js`
-18. `js/global_ui.js`
-19. `js/app.js`
-20. `js/ws_client.js`
+### Shared app shell
 
-There is no build step or module system.
+- `index.html`
 
-## Core Files
+This is the main portfolio workspace. It supports:
 
-| File | Responsibility |
-| --- | --- |
-| `index.html` | App shell, templates, global cards, canvases, controls |
-| `style.css` | Layout and styling |
-| `js/date_utils.js` | Pure date and trading-day helpers |
-| `js/pricing_core.js` | Pure pricing helpers, leg normalization, simulated pricing |
-| `js/bsm.js` | Backward-compatible browser bridge for pricing globals |
-| `js/chart.js` | P&L chart and amortized-basis chart rendering |
-| `js/chart_controls.js` | Group chart controls, global chart controls, global amortized chart controls |
-| `js/amortized.js` | Pure amortized-cost calculations |
-| `js/valuation.js` | Pure portfolio state-derivation and aggregation helpers |
-| `js/session_logic.js` | Pure import/export and mode-selection helpers |
-| `js/session_ui.js` | Control-panel DOM sync after session-level state changes |
-| `js/control_panel_ui.js` | Control-panel event binding and sidebar interactions |
-| `js/hedge_editor_ui.js` | Hedge editor rendering and event binding |
-| `js/group_editor_ui.js` | Group and leg editor rendering and event binding |
-| `js/hedge_ui.js` | Hedge DOM write layer |
-| `js/group_ui.js` | Group DOM write layer |
-| `js/global_ui.js` | Global summary DOM write layer |
-| `js/app.js` | State container and top-level orchestration bridge |
-| `js/prob_charts.js` | Probability analysis worker and charts |
-| `js/ws_client.js` | Browser WebSocket client for IBKR live data |
-| `ib_server.py` | Python WebSocket bridge to IBKR |
-| `config.ini` | TWS and WebSocket server configuration |
+- live workspace mode
+- historical replay workspace mode
+- import / export / save-back session flow
+- group editing, charts, probability analysis, and execution controls
 
-## Pricing Rules
+### Experimental projection page
 
-`pricing_core.js` is the pure pricing single source of truth, with `bsm.js` retained as a compatibility bridge.
+- `chart_lab.html`
 
-Important helpers:
+This is a sandbox page for the daily K-line payoff projection experiment.
 
-- `processLegData(...)`
-- `computeLegPrice(...)`
-- `computeSimulatedPrice(...)`
+Current state:
 
-Current time convention:
+- reuses the same in-memory app state as the main page
+- can project either one group or the included global portfolio
+- uses the same `Simulated Date` as the portfolio page
+- uses IBKR historical daily bars when available, with SQLite fallback
+- aligns price on the candle chart, but the horizontal projection width is still normalized P&L, not true time
 
-- option pricing uses `calendar days / 365`
-- trading days are display-only context
+## Startup
 
-## The Four Group Modes
+### Windows
 
-Each combo group now supports four modes.
+Preferred startup scripts:
 
-### `trial`
+- `start_option_combo.bat`
+  - starts the frontend HTTP server
+  - starts `ib_server.py`
+  - opens the locked live workspace
 
-Use this for live idea evaluation.
+- `start_historical_replay.bat`
+  - starts the frontend HTTP server
+  - starts `historical_server.py`
+  - opens the locked historical replay workspace
 
-- can use current live price as the effective starting cost
-- can fall back to a theoretical base-date price when live data is absent
+- `install_ib_bridge_deps.bat`
+  - installs the Python dependencies for the live IBKR bridge
 
-### `active`
+- `powershell_scripts/start_option_combo_codex.ps1`
+  - background-friendly startup used for Codex / automation flows
+  - writes PID and log files into the repo root
 
-Use this for positions with a known deterministic entry cost.
+### macOS
 
-- stored `cost` remains the reference basis
-- focuses on expected P&L from the current cost structure
+- `start_option_combo_mac.command`
+- `install_ib_bridge_deps_mac.command`
 
-### `amortized`
+## Manual Local Run
 
-Use this before final settlement when you want an equivalent buy or sell basis.
+### Frontend only
 
-- requires deterministic costs
-- uses `Scenario Underlying Price` when provided
-- owns the yellow amortized banner
-- owns the group-level amortized chart
+```powershell
+$PYTHON = powershell -NoProfile -ExecutionPolicy Bypass -File .\powershell_scripts\resolve_python.ps1
+& $PYTHON -m http.server 8000
+```
 
-### `settlement`
+Open one of:
 
-Use this for a clean settlement-style scenario.
+- `http://localhost:8000/index.html`
+- `http://localhost:8000/index.html?entry=live&marketDataMode=live&lockMarketDataMode=1`
+- `http://localhost:8000/index.html?entry=historical&marketDataMode=historical&lockMarketDataMode=1`
+- `http://localhost:8000/chart_lab.html`
 
-- shares the same `Scenario Underlying Price` input concept
-- shows settlement-oriented valuation and expiry state
-- does not show the amortized banner or amortized chart
+### Frontend + live IBKR bridge
 
-## Amortized Calculations
+```powershell
+$PYTHON = powershell -NoProfile -ExecutionPolicy Bypass -File .\powershell_scripts\resolve_python.ps1
+& $PYTHON ib_server.py
+```
 
-### Group-level amortized result
+The live bridge defaults to:
 
-`app.js` uses:
+- `ws://127.0.0.1:8765`
 
-- `calculateAmortizedCost(group, evalUnderlyingPrice, globalState)`
+### Frontend + historical replay bridge
 
-This powers:
+```powershell
+$PYTHON = powershell -NoProfile -ExecutionPolicy Bypass -File .\powershell_scripts\resolve_python.ps1
+& $PYTHON historical_server.py
+```
 
-- the yellow amortized banner inside each amortized group
-- the group-level amortized chart
+## Python Resolution
 
-The calculation accounts for:
+Do not assume bare `python` is reliable on Windows.
 
-- initial option and stock cash outflow
-- closed option cash flows
-- residual value of unexpired options
-- assignment or delivery cash flows
-- resulting net shares and effective basis
+The repo resolves Python in this order:
 
-### Global amortized result
+1. `OPTION_COMBO_PYTHON`
+2. `config.local.ini` -> `[python] executable`
+3. `config.ini` -> `[python] executable`
+4. `.venv\Scripts\python.exe`
+5. `venv\Scripts\python.exe`
+6. common Windows install locations
+7. `python.exe` / `python` from `PATH`
 
-The app also provides a global amortized section below the global portfolio P&L card.
+Use:
 
-It has two outputs with different semantics:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\powershell_scripts\resolve_python.ps1
+```
 
-#### Global amortized banner
+## Product Support
 
-The banner combines all groups currently in `amortized` mode.
+### Equity / ETF option families
 
-It uses:
+- default stock / ETF flow
+- equity-style underlying legs supported
+- amortized mode supported
 
-- `calculateCombinedAmortizedCost(groups, globalState)`
-- each amortized group's own `Scenario Underlying Price` override when set
+### Cash-settled index option families
 
-This is the best summary for the combined effective assigned or delivered basis across multiple amortized groups.
-
-#### Global amortized chart
-
-The global amortized card also includes a reference chart.
-
-It:
-
-- combines all groups currently in `amortized` mode into one virtual portfolio
-- reuses the same `AmortizationChart` class as the group-level amortized chart
-- uses a shared global scenario-price x-axis for comparison and reference
-
-So the global banner and global chart are intentionally related but not identical:
-
-- banner: aggregate effective basis using each group's override
-- chart: combined portfolio behavior across one shared scenario-price axis
-
-## Charts
-
-The current chart set includes:
-
-- per-group P&L chart
-- global portfolio P&L chart
-- per-group amortized-basis chart
-- global amortized-basis chart
-- probability analysis charts
-
-## Probability Analysis
-
-`prob_charts.js` provides:
-
-- price probability density
-- expected P&L density
+- `SPX`
+- `NDX`
 
 Current behavior:
 
-- Student-t parameters come from `js/t_params_db.js`
-- volatility is scaled from portfolio mean IV using `IV / sqrt(365)`
-- the horizon uses calendar days from `baseDate` to `simulatedDate`
-- simulation runs in a Web Worker
+- priced through product-aware metadata
+- live-data contract resolution supported through the current IBKR bridge
+- cash-settled behavior modeled
+- amortized mode intentionally disabled
 
-## Live Market Data
+### Futures option families
 
-Live data is optional and intended for local use.
+- `ES`
+- `NQ`
+- `CL`
+- `GC`
+- `SI`
+- `HG`
 
-### Browser side
+Current behavior:
 
-`ws_client.js`:
+- family-specific multipliers
+- futures underlying legs supported
+- Black-76 pricing path available
+- product-aware IBKR contract building supported
+- amortized mode intentionally disabled
 
-- connects to `ws://localhost:<port>`
-- supports a hidden local WebSocket port override in the sidebar
-- stores the chosen port in browser local storage
-- reconnects with exponential backoff
-- resends subscriptions after reconnect
+## Historical Replay / Backtest
 
-### Python side
+Historical replay is implemented and no longer just a plan.
 
-`ib_server.py`:
+Current behavior includes:
 
-- reads TWS and WebSocket settings from `config.ini`
-- connects to IBKR using `ib_async`
-- streams option marks, stock prices, and IV
+- historical mode split from live mode
+- replay-day quote loading from SQLite
+- replay timeline stepping
+- historical trigger preview / test submit / submit simulation
+- `Enter @ Replay Day`
+- close simulation
+- expiry auto-settlement controls
 
-## JSON Persistence
+Main files:
 
-The app supports:
+- `historical_server.py`
+- `historical_data.py`
+- `historical_replay_service.py`
 
-- JSON import
-- JSON export
-- direct save-back to the imported file when browser file handles are available
+## Major Files
 
-Imported groups are appended into the current in-memory session.
+| File | Responsibility |
+| --- | --- |
+| `index.html` | Main app shell, templates, shared controls, cards, charts |
+| `chart_lab.html` | Experimental daily candle projection page |
+| `style.css` | Main app styles |
+| `chart_lab.css` | Chart Lab styles |
+| `js/product_registry.js` | Product-family metadata and capability flags |
+| `js/pricing_context.js` | Underlying anchor logic, futures-pool and forward-rate context |
+| `js/pricing_core.js` | Core pricing helpers and simulated pricing |
+| `js/valuation.js` | Portfolio/group derived values |
+| `js/chart.js` | P&L and amortized chart renderers |
+| `js/chart_controls.js` | Group/global chart control plumbing |
+| `js/prob_charts.js` | Probability analysis charts and worker logic |
+| `js/ws_client.js` | Browser WebSocket client for live and historical backends |
+| `js/chart_lab.js` | Daily K projection lab |
+| `ib_server.py` | IBKR live market data and execution bridge |
+| `historical_server.py` | SQLite historical replay backend |
+| `historical_data.py` | SQLite data access |
+| `historical_replay_service.py` | Historical replay payload assembly |
+| `trade_execution/` | Execution engine and IBKR adapter |
 
-## Running the Project
+## Current Known Boundaries
 
-### Recommended local startup
+- `chart_lab.html` is still experimental.
+- The daily K projection currently aligns the price axis only; horizontal projection width is normalized P&L, not time.
+- Mixed-expiry payoff projection still needs a more explicit path assumption if you want a financially rigorous later-expiry overlay.
+- `contract_specs/*.xml` exist as reference material, but runtime product behavior currently comes from `js/product_registry.js`.
+- Reloading the page does not reconstruct an old live managed-order supervision session.
 
-Using a local HTTP server is recommended over opening `index.html` via `file://`, because browsers apply stricter security rules to local file origins.
+## Tests
 
-#### Frontend only
+Tests live under `tests/`.
 
-Start a static server from the project root:
+They currently cover the key shared logic areas, including:
 
-```bash
-python -m http.server 8000
-```
+- product registry
+- pricing core / BSM / Black-76 behavior
+- valuation
+- session logic
+- WebSocket client behavior
+- pricing-context logic
+- UI helpers
 
-Then open:
+## Related Docs
 
-```text
-http://localhost:8000/index.html
-```
-
-On macOS, `python3 -m http.server 8000` may be required instead.
-
-#### Frontend + IBKR live bridge
-
-1. Start TWS or Gateway with API access enabled.
-2. Install Python dependencies:
-
-```bash
-pip install ib_async websockets
-```
-
-3. In one terminal, start the static frontend server:
-
-```bash
-python -m http.server 8000
-```
-
-4. In a second terminal, start the IB bridge:
-
-```bash
-python ib_server.py
-```
-
-5. Open:
-
-```text
-http://localhost:8000/index.html
-```
-
-6. If needed, match the frontend's local WS port override to the port in `config.ini`.
-
-#### One-click startup scripts
-
-The project root includes convenience launchers:
-
-- Windows: `start_option_combo.bat`
-- macOS: `start_option_combo_mac.command`
-
-They start both:
-
-- the static frontend server on `http://localhost:8000/index.html`
-- the IB WebSocket bridge on `ws://localhost:8765`
-
-### Refresh probability parameters
-
-```bash
-pip install yfinance scipy numpy pandas
-python scripts/fit_underlying.py SPY QQQ AAPL
-```
-
-This updates:
-
-- `t_params_db.json`
-- `js/t_params_db.js`
-
-## Current Notes
-
-- `amortized` is now a first-class mode, separate from `settlement`
-- only groups in `amortized` mode contribute to the global amortized result
-- group-level and global amortized charts share the same chart implementation for consistency
+- `ARCHITECTURE.md` for the current runtime design
+- `DEV_HANDOVER.md` for operational developer notes
+- `AGENTS.md` for repo-specific agent guidance

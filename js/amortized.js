@@ -5,6 +5,7 @@
 (function attachAmortized(globalScope) {
     const pricingCore = globalScope.OptionComboPricingCore;
     const productRegistry = globalScope.OptionComboProductRegistry;
+    const pricingContext = globalScope.OptionComboPricingContext;
     if (!pricingCore) {
         throw new Error('OptionComboPricingCore must be loaded before amortized.js');
     }
@@ -50,17 +51,27 @@
         let initialCashOutflow = 0;
         let residualValue = 0;
         let assignmentCash = 0;
+        const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
+            ? pricingContext.resolveSimulationDate(globalState)
+            : globalState.simulatedDate;
+        const quoteDate = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
+            ? pricingContext.resolveQuoteDate(globalState)
+            : globalState.baseDate;
 
         group.legs.forEach(leg => {
+            const legInterestRate = pricingContext && typeof pricingContext.resolveLegInterestRate === 'function'
+                ? pricingContext.resolveLegInterestRate(globalState, leg, globalState.interestRate)
+                : globalState.interestRate;
             const pLeg = processLegData(
                 leg,
-                globalState.simulatedDate,
+                simulationDate,
                 globalState.ivOffset,
-                globalState.baseDate,
+                quoteDate,
                 evalUnderlyingPrice,
-                globalState.interestRate,
+                legInterestRate,
                 group.viewMode || 'active',
-                profile
+                profile,
+                globalState.marketDataMode
             );
             initialCashOutflow += pLeg.costBasis;
             if (isUnderlyingLeg(leg)) {
@@ -75,16 +86,28 @@
 
             const pos = leg.pos;
             const activeViewMode = leg._viewMode || group.viewMode || 'active';
+            const legUnderlyingPrice = pricingContext
+                ? pricingContext.resolveLegScenarioUnderlyingPrice(
+                    globalState,
+                    leg,
+                    evalUnderlyingPrice,
+                    globalState.underlyingPrice
+                )
+                : evalUnderlyingPrice;
+            const legInterestRate = pricingContext && typeof pricingContext.resolveLegInterestRate === 'function'
+                ? pricingContext.resolveLegInterestRate(globalState, leg, globalState.interestRate)
+                : globalState.interestRate;
 
             const pLeg = processLegData(
                 leg,
-                globalState.simulatedDate,
+                simulationDate,
                 globalState.ivOffset,
-                globalState.baseDate,
-                evalUnderlyingPrice,
-                globalState.interestRate,
+                quoteDate,
+                legUnderlyingPrice,
+                legInterestRate,
                 activeViewMode,
-                profile
+                profile,
+                globalState.marketDataMode
             );
             const contractMultiplier = pLeg.contractMultiplier || 100;
             const settlementUnitsPerContract = pLeg.settlementUnitsPerContract || 100;
@@ -97,11 +120,11 @@
             const simPricePerShare = computeSimulatedPrice(
                 pLeg,
                 leg,
-                evalUnderlyingPrice,
-                globalState.interestRate,
+                legUnderlyingPrice,
+                legInterestRate,
                 activeViewMode,
-                globalState.simulatedDate,
-                globalState.baseDate,
+                simulationDate,
+                quoteDate,
                 globalState.ivOffset
             );
 
@@ -165,9 +188,12 @@
         let initialCost = 0;
 
         groups.forEach(group => {
+            const liveAnchorUnderlyingPrice = pricingContext
+                ? pricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
+                : globalState.underlyingPrice;
             const evalUnderlyingPrice = (group.settleUnderlyingPrice !== null && group.settleUnderlyingPrice !== undefined)
                 ? group.settleUnderlyingPrice
-                : globalState.underlyingPrice;
+                : liveAnchorUnderlyingPrice;
             const result = calculateAmortizedCost(group, evalUnderlyingPrice, globalState);
             netShares += result.netShares;
             totalCash += result.totalCash;

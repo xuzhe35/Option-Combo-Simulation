@@ -108,6 +108,117 @@
         return next;
     }
 
+    function _toFiniteNumberOrNull(value) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function _createDefaultForwardRateSample() {
+        return {
+            id: '',
+            daysToExpiry: 30,
+            expDate: '',
+            strike: null,
+            dailyCarry: null,
+            impliedRate: null,
+            lastComputedAt: null,
+            isStale: false,
+        };
+    }
+
+    function _normalizeForwardRateSample(sample, generateId, addDays, baseDate, markStale) {
+        const next = {
+            ..._createDefaultForwardRateSample(),
+            ...(sample && typeof sample === 'object' ? sample : {}),
+        };
+
+        next.id = generateId();
+        next.daysToExpiry = Math.max(0, parseInt(next.daysToExpiry, 10) || 0);
+
+        if (typeof next.expDate !== 'string' || !next.expDate) {
+            next.expDate = next.daysToExpiry > 0 ? addDays(baseDate, next.daysToExpiry) : '';
+        }
+
+        next.strike = _toFiniteNumberOrNull(next.strike);
+        next.dailyCarry = _toFiniteNumberOrNull(next.dailyCarry);
+        next.impliedRate = _toFiniteNumberOrNull(next.impliedRate);
+        next.lastComputedAt = typeof next.lastComputedAt === 'string' && next.lastComputedAt
+            ? next.lastComputedAt
+            : null;
+
+        const hasComputedValue = next.dailyCarry !== null || next.impliedRate !== null;
+        next.isStale = markStale
+            ? hasComputedValue
+            : next.isStale === true;
+
+        return next;
+    }
+
+    function _buildArchivableForwardRateSample(sample) {
+        const normalized = {
+            ..._createDefaultForwardRateSample(),
+            ...(sample && typeof sample === 'object' ? sample : {}),
+        };
+
+        return {
+            id: normalized.id || '',
+            daysToExpiry: Math.max(0, parseInt(normalized.daysToExpiry, 10) || 0),
+            expDate: typeof normalized.expDate === 'string' ? normalized.expDate : '',
+            strike: _toFiniteNumberOrNull(normalized.strike),
+            dailyCarry: _toFiniteNumberOrNull(normalized.dailyCarry),
+            impliedRate: _toFiniteNumberOrNull(normalized.impliedRate),
+            lastComputedAt: typeof normalized.lastComputedAt === 'string' && normalized.lastComputedAt
+                ? normalized.lastComputedAt
+                : null,
+            isStale: normalized.isStale === true,
+        };
+    }
+
+    function _createDefaultFuturesPoolEntry() {
+        return {
+            id: '',
+            contractMonth: '',
+            bid: null,
+            ask: null,
+            mark: null,
+            lastQuotedAt: null,
+        };
+    }
+
+    function _normalizeFuturesPoolEntry(entry, generateId) {
+        const next = {
+            ..._createDefaultFuturesPoolEntry(),
+            ...(entry && typeof entry === 'object' ? entry : {}),
+        };
+
+        next.id = generateId();
+        next.contractMonth = String(next.contractMonth || '').replace(/\D/g, '').slice(0, 6);
+        next.bid = _toFiniteNumberOrNull(next.bid);
+        next.ask = _toFiniteNumberOrNull(next.ask);
+        next.mark = _toFiniteNumberOrNull(next.mark);
+        next.lastQuotedAt = typeof next.lastQuotedAt === 'string' && next.lastQuotedAt
+            ? next.lastQuotedAt
+            : null;
+
+        return next;
+    }
+
+    function _buildArchivableFuturesPoolEntry(entry) {
+        const normalized = {
+            ..._createDefaultFuturesPoolEntry(),
+            ...(entry && typeof entry === 'object' ? entry : {}),
+        };
+
+        return {
+            id: normalized.id || '',
+            contractMonth: String(normalized.contractMonth || '').replace(/\D/g, '').slice(0, 6),
+            bid: null,
+            ask: null,
+            mark: null,
+            lastQuotedAt: null,
+        };
+    }
+
     function _buildArchivableTradeTrigger(trigger) {
         const normalized = _normalizeTradeTrigger(trigger);
         return {
@@ -163,6 +274,10 @@
         return isPortfolioAvgCostSyncEnabled(group);
     }
 
+    function normalizeHistoricalAutoCloseAtExpiry(value) {
+        return value !== false;
+    }
+
     function groupHasDeterministicCost(group) {
         return (group.legs || []).some(leg => Math.abs(parseFloat(leg.cost) || 0) > 0);
     }
@@ -170,7 +285,7 @@
     function groupHasOpenPosition(group) {
         return (group.legs || []).some((leg) => {
             const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
-            const hasClosePrice = leg && leg.closePrice !== null && leg.closePrice !== '';
+            const hasClosePrice = leg && leg.closePrice !== null && leg.closePrice !== '' && leg.closePrice !== undefined;
             return pos > 0.0001 && !hasClosePrice;
         });
     }
@@ -197,6 +312,10 @@
             tradeTrigger: _buildArchivableTradeTrigger(group.tradeTrigger),
             closeExecution: _buildArchivableCloseExecution(group.closeExecution),
         }));
+        snapshot.forwardRateSamples = (snapshot.forwardRateSamples || [])
+            .map(sample => _buildArchivableForwardRateSample(sample));
+        snapshot.futuresPool = (snapshot.futuresPool || [])
+            .map(entry => _buildArchivableFuturesPoolEntry(entry));
         return snapshot;
     }
 
@@ -207,9 +326,21 @@
             underlyingPrice: importedState.underlyingPrice || 100,
             baseDate: importedState.baseDate || initialDateStr,
             simulatedDate: importedState.baseDate || initialDateStr,
+            marketDataMode: importedState.marketDataMode === 'historical' ? 'historical' : 'live',
+            historicalQuoteDate: importedState.marketDataMode === 'historical'
+                ? (typeof importedState.historicalQuoteDate === 'string' && importedState.historicalQuoteDate
+                    ? importedState.historicalQuoteDate
+                    : (typeof importedState.simulatedDate === 'string' ? importedState.simulatedDate : (importedState.baseDate || '')))
+                : (typeof importedState.historicalQuoteDate === 'string'
+                    ? importedState.historicalQuoteDate
+                    : ''),
+            historicalAvailableStartDate: '',
+            historicalAvailableEndDate: '',
             interestRate: importedState.interestRate !== undefined ? importedState.interestRate : 0.03,
             ivOffset: importedState.ivOffset || 0,
             allowLiveComboOrders: importedState.allowLiveComboOrders === true,
+            forwardRateSamples: [],
+            futuresPool: [],
             groups: currentState.groups.slice(),
             hedges: currentState.hedges.slice(),
         };
@@ -231,6 +362,12 @@
                 }
                 if (newLeg.currentPrice === undefined) {
                     newLeg.currentPrice = 0.00;
+                }
+                if (typeof newLeg.currentPriceSource !== 'string') {
+                    newLeg.currentPriceSource = '';
+                }
+                if (typeof newLeg.underlyingFutureId !== 'string') {
+                    newLeg.underlyingFutureId = '';
                 }
                 if (newLeg.closePrice === undefined) {
                     newLeg.closePrice = null;
@@ -255,6 +392,7 @@
                 includedInGlobal: true,
                 isCollapsed: false,
                 settleUnderlyingPrice: null,
+                historicalAutoCloseAtExpiry: true,
                 tradeTrigger: _createDefaultTradeTrigger(),
                 closeExecution: _createDefaultCloseExecution(),
                 legs: migrateLegs(importedState.legs)
@@ -267,6 +405,7 @@
                 includedInGlobal: isGroupIncludedInGlobal(g),
                 isCollapsed: g.isCollapsed === true,
                 settleUnderlyingPrice: g.settleUnderlyingPrice !== undefined ? g.settleUnderlyingPrice : null,
+                historicalAutoCloseAtExpiry: normalizeHistoricalAutoCloseAtExpiry(g.historicalAutoCloseAtExpiry),
                 tradeTrigger: _buildArchivableTradeTrigger(g.tradeTrigger),
                 closeExecution: _buildArchivableCloseExecution(g.closeExecution),
                 legs: migrateLegs(Array.isArray(g.legs) ? g.legs : [])
@@ -275,8 +414,23 @@
 
         importedGroups = importedGroups.map(group => ({
             ...group,
+            historicalAutoCloseAtExpiry: normalizeHistoricalAutoCloseAtExpiry(group.historicalAutoCloseAtExpiry),
             syncAvgCostFromPortfolio: normalizePortfolioAvgCostSync(group),
         }));
+
+        nextState.forwardRateSamples = Array.isArray(importedState.forwardRateSamples)
+            ? importedState.forwardRateSamples.map(sample => _normalizeForwardRateSample(
+                sample,
+                generateId,
+                addDays,
+                nextState.baseDate,
+                true
+            ))
+            : [];
+
+        nextState.futuresPool = Array.isArray(importedState.futuresPool)
+            ? importedState.futuresPool.map(entry => _normalizeFuturesPoolEntry(entry, generateId))
+            : [];
 
         nextState.groups.push(...importedGroups);
 
@@ -295,6 +449,7 @@
         getDefaultPortfolioAvgCostSync,
         isPortfolioAvgCostSyncEnabled,
         normalizePortfolioAvgCostSync,
+        normalizeHistoricalAutoCloseAtExpiry,
         groupHasDeterministicCost,
         resolveGroupViewModeChange,
         getRenderableGroupViewMode,

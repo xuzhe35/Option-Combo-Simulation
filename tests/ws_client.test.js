@@ -89,10 +89,13 @@ module.exports = {
             run() {
                 const state = {
                     underlyingSymbol: 'CL',
-                    underlyingContractMonth: '202605',
+                    underlyingContractMonth: '',
                     underlyingPrice: 72.5,
                     simulatedDate: '2026-03-17',
                     baseDate: '2026-03-17',
+                    futuresPool: [
+                        { id: 'future_jul', contractMonth: '202607' },
+                    ],
                     groups: [
                         {
                             id: 'group_cl',
@@ -104,6 +107,7 @@ module.exports = {
                                     pos: 1,
                                     strike: 75,
                                     expDate: '2026-04-20',
+                                    underlyingFutureId: 'future_jul',
                                 },
                             ],
                         },
@@ -159,14 +163,98 @@ module.exports = {
                 assert.equal(firstMessage.underlying.secType, 'FUT');
                 assert.equal(firstMessage.underlying.symbol, 'CL');
                 assert.equal(firstMessage.underlying.exchange, 'NYMEX');
-                assert.equal(firstMessage.underlying.contractMonth, '202605');
+                assert.equal(firstMessage.underlying.contractMonth, '202607');
                 assert.equal(firstMessage.underlying.multiplier, '1000');
                 assert.equal(firstMessage.options.length, 1);
+                assert.equal(firstMessage.futures.length, 1);
+                assert.equal(firstMessage.futures[0].contractMonth, '202607');
                 assert.equal(firstMessage.options[0].secType, 'FOP');
                 assert.equal(firstMessage.options[0].symbol, 'CL');
                 assert.equal(firstMessage.options[0].exchange, 'NYMEX');
                 assert.equal(firstMessage.options[0].tradingClass, 'ML3');
-                assert.equal(firstMessage.options[0].underlyingContractMonth, '202605');
+                assert.equal(firstMessage.options[0].underlyingContractMonth, '202607');
+            },
+        },
+        {
+            name: 'builds historical replay snapshot requests for selected SPY option legs',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2025-04-07',
+                    underlyingSymbol: 'SPY',
+                    underlyingContractMonth: '',
+                    underlyingPrice: 510,
+                    simulatedDate: '2026-03-17',
+                    baseDate: '2026-03-17',
+                    groups: [
+                        {
+                            id: 'group_spy',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_spy_call',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 510,
+                                    expDate: '2025/04/17',
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+
+                const firstMessage = JSON.parse(MockWebSocket.instance.sent[0]);
+                assert.equal(firstMessage.action, 'request_historical_snapshot');
+                assert.equal(firstMessage.replayDate, '2025-04-07');
+                assert.equal(firstMessage.underlying.symbol, 'SPY');
+                assert.equal(firstMessage.options.length, 1);
+                assert.equal(firstMessage.options[0].symbol, 'SPY');
+                assert.equal(firstMessage.options[0].expDate, '20250417');
+                assert.equal(firstMessage.stocks.length, 0);
             },
         },
         {
@@ -230,6 +318,1458 @@ module.exports = {
                 assert.equal(state.groups[0].viewMode, 'active');
                 assert.equal(state.groups[0].legs[0].cost, 9.68);
                 assert.equal(state.groups[0].legs[1].cost, 7.41);
+            },
+        },
+        {
+            name: 'marks missing historical option quotes explicitly instead of keeping them usable',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2025-04-07',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 510,
+                    simulatedDate: '2026-03-17',
+                    baseDate: '2026-03-17',
+                    groups: [
+                        {
+                            id: 'group_hist',
+                            liveData: true,
+                            viewMode: 'trial',
+                            legs: [
+                                {
+                                    id: 'leg_missing',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 510,
+                                    expDate: '2025-04-17',
+                                    currentPrice: 6.5,
+                                    currentPriceSource: 'historical',
+                                    iv: 0.24,
+                                    ivSource: 'historical',
+                                    ivManualOverride: false,
+                                    cost: 0,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let updateCalls = 0;
+                let refreshCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        currencyFormatter: new Intl.NumberFormat('en-US', {
+                            style: 'currency',
+                            currency: 'USD',
+                            minimumFractionDigits: 2,
+                        }),
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        OptionComboControlPanelUI: {
+                            refreshBoundDynamicControls() {
+                                refreshCalls += 1;
+                            },
+                        },
+                        document: {
+                            getElementById(id) {
+                                if (id === 'underlyingPrice') return { value: '' };
+                                if (id === 'underlyingPriceSlider') return { value: '' };
+                                if (id === 'underlyingPriceDisplay') return { textContent: '' };
+                                return null;
+                            },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    underlyingPrice: 512.25,
+                    underlyingQuote: { mark: 512.25, bid: 512.25, ask: 512.25 },
+                    riskFreeRate: 0.0542,
+                    options: {
+                        leg_missing: { missing: true },
+                    },
+                    historicalReplay: {
+                        requestedDate: '2025-04-07',
+                        effectiveDate: '2025-04-07',
+                        availableStartDate: '2008-01-02',
+                        availableEndDate: '2025-04-07',
+                    },
+                });
+
+                assert.equal(state.groups[0].legs[0].currentPriceSource, 'missing');
+                assert.equal(state.groups[0].legs[0].ivSource, 'missing');
+                assert.equal(state.historicalQuoteDate, '2025-04-07');
+                assert.equal(state.simulatedDate, '2026-03-17');
+                assert.equal(state.baseDate, '2025-04-07');
+                assert.equal(state.interestRate, 0.0542);
+                assert.equal(refreshCalls, 1);
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
+            name: 'attaches expiry-day underlying anchors to expired historical option legs',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2023-02-07',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 415.19,
+                    simulatedDate: '2023-02-07',
+                    baseDate: '2023-01-03',
+                    groups: [
+                        {
+                            id: 'group_hist_expired_anchor',
+                            liveData: true,
+                            viewMode: 'trial',
+                            legs: [
+                                {
+                                    id: 'leg_hist_expired_anchor',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 381,
+                                    expDate: '2023/01/27',
+                                    currentPrice: 0,
+                                    currentPriceSource: '',
+                                    iv: 0.2,
+                                    ivSource: 'manual',
+                                    ivManualOverride: false,
+                                    cost: 0,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        currencyFormatter: new Intl.NumberFormat('en-US', {
+                            style: 'currency',
+                            currency: 'USD',
+                            minimumFractionDigits: 2,
+                        }),
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        OptionComboControlPanelUI: {
+                            refreshBoundDynamicControls() {},
+                        },
+                        document: {
+                            getElementById(id) {
+                                if (id === 'underlyingPrice') return { value: '' };
+                                if (id === 'underlyingPriceSlider') return { value: '' };
+                                if (id === 'underlyingPriceDisplay') return { textContent: '' };
+                                return null;
+                            },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    underlyingPrice: 415.19,
+                    underlyingQuote: { mark: 415.19, bid: 415.19, ask: 415.19 },
+                    options: {
+                        leg_hist_expired_anchor: { missing: true },
+                    },
+                    historicalReplay: {
+                        requestedDate: '2023-02-07',
+                        effectiveDate: '2023-02-07',
+                        availableStartDate: '2008-01-02',
+                        availableEndDate: '2025-04-07',
+                        expiryUnderlyingQuotes: {
+                            '2023-01-27': {
+                                requestedDate: '2023-01-27',
+                                effectiveDate: '2023-01-27',
+                                price: 402.13,
+                                quote: { mark: 402.13 },
+                            },
+                        },
+                    },
+                });
+
+                assert.equal(state.groups[0].legs[0].historicalExpiryUnderlyingPrice, 402.13);
+                assert.equal(state.groups[0].legs[0].historicalExpiryUnderlyingDate, '2023-01-27');
+            },
+        },
+        {
+            name: 'captures base-day historical quotes as entry costs and promotes trial groups to active',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2025-04-07',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 510,
+                    simulatedDate: '2025-04-07',
+                    baseDate: '2025-04-07',
+                    groups: [
+                        {
+                            id: 'group_hist_entry',
+                            liveData: true,
+                            viewMode: 'trial',
+                            legs: [
+                                {
+                                    id: 'leg_entry',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 510,
+                                    expDate: '2025-04-17',
+                                    currentPrice: 0,
+                                    currentPriceSource: '',
+                                    iv: 0.2,
+                                    ivSource: 'manual',
+                                    ivManualOverride: false,
+                                    cost: 0,
+                                    closePrice: null,
+                                },
+                            ],
+                            closeExecution: {},
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let updateCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        currencyFormatter: new Intl.NumberFormat('en-US', {
+                            style: 'currency',
+                            currency: 'USD',
+                            minimumFractionDigits: 2,
+                        }),
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        document: {
+                            getElementById(id) {
+                                if (id === 'underlyingPrice') return { value: '' };
+                                if (id === 'underlyingPriceSlider') return { value: '' };
+                                if (id === 'underlyingPriceDisplay') return { textContent: '' };
+                                return null;
+                            },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    underlyingPrice: 512.25,
+                    underlyingQuote: { mark: 512.25, bid: 512.25, ask: 512.25 },
+                    options: {
+                        leg_entry: { mark: 6.5, bid: 6.4, ask: 6.6, iv: 0.24 },
+                    },
+                    historicalReplay: {
+                        requestedDate: '2025-04-07',
+                        effectiveDate: '2025-04-07',
+                        availableStartDate: '2008-01-02',
+                        availableEndDate: '2025-04-07',
+                    },
+                });
+
+                assert.equal(state.groups[0].legs[0].currentPrice, 6.5);
+                assert.equal(state.groups[0].legs[0].currentPriceSource, 'historical');
+                assert.equal(state.groups[0].legs[0].cost, 6.5);
+                assert.equal(state.groups[0].legs[0].costSource, 'historical_base');
+                assert.equal(state.groups[0].viewMode, 'active');
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
+            name: 'skips historical base-day cost seeding for trigger-armed trial groups',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2025-04-07',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 510,
+                    simulatedDate: '2025-04-07',
+                    baseDate: '2025-04-07',
+                    groups: [
+                        {
+                            id: 'group_hist_trigger_entry',
+                            liveData: true,
+                            viewMode: 'trial',
+                            tradeTrigger: {
+                                enabled: true,
+                                condition: 'gte',
+                                price: 600,
+                                executionMode: 'preview',
+                            },
+                            legs: [
+                                {
+                                    id: 'leg_trigger_entry',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 510,
+                                    expDate: '2025-04-17',
+                                    currentPrice: 0,
+                                    currentPriceSource: '',
+                                    iv: 0.2,
+                                    ivSource: 'manual',
+                                    ivManualOverride: false,
+                                    cost: 0,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        currencyFormatter: new Intl.NumberFormat('en-US', {
+                            style: 'currency',
+                            currency: 'USD',
+                            minimumFractionDigits: 2,
+                        }),
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        document: {
+                            getElementById(id) {
+                                if (id === 'underlyingPrice') return { value: '' };
+                                if (id === 'underlyingPriceSlider') return { value: '' };
+                                if (id === 'underlyingPriceDisplay') return { textContent: '' };
+                                return null;
+                            },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    underlyingPrice: 512.25,
+                    underlyingQuote: { mark: 512.25, bid: 512.25, ask: 512.25 },
+                    options: {
+                        leg_trigger_entry: { mark: 6.5, bid: 6.4, ask: 6.6, iv: 0.24 },
+                    },
+                    historicalReplay: {
+                        requestedDate: '2025-04-07',
+                        effectiveDate: '2025-04-07',
+                        availableStartDate: '2008-01-02',
+                        availableEndDate: '2025-04-07',
+                    },
+                });
+
+                assert.equal(state.groups[0].legs[0].currentPrice, 6.5);
+                assert.equal(state.groups[0].legs[0].cost, 0);
+                assert.equal(state.groups[0].legs[0].costSource, undefined);
+                assert.equal(state.groups[0].viewMode, 'trial');
+                assert.equal(state.groups[0].tradeTrigger.enabled, true);
+            },
+        },
+        {
+            name: 'simulates historical trigger previews using the replay-day option quote',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2025-04-10',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 500,
+                    simulatedDate: '2025-04-10',
+                    baseDate: '2025-04-07',
+                    groups: [
+                        {
+                            id: 'group_hist_preview',
+                            liveData: true,
+                            viewMode: 'trial',
+                            tradeTrigger: {
+                                enabled: true,
+                                condition: 'gte',
+                                price: 512,
+                                executionMode: 'preview',
+                            },
+                            legs: [
+                                {
+                                    id: 'leg_hist_preview',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 510,
+                                    expDate: '2025-04-17',
+                                    currentPrice: 1.25,
+                                    currentPriceSource: 'historical',
+                                    iv: 0.2,
+                                    ivSource: 'manual',
+                                    ivManualOverride: false,
+                                    cost: 0,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        currencyFormatter: new Intl.NumberFormat('en-US', {
+                            style: 'currency',
+                            currency: 'USD',
+                            minimumFractionDigits: 2,
+                        }),
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        document: {
+                            getElementById(id) {
+                                if (id === 'underlyingPrice') return { value: '' };
+                                if (id === 'underlyingPriceSlider') return { value: '' };
+                                if (id === 'underlyingPriceDisplay') return { textContent: '' };
+                                return null;
+                            },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    underlyingPrice: 512.25,
+                    underlyingQuote: { mark: 512.25, bid: 512.25, ask: 512.25 },
+                    options: {
+                        leg_hist_preview: { mark: 6.5, bid: 6.4, ask: 6.6, iv: 0.24 },
+                    },
+                    historicalReplay: {
+                        requestedDate: '2025-04-10',
+                        effectiveDate: '2025-04-10',
+                        availableStartDate: '2008-01-02',
+                        availableEndDate: '2025-04-10',
+                    },
+                });
+
+                assert.equal(state.groups[0].tradeTrigger.enabled, false);
+                assert.equal(state.groups[0].tradeTrigger.status, 'previewed');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.pricingSource, 'historical_replay');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.limitPrice, 6.5);
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.orderAction, 'BUY');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.legs[0].mark, 6.5);
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.orderId, undefined);
+            },
+        },
+        {
+            name: 'simulates historical test submits locally and cancels them from exit conditions',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2025-04-10',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 500,
+                    simulatedDate: '2025-04-10',
+                    baseDate: '2025-04-07',
+                    allowLiveComboOrders: false,
+                    groups: [
+                        {
+                            id: 'group_hist_submit',
+                            liveData: true,
+                            viewMode: 'trial',
+                            tradeTrigger: {
+                                enabled: true,
+                                condition: 'gte',
+                                price: 512,
+                                executionMode: 'test_submit',
+                                exitEnabled: true,
+                                exitCondition: 'lte',
+                                exitPrice: 510,
+                            },
+                            legs: [
+                                {
+                                    id: 'leg_hist_submit',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 510,
+                                    expDate: '2025-04-17',
+                                    currentPrice: 0,
+                                    currentPriceSource: '',
+                                    iv: 0.2,
+                                    ivSource: 'manual',
+                                    ivManualOverride: false,
+                                    cost: 0,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        currencyFormatter: new Intl.NumberFormat('en-US', {
+                            style: 'currency',
+                            currency: 'USD',
+                            minimumFractionDigits: 2,
+                        }),
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        document: {
+                            getElementById(id) {
+                                if (id === 'underlyingPrice') return { value: '' };
+                                if (id === 'underlyingPriceSlider') return { value: '' };
+                                if (id === 'underlyingPriceDisplay') return { textContent: '' };
+                                return null;
+                            },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    underlyingPrice: 512.25,
+                    underlyingQuote: { mark: 512.25, bid: 512.25, ask: 512.25 },
+                    options: {
+                        leg_hist_submit: { mark: 6.5, bid: 6.4, ask: 6.6, iv: 0.24 },
+                    },
+                    historicalReplay: {
+                        requestedDate: '2025-04-10',
+                        effectiveDate: '2025-04-10',
+                        availableStartDate: '2008-01-02',
+                        availableEndDate: '2025-04-10',
+                    },
+                });
+
+                assert.equal(state.groups[0].tradeTrigger.status, 'test_submitted');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.status, 'Submitted');
+                assert.ok(Number.isInteger(state.groups[0].tradeTrigger.lastPreview.orderId));
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.limitPrice, 6.5);
+                assert.equal(state.groups[0].legs[0].cost, 0);
+
+                state.historicalQuoteDate = '2025-04-11';
+                state.simulatedDate = '2025-04-11';
+
+                ctx.processLiveMarketData({
+                    underlyingPrice: 509,
+                    underlyingQuote: { mark: 509, bid: 509, ask: 509 },
+                    options: {
+                        leg_hist_submit: { mark: 5.1, bid: 5.0, ask: 5.2, iv: 0.23 },
+                    },
+                    historicalReplay: {
+                        requestedDate: '2025-04-11',
+                        effectiveDate: '2025-04-11',
+                        availableStartDate: '2008-01-02',
+                        availableEndDate: '2025-04-11',
+                    },
+                });
+
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.status, 'Cancelled');
+                assert.match(state.groups[0].tradeTrigger.lastPreview.statusMessage, /simulated order cancelled/i);
+                assert.equal(state.groups[0].tradeTrigger.status, 'test_submitted');
+            },
+        },
+        {
+            name: 'fills historical trigger submits immediately and promotes the group to active',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2025-04-10',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 500,
+                    simulatedDate: '2025-04-10',
+                    baseDate: '2025-04-07',
+                    allowLiveComboOrders: false,
+                    groups: [
+                        {
+                            id: 'group_hist_submit_fill',
+                            liveData: true,
+                            viewMode: 'trial',
+                            tradeTrigger: {
+                                enabled: true,
+                                condition: 'gte',
+                                price: 512,
+                                executionMode: 'submit',
+                            },
+                            legs: [
+                                {
+                                    id: 'leg_hist_submit_fill',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 510,
+                                    expDate: '2025-04-17',
+                                    currentPrice: 0,
+                                    currentPriceSource: '',
+                                    iv: 0.2,
+                                    ivSource: 'manual',
+                                    ivManualOverride: false,
+                                    cost: 0,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        currencyFormatter: new Intl.NumberFormat('en-US', {
+                            style: 'currency',
+                            currency: 'USD',
+                            minimumFractionDigits: 2,
+                        }),
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        document: {
+                            getElementById(id) {
+                                if (id === 'underlyingPrice') return { value: '' };
+                                if (id === 'underlyingPriceSlider') return { value: '' };
+                                if (id === 'underlyingPriceDisplay') return { textContent: '' };
+                                return null;
+                            },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    underlyingPrice: 512.25,
+                    underlyingQuote: { mark: 512.25, bid: 512.25, ask: 512.25 },
+                    options: {
+                        leg_hist_submit_fill: { mark: 6.5, bid: 6.4, ask: 6.6, iv: 0.24 },
+                    },
+                    historicalReplay: {
+                        requestedDate: '2025-04-10',
+                        effectiveDate: '2025-04-10',
+                        availableStartDate: '2008-01-02',
+                        availableEndDate: '2025-04-10',
+                    },
+                });
+
+                assert.equal(state.groups[0].tradeTrigger.status, 'submitted');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.status, 'Filled');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.remaining, 0);
+                assert.equal(state.groups[0].legs[0].cost, 6.5);
+                assert.equal(state.groups[0].legs[0].costSource, 'execution_report');
+                assert.equal(state.groups[0].viewMode, 'active');
+            },
+        },
+        {
+            name: 'locks historical replay entry costs on demand from the current replay prices',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2025-04-10',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 512.25,
+                    simulatedDate: '2025-04-10',
+                    baseDate: '2025-04-07',
+                    groups: [
+                        {
+                            id: 'group_hist_manual_entry',
+                            liveData: true,
+                            viewMode: 'trial',
+                            tradeTrigger: {
+                                enabled: true,
+                                condition: 'gte',
+                                price: 600,
+                                executionMode: 'preview',
+                            },
+                            legs: [
+                                {
+                                    id: 'leg_hist_manual_entry',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 510,
+                                    expDate: '2025-04-17',
+                                    currentPrice: 6.5,
+                                    currentPriceSource: 'historical',
+                                    iv: 0.24,
+                                    ivSource: 'historical',
+                                    ivManualOverride: false,
+                                    cost: 0,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let renderCalls = 0;
+                let updateCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {
+                            renderCalls += 1;
+                        },
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const didEnter = ctx.requestHistoricalReplayEntryGroup(state.groups[0]);
+
+                assert.equal(didEnter, true);
+                assert.equal(state.groups[0].legs[0].cost, 6.5);
+                assert.equal(state.groups[0].legs[0].costSource, 'historical_replay_entry');
+                assert.equal(state.groups[0].legs[0].entryReplayDate, '2025-04-10');
+                assert.equal(state.groups[0].tradeTrigger.enabled, false);
+                assert.equal(state.groups[0].viewMode, 'active');
+                assert.equal(renderCalls, 1);
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
+            name: 'settles historical close-group requests with replay prices instead of sending orders',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2025-04-10',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 512.25,
+                    simulatedDate: '2025-04-10',
+                    baseDate: '2025-04-07',
+                    groups: [
+                        {
+                            id: 'group_hist_close',
+                            name: 'Replay Close',
+                            liveData: true,
+                            viewMode: 'active',
+                            closeExecution: {
+                                executionMode: 'preview',
+                            },
+                            legs: [
+                                {
+                                    id: 'leg_close',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 510,
+                                    expDate: '2025-04-17',
+                                    currentPrice: 7.25,
+                                    currentPriceSource: 'historical',
+                                    iv: 0.24,
+                                    ivSource: 'historical',
+                                    ivManualOverride: false,
+                                    cost: 5.1,
+                                    costSource: 'historical_base',
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let updateCalls = 0;
+                let renderCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {
+                            renderCalls += 1;
+                        },
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const didSettle = ctx.requestCloseGroupComboOrder(state.groups[0]);
+
+                assert.equal(didSettle, true);
+                assert.equal(state.groups[0].legs[0].closePrice, 7.25);
+                assert.equal(state.groups[0].viewMode, 'settlement');
+                assert.equal(state.groups[0].closeExecution.status, 'submitted');
+                assert.equal(state.groups[0].closeExecution.lastPreview.status, 'Filled');
+                assert.equal(renderCalls, 1);
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
+            name: 'auto-settles expired historical legs with locked costs once replay moves past expiry',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2024-08-01',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 543.01,
+                    simulatedDate: '2024-08-01',
+                    baseDate: '2024-06-03',
+                    groups: [
+                        {
+                            id: 'group_hist_auto_expiry',
+                            liveData: true,
+                            viewMode: 'trial',
+                            legs: [
+                                {
+                                    id: 'leg_hist_auto_expiry',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 527,
+                                    expDate: '2024/07/31',
+                                    currentPrice: 27.8112,
+                                    currentPriceSource: 'historical',
+                                    iv: 0.2,
+                                    ivSource: 'historical',
+                                    ivManualOverride: false,
+                                    cost: 27.8112,
+                                    costSource: 'historical_base',
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let updateCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        currencyFormatter: new Intl.NumberFormat('en-US', {
+                            style: 'currency',
+                            currency: 'USD',
+                            minimumFractionDigits: 2,
+                        }),
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        document: {
+                            getElementById(id) {
+                                if (id === 'underlyingPrice') return { value: '' };
+                                if (id === 'underlyingPriceSlider') return { value: '' };
+                                if (id === 'underlyingPriceDisplay') return { textContent: '' };
+                                return null;
+                            },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    underlyingPrice: 543.01,
+                    underlyingQuote: { mark: 543.01, bid: 543.01, ask: 543.01 },
+                    options: {
+                        leg_hist_auto_expiry: { missing: true },
+                    },
+                    historicalReplay: {
+                        requestedDate: '2024-08-01',
+                        effectiveDate: '2024-08-01',
+                        availableStartDate: '2008-01-02',
+                        availableEndDate: '2025-04-07',
+                        expiryUnderlyingQuotes: {
+                            '2024-07-31': {
+                                requestedDate: '2024-07-31',
+                                effectiveDate: '2024-07-31',
+                                price: 551.23,
+                                quote: { mark: 551.23 },
+                            },
+                        },
+                    },
+                });
+
+                assert.equal(state.groups[0].legs[0].closePrice, 24.23);
+                assert.equal(state.groups[0].legs[0].closePriceSource, 'historical_expiry_auto');
+                assert.equal(state.groups[0].viewMode, 'settlement');
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
+            name: 'removes auto-settled expiry closes when historical auto-close is disabled',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2024-08-01',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 543.01,
+                    simulatedDate: '2024-08-01',
+                    baseDate: '2024-06-03',
+                    groups: [
+                        {
+                            id: 'group_hist_manual_expiry',
+                            liveData: true,
+                            viewMode: 'amortized',
+                            historicalAutoCloseAtExpiry: false,
+                            legs: [
+                                {
+                                    id: 'leg_hist_manual_expiry',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 527,
+                                    expDate: '2024/07/31',
+                                    currentPrice: 27.8112,
+                                    currentPriceSource: 'historical',
+                                    iv: 0.2,
+                                    ivSource: 'historical',
+                                    ivManualOverride: false,
+                                    cost: 7.35,
+                                    costSource: 'historical_replay_entry',
+                                    closePrice: 24.23,
+                                    closePriceSource: 'historical_expiry_auto',
+                                    autoSettledAtReplayDate: '2024-08-01',
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let renderCalls = 0;
+                let updateCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {
+                            renderCalls += 1;
+                        },
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const didSync = ctx.requestHistoricalReplayExpirySettlementSync(state.groups[0]);
+
+                assert.equal(didSync, true);
+                assert.equal(state.groups[0].legs[0].closePrice, null);
+                assert.equal(state.groups[0].legs[0].closePriceSource, '');
+                assert.equal(state.groups[0].legs[0].autoSettledAtReplayDate, null);
+                assert.equal(renderCalls, 1);
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
+            name: 'settles expired historical close-group legs from expiry anchor when replay date is later',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    historicalQuoteDate: '2023-02-07',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 415.19,
+                    simulatedDate: '2023-02-07',
+                    baseDate: '2023-01-03',
+                    groups: [
+                        {
+                            id: 'group_hist_close_expired',
+                            name: 'Replay Close Expired',
+                            liveData: true,
+                            viewMode: 'active',
+                            closeExecution: {
+                                executionMode: 'preview',
+                            },
+                            legs: [
+                                {
+                                    id: 'leg_close_expired',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 381,
+                                    expDate: '2023/01/27',
+                                    currentPrice: 0,
+                                    currentPriceSource: 'missing',
+                                    iv: 0.24,
+                                    ivSource: 'historical',
+                                    ivManualOverride: false,
+                                    cost: 35.3007,
+                                    costSource: 'historical_base',
+                                    closePrice: null,
+                                    historicalExpiryUnderlyingPrice: 402.13,
+                                    historicalExpiryUnderlyingDate: '2023-01-27',
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let updateCalls = 0;
+                let renderCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {
+                            renderCalls += 1;
+                        },
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const didSettle = ctx.requestCloseGroupComboOrder(state.groups[0]);
+
+                assert.equal(didSettle, true);
+                assert.equal(state.groups[0].legs[0].closePrice, 21.13);
+                assert.equal(state.groups[0].viewMode, 'settlement');
+                assert.equal(renderCalls, 1);
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
+            name: 'subscribes INDEX forward-rate samples as synthetic call-put pairs',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPX',
+                    underlyingContractMonth: '',
+                    underlyingPrice: 5800,
+                    simulatedDate: '2026-03-17',
+                    baseDate: '2026-03-17',
+                    forwardRateSamples: [
+                        {
+                            id: 'sample_30d',
+                            daysToExpiry: 30,
+                            expDate: '2026-04-16',
+                            strike: 5800,
+                        },
+                    ],
+                    groups: [],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/product_registry.js',
+                        'js/index_forward_rate.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+
+                const firstMessage = JSON.parse(MockWebSocket.instance.sent[0]);
+                assert.equal(firstMessage.action, 'subscribe');
+                assert.equal(firstMessage.underlying.secType, 'IND');
+                assert.equal(firstMessage.options.length, 2);
+                assert.equal(firstMessage.options[0].id, '__forward_rate_sample_30d_call');
+                assert.equal(firstMessage.options[1].id, '__forward_rate_sample_30d_put');
+                assert.equal(firstMessage.options[0].right, 'C');
+                assert.equal(firstMessage.options[1].right, 'P');
+                assert.equal(firstMessage.options[0].strike, 5800);
+                assert.equal(firstMessage.options[0].expDate, '20260416');
+            },
+        },
+        {
+            name: 'caches live bid ask snapshots for browser-side quote consumers',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SLV',
+                    underlyingPrice: 28,
+                    simulatedDate: '2026-03-19',
+                    baseDate: '2026-03-19',
+                    groups: [
+                        {
+                            id: 'group_slv_quotes',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_slv_call',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 61,
+                                    expDate: '2026-04-17',
+                                    iv: 0.2,
+                                    ivSource: 'manual',
+                                    ivManualOverride: false,
+                                    currentPrice: 0,
+                                    cost: 0,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [
+                        {
+                            id: 'hedge_gld',
+                            symbol: 'GLD',
+                            liveData: true,
+                            currentPrice: 0,
+                            pos: 1,
+                            cost: 0,
+                        },
+                    ],
+                };
+
+                const elements = {
+                    underlyingPrice: { value: '' },
+                    underlyingPriceSlider: { value: '' },
+                    underlyingPriceDisplay: { textContent: '' },
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/market_holidays.js',
+                        'js/date_utils.js',
+                        'js/product_registry.js',
+                        'js/pricing_core.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        currencyFormatter: { format(value) { return `$${value.toFixed(2)}`; } },
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        document: {
+                            activeElement: null,
+                            getElementById(id) { return elements[id] || null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    underlyingPrice: 28.5,
+                    underlyingQuote: { mark: 28.5, bid: 28.49, ask: 28.51 },
+                    options: {
+                        leg_slv_call: {
+                            mark: 1.23,
+                            bid: 1.20,
+                            ask: 1.26,
+                            iv: 0.31,
+                        },
+                        __forward_sample: {
+                            mark: 0.91,
+                            bid: 0.89,
+                            ask: 0.93,
+                        },
+                    },
+                    stocks: {
+                        GLD: {
+                            mark: 284.1,
+                            bid: 284.0,
+                            ask: 284.2,
+                        },
+                    },
+                });
+
+                const underlyingQuote = ctx.OptionComboWsLiveQuotes.getUnderlyingQuote();
+                assert.equal(underlyingQuote.mark, 28.5);
+                assert.equal(underlyingQuote.bid, 28.49);
+                assert.equal(underlyingQuote.ask, 28.51);
+
+                const legQuote = ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_slv_call');
+                assert.equal(legQuote.mark, 1.23);
+                assert.equal(legQuote.bid, 1.2);
+                assert.equal(legQuote.ask, 1.26);
+                assert.equal(legQuote.iv, 0.31);
+
+                const syntheticQuote = ctx.OptionComboWsLiveQuotes.getOptionQuote('__forward_sample');
+                assert.equal(syntheticQuote.mark, 0.91);
+                assert.equal(syntheticQuote.bid, 0.89);
+                assert.equal(syntheticQuote.ask, 0.93);
+
+                const stockQuote = ctx.OptionComboWsLiveQuotes.getStockQuote('GLD');
+                assert.equal(stockQuote.mark, 284.1);
+                assert.equal(stockQuote.bid, 284);
+                assert.equal(stockQuote.ask, 284.2);
+                assert.equal(state.groups[0].legs[0].currentPrice, 1.23);
+                assert.equal(state.hedges[0].currentPrice, 284.1);
+            },
+        },
+        {
+            name: 'updates futures pool quotes and bound future legs from live futures payloads',
+            run() {
+                const state = {
+                    underlyingSymbol: 'CL',
+                    underlyingPrice: 72.5,
+                    simulatedDate: '2026-03-19',
+                    baseDate: '2026-03-19',
+                    futuresPool: [
+                        { id: 'future_apr', contractMonth: '202604', bid: null, ask: null, mark: null, lastQuotedAt: null },
+                    ],
+                    groups: [
+                        {
+                            id: 'group_cl_future',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_future',
+                                    type: 'stock',
+                                    pos: 1,
+                                    currentPrice: 0,
+                                    cost: 0,
+                                    underlyingFutureId: 'future_apr',
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let refreshCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        OptionComboControlPanelUI: {
+                            refreshBoundDynamicControls() {
+                                refreshCalls += 1;
+                            },
+                        },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    futures: {
+                        future_apr: {
+                            bid: 70.00,
+                            ask: 70.20,
+                            mark: 70.10,
+                        },
+                    },
+                });
+
+                assert.equal(state.futuresPool[0].mark, 70.10);
+                assert.equal(state.groups[0].legs[0].currentPrice, 70.10);
+                assert.equal(ctx.OptionComboWsLiveQuotes.getFutureQuote('future_apr').mark, 70.10);
+                assert.equal(refreshCalls, 1);
             },
         },
         {

@@ -33,6 +33,8 @@ function loadPricingContext() {
         'js/market_holidays.js',
         'js/date_utils.js',
         'js/product_registry.js',
+        'js/index_forward_rate.js',
+        'js/pricing_context.js',
         'js/pricing_core.js',
         'js/bsm.js',
     ]);
@@ -43,6 +45,8 @@ function loadAmortizedContext() {
         'js/market_holidays.js',
         'js/date_utils.js',
         'js/product_registry.js',
+        'js/index_forward_rate.js',
+        'js/pricing_context.js',
         'js/pricing_core.js',
         'js/amortized.js',
     ]);
@@ -53,6 +57,8 @@ function loadValuationContext() {
         'js/market_holidays.js',
         'js/date_utils.js',
         'js/product_registry.js',
+        'js/index_forward_rate.js',
+        'js/pricing_context.js',
         'js/pricing_core.js',
         'js/amortized.js',
         'js/valuation.js',

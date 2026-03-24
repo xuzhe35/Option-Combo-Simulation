@@ -54,15 +54,39 @@
         return intent === 'close' ? numericPos * -1 : numericPos;
     }
 
+    function _hasResolvedClosePrice(leg) {
+        return !!(leg
+            && leg.closePrice !== null
+            && leg.closePrice !== ''
+            && leg.closePrice !== undefined);
+    }
+
+    function _shouldIncludeLegForIntent(leg, intent) {
+        const pos = parseInt(leg && leg.pos, 10) || 0;
+        if (pos === 0) {
+            return false;
+        }
+
+        if (intent === 'close' && _hasResolvedClosePrice(leg)) {
+            return false;
+        }
+
+        return true;
+    }
+
     function buildGroupOrderLegRequests(group, globalState, options) {
         const profile = _resolveUnderlyingProfile(globalState);
         const defaultUnderlyingContractMonth = _resolveDefaultUnderlyingContractMonth(globalState);
         const intent = _resolveExecutionIntent(options && options.intent);
 
         return (group.legs || [])
-            .filter(leg => (parseInt(leg.pos, 10) || 0) !== 0)
+            .filter((leg) => _shouldIncludeLegForIntent(leg, intent))
             .map((leg) => {
                 const targetPos = _resolveTargetPosition(leg.pos, intent);
+                const optionContractSpec = typeof OptionComboProductRegistry !== 'undefined'
+                    && typeof OptionComboProductRegistry.resolveOptionContractSpec === 'function'
+                    ? OptionComboProductRegistry.resolveOptionContractSpec(globalState.underlyingSymbol, leg.expDate)
+                    : null;
 
                 if (_isUnderlyingLeg(leg)) {
                     const request = {
@@ -88,17 +112,15 @@
                     type: leg.type,
                     pos: targetPos,
                     secType: profile.optionSecType || 'OPT',
-                    symbol: profile.optionSymbol || globalState.underlyingSymbol,
+                    symbol: optionContractSpec?.symbol || profile.optionSymbol || globalState.underlyingSymbol,
                     underlyingSymbol: profile.underlyingSymbol || globalState.underlyingSymbol,
                     exchange: profile.optionExchange || 'SMART',
                     underlyingExchange: profile.underlyingExchange || profile.optionExchange || 'SMART',
                     currency: profile.currency || 'USD',
                     multiplier: String(profile.optionMultiplier || 100),
                     underlyingMultiplier: String(profile.optionMultiplier || 100),
-                    tradingClass: typeof OptionComboProductRegistry !== 'undefined'
-                        && typeof OptionComboProductRegistry.resolveTradingClass === 'function'
-                        ? OptionComboProductRegistry.resolveTradingClass(globalState.underlyingSymbol, leg.expDate)
-                        : undefined,
+                    tradingClass: optionContractSpec?.tradingClass
+                        || (profile.tradingClass || undefined),
                     right: leg.type.charAt(0).toUpperCase(),
                     strike: leg.strike,
                     expDate: String(leg.expDate || '').replace(/-/g, ''),
