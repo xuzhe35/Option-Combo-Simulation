@@ -1,13 +1,16 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import signal
+import sqlite3
 import configparser
 from datetime import datetime
 from ib_async import *
 import websockets
 
+from historical_replay_service import HistoricalReplayService, normalize_replay_date
 from trade_execution.engine import ExecutionEngine
 from trade_execution.adapters.ibkr import IbkrExecutionAdapter
 
@@ -28,6 +31,9 @@ MANAGED_REPRICE_THRESHOLD_DEFAULT = config.getfloat('execution', 'managed_repric
 MANAGED_REPRICE_INTERVAL_SECONDS = config.getfloat('execution', 'managed_reprice_interval_seconds', fallback=2.0)
 MANAGED_REPRICE_MAX_UPDATES = config.getint('execution', 'managed_reprice_max_updates', fallback=12)
 MANAGED_REPRICE_TIMEOUT_SECONDS = config.getfloat('execution', 'managed_reprice_timeout_seconds', fallback=600.0)
+HISTORICAL_SQLITE_DB = os.path.abspath(
+    config.get('historical', 'sqlite_db_path', fallback=os.path.join('sqlite_spy', 'spy_options.db'))
+)
 
 if CONFIGURED_WS_HOST not in ('127.0.0.1', 'localhost'):
     logging.warning(
@@ -49,6 +55,10 @@ portfolio_avg_cost_cache = {}
 combo_order_tracking_by_order_id = {}
 combo_order_tracking_by_perm_id = {}
 option_iv_debug_last_logged = {}
+historical_replay_service = HistoricalReplayService(
+    HISTORICAL_SQLITE_DB,
+    logger=logging.getLogger('historical_replay.sqlite'),
+)
 
 SUPPORTED_LIVE_FAMILIES = {
     'ES': {
@@ -523,6 +533,12 @@ def _to_contract_month(value):
 def _to_expiry(value):
     return str(value or '').replace('-', '')
 
+def _to_strike(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 def _resolve_family_defaults(symbol):
     normalized = _normalize_symbol(symbol)
     return SUPPORTED_LIVE_FAMILIES.get(normalized)
@@ -568,6 +584,126 @@ def _resolve_weekly_fop_trading_class(symbol, expiry, current_trading_class):
     if weekday_suffix:
         return f"{base_trading_class[:-1]}{weekday_suffix}"
     return base_trading_class
+
+def _extract_contract_expiry(contract):
+    raw_value = str(getattr(contract, 'lastTradeDateOrContractMonth', '') or '').strip()
+    return raw_value[:8] if len(raw_value) >= 8 else raw_value
+
+def _filter_derivative_contract_candidates(contract_details_list, contract_request, qualified_underlying=None):
+    requested_expiry = _to_expiry(
+        (contract_request or {}).get('expDate')
+        or (contract_request or {}).get('expiry')
+        or (contract_request or {}).get('contractMonth')
+    )
+    requested_right = _normalize_symbol((contract_request or {}).get('right'))
+    requested_strike = _to_strike((contract_request or {}).get('strike'))
+    requested_multiplier = str((contract_request or {}).get('multiplier') or '')
+    requested_exchange = str((contract_request or {}).get('exchange') or '').strip().upper()
+    requested_under_con_id = getattr(qualified_underlying, 'conId', None)
+
+    matches = []
+    for detail in contract_details_list or []:
+        candidate = getattr(detail, 'contract', None)
+        if candidate is None:
+            continue
+
+        candidate_expiry = _extract_contract_expiry(candidate)
+        if requested_expiry and candidate_expiry and candidate_expiry != requested_expiry:
+            continue
+
+        candidate_right = _normalize_symbol(getattr(candidate, 'right', ''))
+        if requested_right and candidate_right and candidate_right != requested_right:
+            continue
+
+        candidate_strike = _to_strike(getattr(candidate, 'strike', None))
+        if requested_strike is not None and candidate_strike is not None and abs(candidate_strike - requested_strike) > 0.000001:
+            continue
+
+        candidate_under_con_id = getattr(candidate, 'underConId', None)
+        if requested_under_con_id and candidate_under_con_id and candidate_under_con_id != requested_under_con_id:
+            continue
+
+        score = 0
+        if requested_under_con_id and candidate_under_con_id == requested_under_con_id:
+            score += 100
+        if requested_exchange and str(getattr(candidate, 'exchange', '') or '').strip().upper() == requested_exchange:
+            score += 10
+        if requested_multiplier and str(getattr(candidate, 'multiplier', '') or '') == requested_multiplier:
+            score += 5
+        if getattr(candidate, 'tradingClass', ''):
+            score += 1
+
+        matches.append((score, candidate))
+
+    matches.sort(key=lambda item: item[0], reverse=True)
+    return [candidate for _, candidate in matches]
+
+async def _fallback_qualify_derivative_contract(contract, contract_request=None, qualified_underlying=None):
+    if not isinstance(contract_request, dict):
+        return None
+
+    sec_type = _normalize_symbol(contract_request.get('secType') or contract_request.get('sec_type'))
+    if sec_type not in ('OPT', 'FOP'):
+        return None
+
+    exchange = contract_request.get('exchange') or getattr(contract, 'exchange', '') or ''
+    currency = contract_request.get('currency') or getattr(contract, 'currency', '') or 'USD'
+    multiplier = str(contract_request.get('multiplier') or getattr(contract, 'multiplier', '') or '')
+    expiry = _to_expiry(contract_request.get('expDate') or contract_request.get('expiry') or getattr(contract, 'lastTradeDateOrContractMonth', ''))
+    strike = _to_strike(contract_request.get('strike') or getattr(contract, 'strike', None))
+    right = _normalize_symbol(contract_request.get('right') or getattr(contract, 'right', ''))
+    defaults = _resolve_family_defaults(contract_request.get('symbol') or contract_request.get('underlyingSymbol') or getattr(contract, 'symbol', '')) or {}
+
+    symbol_candidates = []
+    for candidate_symbol in (
+        contract_request.get('symbol'),
+        contract_request.get('underlyingSymbol'),
+        defaults.get('option_symbol'),
+        defaults.get('underlying_symbol'),
+        getattr(contract, 'symbol', ''),
+    ):
+        normalized_candidate = _normalize_symbol(candidate_symbol)
+        if normalized_candidate and normalized_candidate not in symbol_candidates:
+            symbol_candidates.append(normalized_candidate)
+
+    for candidate_symbol in symbol_candidates:
+        probe = Contract(
+            secType=sec_type,
+            symbol=candidate_symbol,
+            lastTradeDateOrContractMonth=expiry,
+            strike=float(strike) if strike is not None else 0.0,
+            right=right,
+            exchange=exchange,
+            currency=currency,
+            multiplier=multiplier,
+        )
+        if qualified_underlying is not None and getattr(qualified_underlying, 'conId', None):
+            probe.underConId = qualified_underlying.conId
+
+        try:
+            contract_details = await ib.reqContractDetailsAsync(probe)
+        except Exception as exc:
+            logging.warning(
+                f"FOP fallback contract-details lookup failed for {_describe_contract_request(contract_request)} "
+                f"using symbol {candidate_symbol}: {exc}"
+            )
+            continue
+
+        filtered_candidates = _filter_derivative_contract_candidates(
+            contract_details,
+            contract_request,
+            qualified_underlying=qualified_underlying,
+        )
+        if filtered_candidates:
+            selected = filtered_candidates[0]
+            logging.info(
+                f"Qualified {_describe_contract_request(contract_request)} using contract-details fallback "
+                f"symbol={selected.symbol} tradingClass={getattr(selected, 'tradingClass', '') or '<blank>'} "
+                f"expiry={_extract_contract_expiry(selected)}"
+            )
+            return selected
+
+    return None
 
 async def _qualify_underlying_future(symbol, contract_month, exchange, currency, multiplier):
     cache_key = (
@@ -646,6 +782,7 @@ def _build_contract_from_request(contract_data):
 async def _qualify_one(contract, contract_request=None):
     sec_type = ''
     underlying_contract_month = ''
+    qualified_underlying = None
     if isinstance(contract_request, dict):
         sec_type = _normalize_symbol(contract_request.get('secType') or contract_request.get('sec_type'))
         if sec_type == 'FOP':
@@ -716,6 +853,14 @@ async def _qualify_one(contract, contract_request=None):
                 f"without tradingClass {original_trading_class}"
             )
     if not results or results[0] is None:
+        fallback_contract = await _fallback_qualify_derivative_contract(
+            contract,
+            contract_request=contract_request,
+            qualified_underlying=qualified_underlying,
+        )
+        if fallback_contract is not None:
+            return fallback_contract
+    if not results or results[0] is None:
         return None
     return results[0]
 
@@ -764,6 +909,45 @@ def _extract_option_mark(ticker):
     if fallback == fallback and fallback > 0:
         return round(fallback, 4)
     return None
+
+
+def _sanitize_quote_value(raw_value):
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+    if value != value or value <= 0:
+        return None
+    return round(value, 4)
+
+
+def _extract_quote_snapshot(ticker, sec_type=''):
+    normalized_sec_type = _normalize_symbol(sec_type)
+    bid = _sanitize_quote_value(getattr(ticker, 'bid', None))
+    ask = _sanitize_quote_value(getattr(ticker, 'ask', None))
+
+    if normalized_sec_type in ('OPT', 'FOP'):
+        mark = _extract_option_mark(ticker)
+    else:
+        market_price = _extract_market_price(ticker)
+        mark = round(market_price, 4) if market_price is not None else None
+
+    if mark is None and bid is not None and ask is not None:
+        mark = round((bid + ask) / 2, 4)
+    if mark is None:
+        return None
+
+    if bid is None:
+        bid = mark
+    if ask is None:
+        ask = mark
+
+    return {
+        'bid': bid,
+        'ask': ask,
+        'mark': round(mark, 4),
+    }
 
 
 def _extract_option_iv(ticker):
@@ -831,7 +1015,9 @@ def on_pending_tickers(tickers):
             
         payload = {
             "underlyingPrice": None,
+            "underlyingQuote": None,
             "options": {},
+            "futures": {},
             "stocks": {}
         }
         
@@ -839,9 +1025,11 @@ def on_pending_tickers(tickers):
         
         if 'underlying' in subs:
             ticker = subs['underlying']
-            price = _extract_market_price(ticker)
-            if price is not None:
-                payload["underlyingPrice"] = price
+            sec_type = getattr(getattr(ticker, 'contract', None), 'secType', '')
+            quote = _extract_quote_snapshot(ticker, sec_type)
+            if quote is not None:
+                payload["underlyingPrice"] = quote["mark"]
+                payload["underlyingQuote"] = quote
                 has_data = True
 
         for sub_id, ticker in subs.items():
@@ -851,34 +1039,23 @@ def on_pending_tickers(tickers):
             elif sub_id.startswith('stock_'):
                 # --- Stock / ETF hedge ---
                 stock_sym = sub_id.replace('stock_', '')
-                price = _extract_market_price(ticker)
-                if price is not None:
-                    payload["stocks"][stock_sym] = {
-                        "mark": price
-                    }
+                quote = _extract_quote_snapshot(ticker, 'STK')
+                if quote is not None:
+                    payload["stocks"][stock_sym] = quote
+                    has_data = True
+
+            elif sub_id.startswith('future_'):
+                future_id = sub_id.replace('future_', '')
+                quote = _extract_quote_snapshot(ticker, 'FUT')
+                if quote is not None:
+                    payload["futures"][future_id] = quote
                     has_data = True
 
             else:
                 # --- Option leg ---
-                # Use bid/ask midpoint ("mark") instead of marketPrice() which returns
-                # last trade price — that can be stale for illiquid options.
-                # TWS's "mark" column = (bid + ask) / 2, so we match that here.
-                bid = ticker.bid
-                ask = ticker.ask
-                if bid and ask and bid == bid and ask == ask and bid > 0 and ask > 0:
-                    price = round((bid + ask) / 2, 4)
-                else:
-                    # Fallback chain for illiquid / deep OTM options:
-                    # 1. Try IB's model-computed theoretical price (from Generic Tick 106)
-                    # 2. Fall back to marketPrice() (last trade — may be stale)
-                    price = None
-                    if hasattr(ticker, 'modelGreeks') and ticker.modelGreeks:
-                        opt_price = getattr(ticker.modelGreeks, 'optPrice', None)
-                        if opt_price is not None and opt_price == opt_price and opt_price > 0:
-                            price = round(opt_price, 4)
-                    if price is None:
-                        price = ticker.marketPrice()
-                
+                sec_type = getattr(getattr(ticker, 'contract', None), 'secType', 'OPT')
+                quote = _extract_quote_snapshot(ticker, sec_type)
+
                 # Extract IV: prefer modelGreeks.impliedVol (from Generic Tick 106),
                 # fall back to ticker.impliedVolatility if available.
                 # Both can be NaN, so filter explicitly.
@@ -894,12 +1071,10 @@ def on_pending_tickers(tickers):
                 if iv is None:
                     iv = _extract_option_iv(ticker)
                 _log_option_iv_debug_if_needed(sub_id, ticker, iv)
-                
-                if price == price and price > 0:
-                    payload["options"][sub_id] = {
-                        "mark": price
-                    }
-                    
+
+                if quote is not None:
+                    payload["options"][sub_id] = quote
+
                     if iv and iv == iv and iv > 0: # Check for NaN
                         payload["options"][sub_id]["iv"] = iv
                     has_data = True
@@ -941,6 +1116,145 @@ def unsubscribe_client_safely(ws):
     client_subscriptions[ws] = {}
 
 
+def _coerce_positive_int(value, default_value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default_value
+    return parsed if parsed > 0 else default_value
+
+
+def _normalize_bool(value, default_value=True):
+    if value is None:
+        return default_value
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ('1', 'true', 'yes', 'y', 'on'):
+        return True
+    if text in ('0', 'false', 'no', 'n', 'off'):
+        return False
+    return default_value
+
+
+def _serialize_historical_bar_time(raw_value):
+    if raw_value is None:
+        return ''
+    if hasattr(raw_value, 'date'):
+        try:
+            return raw_value.date().isoformat()
+        except Exception:
+            pass
+
+    text = str(raw_value).strip()
+    if not text:
+        return ''
+
+    normalized = text.replace('/', '-')
+    for fmt in ('%Y-%m-%d', '%Y%m%d', '%Y-%m-%d %H:%M:%S', '%Y%m%d %H:%M:%S'):
+        try:
+            parsed = datetime.strptime(normalized, fmt)
+            return parsed.date().isoformat()
+        except ValueError:
+            continue
+    return normalized
+
+
+def _serialize_historical_bar(bar):
+    try:
+        open_value = float(getattr(bar, 'open', None))
+        high_value = float(getattr(bar, 'high', None))
+        low_value = float(getattr(bar, 'low', None))
+        close_value = float(getattr(bar, 'close', None))
+    except (TypeError, ValueError):
+        return None
+
+    time_value = _serialize_historical_bar_time(getattr(bar, 'date', None))
+    if not time_value:
+        return None
+
+    volume_raw = getattr(bar, 'volume', None)
+    try:
+        volume_value = int(volume_raw) if volume_raw is not None else None
+    except (TypeError, ValueError):
+        volume_value = None
+
+    return {
+        'time': time_value,
+        'open': open_value,
+        'high': high_value,
+        'low': low_value,
+        'close': close_value,
+        'volume': volume_value,
+    }
+
+
+async def _request_ib_historical_bars(
+    underlying_request,
+    *,
+    bar_size='1 day',
+    duration_str='2 Y',
+    use_rth=True,
+    limit=260,
+):
+    if not ib.isConnected():
+        raise RuntimeError('IB is not connected.')
+
+    contract = _build_contract_from_request(underlying_request)
+    qualified_underlying = await _qualify_one(contract, underlying_request)
+    if qualified_underlying is None:
+        raise RuntimeError(
+            f"Failed to qualify underlying {_describe_contract_request(underlying_request)}"
+        )
+
+    sec_type = _normalize_symbol(getattr(qualified_underlying, 'secType', ''))
+    what_to_show = 'MIDPOINT' if sec_type in ('IND', 'CASH') else 'TRADES'
+
+    request_historical = getattr(ib, 'reqHistoricalDataAsync', None)
+    if not callable(request_historical):
+        raise RuntimeError('The current ib_async build does not expose reqHistoricalDataAsync.')
+
+    raw_bars = await request_historical(
+        qualified_underlying,
+        endDateTime='',
+        durationStr=duration_str,
+        barSizeSetting=bar_size,
+        whatToShow=what_to_show,
+        useRTH=use_rth,
+        formatDate=1,
+        keepUpToDate=False,
+    )
+
+    serialized_bars = []
+    for raw_bar in raw_bars or []:
+        serialized_bar = _serialize_historical_bar(raw_bar)
+        if serialized_bar is not None:
+            serialized_bars.append(serialized_bar)
+
+    if limit and len(serialized_bars) > limit:
+        serialized_bars = serialized_bars[-limit:]
+
+    if not serialized_bars:
+        raise RuntimeError(
+            f"IB returned no historical bars for {_describe_contract_request(underlying_request)}."
+        )
+
+    if isinstance(underlying_request, dict):
+        requested_symbol = underlying_request.get('symbol')
+    else:
+        requested_symbol = underlying_request
+
+    return {
+        'action': 'historical_bars_response',
+        'symbol': _normalize_symbol(getattr(qualified_underlying, 'symbol', '') or requested_symbol),
+        'barSize': bar_size,
+        'durationStr': duration_str,
+        'dataSource': 'ibkr',
+        'useRTH': use_rth,
+        'bars': serialized_bars,
+    }
+
+
 def _purge_combo_order_tracking_for_websocket(ws):
     stale_order_ids = [
         order_id for order_id, tracking in combo_order_tracking_by_order_id.items()
@@ -966,17 +1280,60 @@ async def handle_ws_client(websocket):
     try:
         async for message in websocket:
             data = json.loads(message)
-            
-            if data.get('action') == 'subscribe':
+
+            if data.get('action') == 'request_historical_snapshot':
                 raw_underlying = data.get('underlying')
                 options_data = data.get('options', [])
+                requested_date = normalize_replay_date(data.get('replayDate'))
+                underlying_request = _build_underlying_request(raw_underlying, options_data)
+
+                logging.info(
+                    f"Received historical snapshot request from {client_ip} "
+                    f"for date {requested_date or '<latest>'}, "
+                    f"underlying {_describe_contract_request(underlying_request)}, "
+                    f"{len(options_data)} options"
+                )
+
+                unsubscribe_client_safely(websocket)
+
+                try:
+                    payload = historical_replay_service.build_snapshot_payload(
+                        requested_date,
+                        underlying_request if isinstance(underlying_request, dict) else {},
+                        options_data,
+                    )
+                except (sqlite3.Error, ValueError) as exc:
+                    logging.exception("Historical replay snapshot failed")
+                    await send_message_safe(websocket, json.dumps({
+                        "action": "historical_replay_error",
+                        "message": str(exc),
+                    }))
+                    continue
+
+                if payload is None:
+                    await send_message_safe(websocket, json.dumps({
+                        "action": "historical_replay_error",
+                        "message": (
+                            f"No underlying historical quote was found for "
+                            f"{_describe_contract_request(underlying_request)} "
+                            f"on {requested_date or 'the latest available date'}."
+                        ),
+                    }))
+                    continue
+
+                await send_message_safe(websocket, json.dumps(payload))
+
+            elif data.get('action') == 'subscribe':
+                raw_underlying = data.get('underlying')
+                options_data = data.get('options', [])
+                futures_data = data.get('futures', [])
                 stocks_data = data.get('stocks', [])
                 underlying_request = _build_underlying_request(raw_underlying, options_data)
 
                 logging.info(
                     f"Received subscription request from {client_ip} "
                     f"for underlying {_describe_contract_request(underlying_request)}, "
-                    f"{len(options_data)} options, and {len(stocks_data)} stocks"
+                    f"{len(options_data)} options, {len(futures_data)} futures, and {len(stocks_data)} stocks"
                 )
 
                 try:
@@ -1017,6 +1374,26 @@ async def handle_ws_client(websocket):
                     opt_ticker = ib.reqMktData(qualified_option, '106', False, False)
                     client_subscriptions[websocket][leg_id] = opt_ticker
 
+                # Process explicitly subscribed futures.
+                for future_req in futures_data:
+                    future_id = future_req.get('id')
+                    if not future_id:
+                        continue
+
+                    try:
+                        future_contract = _build_contract_from_request(future_req)
+                    except Exception as e:
+                        logging.error(f"Invalid future request {future_req!r} ({e})")
+                        continue
+
+                    qualified_future = await _qualify_one(future_contract, future_req)
+                    if qualified_future is None:
+                        logging.error(f"Failed to qualify future subscription {future_id}: {_describe_contract_request(future_req)}")
+                        continue
+
+                    future_ticker = ib.reqMktData(qualified_future, '', False, False)
+                    client_subscriptions[websocket][f"future_{future_id}"] = future_ticker
+
                 # Process stock hedges.
                 for stock_sym in stocks_data:
                     stock_contract = Stock(stock_sym, 'SMART', 'USD')
@@ -1055,14 +1432,77 @@ async def handle_ws_client(websocket):
                     ticker = ib.reqMktData(qualified_underlying, '', False, False)
                     # Wait momentarily for IB to populate a snapshot-like first tick.
                     await asyncio.sleep(0.5)
-                    price = _extract_market_price(ticker)
+                    quote = _extract_quote_snapshot(ticker, getattr(qualified_underlying, 'secType', ''))
 
-                    if price is not None:
+                    if quote is not None:
                         payload = {
-                            "underlyingPrice": price,
+                            "underlyingPrice": quote["mark"],
+                            "underlyingQuote": quote,
                             "options": {}
                         }
                         await send_message_safe(websocket, json.dumps(payload))
+
+            elif data.get('action') == 'request_historical_bars':
+                raw_underlying = data.get('underlying')
+                options_data = data.get('options', [])
+                underlying_request = _build_underlying_request(raw_underlying, options_data)
+                bar_size = str(data.get('barSize') or '1 day').strip() or '1 day'
+                duration_str = str(data.get('durationStr') or '2 Y').strip() or '2 Y'
+                use_rth = _normalize_bool(data.get('useRTH'), True)
+                limit = _coerce_positive_int(data.get('limit'), 260)
+                request_id = str(data.get('requestId') or '').strip()
+
+                logging.info(
+                    f"Received historical bars request from {client_ip} "
+                    f"for {_describe_contract_request(underlying_request)} "
+                    f"barSize={bar_size} duration={duration_str} useRTH={use_rth} limit={limit}"
+                )
+
+                payload = None
+                ib_error_message = ''
+                try:
+                    payload = await _request_ib_historical_bars(
+                        underlying_request,
+                        bar_size=bar_size,
+                        duration_str=duration_str,
+                        use_rth=use_rth,
+                        limit=limit,
+                    )
+                except Exception as exc:
+                    ib_error_message = str(exc)
+                    logging.warning(
+                        "Historical bars request via IB failed for %s: %s",
+                        _describe_contract_request(underlying_request),
+                        exc,
+                    )
+
+                if payload is None and bar_size == '1 day':
+                    fallback_symbol = _normalize_symbol(
+                        (underlying_request or {}).get('symbol')
+                        if isinstance(underlying_request, dict)
+                        else underlying_request
+                    )
+                    payload = historical_replay_service.build_underlying_daily_bars_payload(
+                        fallback_symbol,
+                        limit=limit,
+                    )
+                    if payload is not None:
+                        payload['fallbackReason'] = ib_error_message or 'IB historical bars unavailable.'
+
+                if payload is None:
+                    await send_message_safe(websocket, json.dumps({
+                        'action': 'historical_bars_error',
+                        'requestId': request_id,
+                        'message': ib_error_message or (
+                            f"No historical bars were available for "
+                            f"{_describe_contract_request(underlying_request)}."
+                        ),
+                    }))
+                    continue
+
+                if request_id:
+                    payload['requestId'] = request_id
+                await send_message_safe(websocket, json.dumps(payload))
 
             elif data.get('action') == 'request_portfolio_avg_cost_snapshot':
                 logging.info(f"Received portfolio avg cost snapshot request from {client_ip}")
@@ -1090,12 +1530,15 @@ async def handle_ws_client(websocket):
         client_subscriptions.pop(websocket, None)
 
 async def main():
+    ib_connect_task = None
     try:
-        # Attempt IB connection (one connection for the lifetime of this process)
-        await connect_ib()
-
         # Register the tick callback
         ib.pendingTickersEvent += on_pending_tickers
+
+        # Start IB connection in the background so historical replay can work
+        # even when TWS/Gateway is not running.
+        ib_connect_task = asyncio.create_task(connect_ib())
+        logging.info("Started background IB connection task.")
 
         # Start the WebSocket server
         logging.info(f"Starting WebSocket server on ws://{WS_HOST}:{WS_PORT}")
@@ -1110,10 +1553,12 @@ async def main():
             return
 
         async with ws_server:
-            # Keep the event loop running forever, yielding to ib_async's network operations
+            # Keep the event loop running forever, yielding to ib_async's network operations.
             while True:
                 await asyncio.sleep(1)
     finally:
+        if ib_connect_task and not ib_connect_task.done():
+            ib_connect_task.cancel()
         # Guaranteed cleanup: runs on Ctrl+C, SIGTERM, or any unhandled exception
         if ib.isConnected():
             logging.info("Disconnecting from IB...")

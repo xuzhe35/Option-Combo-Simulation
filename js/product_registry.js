@@ -47,7 +47,7 @@
             underlyingLegMultiplier: 50,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
-            pricingModel: 'futures-option-pending',
+            pricingModel: 'black76',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -66,7 +66,7 @@
             underlyingLegMultiplier: 20,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
-            pricingModel: 'futures-option-pending',
+            pricingModel: 'black76',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -85,7 +85,7 @@
             underlyingLegMultiplier: 1000,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
-            pricingModel: 'futures-option-pending',
+            pricingModel: 'black76',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -104,9 +104,9 @@
             underlyingLegMultiplier: 100,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
-            pricingModel: 'futures-option-pending',
+            pricingModel: 'black76',
             supportsAmortizedMode: false,
-            supportsLegacyLiveData: false,
+            supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
             deliverableUnitSingular: 'futures contract',
             deliverableUnitPlural: 'futures contracts',
@@ -123,9 +123,9 @@
             underlyingLegMultiplier: 5000,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
-            pricingModel: 'futures-option-pending',
+            pricingModel: 'black76',
             supportsAmortizedMode: false,
-            supportsLegacyLiveData: false,
+            supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
             deliverableUnitSingular: 'futures contract',
             deliverableUnitPlural: 'futures contracts',
@@ -142,9 +142,9 @@
             underlyingLegMultiplier: 25000,
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
-            pricingModel: 'futures-option-pending',
+            pricingModel: 'black76',
             supportsAmortizedMode: false,
-            supportsLegacyLiveData: false,
+            supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
             deliverableUnitSingular: 'futures contract',
             deliverableUnitPlural: 'futures contracts',
@@ -162,7 +162,7 @@
             optionMultiplier: 100,
             settlementUnitsPerContract: 0,
             settlementKind: 'cash-settled',
-            pricingModel: 'bsm-spot',
+            pricingModel: 'black76',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: false,
@@ -184,7 +184,7 @@
             optionMultiplier: 100,
             settlementUnitsPerContract: 0,
             settlementKind: 'cash-settled',
-            pricingModel: 'bsm-spot',
+            pricingModel: 'black76',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: false,
@@ -263,7 +263,8 @@
     }
 
     function _parseIsoDateParts(dateText) {
-        const match = String(dateText || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        const normalized = String(dateText || '').trim().replace(/\//g, '-');
+        const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
         if (!match) return null;
         return {
             year: parseInt(match[1], 10),
@@ -272,8 +273,44 @@
         };
     }
 
+    function _formatUtcDate(date) {
+        return date.toISOString().slice(0, 10);
+    }
+
+    function _addUtcDays(date, days) {
+        return new Date(Date.UTC(
+            date.getUTCFullYear(),
+            date.getUTCMonth(),
+            date.getUTCDate() + days
+        ));
+    }
+
+    function _isTradingDate(dateText) {
+        if (typeof globalScope.OptionComboDateUtils !== 'undefined'
+            && typeof globalScope.OptionComboDateUtils.isTradingDay === 'function') {
+            return globalScope.OptionComboDateUtils.isTradingDay(dateText);
+        }
+
+        if (typeof globalScope.isTradingDay === 'function') {
+            return globalScope.isTradingDay(dateText);
+        }
+
+        const parts = _parseIsoDateParts(dateText);
+        if (!parts) return false;
+        const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+        const weekday = date.getUTCDay();
+        return weekday !== 0 && weekday !== 6;
+    }
+
     function _toContractMonthValue(year, month) {
         return `${year}${String(month).padStart(2, '0')}`;
+    }
+
+    function _shiftContractMonth(year, month, deltaMonths) {
+        const zeroIndexed = (year * 12) + (month - 1) + deltaMonths;
+        const nextYear = Math.floor(zeroIndexed / 12);
+        const nextMonth = (zeroIndexed % 12) + 1;
+        return _toContractMonthValue(nextYear, nextMonth);
     }
 
     function _getThirdFridayUtc(year, month) {
@@ -282,6 +319,22 @@
         const daysUntilFriday = (5 - firstWeekday + 7) % 7;
         const thirdFridayDay = 1 + daysUntilFriday + 14;
         return new Date(Date.UTC(year, month - 1, thirdFridayDay));
+    }
+
+    function _getPreviousTradingDayUtc(date) {
+        let cursor = _addUtcDays(date, -1);
+        while (!_isTradingDate(_formatUtcDate(cursor))) {
+            cursor = _addUtcDays(cursor, -1);
+        }
+        return cursor;
+    }
+
+    function _getSpxStandardMonthlyLastTradingDate(year, month) {
+        let settlementDate = _getThirdFridayUtc(year, month);
+        while (!_isTradingDate(_formatUtcDate(settlementDate))) {
+            settlementDate = _addUtcDays(settlementDate, -1);
+        }
+        return _formatUtcDate(_getPreviousTradingDayUtc(settlementDate));
     }
 
     function resolveDefaultUnderlyingContractMonth(symbol, referenceDate) {
@@ -309,7 +362,11 @@
             return _toContractMonthValue(parts.year + 1, 3);
         }
 
-        return _toContractMonthValue(parts.year, parts.month);
+        if (profile.family === 'CL') {
+            return _shiftContractMonth(parts.year, parts.month, parts.day > 20 ? 2 : 1);
+        }
+
+        return _shiftContractMonth(parts.year, parts.month, 1);
     }
 
     function _getIsoWeekday(dateText) {
@@ -334,7 +391,33 @@
             }
         }
 
+        if (profile.family === 'SPX') {
+            const parts = _parseIsoDateParts(expDate);
+            if (parts) {
+                const standardMonthlyLastTradingDate = _getSpxStandardMonthlyLastTradingDate(parts.year, parts.month);
+                if (standardMonthlyLastTradingDate === `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`) {
+                    return 'SPX';
+                }
+            }
+        }
+
         return defaultTradingClass;
+    }
+
+    function resolveOptionSymbol(symbol, expDate) {
+        const profile = resolveUnderlyingProfile(symbol);
+        if (profile.family === 'SPX') {
+            return resolveTradingClass(symbol, expDate) === 'SPX' ? 'SPX' : 'SPXW';
+        }
+        return profile.optionSymbol || profile.enteredSymbol || null;
+    }
+
+    function resolveOptionContractSpec(symbol, expDate) {
+        const profile = resolveUnderlyingProfile(symbol);
+        return {
+            symbol: resolveOptionSymbol(symbol, expDate) || profile.optionSymbol || profile.enteredSymbol || null,
+            tradingClass: resolveTradingClass(symbol, expDate) || profile.tradingClass || null,
+        };
     }
 
     function supportsAmortizedMode(symbol) {
@@ -347,6 +430,25 @@
 
     function supportsUnderlyingLegs(symbol) {
         return resolveUnderlyingProfile(symbol).supportsUnderlyingLegs !== false;
+    }
+
+    function resolvePricingInputMode(symbol) {
+        const profile = resolveUnderlyingProfile(symbol);
+        if (profile.optionSecType === 'FOP') {
+            return 'FOP';
+        }
+        if (profile.underlyingSecType === 'IND') {
+            return 'INDEX';
+        }
+        return 'STK';
+    }
+
+    function usesForwardRateSamples(symbol) {
+        return resolvePricingInputMode(symbol) === 'INDEX';
+    }
+
+    function usesFuturesPool(symbol) {
+        return resolvePricingInputMode(symbol) === 'FOP';
     }
 
     function getUnderlyingLegLabel(symbol) {
@@ -381,6 +483,8 @@
     const api = {
         normalizeSymbol,
         resolveUnderlyingProfile,
+        resolveOptionSymbol,
+        resolveOptionContractSpec,
         resolveTradingClass,
         resolveDefaultUnderlyingContractMonth,
         normalizeLegType,
@@ -392,6 +496,9 @@
         supportsAmortizedMode,
         supportsLegacyLiveData,
         supportsUnderlyingLegs,
+        resolvePricingInputMode,
+        usesForwardRateSamples,
+        usesFuturesPool,
         getUnderlyingLegLabel,
         getUnderlyingLegPriceTitle,
         getDeliverableLabel,

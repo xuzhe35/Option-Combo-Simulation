@@ -19,6 +19,58 @@ function _isGroupIncludedInGlobal(group) {
     return group.includedInGlobal !== false;
 }
 
+function _getChartAnchorPrice() {
+    if (typeof OptionComboPricingContext !== 'undefined'
+        && typeof OptionComboPricingContext.resolveAnchorUnderlyingPrice === 'function') {
+        return OptionComboPricingContext.resolveAnchorUnderlyingPrice(state, state.underlyingPrice);
+    }
+    return state.underlyingPrice;
+}
+
+function _getChartAnchorDisplayInfo() {
+    if (typeof OptionComboPricingContext !== 'undefined'
+        && typeof OptionComboPricingContext.resolveAnchorDisplayInfo === 'function') {
+        return OptionComboPricingContext.resolveAnchorDisplayInfo(state, state.underlyingPrice);
+    }
+
+    return {
+        pricingMode: 'STK',
+        isFutureAnchor: false,
+        price: _getChartAnchorPrice(),
+        title: 'Current Underlying',
+        shortLabel: state.underlyingSymbol || 'Underlying',
+        lineLabel: 'Current',
+        displayText: `Current Underlying: ${state.underlyingSymbol || 'Underlying'} @ $${_getChartAnchorPrice().toFixed(2)}`,
+        detailText: 'Percent labels are measured from the current underlying price.',
+    };
+}
+
+function _renderAnchorNote(element, anchorInfo) {
+    if (!element) return;
+
+    if (!anchorInfo || anchorInfo.isFutureAnchor !== true) {
+        element.textContent = '';
+        element.style.display = 'none';
+        return;
+    }
+
+    element.textContent = `${anchorInfo.displayText}. ${anchorInfo.detailText}`;
+    element.style.display = 'block';
+}
+
+function _refreshChartAnchorNotes(card) {
+    const anchorInfo = _getChartAnchorDisplayInfo();
+    _renderAnchorNote(card && typeof card.querySelector === 'function'
+        ? card.querySelector('.chart-anchor-note')
+        : null, anchorInfo);
+    _renderAnchorNote(
+        typeof document !== 'undefined' && typeof document.querySelector === 'function'
+            ? document.querySelector('.global-chart-anchor-note')
+            : null,
+        anchorInfo
+    );
+}
+
 function toggleChart(btn) {
     const card = btn.closest('.group-card');
     const chartContainer = card.querySelector('.chart-container');
@@ -57,9 +109,10 @@ function setChartRangeMode(btn, mode) {
         customInputsContainer.style.opacity = '1';
         minInput.disabled = false;
         maxInput.disabled = false;
+        const anchorPrice = _getChartAnchorPrice();
         // Seed with current values if empty
-        if (!minInput.value) minInput.value = (state.underlyingPrice * 0.9).toFixed(0);
-        if (!maxInput.value) maxInput.value = (state.underlyingPrice * 1.1).toFixed(0);
+        if (!minInput.value) minInput.value = (anchorPrice * 0.9).toFixed(0);
+        if (!maxInput.value) maxInput.value = (anchorPrice * 1.1).toFixed(0);
     } else {
         customInputsContainer.style.opacity = '0.5';
         minInput.disabled = true;
@@ -88,21 +141,24 @@ function drawGroupChart(card, group) {
     let minS, maxS;
 
     if (mode === 'custom') {
-        minS = parseFloat(card.querySelector('.chart-min-input').value) || (state.underlyingPrice * 0.9);
-        maxS = parseFloat(card.querySelector('.chart-max-input').value) || (state.underlyingPrice * 1.1);
+        const anchorPrice = _getChartAnchorPrice();
+        minS = parseFloat(card.querySelector('.chart-min-input').value) || (anchorPrice * 0.9);
+        maxS = parseFloat(card.querySelector('.chart-max-input').value) || (anchorPrice * 1.1);
         if (minS >= maxS) {
             maxS = minS + 1; // Prevent crash on bad inputs
         }
     } else {
         const pct = parseFloat(mode) / 100.0;
-        minS = state.underlyingPrice * (1 - pct);
-        maxS = state.underlyingPrice * (1 + pct);
+        const anchorPrice = _getChartAnchorPrice();
+        minS = anchorPrice * (1 - pct);
+        maxS = anchorPrice * (1 + pct);
 
         // Update display inputs just for visibility, without triggering redraw
         card.querySelector('.chart-min-input').value = minS.toFixed(0);
         card.querySelector('.chart-max-input').value = maxS.toFixed(0);
     }
 
+    _refreshChartAnchorNotes(card);
     card.chartInstance.draw(group, state, minS, maxS);
 }
 
@@ -174,8 +230,9 @@ function setAmortChartRangeMode(btn, mode) {
         customInputsContainer.style.opacity = '1';
         minInput.disabled = false;
         maxInput.disabled = false;
-        if (!minInput.value) minInput.value = (state.underlyingPrice * 0.9).toFixed(0);
-        if (!maxInput.value) maxInput.value = (state.underlyingPrice * 1.1).toFixed(0);
+        const anchorPrice = _getChartAnchorPrice();
+        if (!minInput.value) minInput.value = (anchorPrice * 0.9).toFixed(0);
+        if (!maxInput.value) maxInput.value = (anchorPrice * 1.1).toFixed(0);
     } else {
         customInputsContainer.style.opacity = '0.5';
         minInput.disabled = true;
@@ -203,15 +260,17 @@ function drawAmortizationChart(card, group) {
     let minS, maxS;
 
     if (mode === 'custom') {
-        minS = parseFloat(card.querySelector('.amort-chart-min-input').value) || (state.underlyingPrice * 0.9);
-        maxS = parseFloat(card.querySelector('.amort-chart-max-input').value) || (state.underlyingPrice * 1.1);
+        const anchorPrice = _getChartAnchorPrice();
+        minS = parseFloat(card.querySelector('.amort-chart-min-input').value) || (anchorPrice * 0.9);
+        maxS = parseFloat(card.querySelector('.amort-chart-max-input').value) || (anchorPrice * 1.1);
         if (minS >= maxS) {
             maxS = minS + 1;
         }
     } else {
         const pct = parseFloat(mode) / 100.0;
-        minS = state.underlyingPrice * (1 - pct);
-        maxS = state.underlyingPrice * (1 + pct);
+        const anchorPrice = _getChartAnchorPrice();
+        minS = anchorPrice * (1 - pct);
+        maxS = anchorPrice * (1 + pct);
 
         card.querySelector('.amort-chart-min-input').value = minS.toFixed(0);
         card.querySelector('.amort-chart-max-input').value = maxS.toFixed(0);
@@ -258,8 +317,9 @@ function setGlobalChartRangeMode(btn, mode) {
         customInputsContainer.style.opacity = '1';
         minInput.disabled = false;
         maxInput.disabled = false;
-        if (!minInput.value) minInput.value = (state.underlyingPrice * 0.9).toFixed(0);
-        if (!maxInput.value) maxInput.value = (state.underlyingPrice * 1.1).toFixed(0);
+        const anchorPrice = _getChartAnchorPrice();
+        if (!minInput.value) minInput.value = (anchorPrice * 0.9).toFixed(0);
+        if (!maxInput.value) maxInput.value = (anchorPrice * 1.1).toFixed(0);
     } else {
         customInputsContainer.style.opacity = '0.5';
         minInput.disabled = true;
@@ -283,15 +343,17 @@ function drawGlobalChart(card) {
     let minS, maxS;
 
     if (mode === 'custom') {
-        minS = parseFloat(card.querySelector('.global-chart-min-input').value) || (state.underlyingPrice * 0.9);
-        maxS = parseFloat(card.querySelector('.global-chart-max-input').value) || (state.underlyingPrice * 1.1);
+        const anchorPrice = _getChartAnchorPrice();
+        minS = parseFloat(card.querySelector('.global-chart-min-input').value) || (anchorPrice * 0.9);
+        maxS = parseFloat(card.querySelector('.global-chart-max-input').value) || (anchorPrice * 1.1);
         if (minS >= maxS) {
             maxS = minS + 1; // Prevent crash on bad inputs
         }
     } else {
         const pct = parseFloat(mode) / 100.0;
-        minS = state.underlyingPrice * (1 - pct);
-        maxS = state.underlyingPrice * (1 + pct);
+        const anchorPrice = _getChartAnchorPrice();
+        minS = anchorPrice * (1 - pct);
+        maxS = anchorPrice * (1 + pct);
 
         card.querySelector('.global-chart-min-input').value = minS.toFixed(0);
         card.querySelector('.global-chart-max-input').value = maxS.toFixed(0);
@@ -308,6 +370,7 @@ function drawGlobalChart(card) {
         })))
     };
 
+    _refreshChartAnchorNotes(card);
     card.chartInstance.draw(virtualGroup, state, minS, maxS);
 }
 
@@ -360,8 +423,9 @@ function setGlobalAmortizedChartRangeMode(btn, mode) {
         customInputsContainer.style.opacity = '1';
         minInput.disabled = false;
         maxInput.disabled = false;
-        if (!minInput.value) minInput.value = (state.underlyingPrice * 0.9).toFixed(0);
-        if (!maxInput.value) maxInput.value = (state.underlyingPrice * 1.1).toFixed(0);
+        const anchorPrice = _getChartAnchorPrice();
+        if (!minInput.value) minInput.value = (anchorPrice * 0.9).toFixed(0);
+        if (!maxInput.value) maxInput.value = (anchorPrice * 1.1).toFixed(0);
     } else {
         customInputsContainer.style.opacity = '0.5';
         minInput.disabled = true;
@@ -389,13 +453,15 @@ function drawGlobalAmortizedChart(card) {
     let minS, maxS;
 
     if (mode === 'custom') {
-        minS = parseFloat(card.querySelector('.global-amort-chart-min-input').value) || (state.underlyingPrice * 0.9);
-        maxS = parseFloat(card.querySelector('.global-amort-chart-max-input').value) || (state.underlyingPrice * 1.1);
+        const anchorPrice = _getChartAnchorPrice();
+        minS = parseFloat(card.querySelector('.global-amort-chart-min-input').value) || (anchorPrice * 0.9);
+        maxS = parseFloat(card.querySelector('.global-amort-chart-max-input').value) || (anchorPrice * 1.1);
         if (minS >= maxS) maxS = minS + 1;
     } else {
         const pct = parseFloat(mode) / 100.0;
-        minS = state.underlyingPrice * (1 - pct);
-        maxS = state.underlyingPrice * (1 + pct);
+        const anchorPrice = _getChartAnchorPrice();
+        minS = anchorPrice * (1 - pct);
+        maxS = anchorPrice * (1 + pct);
 
         card.querySelector('.global-amort-chart-min-input').value = minS.toFixed(0);
         card.querySelector('.global-amort-chart-max-input').value = maxS.toFixed(0);
@@ -451,13 +517,22 @@ function computePortfolioMeanSimIV() {
         && typeof OptionComboProductRegistry.isOptionLeg === 'function'
         ? OptionComboProductRegistry.isOptionLeg
         : (leg => ['call', 'put'].includes(String(leg && leg.type || '').toLowerCase()));
+    const pricingContext = typeof OptionComboPricingContext === 'undefined'
+        ? null
+        : OptionComboPricingContext;
+    const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
+        ? pricingContext.resolveSimulationDate(state)
+        : state.simulatedDate;
+    const quoteDate = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
+        ? pricingContext.resolveQuoteDate(state)
+        : state.baseDate;
 
     const allLegs = state.groups
         .filter(_isGroupIncludedInGlobal)
         .flatMap(g =>
         g.legs
             .filter(leg => isOptionLeg(leg))
-            .map(leg => processLegData(leg, state.simulatedDate, state.ivOffset))
+            .map(leg => processLegData(leg, simulationDate, state.ivOffset, quoteDate, _getChartAnchorPrice(), state.interestRate, g.viewMode || 'active', null, state.marketDataMode))
     );
     if (allLegs.length === 0) return 0;
     if (allLegs.some(pLeg => !pLeg.isExpired && !Number.isFinite(pLeg.simIV))) {
@@ -472,22 +547,25 @@ function getGlobalChartRange() {
     const card = document.getElementById('globalChartCard');
     if (!card) {
         const pct = 0.10;
-        return { minS: state.underlyingPrice * (1 - pct), maxS: state.underlyingPrice * (1 + pct) };
+        const anchorPrice = _getChartAnchorPrice();
+        return { minS: anchorPrice * (1 - pct), maxS: anchorPrice * (1 + pct) };
     }
 
     const modeBtn = card.querySelector('.global-range-mode-btn.active');
     const mode = modeBtn ? modeBtn.dataset.mode : '10';
 
     if (mode === 'custom') {
-        let minS = parseFloat(card.querySelector('.global-chart-min-input').value) || (state.underlyingPrice * 0.9);
-        let maxS = parseFloat(card.querySelector('.global-chart-max-input').value) || (state.underlyingPrice * 1.1);
+        const anchorPrice = _getChartAnchorPrice();
+        let minS = parseFloat(card.querySelector('.global-chart-min-input').value) || (anchorPrice * 0.9);
+        let maxS = parseFloat(card.querySelector('.global-chart-max-input').value) || (anchorPrice * 1.1);
         if (minS >= maxS) maxS = minS + 1;
         return { minS, maxS };
     } else {
         const pct = parseFloat(mode) / 100.0;
+        const anchorPrice = _getChartAnchorPrice();
         return {
-            minS: state.underlyingPrice * (1 - pct),
-            maxS: state.underlyingPrice * (1 + pct)
+            minS: anchorPrice * (1 - pct),
+            maxS: anchorPrice * (1 + pct)
         };
     }
 }
@@ -505,3 +583,18 @@ function toggleProbCharts(btn) {
         btn.textContent = 'Show Analysis';
     }
 }
+
+function refreshChartAnchorAnnotations() {
+    if (typeof document === 'undefined') return;
+
+    if (typeof document.querySelectorAll === 'function') {
+        document.querySelectorAll('.group-card').forEach(card => {
+            _refreshChartAnchorNotes(card);
+        });
+    }
+    _refreshChartAnchorNotes(typeof document.getElementById === 'function'
+        ? document.getElementById('globalChartCard')
+        : null);
+}
+
+window.refreshChartAnchorAnnotations = refreshChartAnchorAnnotations;

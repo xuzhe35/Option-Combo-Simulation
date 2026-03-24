@@ -263,6 +263,27 @@ module.exports = {
             },
         },
         {
+            name: 'freezes expired option intrinsic at the historical expiry underlying anchor',
+            run() {
+                const ctx = loadPricingContext();
+
+                assert.ok(
+                    Math.abs(
+                        ctx.computeLegPrice(
+                            {
+                                type: 'call',
+                                isExpired: true,
+                                strike: 381,
+                                expiryUnderlyingPrice: 402.13,
+                            },
+                            415.19,
+                            0.03
+                        ) - 21.13
+                    ) < 1e-9
+                );
+            },
+        },
+        {
             name: 'prefers explicit close price overrides over all other pricing logic',
             run() {
                 const ctx = loadPricingContext();
@@ -288,6 +309,96 @@ module.exports = {
                 );
 
                 assert.equal(simulated, 1.23);
+            },
+        },
+        {
+            name: 'prices benchmark Black-76 futures option call and put values',
+            run() {
+                const ctx = loadPricingContext();
+
+                // Black-76: F=100, K=100, T=1, r=0.05, σ=0.2
+                // d1 = [ln(1) + (0.04/2)*1] / (0.2*1) = 0.02/0.2 = 0.1
+                // d2 = 0.1 - 0.2 = -0.1
+                // discount = e^(-0.05) ≈ 0.951229
+                // Call = 0.951229 * (100*N(0.1) - 100*N(-0.1))
+                //      = 0.951229 * 100 * (N(0.1) - N(-0.1))
+                //      = 0.951229 * 100 * 2*(N(0.1)-0.5)
+                // N(0.1) ≈ 0.53983 => Call ≈ 0.951229 * 100 * 0.07966 ≈ 7.577
+                const call = ctx.calculateBlack76Price('call', 100, 100, 1, 0.05, 0.2);
+                const put = ctx.calculateBlack76Price('put', 100, 100, 1, 0.05, 0.2);
+
+                // Verify put-call parity: Call - Put = e^(-rT)(F - K) = 0 for ATM
+                almostEqual(call - put, 0, 1e-10);
+                // Call should be positive and in reasonable range
+                assert.ok(call > 7 && call < 8.5, `Black-76 ATM call=${call} not in [7, 8.5]`);
+                almostEqual(call, put, 1e-10);
+            },
+        },
+        {
+            name: 'Black-76 falls back to intrinsic at expiration',
+            run() {
+                const ctx = loadPricingContext();
+
+                assert.equal(ctx.calculateBlack76Price('call', 105, 100, 0, 0.05, 0.2), 5);
+                assert.equal(ctx.calculateBlack76Price('put', 95, 100, 0, 0.05, 0.2), 5);
+                assert.equal(ctx.calculateBlack76Price('call', 95, 100, 0, 0.05, 0.2), 0);
+            },
+        },
+        {
+            name: 'calculatePrice dispatcher routes to correct model',
+            run() {
+                const ctx = loadPricingContext();
+
+                const bsmCall = ctx.calculateOptionPrice('call', 100, 100, 1, 0.05, 0.2);
+                const b76Call = ctx.calculateBlack76Price('call', 100, 100, 1, 0.05, 0.2);
+
+                // dispatcher should match direct calls
+                almostEqual(ctx.calculatePrice('bsm-spot', 'call', 100, 100, 1, 0.05, 0.2), bsmCall, 1e-12);
+                almostEqual(ctx.calculatePrice('black76', 'call', 100, 100, 1, 0.05, 0.2), b76Call, 1e-12);
+                // default (unknown model) should fall back to BSM
+                almostEqual(ctx.calculatePrice('unknown', 'call', 100, 100, 1, 0.05, 0.2), bsmCall, 1e-12);
+            },
+        },
+        {
+            name: 'uses Black-76 pricing for FOP leg data and forward simulation',
+            run() {
+                const ctx = loadPricingContext();
+                const profile = ctx.OptionComboProductRegistry.resolveUnderlyingProfile('CL');
+                assert.equal(profile.pricingModel, 'black76');
+
+                const leg = {
+                    type: 'call',
+                    pos: 1,
+                    strike: 75,
+                    expDate: '2026-04-13',
+                    iv: 0.30,
+                    cost: 0,
+                    currentPrice: 0,
+                };
+
+                // processLegData should use Black-76 for offline trial cost
+                const processed = ctx.processLegData(
+                    leg,
+                    '2026-03-20',
+                    0,
+                    '2026-03-14',
+                    72.5,
+                    0.03,
+                    'trial',
+                    profile
+                );
+                assert.equal(processed.pricingModel, 'black76');
+
+                // the offline trial cost should match Black-76 directly
+                const baseCalDTE = ctx.diffDays('2026-03-14', '2026-04-13');
+                const baseT = baseCalDTE / 365.0;
+                const expectedCost = ctx.calculateBlack76Price('call', 72.5, 75, baseT, 0.03, 0.30);
+                almostEqual(processed.effectiveCostPerShare, expectedCost, 1e-9);
+
+                // computeLegPrice should also use Black-76
+                const simPrice = ctx.computeLegPrice(processed, 74, 0.03);
+                const expectedSim = ctx.calculateBlack76Price('call', 74, 75, processed.T, 0.03, processed.simIV);
+                almostEqual(simPrice, expectedSim, 1e-9);
             },
         },
     ],

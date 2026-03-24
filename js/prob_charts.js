@@ -142,27 +142,28 @@ self.onmessage = function(e) {
         // Exact BSM path pricing if legs provided (calculate for ALL paths for true Expectation)
         if (legs && legs.length > 0) {
             let pathPnL = 0.0;
-            const s_safe = finalPrice > 0 ? finalPrice : 0.0001;
-            const log_S = Math.log(s_safe);
             
             for (let l = 0; l < legs.length; l++) {
                 const leg = legs[l];
+                const legPrice = finalPrice * (leg.underlyingScale || 1);
+                const safeLegPrice = legPrice > 0 ? legPrice : 0.0001;
+                const log_S = Math.log(safeLegPrice);
                 let v_opt = 0;
                 if (leg.fixedPrice !== undefined) {
                     v_opt = leg.fixedPrice;
                 } else if (leg.isUnderlyingLeg) {
                     // Underlying leg: price IS the simulated underlying price, no BSM
-                    v_opt = finalPrice;
+                    v_opt = legPrice;
                 } else if (leg.isExpired) {
-                    if (leg.type === 'call') v_opt = Math.max(0, finalPrice - leg.K);
-                    else                     v_opt = Math.max(0, leg.K - finalPrice);
+                    if (leg.type === 'call') v_opt = Math.max(0, legPrice - leg.K);
+                    else                     v_opt = Math.max(0, leg.K - legPrice);
                 } else {
                     const d1 = log_S * leg.inv_v_sqrt_T + leg.d1_const;
                     const d2 = d1 - leg.v_sqrt_T;
                     if (leg.type === 'call') {
-                        v_opt = finalPrice * normalCDF(d1) - leg.K_exp_rT * normalCDF(d2);
+                        v_opt = legPrice * normalCDF(d1) - leg.K_exp_rT * normalCDF(d2);
                     } else {
-                        v_opt = leg.K_exp_rT * normalCDF(-d2) - finalPrice * normalCDF(-d1);
+                        v_opt = leg.K_exp_rT * normalCDF(-d2) - legPrice * normalCDF(-d1);
                     }
                 }
                 pathPnL += leg.posMultiplier * v_opt - leg.costBasis;
@@ -230,6 +231,33 @@ function _lognormalDensity(s, S0, portfolioIV, loc, nDays) {
     return (1.0 / (s * sigma * Math.sqrt(2 * Math.PI))) * Math.exp(-0.5 * z * z);
 }
 
+function _getProbabilityAnchorPrice() {
+    if (typeof OptionComboPricingContext !== 'undefined'
+        && typeof OptionComboPricingContext.resolveAnchorUnderlyingPrice === 'function') {
+        return OptionComboPricingContext.resolveAnchorUnderlyingPrice(state, state.underlyingPrice);
+    }
+    return state.underlyingPrice;
+}
+
+function _getProbabilityAnchorInfo() {
+    if (typeof OptionComboPricingContext !== 'undefined'
+        && typeof OptionComboPricingContext.resolveAnchorDisplayInfo === 'function') {
+        return OptionComboPricingContext.resolveAnchorDisplayInfo(state, state.underlyingPrice);
+    }
+
+    const price = _getProbabilityAnchorPrice();
+    return {
+        pricingMode: 'STK',
+        isFutureAnchor: false,
+        price,
+        title: 'Current Underlying',
+        shortLabel: state?.underlyingSymbol || 'Underlying',
+        lineLabel: 'Current',
+        displayText: `Current Underlying: ${state?.underlyingSymbol || 'Underlying'} @ $${price.toFixed(2)}`,
+        detailText: 'Percent labels are measured from the current underlying price.',
+    };
+}
+
 /**
  * Compute the portfolio's P&L at a given underlying price using the
  * BSM model with the current simulation date and IV settings.
@@ -240,6 +268,16 @@ function _computePortfolioPnLAtPrice(price) {
 
     let totalValue = 0;
     let totalCost = 0;
+    const anchorPrice = _getProbabilityAnchorPrice();
+    const pricingContext = typeof OptionComboPricingContext === 'undefined'
+        ? null
+        : OptionComboPricingContext;
+    const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
+        ? pricingContext.resolveSimulationDate(state)
+        : state.simulatedDate;
+    const quoteDate = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
+        ? pricingContext.resolveQuoteDate(state)
+        : state.baseDate;
     const underlyingProfile = typeof OptionComboProductRegistry === 'undefined'
         ? null
         : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
@@ -247,12 +285,24 @@ function _computePortfolioPnLAtPrice(price) {
     state.groups.filter(_isGroupIncludedInGlobal).forEach(group => {
         const activeViewMode = group.viewMode || 'active';
         group.legs.forEach(leg => {
+            const legCurrentUnderlying = pricingContext
+                && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
+                ? pricingContext.resolveLegCurrentUnderlyingPrice(state, leg, anchorPrice)
+                : state.underlyingPrice;
+            const legInterestRate = pricingContext
+                && typeof pricingContext.resolveLegInterestRate === 'function'
+                ? pricingContext.resolveLegInterestRate(state, leg, state.interestRate)
+                : state.interestRate;
             // Use processLegData to handle unified BSM formatting (Exp, Implied Vol offset, T)
-            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode, underlyingProfile);
+            const pLeg = processLegData(leg, simulationDate, state.ivOffset, quoteDate, legCurrentUnderlying, legInterestRate, activeViewMode, underlyingProfile, state.marketDataMode);
+            const legScenarioUnderlying = pricingContext
+                && typeof pricingContext.resolveLegScenarioUnderlyingPrice === 'function'
+                ? pricingContext.resolveLegScenarioUnderlyingPrice(state, leg, price, anchorPrice)
+                : price;
             // Use unified simulation price (includes Zero-Delta bypass at current price)
             const pps = computeSimulatedPrice(
-                pLeg, leg, price, state.interestRate,
-                activeViewMode, state.simulatedDate, state.baseDate, state.ivOffset
+                pLeg, leg, legScenarioUnderlying, legInterestRate,
+                activeViewMode, simulationDate, quoteDate, state.ivOffset
             );
 
             totalValue += pLeg.posMultiplier * pps;
@@ -330,9 +380,9 @@ class ProbabilityChart {
         this._cache = null;
     }
 
-    draw(binCenters, tDensity, normalDensity, minS, maxS, currentPrice) {
+    draw(binCenters, tDensity, normalDensity, minS, maxS, currentPrice, anchorInfo) {
         // Save args so we can redraw on resize without re-simulating
-        this._cache = { binCenters, tDensity, normalDensity, minS, maxS, currentPrice };
+        this._cache = { binCenters, tDensity, normalDensity, minS, maxS, currentPrice, anchorInfo };
 
         const { ctx, w, h } = _resizeCanvas(this.canvas, 220);
         ctx.clearRect(0, 0, w, h);
@@ -444,6 +494,15 @@ class ProbabilityChart {
             ctx.lineWidth = 1.5;
             ctx.stroke();
             ctx.setLineDash([]);
+
+            ctx.fillStyle = '#6366F1';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(
+                `${anchorInfo && anchorInfo.lineLabel ? anchorInfo.lineLabel : 'Current'}: $${currentPrice.toFixed(2)}`,
+                px,
+                pad.top - 4
+            );
         }
 
         ctx.restore();
@@ -480,7 +539,7 @@ class ProbabilityChart {
     redraw() {
         if (this._cache) {
             const c = this._cache;
-            this.draw(c.binCenters, c.tDensity, c.normalDensity, c.minS, c.maxS, c.currentPrice);
+            this.draw(c.binCenters, c.tDensity, c.normalDensity, c.minS, c.maxS, c.currentPrice, c.anchorInfo);
         }
     }
 }
@@ -505,8 +564,8 @@ class ExpectedPnLDensityChart {
         this._cache = null;
     }
 
-    draw(binCenters, pnlValues, tDensity, minS, maxS, currentPrice) {
-        this._cache = { binCenters, pnlValues, tDensity, minS, maxS, currentPrice };
+    draw(binCenters, pnlValues, tDensity, minS, maxS, currentPrice, anchorInfo) {
+        this._cache = { binCenters, pnlValues, tDensity, minS, maxS, currentPrice, anchorInfo };
 
         const { ctx, w, h } = _resizeCanvas(this.canvas, 220);
         ctx.clearRect(0, 0, w, h);
@@ -675,6 +734,15 @@ class ExpectedPnLDensityChart {
             ctx.lineWidth = 1.5;
             ctx.stroke();
             ctx.setLineDash([]);
+
+            ctx.fillStyle = '#6366F1';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(
+                `${anchorInfo && anchorInfo.lineLabel ? anchorInfo.lineLabel : 'Current'}: $${currentPrice.toFixed(2)}`,
+                px,
+                pad.top - 2
+            );
         }
 
         ctx.restore();
@@ -690,7 +758,7 @@ class ExpectedPnLDensityChart {
     redraw() {
         if (this._cache) {
             const c = this._cache;
-            this.draw(c.binCenters, c.pnlValues, c.tDensity, c.minS, c.maxS, c.currentPrice);
+            this.draw(c.binCenters, c.pnlValues, c.tDensity, c.minS, c.maxS, c.currentPrice, c.anchorInfo);
         }
     }
 }
@@ -726,16 +794,27 @@ function updateProbCharts() {
         _probChart && _probChart.drawEmpty('Select at least one included group to see probability analysis.');
         _epnlChart && _epnlChart.drawEmpty('Select at least one included group to see expected P&L density.');
         _setExpectedPnLBadge(null);
+        _setAnchorInfoText(null);
         _setInfoText('No globally included legs in portfolio.');
         return;
     }
 
     // Guard: need at least 1 calendar day of horizon
-    const nCalDays = diffDays(state.baseDate, state.simulatedDate);
+    const pricingContext = typeof OptionComboPricingContext === 'undefined'
+        ? null
+        : OptionComboPricingContext;
+    const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
+        ? pricingContext.resolveSimulationDate(state)
+        : state.simulatedDate;
+    const quoteDate = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
+        ? pricingContext.resolveQuoteDate(state)
+        : state.baseDate;
+    const nCalDays = diffDays(quoteDate, simulationDate);
     if (nCalDays === 0) {
         _probChart && _probChart.drawEmpty('Advance the simulation date to see probabilities.');
         _epnlChart && _epnlChart.drawEmpty('No future days to simulate (simulation date = today).');
         _setExpectedPnLBadge(null);
+        _setAnchorInfoText(null);
         _setInfoText('Simulation date = today  (0 days).');
         return;
     }
@@ -746,12 +825,15 @@ function updateProbCharts() {
         _probChart && _probChart.drawEmpty('No valid IV found in portfolio legs.');
         _epnlChart && _epnlChart.drawEmpty('');
         _setExpectedPnLBadge(null);
+        _setAnchorInfoText(null);
         return;
     }
 
     // Price range from global P&L chart
     const { minS, maxS } = getGlobalChartRange();
     if (minS >= maxS) return;
+    const anchorPrice = _getProbabilityAnchorPrice();
+    const anchorInfo = _getProbabilityAnchorInfo();
 
     const underlyingProfile = typeof OptionComboProductRegistry === 'undefined'
         ? null
@@ -771,6 +853,7 @@ function updateProbCharts() {
         _probChart && _probChart.drawEmpty(`No distribution parameters for ${distributionLabel}. Please run backend script.`);
         _epnlChart && _epnlChart.drawEmpty(`Run: python scripts/fit_underlying.py ${distributionSymbol}`);
         _setExpectedPnLBadge(null);
+        _setAnchorInfoText(anchorInfo);
         _setInfoText(`Missing distribution parameters for ${distributionLabel}.`);
         return;
     }
@@ -785,6 +868,7 @@ function updateProbCharts() {
     // Show loading state
     _probChart && _probChart.drawLoading();
     _epnlChart && _epnlChart.drawLoading();
+    _setAnchorInfoText(anchorInfo);
     const driftLabel = useRandomWalk ? ', Random Walk' : '';
     const proxyInfoText = distributionSymbol === underlying ? '' : ` | Dist Proxy: ${distributionSymbol}`;
     _setInfoText(`Simulating 1M paths × ${nCalDays} cd  (IV ${(portfolioIV * 100).toFixed(1)}%${driftLabel})${proxyInfoText}…`);
@@ -794,12 +878,20 @@ function updateProbCharts() {
     if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
 
     // Assemble legs for exact MC Pricing
-    const simDateObj = new Date(state.simulatedDate + 'T00:00:00Z');
+    const simDateObj = new Date(simulationDate + 'T00:00:00Z');
     const workerLegs = [];
-    includedGroups.forEach(group => {
-        group.legs.forEach(leg => {
-            const activeViewMode = group.viewMode || 'active';
-            const pLeg = processLegData(leg, state.simulatedDate, state.ivOffset, state.baseDate, state.underlyingPrice, state.interestRate, activeViewMode, underlyingProfile);
+        includedGroups.forEach(group => {
+            group.legs.forEach(leg => {
+                const activeViewMode = group.viewMode || 'active';
+                const legCurrentUnderlying = pricingContext
+                    && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
+                    ? pricingContext.resolveLegCurrentUnderlyingPrice(state, leg, anchorPrice)
+                    : state.underlyingPrice;
+                const legInterestRate = pricingContext
+                    && typeof pricingContext.resolveLegInterestRate === 'function'
+                    ? pricingContext.resolveLegInterestRate(state, leg, state.interestRate)
+                    : state.interestRate;
+            const pLeg = processLegData(leg, simulationDate, state.ivOffset, quoteDate, legCurrentUnderlying, legInterestRate, activeViewMode, underlyingProfile, state.marketDataMode);
 
             let fixedPrice = undefined;
             if (leg.closePrice !== null && leg.closePrice !== '') {
@@ -813,11 +905,12 @@ function updateProbCharts() {
                 type: pLeg.type,
                 isUnderlyingLeg: !!pLeg.isUnderlyingLeg,
                 K: pLeg.strike,
-                r: state.interestRate,
+                r: legInterestRate,
                 T: pLeg.T,
                 v: pLeg.simIV,
                 posMultiplier: pLeg.posMultiplier,
                 costBasis: pLeg.costBasis,
+                underlyingScale: anchorPrice > 0 ? (legCurrentUnderlying / anchorPrice) : 1,
                 fixedPrice: fixedPrice
             });
         });
@@ -829,7 +922,7 @@ function updateProbCharts() {
         df, loc, newScale,
         nDays: nCalDays,
         nPaths,
-        currentPrice: state.underlyingPrice,
+        currentPrice: anchorPrice,
         minS, maxS, bins,
         legs: workerLegs
     });
@@ -837,7 +930,7 @@ function updateProbCharts() {
     // Capture closure values for the callback
     const _nCalDays = nCalDays;
     const _portfolioIV = portfolioIV;
-    const _currentPrice = state.underlyingPrice;
+    const _currentPrice = anchorPrice;
     const _loc = loc;
     const _useRandomWalk = useRandomWalk;
     const _underlying = underlying;
@@ -863,12 +956,12 @@ function updateProbCharts() {
 
         // --- Render Chart 2 ---
         if (_probChart) {
-            _probChart.draw(binCenters, tDensity, normalDensity, minS, maxS, _currentPrice);
+            _probChart.draw(binCenters, tDensity, normalDensity, minS, maxS, _currentPrice, anchorInfo);
         }
 
         // --- Render Chart 3 ---
         if (_epnlChart) {
-            _epnlChart.draw(binCenters, pnlValues, tDensity, minS, maxS, _currentPrice);
+            _epnlChart.draw(binCenters, pnlValues, tDensity, minS, maxS, _currentPrice, anchorInfo);
         }
 
         // --- Update badges ---
@@ -918,4 +1011,18 @@ function _setExpectedPnLBadge(value) {
 function _setInfoText(text) {
     const el = document.getElementById('probSimInfoText');
     if (el) el.textContent = text;
+}
+
+function _setAnchorInfoText(anchorInfo) {
+    const el = document.getElementById('probAnchorInfoText');
+    if (!el) return;
+
+    if (!anchorInfo || anchorInfo.isFutureAnchor !== true) {
+        el.textContent = '';
+        el.style.display = 'none';
+        return;
+    }
+
+    el.textContent = `${anchorInfo.displayText}. ${anchorInfo.detailText}`;
+    el.style.display = 'block';
 }

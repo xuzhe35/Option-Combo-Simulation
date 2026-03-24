@@ -82,5 +82,57 @@ module.exports = {
                 assert.equal(payload.legs[1].pos, 3);
             },
         },
+        {
+            name: 'close-intent payload excludes already-closed assignment-converted option legs',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_order_builder.js',
+                ]);
+
+                const payload = ctx.OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(
+                    {
+                        id: 'group_close_assignment',
+                        name: 'Close Assignment Test',
+                        legs: [
+                            {
+                                id: 'put_685',
+                                type: 'put',
+                                pos: -4,
+                                strike: 685,
+                                expDate: '2026-03-27',
+                                closePrice: 0,
+                                closePriceSource: 'assignment_conversion',
+                            },
+                            {
+                                id: 'stock_685',
+                                type: 'stock',
+                                pos: 400,
+                                strike: 0,
+                                expDate: '',
+                                cost: 685,
+                                assignmentSourceLegId: 'put_685',
+                            },
+                        ],
+                    },
+                    {
+                        underlyingSymbol: 'SPY',
+                        underlyingContractMonth: '',
+                        baseDate: '2026-03-15',
+                        simulatedDate: '2026-03-15',
+                    },
+                    {
+                        executionMode: 'submit',
+                        intent: 'close',
+                        source: 'close_group',
+                    }
+                );
+
+                assert.equal(payload.legs.length, 1);
+                assert.equal(payload.legs[0].id, 'stock_685');
+                assert.equal(payload.legs[0].type, 'stock');
+                assert.equal(payload.legs[0].pos, -400);
+            },
+        },
     ],
 };

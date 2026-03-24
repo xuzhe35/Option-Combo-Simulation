@@ -17,7 +17,7 @@ module.exports = {
         {
             name: 'adds a group with one default leg and triggers a re-render',
             run() {
-                const ctx = loadBrowserScripts(['js/group_order_builder.js', 'js/trade_trigger_logic.js', 'js/group_editor_ui.js']);
+                const ctx = loadBrowserScripts(['js/group_order_builder.js', 'js/trade_trigger_logic.js', 'js/session_logic.js', 'js/group_editor_ui.js']);
                 const state = {
                     underlyingPrice: 432.1,
                     baseDate: '2026-03-15',
@@ -42,10 +42,12 @@ module.exports = {
                 assert.equal(state.groups[0].name, 'Combo Group 1');
                 assert.equal(state.groups[0].isCollapsed, false);
                 assert.equal(state.groups[0].syncAvgCostFromPortfolio, true);
+                assert.equal(state.groups[0].historicalAutoCloseAtExpiry, true);
                 assert.equal(state.groups[0].tradeTrigger.enabled, false);
                 assert.equal(state.groups[0].legs.length, 1);
                 assert.equal(state.groups[0].legs[0].strike, 432.1);
                 assert.equal(state.groups[0].legs[0].expDate, '2026-04-14');
+                assert.equal(state.groups[0].legs[0].underlyingFutureId, '');
                 assert.equal(renderCalls, 1);
             },
         },
@@ -235,6 +237,153 @@ module.exports = {
                 assert.equal(exitEnabledInput.checked, true);
                 assert.equal(exitConditionInput.value, 'lte');
                 assert.equal(exitPriceInput.value, '671.00');
+            },
+        },
+        {
+            name: 'converts an assigned short put into realized premium plus underlying shares',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_editor_ui.js',
+                ]);
+
+                const group = {
+                    id: 'g_assign',
+                    viewMode: 'active',
+                    legs: [
+                        {
+                            id: 'put_685',
+                            type: 'put',
+                            pos: -4,
+                            strike: 685,
+                            expDate: '2026-03-27',
+                            iv: 0.2,
+                            cost: 12.59,
+                            currentPrice: 25.12,
+                            closePrice: null,
+                            underlyingFutureId: '',
+                        },
+                    ],
+                };
+                let renderCalls = 0;
+                let subscriptionCalls = 0;
+                let idCounter = 0;
+
+                const converted = ctx.OptionComboGroupEditorUI.applyOptionAssignmentConversion(
+                    group,
+                    group.legs[0],
+                    { underlyingSymbol: 'SPY' },
+                    {
+                        getRenderableGroupViewMode() { return 'active'; },
+                        supportsUnderlyingLegs() { return true; },
+                        getUnderlyingProfile() { return ctx.OptionComboProductRegistry.resolveUnderlyingProfile('SPY'); },
+                        generateId() { idCounter += 1; return `generated_${idCounter}`; },
+                        handleLiveSubscriptions() { subscriptionCalls += 1; },
+                        renderGroups() { renderCalls += 1; },
+                    }
+                );
+
+                assert.equal(converted, true);
+                assert.equal(group.legs[0].closePrice, 0);
+                assert.equal(group.legs[0].closePriceSource, 'assignment_conversion');
+                assert.equal(group.legs[0].assignmentUnderlyingQuantity, 400);
+                assert.equal(group.legs[0].assignmentUnderlyingLegId, 'generated_1');
+                assert.equal(group.legs.length, 2);
+                assert.equal(group.legs[1].type, 'stock');
+                assert.equal(group.legs[1].pos, 400);
+                assert.equal(group.legs[1].cost, 685);
+                assert.equal(group.legs[1].assignmentSourceLegId, 'put_685');
+                assert.equal(subscriptionCalls, 1);
+                assert.equal(renderCalls, 1);
+            },
+        },
+        {
+            name: 'retitles trigger execution modes for historical replay',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/group_order_builder.js',
+                    'js/trade_trigger_logic.js',
+                    'js/group_editor_ui.js',
+                ]);
+
+                const noop = () => {};
+                const listeners = {};
+                const previewOption = { value: 'preview', textContent: 'Preview Only' };
+                const testSubmitOption = { value: 'test_submit', textContent: 'Send to TWS (Test Only)' };
+                const submitOption = { value: 'submit', textContent: 'Send to TWS' };
+                const helpText = { textContent: '' };
+                const container = {
+                    querySelector(selector) {
+                        return {
+                            '.trial-trigger-enabled': enabledInput,
+                            '.trial-trigger-collapse-btn': collapseBtn,
+                            '.trial-trigger-condition': conditionInput,
+                            '.trial-trigger-price': priceInput,
+                            '.trial-trigger-execution-mode': executionModeInput,
+                            '.trial-trigger-reprice-threshold': repriceThresholdInput,
+                            '.trial-trigger-tif': timeInForceInput,
+                            '.trial-trigger-exit-enabled': exitEnabledInput,
+                            '.trial-trigger-exit-condition': exitConditionInput,
+                            '.trial-trigger-exit-price': exitPriceInput,
+                            '.trial-trigger-reset-btn': resetBtn,
+                            '.trial-trigger-body': body,
+                            '.trial-trigger-help': helpText,
+                        }[selector] || null;
+                    },
+                    addEventListener(type, handler) {
+                        listeners[type] = handler;
+                    },
+                };
+                const enabledInput = { checked: false, addEventListener: noop };
+                const collapseBtn = { title: '', setAttribute: noop, addEventListener: noop };
+                const conditionInput = { value: '', addEventListener: noop };
+                const priceInput = { value: '', disabled: false, title: '', addEventListener: noop };
+                const executionModeInput = {
+                    value: '',
+                    title: '',
+                    options: [previewOption, testSubmitOption, submitOption],
+                    addEventListener: noop,
+                };
+                const repriceThresholdInput = { value: '', addEventListener: noop };
+                const timeInForceInput = { value: '', addEventListener: noop };
+                const exitEnabledInput = { checked: false, disabled: false, addEventListener: noop };
+                const exitConditionInput = { value: '', disabled: false, addEventListener: noop };
+                const exitPriceInput = { value: '', disabled: false, title: '', addEventListener: noop };
+                const resetBtn = { addEventListener: noop };
+                const body = { style: {} };
+                const card = {
+                    querySelector(selector) {
+                        if (selector === '.trial-trigger-container') return container;
+                        return null;
+                    },
+                };
+                const group = {
+                    tradeTrigger: {
+                        enabled: false,
+                        condition: 'gte',
+                        price: 672,
+                        executionMode: 'submit',
+                        repriceThreshold: 0.01,
+                        timeInForce: 'DAY',
+                        exitEnabled: false,
+                        exitCondition: 'lte',
+                        exitPrice: null,
+                        isCollapsed: false,
+                        status: 'armed',
+                    },
+                };
+
+                ctx.OptionComboGroupEditorUI.bindTrialTriggerControls(card, group, {
+                    marketDataMode: 'historical',
+                    allowLiveComboOrders: false,
+                }, {
+                    renderGroups() {},
+                });
+
+                assert.equal(testSubmitOption.textContent, 'Simulated Test Submit');
+                assert.equal(submitOption.textContent, 'Simulated Submit');
+                assert.match(executionModeInput.title, /never routes orders to TWS/i);
+                assert.match(helpText.textContent, /historical replay/i);
             },
         },
         {

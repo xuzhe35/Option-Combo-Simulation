@@ -1,0 +1,1183 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Option Combo Simulator - Chart Lab</title>
+    <link rel="icon" href="favicon.ico" sizes="any">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css?v=20260322-workspace">
+    <link rel="stylesheet" href="chart_lab.css?v=20260323-prototype">
+</head>
+
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <div class="header-content">
+                <div class="logo-area">
+                    <div class="logo-icon">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="12" y1="20" x2="12" y2="10"></line>
+                            <line x1="18" y1="20" x2="18" y2="4"></line>
+                            <line x1="6" y1="20" x2="6" y2="16"></line>
+                        </svg>
+                    </div>
+                    <div class="app-title-stack">
+                        <h1 id="appTitle">Option Combo Simulator</h1>
+                        <p id="appSubtitle" class="app-subtitle">Shared analysis workspace for live trading and historical replay.</p>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <button id="importBtn" class="btn btn-secondary"
+                        onclick="handleImportBtnClick()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                        Import JSON
+                    </button>
+                    <input type="file" id="importFile" accept=".json" style="display: none;"
+                        onchange="importFromJSON(event)">
+                    <button id="saveBtn" class="btn btn-primary" style="display: none;" onclick="saveToJSON()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                            <polyline points="7 3 7 8 15 8"></polyline>
+                        </svg>
+                        Save
+                    </button>
+                    <button id="exportBtn" class="btn btn-secondary" onclick="exportToJSON()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                        </svg>
+                        Export JSON
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <div class="lab-tab-strip" role="tablist" aria-label="Workspace Tabs">
+            <button type="button" class="lab-tab-btn active" data-target="portfolioPage" aria-selected="true">Portfolio</button>
+            <button type="button" class="lab-tab-btn" data-target="chartLabPage" aria-selected="false">Chart Lab</button>
+        </div>
+
+        <main class="app-main">
+            <section id="portfolioPage" class="app-tab-panel is-active">
+            <section id="workspaceBanner" class="workspace-banner" hidden>
+                <div class="workspace-banner-badge" id="workspaceBannerBadge"></div>
+                <div class="workspace-banner-copy">
+                    <h2 id="workspaceBannerTitle">Option Combo Simulator</h2>
+                    <p id="workspaceBannerBody"></p>
+                </div>
+            </section>
+            <div class="layout-grid">
+                <!-- Control Panel (Left Sidebar) -->
+                <aside class="control-panel">
+                    <div class="panel-card">
+                        <div class="control-group">
+                            <label for="marketDataMode">
+                                Data Environment
+                            </label>
+                            <select id="marketDataMode" class="number-input">
+                                <option value="live">Production / Live IBKR</option>
+                                <option value="historical">Historical Replay</option>
+                            </select>
+                            <div class="text-muted small mt-1" id="marketDataModeHint" style="display: none;">
+                                Live mode uses IBKR market data and can route real orders. Historical mode replays quotes from SQLite and blocks real execution.
+                            </div>
+                        </div>
+
+                        <div class="control-group" id="historicalQuoteDateGroup" hidden>
+                            <label for="historicalQuoteDate" id="historicalQuoteDateLabel">
+                                Historical Start Date
+                            </label>
+                            <input type="date" id="historicalQuoteDate" class="number-input" style="width: 100%;">
+                            <div class="text-muted small mt-1" id="historicalQuoteDateHint">
+                                Sets the historical entry day. Replay Date below moves forward from here.
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <label for="underlyingSymbol">
+                                Underlying Symbol
+                            </label>
+                            <input type="text" id="underlyingSymbol" class="number-input" value="SPY"
+                                placeholder="e.g. SPY, AAPL" style="text-transform: uppercase;">
+                            <input type="text" id="underlyingContractMonth" class="number-input mt-2" value=""
+                                placeholder="Underlying Contract Month (YYYYMM)"
+                                title="Used for FUT/FOP live-data qualification, e.g. 202603 or 202606."
+                                style="text-transform: uppercase;">
+                            <div class="text-muted small mt-1" id="underlyingContractMonthHint">
+                                Used for FUT/FOP live data only. Leave blank for stocks and cash-settled index options.
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <label for="underlyingPrice"
+                                style="display: flex; align-items: center; justify-content: space-between;">
+                                <span>
+                                    Underlying Price
+                                    <button class="icon-btn" title="Sync Latest Price"
+                                        onclick="requestUnderlyingPriceSync()"
+                                        style="padding: 0 4px; vertical-align: middle;">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                                            stroke="var(--primary-color)" stroke-width="2" stroke-linecap="round"
+                                            stroke-linejoin="round">
+                                            <polyline points="23 4 23 10 17 10"></polyline>
+                                            <polyline points="1 20 1 14 7 14"></polyline>
+                                            <path
+                                                d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15">
+                                            </path>
+                                        </svg>
+                                    </button>
+                                </span>
+                                <span class="value-display" id="underlyingPriceDisplay">$100.00</span>
+                            </label>
+                            <input type="number" id="underlyingPrice" class="number-input" value="100.00" step="0.01">
+                            <input type="range" id="underlyingPriceSlider" min="0" max="1000" value="100" step="1">
+                            <div class="quick-adjust-buttons mt-2">
+                                <button class="btn btn-secondary btn-sm" onclick="adjustUnderlying(-0.01)">-1%</button>
+                                <button class="btn btn-secondary btn-sm" onclick="adjustUnderlying(0.01)">+1%</button>
+                            </div>
+                        </div>
+
+                        <div class="control-group" id="historicalReplayDateGroup" hidden>
+                            <label for="historicalReplayDate" id="historicalReplayDateLabel">
+                                Replay Date
+                            </label>
+                            <input type="date" id="historicalReplayDate" class="number-input"
+                                style="width: 100%; margin-bottom: 0.5rem;" value="">
+                            <div
+                                style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">
+                                <span id="historicalReplayStartLabel">Start</span>
+                                <span id="historicalReplayDaysDisplay">+0 td / +0 cd</span>
+                            </div>
+                            <input type="range" id="historicalReplaySlider" min="0" max="365" value="0" step="1">
+                            <div id="historicalTimelineControls" hidden style="display: none; margin-top: 0.6rem;">
+                                <div class="text-muted small" id="historicalTimelineHint" style="margin-bottom: 0.5rem;">
+                                    Replay Date steps through daily market closes.
+                                </div>
+                                <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                                    <button type="button" class="btn btn-secondary btn-sm" id="historicalNextDayBtn">Next Day</button>
+                                    <button type="button" class="btn btn-secondary btn-sm" id="historicalSettleAllBtn">Settle All Groups</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <label for="simulatedDate" id="simulatedDateLabel">
+                                Simulated Date
+                            </label>
+                            <input type="date" id="simulatedDate" class="number-input"
+                                style="width: 100%; margin-bottom: 0.5rem;" value="">
+                            <div id="simulatedDateHint" class="text-muted small mt-1" hidden></div>
+                            <div id="simulatedDateOffsetGroup">
+                                <div
+                                    style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">
+                                    <span id="simulatedDateStartLabel">Today</span>
+                                    <span id="daysPassedDisplay">+0 Days</span>
+                                </div>
+                                <input type="range" id="daysPassedSlider" min="0" max="365" value="0" step="1">
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <label for="interestRate">
+                                Interest Rate (%)
+                                <span class="value-display" id="interestRateDisplay">3.0%</span>
+                            </label>
+                            <input type="number" id="interestRate" class="number-input" value="3.0" step="0.1">
+                        </div>
+
+                        <div class="control-group" id="forwardRatePanel" hidden>
+                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem;">
+                                <label style="margin: 0;">Forward Carry (r-q approx)</label>
+                                <button type="button" class="btn btn-secondary btn-sm" id="addForwardRateSampleBtn">Add Sample</button>
+                            </div>
+                            <div class="text-muted small" id="forwardRateStatus" style="margin-bottom: 0.5rem;">
+                                Add one or more reference samples to derive market-implied daily carry.
+                            </div>
+                            <div class="text-muted small" style="display: grid; grid-template-columns: 72px minmax(0, 1fr) minmax(0, 1fr); gap: 0.5rem; margin-bottom: 0.35rem; font-size: 0.72rem;">
+                                <span>Days</span>
+                                <span>Expiry</span>
+                                <span>Strike</span>
+                                <span style="grid-column: 1 / span 2;">Status / Snapshot</span>
+                                <span style="text-align: right;">Action</span>
+                            </div>
+                            <div id="forwardRateSamplesList"></div>
+                        </div>
+
+                        <div class="control-group" id="futuresPoolPanel" hidden>
+                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem;">
+                                <label style="margin: 0;">Futures Pool</label>
+                                <button type="button" class="btn btn-secondary btn-sm" id="addFutureContractBtn">Add Future</button>
+                            </div>
+                            <div class="text-muted small" id="futuresPoolStatus" style="margin-bottom: 0.5rem;">
+                                Add one or more futures contracts. Each FOP leg will be required to pick one.
+                            </div>
+                            <div class="text-muted small" style="display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; gap: 0.5rem; margin-bottom: 0.35rem; font-size: 0.72rem;">
+                                <span>Contract</span>
+                                <span>Latest Quote</span>
+                                <span></span>
+                            </div>
+                            <div id="futuresPoolList"></div>
+                        </div>
+
+                        <div class="control-group">
+                            <label for="ivOffset">
+                                IV Adjustment (%)
+                                <span class="value-display" id="ivOffsetDisplay">+0.0%</span>
+                            </label>
+                            <input type="number" id="ivOffset" class="number-input" value="0.00" step="0.01">
+                            <input type="range" id="ivOffsetSlider" min="-100" max="100" value="0" step="1">
+                        </div>
+                    </div>
+
+                    <div class="panel-card summary-card">
+                        <h2>Portfolio Valuation</h2>
+
+                        <div class="summary-item">
+                            <span class="label">Total Cost Basis</span>
+                            <span class="value" id="totalCost">$0.00</span>
+                        </div>
+
+                        <div class="summary-item highlight">
+                            <span class="label">Simulated Value</span>
+                            <span class="value" id="simulatedValue">$0.00</span>
+                        </div>
+
+                        <div class="summary-item">
+                            <span class="label">Theo P&L</span>
+                            <span class="value" id="unrealizedPnL">$0.00</span>
+                        </div>
+
+                        <div class="summary-item" id="globalLivePnLRow"
+                            style="display: none; border-top: 1px dashed var(--border-color); padding-top: 0.5rem; margin-top: 0.25rem;">
+                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🟢 Options
+                                Live P&L</span>
+                            <span class="value font-weight-semibold" id="globalLivePnL">$0.00</span>
+                        </div>
+
+                        <div class="summary-item" id="hedgeLivePnLRow" style="display: none; padding-top: 0.25rem;">
+                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🛡️ Hedge Live
+                                P&L</span>
+                            <span class="value font-weight-semibold" id="hedgeLivePnL">$0.00</span>
+                        </div>
+
+                        <div class="summary-item" id="totalLivePnLRow"
+                            style="display: none; border-top: 1px solid var(--border-color); padding-top: 0.5rem; margin-top: 0.25rem;">
+                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🔥 Total Live
+                                P&L</span>
+                            <span class="value font-weight-semibold" id="totalLivePnL">$0.00</span>
+                        </div>
+                    </div>
+
+                    <div class="panel-card" style="padding: 0.875rem 1rem;">
+                        <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;">
+                            <input type="checkbox" id="allowLiveComboOrders" style="accent-color: var(--danger-color);">
+                            <span style="font-size: 0.9rem; font-weight: 600;">Enable Live Combo Orders</span>
+                        </label>
+                        <div class="text-muted small mt-2">
+                            Off by default. Trial triggers can always preview instructions, but real combo orders are only sent to TWS when this switch is enabled.
+                        </div>
+                    </div>
+
+                    <div id="wsStatus" class="ws-status ws-disconnected">🔴 Disconnected</div>
+                    <div class="panel-card" style="padding: 0.875rem 1rem;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;">
+                            <div>
+                                <div style="font-size: 0.85rem; font-weight: 600;">Local WebSocket Port</div>
+                                <div class="text-muted small">Only change this if `config.ini` uses a different `ws_port`.</div>
+                            </div>
+                            <button class="btn btn-secondary btn-sm" type="button" onclick="toggleWsPortControls()">WS Port</button>
+                        </div>
+                        <div id="wsPortControls" style="display: none; margin-top: 0.75rem;">
+                            <label for="wsPortInput" class="small text-muted" style="display: block; margin-bottom: 0.35rem;">Browser WS Port</label>
+                            <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                <input type="number" id="wsPortInput" class="number-input" min="1" max="65535" step="1" value="8765">
+                                <button class="btn btn-primary btn-sm" type="button" onclick="applyWsPort()">Apply</button>
+                                <button class="btn btn-secondary btn-sm" type="button" onclick="resetWsPort()">Reset</button>
+                            </div>
+                        </div>
+                    </div>
+                </aside>
+
+                <!-- Portfolio Area (Right Main Content) -->
+                <section class="portfolio-area">
+                    <div class="portfolio-header-global">
+                        <div style="display: flex; align-items: center; gap: 1rem;">
+                            <button id="toggleSidebarTopBtn" class="btn btn-secondary btn-sm" onclick="toggleSidebar()"
+                                title="Toggle Sidebar Controls">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                    <line x1="9" y1="3" x2="9" y2="21"></line>
+                                </svg>
+                                Controls
+                            </button>
+                            <h2 style="margin: 0;">Combo Groups</h2>
+                        </div>
+                        <button class="btn btn-primary" onclick="addGroup()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="12" y1="5" x2="12" y2="19"></line>
+                                <line x1="5" y1="12" x2="19" y2="12"></line>
+                            </svg>
+                            Add New Group
+                        </button>
+                    </div>
+
+                    <!-- Global Portfolio Chart -->
+                    <div class="panel-card global-chart-card mb-4" id="globalChartCard" style="display: none;">
+                        <div class="group-header" style="border-bottom: none; padding-bottom: 0;">
+                            <div class="group-title-area">
+                                <h3 class="h3-style m-0">Global Portfolio P&L</h3>
+                            </div>
+                            <div class="group-actions">
+                                <button class="btn btn-secondary btn-sm toggle-global-chart-btn"
+                                    onclick="toggleGlobalChart(this)">Show Chart</button>
+                            </div>
+                        </div>
+
+                        <div class="chart-container mt-3" id="globalChartContainer"
+                            style="display: none; border-top: 1px solid var(--border-color); padding-top: 1rem;">
+                            <div class="chart-controls" style="display: flex; gap: 2rem; margin-bottom: 1rem;">
+                                <div class="chart-control-item">
+                                    <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Range
+                                        Mode</label>
+                                    <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="5"
+                                            onclick="setGlobalChartRangeMode(this, 5)">±5%</button>
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn active"
+                                            data-mode="10" onclick="setGlobalChartRangeMode(this, 10)">±10%</button>
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="20"
+                                            onclick="setGlobalChartRangeMode(this, 20)">±20%</button>
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="25"
+                                            onclick="setGlobalChartRangeMode(this, 25)">±25%</button>
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn"
+                                            data-mode="custom"
+                                            onclick="setGlobalChartRangeMode(this, 'custom')">Custom</button>
+                                    </div>
+                                </div>
+                                <div class="chart-control-item global-custom-range-inputs" style="opacity: 0.5;">
+                                    <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Price
+                                        Range (From - To)</label>
+                                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                        <input type="number" class="leg-input global-chart-min-input"
+                                            style="min-width: 70px" step="1" disabled
+                                            onchange="triggerGlobalChartRedraw()">
+                                        <span class="text-muted">-</span>
+                                        <input type="number" class="leg-input global-chart-max-input"
+                                            style="min-width: 70px" step="1" disabled
+                                            onchange="triggerGlobalChartRedraw()">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="text-muted small global-chart-anchor-note" style="display: none; margin: -0.25rem 0 0.75rem 0;"></div>
+                            <div class="canvas-wrapper" style="width: 100%; height: 250px; position: relative;">
+                                <canvas class="global-pnl-canvas"
+                                    style="width: 100%; height: 100%; display: block;"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel-card mb-4" id="globalAmortizedCard" style="display: none;">
+                        <div class="group-header" style="border-bottom: none; padding-bottom: 0;">
+                            <div class="group-title-area">
+                                <h3 class="h3-style m-0">Global Amortized Result</h3>
+                                <span class="text-muted small" id="globalAmortizedInfoText"
+                                    style="margin-left: 1rem; font-weight: normal;"></span>
+                            </div>
+                            <div class="group-actions">
+                                <button class="btn btn-secondary btn-sm toggle-global-amortized-chart-btn"
+                                    onclick="toggleGlobalAmortizedChart(this)">Show Chart</button>
+                            </div>
+                        </div>
+
+                        <div id="globalAmortizedBanner"
+                            style="display: none; margin-top: 1rem; padding: 1rem; border-radius: 0.5rem; color: #856404; background-color: #fff3cd; border: 2px dashed #ffeeba; font-weight: 600; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.05); font-size: 1.05rem;">
+                            <span id="globalAmortizedText"></span>
+                        </div>
+
+                        <div class="amortization-chart-container mt-3" id="globalAmortizedChartContainer"
+                            style="display: none; border-top: 1px solid var(--border-color); padding-top: 1rem;">
+                            <div class="chart-controls" style="display: flex; gap: 2rem; margin-bottom: 1rem;">
+                                <div class="chart-control-item">
+                                    <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Range Mode</label>
+                                    <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                        <button class="btn btn-secondary btn-sm global-amort-range-mode-btn" data-mode="5"
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 5)">卤5%</button>
+                                        <button class="btn btn-secondary btn-sm global-amort-range-mode-btn active" data-mode="10"
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 10)">卤10%</button>
+                                        <button class="btn btn-secondary btn-sm global-amort-range-mode-btn" data-mode="20"
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 20)">卤20%</button>
+                                        <button class="btn btn-secondary btn-sm global-amort-range-mode-btn" data-mode="25"
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 25)">卤25%</button>
+                                        <button class="btn btn-secondary btn-sm global-amort-range-mode-btn" data-mode="custom"
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 'custom')">Custom</button>
+                                    </div>
+                                </div>
+                                <div class="chart-control-item global-amort-custom-range-inputs" style="opacity: 0.5;">
+                                    <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Price Range (From - To)</label>
+                                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                        <input type="number" class="leg-input global-amort-chart-min-input"
+                                            style="min-width: 70px" step="1" disabled
+                                            onchange="triggerGlobalAmortizedChartRedraw()">
+                                        <span class="text-muted">-</span>
+                                        <input type="number" class="leg-input global-amort-chart-max-input"
+                                            style="min-width: 70px" step="1" disabled
+                                            onchange="triggerGlobalAmortizedChartRedraw()">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="canvas-wrapper" style="width: 100%; height: 250px; position: relative; background: rgba(0,0,0,0.01); border-radius: 8px 8px 0 0; border-bottom: 1px solid var(--border-color);">
+                                <canvas class="global-amortization-canvas" style="width: 100%; height: 100%; display: block;"></canvas>
+                            </div>
+                            <div class="margin-canvas-wrapper" style="width: 100%; height: 80px; position: relative; background: rgba(0,0,0,0.01); border-radius: 0 0 8px 8px;">
+                                <canvas class="global-amort-margin-canvas" style="width: 100%; height: 100%; display: block;"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Probability Analysis Card -->
+                    <div class="panel-card mb-4" id="probAnalysisCard" style="display: none;">
+                        <div class="group-header" style="border-bottom: none; padding-bottom: 0;">
+                            <div class="group-title-area">
+                                <h3 class="h3-style m-0">Probability Analysis</h3>
+                                <span class="text-muted small" id="probSimInfoText"
+                                    style="margin-left: 1rem; font-weight: normal;"></span>
+                            </div>
+                            <div class="group-actions" style="display: flex; align-items: center; gap: 0.75rem;">
+                                <span class="distribution-hint" style="font-size: 11px; color: #9CA3AF; cursor: help;"
+                                    title="Run: python scripts/fit_underlying.py [TICKER]">ℹ️ Params DB</span>
+                                <label class="prob-toggle"
+                                    title="Use zero drift (random walk) instead of historical drift">
+                                    <input type="checkbox" id="randomWalkToggle" onchange="updateProbCharts()">
+                                    <span>Random Walk</span>
+                                </label>
+                                <div id="expectedPnLBadge" style="font-weight: 600; font-size: 0.95rem;"></div>
+                                <button class="btn btn-secondary btn-sm" onclick="toggleProbCharts(this)">Show
+                                    Analysis</button>
+                                <button class="btn btn-primary btn-sm" onclick="updateProbCharts()"
+                                    title="Re-run Simulation">🔄 Recalculate</button>
+                            </div>
+                        </div>
+
+                        <div id="probAnalysisContainer"
+                            style="display: none; border-top: 1px solid var(--border-color); padding-top: 1rem; margin-top: 0.75rem;">
+                            <div class="text-muted small" id="probAnchorInfoText" style="display: none; margin-bottom: 0.75rem;"></div>
+
+                            <!-- Chart 2: Price Probability Density -->
+                            <div class="small text-muted" style="margin-bottom: 0.25rem; font-weight: 500;">
+                                Price Probability Density at Simulation Date
+                            </div>
+                            <div class="canvas-wrapper" style="width: 100%; height: 220px; position: relative;">
+                                <canvas id="priceDensityCanvas"
+                                    style="width: 100%; height: 100%; display: block;"></canvas>
+                            </div>
+
+                            <!-- Chart 3: Expected P&L Density -->
+                            <div class="small text-muted"
+                                style="margin-top: 1.25rem; margin-bottom: 0.25rem; font-weight: 500;">
+                                Expected P&amp;L Contribution by Price &nbsp;
+                                <span style="font-weight: normal;">
+                                    (P&amp;L × Probability — area under curve = Expected P&amp;L)
+                                </span>
+                            </div>
+                            <div class="canvas-wrapper" style="width: 100%; height: 220px; position: relative;">
+                                <canvas id="expectedPnLDensityCanvas"
+                                    style="width: 100%; height: 100%; display: block;"></canvas>
+                            </div>
+
+                        </div>
+                    </div>
+
+                    <div id="groupsContainer">
+                        <!-- Group Cards will be rendered here via JS -->
+                    </div>
+
+                    <div class="empty-state" id="globalEmptyState" style="display: none;">
+                        <div class="empty-icon">📈</div>
+                        <h3>No combo groups</h3>
+                        <p>Create a group to start simulating your options strategies.</p>
+                        <button class="btn btn-primary mt-3" onclick="addGroup()">Create First Group</button>
+                    </div>
+
+                    <!-- Hedge Group (VIX/Stocks) -->
+                    <div class="panel-card mt-4 mb-4" id="hedgeGroupCard">
+                        <div class="group-header">
+                            <div class="group-title-area">
+                                <h3 class="h3-style m-0" style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <button class="icon-btn collapse-toggle-btn" onclick="OptionComboGroupEditorUI.toggleGroupCollapse(this)" title="Toggle Collapse">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="chevron-icon">
+                                            <polyline points="6 9 12 15 18 9"></polyline>
+                                        </svg>
+                                    </button>
+                                    🛡️ Hedges (Live P&amp;L Tracking)
+                                </h3>
+                                <p class="text-muted small" style="margin-left: 1rem; margin-bottom: 0;">These positions
+                                    only track Live P&L and do not affect simulated BSM charts.</p>
+                            </div>
+                            <div class="group-actions">
+                                <button class="btn btn-secondary btn-sm" onclick="addHedge()">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    </svg>
+                                    Add Hedge
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="group-body">
+                            <div class="table-container mt-2">
+                            <table class="portfolio-table">
+                                <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Live Price</th>
+                                        <th>Pos</th>
+                                        <th>Cost Base</th>
+                                        <th>Live P&L</th>
+                                        <th>Data</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="hedgesTableBody">
+                                    <!-- Hedge rows rendered here -->
+                                </tbody>
+                            </table>
+                            <div class="group-empty-state" id="hedgeEmptyState" style="display: none;">
+                                <p class="text-muted small">No active hedge positions. Add one to track its live impact
+                                    on your overall P&L.</p>
+                            </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Template for a Combo Group Card -->
+                    <template id="groupCardTemplate">
+                        <div class="panel-card group-card" data-group-id="">
+                            <div class="group-header">
+                                <div class="group-title-area">
+                                    <button class="icon-btn collapse-toggle-btn" onclick="OptionComboGroupEditorUI.toggleGroupCollapse(this)" title="Toggle Collapse">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="chevron-icon">
+                                            <polyline points="6 9 12 15 18 9"></polyline>
+                                        </svg>
+                                    </button>
+                                    <label style="display: inline-flex; align-items: center; gap: 0.35rem; margin-right: 0.15rem;" title="Include this group in global totals, global charts, and probability analysis">
+                                        <input type="checkbox" class="group-global-toggle" checked>
+                                    </label>
+                                    <input type="text" class="group-name-input h3-style" value="New Combo">
+                                    <button class="btn btn-secondary btn-sm trial-trigger-toggle-btn" type="button" style="display: none;">
+                                        Trial Trigger
+                                    </button>
+                                    <button class="btn btn-secondary btn-sm close-group-toggle-btn" type="button" style="display: none;">
+                                        Close Group
+                                    </button>
+                                    <div class="group-header-live-pnl-item" style="display: none;">
+                                        <span class="group-header-live-pnl-dot"></span>
+                                        <span class="label group-header-live-pnl-label">Live P&amp;L:</span>
+                                        <span class="group-header-live-pnl font-weight-semibold">$0.00</span>
+                                    </div>
+                                </div>
+                                <div class="group-actions">
+                                    <button class="btn btn-secondary btn-sm" onclick="addLegToGroup(this)">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                                            stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                            stroke-linejoin="round">
+                                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                                        </svg>
+                                        Add Leg
+                                    </button>
+                                    <button class="icon-btn text-danger ml-2 remove-group-btn" title="Remove Group">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                                            stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                            stroke-linejoin="round">
+                                            <polyline points="3 6 5 6 21 6"></polyline>
+                                            <path
+                                                d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">
+                                            </path>
+                                            <line x1="10" y1="11" x2="10" y2="17"></line>
+                                            <line x1="14" y1="11" x2="14" y2="17"></line>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="group-body">
+                            <div class="group-live-control"
+                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+
+                                <!-- Dual Charting Toggle -->
+                                <div class="chart-mode-toggle"
+                                    style="display: flex; align-items: center; gap: 0.5rem; background: var(--bg-color); border: 1px solid var(--border-color); padding: 0.25rem; border-radius: 0.5rem;">
+                                    <button class="btn btn-sm btn-secondary active toggle-view-trial"
+                                        style="border: none; box-shadow: none;"
+                                        onclick="setGroupViewMode(this, 'trial')"
+                                        title="Calculate using Current Live Price">
+                                        📈 Trial (Current Price)
+                                    </button>
+                                    <button class="btn btn-sm btn-secondary toggle-view-active"
+                                        style="border: none; box-shadow: none;"
+                                        onclick="setGroupViewMode(this, 'active')"
+                                        title="Calculate using your filled Entry Cost">
+                                        🔒 Active (Entry Cost)
+                                    </button>
+                                    <button class="btn btn-sm btn-secondary toggle-view-amortized"
+                                        style="border: none; box-shadow: none;"
+                                        onclick="setGroupViewMode(this, 'amortized')"
+                                        title="Estimate equivalent buy/sell basis before settlement">
+                                        Amortized
+                                    </button>
+                                    <button class="btn btn-sm btn-secondary toggle-view-settlement"
+                                        style="border: none; box-shadow: none;"
+                                        onclick="setGroupViewMode(this, 'settlement')"
+                                        title="Settle expired/closed combos">
+                                        💰 Settlement
+                                    </button>
+                                </div>
+
+                                <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;">
+                                    <span class="small text-muted">🔴 Offline</span>
+                                    <label class="switch-toggle"
+                                        style="cursor: pointer; display: flex; align-items: center; gap: 0.5rem;">
+                                        <input type="checkbox" class="live-data-toggle"
+                                            style="accent-color: var(--primary-color);">
+                                        <span class="small font-weight-semibold market-data-toggle-label">Market Data Feed</span>
+                                    </label>
+                                    <label class="small text-muted" style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
+                                        <input type="checkbox" class="avg-cost-sync-toggle" style="accent-color: var(--success-color);">
+                                        <span>Fill Cost From TWS Avg Cost</span>
+                                    </label>
+                                    <button type="button" class="btn btn-secondary btn-sm historical-entry-btn" style="display: none; align-self: flex-end;">
+                                        Enter @ Replay Day
+                                    </button>
+                                    <div class="historical-entry-hint text-muted small" style="display: none; max-width: 240px; text-align: right;">
+                                        Locks this group's current replay prices into Cost and starts historical position tracking.
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="trial-trigger-container" style="display: none; margin-bottom: 1rem; padding: 0.75rem; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 0.5rem;">
+                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.6rem;">
+                                    <div style="display: inline-flex; align-items: center; gap: 0.5rem;">
+                                        <button class="icon-btn trial-trigger-collapse-btn" type="button" title="Collapse Trial Trigger" style="padding: 0 2px;">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="trial-trigger-chevron">
+                                                <polyline points="6 9 12 15 18 9"></polyline>
+                                            </svg>
+                                        </button>
+                                        <label style="display: inline-flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.9rem; font-weight: 600;">
+                                        <input type="checkbox" class="trial-trigger-enabled" style="accent-color: var(--warning-color);">
+                                        <span>Trial Trigger</span>
+                                        </label>
+                                    </div>
+                                    <span class="trial-trigger-status small text-muted">Idle</span>
+                                </div>
+                                <div class="trial-trigger-body">
+                                <div style="display: grid; grid-template-columns: 176px 96px 150px 120px 92px max-content; gap: 0.5rem; align-items: center; justify-content: start;">
+                                    <select class="leg-input trial-trigger-condition" style="width: 176px;">
+                                        <option value="gte">Price ≥ Trigger</option>
+                                        <option value="lte">Price ≤ Trigger</option>
+                                    </select>
+                                    <input type="number" class="leg-input trial-trigger-price" step="0.01" placeholder="Trigger">
+                                    <select class="leg-input trial-trigger-execution-mode" style="width: 150px;">
+                                        <option value="preview">Preview Only</option>
+                                        <option value="test_submit">Send to TWS (Test Only)</option>
+                                        <option value="submit">Send to TWS</option>
+                                    </select>
+                                    <select class="leg-input trial-trigger-reprice-threshold" style="width: 120px;" title="Auto-reprice when combo middle drifts by at least this amount.">
+                                        <option value="0.01">Drift 0.01</option>
+                                        <option value="0.02">Drift 0.02</option>
+                                        <option value="0.05">Drift 0.05</option>
+                                    </select>
+                                    <select class="leg-input trial-trigger-tif" style="width: 92px;" title="Broker time-in-force for the combo order.">
+                                        <option value="DAY">DAY</option>
+                                        <option value="GTC">GTC</option>
+                                    </select>
+                                    <button class="btn btn-secondary btn-sm trial-trigger-reset-btn" type="button" style="min-width: 68px; padding-inline: 0.85rem;">Reset</button>
+                                </div>
+                                <div class="trial-trigger-help text-muted small" style="margin-top: 0.55rem;">
+                                    Only works when this group is in Trial mode and Live Market Data is enabled. Preview mode never sends orders.
+                                </div>
+                                <div style="display: grid; grid-template-columns: max-content 150px 96px; gap: 0.5rem; align-items: center; justify-content: start; margin-top: 0.6rem;">
+                                    <label class="small text-muted" style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
+                                        <input type="checkbox" class="trial-trigger-exit-enabled" style="accent-color: var(--danger-color, #ef4444);">
+                                        <span>Exit Condition</span>
+                                    </label>
+                                    <select class="leg-input trial-trigger-exit-condition" style="width: 150px;">
+                                        <option value="lte">Price ≤ Exit</option>
+                                        <option value="gte">Price ≥ Exit</option>
+                                    </select>
+                                    <input type="number" class="leg-input trial-trigger-exit-price" step="0.01" placeholder="Exit">
+                                </div>
+                                <div class="trial-trigger-actions" style="display: none; margin-top: 0.6rem;"></div>
+                                <div class="trial-trigger-preview small" style="display: none; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed rgba(245, 158, 11, 0.35);"></div>
+                                </div>
+                            </div>
+
+                            <div class="close-group-container" style="display: none; margin-bottom: 1rem; padding: 0.75rem; background: rgba(59, 130, 246, 0.07); border: 1px solid rgba(59, 130, 246, 0.22); border-radius: 0.5rem;">
+                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.6rem;">
+                                    <div style="font-size: 0.9rem; font-weight: 600;">Close Group</div>
+                                    <span class="close-group-status small text-muted">Idle</span>
+                                </div>
+                                <div class="close-group-body">
+                                    <div style="display: grid; grid-template-columns: 160px 120px 92px max-content; gap: 0.5rem; align-items: center; justify-content: start;">
+                                        <select class="leg-input close-group-execution-mode" style="width: 160px;" title="Preview first, or send a closing combo to TWS.">
+                                            <option value="preview">Preview Only</option>
+                                            <option value="test_submit">Send to TWS (Test Only)</option>
+                                            <option value="submit">Send to TWS</option>
+                                        </select>
+                                        <select class="leg-input close-group-reprice-threshold" style="width: 120px;" title="Auto-reprice the close order when combo middle drifts by at least this amount.">
+                                            <option value="0.01">Drift 0.01</option>
+                                            <option value="0.02">Drift 0.02</option>
+                                            <option value="0.05">Drift 0.05</option>
+                                        </select>
+                                        <select class="leg-input close-group-tif" style="width: 92px;" title="Broker time-in-force for the closing combo order.">
+                                            <option value="DAY">DAY</option>
+                                            <option value="GTC">GTC</option>
+                                        </select>
+                                        <button class="btn btn-secondary btn-sm close-group-submit-btn" type="button" style="min-width: 96px; padding-inline: 0.85rem;">Close Group</button>
+                                    </div>
+                                    <div class="close-group-help text-muted small" style="margin-top: 0.55rem;">
+                                        Sends the reverse combo for all non-zero legs and reuses the managed middle-price negotiation flow.
+                                    </div>
+                                    <div class="close-group-actions" style="display: none; margin-top: 0.6rem;"></div>
+                                    <div class="close-group-preview small" style="display: none; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed rgba(59, 130, 246, 0.3);"></div>
+                                </div>
+                            </div>
+
+                            <div class="settlement-controls" style="display: none; align-items: center; gap: 0.5rem; margin-bottom: 1rem; padding: 0.5rem; background: rgba(var(--primary-rgb), 0.05); border: 1px solid rgba(var(--primary-rgb), 0.2); border-radius: 0.5rem; flex-wrap: wrap;">
+                                <span class="small font-weight-semibold">Scenario Underlying Price:</span>
+                                <input type="number" class="group-settle-underlying-input" step="0.01" placeholder="Auto" style="max-width: 100px; font-size: 0.8rem; padding: 0.25rem; border: 1px solid var(--border-color); border-radius: 4px;" title="Price of the underlying at expiration (leave empty to use current global price)">
+                                <label class="historical-expiry-auto-close-toggle small text-muted" style="display: none; align-items: center; gap: 0.35rem; margin-left: 0.75rem; white-space: nowrap;">
+                                    <input type="checkbox" class="group-historical-expiry-auto-close" checked style="accent-color: var(--primary-color);">
+                                    <span>Auto-close expired legs at expiry close</span>
+                                </label>
+                                <span class="small text-muted scenario-mode-note" style="margin-left: auto;">Used by Amortized and Settlement modes for expired options without early close.</span>
+                                <button class="btn btn-primary btn-sm btn-simulate-amortized" onclick="toggleAmortizationChart(this)" style="margin-left: 1rem; display: none;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
+                                        <line x1="18" y1="20" x2="18" y2="10"></line>
+                                        <line x1="12" y1="20" x2="12" y2="4"></line>
+                                        <line x1="6" y1="20" x2="6" y2="14"></line>
+                                    </svg>
+                                    Simulate Amortized Price
+                                </button>
+                            </div>
+
+                            <div class="table-container">
+                                <table class="portfolio-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Type</th>
+                                            <th>Pos</th>
+                                            <th>Strike</th>
+                                            <th>DTE & Vol (%)</th>
+                                            <th>Price / Cost</th>
+                                            <th>Simulated</th>
+                                            <th style="min-width: 80px; text-align: right;">
+                                                <span class="sim-pnl-header-text">Theo P&L</span><br>
+                                                <span class="text-muted small live-pnl-header-text">Live P&L</span>
+                                            </th>
+                                            <th>Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="legsTableBody">
+                                        <!-- Legs rendered here -->
+                                    </tbody>
+                                </table>
+                                <div class="group-empty-state" style="display: none;">
+                                    <p class="text-muted small">No legs in this combo.</p>
+                                </div>
+                            </div>
+
+                            <style>
+                                .settlement-highlight {
+                                    background: linear-gradient(135deg, rgba(var(--primary-rgb), 0.1), rgba(var(--primary-rgb), 0.2));
+                                    border: 2px dashed var(--primary-color);
+                                    border-radius: 0.5rem;
+                                    padding: 0.5rem 1rem !important;
+                                    font-size: 1.1rem;
+                                    box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.15);
+                                    transform: translateY(-2px);
+                                }
+                                .settlement-highlight .group-pnl-label {
+                                    color: var(--primary-color);
+                                }
+                                .settlement-highlight .group-pnl {
+                                    font-size: 1.5rem;
+                                }
+                            </style>
+                            <div class="group-summary mt-3">
+                                <div class="group-summary-item">
+                                    <span class="label">Cost:</span> <span
+                                        class="group-cost font-weight-semibold">$0.00</span>
+                                </div>
+                                <div class="group-summary-item">
+                                    <span class="label">Sim Value:</span> <span
+                                        class="group-sim-value font-weight-semibold">$0.00</span>
+                                </div>
+                                <div class="group-summary-item pnl-container" style="transition: all 0.3s ease;">
+                                    <span class="label group-pnl-label">Theo P&L:</span> <span class="group-pnl font-weight-bold">+$0.00</span>
+                                </div>
+                                <div class="group-summary-item group-live-pnl-item" style="display: none;">
+                                    <span class="label">🟢 Live P&L:</span>
+                                    <span class="group-live-pnl font-weight-semibold">$0.00</span>
+                                </div>
+                                <div class="group-summary-item" style="margin-left: auto;">
+                                    <button class="btn btn-secondary btn-sm toggle-chart-btn"
+                                        onclick="toggleChart(this)">Show Chart</button>
+                                </div>
+                            </div>
+                            
+                            <!-- Amortization Banner (Outside flex flow) -->
+                            <div class="amortization-container mt-3" style="display: none; padding: 1rem; border-radius: 0.5rem; color: #856404; background-color: #fff3cd; border: 2px dashed #ffeeba; font-weight: 600; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.05); font-size: 1.15rem;">
+                                👉 <span class="amortization-text"></span>
+                            </div>
+
+                            <!-- Amortization Chart Container -->
+                            <div class="amortization-chart-container mt-3"
+                                style="display: none; border-top: 1px solid var(--border-color); padding-top: 1rem;">
+                                
+                                <h4 class="h4-style m-0 mb-3" style="color: var(--primary-color); display: flex; align-items: center; justify-content: space-between;">
+                                    <span>Amortized Cost Basis Simulation</span>
+                                    <button class="btn btn-sm btn-secondary" onclick="toggleAmortizationChart(this.closest('.amortization-chart-container').previousElementSibling.previousElementSibling.querySelector('.btn-simulate-amortized'))">Close</button>
+                                </h4>
+
+                                <div class="chart-controls" style="display: flex; gap: 2rem; margin-bottom: 1rem;">
+                                    <div class="chart-control-item">
+                                        <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Range Mode</label>
+                                        <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                            <button class="btn btn-secondary btn-sm amort-range-mode-btn" data-mode="5"
+                                                onclick="setAmortChartRangeMode(this, 5)">±5%</button>
+                                            <button class="btn btn-secondary btn-sm amort-range-mode-btn active" data-mode="10"
+                                                onclick="setAmortChartRangeMode(this, 10)">±10%</button>
+                                            <button class="btn btn-secondary btn-sm amort-range-mode-btn" data-mode="20"
+                                                onclick="setAmortChartRangeMode(this, 20)">±20%</button>
+                                            <button class="btn btn-secondary btn-sm amort-range-mode-btn" data-mode="25"
+                                                onclick="setAmortChartRangeMode(this, 25)">±25%</button>
+                                            <button class="btn btn-secondary btn-sm amort-range-mode-btn" data-mode="custom"
+                                                onclick="setAmortChartRangeMode(this, 'custom')">Custom</button>
+                                        </div>
+                                    </div>
+                                    <div class="chart-control-item amort-custom-range-inputs" style="opacity: 0.5;">
+                                        <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Price Range (From - To)</label>
+                                        <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                            <input type="number" class="leg-input amort-chart-min-input" style="min-width: 70px" step="1" disabled onchange="triggerAmortChartRedraw(this)">
+                                            <span class="text-muted">-</span>
+                                            <input type="number" class="leg-input amort-chart-max-input" style="min-width: 70px" step="1" disabled onchange="triggerAmortChartRedraw(this)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="canvas-wrapper" style="width: 100%; height: 250px; position: relative; background: rgba(0,0,0,0.01); border-radius: 8px 8px 0 0; border-bottom: 1px solid var(--border-color);">
+                                    <canvas class="amortization-canvas" style="width: 100%; height: 100%; display: block;"></canvas>
+                                </div>
+                                <!-- Profit Margin Sub-chart -->
+                                <div class="margin-canvas-wrapper" style="width: 100%; height: 80px; position: relative; background: rgba(0,0,0,0.01); border-radius: 0 0 8px 8px;">
+                                    <canvas class="margin-canvas" style="width: 100%; height: 100%; display: block;"></canvas>
+                                </div>
+                            </div>
+
+                            <!-- Standard P&L Chart Container -->
+                            <div class="chart-container mt-3"
+                                style="display: none; border-top: 1px solid var(--border-color); padding-top: 1rem;">
+                                <div class="chart-controls" style="display: flex; gap: 2rem; margin-bottom: 1rem;">
+                                    <div class="chart-control-item">
+                                        <label class="small text-muted"
+                                            style="display:block; margin-bottom: 0.25rem;">Range Mode</label>
+                                        <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                            <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="5"
+                                                onclick="setChartRangeMode(this, 5)">±5%</button>
+                                            <button class="btn btn-secondary btn-sm range-mode-btn active"
+                                                data-mode="10" onclick="setChartRangeMode(this, 10)">±10%</button>
+                                            <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="20"
+                                                onclick="setChartRangeMode(this, 20)">±20%</button>
+                                            <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="25"
+                                                onclick="setChartRangeMode(this, 25)">±25%</button>
+                                            <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="custom"
+                                                onclick="setChartRangeMode(this, 'custom')">Custom</button>
+                                        </div>
+                                    </div>
+                                    <div class="chart-control-item custom-range-inputs" style="opacity: 0.5;">
+                                        <label class="small text-muted"
+                                            style="display:block; margin-bottom: 0.25rem;">Price Range (From -
+                                            To)</label>
+                                        <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                            <input type="number" class="leg-input chart-min-input"
+                                                style="min-width: 70px" step="1" disabled
+                                                onchange="triggerChartRedraw(this)">
+                                            <span class="text-muted">-</span>
+                                            <input type="number" class="leg-input chart-max-input"
+                                                style="min-width: 70px" step="1" disabled
+                                                onchange="triggerChartRedraw(this)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="text-muted small chart-anchor-note" style="display: none; margin: -0.25rem 0 0.75rem 0;"></div>
+                                <div class="canvas-wrapper" style="width: 100%; height: 250px; position: relative;">
+                                    <canvas class="pnl-canvas"
+                                        style="width: 100%; height: 100%; display: block;"></canvas>
+                                </div>
+                                                            </div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <!-- Form template for adding/editing legs inline -->
+                    <template id="legRowTemplate">
+                        <tr class="leg-row" data-id="">
+                            <td>
+                                <select class="leg-input type-input">
+                                    <option value="call">Call</option>
+                                    <option value="put">Put</option>
+                                    <option value="stock">Underlying</option>
+                                </select>
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input pos-input" value="1" step="1"
+                                    style="min-width: 60px;">
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input strike-input" value="100" step="0.01"
+                                    style="min-width: 80px;">
+                            </td>
+                            <td>
+                                <div
+                                    style="display: grid; grid-template-columns: 105px 120px; gap: 0.5rem; align-items: center;">
+                                    <input type="date" class="leg-input dte-input original-dte"
+                                        style="width: 100%; font-size: 0.8rem; padding: 0.25rem;">
+                                    <span class="simulated-dte-display text-muted small"
+                                        style="white-space:nowrap; font-size: 0.75rem; text-align: left;"></span>
+
+                                    <input type="text" class="leg-input iv-input original-iv" value="20.0000%"
+                                        style="width: 100%; font-size: 0.8rem; padding: 0.25rem; text-align: center;">
+                                    <span class="simulated-iv-display text-muted small"
+                                        style="white-space:nowrap; font-size: 0.75rem; text-align: left;"></span>
+                                </div>
+                                <div class="fop-underlying-field" style="display: none; margin-top: 0.4rem;">
+                                    <select class="leg-input fop-underlying-select" style="width: 100%; font-size: 0.8rem; padding: 0.25rem;">
+                                        <option value="">Select future</option>
+                                    </select>
+                                    <div class="fop-underlying-hint text-muted small" style="margin-top: 0.2rem; font-size: 0.72rem;">
+                                        Required for FOP legs.
+                                    </div>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="price-cost-grid"
+                                    style="display: grid; grid-template-columns: 35px 75px; gap: 0.25rem; align-items: center;">
+                                    <span class="text-muted small"
+                                        style="font-size: 0.7rem; font-weight: 500; text-align: right;">Pri:</span>
+                                    <input type="number" class="leg-input current-price-input" value="0.00" step="0.01"
+                                        style="width: 100%; font-size: 0.8rem; padding: 0.25rem;" placeholder="0.00"
+                                        title="Current Live Price">
+
+                                    <span class="text-muted small"
+                                        style="font-size: 0.7rem; font-weight: 500; text-align: right;">Cost:</span>
+                                    <input type="number" class="leg-input cost-input" value="0.00" step="0.01"
+                                        style="width: 100%; font-size: 0.8rem; padding: 0.25rem;" placeholder="0.00"
+                                        title="Your Executed Entry Cost">
+
+                                    <span class="text-muted small close-label"
+                                        style="display: none; font-size: 0.7rem; font-weight: 500; text-align: right; color: var(--danger-color) !important;">Close:</span>
+                                    <input type="number" class="leg-input close-price-input" step="0.01"
+                                        style="display: none; width: 100%; font-size: 0.8rem; padding: 0.25rem; border-color: rgba(var(--danger-rgb), 0.5);" placeholder="Auto"
+                                        title="Early Close Price (overrides simulation)">
+                                </div>
+                            </td>
+                            <td class="simulated-price-cell leg-summary-cell">
+                                <div class="simulated-value-stack font-weight-semibold">
+                                    $0.00
+                                </div>
+                            </td>
+                            <td class="leg-summary-cell leg-pnl-summary-cell">
+                                <div class="leg-pnl-stack">
+                                    <div class="pnl-cell font-weight-semibold" title="Theoretical P&L">$0.00</div>
+                                    <div class="live-pnl-cell font-weight-semibold" style="display: none;"
+                                        title="Live P&L">$0.00</div>
+                                </div>
+                            </td>
+                            <td class="actions-cell">
+                                <div class="leg-actions-stack">
+                                    <button class="btn btn-secondary btn-sm assignment-convert-btn" type="button"
+                                        style="visibility: hidden; padding-inline: 0.55rem; min-width: 82px;">
+                                        Assign
+                                    </button>
+                                    <button class="icon-btn text-danger delete-btn" title="Remove Leg">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <polyline points="3 6 5 6 21 6"></polyline>
+                                            <path
+                                                d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">
+                                            </path>
+                                            <line x1="10" y1="11" x2="10" y2="17"></line>
+                                            <line x1="14" y1="11" x2="14" y2="17"></line>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                    </template>
+
+                    <!-- Template for a Hedge Row -->
+                    <template id="hedgeRowTemplate">
+                        <tr class="hedge-row" data-id="">
+                            <td>
+                                <input type="text" class="leg-input symbol-input" value="UVXY"
+                                    style="min-width: 80px; text-transform: uppercase;">
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input current-price-input" value="0.00" step="0.01"
+                                    style="min-width: 80px;" placeholder="0.00">
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input pos-input" value="-100" step="1"
+                                    style="min-width: 60px;">
+                            </td>
+                            <td>
+                                <input type="number" class="leg-input cost-input" value="25.00" step="0.01"
+                                    style="min-width: 80px;" placeholder="0.00">
+                            </td>
+                            <td class="pnl-cell font-weight-semibold">
+                                $0.00
+                            </td>
+                            <td>
+                                <label class="switch-toggle"
+                                    style="cursor: pointer; display: flex; align-items: center; justify-content: center;">
+                                    <input type="checkbox" class="live-data-toggle"
+                                        style="accent-color: var(--primary-color);">
+                                </label>
+                            </td>
+                            <td class="actions-cell">
+                                <button class="icon-btn text-danger delete-btn" title="Remove Hedge"
+                                    onclick="removeHedge(this)">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <polyline points="3 6 5 6 21 6"></polyline>
+                                        <path
+                                            d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">
+                                        </path>
+                                        <line x1="10" y1="11" x2="10" y2="17"></line>
+                                        <line x1="14" y1="11" x2="14" y2="17"></line>
+                                    </svg>
+                                </button>
+                            </td>
+                        </tr>
+                    </template>
+
+                </section>
+            </div>
+            </section>
+
+            <section id="chartLabPage" class="app-tab-panel" hidden>
+                <div class="panel-card chart-lab-shell">
+                    <div class="chart-lab-header">
+                        <div>
+                            <h2>Daily K Projection Lab</h2>
+                            <p class="section-desc" style="margin-bottom: 0;">
+                                Experimental page: draw a daily candle chart, keep the latest price updated, and project the selected combo's rotated payoff onto the same price axis.
+                            </p>
+                        </div>
+                        <div class="chart-lab-actions">
+                            <button type="button" class="btn btn-secondary" id="chartLabSyncBtn">Use Current Combo</button>
+                            <button type="button" class="btn btn-primary" id="chartLabRefreshBtn">Refresh Bars</button>
+                        </div>
+                    </div>
+
+                    <div class="chart-lab-controls">
+                        <div class="chart-lab-field">
+                            <label for="chartLabGroupSelect">Projection Source</label>
+                            <select id="chartLabGroupSelect" class="number-input">
+                                <option value="">No imported groups yet</option>
+                            </select>
+                        </div>
+                        <div class="chart-lab-field">
+                            <label for="chartLabBarCountSelect">Visible Daily Bars</label>
+                            <select id="chartLabBarCountSelect" class="number-input">
+                                <option value="90">90</option>
+                                <option value="180" selected>180</option>
+                                <option value="260">260</option>
+                            </select>
+                        </div>
+                        <div class="chart-lab-toggle">
+                            <span>Projection uses the same Simulated Date as the Portfolio page.</span>
+                        </div>
+                    </div>
+
+                    <div class="chart-lab-status-grid">
+                        <div class="chart-lab-stat">
+                            <span class="text-muted small">Underlying</span>
+                            <strong id="chartLabSymbol">SPY</strong>
+                        </div>
+                        <div class="chart-lab-stat">
+                            <span class="text-muted small">Bars Source</span>
+                            <strong id="chartLabBarsSource">Waiting</strong>
+                        </div>
+                        <div class="chart-lab-stat">
+                            <span class="text-muted small">Latest Price</span>
+                            <strong id="chartLabLivePrice">--</strong>
+                        </div>
+                        <div class="chart-lab-stat">
+                            <span class="text-muted small">Simulated Date</span>
+                            <strong id="chartLabProjectionDate">--</strong>
+                        </div>
+                    </div>
+
+                    <div id="chartLabMessage" class="chart-lab-message">
+                        Import a combo from the header, then open this tab to project either one group or the included Global Portfolio onto the daily candle chart using the same simulated date as the Portfolio page.
+                    </div>
+
+                    <div class="chart-lab-canvas-shell">
+                        <canvas id="chartLabCanvas"></canvas>
+                    </div>
+
+                    <div class="text-muted small" style="margin-top: 0.9rem;">
+                        Experimental note: candle width is time, but the translucent projection width is normalized P&amp;L magnitude. Only the price axis is aligned 1:1.
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Scripts -->
+    <script src="js/t_params_db.js"></script>
+    <script src="js/market_holidays.js"></script>
+    <script src="js/date_utils.js?v=20260322-expiryfreeze"></script>
+    <script src="js/product_registry.js"></script>
+    <script src="js/index_forward_rate.js"></script>
+    <script src="js/pricing_context.js?v=20260322-histsimdate"></script>
+    <script src="js/group_order_builder.js"></script>
+    <script src="js/trade_trigger_logic.js"></script>
+    <script src="js/distribution_proxy_config.js"></script>
+    <script src="js/pricing_core.js?v=20260322-expiryfreeze"></script>
+    <script src="js/bsm.js"></script>
+    <script src="js/chart.js?v=20260322-histsimdate"></script>
+    <script src="js/prob_charts.js?v=20260322-histsimdate"></script>
+    <script src="js/chart_controls.js?v=20260322-histsimdate"></script>
+    <script src="js/amortized.js?v=20260322-histsimdate"></script>
+    <script src="js/valuation.js?v=20260322-histsimdate"></script>
+    <script src="js/session_logic.js?v=20260322-phase4"></script>
+    <script src="js/session_ui.js?v=20260322-histsimdate"></script>
+    <script src="js/control_panel_ui.js?v=20260322-riskfree"></script>
+    <script src="js/hedge_editor_ui.js"></script>
+    <script src="js/group_editor_ui.js?v=20260322-phase4"></script>
+    <script src="js/hedge_ui.js"></script>
+    <script src="js/group_ui.js?v=20260322-phase4"></script>
+    <script src="js/global_ui.js"></script>
+    <script src="js/app.js?v=20260322-phase4"></script>
+    <script src="js/ws_client.js?v=20260322-riskfree"></script>
+    <script src="js/chart_lab.js?v=20260324-global-projection"></script>
+</body>
+
+</html>

@@ -104,10 +104,11 @@
         return brokerStatus === 'Filled';
     }
 
-    function resolveCloseGroupUiState(activeViewMode, hasOpenPosition, closeExecution) {
+    function resolveCloseGroupUiState(activeViewMode, hasOpenPosition, closeExecution, isHistoricalMode = false) {
         const hasRuntime = hasCloseGroupRuntime(closeExecution);
         const isCompleted = isCloseExecutionCompleted(closeExecution);
-        const showToggle = !isCompleted && ((activeViewMode === 'active' && hasOpenPosition) || hasRuntime);
+        const closeableMode = activeViewMode === 'active' || (isHistoricalMode && activeViewMode === 'trial');
+        const showToggle = !isCompleted && ((closeableMode && hasOpenPosition) || hasRuntime);
         return {
             showToggle,
             showPanel: hasRuntime || (showToggle && closeExecution && closeExecution.isExpanded === true),
@@ -154,7 +155,9 @@
             : (isTestOnly ? 'Net test order:' : 'Net order:');
         const pricingSourceLabel = preview.pricingSource === 'test_guardrail'
             ? 'test-only guardrail'
-            : (preview.pricingSource || 'middle');
+            : (preview.pricingSource === 'historical_replay'
+                ? 'historical replay'
+                : (preview.pricingSource || 'middle'));
         const summaryText = [
             `<div class="small text-muted" style="font-weight: 600; letter-spacing: 0.02em;">${summaryHeader}</div>`,
             `<div><strong>${netLabel}</strong> ${(preview.orderAction || 'BUY')} ${(preview.totalQuantity || 0)} ${orderTarget} @ ${limitText} LMT${preview.timeInForce ? ` ${preview.timeInForce}` : ''}</div>`,
@@ -337,7 +340,12 @@
         let simPriceHtml = currencyFormatter.format(simPricePerShare);
 
         if (leg.closePrice !== null && leg.closePrice !== '') {
-            simPriceHtml += ` <span class="badge" style="background: var(--primary-color); font-size: 0.65rem; vertical-align: middle;">Closed</span>`;
+            const closeBadgeText = leg.closePriceSource === 'historical_expiry_auto'
+                ? 'Held to Expiry'
+                : (leg.closePriceSource === 'assignment_conversion'
+                    ? ((parseFloat(leg.pos) || 0) < 0 ? 'Assigned' : 'Exercised')
+                    : 'Closed');
+            simPriceHtml += ` <span class="badge" style="background: var(--primary-color); font-size: 0.65rem; vertical-align: middle;">${closeBadgeText}</span>`;
         } else if (usesScenarioUnderlying) {
             if (processedLeg.isExpired) {
                 if (simPricePerShare > 0) {
@@ -494,7 +502,12 @@
                 && typeof OptionComboSessionLogic.groupHasOpenPosition === 'function'
                 ? OptionComboSessionLogic.groupHasOpenPosition(groupResult.group)
                 : (groupResult.group.legs || []).some(leg => Math.abs(parseFloat(leg && leg.pos) || 0) > 0.0001);
-            const closeUiState = resolveCloseGroupUiState(groupResult.activeViewMode, hasOpenPosition, closeExecution);
+            const closeUiState = resolveCloseGroupUiState(
+                groupResult.activeViewMode,
+                hasOpenPosition,
+                closeExecution,
+                groupResult.isHistoricalMode === true
+            );
             closeContainer.style.display = closeUiState.showPanel ? 'block' : 'none';
 
             const closeToggleBtn = card.querySelector('.close-group-toggle-btn');

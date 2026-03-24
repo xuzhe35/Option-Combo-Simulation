@@ -19,15 +19,79 @@ const percentFormatter = new Intl.NumberFormat('en-US', {
 const today = new Date();
 const initialDateStr = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
 
+function resolveBootstrapRuntimeConfig() {
+    const bootstrap = (typeof window !== 'undefined' && window.OptionComboBootstrap && typeof window.OptionComboBootstrap === 'object')
+        ? window.OptionComboBootstrap
+        : {};
+    const search = typeof window !== 'undefined' && window.location && typeof window.location.search === 'string'
+        ? window.location.search
+        : '';
+    const params = typeof URLSearchParams !== 'undefined' && search
+        ? new URLSearchParams(search)
+        : null;
+
+    let workspaceVariant = String(
+        bootstrap.workspaceVariant
+        || bootstrap.entry
+        || (params ? (params.get('workspaceVariant') || params.get('entry') || '') : '')
+        || ''
+    ).trim().toLowerCase();
+    if (workspaceVariant !== 'historical' && workspaceVariant !== 'live') {
+        workspaceVariant = '';
+    }
+
+    let requestedMode = bootstrap.marketDataMode;
+    if (!requestedMode && params) {
+        requestedMode = params.get('marketDataMode') || params.get('mode') || '';
+    }
+    if (workspaceVariant && !requestedMode) {
+        requestedMode = workspaceVariant;
+    }
+
+    const marketDataMode = String(requestedMode || '').trim().toLowerCase() === 'historical'
+        ? 'historical'
+        : 'live';
+
+    let marketDataModeLocked = bootstrap.marketDataModeLocked === true || bootstrap.lockMarketDataMode === true;
+    if (!marketDataModeLocked && params) {
+        const lockValue = String(params.get('marketDataModeLocked') || params.get('lockMarketDataMode') || '').trim().toLowerCase();
+        marketDataModeLocked = lockValue === '1' || lockValue === 'true' || lockValue === 'yes';
+    }
+    if (workspaceVariant && bootstrap.marketDataModeLocked === undefined && bootstrap.lockMarketDataMode === undefined && !params?.has('marketDataModeLocked') && !params?.has('lockMarketDataMode')) {
+        marketDataModeLocked = true;
+    }
+
+    return {
+        marketDataMode: workspaceVariant === 'historical'
+            ? 'historical'
+            : (workspaceVariant === 'live' ? 'live' : marketDataMode),
+        workspaceVariant,
+        marketDataModeLocked,
+    };
+}
+
+const bootstrapRuntimeConfig = resolveBootstrapRuntimeConfig();
+if (typeof window !== 'undefined') {
+    window.OptionComboRuntimeConfig = bootstrapRuntimeConfig;
+}
+
 const state = {
     underlyingSymbol: 'SPY',
     underlyingContractMonth: '',
     underlyingPrice: 100.00,
     baseDate: initialDateStr, // Today local YYYY-MM-DD
     simulatedDate: initialDateStr, // Initially same as baseDate
+    marketDataMode: bootstrapRuntimeConfig.marketDataMode,
+    workspaceVariant: bootstrapRuntimeConfig.workspaceVariant,
+    marketDataModeLocked: bootstrapRuntimeConfig.marketDataModeLocked === true,
+    historicalQuoteDate: '',
+    historicalAvailableStartDate: '',
+    historicalAvailableEndDate: '',
     interestRate: 0.03, // 3% default risk-free rate
     ivOffset: 0.0, // 0%
     allowLiveComboOrders: false,
+    forwardRateSamples: [],
+    futuresPool: [],
     viewMode: 'active', // 'active' (Historical Entry Cost) or 'trial' (Current Live Price)
     groups: [],
     hedges: [] // {id, symbol, currentPrice, pos, cost, liveData}
@@ -103,7 +167,9 @@ function bindControlPanelEvents() {
         updateDerivedValues,
         throttledUpdate,
         handleLiveSubscriptions,
+        settleHistoricalReplayGroups,
         renderGroups,
+        generateId,
         addDays,
         diffDays,
         calendarToTradingDays,
@@ -205,7 +271,10 @@ function renderGroups() {
         requestConcedeManagedComboOrder,
         requestCancelManagedComboOrder,
         requestCloseGroupComboOrder,
+        enterHistoricalReplayGroup,
+        syncHistoricalReplayExpirySettlement,
         getUnderlyingProfile,
+        generateId,
         renderGroups,
     });
 }
@@ -260,6 +329,11 @@ function applyGlobalDerivedData(derivedData) {
 function updateDerivedValues() {
     const derivedData = OptionComboValuation.computePortfolioDerivedData(state);
 
+    if (typeof OptionComboSessionUI !== 'undefined'
+        && typeof OptionComboSessionUI.syncWorkspaceChrome === 'function') {
+        OptionComboSessionUI.syncWorkspaceChrome(state);
+    }
+
     applyHedgeDerivedData(derivedData);
 
     document.querySelectorAll('.group-card').forEach(card => {
@@ -269,6 +343,39 @@ function updateDerivedValues() {
     });
 
     applyGlobalDerivedData(derivedData);
+}
+
+function settleHistoricalReplayGroups() {
+    if (state.marketDataMode !== 'historical') {
+        return 0;
+    }
+
+    let settledCount = 0;
+    state.groups.forEach((group) => {
+        if (requestCloseGroupComboOrder(group)) {
+            settledCount += 1;
+        }
+    });
+
+    return settledCount;
+}
+
+function enterHistoricalReplayGroup(group) {
+    if (state.marketDataMode !== 'historical'
+        || typeof requestHistoricalReplayEntryGroup !== 'function') {
+        return false;
+    }
+
+    return requestHistoricalReplayEntryGroup(group);
+}
+
+function syncHistoricalReplayExpirySettlement(group) {
+    if (state.marketDataMode !== 'historical'
+        || typeof requestHistoricalReplayExpirySettlementSync !== 'function') {
+        return false;
+    }
+
+    return requestHistoricalReplayExpirySettlementSync(group);
 }
 
 let currentFileHandle = null;
@@ -360,9 +467,22 @@ function applyImportedState(normalizedState) {
     state.underlyingPrice = normalizedState.underlyingPrice;
     state.baseDate = normalizedState.baseDate;
     state.simulatedDate = normalizedState.simulatedDate;
+    state.marketDataMode = normalizedState.marketDataMode === 'historical' ? 'historical' : 'live';
+    if (state.marketDataModeLocked === true) {
+        state.marketDataMode = state.workspaceVariant === 'historical' ? 'historical' : 'live';
+    }
+    state.historicalQuoteDate = normalizedState.historicalQuoteDate
+        || (state.marketDataMode === 'historical' ? (normalizedState.baseDate || normalizedState.simulatedDate || '') : '');
+    state.historicalAvailableStartDate = '';
+    state.historicalAvailableEndDate = '';
     state.interestRate = normalizedState.interestRate;
     state.ivOffset = normalizedState.ivOffset;
     state.allowLiveComboOrders = normalizedState.allowLiveComboOrders === true;
+    if (state.marketDataMode !== 'live') {
+        state.allowLiveComboOrders = false;
+    }
+    state.forwardRateSamples = normalizedState.forwardRateSamples || [];
+    state.futuresPool = normalizedState.futuresPool || [];
     state.groups = normalizedState.groups;
     state.hedges = normalizedState.hedges;
 

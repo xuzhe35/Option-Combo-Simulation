@@ -1,0 +1,5 @@
+[python]
+; Optional machine-specific override.
+; Example:
+; executable = C:\Users\yourname\AppData\Local\Programs\Python\Python313\python.exe
+executable =

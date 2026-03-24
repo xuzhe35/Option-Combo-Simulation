@@ -1,70 +1,86 @@
 {
   "underlyingSymbol": "SPY",
   "underlyingContractMonth": "",
-  "underlyingPrice": 650.42,
+  "underlyingPrice": 660.9,
   "baseDate": "2026-03-03",
   "simulatedDate": "2026-03-27",
+  "marketDataMode": "live",
+  "workspaceVariant": "",
+  "marketDataModeLocked": false,
+  "historicalQuoteDate": "",
+  "historicalAvailableStartDate": "",
+  "historicalAvailableEndDate": "",
   "interestRate": 0.03,
   "ivOffset": 0,
   "allowLiveComboOrders": true,
+  "forwardRateSamples": [],
+  "futuresPool": [],
   "viewMode": "active",
   "groups": [
     {
-      "id": "_lj3ytayos",
+      "id": "_7qo01618q",
       "name": "664 Strangle-3rd",
       "settleUnderlyingPrice": null,
       "legs": [
         {
-          "id": "_x4zx1b2bn",
+          "id": "_lgv47fnau",
           "type": "call",
           "pos": -4,
           "strike": 664,
           "expDate": "2026-03-27",
-          "iv": 0.21248135463663043,
-          "currentPrice": 2.985,
+          "iv": 0.22986111794454891,
+          "currentPrice": 5.31,
           "cost": 12.463,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_ihrnyleon",
+          "id": "_6dezbtxdz",
           "type": "put",
           "pos": -4,
           "strike": 664,
           "expDate": "2026-03-27",
-          "iv": 0.21248135463663043,
-          "currentPrice": 16.105,
+          "iv": 0.22986111794454891,
+          "currentPrice": 8.025,
           "cost": 13.486,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_snldo3s5b",
+          "id": "_2l0v9vbw5",
           "type": "call",
           "pos": 5,
           "strike": 666,
           "expDate": "2026-04-24",
-          "iv": 0.20251918579092412,
-          "currentPrice": 10.82,
+          "iv": 0.1942741629123943,
+          "currentPrice": 14.07,
           "cost": 19.044,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_yzfgoinla",
+          "id": "_wh4zd4ku2",
           "type": "put",
           "pos": 5,
           "strike": 666,
           "expDate": "2026-04-24",
-          "iv": 0.20251918579092412,
-          "currentPrice": 24.155,
+          "iv": 0.1942741629123943,
+          "currentPrice": 16.83,
           "cost": 20.3,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         }
       ],
       "viewMode": "active",
@@ -99,70 +115,99 @@
         "pendingRequest": false,
         "lastPreview": null,
         "lastError": ""
-      }
+      },
+      "historicalAutoCloseAtExpiry": true
     },
     {
-      "id": "_1q6kbfabm",
+      "id": "_4r30rj4px",
       "name": "685 Strangle-1st",
       "legs": [
         {
-          "id": "_gruhy8jmm",
+          "id": "_fx64vg7m7",
           "type": "call",
           "pos": -4,
           "strike": 685,
           "expDate": "2026-03-27",
-          "iv": 0.17061827876928412,
-          "currentPrice": 0.095,
+          "iv": 0.1725951857624223,
+          "currentPrice": 0.14,
           "cost": 12.381,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_0yh42cope",
+          "id": "_9jryjro58",
           "type": "put",
           "pos": -4,
           "strike": 685,
           "expDate": "2026-03-27",
-          "iv": 0.17061827876928412,
-          "currentPrice": 34.5,
+          "iv": 0.1725951857624223,
+          "currentPrice": 24.065,
           "cost": 12.586,
-          "closePrice": null,
+          "closePrice": 0,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": "",
+          "closePriceSource": "assignment_conversion",
+          "assignmentUnderlyingLegId": "_0lt0aezkd",
+          "assignmentUnderlyingQuantity": 400
         },
         {
-          "id": "_e6lbyopjy",
+          "id": "_qgcyprkgk",
           "type": "call",
           "pos": 5,
           "strike": 689,
           "expDate": "2026-05-29",
-          "iv": 0.17241254592944677,
-          "currentPrice": 7.72,
+          "iv": 0.16434631204993688,
+          "currentPrice": 9.74,
           "cost": 22.694,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_d7c5ewlit",
+          "id": "_inhsr1onl",
           "type": "put",
           "pos": 5,
           "strike": 689,
           "expDate": "2026-05-29",
-          "iv": 0.17241254592944677,
-          "currentPrice": 42.525,
+          "iv": 0.16434631204993688,
+          "currentPrice": 33.62,
           "cost": 22.804,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
+        },
+        {
+          "id": "_0lt0aezkd",
+          "type": "stock",
+          "pos": 400,
+          "strike": 0,
+          "expDate": "",
+          "iv": 0,
+          "ivSource": "manual",
+          "ivManualOverride": false,
+          "currentPrice": 660.9,
+          "currentPriceSource": "live",
+          "cost": 685,
+          "costSource": "assignment_conversion",
+          "closePrice": null,
+          "underlyingFutureId": "",
+          "assignmentSourceLegId": "_9jryjro58"
         }
       ],
       "viewMode": "active",
       "liveData": true,
       "settleUnderlyingPrice": null,
       "includedInGlobal": true,
-      "isCollapsed": true,
+      "isCollapsed": false,
       "tradeTrigger": {
         "enabled": false,
         "condition": "gte",
@@ -191,63 +236,72 @@
         "pendingRequest": false,
         "lastPreview": null,
         "lastError": ""
-      }
+      },
+      "historicalAutoCloseAtExpiry": true
     },
     {
-      "id": "_5uhrsojo8",
+      "id": "_fx9p17143",
       "name": "673 Strangle-2nd",
       "legs": [
         {
-          "id": "_s80gj3xa2",
+          "id": "_o31pua42k",
           "type": "call",
           "pos": -4,
           "strike": 673,
           "expDate": "2026-03-27",
-          "iv": 0.19078562419774117,
-          "currentPrice": 0.905,
+          "iv": 0.20093284096437106,
+          "currentPrice": 1.715,
           "cost": 15.138,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_ws52asjq2",
+          "id": "_7xhywp5u0",
           "type": "put",
           "pos": -4,
           "strike": 673,
           "expDate": "2026-03-27",
-          "iv": 0.19078562419774117,
-          "currentPrice": 23.14,
+          "iv": 0.20093284096437106,
+          "currentPrice": 13.475,
           "cost": 15.036,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_wulke93ia",
+          "id": "_q0m5pukuf",
           "type": "call",
           "pos": 5,
           "strike": 679,
           "expDate": "2026-05-29",
-          "iv": 0.18420715876657473,
-          "currentPrice": 11.68,
+          "iv": 0.1767442121472569,
+          "currentPrice": 14.49,
           "cost": 23.884,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_aupiefxgv",
+          "id": "_dgkzi3m21",
           "type": "put",
           "pos": 5,
           "strike": 679,
           "expDate": "2026-05-29",
-          "iv": 0.18420715876657473,
-          "currentPrice": 36.11,
+          "iv": 0.1767442121472569,
+          "currentPrice": 28.075,
           "cost": 25.934,
           "closePrice": null,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         }
       ],
       "viewMode": "active",
@@ -283,10 +337,11 @@
         "pendingRequest": false,
         "lastPreview": null,
         "lastError": ""
-      }
+      },
+      "historicalAutoCloseAtExpiry": true
     },
     {
-      "id": "_oe9dfd0ur",
+      "id": "_b1uzdswsu",
       "name": "Adjust after 2nd append",
       "includedInGlobal": true,
       "isCollapsed": true,
@@ -312,13 +367,13 @@
       "syncAvgCostFromPortfolio": true,
       "legs": [
         {
-          "id": "_kqjj2wdal",
+          "id": "_i0jkwpz6r",
           "type": "call",
           "pos": 4,
           "strike": 684,
           "expDate": "2026-04-02",
-          "iv": 0.17147791866961065,
-          "currentPrice": 0.645,
+          "iv": 0.16861555498800418,
+          "currentPrice": 1.145,
           "cost": 3.175,
           "closePrice": null,
           "costSource": "execution_report",
@@ -326,16 +381,18 @@
           "executionReportOrderId": 2550,
           "executionReportPermId": 1456122364,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_f1xooe6mn",
+          "id": "_xqb21e5on",
           "type": "put",
           "pos": 6,
           "strike": 664,
           "expDate": "2026-04-02",
-          "iv": 0.21477590811464242,
-          "currentPrice": 18.255,
+          "iv": 0.21559705625477096,
+          "currentPrice": 10.75,
           "cost": 9.595,
           "closePrice": null,
           "costSource": "execution_report",
@@ -343,16 +400,18 @@
           "executionReportOrderId": 2550,
           "executionReportPermId": 1456122364,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_u6yog1it0",
+          "id": "_7sbopanve",
           "type": "put",
           "pos": -8,
           "strike": 630,
           "expDate": "2026-04-02",
-          "iv": 0.274612978310832,
-          "currentPrice": 5.28,
+          "iv": 0.2914217352554136,
+          "currentPrice": 2.6,
           "cost": 2.7763,
           "closePrice": null,
           "costSource": "execution_report",
@@ -360,7 +419,9 @@
           "executionReportOrderId": 2550,
           "executionReportPermId": 1456122364,
           "ivSource": "live",
-          "ivManualOverride": false
+          "ivManualOverride": false,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         }
       ],
       "viewMode": "active",
@@ -374,10 +435,11 @@
         "pendingRequest": false,
         "lastPreview": null,
         "lastError": ""
-      }
+      },
+      "historicalAutoCloseAtExpiry": true
     },
     {
-      "id": "_pbohb711z",
+      "id": "_0kkiiazc0",
       "name": "20x BearSpread",
       "includedInGlobal": true,
       "isCollapsed": true,
@@ -413,45 +475,50 @@
       "syncAvgCostFromPortfolio": true,
       "legs": [
         {
-          "id": "_8syujp4bn",
+          "id": "_wg22r8a94",
           "type": "put",
           "pos": 20,
           "strike": 651,
           "expDate": "2026-04-02",
-          "iv": 0.24094180401586687,
+          "iv": 0.24642403636922414,
           "ivSource": "live",
           "ivManualOverride": false,
-          "currentPrice": 11.71,
+          "currentPrice": 6.285,
           "cost": 10.84,
           "closePrice": null,
           "costSource": "execution_report",
           "executionReportedCost": true,
           "executionReportOrderId": 12217,
-          "executionReportPermId": 143830896
+          "executionReportPermId": 143830896,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_f3z79ujrk",
+          "id": "_licy6twlh",
           "type": "put",
           "pos": -20,
           "strike": 650,
           "expDate": "2026-04-02",
-          "iv": 0.2426123027417622,
+          "iv": 0.2487557527042656,
           "ivSource": "live",
           "ivManualOverride": false,
-          "currentPrice": 11.295,
+          "currentPrice": 6.03,
           "cost": 10.43,
           "closePrice": null,
           "costSource": "execution_report",
           "executionReportedCost": true,
           "executionReportOrderId": 12217,
-          "executionReportPermId": 143830896
+          "executionReportPermId": 143830896,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         }
       ],
       "viewMode": "active",
-      "liveData": true
+      "liveData": true,
+      "historicalAutoCloseAtExpiry": true
     },
     {
-      "id": "_eecgiygiy",
+      "id": "_pvdlydd7k",
       "name": "CutPeak",
       "includedInGlobal": true,
       "isCollapsed": true,
@@ -487,62 +554,69 @@
       "syncAvgCostFromPortfolio": true,
       "legs": [
         {
-          "id": "_5a38ooy4c",
+          "id": "_wlr8ue4bx",
           "type": "put",
           "pos": 3,
           "strike": 673,
           "expDate": "2026-04-02",
-          "iv": 0.19472130012553499,
+          "iv": 0.19388540637258014,
           "ivSource": "live",
           "ivManualOverride": false,
-          "currentPrice": 24.335,
+          "currentPrice": 15.475,
           "cost": 24.3567,
           "closePrice": null,
           "costSource": "execution_report",
           "executionReportedCost": true,
           "executionReportOrderId": 13647,
-          "executionReportPermId": 143831041
+          "executionReportPermId": 143831041,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_5c47lonwn",
+          "id": "_ewbypq1xh",
           "type": "put",
           "pos": -4,
           "strike": 630,
           "expDate": "2026-04-02",
-          "iv": 0.274612978310832,
+          "iv": 0.2914217352554136,
           "ivSource": "live",
           "ivManualOverride": false,
-          "currentPrice": 5.28,
+          "currentPrice": 2.57,
           "cost": 5.24,
           "closePrice": null,
           "costSource": "execution_report",
           "executionReportedCost": true,
           "executionReportOrderId": 13647,
-          "executionReportPermId": 143831041
+          "executionReportPermId": 143831041,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_jhayeleek",
+          "id": "_c2av94kzl",
           "type": "call",
           "pos": 2,
           "strike": 673,
           "expDate": "2026-04-02",
-          "iv": 0.19472130012553499,
+          "iv": 0.19388540637258014,
           "ivSource": "live",
           "ivManualOverride": false,
-          "currentPrice": 2.57,
+          "currentPrice": 4.23,
           "cost": 2.56,
           "closePrice": null,
           "costSource": "execution_report",
           "executionReportedCost": true,
           "executionReportOrderId": 13647,
-          "executionReportPermId": 143831041
+          "executionReportPermId": 143831041,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         }
       ],
       "viewMode": "active",
-      "liveData": true
+      "liveData": true,
+      "historicalAutoCloseAtExpiry": true
     },
     {
-      "id": "_u43ky55mr",
+      "id": "_7dfgrlzgv",
       "name": "652",
       "includedInGlobal": false,
       "isCollapsed": true,
@@ -578,70 +652,80 @@
       "syncAvgCostFromPortfolio": true,
       "legs": [
         {
-          "id": "_vzjdqc7m4",
+          "id": "_vlwb3gldp",
           "type": "call",
           "pos": -4,
           "strike": 652,
           "expDate": "2026-03-27",
-          "iv": 0.23916040590321325,
+          "iv": 0.26749929471394485,
           "ivSource": "live",
           "ivManualOverride": false,
-          "currentPrice": 8.22,
+          "currentPrice": 13.255,
           "cost": 0,
-          "closePrice": null
+          "closePrice": null,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_mpp9hiv4t",
+          "id": "_zrzxc7vzs",
           "type": "put",
           "pos": -4,
           "strike": 652,
           "expDate": "2026-03-27",
-          "iv": 0.23916040590321325,
+          "iv": 0.26749929471394485,
           "ivSource": "live",
           "ivManualOverride": false,
-          "currentPrice": 9.295,
+          "currentPrice": 3.755,
           "cost": 0,
-          "closePrice": null
+          "closePrice": null,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_7v9655kpr",
+          "id": "_vhhp09hpe",
           "type": "call",
           "pos": 5,
           "strike": 652,
           "expDate": "2026-04-10",
-          "iv": 0.23039376937762007,
+          "iv": 0.22660616734886252,
           "ivSource": "live",
           "ivManualOverride": false,
-          "currentPrice": 14.425,
+          "currentPrice": 19.255,
           "cost": 0,
-          "closePrice": null
+          "closePrice": null,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         },
         {
-          "id": "_24ptuwbxs",
+          "id": "_3z028ezuv",
           "type": "put",
           "pos": 5,
           "strike": 652,
           "expDate": "2026-04-10",
-          "iv": 0.23039376937762007,
+          "iv": 0.22660616734886252,
           "ivSource": "live",
           "ivManualOverride": false,
-          "currentPrice": 14.54,
+          "currentPrice": 8.725,
           "cost": 0,
-          "closePrice": null
+          "closePrice": null,
+          "currentPriceSource": "live",
+          "underlyingFutureId": ""
         }
       ],
       "viewMode": "trial",
-      "liveData": true
+      "liveData": true,
+      "historicalAutoCloseAtExpiry": true
     }
   ],
   "hedges": [
     {
-      "id": "_o48nyrqyx",
+      "id": "_8flbkhv3a",
       "symbol": "UVXY",
       "pos": -100,
       "cost": 42.249,
-      "currentPrice": 51.7,
-      "liveData": true
+      "currentPrice": 48.18,
+      "liveData": true,
+      "currentPriceSource": "live"
     }
   ]
 }

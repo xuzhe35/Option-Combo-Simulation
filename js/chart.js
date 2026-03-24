@@ -132,20 +132,48 @@ class PnLChart {
         // Process all legs globally before the 500-point chart array loop
         // Use per-leg _viewMode (injected by Global Chart flattener) if available, else group-level
         const activeViewMode = group.viewMode || 'active';
+        const pricingContext = typeof OptionComboPricingContext === 'undefined'
+            ? null
+            : OptionComboPricingContext;
         const underlyingProfile = typeof OptionComboProductRegistry === 'undefined'
             ? null
             : OptionComboProductRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol);
+        const simulationDate = pricingContext
+            && typeof pricingContext.resolveSimulationDate === 'function'
+            ? pricingContext.resolveSimulationDate(globalState)
+            : globalState.simulatedDate;
+        const quoteDate = pricingContext
+            && typeof pricingContext.resolveQuoteDate === 'function'
+            ? pricingContext.resolveQuoteDate(globalState)
+            : globalState.baseDate;
+        const anchorInfo = pricingContext
+            && typeof pricingContext.resolveAnchorDisplayInfo === 'function'
+            ? pricingContext.resolveAnchorDisplayInfo(globalState, globalState.underlyingPrice)
+            : null;
+        const currentAnchorUnderlying = pricingContext
+            && typeof pricingContext.resolveAnchorUnderlyingPrice === 'function'
+            ? pricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
+            : globalState.underlyingPrice;
         const processedLegs = group.legs.map(leg => {
             const legViewMode = leg._viewMode || activeViewMode;
+            const legCurrentUnderlying = pricingContext
+                && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
+                ? pricingContext.resolveLegCurrentUnderlyingPrice(globalState, leg, currentAnchorUnderlying)
+                : globalState.underlyingPrice;
+            const legInterestRate = pricingContext
+                && typeof pricingContext.resolveLegInterestRate === 'function'
+                ? pricingContext.resolveLegInterestRate(globalState, leg, globalState.interestRate)
+                : globalState.interestRate;
             return processLegData(
                 leg,
-                globalState.simulatedDate,
+                simulationDate,
                 globalState.ivOffset,
-                globalState.baseDate,
-                globalState.underlyingPrice,
-                globalState.interestRate,
+                quoteDate,
+                legCurrentUnderlying,
+                legInterestRate,
                 legViewMode,
-                underlyingProfile
+                underlyingProfile,
+                globalState.marketDataMode
             );
         });
         const hasUnavailableSimulation = processedLegs.some(leg =>
@@ -184,12 +212,20 @@ class PnLChart {
                 const l = processedLegs[j];
                 const rawLeg = group.legs[j];
                 const legViewMode = rawLeg._viewMode || activeViewMode;
+                const legScenarioUnderlying = pricingContext
+                    && typeof pricingContext.resolveLegScenarioUnderlyingPrice === 'function'
+                    ? pricingContext.resolveLegScenarioUnderlyingPrice(globalState, rawLeg, currentS, currentAnchorUnderlying)
+                    : currentS;
+                const legInterestRate = pricingContext
+                    && typeof pricingContext.resolveLegInterestRate === 'function'
+                    ? pricingContext.resolveLegInterestRate(globalState, rawLeg, globalState.interestRate)
+                    : globalState.interestRate;
                 
                 totalCostBasis += l.costBasis;
 
                 const pricePerShare = computeSimulatedPrice(
-                    l, rawLeg, currentS, globalState.interestRate,
-                    legViewMode, globalState.simulatedDate, globalState.baseDate, globalState.ivOffset
+                    l, rawLeg, legScenarioUnderlying, legInterestRate,
+                    legViewMode, simulationDate, quoteDate, globalState.ivOffset
                 );
                 simValue += l.posMultiplier * pricePerShare;
             }
@@ -226,7 +262,7 @@ class PnLChart {
         this.drawAxes(minS, maxS, minPnL, maxPnL, mapX, mapY, drawW, drawH, globalState);
 
         // Draw Current Underlying Price Reference Line
-        const currentS = globalState.underlyingPrice;
+        const currentS = currentAnchorUnderlying;
         if (currentS >= minS && currentS <= maxS) {
             const curX = mapX(currentS);
             this.ctx.beginPath();
@@ -242,7 +278,11 @@ class PnLChart {
             this.ctx.fillStyle = '#6366F1';
             this.ctx.textAlign = 'center';
             this.ctx.textBaseline = 'bottom';
-            this.ctx.fillText(`Current: $${currentS.toFixed(2)}`, curX, this.padding.top - 5);
+            this.ctx.fillText(
+                `${anchorInfo && anchorInfo.lineLabel ? anchorInfo.lineLabel : 'Current'}: $${currentS.toFixed(2)}`,
+                curX,
+                this.padding.top - 5
+            );
         }
 
         // Clip drawing area to not leak into padding
@@ -437,7 +477,10 @@ class PnLChart {
             this.ctx.stroke();
 
             // Draw Tooltip Box
-            const currentUnderlying = globalState.underlyingPrice;
+            const currentUnderlying = typeof OptionComboPricingContext !== 'undefined'
+                && typeof OptionComboPricingContext.resolveAnchorUnderlyingPrice === 'function'
+                ? OptionComboPricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
+                : globalState.underlyingPrice;
             let percentChange = 0;
             if (currentUnderlying > 0) {
                 percentChange = ((this.hoverData.x - currentUnderlying) / currentUnderlying) * 100;
@@ -519,7 +562,10 @@ class PnLChart {
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'top';
 
-        const currentUnderlying = globalState.underlyingPrice;
+        const currentUnderlying = typeof OptionComboPricingContext !== 'undefined'
+            && typeof OptionComboPricingContext.resolveAnchorUnderlyingPrice === 'function'
+            ? OptionComboPricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
+            : globalState.underlyingPrice;
 
         for (let i = 0; i <= tickCountX; i++) {
             const sTick = minS + (maxS - minS) * (i / tickCountX);

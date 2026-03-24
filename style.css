@@ -1,6 +1,7 @@
 /* Base Variables */
 :root {
     --primary-color: #4F46E5;
+    --primary-rgb: 79, 70, 229;
     /* Indigo 600 */
     --primary-hover: #4338CA;
     --secondary-color: #10B981;
@@ -11,6 +12,7 @@
     --text-muted: #6B7280;
     --border-color: #E5E7EB;
     --danger-color: #EF4444;
+    --danger-rgb: 239, 68, 68;
     --success-bg: #ECFDF5;
     --success-text: #059669;
     --danger-bg: #FEF2F2;
@@ -83,6 +85,12 @@ body {
     color: var(--primary-color);
 }
 
+.app-title-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
 .logo-icon {
     background: var(--primary-color);
     color: white;
@@ -97,6 +105,11 @@ body {
     font-size: 1.5rem;
     font-weight: 700;
     color: var(--text-main);
+}
+
+.app-subtitle {
+    font-size: 0.875rem;
+    color: var(--text-muted);
 }
 
 .header-actions {
@@ -118,6 +131,75 @@ body {
 
 .layout-grid.sidebar-collapsed .control-panel {
     display: none;
+}
+
+.workspace-banner {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    padding: 1rem 1.25rem;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border-color);
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.03), rgba(15, 23, 42, 0.01));
+    box-shadow: var(--shadow-sm);
+}
+
+.workspace-banner-badge {
+    flex: 0 0 auto;
+    min-width: 120px;
+    text-align: center;
+    padding: 0.45rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: rgba(15, 23, 42, 0.08);
+    color: #0f172a;
+}
+
+.workspace-banner-copy {
+    min-width: 0;
+}
+
+.workspace-banner-copy h2 {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 0.15rem;
+}
+
+.workspace-banner-copy p {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+}
+
+.workspace-banner-live {
+    border-color: rgba(185, 28, 28, 0.2);
+    background: linear-gradient(135deg, rgba(254, 242, 242, 1), rgba(254, 226, 226, 0.72));
+}
+
+.workspace-banner-live .workspace-banner-badge {
+    background: #991b1b;
+    color: #fff;
+}
+
+.workspace-banner-live .workspace-banner-copy h2 {
+    color: #7f1d1d;
+}
+
+.workspace-banner-historical {
+    border-color: rgba(30, 64, 175, 0.2);
+    background: linear-gradient(135deg, rgba(239, 246, 255, 1), rgba(219, 234, 254, 0.76));
+}
+
+.workspace-banner-historical .workspace-banner-badge {
+    background: #1d4ed8;
+    color: #fff;
+}
+
+.workspace-banner-historical .workspace-banner-copy h2 {
+    color: #1e3a8a;
 }
 
 /* Cards */
@@ -556,6 +638,43 @@ input[type=range]:focus {
     font-variant-numeric: tabular-nums;
 }
 
+.leg-summary-cell {
+    text-align: right;
+    vertical-align: middle;
+}
+
+.simulated-value-stack {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    min-height: 52px;
+}
+
+.leg-pnl-summary-cell .leg-pnl-stack {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 0.25rem;
+    min-height: 52px;
+}
+
+.actions-cell {
+    vertical-align: top;
+    text-align: center;
+}
+
+.leg-actions-stack {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.45rem;
+    min-height: 52px;
+    width: 82px;
+    padding-top: 0.1rem;
+}
+
 /* Empty State */
 .empty-state {
     text-align: center;
@@ -619,6 +738,17 @@ input[type=range]:focus {
 @media (max-width: 1024px) {
     .layout-grid {
         grid-template-columns: 1fr;
+    }
+
+    .header-content {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+    }
+
+    .workspace-banner {
+        flex-direction: column;
+        align-items: flex-start;
     }
 }
 

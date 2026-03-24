@@ -1,5 +1,10 @@
-$python = 'C:\Users\xuzhe\AppData\Local\Programs\Python\Python313\python.exe'
-$workdir = 'C:\Users\xuzhe\OneDrive\projects\Option Combo Simulation'
+$ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'python_launcher_common.ps1')
+
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$python = (Resolve-OptionComboPython -ProjectRoot $projectRoot).Path
+$workdir = $projectRoot
 $stdout = Join-Path $workdir 'ib_server.codex.log'
 $stderr = Join-Path $workdir 'ib_server.codex.err.log'
 $pidFile = Join-Path $workdir 'ib_server.codex.pid'
