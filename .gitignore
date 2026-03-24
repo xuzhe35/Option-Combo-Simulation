@@ -1,5 +1,7 @@
 Portfolio/
 sqlite_spy/
+__pycache__/
+*.py[cod]
 server_log.txt
 ib_server.codex*.log
 http_server.codex*.log
