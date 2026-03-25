@@ -288,17 +288,19 @@
                     <div class="panel-card" style="padding: 0.875rem 1rem;">
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;">
                             <div>
-                                <div style="font-size: 0.85rem; font-weight: 600;">Local WebSocket Port</div>
-                                <div class="text-muted small">Only change this if `config.ini` uses a different `ws_port`.</div>
+                                <div style="font-size: 0.85rem; font-weight: 600;">WebSocket Endpoint</div>
+                                <div class="text-muted small">Default is local `127.0.0.1`. To reach a remote `ib_server.py`, enter its LAN or Tailscale host here.</div>
                             </div>
-                            <button class="btn btn-secondary btn-sm" type="button" onclick="toggleWsPortControls()">WS Port</button>
+                            <button class="btn btn-secondary btn-sm" type="button" onclick="toggleWsPortControls()">WS Target</button>
                         </div>
                         <div id="wsPortControls" style="display: none; margin-top: 0.75rem;">
+                            <label for="wsHostInput" class="small text-muted" style="display: block; margin-bottom: 0.35rem;">Browser WS Host</label>
+                            <input type="text" id="wsHostInput" class="number-input" value="127.0.0.1" placeholder="127.0.0.1 or server.tailnet.ts.net" style="width: 100%; margin-bottom: 0.6rem;">
                             <label for="wsPortInput" class="small text-muted" style="display: block; margin-bottom: 0.35rem;">Browser WS Port</label>
                             <div style="display: flex; gap: 0.5rem; align-items: center;">
                                 <input type="number" id="wsPortInput" class="number-input" min="1" max="65535" step="1" value="8765">
-                                <button class="btn btn-primary btn-sm" type="button" onclick="applyWsPort()">Apply</button>
-                                <button class="btn btn-secondary btn-sm" type="button" onclick="resetWsPort()">Reset</button>
+                                <button class="btn btn-primary btn-sm" type="button" onclick="applyWsEndpoint()">Apply</button>
+                                <button class="btn btn-secondary btn-sm" type="button" onclick="resetWsEndpoint()">Reset</button>
                             </div>
                         </div>
                     </div>

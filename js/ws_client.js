@@ -17,6 +17,7 @@ let isWsConnected = false;
 
 const DEFAULT_WS_HOST = '127.0.0.1';
 const DEFAULT_WS_PORT = 8765;
+const WS_HOST_STORAGE_KEY = 'optionComboWsHost';
 const WS_PORT_STORAGE_KEY = 'optionComboWsPort';
 
 // Exponential backoff state
@@ -196,6 +197,46 @@ function _normalizeWsPort(rawValue) {
     return parsed;
 }
 
+function _normalizeWsHost(rawValue) {
+    const trimmed = String(rawValue || '').trim();
+    if (!trimmed) {
+        return DEFAULT_WS_HOST;
+    }
+
+    let candidate = trimmed
+        .replace(/^[a-z]+:\/\//i, '')
+        .replace(/[/?#].*$/, '');
+
+    if (candidate.startsWith('[')) {
+        const bracketedMatch = candidate.match(/^\[[^\]]+\]/);
+        if (bracketedMatch) {
+            candidate = bracketedMatch[0];
+        }
+    } else if ((candidate.match(/:/g) || []).length === 1) {
+        candidate = candidate.replace(/:\d+$/, '');
+    }
+
+    return candidate || DEFAULT_WS_HOST;
+}
+
+function _getSavedWsHost() {
+    try {
+        return _normalizeWsHost(localStorage.getItem(WS_HOST_STORAGE_KEY));
+    } catch (e) {
+        return DEFAULT_WS_HOST;
+    }
+}
+
+function _setSavedWsHost(host) {
+    const safeHost = _normalizeWsHost(host);
+    try {
+        localStorage.setItem(WS_HOST_STORAGE_KEY, safeHost);
+    } catch (e) {
+        // Ignore localStorage failures and keep using the runtime value.
+    }
+    return safeHost;
+}
+
 function _getSavedWsPort() {
     try {
         return _normalizeWsPort(localStorage.getItem(WS_PORT_STORAGE_KEY));
@@ -214,9 +255,20 @@ function _setSavedWsPort(port) {
     return safePort;
 }
 
+function _syncWsHostInput(host) {
+    const input = document.getElementById('wsHostInput');
+    if (input) input.value = _normalizeWsHost(host);
+}
+
 function _syncWsPortInput(port) {
     const input = document.getElementById('wsPortInput');
     if (input) input.value = String(_normalizeWsPort(port));
+}
+
+function _getCurrentWsHost() {
+    const input = document.getElementById('wsHostInput');
+    if (input && input.value) return _normalizeWsHost(input.value);
+    return _getSavedWsHost();
 }
 
 function _getCurrentWsPort() {
@@ -226,7 +278,7 @@ function _getCurrentWsPort() {
 }
 
 function _getWsUrl() {
-    return `ws://${DEFAULT_WS_HOST}:${_getCurrentWsPort()}`;
+    return `ws://${_getCurrentWsHost()}:${_getCurrentWsPort()}`;
 }
 
 function _clearWsReconnectTimer() {
@@ -240,21 +292,23 @@ function updateWsStatusUI(status, nextRetrySec) {
     const el = document.getElementById('wsStatus');
     if (!el) return;
 
+    const host = _getCurrentWsHost();
     const port = _getCurrentWsPort();
+    const endpoint = `${host}:${port}`;
     if (status === 'local_only') {
-        el.textContent = 'Local-only mode';
+        el.textContent = `Local page only - ${endpoint}`;
         el.className = 'ws-status ws-error';
         return;
     }
     if (status === 'connected') {
-        el.textContent = `Connected :${port}`;
+        el.textContent = `Connected ${endpoint}`;
         el.className = 'ws-status ws-connected';
     } else if (status === 'error') {
-        el.textContent = `Error :${port}`;
+        el.textContent = `Error ${endpoint}`;
         el.className = 'ws-status ws-error';
     } else {
         const suffix = nextRetrySec != null ? ` - Retry in ${nextRetrySec}s` : '';
-        el.textContent = `Disconnected :${port}${suffix}`;
+        el.textContent = `Disconnected ${endpoint}${suffix}`;
         el.className = 'ws-status ws-disconnected';
     }
 }
@@ -274,7 +328,7 @@ function connectWebSocket() {
     ws.onopen = () => {
         isWsConnected = true;
         _wsReconnectDelay = WS_BASE_DELAY;
-        console.log(`WebSocket Connected to local backend at ${wsUrl}`);
+        console.log(`WebSocket Connected to IB Gateway Backend at ${wsUrl}`);
         updateWsStatusUI('connected');
         handleLiveSubscriptions();
     };
@@ -1007,23 +1061,39 @@ function toggleWsPortControls() {
 }
 
 function applyWsPort() {
-    const input = document.getElementById('wsPortInput');
-    if (!input) return;
+    applyWsEndpoint();
+}
 
-    const safePort = _normalizeWsPort(input.value);
-    input.value = String(safePort);
+function applyWsEndpoint() {
+    const hostInput = document.getElementById('wsHostInput');
+    const portInput = document.getElementById('wsPortInput');
+    if (!portInput) return;
+
+    const safeHost = _normalizeWsHost(hostInput && hostInput.value);
+    const safePort = _normalizeWsPort(portInput.value);
+    if (hostInput) hostInput.value = safeHost;
+    portInput.value = String(safePort);
+    _setSavedWsHost(safeHost);
     _setSavedWsPort(safePort);
     reconnectWebSocket();
 }
 
 function resetWsPort() {
+    resetWsEndpoint();
+}
+
+function resetWsEndpoint() {
+    _setSavedWsHost(DEFAULT_WS_HOST);
     _setSavedWsPort(DEFAULT_WS_PORT);
+    _syncWsHostInput(DEFAULT_WS_HOST);
     _syncWsPortInput(DEFAULT_WS_PORT);
     reconnectWebSocket();
 }
 
 function initWsPortControls() {
+    const savedHost = _getSavedWsHost();
     const savedPort = _getSavedWsPort();
+    _syncWsHostInput(savedHost);
     _syncWsPortInput(savedPort);
     updateWsStatusUI('disconnected');
 }
@@ -1031,6 +1101,8 @@ function initWsPortControls() {
 window.toggleWsPortControls = toggleWsPortControls;
 window.applyWsPort = applyWsPort;
 window.resetWsPort = resetWsPort;
+window.applyWsEndpoint = applyWsEndpoint;
+window.resetWsEndpoint = resetWsEndpoint;
 window.requestPortfolioAvgCostSnapshot = requestPortfolioAvgCostSnapshot;
 window.requestContinueManagedComboOrder = requestContinueManagedComboOrder;
 window.requestConcedeManagedComboOrder = requestConcedeManagedComboOrder;

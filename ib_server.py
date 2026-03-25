@@ -25,7 +25,7 @@ TWS_PORT = config.getint('tws', 'port', fallback=7496)
 TWS_CLIENT_ID = config.getint('tws', 'client_id', fallback=999)
 
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
-WS_HOST = '127.0.0.1'
+WS_HOST = CONFIGURED_WS_HOST or '127.0.0.1'
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
 MANAGED_REPRICE_THRESHOLD_DEFAULT = config.getfloat('execution', 'managed_reprice_threshold_default', fallback=0.01)
 MANAGED_REPRICE_INTERVAL_SECONDS = config.getfloat('execution', 'managed_reprice_interval_seconds', fallback=2.0)
@@ -35,15 +35,11 @@ HISTORICAL_SQLITE_DB = os.path.abspath(
     config.get('historical', 'sqlite_db_path', fallback=os.path.join('sqlite_spy', 'spy_options.db'))
 )
 
-if CONFIGURED_WS_HOST not in ('127.0.0.1', 'localhost'):
+if WS_HOST not in ('127.0.0.1', 'localhost', '::1', '[::1]'):
     logging.warning(
-        "Ignoring configured server.ws_host=%r and binding WebSocket server to 127.0.0.1 only.",
-        CONFIGURED_WS_HOST,
-    )
-elif CONFIGURED_WS_HOST != WS_HOST:
-    logging.info(
-        "Normalizing configured server.ws_host=%r to 127.0.0.1.",
-        CONFIGURED_WS_HOST,
+        "WebSocket server is listening on non-loopback host %r. "
+        "Restrict access with Tailscale ACLs and the OS firewall.",
+        WS_HOST,
     )
 
 ib = IB()
