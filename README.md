@@ -101,6 +101,12 @@ The live bridge defaults to:
 
 - `ws://127.0.0.1:8765`
 
+The browser workspace now lets you choose both a WebSocket host and port from the sidebar. That makes it possible to:
+
+- connect one tab to your local `TWS + ib_server.py`
+- connect another tab to a remote `IB Gateway + ib_server.py`
+- keep both running from the same local Chrome session without using Remote Desktop
+
 ### Frontend + historical replay bridge
 
 ```powershell
@@ -127,6 +133,59 @@ Use:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\powershell_scripts\resolve_python.ps1
 ```
+
+## Live Bridge Config
+
+`ib_server.py` reads its WebSocket bind addresses from `config.ini`:
+
+```ini
+[server]
+ws_host = 127.0.0.1
+ws_port = 8765
+```
+
+Important distinction:
+
+- `tws.host` tells `ib_server.py` how to reach TWS / IB Gateway
+- `server.ws_host` tells your browser how to reach `ib_server.py`
+
+`server.ws_host` supports a comma-separated list. This lets one `ib_server.py` process listen on both loopback and a Tailscale / LAN address at the same time.
+
+Example:
+
+```ini
+[server]
+ws_host = 127.0.0.1,100.106.134.104
+ws_port = 8765
+```
+
+That configuration accepts WebSocket connections on:
+
+- `127.0.0.1:8765`
+- `100.106.134.104:8765`
+
+## Remote Access Over Tailscale
+
+One practical deployment pattern is:
+
+1. Run `IB Gateway` and `ib_server.py` on the remote machine.
+2. Keep `tws.host = 127.0.0.1` on that remote machine if Gateway is local to it.
+3. Set `server.ws_host` to include the remote machine's Tailscale IP, optionally alongside `127.0.0.1`.
+4. From your own laptop, open the frontend locally in Chrome.
+5. In the sidebar's `WebSocket Endpoint` controls, enter either:
+   - `127.0.0.1` for your personal local account
+   - the remote Tailscale IP or MagicDNS host for the company account
+
+Current connection model:
+
+- one browser tab connects to one backend at a time
+- using two tabs is the simplest way to operate local and remote accounts side by side
+
+Recommended safety posture:
+
+- do not expose `8765` directly to the public internet
+- prefer Tailscale reachability plus OS firewall restrictions
+- if the remote bridge listens on a non-loopback host, confirm only your tailnet can reach it
 
 ## Product Support
 

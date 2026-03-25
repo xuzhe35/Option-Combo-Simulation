@@ -6,6 +6,7 @@ import random
 import signal
 import sqlite3
 import configparser
+from contextlib import AsyncExitStack
 from datetime import datetime
 from ib_async import *
 import websockets
@@ -25,7 +26,6 @@ TWS_PORT = config.getint('tws', 'port', fallback=7496)
 TWS_CLIENT_ID = config.getint('tws', 'client_id', fallback=999)
 
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
-WS_HOST = CONFIGURED_WS_HOST or '127.0.0.1'
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
 MANAGED_REPRICE_THRESHOLD_DEFAULT = config.getfloat('execution', 'managed_reprice_threshold_default', fallback=0.01)
 MANAGED_REPRICE_INTERVAL_SECONDS = config.getfloat('execution', 'managed_reprice_interval_seconds', fallback=2.0)
@@ -35,12 +35,24 @@ HISTORICAL_SQLITE_DB = os.path.abspath(
     config.get('historical', 'sqlite_db_path', fallback=os.path.join('sqlite_spy', 'spy_options.db'))
 )
 
-if WS_HOST not in ('127.0.0.1', 'localhost', '::1', '[::1]'):
-    logging.warning(
-        "WebSocket server is listening on non-loopback host %r. "
-        "Restrict access with Tailscale ACLs and the OS firewall.",
-        WS_HOST,
-    )
+def _parse_ws_hosts(raw_value):
+    hosts = []
+    for candidate in str(raw_value or '').split(','):
+        host = candidate.strip()
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts or ['127.0.0.1']
+
+
+WS_HOSTS = _parse_ws_hosts(CONFIGURED_WS_HOST)
+
+for host in WS_HOSTS:
+    if host not in ('127.0.0.1', 'localhost', '::1', '[::1]'):
+        logging.warning(
+            "WebSocket server is listening on non-loopback host %r. "
+            "Restrict access with Tailscale ACLs and the OS firewall.",
+            host,
+        )
 
 ib = IB()
 connected_clients = set()
@@ -1536,19 +1548,27 @@ async def main():
         ib_connect_task = asyncio.create_task(connect_ib())
         logging.info("Started background IB connection task.")
 
-        # Start the WebSocket server
-        logging.info(f"Starting WebSocket server on ws://{WS_HOST}:{WS_PORT}")
+        # Start one WebSocket listener per configured interface so localhost and
+        # a Tailscale/LAN address can both reach the same ib_server.py process.
+        ws_servers = []
         try:
-            ws_server = await websockets.serve(handle_ws_client, WS_HOST, WS_PORT)
+            for ws_host in WS_HOSTS:
+                logging.info(f"Starting WebSocket server on ws://{ws_host}:{WS_PORT}")
+                ws_servers.append(await websockets.serve(handle_ws_client, ws_host, WS_PORT))
         except OSError as e:
+            for ws_server in ws_servers:
+                ws_server.close()
+                await ws_server.wait_closed()
             logging.error(
-                f"Cannot bind WebSocket server on port {WS_PORT}: {e}\n"
-                f"  A previous ib_server.py session is likely still running.\n"
-                f"  Fix: run  Stop-Process -Name python -Force  in PowerShell, then restart."
+                f"Cannot bind WebSocket server on host {ws_host} port {WS_PORT}: {e}\n"
+                f"  Confirm the address exists on this machine and the port is free, then restart."
             )
             return
 
-        async with ws_server:
+        async with AsyncExitStack() as stack:
+            for ws_server in ws_servers:
+                await stack.enter_async_context(ws_server)
+
             # Keep the event loop running forever, yielding to ib_async's network operations.
             while True:
                 await asyncio.sleep(1)

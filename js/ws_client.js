@@ -26,7 +26,6 @@ const WS_MAX_DELAY = 60000;   // 60s cap
 let _wsReconnectDelay = WS_BASE_DELAY;
 let _wsReconnectTimer = null;
 let _legacyLiveDataWarningShown = false;
-let _wsLocalOriginWarningShown = false;
 let _historicalReplayOrderCounter = 900000;
 const _liveQuoteRuntime = {
     underlyingQuote: null,
@@ -150,41 +149,6 @@ function _getQuoteReferenceDate() {
         : (state.baseDate || state.simulatedDate || '');
 }
 
-function _isLoopbackHostname(hostname) {
-    const normalized = String(hostname || '').trim().toLowerCase();
-    return normalized === 'localhost'
-        || normalized === '127.0.0.1'
-        || normalized === '[::1]'
-        || normalized === '::1';
-}
-
-function _isLocalPageContext() {
-    if (typeof window === 'undefined' || !window.location) {
-        return false;
-    }
-
-    const protocol = String(window.location.protocol || '').toLowerCase();
-    if (protocol === 'file:') {
-        return true;
-    }
-
-    return _isLoopbackHostname(window.location.hostname);
-}
-
-function _reportLocalOnlyWsRestriction() {
-    updateWsStatusUI('local_only');
-
-    if (_wsLocalOriginWarningShown) {
-        return;
-    }
-    _wsLocalOriginWarningShown = true;
-
-    console.warn(
-        'WebSocket connection is disabled because this page is not running from a local origin. '
-        + 'For safety, live IB connectivity is only enabled from file://, localhost, or 127.0.0.1.'
-    );
-}
-
 function _isUnderlyingLeg(legOrType) {
     return OptionComboProductRegistry.isUnderlyingLeg(legOrType);
 }
@@ -295,11 +259,6 @@ function updateWsStatusUI(status, nextRetrySec) {
     const host = _getCurrentWsHost();
     const port = _getCurrentWsPort();
     const endpoint = `${host}:${port}`;
-    if (status === 'local_only') {
-        el.textContent = `Local page only - ${endpoint}`;
-        el.className = 'ws-status ws-error';
-        return;
-    }
     if (status === 'connected') {
         el.textContent = `Connected ${endpoint}`;
         el.className = 'ws-status ws-connected';
@@ -315,12 +274,6 @@ function updateWsStatusUI(status, nextRetrySec) {
 
 function connectWebSocket() {
     _clearWsReconnectTimer();
-
-    if (!_isLocalPageContext()) {
-        isWsConnected = false;
-        _reportLocalOnlyWsRestriction();
-        return;
-    }
 
     const wsUrl = _getWsUrl();
     ws = new WebSocket(wsUrl);
@@ -381,11 +334,6 @@ function reconnectWebSocket() {
             // Ignore close errors and reconnect below.
         }
         ws = null;
-    }
-
-    if (!_isLocalPageContext()) {
-        _reportLocalOnlyWsRestriction();
-        return;
     }
 
     updateWsStatusUI('disconnected');
