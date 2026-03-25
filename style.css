@@ -61,7 +61,7 @@ body {
 
 /* Layout */
 .app-container {
-    max-width: 1400px;
+    max-width: 1368px;
     margin: 0 auto;
     padding: 0 1.5rem 3rem;
 }
@@ -119,8 +119,8 @@ body {
 
 .layout-grid {
     display: grid;
-    grid-template-columns: 320px 1fr;
-    gap: 2rem;
+    grid-template-columns: 300px 1fr;
+    gap: 1.5rem;
     align-items: start;
     transition: grid-template-columns 0.3s ease;
 }

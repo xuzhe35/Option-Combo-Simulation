@@ -148,5 +148,31 @@ module.exports = {
                 assert.equal(ctx.document.title, 'QQQ Mar20');
             },
         },
+        {
+            name: 'prefers imported json filename for document title and strips extension',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/session_ui.js',
+                ]);
+
+                assert.equal(
+                    ctx.OptionComboSessionUI.resolveDocumentTitle({
+                        importedSessionTitle: 'SPY Mar27.json',
+                        underlyingSymbol: 'QQQ',
+                        simulatedDate: '2026-03-20',
+                    }),
+                    'SPY Mar27'
+                );
+
+                assert.equal(
+                    ctx.OptionComboSessionUI.resolveDocumentTitle({
+                        importedSessionTitle: 'Iron Condor Setup',
+                        underlyingSymbol: 'QQQ',
+                        simulatedDate: '2026-03-20',
+                    }),
+                    'Iron Condor Setup'
+                );
+            },
+        },
     ],
 };

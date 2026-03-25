@@ -3,6 +3,15 @@
  */
 
 (function attachSessionUI(globalScope) {
+    function normalizeImportedSessionTitle(rawTitle) {
+        const normalized = String(rawTitle || '').trim();
+        if (!normalized) {
+            return '';
+        }
+
+        return normalized.replace(/\.json$/i, '');
+    }
+
     function formatDocumentTitleDate(dateStr) {
         const normalized = String(dateStr || '').trim();
         const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -64,6 +73,11 @@
 
     function resolveDocumentTitle(state) {
         const descriptor = resolveWorkspaceDescriptor(state);
+        const importedSessionTitle = normalizeImportedSessionTitle(state && state.importedSessionTitle);
+        if (importedSessionTitle) {
+            return importedSessionTitle;
+        }
+
         const symbol = String(state && state.underlyingSymbol || '').trim().toUpperCase();
         const dateLabel = formatDocumentTitleDate((state && state.simulatedDate) || (state && state.baseDate) || '');
 

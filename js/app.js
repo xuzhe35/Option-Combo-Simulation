@@ -76,6 +76,7 @@ if (typeof window !== 'undefined') {
 }
 
 const state = {
+    importedSessionTitle: '',
     underlyingSymbol: 'SPY',
     underlyingContractMonth: '',
     underlyingPrice: 100.00,
@@ -461,7 +462,8 @@ function importFromJSON(event) {
     event.target.value = '';
 }
 
-function applyImportedState(normalizedState) {
+function applyImportedState(normalizedState, importedSessionTitle = '') {
+    state.importedSessionTitle = String(importedSessionTitle || '').trim();
     state.underlyingSymbol = normalizedState.underlyingSymbol;
     state.underlyingContractMonth = normalizedState.underlyingContractMonth;
     state.underlyingPrice = normalizedState.underlyingPrice;
@@ -511,7 +513,7 @@ function processImportedFile(file) {
                     addDays
                 );
 
-                applyImportedState(normalizedState);
+                applyImportedState(normalizedState, file && typeof file.name === 'string' ? file.name : '');
                 OptionComboSessionUI.syncControlPanel(state, currencyFormatter, {
                     diffDays,
                     calendarToTradingDays,
