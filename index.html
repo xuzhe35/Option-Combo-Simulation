@@ -8,7 +8,7 @@
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260322-workspace">
+    <link rel="stylesheet" href="style.css?v=20260326-mobilemeta">
 </head>
 
 <body>
@@ -244,7 +244,7 @@
                         </div>
 
                         <div class="summary-item highlight">
-                            <span class="label">Simulated Value</span>
+                            <span class="label">Sim Value</span>
                             <span class="value" id="simulatedValue">$0.00</span>
                         </div>
 
@@ -948,17 +948,18 @@
                                     style="min-width: 80px;">
                             </td>
                             <td>
-                                <div
-                                    style="display: grid; grid-template-columns: 105px 120px; gap: 0.5rem; align-items: center;">
-                                    <input type="date" class="leg-input dte-input original-dte"
-                                        style="width: 100%; font-size: 0.8rem; padding: 0.25rem;">
-                                    <span class="simulated-dte-display text-muted small"
-                                        style="white-space:nowrap; font-size: 0.75rem; text-align: left;"></span>
+                                <div class="leg-dte-iv-grid">
+                                    <div class="leg-dte-iv-field">
+                                        <input type="date" class="leg-input dte-input original-dte"
+                                            style="width: 100%; font-size: 0.8rem; padding: 0.25rem;">
+                                        <span class="simulated-dte-display text-muted small leg-inline-meta"></span>
+                                    </div>
 
-                                    <input type="text" class="leg-input iv-input original-iv" value="20.0000%"
-                                        style="width: 100%; font-size: 0.8rem; padding: 0.25rem; text-align: center;">
-                                    <span class="simulated-iv-display text-muted small"
-                                        style="white-space:nowrap; font-size: 0.75rem; text-align: left;"></span>
+                                    <div class="leg-dte-iv-field">
+                                        <input type="text" class="leg-input iv-input original-iv" value="20.0000%"
+                                            style="width: 100%; font-size: 0.8rem; padding: 0.25rem; text-align: center;">
+                                        <span class="simulated-iv-display text-muted small leg-inline-meta"></span>
+                                    </div>
                                 </div>
                                 <div class="fop-underlying-field" style="display: none; margin-top: 0.4rem;">
                                     <select class="leg-input fop-underlying-select" style="width: 100%; font-size: 0.8rem; padding: 0.25rem;">
@@ -1099,7 +1100,7 @@
     <script src="js/hedge_editor_ui.js"></script>
     <script src="js/group_editor_ui.js?v=20260322-phase4"></script>
     <script src="js/hedge_ui.js"></script>
-    <script src="js/group_ui.js?v=20260322-phase4"></script>
+    <script src="js/group_ui.js?v=20260326-mobilemeta"></script>
     <script src="js/global_ui.js"></script>
     <script src="js/app.js?v=20260322-phase4"></script>
     <script src="js/ws_client.js?v=20260322-riskfree"></script>
