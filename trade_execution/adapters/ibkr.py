@@ -43,6 +43,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.managed_reprice_interval_seconds = float(managed_reprice_interval_seconds)
         self.managed_reprice_max_updates = int(managed_reprice_max_updates)
         self.managed_reprice_timeout_seconds = float(managed_reprice_timeout_seconds)
+        self.managed_terminal_confirmation_seconds = 3.0
         self.managed_executions_by_order_id = {}
         self.managed_executions_by_perm_id = {}
         self.ib.orderStatusEvent += self._on_managed_order_status
@@ -458,6 +459,9 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     def _is_terminal_order_status(self, status):
         return str(status or '').strip() in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
 
+    def _is_soft_terminal_order_status(self, status):
+        return str(status or '').strip() in {'Cancelled', 'ApiCancelled', 'Inactive'}
+
     def _resolve_order_tracking(self, order_id, perm_id):
         context = None
         if order_id is not None:
@@ -535,10 +539,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         except (TypeError, ValueError):
             raise ValueError('Invalid concession ratio.')
 
-        for allowed in (0.10, 0.20, 0.30, 0.50):
+        for allowed in (0.10, 0.20, 0.30, 0.50, 0.75, 0.90):
             if abs(value - allowed) < 0.0001:
                 return allowed
-        raise ValueError('Concession ratio must be one of 0.10, 0.20, 0.30, or 0.50.')
+        raise ValueError('Concession ratio must be one of 0.10, 0.20, 0.30, 0.50, 0.75, or 0.90.')
 
     async def _emit_managed_update(self, context):
         callback = self.emit_order_update
@@ -563,6 +567,87 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             self.logger.exception(
                 f"Failed to emit managed combo update for groupId={context.get('groupId')}"
             )
+
+    def _build_default_watching_message(self, context):
+        threshold = float(context.get('managedRepriceThreshold') or self.managed_reprice_threshold)
+        if float(context.get('managedConcessionRatio') or 0.0) > 0:
+            return (
+                f'Auto-repricing is active with a {int(float(context.get("managedConcessionRatio")) * 100)}% '
+                f'concession from middle toward the quoted worst price. '
+                f'The backend will refresh the working limit when the target combo price moves by at least {threshold:.2f}.'
+            )
+        return (
+            f'Auto-repricing is active. The backend will refresh the working limit when '
+            f'the target combo price moves by at least {threshold:.2f}.'
+        )
+
+    def _clear_pending_terminal_confirmation(self, context):
+        task = context.get('pendingTerminalTask')
+        current_task = asyncio.current_task()
+        if task and not task.done() and task is not current_task:
+            task.cancel()
+        context['pendingTerminalTask'] = None
+        context['pendingTerminalStatus'] = None
+        context['repricingSuspended'] = False
+
+    async def _finalize_managed_terminal(self, context, terminal_status, message=None):
+        self._clear_pending_terminal_confirmation(context)
+        if terminal_status == 'Filled':
+            context['managedState'] = 'filled'
+            context['managedMessage'] = message or 'Order fully filled; auto-repricing is complete.'
+        else:
+            context['managedState'] = 'done'
+            context['managedMessage'] = message or f'Broker order reached terminal status {terminal_status}.'
+
+        await self._emit_managed_update(context)
+        if not context.get('terminated'):
+            context['terminated'] = True
+        task = context.get('task')
+        current_task = asyncio.current_task()
+        if task and not task.done() and task is not current_task:
+            task.cancel()
+        self._cleanup_managed_context(context)
+
+    async def _confirm_terminal_status_after_grace(self, context, terminal_status, token):
+        try:
+            await asyncio.sleep(self.managed_terminal_confirmation_seconds)
+        except asyncio.CancelledError:
+            return
+
+        if context.get('terminated'):
+            return
+        if context.get('pendingTerminalToken') != token:
+            return
+
+        current_status = str(context.get('status') or '').strip()
+        if current_status != terminal_status:
+            return
+
+        await self._finalize_managed_terminal(
+            context,
+            terminal_status,
+            f'Broker order remained in terminal status {terminal_status} after modify-state confirmation.',
+        )
+
+    def _start_terminal_confirmation(self, context, terminal_status):
+        existing_status = str(context.get('pendingTerminalStatus') or '').strip()
+        existing_task = context.get('pendingTerminalTask')
+        if existing_status == terminal_status and existing_task and not existing_task.done():
+            return
+
+        self._clear_pending_terminal_confirmation(context)
+        token = int(context.get('pendingTerminalToken') or 0) + 1
+        context['pendingTerminalToken'] = token
+        context['pendingTerminalStatus'] = terminal_status
+        context['repricingSuspended'] = True
+        context['managedState'] = 'confirming_terminal'
+        context['managedMessage'] = (
+            f'Observed broker status {terminal_status}; pausing auto-repricing briefly to confirm '
+            f'whether this is a terminal cancel or an in-flight modify/replace.'
+        )
+        context['pendingTerminalTask'] = asyncio.create_task(
+            self._confirm_terminal_status_after_grace(context, terminal_status, token)
+        )
 
     def _compute_quote_bounds_from_resolved_legs(self, resolved_legs):
         direct_net_mid = 0.0
@@ -658,13 +743,18 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             if context.get('terminated'):
                 break
 
+            if context.get('repricingSuspended'):
+                if context.get('managedState') != 'confirming_terminal':
+                    context['managedState'] = 'confirming_terminal'
+                    context['managedMessage'] = (
+                        'Pausing auto-repricing while confirming the latest broker order status.'
+                    )
+                await self._emit_managed_update(context)
+                continue
+
             status = str(context.get('status') or '').strip()
-            if self._is_terminal_order_status(status):
-                await self._stop_managed_context(
-                    context,
-                    'done',
-                    f'Broker order reached terminal status {status}.',
-                )
+            if status == 'Filled':
+                await self._finalize_managed_terminal(context, 'Filled')
                 break
 
             filled = float(context.get('filled') or 0)
@@ -807,13 +897,17 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'maxRepriceCount': self.managed_reprice_max_updates,
             'lastRepriceAt': None,
             'managedState': 'watching',
-            'managedMessage': (
-                f'Auto-repricing is active. The backend will refresh the working limit when '
-                f'the target combo price moves by at least {managed_threshold:.2f}.'
-            ),
+            'managedMessage': self._build_default_watching_message({
+                'managedRepriceThreshold': managed_threshold,
+                'managedConcessionRatio': 0.0,
+            }),
             'timeoutAt': time.monotonic() + self.managed_reprice_timeout_seconds,
             'terminated': False,
             'lastManagedEmitSignature': None,
+            'pendingTerminalStatus': None,
+            'pendingTerminalToken': 0,
+            'pendingTerminalTask': None,
+            'repricingSuspended': False,
         }
 
         if context['orderId'] is not None:
@@ -858,23 +952,27 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         if perm_id is not None:
             self.managed_executions_by_perm_id[perm_id] = context
 
-        asyncio.create_task(self._emit_managed_update(context))
+        status = str(context.get('status') or '').strip()
+        if status == 'Filled':
+            asyncio.create_task(self._finalize_managed_terminal(context, 'Filled'))
+            return
 
-        if self._is_terminal_order_status(context.get('status')):
-            terminal_status = str(context.get('status') or '').strip()
-            if terminal_status == 'Filled':
-                context['managedState'] = 'filled'
-                context['managedMessage'] = 'Order fully filled; auto-repricing is complete.'
+        if self._is_soft_terminal_order_status(status):
+            if context.get('managedState') == 'cancelling':
+                asyncio.create_task(self._finalize_managed_terminal(context, status))
             else:
-                context['managedState'] = 'done'
-                context['managedMessage'] = f'Broker order reached terminal status {terminal_status}.'
-            asyncio.create_task(self._emit_managed_update(context))
-            if not context.get('terminated'):
-                context['terminated'] = True
-            task = context.get('task')
-            if task and not task.done():
-                task.cancel()
-            self._cleanup_managed_context(context)
+                self._start_terminal_confirmation(context, status)
+                asyncio.create_task(self._emit_managed_update(context))
+            return
+
+        if context.get('pendingTerminalStatus'):
+            self._clear_pending_terminal_confirmation(context)
+            context['managedState'] = 'watching'
+            context['managedMessage'] = (
+                f'Broker order resumed with status {status}; auto-repricing supervision continues.'
+            )
+
+        asyncio.create_task(self._emit_managed_update(context))
 
     def _should_use_non_guaranteed_routing(self, combo_exchange, combo_legs, order):
         if str(combo_exchange or '').upper() != 'SMART':

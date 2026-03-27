@@ -42,6 +42,7 @@ module.exports = {
                 assert.equal(state.groups[0].name, 'Combo Group 1');
                 assert.equal(state.groups[0].isCollapsed, false);
                 assert.equal(state.groups[0].syncAvgCostFromPortfolio, true);
+                assert.equal(state.groups[0].livePriceMode, 'mark');
                 assert.equal(state.groups[0].historicalAutoCloseAtExpiry, true);
                 assert.equal(state.groups[0].tradeTrigger.enabled, false);
                 assert.equal(state.groups[0].legs.length, 1);

@@ -212,6 +212,29 @@
         return Number.isFinite(parsed) ? parsed.toFixed(2) : '--';
     }
 
+    function _formatForwardRateTimestamp(value) {
+        const raw = String(value || '').trim();
+        if (!raw) {
+            return '';
+        }
+
+        const isoMatch = raw.match(/^(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2})/);
+        if (isoMatch) {
+            return `${isoMatch[1].slice(5)} ${isoMatch[2]}`;
+        }
+
+        const parsed = new Date(raw);
+        if (Number.isNaN(parsed.getTime())) {
+            return raw;
+        }
+
+        const month = String(parsed.getMonth() + 1).padStart(2, '0');
+        const day = String(parsed.getDate()).padStart(2, '0');
+        const hours = String(parsed.getHours()).padStart(2, '0');
+        const minutes = String(parsed.getMinutes()).padStart(2, '0');
+        return `${month}-${day} ${hours}:${minutes}`;
+    }
+
     function _hasComputedForwardRate(sample) {
         return sample
             && sample.isStale !== true
@@ -274,6 +297,29 @@
         status.textContent = `Waiting for live call/put quotes to compute Forward Carry for ${samples.length} sample${samples.length === 1 ? '' : 's'}.`;
     }
 
+    function _syncForwardRatePanelCollapseUi(state, showPanel) {
+        const toggleBtn = _getElement('toggleForwardRatePanelBtn');
+        const header = _getElement('forwardRateSamplesHeader');
+        const list = _getElement('forwardRateSamplesList');
+        const status = _getElement('forwardRateStatus');
+        const collapsed = !!(state && state.forwardRatePanelCollapsed === true);
+
+        if (toggleBtn) {
+            _setHidden(toggleBtn, !showPanel);
+            toggleBtn.textContent = collapsed ? 'Show' : 'Hide';
+            toggleBtn.title = collapsed
+                ? 'Expand Forward Carry samples'
+                : 'Collapse Forward Carry samples';
+        }
+
+        _setHidden(header, !showPanel || collapsed);
+        _setHidden(list, !showPanel || collapsed);
+
+        if (status && status.style) {
+            status.style.marginBottom = collapsed ? '0' : '0.5rem';
+        }
+    }
+
     function _renderFuturesPoolStatus(state) {
         const status = _getElement('futuresPoolStatus');
         if (!status) return;
@@ -307,10 +353,16 @@
         const panel = _getElement('forwardRatePanel');
         const list = _getElement('forwardRateSamplesList');
         const addBtn = _getElement('addForwardRateSampleBtn');
+        const toggleBtn = _getElement('toggleForwardRatePanelBtn');
         const showPanel = _getPricingInputMode(state.underlyingSymbol) === 'INDEX';
+
+        if (typeof state.forwardRatePanelCollapsed !== 'boolean') {
+            state.forwardRatePanelCollapsed = false;
+        }
 
         _setHidden(panel, !showPanel);
         _renderForwardRateStatus(state);
+        _syncForwardRatePanelCollapseUi(state, showPanel);
 
         if (addBtn && typeof addBtn.addEventListener === 'function' && addBtn.__forwardRateBound !== true) {
             addBtn.__forwardRateBound = true;
@@ -318,6 +370,7 @@
                 if (!Array.isArray(state.forwardRateSamples)) {
                     state.forwardRateSamples = [];
                 }
+                state.forwardRatePanelCollapsed = false;
                 state.forwardRateSamples.push({
                     id: typeof deps.generateId === 'function' ? deps.generateId() : _createLocalId('forward'),
                     daysToExpiry: 30,
@@ -338,7 +391,19 @@
             });
         }
 
+        if (toggleBtn && typeof toggleBtn.addEventListener === 'function' && toggleBtn.__forwardRateToggleBound !== true) {
+            toggleBtn.__forwardRateToggleBound = true;
+            toggleBtn.addEventListener('click', () => {
+                state.forwardRatePanelCollapsed = !state.forwardRatePanelCollapsed;
+                _renderForwardRateSamples(state, deps);
+            });
+        }
+
         if (!showPanel || !list || typeof document === 'undefined' || typeof document.createElement !== 'function' || typeof list.appendChild !== 'function') {
+            return;
+        }
+
+        if (state.forwardRatePanelCollapsed === true) {
             return;
         }
 
@@ -440,13 +505,23 @@
                 ? `daily=${Number(sample.dailyCarry).toFixed(6)}`
                 : 'daily=--';
             const impliedRateText = sample.impliedRate !== null && sample.impliedRate !== undefined
-                ? ` annual=${(Number(sample.impliedRate) * 100).toFixed(2)}%`
+                ? `annual=${(Number(sample.impliedRate) * 100).toFixed(2)}%`
                 : '';
-            const timestampText = sample.lastComputedAt ? ` @ ${sample.lastComputedAt}` : '';
-            const quoteText = snapshot
-                ? ` C=${snapshot.callMid.toFixed(2)} P=${snapshot.putMid.toFixed(2)} F~${snapshot.syntheticForward.toFixed(2)} |`
-                : '';
-            meta.textContent = `${statusLabel} |${quoteText} ${carryText}${impliedRateText}${timestampText}`.trim();
+            const timestampText = _formatForwardRateTimestamp(sample.lastComputedAt);
+            const summarySegments = [carryText];
+            if (impliedRateText) {
+                summarySegments.push(impliedRateText);
+            }
+            if (timestampText) {
+                summarySegments.push(`@ ${timestampText}`);
+            }
+            const metaSegments = [statusLabel];
+            if (snapshot) {
+                metaSegments.push(`C=${snapshot.callMid.toFixed(2)} P=${snapshot.putMid.toFixed(2)} F~${snapshot.syntheticForward.toFixed(2)}`);
+            }
+            metaSegments.push(summarySegments.join(' '));
+            meta.textContent = metaSegments.join(' | ');
+            meta.title = sample.lastComputedAt ? `Last computed ${sample.lastComputedAt}` : '';
 
             const removeBtn = document.createElement('button');
             removeBtn.type = 'button';

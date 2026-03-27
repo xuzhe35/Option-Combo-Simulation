@@ -250,6 +250,7 @@ module.exports = {
                 assert.equal(result.groups[0].id, 'gid_1');
                 assert.equal(result.groups[0].includedInGlobal, false);
                 assert.equal(result.groups[0].isCollapsed, true);
+                assert.equal(result.groups[0].livePriceMode, 'mark');
                 assert.equal(result.groups[0].historicalAutoCloseAtExpiry, false);
                 assert.equal(result.groups[0].syncAvgCostFromPortfolio, false);
                 assert.equal(result.groups[0].viewMode, 'settlement');

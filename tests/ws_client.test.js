@@ -6,7 +6,7 @@ module.exports = {
     name: 'ws_client.js',
     tests: [
         {
-            name: 'applies portfolio avg cost updates only to opted-in matching legs',
+            name: 'applies portfolio price updates to matching legs and limits avg cost syncing to opted-in groups',
             run() {
                 const state = {
                     underlyingSymbol: 'SPY',
@@ -26,7 +26,7 @@ module.exports = {
                             viewMode: 'trial',
                             syncAvgCostFromPortfolio: false,
                             legs: [
-                                { id: 'leg_put', type: 'put', pos: 1, strike: 662, expDate: '2026-04-02', cost: 0 },
+                                { id: 'leg_call_off', type: 'call', pos: 1, strike: 670, expDate: '2026-04-02', cost: 0 },
                             ],
                         },
                     ],
@@ -73,6 +73,8 @@ module.exports = {
                             strike: 670,
                             position: 1,
                             avgCostPerUnit: 10.31,
+                            marketPrice: 10.62,
+                            unrealizedPNL: 31,
                         },
                     ],
                 });
@@ -80,6 +82,11 @@ module.exports = {
                 assert.equal(handled, true);
                 assert.equal(state.groups[0].legs[0].cost, 10.31);
                 assert.equal(state.groups[1].legs[0].cost, 0);
+                assert.equal(state.groups[0].legs[0].portfolioMarketPrice, 10.62);
+                assert.equal(state.groups[0].legs[0].portfolioMarketPriceSource, 'tws_portfolio');
+                assert.equal(state.groups[1].legs[0].portfolioMarketPrice, 10.62);
+                assert.equal(state.groups[1].legs[0].portfolioMarketPriceSource, 'tws_portfolio');
+                assert.equal(state.groups[0].legs[0].portfolioUnrealizedPnl, 31);
                 assert.equal(renderCalls, 1);
                 assert.equal(updateCalls, 0);
             },
@@ -173,6 +180,8 @@ module.exports = {
                 assert.equal(firstMessage.options[0].exchange, 'NYMEX');
                 assert.equal(firstMessage.options[0].tradingClass, 'ML3');
                 assert.equal(firstMessage.options[0].underlyingContractMonth, '202607');
+                const secondMessage = JSON.parse(MockWebSocket.instance.sent[1]);
+                assert.equal(secondMessage.action, 'request_portfolio_avg_cost_snapshot');
             },
         },
         {
@@ -255,6 +264,7 @@ module.exports = {
                 assert.equal(firstMessage.options[0].symbol, 'SPY');
                 assert.equal(firstMessage.options[0].expDate, '20250417');
                 assert.equal(firstMessage.stocks.length, 0);
+                assert.equal(MockWebSocket.instance.sent.length, 1);
             },
         },
         {
@@ -2178,6 +2188,8 @@ module.exports = {
                             strike: 662,
                             position: 1,
                             avgCostPerUnit: 10.006,
+                            marketPrice: 10.12,
+                            unrealizedPNL: 215.5,
                         },
                     ],
                 });
@@ -2185,6 +2197,8 @@ module.exports = {
                 assert.equal(handled, true);
                 assert.equal(state.groups[0].legs[0].cost, 7.967);
                 assert.equal(state.groups[0].legs[0].costSource, 'execution_report');
+                assert.equal(state.groups[0].legs[0].portfolioMarketPrice, 10.12);
+                assert.equal(state.groups[0].legs[0].portfolioUnrealizedPnl, 215.5);
             },
         },
         {
@@ -2461,6 +2475,76 @@ module.exports = {
                 assert.equal(state.groups[0].tradeTrigger.lastPreview.status, 'Filled');
                 assert.equal(state.groups[0].tradeTrigger.lastPreview.managedState, 'filled');
                 assert.match(state.groups[0].tradeTrigger.lastPreview.managedMessage, /fully filled/i);
+            },
+        },
+        {
+            name: 'clears stale managed execution fields when broker updates fall back to plain order status',
+            run() {
+                const state = {
+                    groups: [
+                        {
+                            id: 'group_1',
+                            tradeTrigger: {
+                                enabled: false,
+                                pendingRequest: false,
+                                status: 'submitted',
+                                lastPreview: {
+                                    executionMode: 'submit',
+                                    status: 'Submitted',
+                                    orderId: 393,
+                                    permId: 1991671892,
+                                    managedMode: true,
+                                    managedState: 'done',
+                                    managedMessage: 'Broker order reached terminal status Cancelled.',
+                                    workingLimitPrice: 154.53,
+                                    latestComboMid: 154.53,
+                                    repricingCount: 1,
+                                    maxRepriceCount: 12,
+                                },
+                                lastError: '',
+                            },
+                        },
+                    ],
+                };
+
+                const ctx = loadBrowserScripts(
+                    ['js/trade_trigger_logic.js', 'js/session_logic.js', 'js/ws_client.js'],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx._applyComboOrderStatusUpdate({
+                    action: 'combo_order_status_update',
+                    groupId: 'group_1',
+                    orderStatus: {
+                        executionMode: 'submit',
+                        orderId: 393,
+                        permId: 1991671892,
+                        status: 'Submitted',
+                        filled: 0,
+                        remaining: 1,
+                        managedMode: false,
+                    },
+                });
+
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.status, 'Submitted');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.managedMode, false);
+                assert.equal('managedState' in state.groups[0].tradeTrigger.lastPreview, false);
+                assert.equal('managedMessage' in state.groups[0].tradeTrigger.lastPreview, false);
+                assert.equal('workingLimitPrice' in state.groups[0].tradeTrigger.lastPreview, false);
             },
         },
         {

@@ -500,7 +500,7 @@ module.exports = {
                 assert.equal(actionState.actions[1].kind, 'concede_select');
                 assert.equal(
                     actionState.actions[1].options.map(option => option.label).join('|'),
-                    'Concede 10%|Concede 20%|Concede 30%|Concede 50%'
+                    'Concede 10%|Concede 20%|Concede 30%|Concede 50%|Concede 75%|Concede 90%'
                 );
                 assert.equal(actionState.actions[2].label, 'Cancel Order');
             },
@@ -524,6 +524,37 @@ module.exports = {
 
                 assert.equal(actionState.actions[0].label, 'Continue Monitoring (10 More Minutes)');
                 assert.equal(actionState.actions[1].label, 'Cancel Order');
+            },
+        },
+        {
+            name: 'shows a confirming status while broker terminal callbacks are being verified',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_ui.js',
+                ]);
+
+                assert.equal(
+                    ctx.OptionComboGroupUI.formatTriggerStatus({
+                        status: 'submitted',
+                        lastPreview: {
+                            status: 'Cancelled',
+                            managedState: 'confirming_terminal',
+                        },
+                    }),
+                    'Confirming broker order state...'
+                );
+
+                assert.equal(
+                    ctx.OptionComboGroupUI.formatCloseExecutionStatus({
+                        status: 'submitted',
+                        lastPreview: {
+                            status: 'Inactive',
+                            managedState: 'confirming_terminal',
+                        },
+                    }),
+                    'Confirming close-order broker state...'
+                );
             },
         },
     ],

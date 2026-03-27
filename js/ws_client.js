@@ -1287,6 +1287,7 @@ function handleLiveSubscriptions() {
     }
 
     ws.send(JSON.stringify(payload));
+    requestPortfolioAvgCostSnapshot();
 }
 
 function requestUnderlyingPriceSync() {
@@ -1422,6 +1423,50 @@ function _matchesPortfolioAvgCostItem(leg, item) {
     return Math.abs(descriptor.strike - itemStrike) < 0.0001;
 }
 
+function _parsePositivePortfolioMarketPrice(rawValue) {
+    const parsed = parseFloat(rawValue);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function _parsePortfolioPnlValue(rawValue) {
+    const parsed = parseFloat(rawValue);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function _applyPortfolioValuationToLeg(leg, item) {
+    let changed = false;
+
+    const nextPortfolioMarketPrice = _parsePositivePortfolioMarketPrice(item.marketPrice);
+    if (nextPortfolioMarketPrice === null) {
+        if (leg.portfolioMarketPrice !== null && leg.portfolioMarketPrice !== undefined) {
+            leg.portfolioMarketPrice = null;
+            changed = true;
+        }
+        if (leg.portfolioMarketPriceSource) {
+            leg.portfolioMarketPriceSource = '';
+            changed = true;
+        }
+    } else if (Math.abs((parseFloat(leg.portfolioMarketPrice) || 0) - nextPortfolioMarketPrice) > 0.0001
+        || leg.portfolioMarketPriceSource !== 'tws_portfolio') {
+        leg.portfolioMarketPrice = nextPortfolioMarketPrice;
+        leg.portfolioMarketPriceSource = 'tws_portfolio';
+        changed = true;
+    }
+
+    const nextPortfolioUnrealizedPnl = _parsePortfolioPnlValue(item.unrealizedPNL);
+    if (nextPortfolioUnrealizedPnl === null) {
+        if (leg.portfolioUnrealizedPnl !== null && leg.portfolioUnrealizedPnl !== undefined) {
+            leg.portfolioUnrealizedPnl = null;
+            changed = true;
+        }
+    } else if (Math.abs((parseFloat(leg.portfolioUnrealizedPnl) || 0) - nextPortfolioUnrealizedPnl) > 0.0001) {
+        leg.portfolioUnrealizedPnl = nextPortfolioUnrealizedPnl;
+        changed = true;
+    }
+
+    return changed;
+}
+
 function _applyPortfolioAvgCostUpdate(data) {
     const items = Array.isArray(data && data.items) ? data.items : [];
     if (items.length === 0) {
@@ -1431,21 +1476,9 @@ function _applyPortfolioAvgCostUpdate(data) {
     let stateChanged = false;
 
     state.groups.forEach(group => {
-        if (!_isPortfolioAvgCostSyncEnabled(group)) {
-            return;
-        }
-
         (group.legs || []).forEach(leg => {
-            if (leg && leg.costSource === 'execution_report') {
-                return;
-            }
-
             const match = items.find(item => {
-                const avgCostPerUnit = parseFloat(item.avgCostPerUnit);
                 const position = parseFloat(item.position);
-                if (!Number.isFinite(avgCostPerUnit) || avgCostPerUnit <= 0) {
-                    return false;
-                }
                 if (!Number.isFinite(position) || position === 0) {
                     return false;
                 }
@@ -1456,6 +1489,12 @@ function _applyPortfolioAvgCostUpdate(data) {
             });
 
             if (!match) {
+                return;
+            }
+
+            stateChanged = _applyPortfolioValuationToLeg(leg, match) || stateChanged;
+
+            if (!_isPortfolioAvgCostSyncEnabled(group) || (leg && leg.costSource === 'execution_report')) {
                 return;
             }
 
@@ -1883,6 +1922,28 @@ function _applyComboOrderStatusUpdate(data) {
 
     if (!runtime.lastPreview || typeof runtime.lastPreview !== 'object') {
         runtime.lastPreview = {};
+    }
+
+    if (update.managedMode === false) {
+        const {
+            managedMode,
+            managedState,
+            workingLimitPrice,
+            latestComboMid,
+            bestComboPrice,
+            worstComboPrice,
+            managedRepriceThreshold,
+            managedConcessionRatio,
+            repricingCount,
+            maxRepriceCount,
+            lastRepriceAt,
+            managedMessage,
+            canContinueRepricing,
+            canConcedePricing,
+            continueActionLabel,
+            ...nonManagedPreview
+        } = runtime.lastPreview;
+        runtime.lastPreview = nonManagedPreview;
     }
 
     runtime.lastPreview = {

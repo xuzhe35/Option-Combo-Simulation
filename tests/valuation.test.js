@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 
-const { loadValuationContext } = require('./helpers/load-browser-scripts');
+const { loadBrowserScripts, loadValuationContext } = require('./helpers/load-browser-scripts');
 
 function almostEqual(actual, expected, tolerance = 1e-6) {
     assert.ok(
@@ -383,6 +383,124 @@ module.exports = {
                 assert.equal(result.groupSimValue, 74200);
                 assert.equal(result.groupPnL, 1200);
                 assert.equal(result.legResults[0].currentPriceDisplay.placeholder, '74.20');
+            },
+        },
+        {
+            name: 'prefers TWS portfolio market price when computing live pnl',
+            run() {
+                const ctx = loadValuationContext();
+                const globalState = {
+                    underlyingSymbol: 'USO',
+                    underlyingPrice: 91.18,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_uso',
+                    viewMode: 'active',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'uso_short_call',
+                            type: 'call',
+                            pos: -4,
+                            strike: 122,
+                            expDate: '2026-04-17',
+                            iv: 0.3,
+                            cost: 11.1165,
+                            currentPrice: 12.22,
+                            currentPriceSource: 'live',
+                            portfolioMarketPrice: 12.3138218,
+                            portfolioMarketPriceSource: 'tws_portfolio',
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                almostEqual(result.legResults[0].liveLegPnL, -478.92872);
+                almostEqual(result.groupLivePnL, -478.92872);
+                assert.equal(result.legResults[0].livePnlSource, 'tws_portfolio');
+                assert.equal(result.groupUsesPortfolioLivePnl, true);
+            },
+        },
+        {
+            name: 'uses live bid ask midpoint when the group price source is midpoint',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/session_logic.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(subId) {
+                            if (subId === 'uso_midpoint') {
+                                return { bid: 15.2, ask: 15.7, mark: 15.45 };
+                            }
+                            return null;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    underlyingSymbol: 'USO',
+                    underlyingPrice: 91.18,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_midpoint',
+                    viewMode: 'active',
+                    livePriceMode: 'midpoint',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'uso_midpoint',
+                            type: 'call',
+                            pos: 5,
+                            strike: 129,
+                            expDate: '2026-06-18',
+                            iv: 0.3,
+                            cost: 14.9735,
+                            currentPrice: 15.45,
+                            currentPriceSource: 'live',
+                            portfolioMarketPrice: 15.5985,
+                            portfolioMarketPriceSource: 'tws_portfolio',
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                almostEqual(result.legResults[0].liveLegPnL, 238.25);
+                assert.equal(result.legResults[0].livePnlSource, 'live_midpoint');
+                assert.equal(result.legResults[0].currentPriceDisplay.value, '15.45');
+                assert.match(result.legResults[0].currentPriceDisplay.title, /midpoint/i);
+                assert.equal(result.groupUsesPortfolioLivePnl, false);
             },
         },
         {

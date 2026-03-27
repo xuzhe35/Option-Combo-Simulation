@@ -274,6 +274,12 @@
         return isPortfolioAvgCostSyncEnabled(group);
     }
 
+    function normalizeGroupLivePriceMode(value) {
+        return String(value || '').trim().toLowerCase() === 'midpoint'
+            ? 'midpoint'
+            : 'mark';
+    }
+
     function normalizeHistoricalAutoCloseAtExpiry(value) {
         return value !== false;
     }
@@ -366,6 +372,19 @@
                 if (typeof newLeg.currentPriceSource !== 'string') {
                     newLeg.currentPriceSource = '';
                 }
+                if (!Number.isFinite(parseFloat(newLeg.portfolioMarketPrice)) || parseFloat(newLeg.portfolioMarketPrice) <= 0) {
+                    newLeg.portfolioMarketPrice = null;
+                } else {
+                    newLeg.portfolioMarketPrice = parseFloat(newLeg.portfolioMarketPrice);
+                }
+                if (typeof newLeg.portfolioMarketPriceSource !== 'string') {
+                    newLeg.portfolioMarketPriceSource = '';
+                }
+                if (!Number.isFinite(parseFloat(newLeg.portfolioUnrealizedPnl))) {
+                    newLeg.portfolioUnrealizedPnl = null;
+                } else {
+                    newLeg.portfolioUnrealizedPnl = parseFloat(newLeg.portfolioUnrealizedPnl);
+                }
                 if (typeof newLeg.underlyingFutureId !== 'string') {
                     newLeg.underlyingFutureId = '';
                 }
@@ -391,6 +410,7 @@
                 name: 'Legacy Combo',
                 includedInGlobal: true,
                 isCollapsed: false,
+                livePriceMode: 'mark',
                 settleUnderlyingPrice: null,
                 historicalAutoCloseAtExpiry: true,
                 tradeTrigger: _createDefaultTradeTrigger(),
@@ -404,6 +424,7 @@
                 id: generateId(),
                 includedInGlobal: isGroupIncludedInGlobal(g),
                 isCollapsed: g.isCollapsed === true,
+                livePriceMode: normalizeGroupLivePriceMode(g.livePriceMode),
                 settleUnderlyingPrice: g.settleUnderlyingPrice !== undefined ? g.settleUnderlyingPrice : null,
                 historicalAutoCloseAtExpiry: normalizeHistoricalAutoCloseAtExpiry(g.historicalAutoCloseAtExpiry),
                 tradeTrigger: _buildArchivableTradeTrigger(g.tradeTrigger),
@@ -414,6 +435,7 @@
 
         importedGroups = importedGroups.map(group => ({
             ...group,
+            livePriceMode: normalizeGroupLivePriceMode(group.livePriceMode),
             historicalAutoCloseAtExpiry: normalizeHistoricalAutoCloseAtExpiry(group.historicalAutoCloseAtExpiry),
             syncAvgCostFromPortfolio: normalizePortfolioAvgCostSync(group),
         }));
@@ -449,6 +471,7 @@
         getDefaultPortfolioAvgCostSync,
         isPortfolioAvgCostSyncEnabled,
         normalizePortfolioAvgCostSync,
+        normalizeGroupLivePriceMode,
         normalizeHistoricalAutoCloseAtExpiry,
         groupHasDeterministicCost,
         resolveGroupViewModeChange,

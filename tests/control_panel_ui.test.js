@@ -83,7 +83,9 @@ module.exports = {
                     interestRateDisplay: createElement({ textContent: '3.00%' }),
                     forwardRatePanel: createElement({ hidden: true, style: {} }),
                     addForwardRateSampleBtn: createElement(),
+                    toggleForwardRatePanelBtn: createElement(),
                     forwardRateStatus: createElement({ textContent: '' }),
+                    forwardRateSamplesHeader: createElement({ hidden: false, style: {} }),
                     forwardRateSamplesList: createElement(),
                     futuresPoolPanel: createElement({ hidden: true, style: {} }),
                     addFutureContractBtn: createElement(),
@@ -337,7 +339,9 @@ module.exports = {
                     interestRateDisplay: createElement({ textContent: '3.00%' }),
                     forwardRatePanel: createElement({ hidden: true, style: {} }),
                     addForwardRateSampleBtn: createElement(),
+                    toggleForwardRatePanelBtn: createElement(),
                     forwardRateStatus: createElement({ textContent: '' }),
+                    forwardRateSamplesHeader: createElement({ hidden: false, style: {} }),
                     forwardRateSamplesList: createElement(),
                     futuresPoolPanel: createElement({ hidden: true, style: {} }),
                     addFutureContractBtn: createElement(),
@@ -455,7 +459,9 @@ module.exports = {
                     interestRateDisplay: createElement({ textContent: '3.00%' }),
                     forwardRatePanel: createElement({ hidden: false, style: {} }),
                     addForwardRateSampleBtn: createElement(),
+                    toggleForwardRatePanelBtn: createElement(),
                     forwardRateStatus: createElement({ textContent: '' }),
+                    forwardRateSamplesHeader: createElement({ hidden: false, style: {} }),
                     forwardRateSamplesList: createElement(),
                     futuresPoolPanel: createElement({ hidden: true, style: {} }),
                     addFutureContractBtn: createElement(),
@@ -580,7 +586,9 @@ module.exports = {
                     interestRateDisplay: createElement({ textContent: '3.00%' }),
                     forwardRatePanel: createElement({ hidden: true, style: {} }),
                     addForwardRateSampleBtn: createElement(),
+                    toggleForwardRatePanelBtn: createElement(),
                     forwardRateStatus: createElement({ textContent: '' }),
+                    forwardRateSamplesHeader: createElement({ hidden: false, style: {} }),
                     forwardRateSamplesList: createElement(),
                     futuresPoolPanel: createElement({ hidden: false, style: {} }),
                     addFutureContractBtn: createElement(),
@@ -658,6 +666,136 @@ module.exports = {
             },
         },
         {
+            name: 'formats forward-carry timestamps compactly and supports collapsing the sample list',
+            run() {
+                const elements = {
+                    marketDataMode: createElement({ value: 'live' }),
+                    marketDataModeHint: createElement({ textContent: '' }),
+                    historicalQuoteDateGroup: createElement({ hidden: true, style: {} }),
+                    historicalQuoteDateLabel: createElement({ textContent: '' }),
+                    historicalQuoteDate: createElement({ value: '' }),
+                    historicalQuoteDateHint: createElement({ textContent: '' }),
+                    historicalReplayDateGroup: createElement({ hidden: true, style: {} }),
+                    historicalReplayDateLabel: createElement({ textContent: '' }),
+                    historicalReplayDate: createElement({ value: '' }),
+                    historicalReplayStartLabel: createElement({ textContent: '' }),
+                    historicalReplayDaysDisplay: createElement({ textContent: '' }),
+                    historicalReplaySlider: createElement({ value: '0', min: '0', max: '0' }),
+                    historicalTimelineControls: createElement({ hidden: true, style: {} }),
+                    historicalTimelineHint: createElement({ textContent: '' }),
+                    historicalNextDayBtn: createElement({ disabled: true }),
+                    historicalSettleAllBtn: createElement({ disabled: true }),
+                    underlyingSymbol: createElement({ value: 'SPX' }),
+                    underlyingContractMonth: createElement({ value: '' }),
+                    underlyingContractMonthHint: createElement({ textContent: '' }),
+                    underlyingPrice: createElement({ value: '6581.00' }),
+                    underlyingPriceSlider: createElement({ value: '6581.00' }),
+                    underlyingPriceDisplay: createElement({ textContent: '$6,581.00' }),
+                    simulatedDateLabel: createElement({ textContent: 'Simulated Date' }),
+                    simulatedDateStartLabel: createElement({ textContent: 'Today' }),
+                    simulatedDateHint: createElement({ textContent: '', hidden: true }),
+                    simulatedDateOffsetGroup: createElement({ hidden: false, style: {} }),
+                    simulatedDate: createElement({ value: '2026-03-26', min: '2026-03-26' }),
+                    daysPassedSlider: createElement({ value: '0' }),
+                    daysPassedDisplay: createElement({ textContent: '+0 td / +0 cd' }),
+                    interestRate: createElement({ value: '3.00' }),
+                    interestRateDisplay: createElement({ textContent: '3.00%' }),
+                    forwardRatePanel: createElement({ hidden: false, style: {} }),
+                    addForwardRateSampleBtn: createElement(),
+                    toggleForwardRatePanelBtn: createElement(),
+                    forwardRateStatus: createElement({ textContent: '' }),
+                    forwardRateSamplesHeader: createElement({ hidden: false, style: {} }),
+                    forwardRateSamplesList: createElement({ hidden: false, style: {} }),
+                    futuresPoolPanel: createElement({ hidden: true, style: {} }),
+                    addFutureContractBtn: createElement(),
+                    futuresPoolStatus: createElement({ textContent: '' }),
+                    futuresPoolList: createElement(),
+                    ivOffset: createElement({ value: '0' }),
+                    ivOffsetSlider: createElement({ value: '0' }),
+                    ivOffsetDisplay: createElement({ textContent: '0.00%' }),
+                    allowLiveComboOrders: createElement({ checked: false }),
+                };
+
+                const ctx = loadBrowserScripts(['js/date_utils.js', 'js/product_registry.js', 'js/control_panel_ui.js'], {
+                    document: {
+                        getElementById(id) {
+                            return elements[id];
+                        },
+                        querySelector() {
+                            return null;
+                        },
+                        createElement() {
+                            return createElement();
+                        },
+                        activeElement: null,
+                    },
+                });
+
+                const state = {
+                    underlyingSymbol: 'SPX',
+                    underlyingContractMonth: '',
+                    underlyingPrice: 6581,
+                    baseDate: '2026-03-26',
+                    simulatedDate: '2026-03-26',
+                    marketDataMode: 'live',
+                    workspaceVariant: '',
+                    marketDataModeLocked: false,
+                    historicalQuoteDate: '',
+                    historicalAvailableStartDate: '',
+                    historicalAvailableEndDate: '',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    allowLiveComboOrders: false,
+                    forwardRatePanelCollapsed: false,
+                    forwardRateSamples: [{
+                        id: 'sample_compact',
+                        daysToExpiry: 32,
+                        expDate: '2026-04-27',
+                        strike: 6580,
+                        dailyCarry: 0.000092,
+                        impliedRate: 0.0336,
+                        lastComputedAt: '2026-03-26T15:59:52.023Z',
+                        isStale: false,
+                    }],
+                    futuresPool: [],
+                    groups: [],
+                };
+
+                ctx.OptionComboControlPanelUI.bindControlPanelEvents(state, new Intl.NumberFormat('en-US', {
+                    style: 'currency',
+                    currency: 'USD',
+                    minimumFractionDigits: 2,
+                }), {
+                    updateDerivedValues() {},
+                    throttledUpdate() {},
+                    handleLiveSubscriptions() {},
+                    settleHistoricalReplayGroups() {},
+                    renderGroups() {},
+                    addDays() { return '2026-04-27'; },
+                    diffDays() { return 32; },
+                    calendarToTradingDays() { return 23; },
+                });
+
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+
+                const sampleRow = elements.forwardRateSamplesList.children[0];
+                const meta = sampleRow.children[3];
+                assert.match(meta.textContent, /@ 03-26 15:59/);
+                assert.doesNotMatch(meta.textContent, /T15:59:52|\.023Z/);
+                assert.equal(elements.toggleForwardRatePanelBtn.textContent, 'Hide');
+                assert.equal(elements.forwardRateSamplesHeader.hidden, false);
+                assert.equal(elements.forwardRateSamplesList.hidden, false);
+
+                elements.toggleForwardRatePanelBtn.listeners.click();
+
+                assert.equal(state.forwardRatePanelCollapsed, true);
+                assert.equal(elements.toggleForwardRatePanelBtn.textContent, 'Show');
+                assert.equal(elements.forwardRateSamplesHeader.hidden, true);
+                assert.equal(elements.forwardRateSamplesList.hidden, true);
+                assert.equal(elements.forwardRateStatus.style.marginBottom, '0');
+            },
+        },
+        {
             name: 'does not rebuild futures-pool rows when only quotes change',
             run() {
                 const elements = {
@@ -694,7 +832,9 @@ module.exports = {
                     interestRateDisplay: createElement({ textContent: '3.00%' }),
                     forwardRatePanel: createElement({ hidden: true, style: {} }),
                     addForwardRateSampleBtn: createElement(),
+                    toggleForwardRatePanelBtn: createElement(),
                     forwardRateStatus: createElement({ textContent: '' }),
+                    forwardRateSamplesHeader: createElement({ hidden: false, style: {} }),
                     forwardRateSamplesList: createElement(),
                     futuresPoolPanel: createElement({ hidden: false, style: {} }),
                     addFutureContractBtn: createElement(),

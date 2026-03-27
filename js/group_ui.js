@@ -14,6 +14,7 @@
     function formatTriggerStatus(trigger) {
         if (!trigger) return 'Idle';
         const brokerStatus = String(trigger.lastPreview && trigger.lastPreview.status || '').trim();
+        const managedState = String(trigger.lastPreview && trigger.lastPreview.managedState || '').trim();
 
         switch (trigger.status) {
             case 'armed':
@@ -35,8 +36,14 @@
             case 'previewed':
                 return 'Preview generated';
             case 'submitted':
+                if (managedState === 'confirming_terminal') {
+                    return 'Confirming broker order state...';
+                }
                 return brokerStatus ? `Combo order: ${brokerStatus}` : 'Combo sent to TWS';
             case 'test_submitted':
+                if (managedState === 'confirming_terminal') {
+                    return 'Confirming broker test-order state...';
+                }
                 return brokerStatus ? `Test order: ${brokerStatus}` : 'Test order sent to TWS';
             case 'error':
                 return 'Trigger error';
@@ -48,6 +55,7 @@
     function formatCloseExecutionStatus(closeExecution) {
         if (!closeExecution) return 'Idle';
         const brokerStatus = String(closeExecution.lastPreview && closeExecution.lastPreview.status || '').trim();
+        const managedState = String(closeExecution.lastPreview && closeExecution.lastPreview.managedState || '').trim();
 
         switch (closeExecution.status) {
             case 'pending_preview':
@@ -65,8 +73,14 @@
             case 'previewed':
                 return 'Close preview generated';
             case 'submitted':
+                if (managedState === 'confirming_terminal') {
+                    return 'Confirming close-order broker state...';
+                }
                 return brokerStatus ? `Close order: ${brokerStatus}` : 'Close order sent to TWS';
             case 'test_submitted':
+                if (managedState === 'confirming_terminal') {
+                    return 'Confirming close test-order state...';
+                }
                 return brokerStatus ? `Close test order: ${brokerStatus}` : 'Close test order sent to TWS';
             case 'error':
                 return 'Close order error';
@@ -253,7 +267,7 @@
             actions.push({
                 kind: 'concede_select',
                 className: 'trial-trigger-concede-group',
-                options: [0.10, 0.20, 0.30, 0.50].map((ratio) => ({
+                options: [0.10, 0.20, 0.30, 0.50, 0.75, 0.90].map((ratio) => ({
                     value: ratio.toFixed(2),
                     label: `Concede ${Math.round(ratio * 100)}%`,
                 })),
@@ -412,12 +426,19 @@
                 if (legResult.hasLivePnl) {
                     if (legResult.isClosed) {
                         livePnlCell.style.display = 'none';
+                        livePnlCell.removeAttribute('title');
                     } else {
                         livePnlCell.innerHTML = formatSignedCurrencyValue(currencyFormatter, legResult.liveLegPnL, 'success-text', 'danger-text');
                         livePnlCell.style.display = 'block';
+                        livePnlCell.title = legResult.livePnlSource === 'tws_portfolio'
+                            ? 'Using TWS Portfolio Mark for live P&L parity.'
+                            : (legResult.livePnlSource === 'live_midpoint'
+                                ? 'Using live bid/ask midpoint for live P&L.'
+                                : 'Using the current live quote for live P&L.');
                     }
                 } else {
                     livePnlCell.style.display = 'none';
+                    livePnlCell.removeAttribute('title');
                 }
             }
         });
@@ -646,9 +667,19 @@
                 const livePnlSpan = card.querySelector('.group-header-live-pnl');
                 if (livePnlLabel) livePnlLabel.textContent = headerSummaryState.label;
                 if (livePnlSpan) livePnlSpan.innerHTML = buildGroupLivePnlHtml(currencyFormatter, headerSummaryState.value);
+                if (headerSummaryState.type === 'live') {
+                    livePnlItem.title = groupResult.groupUsesPortfolioLivePnl
+                        ? 'Using TWS Portfolio Mark for live P&L parity.'
+                        : (String(groupResult.group && groupResult.group.livePriceMode || '').trim().toLowerCase() === 'midpoint'
+                            ? 'Using live bid/ask midpoint for live P&L.'
+                            : 'Using the current live quote for live P&L.');
+                } else {
+                    livePnlItem.removeAttribute('title');
+                }
             } else {
                 livePnlItem.style.display = 'none';
                 delete livePnlItem.dataset.summaryType;
+                livePnlItem.removeAttribute('title');
             }
         }
 
@@ -669,6 +700,8 @@
         applyGroupDerivedData,
         buildTriggerPreviewHtml,
         buildGroupLivePnlHtml,
+        formatTriggerStatus,
+        formatCloseExecutionStatus,
         resolveGroupHeaderSummaryState,
         resolveTriggerActionState,
         resolveTradeTriggerUiState,

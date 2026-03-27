@@ -48,8 +48,99 @@
         );
     }
 
-    function buildCurrentPriceDisplayState(leg, activeViewMode, displayUnderlyingPrice, processedLeg, underlyingProfile) {
-        if (leg && leg.currentPriceSource === 'missing') {
+    function resolveGroupLivePriceMode(group) {
+        if (globalScope.OptionComboSessionLogic
+            && typeof globalScope.OptionComboSessionLogic.normalizeGroupLivePriceMode === 'function') {
+            return globalScope.OptionComboSessionLogic.normalizeGroupLivePriceMode(group && group.livePriceMode);
+        }
+        return String(group && group.livePriceMode || '').trim().toLowerCase() === 'midpoint'
+            ? 'midpoint'
+            : 'mark';
+    }
+
+    function resolveLiveQuoteSnapshotForLeg(leg) {
+        const liveQuotes = globalScope.OptionComboWsLiveQuotes;
+        if (!liveQuotes || !leg) {
+            return null;
+        }
+
+        if (isUnderlyingLeg(leg)) {
+            if (leg.underlyingFutureId
+                && typeof liveQuotes.getFutureQuote === 'function') {
+                return liveQuotes.getFutureQuote(leg.underlyingFutureId);
+            }
+            if (typeof liveQuotes.getUnderlyingQuote === 'function') {
+                return liveQuotes.getUnderlyingQuote();
+            }
+            return null;
+        }
+
+        if (typeof liveQuotes.getOptionQuote === 'function') {
+            return liveQuotes.getOptionQuote(leg.id);
+        }
+        return null;
+    }
+
+    function resolveSnapshotMidpoint(snapshot) {
+        const bid = parseFloat(snapshot && snapshot.bid);
+        const ask = parseFloat(snapshot && snapshot.ask);
+        if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) {
+            return null;
+        }
+        return (bid + ask) / 2;
+    }
+
+    function resolveLegSelectedLivePrice(group, leg) {
+        const currentPrice = parseFloat(leg && leg.currentPrice);
+        const currentPriceSource = String(leg && leg.currentPriceSource || '').trim();
+        if (currentPriceSource === 'manual' && Number.isFinite(currentPrice) && currentPrice > 0) {
+            return {
+                available: true,
+                price: currentPrice,
+                source: 'manual',
+            };
+        }
+
+        const livePriceMode = resolveGroupLivePriceMode(group);
+        if (livePriceMode === 'mark') {
+            const portfolioMarketPrice = parseFloat(leg && leg.portfolioMarketPrice);
+            if (Number.isFinite(portfolioMarketPrice) && portfolioMarketPrice > 0) {
+                return {
+                    available: true,
+                    price: portfolioMarketPrice,
+                    source: 'tws_portfolio',
+                };
+            }
+        }
+
+        if (livePriceMode === 'midpoint') {
+            const midpointPrice = resolveSnapshotMidpoint(resolveLiveQuoteSnapshotForLeg(leg));
+            if (Number.isFinite(midpointPrice) && midpointPrice > 0) {
+                return {
+                    available: true,
+                    price: midpointPrice,
+                    source: 'live_midpoint',
+                };
+            }
+        }
+
+        if (leg && currentPriceSource !== 'missing' && Number.isFinite(currentPrice) && currentPrice > 0) {
+            return {
+                available: true,
+                price: currentPrice,
+                source: currentPriceSource || 'live_quote',
+            };
+        }
+
+        return {
+            available: false,
+            price: 0,
+            source: '',
+        };
+    }
+
+    function buildCurrentPriceDisplayState(leg, activeViewMode, displayUnderlyingPrice, processedLeg, underlyingProfile, selectedLivePrice) {
+        if ((!selectedLivePrice || !selectedLivePrice.available) && leg && leg.currentPriceSource === 'missing') {
             return {
                 value: '',
                 placeholder: 'N/A',
@@ -63,7 +154,7 @@
                     (underlyingProfile && (underlyingProfile.enteredSymbol || underlyingProfile.underlyingSymbol)) || ''
                 )
                 : 'Current Underlying Leg Price';
-            if (leg.currentPrice === 0) {
+            if (!selectedLivePrice || !selectedLivePrice.available) {
                 return {
                     value: '',
                     placeholder: displayUnderlyingPrice.toFixed(2),
@@ -71,13 +162,19 @@
                 };
             }
             return {
-                value: leg.currentPrice.toFixed(2),
+                value: selectedLivePrice.price.toFixed(2),
                 placeholder: '0.00',
-                title: titleLabel
+                title: selectedLivePrice.source === 'live_midpoint'
+                    ? `${titleLabel} (bid/ask midpoint)`
+                    : (selectedLivePrice.source === 'tws_portfolio'
+                        ? `${titleLabel} (TWS Portfolio Mark)`
+                        : titleLabel)
             };
         }
 
-        if (activeViewMode === 'trial' && leg.currentPrice === 0) {
+        if ((!selectedLivePrice || !selectedLivePrice.available)
+            && activeViewMode === 'trial'
+            && leg.currentPrice === 0) {
             return {
                 value: '',
                 placeholder: processedLeg.effectiveCostPerShare.toFixed(2),
@@ -85,24 +182,48 @@
             };
         }
 
-        if (leg && leg.currentPriceSource === 'historical') {
+        if (selectedLivePrice && selectedLivePrice.source === 'tws_portfolio') {
             return {
-                value: leg.currentPrice.toFixed(2),
+                value: selectedLivePrice.price.toFixed(2),
+                placeholder: '0.00',
+                title: 'TWS Portfolio Mark (display-only; order pricing still uses the existing midpoint execution flow).',
+            };
+        }
+
+        if (selectedLivePrice && selectedLivePrice.source === 'live_midpoint') {
+            return {
+                value: selectedLivePrice.price.toFixed(2),
+                placeholder: '0.00',
+                title: 'Live bid/ask midpoint (display-only; order pricing still uses the existing midpoint execution flow).',
+            };
+        }
+
+        if ((selectedLivePrice && selectedLivePrice.source === 'historical')
+            || (leg && leg.currentPriceSource === 'historical')) {
+            return {
+                value: (selectedLivePrice && selectedLivePrice.available
+                    ? selectedLivePrice.price
+                    : leg.currentPrice).toFixed(2),
                 placeholder: '0.00',
                 title: 'Historical replay quote from the selected day',
             };
         }
 
-        if (leg && leg.currentPriceSource === 'manual') {
+        if ((selectedLivePrice && selectedLivePrice.source === 'manual')
+            || (leg && leg.currentPriceSource === 'manual')) {
             return {
-                value: leg.currentPrice.toFixed(2),
+                value: (selectedLivePrice && selectedLivePrice.available
+                    ? selectedLivePrice.price
+                    : leg.currentPrice).toFixed(2),
                 placeholder: '0.00',
                 title: 'Manual current-price override',
             };
         }
 
         return {
-            value: leg.currentPrice.toFixed(2),
+            value: (selectedLivePrice && selectedLivePrice.available
+                ? selectedLivePrice.price
+                : leg.currentPrice).toFixed(2),
             placeholder: '0.00',
             title: 'Current Live Quote (or manually entered)'
         };
@@ -162,12 +283,12 @@
         const simValue = simulationAvailable ? processedLeg.posMultiplier * simPricePerShare : null;
         const pnl = simulationAvailable ? (simValue - processedLeg.costBasis) : null;
         const isClosed = (leg.closePrice !== null && leg.closePrice !== '');
-        const quoteAvailable = leg.currentPriceSource !== 'missing';
+        const livePnlQuote = resolveLegSelectedLivePrice(group, leg);
         const hasLivePnl = activeViewMode === 'active'
-            && quoteAvailable
-            && (leg.cost !== 0 || leg.currentPrice !== 0 || isClosed);
-        const liveLegPnL = quoteAvailable
-            ? (leg.currentPrice - leg.cost) * processedLeg.posMultiplier
+            && livePnlQuote.available
+            && (leg.cost !== 0 || livePnlQuote.price !== 0 || isClosed);
+        const liveLegPnL = livePnlQuote.available
+            ? (livePnlQuote.price - leg.cost) * processedLeg.posMultiplier
             : 0;
         const effectiveLivePnL = isClosed ? pnl : liveLegPnL;
         const ivText = processedLeg.isUnderlyingLeg
@@ -188,9 +309,17 @@
             hasLivePnl,
             liveLegPnL,
             effectiveLivePnL,
+            livePnlSource: livePnlQuote.source,
             dteText: `Sim DTE: ${processedLeg.tradDTE} td / ${processedLeg.calDTE} cd`,
             ivText,
-            currentPriceDisplay: buildCurrentPriceDisplayState(leg, activeViewMode, legUnderlyingPrice, processedLeg, underlyingProfile),
+            currentPriceDisplay: buildCurrentPriceDisplayState(
+                leg,
+                activeViewMode,
+                legUnderlyingPrice,
+                processedLeg,
+                underlyingProfile,
+                livePnlQuote
+            ),
         };
     }
 
@@ -213,6 +342,7 @@
         let groupSimValue = 0;
         let groupLivePnL = 0;
         let groupHasLiveData = false;
+        let groupUsesPortfolioLivePnl = false;
         let groupSimulationAvailable = true;
 
         const legResults = group.legs.map((leg) => {
@@ -235,6 +365,7 @@
             if (legResult.hasLivePnl) {
                 groupLivePnL += legResult.effectiveLivePnL;
                 groupHasLiveData = true;
+                groupUsesPortfolioLivePnl = groupUsesPortfolioLivePnl || legResult.livePnlSource === 'tws_portfolio';
             }
 
             return legResult;
@@ -258,6 +389,7 @@
             groupPnL: groupSimulationAvailable ? (groupSimValue - groupCost) : null,
             groupLivePnL,
             groupHasLiveData,
+            groupUsesPortfolioLivePnl,
             amortizedResult: isAmortizedMode ? calculateAmortizedCost(group, evalUnderlyingPrice, globalState) : null,
         };
     }

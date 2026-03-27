@@ -70,6 +70,21 @@
         return group.syncAvgCostFromPortfolio;
     }
 
+    function _ensureLivePriceMode(group) {
+        if (!group || typeof group !== 'object') {
+            return 'mark';
+        }
+        if (typeof OptionComboSessionLogic !== 'undefined'
+            && typeof OptionComboSessionLogic.normalizeGroupLivePriceMode === 'function') {
+            group.livePriceMode = OptionComboSessionLogic.normalizeGroupLivePriceMode(group.livePriceMode);
+        } else {
+            group.livePriceMode = String(group.livePriceMode || '').trim().toLowerCase() === 'midpoint'
+                ? 'midpoint'
+                : 'mark';
+        }
+        return group.livePriceMode;
+    }
+
     function _ensureCloseExecution(group) {
         if (!group || typeof group !== 'object') {
             return null;
@@ -209,6 +224,9 @@
             ivManualOverride: false,
             currentPrice: 0.00,
             currentPriceSource: '',
+            portfolioMarketPrice: null,
+            portfolioMarketPriceSource: '',
+            portfolioUnrealizedPnl: null,
             cost: strike,
             costSource: 'assignment_conversion',
             closePrice: null,
@@ -263,6 +281,7 @@
             name: `Combo Group ${state.groups.length + 1}`,
             includedInGlobal: true,
             isCollapsed: false,
+            livePriceMode: 'mark',
             settleUnderlyingPrice: null,
             historicalAutoCloseAtExpiry: true,
             tradeTrigger: _ensureTradeTrigger({}),
@@ -296,6 +315,9 @@
             ivManualOverride: false,
             currentPrice: 0.00,
             currentPriceSource: '',
+            portfolioMarketPrice: null,
+            portfolioMarketPriceSource: '',
+            portfolioUnrealizedPnl: null,
             cost: 0.00,
             closePrice: null,
             underlyingFutureId: ''
@@ -347,6 +369,7 @@
             _ensureTradeTrigger(group);
             _ensureCloseExecution(group);
             _ensurePortfolioAvgCostSync(group);
+            _ensureLivePriceMode(group);
             const clone = groupTemplate.content.cloneNode(true);
         const card = clone.querySelector('.group-card');
         card.dataset.groupId = group.id;
@@ -417,6 +440,7 @@
 
         const liveToggle = card.querySelector('.live-data-toggle');
         const avgCostSyncToggle = card.querySelector('.avg-cost-sync-toggle');
+        const livePriceModeSelect = card.querySelector('.group-live-price-mode-select');
         const historicalEntryBtn = card.querySelector('.historical-entry-btn');
         const historicalEntryHint = card.querySelector('.historical-entry-hint');
         const isHistoricalMode = !!(state && state.marketDataMode === 'historical');
@@ -440,6 +464,18 @@
                 if (group.syncAvgCostFromPortfolio && typeof deps.requestPortfolioAvgCostSnapshot === 'function') {
                     deps.requestPortfolioAvgCostSnapshot();
                 }
+            });
+        }
+
+        if (livePriceModeSelect) {
+            livePriceModeSelect.value = _ensureLivePriceMode(group);
+            livePriceModeSelect.title = 'Controls the Price column and Live P&L display only. Order pricing still uses the existing midpoint-based execution flow.';
+            livePriceModeSelect.addEventListener('change', (e) => {
+                group.livePriceMode = String(e.target.value || '').trim().toLowerCase() === 'midpoint'
+                    ? 'midpoint'
+                    : 'mark';
+                e.target.value = group.livePriceMode;
+                deps.updateDerivedValues();
             });
         }
 

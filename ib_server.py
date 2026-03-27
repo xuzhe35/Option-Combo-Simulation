@@ -166,6 +166,17 @@ def _portfolio_avg_cost_cache_key(item_payload):
     )
 
 
+def _serialize_finite_number(raw_value, digits=4):
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+    if value != value:
+        return None
+    return round(value, digits)
+
+
 def _serialize_portfolio_avg_cost_item(portfolio_item):
     contract = getattr(portfolio_item, 'contract', None)
     if contract is None:
@@ -199,6 +210,10 @@ def _serialize_portfolio_avg_cost_item(portfolio_item):
     if not (avg_cost_per_unit == avg_cost_per_unit and avg_cost_per_unit > 0):
         return None
 
+    market_price = _serialize_finite_number(getattr(portfolio_item, 'marketPrice', None))
+    unrealized_pnl = _serialize_finite_number(getattr(portfolio_item, 'unrealizedPNL', None))
+    realized_pnl = _serialize_finite_number(getattr(portfolio_item, 'realizedPNL', None))
+
     return {
         'account': getattr(portfolio_item, 'account', '') or '',
         'secType': sec_type,
@@ -211,6 +226,9 @@ def _serialize_portfolio_avg_cost_item(portfolio_item):
         'position': position_value,
         'averageCost': average_cost_value,
         'avgCostPerUnit': round(avg_cost_per_unit, 4),
+        'marketPrice': market_price,
+        'unrealizedPNL': unrealized_pnl,
+        'realizedPNL': realized_pnl,
     }
 
 
@@ -246,7 +264,8 @@ def on_update_portfolio_item(portfolio_item):
     logging.info(
         f"Broadcasting portfolio avg cost update: "
         f"{item.get('secType')} {item.get('localSymbol') or item.get('symbol')} "
-        f"position={item.get('position')} avgCostPerUnit={item.get('avgCostPerUnit')}"
+        f"position={item.get('position')} avgCostPerUnit={item.get('avgCostPerUnit')} "
+        f"marketPrice={item.get('marketPrice')}"
     )
     _broadcast_portfolio_avg_cost_items([item])
 
@@ -374,6 +393,8 @@ def _build_combo_order_status_payload(trade, tracking):
     )
     if managed_snapshot:
         payload['orderStatus'].update(managed_snapshot)
+    else:
+        payload['orderStatus']['managedMode'] = False
     return payload
 
 
