@@ -1,6 +1,6 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-03-24
+**Updated:** 2026-03-27
 
 ## 1. Current Product State
 
@@ -52,7 +52,10 @@ Current shipped surface area:
 - test submit
 - real submit
 - managed repricing
-- execution-report cost attribution
+- close-group execution using the same managed repricing path
+- concession pricing from middle toward worst quoted price
+- assignment / exercise conversion into realized premium plus underlying legs
+- execution-report cost attribution preferred over account-level avg cost for triggered orders
 
 ### Chart Lab
 
@@ -83,6 +86,7 @@ Windows:
 - `start_historical_replay.bat`
 - `install_ib_bridge_deps.bat`
 - `powershell_scripts/start_option_combo_codex.ps1`
+- `powershell_scripts/start_ib_server_server_template.ps1`
 
 macOS:
 
@@ -157,7 +161,10 @@ This file is large, but it is the real frontend transport layer for:
 - live subscriptions
 - historical replay requests
 - Trigger execution messages
+- close-group execution messages
 - broker sync messages
+- execution-report fill attribution
+- live IV fallback handling (`TWS live` / `estimated` / `manual` / `N/A`)
 
 ### `ib_server.py`
 
@@ -168,6 +175,8 @@ It now also owns:
 - product-aware IB contract qualification
 - historical daily-bar responses for Chart Lab
 - execution routing bridge into `trade_execution/`
+- combo order status fan-out back to the browser
+- explicit server-side PID/log friendly startup templates via `powershell_scripts/`
 
 ## 6. Current Known Rough Edges
 
@@ -176,6 +185,7 @@ It now also owns:
 - Mixed-expiry projection semantics in Chart Lab still need a more explicit path assumption for later-expiry overlays.
 - `contract_specs/*.xml` are still reference metadata, not runtime truth.
 - Reloading the page does not restore old live managed-order supervision state.
+- A remote/server deployment should run exactly one observable `ib_server.py` instance; if multiple unmanaged Python processes are left alive, broker-status debugging becomes unreliable.
 
 ## 7. Practical Maintenance Notes
 
@@ -215,3 +225,4 @@ If you are changing these features, read these files together:
 - `js/ws_client.js`
 - `ib_server.py`
 - `trade_execution/adapters/ibkr.py`
+- `powershell_scripts/start_ib_server_server_template.ps1`

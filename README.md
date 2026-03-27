@@ -16,6 +16,7 @@ Current shipped capabilities include:
 - **Session Continuity**: Full Import/Export of workspace state via JSON files, preserving simulated dates and timeline settings.
 - **Historical Replay / Backtest**: A dedicated workspace mode to step through SQLite historical option chains, preview triggers, and simulate executions.
 - **Live Trading Bridge**: Optional Python IBKR bridge offering live quotes, IV tracking, and managed live execution of combo orders.
+  - supports trigger-based combo execution, close-group execution, concession pricing, and assignment/exercise-aware bookkeeping
 - **Chart Lab**: An experimental sandbox projecting multi-leg payoff structures directly onto daily candle charts.
 
 There is no frontend build step. The app runs from plain HTML/CSS/JavaScript files loaded in order.
@@ -55,12 +56,12 @@ Preferred startup scripts:
 - `start_option_combo.bat`
   - starts the frontend HTTP server
   - starts `ib_server.py`
-  - opens the locked live workspace
+  - prints the locked live workspace URL to the console
 
 - `start_historical_replay.bat`
   - starts the frontend HTTP server
   - starts `historical_server.py`
-  - opens the locked historical replay workspace
+  - prints the locked historical replay workspace URL to the console
 
 - `install_ib_bridge_deps.bat`
   - installs the Python dependencies for the live IBKR bridge
@@ -68,6 +69,11 @@ Preferred startup scripts:
 - `powershell_scripts/start_option_combo_codex.ps1`
   - background-friendly startup used for Codex / automation flows
   - writes PID and log files into the repo root
+
+- `powershell_scripts/start_ib_server_server_template.ps1`
+  - editable server-side template for running a single background `ib_server.py`
+  - writes a dedicated PID file plus stdout/stderr logs
+  - intended for remote / server deployments where you want one observable backend instance
 
 ### macOS
 
@@ -186,6 +192,7 @@ Recommended safety posture:
 - do not expose `8765` directly to the public internet
 - prefer Tailscale reachability plus OS firewall restrictions
 - if the remote bridge listens on a non-loopback host, confirm only your tailnet can reach it
+- when running on a server, keep exactly one `ib_server.py` instance active and prefer the PID/log workflow in `powershell_scripts/start_ib_server_server_template.ps1`
 
 ## Product Support
 
@@ -251,6 +258,8 @@ Main files:
 | `chart_lab.html` | Experimental daily candle projection page |
 | `style.css` | Main app styles |
 | `chart_lab.css` | Chart Lab styles |
+| `js/app.js` | Core application bootstrap and query parameter routing |
+| `js/session_logic.js` | Import/Export core capabilities and state restoration |
 | `js/product_registry.js` | Product-family metadata and capability flags |
 | `js/pricing_context.js` | Underlying anchor logic, futures-pool and forward-rate context |
 | `js/pricing_core.js` | Core pricing helpers and simulated pricing logic |
@@ -284,7 +293,8 @@ They currently cover key shared logic areas, including:
 - pricing core / BSM / Black-76 behavior
 - valuation and session logic
 - WebSocket client payload assembly
-- pricing-context functionality
+- pricing-context and forward-rate functionality
+- group order generation
 - UI helpers
 
 ## Related Docs

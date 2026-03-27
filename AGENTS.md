@@ -35,6 +35,7 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 - IB bridge dependency install: `install_ib_bridge_deps.bat`
 - Python resolution helper: `powershell_scripts/resolve_python.ps1`
 - background / Codex startup: `powershell_scripts/start_option_combo_codex.ps1`
+- editable single-backend server template: `powershell_scripts/start_ib_server_server_template.ps1`
 
 ### macOS
 

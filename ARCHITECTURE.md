@@ -147,6 +147,7 @@ Responsibilities:
 - session import/export normalization
 - Trigger configuration and state rules
 - combo order payload assembly
+- close-group payload assembly
 
 ### 4.5 UI binding and DOM writes
 
@@ -214,6 +215,9 @@ Responsibilities:
 - historical daily bars for Chart Lab
 - combo preview / test submit / live submit
 - managed repricing and order supervision
+- close-group execution through the same managed order path
+- managed concession pricing from middle toward worst quoted price
+- soft-terminal broker-state confirmation for modify/replace flows
 - execution-report attribution back into group legs
 
 ### 4.9 Historical replay stack
@@ -256,6 +260,7 @@ Important group fields include:
 - `includedInGlobal`
 - `isCollapsed`
 - `tradeTrigger`
+- `closeExecution`
 - `settleUnderlyingPrice`
 - `syncAvgCostFromPortfolio`
 - `legs`
@@ -273,6 +278,9 @@ Important leg fields include:
 - `currentPrice`
 - `cost`
 - `closePrice`
+- `ivSource`
+- `ivManualOverride`
+- `closePriceSource`
 
 Runtime-only fields may also be attached during broker sync and historical replay.
 
@@ -360,6 +368,10 @@ Historical replay also supports:
 - backend served by `ib_server.py`
 - locked route:
   - `index.html?entry=live&marketDataMode=live&lockMarketDataMode=1`
+- for remote/server deployments, prefer a single observable backend instance using:
+  - `powershell_scripts/start_ib_server_server_template.ps1`
+  - dedicated PID file
+  - dedicated stdout/stderr logs
 
 ### Historical replay workspace
 
@@ -381,6 +393,7 @@ Historical replay also supports:
 - Chart Lab is still experimental.
 - The projection lab currently uses daily bars only.
 - The projection lab aligns price, but not true future time.
+- If multiple unmanaged `ib_server.py` processes are left running, broker-status debugging becomes unreliable because the browser may connect to a different backend than the logs you are reading.
 
 ## 11. If Notes and Code Drift
 
