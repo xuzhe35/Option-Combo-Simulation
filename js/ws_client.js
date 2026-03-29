@@ -503,6 +503,7 @@ function _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode 
         intent: 'close',
         source: 'close_group',
         managedRepriceThreshold: closeExecution.repriceThreshold,
+        managedConcessionRatio: closeExecution.concessionRatio,
         timeInForce: closeExecution.timeInForce,
     });
 }

@@ -585,6 +585,7 @@
         const priceInput = container.querySelector('.trial-trigger-price');
         const executionModeInput = container.querySelector('.trial-trigger-execution-mode');
         const repriceThresholdInput = container.querySelector('.trial-trigger-reprice-threshold');
+        const concessionInput = container.querySelector('.trial-trigger-concession');
         const timeInForceInput = container.querySelector('.trial-trigger-tif');
         const exitEnabledInput = container.querySelector('.trial-trigger-exit-enabled');
         const exitConditionInput = container.querySelector('.trial-trigger-exit-condition');
@@ -593,7 +594,7 @@
         const body = container.querySelector('.trial-trigger-body');
         const helpText = container.querySelector('.trial-trigger-help');
 
-        if (!enabledInput || !collapseBtn || !conditionInput || !priceInput || !executionModeInput || !repriceThresholdInput || !timeInForceInput || !exitEnabledInput || !exitConditionInput || !exitPriceInput || !resetBtn || !body) {
+        if (!enabledInput || !collapseBtn || !conditionInput || !priceInput || !executionModeInput || !repriceThresholdInput || !concessionInput || !timeInForceInput || !exitEnabledInput || !exitConditionInput || !exitPriceInput || !resetBtn || !body) {
             return;
         }
 
@@ -628,6 +629,7 @@
             : '';
         executionModeInput.value = trigger.executionMode;
         repriceThresholdInput.value = Number(trigger.repriceThreshold || 0.01).toFixed(2);
+        concessionInput.value = Number(trigger.concessionRatio || 0.0).toFixed(2);
         timeInForceInput.value = String(trigger.timeInForce || 'DAY').toUpperCase();
         exitEnabledInput.checked = trigger.exitEnabled === true;
         exitEnabledInput.disabled = trigger.enabled === true;
@@ -694,6 +696,15 @@
                 ? parsed
                 : 0.01;
             e.target.value = Number(trigger.repriceThreshold).toFixed(2);
+        });
+
+        concessionInput.addEventListener('change', (e) => {
+            const parsed = parseFloat(e.target.value);
+            const validRatios = [0.0, 0.10, 0.20, 0.30, 0.50, 0.75];
+            trigger.concessionRatio = validRatios.some(value => Math.abs(value - parsed) < 0.0001)
+                ? parsed
+                : 0.0;
+            e.target.value = Number(trigger.concessionRatio).toFixed(2);
         });
 
         timeInForceInput.addEventListener('change', (e) => {
@@ -766,10 +777,11 @@
 
         const executionModeInput = container.querySelector('.close-group-execution-mode');
         const thresholdInput = container.querySelector('.close-group-reprice-threshold');
+        const concessionInput = container.querySelector('.close-group-concession');
         const timeInForceInput = container.querySelector('.close-group-tif');
         const submitBtn = container.querySelector('.close-group-submit-btn');
         const helpText = container.querySelector('.close-group-help');
-        if (!executionModeInput || !thresholdInput || !timeInForceInput || !submitBtn) {
+        if (!executionModeInput || !thresholdInput || !concessionInput || !timeInForceInput || !submitBtn) {
             return;
         }
 
@@ -787,10 +799,12 @@
         }
         executionModeInput.value = String(closeExecution.executionMode || 'preview');
         thresholdInput.value = Number(closeExecution.repriceThreshold || 0.01).toFixed(2);
+        concessionInput.value = Number(closeExecution.concessionRatio || 0.0).toFixed(2);
         timeInForceInput.value = String(closeExecution.timeInForce || 'DAY').toUpperCase();
 
         executionModeInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         thresholdInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
+        concessionInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         timeInForceInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         if (helpText) {
             helpText.textContent = isHistoricalMode
@@ -854,6 +868,15 @@
                 ? parsed
                 : 0.01;
             e.target.value = Number(closeExecution.repriceThreshold).toFixed(2);
+        });
+
+        concessionInput.addEventListener('change', (e) => {
+            const parsed = parseFloat(e.target.value);
+            const validRatios = [0.0, 0.10, 0.20, 0.30, 0.50, 0.75];
+            closeExecution.concessionRatio = validRatios.some(value => Math.abs(value - parsed) < 0.0001)
+                ? parsed
+                : 0.0;
+            e.target.value = Number(closeExecution.concessionRatio).toFixed(2);
         });
 
         timeInForceInput.addEventListener('change', (e) => {

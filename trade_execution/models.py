@@ -73,6 +73,7 @@ class ComboOrderRequest:
     execution_intent: str = "open"
     request_source: str = "manual"
     managed_reprice_threshold: Optional[float] = None
+    managed_concession_ratio: Optional[float] = None
     time_in_force: str = "DAY"
     profile: dict[str, Any] = field(default_factory=dict)
     legs: list[ComboLegRequest] = field(default_factory=list)
@@ -89,6 +90,9 @@ class ComboOrderRequest:
             request_source=str(payload.get("requestSource") or payload.get("source") or "manual"),
             managed_reprice_threshold=_parse_optional_float(
                 payload.get("managedRepriceThreshold") or payload.get("managed_reprice_threshold")
+            ),
+            managed_concession_ratio=_parse_optional_float(
+                payload.get("managedConcessionRatio") or payload.get("managed_concession_ratio")
             ),
             time_in_force=str(payload.get("timeInForce") or payload.get("time_in_force") or "DAY").upper(),
             profile=dict(payload.get("profile") or {}),

@@ -202,6 +202,7 @@
                 intent: 'open',
                 source: 'trial_trigger',
                 managedRepriceThreshold: trigger.repriceThreshold,
+                managedConcessionRatio: trigger.concessionRatio,
                 timeInForce: trigger.timeInForce,
             });
         }

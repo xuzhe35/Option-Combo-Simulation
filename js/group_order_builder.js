@@ -149,6 +149,7 @@
             executionIntent: intent,
             requestSource: String(requestOptions.source || 'manual'),
             managedRepriceThreshold: requestOptions.managedRepriceThreshold,
+            managedConcessionRatio: requestOptions.managedConcessionRatio,
             timeInForce: requestOptions.timeInForce || 'DAY',
             profile: {
                 family: profile.family,
