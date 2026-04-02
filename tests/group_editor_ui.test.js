@@ -181,6 +181,7 @@ module.exports = {
                             '.trial-trigger-price': priceInput,
                             '.trial-trigger-execution-mode': executionModeInput,
                             '.trial-trigger-reprice-threshold': repriceThresholdInput,
+                            '.trial-trigger-concession': concessionInput,
                             '.trial-trigger-tif': timeInForceInput,
                             '.trial-trigger-exit-enabled': exitEnabledInput,
                             '.trial-trigger-exit-condition': exitConditionInput,
@@ -199,6 +200,7 @@ module.exports = {
                 const priceInput = { value: '', disabled: false, title: '', addEventListener: noop };
                 const executionModeInput = { value: '', title: '', addEventListener: noop };
                 const repriceThresholdInput = { value: '', addEventListener: noop };
+                const concessionInput = { value: '', addEventListener: noop };
                 const timeInForceInput = { value: '', addEventListener: noop };
                 const exitEnabledInput = { checked: false, disabled: false, addEventListener: noop };
                 const exitConditionInput = { value: '', disabled: false, addEventListener: noop };
@@ -322,6 +324,7 @@ module.exports = {
                             '.trial-trigger-price': priceInput,
                             '.trial-trigger-execution-mode': executionModeInput,
                             '.trial-trigger-reprice-threshold': repriceThresholdInput,
+                            '.trial-trigger-concession': concessionInput,
                             '.trial-trigger-tif': timeInForceInput,
                             '.trial-trigger-exit-enabled': exitEnabledInput,
                             '.trial-trigger-exit-condition': exitConditionInput,
@@ -346,6 +349,7 @@ module.exports = {
                     addEventListener: noop,
                 };
                 const repriceThresholdInput = { value: '', addEventListener: noop };
+                const concessionInput = { value: '', addEventListener: noop };
                 const timeInForceInput = { value: '', addEventListener: noop };
                 const exitEnabledInput = { checked: false, disabled: false, addEventListener: noop };
                 const exitConditionInput = { value: '', disabled: false, addEventListener: noop };
@@ -407,6 +411,7 @@ module.exports = {
                             '.trial-trigger-price': priceInput,
                             '.trial-trigger-execution-mode': executionModeInput,
                             '.trial-trigger-reprice-threshold': repriceThresholdInput,
+                            '.trial-trigger-concession': concessionInput,
                             '.trial-trigger-tif': timeInForceInput,
                             '.trial-trigger-exit-enabled': exitEnabledInput,
                             '.trial-trigger-exit-condition': exitConditionInput,
@@ -425,6 +430,7 @@ module.exports = {
                 const priceInput = { value: '', disabled: false, title: '', addEventListener: noop };
                 const executionModeInput = { value: '', title: '', addEventListener: noop };
                 const repriceThresholdInput = { value: '', addEventListener: noop };
+                const concessionInput = { value: '', addEventListener: noop };
                 const timeInForceInput = { value: '', addEventListener: noop };
                 const exitEnabledInput = { checked: false, disabled: false, addEventListener: noop };
                 const exitConditionInput = { value: '', disabled: false, addEventListener: noop };
@@ -496,6 +502,7 @@ module.exports = {
                             '.trial-trigger-price': priceInput,
                             '.trial-trigger-execution-mode': executionModeInput,
                             '.trial-trigger-reprice-threshold': repriceThresholdInput,
+                            '.trial-trigger-concession': concessionInput,
                             '.trial-trigger-tif': timeInForceInput,
                             '.trial-trigger-exit-enabled': exitEnabledInput,
                             '.trial-trigger-exit-condition': exitConditionInput,
@@ -514,6 +521,7 @@ module.exports = {
                 const priceInput = { value: '', disabled: false, title: '', addEventListener: noop };
                 const executionModeInput = { value: '', title: '', addEventListener: noop };
                 const repriceThresholdInput = { value: '', addEventListener: noop };
+                const concessionInput = { value: '', addEventListener: noop };
                 const timeInForceInput = { value: '', addEventListener: noop };
                 const exitEnabledInput = { checked: false, disabled: false, addEventListener: noop };
                 const exitConditionInput = { value: '', disabled: false, addEventListener: noop };

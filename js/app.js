@@ -91,6 +91,9 @@ const state = {
     interestRate: 0.03, // 3% default risk-free rate
     ivOffset: 0.0, // 0%
     allowLiveComboOrders: false,
+    liveComboOrderAccounts: [],
+    liveComboOrderAccountsConnected: false,
+    selectedLiveComboOrderAccount: '',
     forwardRateSamples: [],
     futuresPool: [],
     viewMode: 'active', // 'active' (Historical Entry Cost) or 'trial' (Current Live Price)
@@ -168,6 +171,7 @@ function bindControlPanelEvents() {
         updateDerivedValues,
         throttledUpdate,
         handleLiveSubscriptions,
+        requestManagedAccountsSnapshot,
         settleHistoricalReplayGroups,
         renderGroups,
         generateId,
@@ -483,6 +487,13 @@ function applyImportedState(normalizedState, importedSessionTitle = '') {
     if (state.marketDataMode !== 'live') {
         state.allowLiveComboOrders = false;
     }
+    state.liveComboOrderAccounts = Array.isArray(normalizedState.liveComboOrderAccounts)
+        ? normalizedState.liveComboOrderAccounts.slice()
+        : [];
+    state.liveComboOrderAccountsConnected = normalizedState.liveComboOrderAccountsConnected === true;
+    state.selectedLiveComboOrderAccount = typeof normalizedState.selectedLiveComboOrderAccount === 'string'
+        ? normalizedState.selectedLiveComboOrderAccount
+        : '';
     state.forwardRateSamples = normalizedState.forwardRateSamples || [];
     state.futuresPool = normalizedState.futuresPool || [];
     state.groups = normalizedState.groups;

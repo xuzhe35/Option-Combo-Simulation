@@ -82,6 +82,23 @@ function _setStockQuoteSnapshot(symbol, rawQuote) {
     _liveQuoteRuntime.stockQuotesBySymbol.set(symbol, snapshot);
 }
 
+function _formatSymbolPriceInputValue(symbol, value) {
+    if (typeof OptionComboProductRegistry !== 'undefined'
+        && typeof OptionComboProductRegistry.formatPriceInputValue === 'function') {
+        return OptionComboProductRegistry.formatPriceInputValue(symbol, value);
+    }
+    const parsed = parseFloat(value);
+    return Number.isFinite(parsed) ? parsed.toFixed(2) : '';
+}
+
+function _formatSymbolPriceDisplay(symbol, value) {
+    if (typeof OptionComboProductRegistry !== 'undefined'
+        && typeof OptionComboProductRegistry.formatPriceDisplay === 'function') {
+        return OptionComboProductRegistry.formatPriceDisplay(symbol, value);
+    }
+    return currencyFormatter.format(value);
+}
+
 function getLiveOptionQuote(subId) {
     const snapshot = _liveQuoteRuntime.optionQuotesById.get(subId);
     return snapshot ? { ...snapshot } : null;
@@ -117,6 +134,28 @@ function _getMarketDataMode() {
 
 function _isHistoricalMode() {
     return _getMarketDataMode() === 'historical';
+}
+
+function _normalizeLiveComboOrderAccount(value) {
+    return String(value || '').trim();
+}
+
+function _getSelectedLiveComboOrderAccount() {
+    return _normalizeLiveComboOrderAccount(state && state.selectedLiveComboOrderAccount);
+}
+
+function _hasSelectedLiveComboOrderAccount() {
+    return !!_getSelectedLiveComboOrderAccount();
+}
+
+function _getLiveComboOrderAccountRequirementMessage() {
+    const accounts = Array.isArray(state && state.liveComboOrderAccounts)
+        ? state.liveComboOrderAccounts.filter((account) => _normalizeLiveComboOrderAccount(account))
+        : [];
+    if (state && state.liveComboOrderAccountsConnected === true && accounts.length > 0) {
+        return 'Select a TWS account before sending live combo orders.';
+    }
+    return 'Waiting for TWS account list before sending live combo orders.';
 }
 
 function _getHistoricalReplayDate() {
@@ -288,6 +327,11 @@ function connectWebSocket() {
 
     ws.onclose = () => {
         isWsConnected = false;
+        state.liveComboOrderAccountsConnected = false;
+        if (typeof OptionComboControlPanelUI !== 'undefined'
+            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
+            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        }
         const delaySec = Math.round(_wsReconnectDelay / 1000);
         console.log(`WebSocket Disconnected. Reconnecting in ${delaySec}s...`);
         updateWsStatusUI('disconnected', delaySec);
@@ -297,12 +341,20 @@ function connectWebSocket() {
 
     ws.onerror = (error) => {
         console.error("WebSocket Error:", error);
+        state.liveComboOrderAccountsConnected = false;
+        if (typeof OptionComboControlPanelUI !== 'undefined'
+            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
+            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        }
         updateWsStatusUI('error');
     };
 
     ws.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
+            if (_handleManagedAccountsMessage(data)) {
+                return;
+            }
             if (_handlePortfolioAvgCostMessage(data)) {
                 return;
             }
@@ -347,6 +399,17 @@ function requestPortfolioAvgCostSnapshot() {
 
     ws.send(JSON.stringify({
         action: 'request_portfolio_avg_cost_snapshot',
+    }));
+    return true;
+}
+
+function requestManagedAccountsSnapshot() {
+    if (!isWsConnected || !ws || _isHistoricalMode()) {
+        return false;
+    }
+
+    ws.send(JSON.stringify({
+        action: 'request_managed_accounts_snapshot',
     }));
     return true;
 }
@@ -959,6 +1022,14 @@ function requestCloseGroupComboOrder(group) {
         renderGroups();
         return false;
     }
+    if ((executionMode === 'submit' || executionMode === 'test_submit') && !_hasSelectedLiveComboOrderAccount()) {
+        _markCloseExecutionError(group, _getLiveComboOrderAccountRequirementMessage());
+        if (state.allowLiveComboOrders === true) {
+            requestManagedAccountsSnapshot();
+        }
+        renderGroups();
+        return false;
+    }
 
     const payload = _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode);
     if (!payload) {
@@ -1289,6 +1360,12 @@ function handleLiveSubscriptions() {
 
     ws.send(JSON.stringify(payload));
     requestPortfolioAvgCostSnapshot();
+    if (state.allowLiveComboOrders === true
+        || !Array.isArray(state.liveComboOrderAccounts)
+        || state.liveComboOrderAccounts.length === 0
+        || state.liveComboOrderAccountsConnected !== true) {
+        requestManagedAccountsSnapshot();
+    }
 }
 
 function requestUnderlyingPriceSync() {
@@ -1517,7 +1594,7 @@ function _applyPortfolioAvgCostUpdate(data) {
             if (row) {
                 const costInput = row.querySelector('.cost-input');
                 if (costInput) {
-                    costInput.value = nextCost.toFixed(2);
+                    costInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, nextCost);
                     flashElement(costInput);
                 }
             }
@@ -1788,6 +1865,14 @@ function _requestTrialGroupComboOrder(group) {
         renderGroups();
         return;
     }
+    if ((executionMode === 'submit' || executionMode === 'test_submit') && !_hasSelectedLiveComboOrderAccount()) {
+        _markTradeTriggerError(group, _getLiveComboOrderAccountRequirementMessage());
+        if (state.allowLiveComboOrders === true) {
+            requestManagedAccountsSnapshot();
+        }
+        renderGroups();
+        return;
+    }
 
     const payload = typeof OptionComboTradeTriggerLogic !== 'undefined'
         && typeof OptionComboTradeTriggerLogic.buildComboOrderRequestPayload === 'function'
@@ -1847,6 +1932,12 @@ function _applyComboOrderValidationResult(data) {
     }
     if (state.allowLiveComboOrders !== true) {
         _markExecutionError(group, 'Global live combo order switch is OFF.', runtimeKind);
+        renderGroups();
+        return true;
+    }
+    if (!_hasSelectedLiveComboOrderAccount()) {
+        _markExecutionError(group, _getLiveComboOrderAccountRequirementMessage(), runtimeKind);
+        requestManagedAccountsSnapshot();
         renderGroups();
         return true;
     }
@@ -2092,7 +2183,7 @@ function _applyComboOrderFillCostUpdate(data) {
                 ? row.querySelector('.close-price-input')
                 : row.querySelector('.cost-input');
             if (targetInput) {
-                targetInput.value = nextCost.toFixed(2);
+                targetInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, nextCost);
                 flashElement(targetInput);
             }
         }
@@ -2177,6 +2268,53 @@ function _handlePortfolioAvgCostMessage(data) {
     }
 
     return _applyPortfolioAvgCostUpdate(data);
+}
+
+function _applyManagedAccountsUpdate(data) {
+    if (!data || typeof data !== 'object') {
+        return false;
+    }
+
+    const nextAccounts = Array.isArray(data.accounts)
+        ? data.accounts
+            .map((account) => _normalizeLiveComboOrderAccount(account))
+            .filter((account, index, list) => account && list.indexOf(account) === index)
+        : [];
+    const nextConnected = data.ibConnected === true;
+    const previousAccounts = Array.isArray(state.liveComboOrderAccounts)
+        ? state.liveComboOrderAccounts.map((account) => _normalizeLiveComboOrderAccount(account))
+        : [];
+    const previousSelection = _getSelectedLiveComboOrderAccount();
+    let nextSelection = previousSelection;
+
+    if (!nextSelection || !nextAccounts.includes(nextSelection)) {
+        nextSelection = nextAccounts.length === 1 ? nextAccounts[0] : '';
+    }
+
+    const accountsChanged = JSON.stringify(previousAccounts) !== JSON.stringify(nextAccounts);
+    const selectionChanged = previousSelection !== nextSelection;
+    const connectedChanged = (state.liveComboOrderAccountsConnected === true) !== nextConnected;
+
+    state.liveComboOrderAccounts = nextAccounts;
+    state.liveComboOrderAccountsConnected = nextConnected;
+    state.selectedLiveComboOrderAccount = nextSelection;
+
+    if (accountsChanged || selectionChanged || connectedChanged) {
+        if (typeof OptionComboControlPanelUI !== 'undefined'
+            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
+            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        }
+    }
+
+    return true;
+}
+
+function _handleManagedAccountsMessage(data) {
+    if (!data || typeof data !== 'object' || data.action !== 'managed_accounts_update') {
+        return false;
+    }
+
+    return _applyManagedAccountsUpdate(data);
 }
 
 function evaluateTrialTradeTriggers() {
@@ -2639,7 +2777,7 @@ function processLiveMarketData(data) {
                 if (row) {
                     const currentPriceInput = row.querySelector('.current-price-input');
                     if (currentPriceInput) {
-                        currentPriceInput.value = liveMark.toFixed(2);
+                        currentPriceInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, liveMark);
                         flashElement(currentPriceInput);
                     }
                 }
@@ -2655,9 +2793,9 @@ function processLiveMarketData(data) {
     // Update Underlying Price if present
     if (data.underlyingPrice) {
         state.underlyingPrice = data.underlyingPrice;
-        document.getElementById('underlyingPrice').value = state.underlyingPrice.toFixed(2);
+        document.getElementById('underlyingPrice').value = _formatSymbolPriceInputValue(state.underlyingSymbol, state.underlyingPrice);
         document.getElementById('underlyingPriceSlider').value = state.underlyingPrice;
-        document.getElementById('underlyingPriceDisplay').textContent = currencyFormatter.format(state.underlyingPrice);
+        document.getElementById('underlyingPriceDisplay').textContent = _formatSymbolPriceDisplay(state.underlyingSymbol, state.underlyingPrice);
         if (!_isHistoricalMode()) {
             evaluateTrialTradeTriggers();
             evaluateTriggeredOrderExitConditions();
@@ -2692,7 +2830,7 @@ function processLiveMarketData(data) {
                                 if (row) {
                                     const currentPriceInput = row.querySelector('.current-price-input');
                                     if (currentPriceInput) {
-                                        currentPriceInput.value = liveMark.toFixed(2);
+                                        currentPriceInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, liveMark);
                                         flashElement(currentPriceInput);
                                     }
                                 }
@@ -2771,7 +2909,7 @@ function processLiveMarketData(data) {
                     if (row) {
                         const currentPriceInput = row.querySelector('.current-price-input');
                         if (currentPriceInput) {
-                            currentPriceInput.value = liveMark.toFixed(2);
+                            currentPriceInput.value = _formatSymbolPriceInputValue(hedge.symbol, liveMark);
                             flashElement(currentPriceInput);
                         }
                     }
@@ -2803,7 +2941,7 @@ function processLiveMarketData(data) {
                         if (row) {
                             const currentPriceInput = row.querySelector('.current-price-input');
                             if (currentPriceInput) {
-                                currentPriceInput.value = data.underlyingPrice.toFixed(2);
+                                currentPriceInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, data.underlyingPrice);
                                 flashElement(currentPriceInput);
                             }
                         }

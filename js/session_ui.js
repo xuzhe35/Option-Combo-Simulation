@@ -3,6 +3,32 @@
  */
 
 (function attachSessionUI(globalScope) {
+    function formatUnderlyingPriceInputValue(symbol, value) {
+        if (globalScope.OptionComboProductRegistry
+            && typeof globalScope.OptionComboProductRegistry.formatPriceInputValue === 'function') {
+            return globalScope.OptionComboProductRegistry.formatPriceInputValue(symbol, value);
+        }
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed.toFixed(2) : '';
+    }
+
+    function formatUnderlyingPriceDisplay(symbol, value) {
+        if (globalScope.OptionComboProductRegistry
+            && typeof globalScope.OptionComboProductRegistry.formatPriceDisplay === 'function') {
+            return globalScope.OptionComboProductRegistry.formatPriceDisplay(symbol, value);
+        }
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? `$${parsed.toFixed(2)}` : '$0.00';
+    }
+
+    function getUnderlyingPriceInputStep(symbol) {
+        if (globalScope.OptionComboProductRegistry
+            && typeof globalScope.OptionComboProductRegistry.getPriceInputStep === 'function') {
+            return globalScope.OptionComboProductRegistry.getPriceInputStep(symbol);
+        }
+        return '0.01';
+    }
+
     function normalizeImportedSessionTitle(rawTitle) {
         const normalized = String(rawTitle || '').trim();
         if (!normalized) {
@@ -178,9 +204,11 @@
         document.getElementById('underlyingSymbol').value = state.underlyingSymbol;
         const underlyingContractMonthInput = document.getElementById('underlyingContractMonth');
         const underlyingContractMonthHint = document.getElementById('underlyingContractMonthHint');
-        document.getElementById('underlyingPrice').value = state.underlyingPrice;
+        document.getElementById('underlyingPrice').step = getUnderlyingPriceInputStep(state.underlyingSymbol);
+        document.getElementById('underlyingPrice').value = formatUnderlyingPriceInputValue(state.underlyingSymbol, state.underlyingPrice);
+        document.getElementById('underlyingPriceSlider').step = getUnderlyingPriceInputStep(state.underlyingSymbol);
         document.getElementById('underlyingPriceSlider').value = state.underlyingPrice;
-        document.getElementById('underlyingPriceDisplay').textContent = currencyFormatter.format(state.underlyingPrice);
+        document.getElementById('underlyingPriceDisplay').textContent = formatUnderlyingPriceDisplay(state.underlyingSymbol, state.underlyingPrice);
 
         if (marketDataModeInput) {
             marketDataModeInput.value = marketDataMode;

@@ -182,6 +182,61 @@ module.exports = {
                 assert.equal(firstMessage.options[0].underlyingContractMonth, '202607');
                 const secondMessage = JSON.parse(MockWebSocket.instance.sent[1]);
                 assert.equal(secondMessage.action, 'request_portfolio_avg_cost_snapshot');
+                const thirdMessage = JSON.parse(MockWebSocket.instance.sent[2]);
+                assert.equal(thirdMessage.action, 'request_managed_accounts_snapshot');
+            },
+        },
+        {
+            name: 'applies managed account snapshots and auto-selects the only available account',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    liveComboOrderAccounts: [],
+                    liveComboOrderAccountsConnected: false,
+                    selectedLiveComboOrderAccount: '',
+                    groups: [],
+                    hedges: [],
+                };
+
+                let refreshCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        OptionComboControlPanelUI: {
+                            refreshBoundDynamicControls() {
+                                refreshCalls += 1;
+                            },
+                        },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const handled = ctx._handleManagedAccountsMessage({
+                    action: 'managed_accounts_update',
+                    ibConnected: true,
+                    accounts: ['F1234567'],
+                });
+
+                assert.equal(handled, true);
+                assert.deepEqual(state.liveComboOrderAccounts, ['F1234567']);
+                assert.equal(state.liveComboOrderAccountsConnected, true);
+                assert.equal(state.selectedLiveComboOrderAccount, 'F1234567');
+                assert.equal(refreshCalls, 1);
             },
         },
         {
@@ -265,6 +320,102 @@ module.exports = {
                 assert.equal(firstMessage.options[0].expDate, '20250417');
                 assert.equal(firstMessage.stocks.length, 0);
                 assert.equal(MockWebSocket.instance.sent.length, 1);
+            },
+        },
+        {
+            name: 'blocks live submit requests until a TWS order account is selected',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 512.25,
+                    simulatedDate: '2026-03-17',
+                    baseDate: '2026-03-17',
+                    allowLiveComboOrders: true,
+                    liveComboOrderAccounts: ['DU111111', 'F222222'],
+                    liveComboOrderAccountsConnected: true,
+                    selectedLiveComboOrderAccount: '',
+                    groups: [
+                        {
+                            id: 'group_live_submit',
+                            liveData: true,
+                            viewMode: 'trial',
+                            tradeTrigger: {
+                                enabled: true,
+                                condition: 'gte',
+                                price: 512,
+                                executionMode: 'submit',
+                                pendingRequest: false,
+                                status: 'armed',
+                                lastPreview: null,
+                                lastError: '',
+                            },
+                            legs: [
+                                {
+                                    id: 'leg_live_submit',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 510,
+                                    expDate: '2026-04-17',
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/group_order_builder.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                MockWebSocket.instance.sent.length = 0;
+
+                ctx._requestTrialGroupComboOrder(state.groups[0]);
+
+                assert.equal(MockWebSocket.instance.sent.length, 1);
+                assert.equal(JSON.parse(MockWebSocket.instance.sent[0]).action, 'request_managed_accounts_snapshot');
+                assert.match(state.groups[0].tradeTrigger.lastError, /select a tws account/i);
+                assert.equal(state.groups[0].tradeTrigger.pendingRequest, false);
             },
         },
         {
@@ -2324,6 +2475,7 @@ module.exports = {
                     groupId: 'group_1',
                     orderStatus: {
                         executionMode: 'test_submit',
+                        account: 'F1234567',
                         status: 'Submitted',
                         orderId: 930,
                         permId: 12345,
@@ -2334,6 +2486,7 @@ module.exports = {
 
                 assert.equal(handled, true);
                 assert.equal(state.groups[0].tradeTrigger.lastPreview.status, 'Submitted');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.account, 'F1234567');
                 assert.equal(state.groups[0].tradeTrigger.lastPreview.permId, 12345);
                 assert.equal(state.groups[0].tradeTrigger.status, 'test_submitted');
                 assert.equal(renderCalls, 1);

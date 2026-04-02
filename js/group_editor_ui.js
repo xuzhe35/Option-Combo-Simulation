@@ -29,6 +29,20 @@
             : 'STK';
     }
 
+    function getPriceInputStep(symbol) {
+        return productRegistry && typeof productRegistry.getPriceInputStep === 'function'
+            ? productRegistry.getPriceInputStep(symbol)
+            : '0.01';
+    }
+
+    function formatPriceInputValue(symbol, value) {
+        if (productRegistry && typeof productRegistry.formatPriceInputValue === 'function') {
+            return productRegistry.formatPriceInputValue(symbol, value);
+        }
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed.toFixed(2) : '';
+    }
+
     function getLegAnchorDate(state) {
         if (state && state.marketDataMode === 'historical' && state.historicalQuoteDate) {
             return state.historicalQuoteDate;
@@ -1031,6 +1045,7 @@
             strikeInput.style.visibility = 'visible';
             dteInput.closest('div').style.visibility = 'visible';
 
+            strikeInput.step = getPriceInputStep(state.underlyingSymbol);
             strikeInput.value = leg.strike;
             strikeInput.addEventListener('input', (e) => {
                 leg.strike = parseFloat(e.target.value) || 0;
@@ -1091,7 +1106,8 @@
         }
 
         const currentPriceInput = tr.querySelector('.current-price-input');
-        currentPriceInput.value = leg.currentPrice > 0 ? leg.currentPrice.toFixed(2) : '';
+        currentPriceInput.step = getPriceInputStep(state.underlyingSymbol);
+        currentPriceInput.value = leg.currentPrice > 0 ? formatPriceInputValue(state.underlyingSymbol, leg.currentPrice) : '';
         currentPriceInput.addEventListener('input', (e) => {
             leg.currentPrice = parseFloat(e.target.value) || 0;
             leg.currentPriceSource = leg.currentPrice > 0 ? 'manual' : '';
@@ -1099,7 +1115,8 @@
         });
 
         const costInput = tr.querySelector('.cost-input');
-        costInput.value = leg.cost > 0 ? leg.cost.toFixed(2) : '';
+        costInput.step = getPriceInputStep(state.underlyingSymbol);
+        costInput.value = leg.cost > 0 ? formatPriceInputValue(state.underlyingSymbol, leg.cost) : '';
         costInput.addEventListener('input', (e) => {
             leg.cost = parseFloat(e.target.value) || 0;
             leg.costSource = 'manual';
@@ -1115,8 +1132,9 @@
         if (closePriceInput && closeLabel) {
             closePriceInput.style.display = 'block';
             closeLabel.style.display = 'block';
+            closePriceInput.step = getPriceInputStep(state.underlyingSymbol);
             closePriceInput.value = leg.closePrice !== null && leg.closePrice !== undefined
-                ? leg.closePrice.toFixed(2)
+                ? formatPriceInputValue(state.underlyingSymbol, leg.closePrice)
                 : '';
             closePriceInput.addEventListener('input', (e) => {
                 const val = parseFloat(e.target.value);

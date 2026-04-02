@@ -239,6 +239,49 @@ def _build_portfolio_avg_cost_payload(items):
     }
 
 
+def _get_managed_accounts():
+    if not ib.isConnected():
+        return []
+
+    try:
+        raw_accounts = ib.managedAccounts()
+    except Exception:
+        logging.exception("Failed to read managed accounts from ib_async")
+        return []
+
+    accounts = []
+    for raw_account in raw_accounts or []:
+        account = str(raw_account or '').strip()
+        if account and account not in accounts:
+            accounts.append(account)
+    return accounts
+
+
+def _build_managed_accounts_payload():
+    accounts = _get_managed_accounts()
+    payload = {
+        'action': 'managed_accounts_update',
+        'accounts': accounts,
+        'ibConnected': ib.isConnected(),
+    }
+    if accounts:
+        payload['defaultAccount'] = accounts[0]
+    return payload
+
+
+def _broadcast_managed_accounts_snapshot():
+    if not connected_clients:
+        return
+
+    message = json.dumps(_build_managed_accounts_payload())
+    for ws in list(connected_clients):
+        asyncio.create_task(send_message_safe(ws, message))
+
+
+def _send_managed_accounts_snapshot(websocket):
+    asyncio.create_task(send_message_safe(websocket, json.dumps(_build_managed_accounts_payload())))
+
+
 def _broadcast_portfolio_avg_cost_items(items):
     if not items or not connected_clients:
         return
@@ -524,6 +567,8 @@ async def connect_ib():
             logging.info(f"Successfully connected to IB (Client ID: {client_id}).")
             # Enforce Real-Time Data (1)
             ib.reqMarketDataType(1)
+            logging.info("Managed accounts available: %s", ', '.join(_get_managed_accounts()) or '<none>')
+            _broadcast_managed_accounts_snapshot()
         except Exception as e:
             if 326 in error_codes:
                 # Error 326: "Client ID already in use" — pick a random ID and retry immediately
@@ -1305,6 +1350,7 @@ async def handle_ws_client(websocket):
     connected_clients.add(websocket)
     client_subscriptions[websocket] = {}
     _send_portfolio_avg_cost_snapshot(websocket)
+    _send_managed_accounts_snapshot(websocket)
     
     try:
         async for message in websocket:
@@ -1536,6 +1582,10 @@ async def handle_ws_client(websocket):
             elif data.get('action') == 'request_portfolio_avg_cost_snapshot':
                 logging.info(f"Received portfolio avg cost snapshot request from {client_ip}")
                 _send_portfolio_avg_cost_snapshot(websocket)
+
+            elif data.get('action') == 'request_managed_accounts_snapshot':
+                logging.info(f"Received managed accounts snapshot request from {client_ip}")
+                _send_managed_accounts_snapshot(websocket)
 
             else:
                 payload = await execution_engine.handle_combo_action(

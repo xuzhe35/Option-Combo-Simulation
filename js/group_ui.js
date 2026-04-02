@@ -186,8 +186,18 @@
                 legsHtml,
             ].join('')
             : '';
+        const brokerStatusDetails = [];
+        if (preview.account) {
+            brokerStatusDetails.push(`Account ${preview.account}`);
+        }
+        if (preview.orderId) {
+            brokerStatusDetails.push(`Order ID ${preview.orderId}`);
+        }
+        if (preview.permId) {
+            brokerStatusDetails.push(`Perm ID ${preview.permId}`);
+        }
         const brokerStatusText = preview.status
-            ? `<div class="text-muted" style="margin-top: 8px;">Broker status: ${preview.status}${preview.orderId ? ` (Order ID ${preview.orderId})` : ''}${preview.permId ? `, Perm ID ${preview.permId}` : ''}</div>`
+            ? `<div class="text-muted" style="margin-top: 8px;">Broker status: ${preview.status}${brokerStatusDetails.length > 0 ? ` (${brokerStatusDetails.join(', ')})` : ''}</div>`
             : '';
         const managedStateText = preview.managedMode
             ? `<div class="text-muted" style="margin-top: 8px;">Managed execution: ${preview.managedState || 'watching'}${Number.isFinite(preview.workingLimitPrice) ? `, Working LMT ${currencyFormatter.format(preview.workingLimitPrice)}` : ''}${Number.isFinite(preview.latestComboMid) ? `, Latest combo mid ${currencyFormatter.format(preview.latestComboMid)}` : ''}${Number.isFinite(preview.managedRepriceThreshold) ? `, Drift threshold ${preview.managedRepriceThreshold.toFixed(2)}` : ''}${Number.isFinite(preview.managedConcessionRatio) && preview.managedConcessionRatio > 0 ? `, Concession ${Math.round(preview.managedConcessionRatio * 100)}%` : ''}</div>`

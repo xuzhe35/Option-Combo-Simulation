@@ -428,7 +428,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             f"{prefix} comboSymbol={preview.combo_symbol} exchange={preview.combo_exchange} "
             f"action={preview.order_action} qty={preview.total_quantity} "
             f"limit={preview.limit_price} rawNetMid={preview.raw_net_mid} "
-            f"executionMode={preview.execution_mode} pricingSource={preview.pricing_source} "
+            f"executionMode={preview.execution_mode} account={preview.account or ''} pricingSource={preview.pricing_source} "
             f"pricingNote={preview.pricing_note!r} legs=[{leg_lines}]"
         )
 
@@ -488,6 +488,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'groupId': context.get('groupId'),
             'groupName': context.get('groupName'),
             'executionMode': context.get('executionMode'),
+            'account': context.get('account'),
             'executionIntent': context.get('executionIntent'),
             'requestSource': context.get('requestSource'),
             'orderId': context.get('orderId'),
@@ -872,6 +873,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'groupId': request.group_id,
             'groupName': request.group_name,
             'executionMode': request.execution_mode,
+            'account': str(getattr(order, 'account', '') or request.account or '').strip() or None,
             'executionIntent': request.execution_intent,
             'requestSource': request.request_source,
             'comboContract': combo_contract,
@@ -941,6 +943,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         context['trade'] = trade
         context['orderId'] = order_id
         context['permId'] = perm_id
+        context['account'] = str(getattr(order, 'account', '') or context.get('account') or '').strip() or None
         context['status'] = getattr(order_status, 'status', None)
         context['filled'] = getattr(order_status, 'filled', None)
         context['remaining'] = getattr(order_status, 'remaining', None)
@@ -1113,6 +1116,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         order.lmtPrice = self._quantize_limit_price(limit_price, order_action)
         order.tif = self._resolve_time_in_force(request)
         order.transmit = True
+        if str(request.account or '').strip():
+            order.account = str(request.account).strip()
 
         if self._should_use_non_guaranteed_routing(combo_exchange, combo_legs, order):
             try:
@@ -1141,6 +1146,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             raw_net_mid=round(direct_net_mid, 4),
             time_in_force=order.tif,
             execution_mode=request.execution_mode or 'preview',
+            account=str(getattr(order, 'account', '') or request.account or '').strip(),
             execution_intent=request.execution_intent or 'open',
             request_source=request.request_source or 'manual',
             pricing_note=pricing_note,
@@ -1239,7 +1245,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.logger.info(
             f"Placing combo order for groupId={request.group_id}: "
             f"executionMode={request.execution_mode} action={order.action} qty={order.totalQuantity} "
-            f"limit={order.lmtPrice} tif={order.tif}"
+            f"limit={order.lmtPrice} tif={order.tif} account={getattr(order, 'account', '') or ''}"
         )
         trade = self.ib.placeOrder(combo_contract, order)
         await asyncio.sleep(1.5)
@@ -1366,7 +1372,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         await self._emit_managed_update(context)
         self.logger.info(
             f"Resumed managed combo repricing for groupId={group_id} "
-            f"orderId={context.get('orderId')} permId={context.get('permId')} "
+            f"orderId={context.get('orderId')} permId={context.get('permId')} account={context.get('account') or ''} "
             f"newMaxRepriceCount={context.get('maxRepriceCount')}"
         )
         return self._build_managed_snapshot(context)
@@ -1454,7 +1460,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         await self._emit_managed_update(context)
         self.logger.info(
             f"Applied managed concession repricing for groupId={group_id} "
-            f"orderId={context.get('orderId')} permId={context.get('permId')} "
+            f"orderId={context.get('orderId')} permId={context.get('permId')} account={context.get('account') or ''} "
             f"concessionRatio={concession_ratio:.2f} workingLimit={context.get('workingLimitPrice')}"
         )
         return self._build_managed_snapshot(context)
@@ -1502,6 +1508,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.ib.cancelOrder(order)
         self.logger.info(
             f"Requested combo order cancellation for groupId={group_id} "
-            f"orderId={context.get('orderId')} permId={context.get('permId')} reason={reason}"
+            f"orderId={context.get('orderId')} permId={context.get('permId')} account={context.get('account') or ''} reason={reason}"
         )
         return self._build_managed_snapshot(context)

@@ -36,8 +36,8 @@ module.exports = {
                     underlyingSymbol: { value: '' },
                     underlyingContractMonth: { value: '', placeholder: '', disabled: false },
                     underlyingContractMonthHint: { textContent: '' },
-                    underlyingPrice: { value: '' },
-                    underlyingPriceSlider: { value: '' },
+                    underlyingPrice: { value: '', step: '' },
+                    underlyingPriceSlider: { value: '', step: '' },
                     underlyingPriceDisplay: { textContent: '' },
                     simulatedDate: { value: '', min: '', max: '' },
                     daysPassedSlider: { value: '' },
@@ -130,8 +130,10 @@ module.exports = {
                 assert.equal(elements.underlyingSymbol.value, 'QQQ');
                 assert.equal(elements.underlyingContractMonth.value, '');
                 assert.equal(elements.underlyingContractMonth.disabled, true);
-                assert.equal(elements.underlyingPrice.value, 512.34);
+                assert.equal(elements.underlyingPrice.value, '512.34');
+                assert.equal(elements.underlyingPrice.step, '0.01');
                 assert.equal(elements.underlyingPriceSlider.value, 512.34);
+                assert.equal(elements.underlyingPriceSlider.step, '0.01');
                 assert.equal(elements.underlyingPriceDisplay.textContent, '$512.34');
                 assert.equal(elements.simulatedDate.min, '2026-03-07');
                 assert.equal(elements.simulatedDate.max, '');
@@ -172,6 +174,98 @@ module.exports = {
                     }),
                     'Iron Condor Setup'
                 );
+            },
+        },
+        {
+            name: 'uses product-aware underlying price precision for copper futures sessions',
+            run() {
+                const elements = {
+                    workspaceBanner: { hidden: true, style: {}, className: '' },
+                    workspaceBannerBadge: { textContent: '' },
+                    workspaceBannerTitle: { textContent: '' },
+                    workspaceBannerBody: { textContent: '' },
+                    appTitle: { textContent: '' },
+                    appSubtitle: { textContent: '' },
+                    marketDataMode: { value: '' },
+                    marketDataModeHint: { textContent: '' },
+                    historicalQuoteDateGroup: { hidden: true, style: {} },
+                    historicalQuoteDateLabel: { textContent: '' },
+                    historicalQuoteDate: { value: '' },
+                    historicalQuoteDateHint: { textContent: '' },
+                    historicalReplayDateGroup: { hidden: true, style: {} },
+                    historicalReplayDateLabel: { textContent: '' },
+                    historicalReplayDate: { value: '' },
+                    historicalReplayStartLabel: { textContent: '' },
+                    historicalReplayDaysDisplay: { textContent: '' },
+                    historicalReplaySlider: { value: '' },
+                    historicalTimelineControls: { hidden: true, style: {} },
+                    historicalTimelineHint: { textContent: '' },
+                    simulatedDateLabel: { textContent: '' },
+                    simulatedDateStartLabel: { textContent: '' },
+                    simulatedDateHint: { textContent: '', hidden: true },
+                    simulatedDateOffsetGroup: { style: {} },
+                    underlyingSymbol: { value: '' },
+                    underlyingContractMonth: { value: '', placeholder: '', disabled: false },
+                    underlyingContractMonthHint: { textContent: '' },
+                    underlyingPrice: { value: '', step: '' },
+                    underlyingPriceSlider: { value: '', step: '' },
+                    underlyingPriceDisplay: { textContent: '' },
+                    simulatedDate: { value: '', min: '', max: '' },
+                    daysPassedSlider: { value: '' },
+                    daysPassedDisplay: { textContent: '' },
+                    interestRate: { value: '' },
+                    interestRateDisplay: { textContent: '' },
+                    ivOffset: { value: '' },
+                    ivOffsetSlider: { value: '' },
+                    ivOffsetDisplay: { textContent: '' },
+                    allowLiveComboOrders: { checked: false },
+                };
+
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/session_ui.js',
+                ], {
+                    document: {
+                        title: '',
+                        getElementById(id) {
+                            return elements[id];
+                        },
+                    },
+                });
+
+                const currencyFormatter = new Intl.NumberFormat('en-US', {
+                    style: 'currency',
+                    currency: 'USD',
+                    minimumFractionDigits: 2,
+                });
+
+                ctx.OptionComboSessionUI.syncControlPanel(
+                    {
+                        underlyingSymbol: 'HG',
+                        underlyingContractMonth: '202605',
+                        underlyingPrice: 4.35789,
+                        baseDate: '2026-04-02',
+                        simulatedDate: '2026-04-02',
+                        marketDataMode: 'live',
+                        workspaceVariant: 'live',
+                        marketDataModeLocked: false,
+                        historicalQuoteDate: '',
+                        historicalAvailableEndDate: '',
+                        interestRate: 0.03,
+                        ivOffset: 0,
+                        allowLiveComboOrders: false,
+                    },
+                    currencyFormatter,
+                    {
+                        diffDays() { return 0; },
+                        calendarToTradingDays() { return 0; },
+                    }
+                );
+
+                assert.equal(elements.underlyingPrice.value, '4.35789');
+                assert.equal(elements.underlyingPrice.step, '0.00001');
+                assert.equal(elements.underlyingPriceSlider.step, '0.00001');
+                assert.equal(elements.underlyingPriceDisplay.textContent, '$4.35789');
             },
         },
     ],

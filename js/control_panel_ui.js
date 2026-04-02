@@ -20,6 +20,40 @@
         return registry.resolvePricingInputMode(symbol);
     }
 
+    function _getPriceInputStep(symbol) {
+        const registry = _getRegistry();
+        if (!registry || typeof registry.getPriceInputStep !== 'function') {
+            return '0.01';
+        }
+        return registry.getPriceInputStep(symbol);
+    }
+
+    function _formatPriceInputValue(symbol, value) {
+        const registry = _getRegistry();
+        if (!registry || typeof registry.formatPriceInputValue !== 'function') {
+            const parsed = parseFloat(value);
+            return Number.isFinite(parsed) ? parsed.toFixed(2) : '';
+        }
+        return registry.formatPriceInputValue(symbol, value);
+    }
+
+    function _formatPriceDisplayValue(symbol, value, options = {}) {
+        const registry = _getRegistry();
+        if (!registry || typeof registry.formatPriceDisplay !== 'function') {
+            const parsed = parseFloat(value);
+            if (!Number.isFinite(parsed)) {
+                return Object.prototype.hasOwnProperty.call(options, 'fallback')
+                    ? options.fallback
+                    : '--';
+            }
+            const prefix = Object.prototype.hasOwnProperty.call(options, 'prefix')
+                ? String(options.prefix ?? '')
+                : '$';
+            return `${prefix}${parsed.toFixed(2)}`;
+        }
+        return registry.formatPriceDisplay(symbol, value, options);
+    }
+
     function _createLocalId(prefix) {
         return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
     }
@@ -207,9 +241,11 @@
         return tagName === 'INPUT' || tagName === 'SELECT' || tagName === 'TEXTAREA';
     }
 
-    function _formatQuoteValue(value) {
-        const parsed = parseFloat(value);
-        return Number.isFinite(parsed) ? parsed.toFixed(2) : '--';
+    function _formatQuoteValue(value, symbol) {
+        return _formatPriceDisplayValue(symbol, value, {
+            prefix: '',
+            fallback: '--',
+        });
     }
 
     function _formatForwardRateTimestamp(value) {
@@ -310,6 +346,29 @@
             toggleBtn.title = collapsed
                 ? 'Expand Forward Carry samples'
                 : 'Collapse Forward Carry samples';
+        }
+
+        _setHidden(header, !showPanel || collapsed);
+        _setHidden(list, !showPanel || collapsed);
+
+        if (status && status.style) {
+            status.style.marginBottom = collapsed ? '0' : '0.5rem';
+        }
+    }
+
+    function _syncFuturesPoolPanelCollapseUi(state, showPanel) {
+        const toggleBtn = _getElement('toggleFuturesPoolPanelBtn');
+        const header = _getElement('futuresPoolHeader');
+        const list = _getElement('futuresPoolList');
+        const status = _getElement('futuresPoolStatus');
+        const collapsed = !!(state && state.futuresPoolPanelCollapsed === true);
+
+        if (toggleBtn) {
+            _setHidden(toggleBtn, !showPanel);
+            toggleBtn.textContent = collapsed ? 'Show' : 'Hide';
+            toggleBtn.title = collapsed
+                ? 'Expand Futures Pool contracts'
+                : 'Collapse Futures Pool contracts';
         }
 
         _setHidden(header, !showPanel || collapsed);
@@ -554,10 +613,16 @@
         const panel = _getElement('futuresPoolPanel');
         const list = _getElement('futuresPoolList');
         const addBtn = _getElement('addFutureContractBtn');
+        const toggleBtn = _getElement('toggleFuturesPoolPanelBtn');
         const showPanel = _getPricingInputMode(state.underlyingSymbol) === 'FOP';
+
+        if (typeof state.futuresPoolPanelCollapsed !== 'boolean') {
+            state.futuresPoolPanelCollapsed = false;
+        }
 
         _setHidden(panel, !showPanel);
         _renderFuturesPoolStatus(state);
+        _syncFuturesPoolPanelCollapseUi(state, showPanel);
 
         if (addBtn && typeof addBtn.addEventListener === 'function' && addBtn.__futuresPoolBound !== true) {
             addBtn.__futuresPoolBound = true;
@@ -565,6 +630,7 @@
                 if (!Array.isArray(state.futuresPool)) {
                     state.futuresPool = [];
                 }
+                state.futuresPoolPanelCollapsed = false;
                 state.futuresPool.push({
                     id: typeof deps.generateId === 'function' ? deps.generateId() : _createLocalId('future'),
                     contractMonth: '',
@@ -580,7 +646,19 @@
             });
         }
 
+        if (toggleBtn && typeof toggleBtn.addEventListener === 'function' && toggleBtn.__futuresPoolToggleBound !== true) {
+            toggleBtn.__futuresPoolToggleBound = true;
+            toggleBtn.addEventListener('click', () => {
+                state.futuresPoolPanelCollapsed = !state.futuresPoolPanelCollapsed;
+                _renderFuturesPool(state, deps);
+            });
+        }
+
         if (!showPanel || !list || typeof document === 'undefined' || typeof document.createElement !== 'function' || typeof list.appendChild !== 'function') {
+            return;
+        }
+
+        if (state.futuresPoolPanelCollapsed === true) {
             return;
         }
 
@@ -603,7 +681,7 @@
                     contractMonthInput.value = entry.contractMonth || '';
                 }
                 if (quoteDisplay) {
-                    quoteDisplay.textContent = `Bid ${_formatQuoteValue(entry.bid)} / Ask ${_formatQuoteValue(entry.ask)} / Mark ${_formatQuoteValue(entry.mark)}`;
+                    quoteDisplay.textContent = `Bid ${_formatQuoteValue(entry.bid, state.underlyingSymbol)} / Ask ${_formatQuoteValue(entry.ask, state.underlyingSymbol)} / Mark ${_formatQuoteValue(entry.mark, state.underlyingSymbol)}`;
                 }
             });
             return;
@@ -645,7 +723,7 @@
             const quoteDisplay = document.createElement('div');
             quoteDisplay.className = 'text-muted small';
             quoteDisplay.style.lineHeight = '1.25';
-            quoteDisplay.textContent = `Bid ${_formatQuoteValue(entry.bid)} / Ask ${_formatQuoteValue(entry.ask)} / Mark ${_formatQuoteValue(entry.mark)}`;
+            quoteDisplay.textContent = `Bid ${_formatQuoteValue(entry.bid, state.underlyingSymbol)} / Ask ${_formatQuoteValue(entry.ask, state.underlyingSymbol)} / Mark ${_formatQuoteValue(entry.mark, state.underlyingSymbol)}`;
             row.__quoteDisplay = quoteDisplay;
 
             const removeBtn = document.createElement('button');
@@ -879,7 +957,105 @@
                 : '';
         }
 
+        _syncLiveComboOrderAccountUI(state);
         _syncWorkspaceChrome(state);
+    }
+
+    function _createSelectOption(value, label, selected = false, disabled = false) {
+        if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
+            return null;
+        }
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        option.selected = selected;
+        option.disabled = disabled;
+        return option;
+    }
+
+    function _setSelectOptions(select, optionDescriptors) {
+        if (!select) return;
+
+        const options = (optionDescriptors || [])
+            .map((descriptor) => _createSelectOption(
+                descriptor.value,
+                descriptor.label,
+                descriptor.selected === true,
+                descriptor.disabled === true
+            ))
+            .filter(Boolean);
+
+        if (typeof select.replaceChildren === 'function') {
+            select.replaceChildren(...options);
+        } else {
+            select.innerHTML = '';
+            options.forEach((option) => {
+                if (typeof select.appendChild === 'function') {
+                    select.appendChild(option);
+                }
+            });
+        }
+    }
+
+    function _syncLiveComboOrderAccountUI(state) {
+        const controls = _getElement('liveComboOrderAccountControls');
+        const select = _getElement('liveComboOrderAccountSelect');
+        const hint = _getElement('liveComboOrderAccountHint');
+        const mode = _getMarketDataMode(state);
+        const accounts = Array.isArray(state && state.liveComboOrderAccounts)
+            ? state.liveComboOrderAccounts
+                .map((account) => String(account || '').trim())
+                .filter((account, index, list) => account && list.indexOf(account) === index)
+            : [];
+        const selectedAccount = typeof state?.selectedLiveComboOrderAccount === 'string'
+            ? state.selectedLiveComboOrderAccount.trim()
+            : '';
+        const isVisible = mode === 'live' && state && state.allowLiveComboOrders === true;
+        const hasValidSelection = selectedAccount && accounts.includes(selectedAccount);
+        const placeholderLabel = accounts.length > 0
+            ? 'Select TWS account'
+            : (state && state.liveComboOrderAccountsConnected === true
+                ? 'No TWS accounts available'
+                : 'Waiting for TWS account list...');
+
+        _setHidden(controls, !isVisible);
+
+        if (select) {
+            const optionDescriptors = [];
+            if (!hasValidSelection) {
+                optionDescriptors.push({
+                    value: '',
+                    label: placeholderLabel,
+                    selected: true,
+                    disabled: accounts.length === 0,
+                });
+            }
+            accounts.forEach((account) => {
+                optionDescriptors.push({
+                    value: account,
+                    label: account,
+                    selected: account === selectedAccount,
+                    disabled: false,
+                });
+            });
+            _setSelectOptions(select, optionDescriptors);
+            select.value = hasValidSelection ? selectedAccount : '';
+            select.disabled = !isVisible || accounts.length === 0;
+        }
+
+        if (hint) {
+            if (!isVisible) {
+                hint.textContent = '';
+            } else if (state && state.liveComboOrderAccountsConnected !== true) {
+                hint.textContent = 'Waiting for ib_server / TWS to report the available accounts.';
+            } else if (accounts.length === 0) {
+                hint.textContent = 'TWS did not report any accounts that can be selected for combo orders yet.';
+            } else if (!hasValidSelection) {
+                hint.textContent = 'Choose which TWS account real combo orders should use.';
+            } else {
+                hint.textContent = `Real combo orders will be routed to ${selectedAccount}.`;
+            }
+        }
     }
 
     function _syncHistoricalTimelineUi(state) {
@@ -990,7 +1166,22 @@
         _syncHistoricalTimelineUi(_boundState);
         _syncSimulationDateUi(_boundState);
         _syncUnderlyingContractMonthUI(_boundState, false);
+        const underlyingPriceInput = _getElement('underlyingPrice');
+        const underlyingPriceSlider = _getElement('underlyingPriceSlider');
+        const underlyingPriceDisplay = _getElement('underlyingPriceDisplay');
+        if (underlyingPriceInput) {
+            underlyingPriceInput.step = _getPriceInputStep(_boundState.underlyingSymbol);
+            underlyingPriceInput.value = _formatPriceInputValue(_boundState.underlyingSymbol, _boundState.underlyingPrice);
+        }
+        if (underlyingPriceSlider) {
+            underlyingPriceSlider.step = _getPriceInputStep(_boundState.underlyingSymbol);
+            underlyingPriceSlider.value = _boundState.underlyingPrice;
+        }
+        if (underlyingPriceDisplay) {
+            underlyingPriceDisplay.textContent = _formatPriceDisplayValue(_boundState.underlyingSymbol, _boundState.underlyingPrice);
+        }
         _syncInterestRateUI(_boundState);
+        _syncLiveComboOrderAccountUI(_boundState);
         if (_shouldPauseDynamicControlRefresh('forwardRatePanel')) {
             _renderForwardRateStatus(_boundState);
         } else {
@@ -1008,6 +1199,7 @@
             updateDerivedValues,
             throttledUpdate,
             handleLiveSubscriptions,
+            requestManagedAccountsSnapshot,
             settleHistoricalReplayGroups,
             renderGroups,
             generateId,
@@ -1020,6 +1212,7 @@
         _boundDeps = {
             updateDerivedValues,
             handleLiveSubscriptions,
+            requestManagedAccountsSnapshot,
             settleHistoricalReplayGroups,
             renderGroups,
             generateId,
@@ -1128,6 +1321,17 @@
             symInput.value = state.underlyingSymbol;
             _syncUnderlyingContractMonthUI(state, symbolChanged);
             _syncInterestRateUI(state);
+            if (upInput) {
+                upInput.step = _getPriceInputStep(state.underlyingSymbol);
+                upInput.value = _formatPriceInputValue(state.underlyingSymbol, state.underlyingPrice);
+            }
+            if (upSlider) {
+                upSlider.step = _getPriceInputStep(state.underlyingSymbol);
+                upSlider.value = state.underlyingPrice;
+            }
+            if (upDisplay) {
+                upDisplay.textContent = _formatPriceDisplayValue(state.underlyingSymbol, state.underlyingPrice);
+            }
             _renderForwardRateSamples(state, _boundDeps);
             _renderFuturesPool(state, _boundDeps);
 
@@ -1180,17 +1384,17 @@
 
         function updateUnderlyingPrice(val) {
             state.underlyingPrice = parseFloat(val);
-            upInput.value = state.underlyingPrice;
+            upInput.value = _formatPriceInputValue(state.underlyingSymbol, state.underlyingPrice);
             upSlider.value = state.underlyingPrice;
-            upDisplay.textContent = currencyFormatter.format(state.underlyingPrice);
+            upDisplay.textContent = _formatPriceDisplayValue(state.underlyingSymbol, state.underlyingPrice);
             updateDerivedValues();
         }
 
         upInput.addEventListener('input', (e) => updateUnderlyingPrice(e.target.value));
         upSlider.addEventListener('input', (e) => {
             state.underlyingPrice = parseFloat(e.target.value);
-            upInput.value = state.underlyingPrice;
-            upDisplay.textContent = currencyFormatter.format(state.underlyingPrice);
+            upInput.value = _formatPriceInputValue(state.underlyingSymbol, state.underlyingPrice);
+            upDisplay.textContent = _formatPriceDisplayValue(state.underlyingSymbol, state.underlyingPrice);
             throttledUpdate();
         });
 
@@ -1319,6 +1523,7 @@
         const ivSlider = _getElement('ivOffsetSlider');
         const ivDisplay = _getElement('ivOffsetDisplay');
         const allowLiveComboOrdersInput = _getElement('allowLiveComboOrders');
+        const liveComboOrderAccountSelect = _getElement('liveComboOrderAccountSelect');
 
         function updateIv(val) {
             const pct = parseFloat(val);
@@ -1343,6 +1548,19 @@
             allowLiveComboOrdersInput.addEventListener('change', (e) => {
                 state.allowLiveComboOrders = _getMarketDataMode(state) === 'live' && e.target.checked === true;
                 allowLiveComboOrdersInput.checked = state.allowLiveComboOrders === true;
+                if (state.allowLiveComboOrders === true
+                    && _boundDeps
+                    && typeof _boundDeps.requestManagedAccountsSnapshot === 'function') {
+                    _boundDeps.requestManagedAccountsSnapshot();
+                }
+                _syncLiveComboOrderAccountUI(state);
+            });
+        }
+
+        if (liveComboOrderAccountSelect) {
+            liveComboOrderAccountSelect.addEventListener('change', (e) => {
+                state.selectedLiveComboOrderAccount = String(e.target.value || '').trim();
+                _syncLiveComboOrderAccountUI(state);
             });
         }
     }

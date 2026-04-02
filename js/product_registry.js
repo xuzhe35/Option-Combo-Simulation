@@ -25,6 +25,7 @@
         settlementUnitsPerContract: 100,
         settlementKind: 'equity-deliverable',
         pricingModel: 'bsm-spot',
+        priceDisplayDecimals: 2,
         supportsAmortizedMode: true,
         supportsLegacyLiveData: true,
         supportsUnderlyingLegs: true,
@@ -124,6 +125,7 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            priceDisplayDecimals: 3,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -143,6 +145,7 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            priceDisplayDecimals: 5,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -473,6 +476,51 @@
         return 'Current Underlying Leg Price';
     }
 
+    function getPriceDisplayDecimals(symbol) {
+        const profile = resolveUnderlyingProfile(symbol);
+        const parsed = parseInt(profile.priceDisplayDecimals, 10);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2;
+    }
+
+    function getPriceInputStep(symbol) {
+        const decimals = getPriceDisplayDecimals(symbol);
+        if (decimals <= 0) {
+            return '1';
+        }
+        return `0.${'0'.repeat(Math.max(0, decimals - 1))}1`;
+    }
+
+    function formatPriceInputValue(symbol, value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return '';
+        }
+        return parsed.toFixed(getPriceDisplayDecimals(symbol));
+    }
+
+    function formatPriceDisplay(symbol, value, options = {}) {
+        const parsed = parseFloat(value);
+        const fallback = Object.prototype.hasOwnProperty.call(options, 'fallback')
+            ? options.fallback
+            : '--';
+        if (!Number.isFinite(parsed)) {
+            return fallback;
+        }
+
+        const decimals = Number.isFinite(parseInt(options.decimals, 10))
+            ? parseInt(options.decimals, 10)
+            : getPriceDisplayDecimals(symbol);
+        const prefix = Object.prototype.hasOwnProperty.call(options, 'prefix')
+            ? String(options.prefix ?? '')
+            : '$';
+        const absFormatted = new Intl.NumberFormat('en-US', {
+            minimumFractionDigits: decimals,
+            maximumFractionDigits: decimals,
+        }).format(Math.abs(parsed));
+        const sign = parsed < 0 ? '-' : '';
+        return `${sign}${prefix}${absFormatted}`;
+    }
+
     function getDeliverableLabel(symbol, count) {
         const profile = resolveUnderlyingProfile(symbol);
         return Math.abs(count) === 1
@@ -501,6 +549,10 @@
         usesFuturesPool,
         getUnderlyingLegLabel,
         getUnderlyingLegPriceTitle,
+        getPriceDisplayDecimals,
+        getPriceInputStep,
+        formatPriceInputValue,
+        formatPriceDisplay,
         getDeliverableLabel,
     };
 

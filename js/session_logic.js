@@ -313,6 +313,8 @@
 
     function buildExportState(state) {
         const snapshot = JSON.parse(JSON.stringify(state));
+        snapshot.liveComboOrderAccounts = [];
+        snapshot.liveComboOrderAccountsConnected = false;
         snapshot.groups = (snapshot.groups || []).map(group => ({
             ...group,
             tradeTrigger: _buildArchivableTradeTrigger(group.tradeTrigger),
@@ -345,6 +347,11 @@
             interestRate: importedState.interestRate !== undefined ? importedState.interestRate : 0.03,
             ivOffset: importedState.ivOffset || 0,
             allowLiveComboOrders: importedState.allowLiveComboOrders === true,
+            liveComboOrderAccounts: [],
+            liveComboOrderAccountsConnected: false,
+            selectedLiveComboOrderAccount: typeof importedState.selectedLiveComboOrderAccount === 'string'
+                ? importedState.selectedLiveComboOrderAccount.trim()
+                : '',
             forwardRateSamples: [],
             futuresPool: [],
             groups: currentState.groups.slice(),

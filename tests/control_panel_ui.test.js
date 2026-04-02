@@ -95,12 +95,16 @@ module.exports = {
                     ivOffsetSlider: createElement({ value: '0' }),
                     ivOffsetDisplay: createElement({ textContent: '0.00%' }),
                     allowLiveComboOrders: createElement({ checked: false }),
+                    liveComboOrderAccountControls: createElement({ hidden: true, style: {} }),
+                    liveComboOrderAccountSelect: createElement({ value: '', disabled: true }),
+                    liveComboOrderAccountHint: createElement({ textContent: '' }),
                 };
 
                 let updateCalls = 0;
                 let throttledCalls = 0;
                 let subscriptionCalls = 0;
                 let settleAllCalls = 0;
+                let managedAccountSnapshotCalls = 0;
 
                 const ctx = loadBrowserScripts(['js/date_utils.js', 'js/product_registry.js', 'js/control_panel_ui.js'], {
                     document: {
@@ -137,6 +141,9 @@ module.exports = {
                     interestRate: 0.03,
                     ivOffset: 0,
                     allowLiveComboOrders: false,
+                    liveComboOrderAccounts: ['DU111111', 'F222222'],
+                    liveComboOrderAccountsConnected: true,
+                    selectedLiveComboOrderAccount: '',
                     forwardRateSamples: [],
                     futuresPool: [],
                     groups: [],
@@ -151,6 +158,9 @@ module.exports = {
                     },
                     handleLiveSubscriptions() {
                         subscriptionCalls += 1;
+                    },
+                    requestManagedAccountsSnapshot() {
+                        managedAccountSnapshotCalls += 1;
                     },
                     settleHistoricalReplayGroups() {
                         settleAllCalls += 1;
@@ -280,6 +290,16 @@ module.exports = {
 
                 elements.allowLiveComboOrders.listeners.change({ target: { checked: true } });
                 assert.equal(state.allowLiveComboOrders, true);
+                assert.equal(managedAccountSnapshotCalls, 1);
+                assert.equal(elements.liveComboOrderAccountControls.hidden, false);
+                assert.equal(elements.liveComboOrderAccountSelect.disabled, false);
+                assert.equal(elements.liveComboOrderAccountSelect.children.length, 3);
+                assert.match(elements.liveComboOrderAccountHint.textContent, /choose which tws account/i);
+
+                elements.liveComboOrderAccountSelect.listeners.change({ target: { value: 'F222222' } });
+                assert.equal(state.selectedLiveComboOrderAccount, 'F222222');
+                assert.equal(elements.liveComboOrderAccountSelect.value, 'F222222');
+                assert.match(elements.liveComboOrderAccountHint.textContent, /F222222/);
 
                 elements.underlyingSymbol.listeners.change({ target: { value: 'spx' } });
                 assert.equal(state.underlyingSymbol, 'SPX');
@@ -793,6 +813,134 @@ module.exports = {
                 assert.equal(elements.forwardRateSamplesHeader.hidden, true);
                 assert.equal(elements.forwardRateSamplesList.hidden, true);
                 assert.equal(elements.forwardRateStatus.style.marginBottom, '0');
+            },
+        },
+        {
+            name: 'collapses futures-pool panel while keeping the status visible',
+            run() {
+                const elements = {
+                    marketDataMode: createElement({ value: 'live' }),
+                    marketDataModeHint: createElement({ textContent: '' }),
+                    historicalQuoteDateGroup: createElement({ hidden: true, style: {} }),
+                    historicalQuoteDateLabel: createElement({ textContent: '' }),
+                    historicalQuoteDate: createElement({ value: '' }),
+                    historicalQuoteDateHint: createElement({ textContent: '' }),
+                    historicalReplayDateGroup: createElement({ hidden: true, style: {} }),
+                    historicalReplayDateLabel: createElement({ textContent: '' }),
+                    historicalReplayDate: createElement({ value: '' }),
+                    historicalReplayStartLabel: createElement({ textContent: '' }),
+                    historicalReplayDaysDisplay: createElement({ textContent: '' }),
+                    historicalReplaySlider: createElement({ value: '0', min: '0', max: '0' }),
+                    historicalTimelineControls: createElement({ hidden: true, style: {} }),
+                    historicalTimelineHint: createElement({ textContent: '' }),
+                    historicalNextDayBtn: createElement({ disabled: true }),
+                    historicalSettleAllBtn: createElement({ disabled: true }),
+                    underlyingSymbol: createElement({ value: 'CL' }),
+                    underlyingContractMonth: createElement({ value: '202605' }),
+                    underlyingContractMonthHint: createElement({ textContent: '' }),
+                    underlyingPrice: createElement({ value: '71.83' }),
+                    underlyingPriceSlider: createElement({ value: '71.83' }),
+                    underlyingPriceDisplay: createElement({ textContent: '$71.83' }),
+                    simulatedDateLabel: createElement({ textContent: 'Simulated Date' }),
+                    simulatedDateStartLabel: createElement({ textContent: 'Today' }),
+                    simulatedDateHint: createElement({ textContent: '', hidden: true }),
+                    simulatedDateOffsetGroup: createElement({ hidden: false, style: {} }),
+                    simulatedDate: createElement({ value: '2026-04-02', min: '2026-04-02' }),
+                    daysPassedSlider: createElement({ value: '0' }),
+                    daysPassedDisplay: createElement({ textContent: '+0 td / +0 cd' }),
+                    interestRate: createElement({ value: '3.00' }),
+                    interestRateDisplay: createElement({ textContent: '3.00%' }),
+                    forwardRatePanel: createElement({ hidden: true, style: {} }),
+                    addForwardRateSampleBtn: createElement(),
+                    toggleForwardRatePanelBtn: createElement(),
+                    forwardRateStatus: createElement({ textContent: '' }),
+                    forwardRateSamplesHeader: createElement({ hidden: false, style: {} }),
+                    forwardRateSamplesList: createElement(),
+                    futuresPoolPanel: createElement({ hidden: false, style: {} }),
+                    addFutureContractBtn: createElement(),
+                    toggleFuturesPoolPanelBtn: createElement(),
+                    futuresPoolStatus: createElement({ textContent: '', style: {} }),
+                    futuresPoolHeader: createElement({ hidden: false, style: {} }),
+                    futuresPoolList: createElement(),
+                    ivOffset: createElement({ value: '0' }),
+                    ivOffsetSlider: createElement({ value: '0' }),
+                    ivOffsetDisplay: createElement({ textContent: '0.00%' }),
+                    allowLiveComboOrders: createElement({ checked: false }),
+                    liveComboOrderAccountControls: createElement({ hidden: true, style: {} }),
+                    liveComboOrderAccountSelect: createElement({ value: '', disabled: true }),
+                    liveComboOrderAccountHint: createElement({ textContent: '' }),
+                };
+
+                const ctx = loadBrowserScripts(['js/date_utils.js', 'js/product_registry.js', 'js/control_panel_ui.js'], {
+                    document: {
+                        getElementById(id) {
+                            return elements[id];
+                        },
+                        querySelector() {
+                            return null;
+                        },
+                        createElement() {
+                            return createElement();
+                        },
+                        activeElement: null,
+                    },
+                });
+
+                const state = {
+                    underlyingSymbol: 'CL',
+                    underlyingContractMonth: '202605',
+                    underlyingPrice: 71.83,
+                    baseDate: '2026-04-02',
+                    simulatedDate: '2026-04-02',
+                    marketDataMode: 'live',
+                    workspaceVariant: '',
+                    marketDataModeLocked: false,
+                    historicalQuoteDate: '',
+                    historicalAvailableStartDate: '',
+                    historicalAvailableEndDate: '',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    allowLiveComboOrders: false,
+                    futuresPoolPanelCollapsed: false,
+                    forwardRateSamples: [],
+                    futuresPool: [{
+                        id: 'future_a',
+                        contractMonth: '202605',
+                        bid: 71.81,
+                        ask: 71.83,
+                        mark: 71.82,
+                    }],
+                    groups: [],
+                };
+
+                ctx.OptionComboControlPanelUI.bindControlPanelEvents(state, new Intl.NumberFormat('en-US', {
+                    style: 'currency',
+                    currency: 'USD',
+                    minimumFractionDigits: 2,
+                }), {
+                    updateDerivedValues() {},
+                    throttledUpdate() {},
+                    handleLiveSubscriptions() {},
+                    settleHistoricalReplayGroups() {},
+                    renderGroups() {},
+                    addDays() { return '2026-05-02'; },
+                    diffDays() { return 30; },
+                    calendarToTradingDays() { return 21; },
+                });
+
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+
+                assert.equal(elements.toggleFuturesPoolPanelBtn.textContent, 'Hide');
+                assert.equal(elements.futuresPoolHeader.hidden, false);
+                assert.equal(elements.futuresPoolList.hidden, false);
+
+                elements.toggleFuturesPoolPanelBtn.listeners.click();
+
+                assert.equal(state.futuresPoolPanelCollapsed, true);
+                assert.equal(elements.toggleFuturesPoolPanelBtn.textContent, 'Show');
+                assert.equal(elements.futuresPoolHeader.hidden, true);
+                assert.equal(elements.futuresPoolList.hidden, true);
+                assert.equal(elements.futuresPoolStatus.style.marginBottom, '0');
             },
         },
         {

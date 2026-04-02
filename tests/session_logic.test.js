@@ -136,6 +136,7 @@ module.exports = {
                         marketDataMode: 'historical',
                         historicalQuoteDate: '2025-04-07',
                         daysPassed: 3,
+                        selectedLiveComboOrderAccount: 'F7654321',
                         legs: [
                             { type: 'call', dte: 30, cost: 1.5 },
                         ],
@@ -165,6 +166,10 @@ module.exports = {
                 assert.equal(result.groups[1].legs[0].underlyingFutureId, '');
                 assert.equal(result.forwardRateSamples.length, 0);
                 assert.equal(result.futuresPool.length, 0);
+                assert.equal(Array.isArray(result.liveComboOrderAccounts), true);
+                assert.equal(result.liveComboOrderAccounts.length, 0);
+                assert.equal(result.liveComboOrderAccountsConnected, false);
+                assert.equal(result.selectedLiveComboOrderAccount, 'F7654321');
                 assert.equal(result.hedges[1].id, 'id_3');
             },
         },
@@ -193,6 +198,7 @@ module.exports = {
                         simulatedDate: '2026-03-20',
                         marketDataMode: 'live',
                         historicalQuoteDate: '',
+                        selectedLiveComboOrderAccount: 'DU12345',
                         groups: [
                             {
                                 id: 'legacy_group',
@@ -246,6 +252,7 @@ module.exports = {
 
                 assert.equal(result.underlyingSymbol, 'IWM');
                 assert.equal(result.simulatedDate, '2026-03-20');
+                assert.equal(result.selectedLiveComboOrderAccount, 'DU12345');
                 assert.equal(result.groups.length, 1);
                 assert.equal(result.groups[0].id, 'gid_1');
                 assert.equal(result.groups[0].includedInGlobal, false);

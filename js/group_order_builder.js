@@ -49,6 +49,10 @@
         return VALID_EXECUTION_INTENTS.includes(normalized) ? normalized : 'open';
     }
 
+    function _resolveSelectedTradeAccount(globalState) {
+        return String(globalState && globalState.selectedLiveComboOrderAccount || '').trim();
+    }
+
     function _resolveTargetPosition(pos, intent) {
         const numericPos = parseInt(pos, 10) || 0;
         return intent === 'close' ? numericPos * -1 : numericPos;
@@ -139,7 +143,7 @@
         ).trim();
         const profile = _resolveUnderlyingProfile(globalState);
 
-        return {
+        const payload = {
             action: requestAction,
             groupId: group.id,
             groupName: group.name || 'Group Combo',
@@ -161,6 +165,13 @@
             },
             legs: buildGroupOrderLegRequests(group, globalState, { intent }),
         };
+
+        const selectedAccount = _resolveSelectedTradeAccount(globalState);
+        if (selectedAccount) {
+            payload.account = selectedAccount;
+        }
+
+        return payload;
     }
 
     globalScope.OptionComboGroupOrderBuilder = {

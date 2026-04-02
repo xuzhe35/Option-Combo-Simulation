@@ -311,6 +311,7 @@ module.exports = {
                             limitPrice: 0.85,
                             pricingSource: 'test_guardrail',
                             executionMode: 'test_submit',
+                            account: 'F1234567',
                             status: 'Submitted',
                             orderId: 930,
                             permId: 1678156393,
@@ -326,6 +327,7 @@ module.exports = {
                 );
 
                 assert.match(html, /Broker status: Submitted/);
+                assert.match(html, /Account F1234567/);
                 assert.match(html, /Order ID 930/);
                 assert.match(html, /Perm ID 1678156393/);
                 assert.match(html, /Filled: 0, Remaining: 1/);

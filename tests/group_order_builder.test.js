@@ -27,6 +27,7 @@ module.exports = {
                         underlyingContractMonth: '',
                         baseDate: '2026-03-15',
                         simulatedDate: '2026-03-15',
+                        selectedLiveComboOrderAccount: 'F1234567',
                     },
                     {
                         action: 'submit_combo_order',
@@ -42,6 +43,7 @@ module.exports = {
                 assert.equal(payload.requestSource, 'trial_trigger');
                 assert.equal(payload.timeInForce, 'GTC');
                 assert.equal(payload.managedRepriceThreshold, 0.02);
+                assert.equal(payload.account, 'F1234567');
                 assert.equal(payload.legs[0].pos, 1);
                 assert.equal(payload.legs[1].pos, -1);
             },

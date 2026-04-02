@@ -49,6 +49,7 @@ class ExecutionEngine:
             f"Received {raw_data.get('action')} from {client_ip}: "
             f"groupId={raw_data.get('groupId')} groupName={raw_data.get('groupName')!r} "
             f"underlying={raw_data.get('underlyingSymbol')} executionMode={raw_data.get('executionMode')} "
+            f"account={raw_data.get('account') or ''} "
             f"executionIntent={raw_data.get('executionIntent') or raw_data.get('intent')} "
             f"requestSource={raw_data.get('requestSource') or raw_data.get('source')} "
             f"legs={len(legs)}"

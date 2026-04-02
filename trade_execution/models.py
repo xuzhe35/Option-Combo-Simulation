@@ -70,6 +70,7 @@ class ComboOrderRequest:
     underlying_symbol: str
     underlying_contract_month: str
     execution_mode: str
+    account: str = ""
     execution_intent: str = "open"
     request_source: str = "manual"
     managed_reprice_threshold: Optional[float] = None
@@ -86,6 +87,7 @@ class ComboOrderRequest:
             underlying_symbol=str(payload.get("underlyingSymbol") or ""),
             underlying_contract_month=str(payload.get("underlyingContractMonth") or ""),
             execution_mode=str(payload.get("executionMode") or ""),
+            account=str(payload.get("account") or ""),
             execution_intent=str(payload.get("executionIntent") or payload.get("intent") or "open"),
             request_source=str(payload.get("requestSource") or payload.get("source") or "manual"),
             managed_reprice_threshold=_parse_optional_float(
@@ -139,6 +141,7 @@ class ComboOrderPreview:
     raw_net_mid: float
     time_in_force: str = "DAY"
     execution_mode: str = "preview"
+    account: str = ""
     execution_intent: str = "open"
     request_source: str = "manual"
     pricing_note: str = ""
@@ -175,6 +178,8 @@ class ComboOrderPreview:
             "requestSource": self.request_source,
             "legs": [leg.to_payload() for leg in self.legs],
         }
+        if self.account:
+            payload["account"] = self.account
         if self.pricing_note:
             payload["pricingNote"] = self.pricing_note
         if self.managed_mode:

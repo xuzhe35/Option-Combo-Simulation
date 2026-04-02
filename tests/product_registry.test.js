@@ -112,6 +112,19 @@ module.exports = {
             },
         },
         {
+            name: 'returns product-aware price precision helpers for small-price futures families',
+            run() {
+                const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
+                const registry = ctx.OptionComboProductRegistry;
+
+                assert.equal(registry.getPriceDisplayDecimals('SPY'), 2);
+                assert.equal(registry.getPriceDisplayDecimals('HG'), 5);
+                assert.equal(registry.getPriceInputStep('HG'), '0.00001');
+                assert.equal(registry.formatPriceInputValue('HG', 4.35789), '4.35789');
+                assert.equal(registry.formatPriceDisplay('HG', 4.35789), '$4.35789');
+            },
+        },
+        {
             name: 'classifies pricing-input modes for stock, index, and futures-option families',
             run() {
                 const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);

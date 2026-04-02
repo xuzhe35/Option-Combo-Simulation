@@ -215,12 +215,15 @@
                         <div class="control-group" id="futuresPoolPanel" hidden>
                             <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem;">
                                 <label style="margin: 0;">Futures Pool</label>
-                                <button type="button" class="btn btn-secondary btn-sm" id="addFutureContractBtn">Add Future</button>
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <button type="button" class="btn btn-secondary btn-sm" id="addFutureContractBtn">Add Future</button>
+                                    <button type="button" class="btn btn-secondary btn-sm" id="toggleFuturesPoolPanelBtn" title="Collapse Futures Pool contracts">Hide</button>
+                                </div>
                             </div>
                             <div class="text-muted small" id="futuresPoolStatus" style="margin-bottom: 0.5rem;">
                                 Add one or more futures contracts. Each FOP leg will be required to pick one.
                             </div>
-                            <div class="text-muted small" style="display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; gap: 0.5rem; margin-bottom: 0.35rem; font-size: 0.72rem;">
+                            <div class="text-muted small" id="futuresPoolHeader" style="display: grid; grid-template-columns: 120px minmax(0, 1fr) auto; gap: 0.5rem; margin-bottom: 0.35rem; font-size: 0.72rem;">
                                 <span>Contract</span>
                                 <span>Latest Quote</span>
                                 <span></span>
@@ -284,6 +287,11 @@
                         </label>
                         <div class="text-muted small mt-2">
                             Off by default. Trial triggers can always preview instructions, but real combo orders are only sent to TWS when this switch is enabled.
+                        </div>
+                        <div id="liveComboOrderAccountControls" hidden style="display: none; margin-top: 0.75rem;">
+                            <label for="liveComboOrderAccountSelect" class="small text-muted" style="display: block; margin-bottom: 0.35rem;">TWS Order Account</label>
+                            <select id="liveComboOrderAccountSelect" class="number-input" style="width: 100%;"></select>
+                            <div id="liveComboOrderAccountHint" class="text-muted small mt-2"></div>
                         </div>
                     </div>
 

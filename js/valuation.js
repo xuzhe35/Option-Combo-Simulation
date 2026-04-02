@@ -27,6 +27,14 @@
         return productRegistry.isUnderlyingLeg(leg);
     }
 
+    function formatPriceInputValue(symbol, value) {
+        if (productRegistry && typeof productRegistry.formatPriceInputValue === 'function') {
+            return productRegistry.formatPriceInputValue(symbol, value);
+        }
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed.toFixed(2) : '';
+    }
+
     function resolveLegEvaluationUnderlyingPrice(group, leg, globalState, usesScenarioUnderlying, anchorUnderlyingPrice) {
         if (!pricingContext) {
             return usesScenarioUnderlying ? anchorUnderlyingPrice : globalState.underlyingPrice;
@@ -140,6 +148,9 @@
     }
 
     function buildCurrentPriceDisplayState(leg, activeViewMode, displayUnderlyingPrice, processedLeg, underlyingProfile, selectedLivePrice) {
+        const displaySymbol = (underlyingProfile && (underlyingProfile.enteredSymbol || underlyingProfile.underlyingSymbol)) || '';
+        const zeroText = formatPriceInputValue(displaySymbol, 0);
+
         if ((!selectedLivePrice || !selectedLivePrice.available) && leg && leg.currentPriceSource === 'missing') {
             return {
                 value: '',
@@ -157,13 +168,13 @@
             if (!selectedLivePrice || !selectedLivePrice.available) {
                 return {
                     value: '',
-                    placeholder: displayUnderlyingPrice.toFixed(2),
+                    placeholder: formatPriceInputValue(displaySymbol, displayUnderlyingPrice),
                     title: `${titleLabel} (defaults to underlying)`
                 };
             }
             return {
-                value: selectedLivePrice.price.toFixed(2),
-                placeholder: '0.00',
+                value: formatPriceInputValue(displaySymbol, selectedLivePrice.price),
+                placeholder: zeroText,
                 title: selectedLivePrice.source === 'live_midpoint'
                     ? `${titleLabel} (bid/ask midpoint)`
                     : (selectedLivePrice.source === 'tws_portfolio'
@@ -177,23 +188,23 @@
             && leg.currentPrice === 0) {
             return {
                 value: '',
-                placeholder: processedLeg.effectiveCostPerShare.toFixed(2),
+                placeholder: formatPriceInputValue(displaySymbol, processedLeg.effectiveCostPerShare),
                 title: 'Theoretical model price for today'
             };
         }
 
         if (selectedLivePrice && selectedLivePrice.source === 'tws_portfolio') {
             return {
-                value: selectedLivePrice.price.toFixed(2),
-                placeholder: '0.00',
+                value: formatPriceInputValue(displaySymbol, selectedLivePrice.price),
+                placeholder: zeroText,
                 title: 'TWS Portfolio Mark (display-only; order pricing still uses the existing midpoint execution flow).',
             };
         }
 
         if (selectedLivePrice && selectedLivePrice.source === 'live_midpoint') {
             return {
-                value: selectedLivePrice.price.toFixed(2),
-                placeholder: '0.00',
+                value: formatPriceInputValue(displaySymbol, selectedLivePrice.price),
+                placeholder: zeroText,
                 title: 'Live bid/ask midpoint (display-only; order pricing still uses the existing midpoint execution flow).',
             };
         }
@@ -201,10 +212,13 @@
         if ((selectedLivePrice && selectedLivePrice.source === 'historical')
             || (leg && leg.currentPriceSource === 'historical')) {
             return {
-                value: (selectedLivePrice && selectedLivePrice.available
-                    ? selectedLivePrice.price
-                    : leg.currentPrice).toFixed(2),
-                placeholder: '0.00',
+                value: formatPriceInputValue(
+                    displaySymbol,
+                    selectedLivePrice && selectedLivePrice.available
+                        ? selectedLivePrice.price
+                        : leg.currentPrice
+                ),
+                placeholder: zeroText,
                 title: 'Historical replay quote from the selected day',
             };
         }
@@ -212,19 +226,25 @@
         if ((selectedLivePrice && selectedLivePrice.source === 'manual')
             || (leg && leg.currentPriceSource === 'manual')) {
             return {
-                value: (selectedLivePrice && selectedLivePrice.available
-                    ? selectedLivePrice.price
-                    : leg.currentPrice).toFixed(2),
-                placeholder: '0.00',
+                value: formatPriceInputValue(
+                    displaySymbol,
+                    selectedLivePrice && selectedLivePrice.available
+                        ? selectedLivePrice.price
+                        : leg.currentPrice
+                ),
+                placeholder: zeroText,
                 title: 'Manual current-price override',
             };
         }
 
         return {
-            value: (selectedLivePrice && selectedLivePrice.available
-                ? selectedLivePrice.price
-                : leg.currentPrice).toFixed(2),
-            placeholder: '0.00',
+            value: formatPriceInputValue(
+                displaySymbol,
+                selectedLivePrice && selectedLivePrice.available
+                    ? selectedLivePrice.price
+                    : leg.currentPrice
+            ),
+            placeholder: zeroText,
             title: 'Current Live Quote (or manually entered)'
         };
     }
