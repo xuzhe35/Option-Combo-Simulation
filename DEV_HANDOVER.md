@@ -177,6 +177,7 @@ It now also owns:
 - execution routing bridge into `trade_execution/`
 - combo order status fan-out back to the browser
 - explicit server-side PID/log friendly startup templates via `powershell_scripts/`
+- TWS/Gateway connection timeout is set to 20 seconds (up from the default) to accommodate slower environments such as Docker containers
 
 ## 6. Current Known Rough Edges
 
