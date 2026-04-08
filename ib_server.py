@@ -563,7 +563,7 @@ async def connect_ib():
         ib.errorEvent += _capture_error
         try:
             logging.info(f"Connecting to IB TWS/Gateway at {TWS_HOST}:{TWS_PORT} (Client ID: {client_id})...")
-            await ib.connectAsync(TWS_HOST, TWS_PORT, clientId=client_id)
+            await ib.connectAsync(TWS_HOST, TWS_PORT, clientId=client_id, timeout=20)
             logging.info(f"Successfully connected to IB (Client ID: {client_id}).")
             # Enforce Real-Time Data (1)
             ib.reqMarketDataType(1)
