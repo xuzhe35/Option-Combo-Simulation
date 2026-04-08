@@ -323,6 +323,126 @@ module.exports = {
             },
         },
         {
+            name: 'does not rebuild live combo account options when refreshes do not change them',
+            run() {
+                const elements = {
+                    marketDataMode: createElement({ value: 'live' }),
+                    marketDataModeHint: createElement({ textContent: '' }),
+                    historicalQuoteDateGroup: createElement({ hidden: true, style: {} }),
+                    historicalQuoteDateLabel: createElement({ textContent: '' }),
+                    historicalQuoteDate: createElement({ value: '' }),
+                    historicalQuoteDateHint: createElement({ textContent: '' }),
+                    historicalReplayDateGroup: createElement({ hidden: true, style: {} }),
+                    historicalReplayDateLabel: createElement({ textContent: '' }),
+                    historicalReplayDate: createElement({ value: '' }),
+                    historicalReplayStartLabel: createElement({ textContent: '' }),
+                    historicalReplayDaysDisplay: createElement({ textContent: '' }),
+                    historicalReplaySlider: createElement({ value: '0', min: '0', max: '0' }),
+                    historicalTimelineControls: createElement({ hidden: true, style: {} }),
+                    historicalTimelineHint: createElement({ textContent: '' }),
+                    historicalNextDayBtn: createElement({ disabled: true }),
+                    historicalSettleAllBtn: createElement({ disabled: true }),
+                    underlyingSymbol: createElement({ value: 'SPY' }),
+                    underlyingContractMonth: createElement({ value: '' }),
+                    underlyingContractMonthHint: createElement({ textContent: '' }),
+                    underlyingPrice: createElement({ value: '100' }),
+                    underlyingPriceSlider: createElement({ value: '100' }),
+                    underlyingPriceDisplay: createElement({ textContent: '$100.00' }),
+                    simulatedDateLabel: createElement({ textContent: 'Simulated Date' }),
+                    simulatedDateStartLabel: createElement({ textContent: 'Today' }),
+                    simulatedDateHint: createElement({ textContent: '', hidden: true }),
+                    simulatedDateOffsetGroup: createElement({ hidden: false, style: {} }),
+                    simulatedDate: createElement({ value: '2026-03-16', min: '2026-03-16' }),
+                    daysPassedSlider: createElement({ value: '0' }),
+                    daysPassedDisplay: createElement({ textContent: '+0 td / +0 cd' }),
+                    interestRate: createElement({ value: '3.00' }),
+                    interestRateDisplay: createElement({ textContent: '3.00%' }),
+                    forwardRatePanel: createElement({ hidden: true, style: {} }),
+                    addForwardRateSampleBtn: createElement(),
+                    toggleForwardRatePanelBtn: createElement(),
+                    forwardRateStatus: createElement({ textContent: '' }),
+                    forwardRateSamplesHeader: createElement({ hidden: false, style: {} }),
+                    forwardRateSamplesList: createElement(),
+                    futuresPoolPanel: createElement({ hidden: true, style: {} }),
+                    addFutureContractBtn: createElement(),
+                    futuresPoolStatus: createElement({ textContent: '' }),
+                    futuresPoolHeader: createElement({ hidden: true, style: {} }),
+                    futuresPoolList: createElement(),
+                    ivOffset: createElement({ value: '0' }),
+                    ivOffsetSlider: createElement({ value: '0' }),
+                    ivOffsetDisplay: createElement({ textContent: '0.00%' }),
+                    allowLiveComboOrders: createElement({ checked: true }),
+                    liveComboOrderAccountControls: createElement({ hidden: false, style: {} }),
+                    liveComboOrderAccountSelect: createElement({ value: '', disabled: false }),
+                    liveComboOrderAccountHint: createElement({ textContent: '' }),
+                };
+
+                const ctx = loadBrowserScripts(['js/date_utils.js', 'js/product_registry.js', 'js/control_panel_ui.js'], {
+                    document: {
+                        getElementById(id) {
+                            return elements[id];
+                        },
+                        querySelector() {
+                            return null;
+                        },
+                        createElement() {
+                            return createElement();
+                        },
+                        activeElement: null,
+                    },
+                });
+
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingContractMonth: '',
+                    underlyingPrice: 100,
+                    baseDate: '2026-03-16',
+                    simulatedDate: '2026-03-16',
+                    marketDataMode: 'live',
+                    workspaceVariant: '',
+                    marketDataModeLocked: false,
+                    historicalQuoteDate: '',
+                    historicalAvailableStartDate: '',
+                    historicalAvailableEndDate: '',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    allowLiveComboOrders: true,
+                    liveComboOrderAccounts: ['DU111111', 'F222222'],
+                    liveComboOrderAccountsConnected: true,
+                    selectedLiveComboOrderAccount: 'F222222',
+                    forwardRateSamples: [],
+                    futuresPool: [],
+                    groups: [],
+                };
+
+                ctx.OptionComboControlPanelUI.bindControlPanelEvents(state, new Intl.NumberFormat('en-US', {
+                    style: 'currency',
+                    currency: 'USD',
+                    minimumFractionDigits: 2,
+                }), {
+                    updateDerivedValues() {},
+                    throttledUpdate() {},
+                    handleLiveSubscriptions() {},
+                    requestManagedAccountsSnapshot() {},
+                    settleHistoricalReplayGroups() {},
+                    addDays() { return '2026-03-16'; },
+                    diffDays() { return 0; },
+                    calendarToTradingDays() { return 0; },
+                });
+
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                const initialOptions = elements.liveComboOrderAccountSelect.children.slice();
+
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+
+                assert.equal(elements.liveComboOrderAccountSelect.children.length, initialOptions.length);
+                initialOptions.forEach((option, index) => {
+                    assert.equal(elements.liveComboOrderAccountSelect.children[index], option);
+                });
+                assert.equal(elements.liveComboOrderAccountSelect.value, 'F222222');
+            },
+        },
+        {
             name: 'locks market data mode for dedicated workspace entries',
             run() {
                 const elements = {

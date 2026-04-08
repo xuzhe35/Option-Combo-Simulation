@@ -997,6 +997,15 @@
         }
     }
 
+    function _serializeSelectOptions(optionDescriptors) {
+        return JSON.stringify((optionDescriptors || []).map((descriptor) => ({
+            value: String(descriptor && descriptor.value || ''),
+            label: String(descriptor && descriptor.label || ''),
+            selected: descriptor && descriptor.selected === true,
+            disabled: descriptor && descriptor.disabled === true,
+        })));
+    }
+
     function _syncLiveComboOrderAccountUI(state) {
         const controls = _getElement('liveComboOrderAccountControls');
         const select = _getElement('liveComboOrderAccountSelect');
@@ -1038,9 +1047,21 @@
                     disabled: false,
                 });
             });
-            _setSelectOptions(select, optionDescriptors);
-            select.value = hasValidSelection ? selectedAccount : '';
-            select.disabled = !isVisible || accounts.length === 0;
+            const nextOptionsSignature = _serializeSelectOptions(optionDescriptors);
+            if (select.__liveComboOrderOptionsSignature !== nextOptionsSignature) {
+                _setSelectOptions(select, optionDescriptors);
+                select.__liveComboOrderOptionsSignature = nextOptionsSignature;
+            }
+
+            const nextValue = hasValidSelection ? selectedAccount : '';
+            if (select.value !== nextValue) {
+                select.value = nextValue;
+            }
+
+            const nextDisabled = !isVisible || accounts.length === 0;
+            if (select.disabled !== nextDisabled) {
+                select.disabled = nextDisabled;
+            }
         }
 
         if (hint) {
