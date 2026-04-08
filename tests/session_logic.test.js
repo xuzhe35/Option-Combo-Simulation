@@ -351,7 +351,7 @@ module.exports = {
                 assert.equal(result.forwardRateSamples[0].isStale, true);
 
                 assert.equal(result.futuresPool.length, 1);
-                assert.equal(result.futuresPool[0].id, 'fid_4');
+                assert.equal(result.futuresPool[0].id, 'legacy_future');
                 assert.equal(result.futuresPool[0].contractMonth, '202604');
                 assert.equal(result.futuresPool[0].mark, 71.28);
 
@@ -385,6 +385,11 @@ module.exports = {
                     groups: [{
                         id: 'g1',
                         name: 'Test',
+                        legs: [{
+                            id: 'leg_1',
+                            type: 'call',
+                            underlyingFutureId: 'future_1',
+                        }],
                         tradeTrigger: {
                             enabled: true,
                             condition: 'gte',
@@ -448,6 +453,7 @@ module.exports = {
                 assert.equal(snapshot.forwardRateSamples[0].dailyCarry, 0.00042);
                 assert.equal(snapshot.forwardRateSamples[0].lastComputedAt, '2026-03-01T12:00:00Z');
                 assert.equal(snapshot.futuresPool[0].contractMonth, '202604');
+                assert.equal(snapshot.groups[0].legs[0].underlyingFutureId, 'future_1');
                 assert.equal(snapshot.futuresPool[0].bid, null);
                 assert.equal(snapshot.futuresPool[0].ask, null);
                 assert.equal(snapshot.futuresPool[0].mark, null);

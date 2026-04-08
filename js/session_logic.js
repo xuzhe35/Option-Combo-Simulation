@@ -191,7 +191,9 @@
             ...(entry && typeof entry === 'object' ? entry : {}),
         };
 
-        next.id = generateId();
+        next.id = typeof next.id === 'string' && next.id.trim()
+            ? next.id.trim()
+            : generateId();
         next.contractMonth = String(next.contractMonth || '').replace(/\D/g, '').slice(0, 6);
         next.bid = _toFiniteNumberOrNull(next.bid);
         next.ask = _toFiniteNumberOrNull(next.ask);
@@ -357,6 +359,7 @@
             groups: currentState.groups.slice(),
             hedges: currentState.hedges.slice(),
         };
+        const importedFutureIdMap = new Map();
 
         if (importedState.simulatedDate) {
             nextState.simulatedDate = importedState.simulatedDate;
@@ -458,8 +461,32 @@
             : [];
 
         nextState.futuresPool = Array.isArray(importedState.futuresPool)
-            ? importedState.futuresPool.map(entry => _normalizeFuturesPoolEntry(entry, generateId))
+            ? importedState.futuresPool.map((entry) => {
+                const normalizedEntry = _normalizeFuturesPoolEntry(entry, generateId);
+                const legacyId = typeof entry?.id === 'string' ? entry.id.trim() : '';
+                if (legacyId) {
+                    importedFutureIdMap.set(legacyId, normalizedEntry.id);
+                }
+                return normalizedEntry;
+            })
             : [];
+
+        if (importedFutureIdMap.size > 0) {
+            importedGroups = importedGroups.map(group => ({
+                ...group,
+                legs: (group.legs || []).map((leg) => {
+                    const legacyFutureId = typeof leg?.underlyingFutureId === 'string'
+                        ? leg.underlyingFutureId.trim()
+                        : '';
+                    return {
+                        ...leg,
+                        underlyingFutureId: legacyFutureId && importedFutureIdMap.has(legacyFutureId)
+                            ? importedFutureIdMap.get(legacyFutureId)
+                            : legacyFutureId,
+                    };
+                }),
+            }));
+        }
 
         nextState.groups.push(...importedGroups);
 
