@@ -105,10 +105,12 @@ window.__optionComboApp = {
     getState: () => state,
     renderGroups: () => renderGroups(),
     renderHedges: () => renderHedges(),
+    updateLiveQuoteDerivedValues: (changeSet) => updateLiveQuoteDerivedValues(changeSet),
 };
 
 // Throttle flag for slider-driven updates (one rAF per frame max)
 let _sliderRafPending = false;
+let _latestPortfolioDerivedData = null;
 function throttledUpdate() {
     if (!_sliderRafPending) {
         _sliderRafPending = true;
@@ -317,6 +319,14 @@ function applyHedgeDerivedData(derivedData) {
     OptionComboHedgeUI.applyHedgeDerivedData(derivedData, currencyFormatter);
 }
 
+function applyHedgeRowDerivedData(row, hedgeResult) {
+    if (!row || !hedgeResult) return;
+    if (typeof OptionComboHedgeUI !== 'undefined'
+        && typeof OptionComboHedgeUI.applyHedgeRowDerivedData === 'function') {
+        OptionComboHedgeUI.applyHedgeRowDerivedData(row, hedgeResult, currencyFormatter);
+    }
+}
+
 function applyGroupDerivedData(card, groupResult) {
     OptionComboGroupUI.applyGroupDerivedData(card, groupResult, currencyFormatter, {
         drawGroupChart,
@@ -331,23 +341,129 @@ function applyGlobalDerivedData(derivedData) {
     });
 }
 
-function updateDerivedValues() {
-    const derivedData = OptionComboValuation.computePortfolioDerivedData(state);
+function _cachePortfolioDerivedData(derivedData) {
+    _latestPortfolioDerivedData = derivedData || null;
+    return derivedData;
+}
 
+function _syncWorkspaceChrome() {
     if (typeof OptionComboSessionUI !== 'undefined'
         && typeof OptionComboSessionUI.syncWorkspaceChrome === 'function') {
         OptionComboSessionUI.syncWorkspaceChrome(state);
     }
+}
 
-    applyHedgeDerivedData(derivedData);
+function _applyPortfolioDerivedData(derivedData, options = {}) {
+    if (!derivedData) {
+        return;
+    }
 
-    document.querySelectorAll('.group-card').forEach(card => {
-        const groupResult = derivedData.groupResultsById.get(card.dataset.groupId);
-        if (!groupResult) return;
-        applyGroupDerivedData(card, groupResult);
-    });
+    if (options.syncWorkspaceChrome === true) {
+        _syncWorkspaceChrome();
+    }
+
+    const groupIds = Array.isArray(options.groupIds) ? options.groupIds.filter(Boolean) : null;
+    const hedgeIds = Array.isArray(options.hedgeIds) ? options.hedgeIds.filter(Boolean) : null;
+
+    if (hedgeIds && hedgeIds.length > 0) {
+        hedgeIds.forEach((hedgeId) => {
+            const row = document.querySelector(`.hedge-row[data-id="${hedgeId}"]`);
+            const hedgeResult = derivedData.hedgeResultsById.get(hedgeId);
+            if (!row || !hedgeResult) return;
+            applyHedgeRowDerivedData(row, hedgeResult);
+        });
+    } else {
+        applyHedgeDerivedData(derivedData);
+    }
+
+    if (groupIds && groupIds.length > 0) {
+        groupIds.forEach((groupId) => {
+            const card = document.querySelector(`.group-card[data-group-id="${groupId}"]`);
+            const groupResult = derivedData.groupResultsById.get(groupId);
+            if (!card || !groupResult) return;
+            applyGroupDerivedData(card, groupResult);
+        });
+    } else {
+        document.querySelectorAll('.group-card').forEach(card => {
+            const groupResult = derivedData.groupResultsById.get(card.dataset.groupId);
+            if (!groupResult) return;
+            applyGroupDerivedData(card, groupResult);
+        });
+    }
 
     applyGlobalDerivedData(derivedData);
+}
+
+function updateDerivedValues() {
+    const derivedData = _cachePortfolioDerivedData(
+        OptionComboValuation.computePortfolioDerivedData(state)
+    );
+    _applyPortfolioDerivedData(derivedData, {
+        syncWorkspaceChrome: true,
+    });
+    return derivedData;
+}
+
+function updateLiveQuoteDerivedValues(changeSet = {}) {
+    if (!_latestPortfolioDerivedData
+        || typeof OptionComboValuation === 'undefined'
+        || typeof OptionComboValuation.computeGroupDerivedData !== 'function'
+        || typeof OptionComboValuation.computeHedgeDerivedData !== 'function'
+        || typeof OptionComboValuation.buildPortfolioDerivedDataFromResults !== 'function') {
+        return updateDerivedValues();
+    }
+
+    const groupIds = Array.from(new Set(
+        Array.isArray(changeSet.groupIds) ? changeSet.groupIds.filter(Boolean) : []
+    ));
+    const hedgeIds = Array.from(new Set(
+        Array.isArray(changeSet.hedgeIds) ? changeSet.hedgeIds.filter(Boolean) : []
+    ));
+
+    if (groupIds.length === 0 && hedgeIds.length === 0) {
+        return _latestPortfolioDerivedData;
+    }
+
+    const nextGroupResults = _latestPortfolioDerivedData.groupResults.slice();
+    const nextHedgeResults = _latestPortfolioDerivedData.hedgeResults.slice();
+
+    groupIds.forEach((groupId) => {
+        const group = state.groups.find(candidate => candidate.id === groupId);
+        if (!group) return;
+        const nextGroupResult = OptionComboValuation.computeGroupDerivedData(group, state);
+        const existingIndex = nextGroupResults.findIndex(result => result.id === groupId);
+        if (existingIndex >= 0) {
+            nextGroupResults[existingIndex] = nextGroupResult;
+        } else {
+            nextGroupResults.push(nextGroupResult);
+        }
+    });
+
+    hedgeIds.forEach((hedgeId) => {
+        const hedge = state.hedges.find(candidate => candidate.id === hedgeId);
+        if (!hedge) return;
+        const nextHedgeResult = OptionComboValuation.computeHedgeDerivedData(hedge);
+        const existingIndex = nextHedgeResults.findIndex(result => result.id === hedgeId);
+        if (existingIndex >= 0) {
+            nextHedgeResults[existingIndex] = nextHedgeResult;
+        } else {
+            nextHedgeResults.push(nextHedgeResult);
+        }
+    });
+
+    const derivedData = _cachePortfolioDerivedData(
+        OptionComboValuation.buildPortfolioDerivedDataFromResults(
+            state,
+            nextGroupResults,
+            nextHedgeResults
+        )
+    );
+
+    _applyPortfolioDerivedData(derivedData, {
+        groupIds,
+        hedgeIds,
+    });
+    return derivedData;
 }
 
 function settleHistoricalReplayGroups() {

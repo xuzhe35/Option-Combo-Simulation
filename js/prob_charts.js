@@ -822,10 +822,11 @@ function updateProbCharts() {
     // Portfolio mean simulated IV
     const portfolioIV = computePortfolioMeanSimIV();
     if (!portfolioIV || portfolioIV <= 0) {
-        _probChart && _probChart.drawEmpty('No valid IV found in portfolio legs.');
+        _probChart && _probChart.drawEmpty('No usable option IV found to scale the distribution.');
         _epnlChart && _epnlChart.drawEmpty('');
         _setExpectedPnLBadge(null);
         _setAnchorInfoText(null);
+        _setInfoText('Probability analysis needs at least one usable option IV input.');
         return;
     }
 

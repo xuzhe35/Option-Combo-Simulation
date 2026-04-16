@@ -414,12 +414,10 @@
         };
     }
 
-    function computePortfolioDerivedData(globalState) {
+    function buildPortfolioDerivedDataFromResults(globalState, groupResults, hedgeResults) {
         const underlyingProfile = productRegistry
             ? productRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol)
             : null;
-        const hedgeResults = globalState.hedges.map(computeHedgeDerivedData);
-        const groupResults = globalState.groups.map(group => computeGroupDerivedData(group, globalState));
         const includedGroupResults = groupResults.filter(result => result.isIncludedInGlobal);
 
         const globalTotalCost = includedGroupResults.reduce((sum, result) => sum + result.groupCost, 0);
@@ -462,12 +460,19 @@
         };
     }
 
+    function computePortfolioDerivedData(globalState) {
+        const hedgeResults = globalState.hedges.map(computeHedgeDerivedData);
+        const groupResults = globalState.groups.map(group => computeGroupDerivedData(group, globalState));
+        return buildPortfolioDerivedDataFromResults(globalState, groupResults, hedgeResults);
+    }
+
     globalScope.OptionComboValuation = {
         isSettlementScenarioMode,
         buildCurrentPriceDisplayState,
         computeHedgeDerivedData,
         computeLegDerivedData,
         computeGroupDerivedData,
+        buildPortfolioDerivedDataFromResults,
         computePortfolioDerivedData,
     };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

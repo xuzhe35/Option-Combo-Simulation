@@ -49,6 +49,25 @@ module.exports = {
             },
         },
         {
+            name: 'preserves sub-cent managed reprice thresholds during trigger normalization',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/session_logic.js',
+                    'js/group_order_builder.js',
+                    'js/trade_trigger_logic.js',
+                ]);
+
+                const trigger = ctx.OptionComboTradeTriggerLogic.normalizeTradeTrigger({
+                    enabled: true,
+                    condition: 'lte',
+                    price: '6.0',
+                    repriceThreshold: '0.0001',
+                });
+
+                assert.equal(trigger.repriceThreshold, 0.0001);
+            },
+        },
+        {
             name: 'builds combo-order payloads from group legs and product metadata',
             run() {
                 const ctx = loadBrowserScripts([

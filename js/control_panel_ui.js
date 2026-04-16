@@ -1203,16 +1203,26 @@
         }
         _syncInterestRateUI(_boundState);
         _syncLiveComboOrderAccountUI(_boundState);
+        refreshForwardRatePanel();
+        refreshFuturesPoolPanel();
+    }
+
+    function refreshForwardRatePanel() {
+        if (!_boundState) return;
         if (_shouldPauseDynamicControlRefresh('forwardRatePanel')) {
             _renderForwardRateStatus(_boundState);
-        } else {
-            _renderForwardRateSamples(_boundState, _boundDeps || {});
+            return;
         }
+        _renderForwardRateSamples(_boundState, _boundDeps || {});
+    }
+
+    function refreshFuturesPoolPanel() {
+        if (!_boundState) return;
         if (_shouldPauseDynamicControlRefresh('futuresPoolPanel')) {
             _renderFuturesPoolStatus(_boundState);
-        } else {
-            _renderFuturesPool(_boundState, _boundDeps || {});
+            return;
         }
+        _renderFuturesPool(_boundState, _boundDeps || {});
     }
 
     function bindControlPanelEvents(state, currencyFormatter, deps) {
@@ -1596,6 +1606,8 @@
     globalScope.OptionComboControlPanelUI = {
         bindControlPanelEvents,
         refreshBoundDynamicControls,
+        refreshForwardRatePanel,
+        refreshFuturesPoolPanel,
         resolvePricingInputMode: _getPricingInputMode,
         toggleSidebar,
     };

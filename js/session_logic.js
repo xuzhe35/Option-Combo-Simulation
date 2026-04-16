@@ -9,7 +9,7 @@
             return globalScope.OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS;
         }
 
-        return [0.01, 0.02, 0.05];
+        return [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05];
     }
 
     function _getValidTimeInForceValues() {

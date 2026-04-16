@@ -510,8 +510,11 @@ window.addEventListener('resize', () => {
 // Probability Analysis Helpers (called from prob_charts.js)
 // -------------------------------------------------------------
 
-// Return the mean simulated IV across all legs in the portfolio
-// Uses processLegData() to ensure IV calculation is in sync with bsm.js SSOT
+// Return the mean IV used to scale probability distributions.
+// Important: this must use each leg's usable quoted/manual IV (+ global offset),
+// not the expiry-clipped simIV from processLegData(). On expiry-day scenarios
+// simIV becomes 0 for pricing purposes, but probability analysis still needs a
+// forward-looking volatility input from today's market.
 function computePortfolioMeanSimIV() {
     const isOptionLeg = typeof OptionComboProductRegistry !== 'undefined'
         && typeof OptionComboProductRegistry.isOptionLeg === 'function'
@@ -527,19 +530,50 @@ function computePortfolioMeanSimIV() {
         ? pricingContext.resolveQuoteDate(state)
         : state.baseDate;
 
-    const allLegs = state.groups
+    const anchorPrice = _getChartAnchorPrice();
+    let sawAnyOptionLeg = false;
+    let sawMissingIvOnActiveLeg = false;
+    let totalIv = 0;
+    let ivCount = 0;
+
+    state.groups
         .filter(_isGroupIncludedInGlobal)
-        .flatMap(g =>
-        g.legs
-            .filter(leg => isOptionLeg(leg))
-            .map(leg => processLegData(leg, simulationDate, state.ivOffset, quoteDate, _getChartAnchorPrice(), state.interestRate, g.viewMode || 'active', null, state.marketDataMode))
-    );
-    if (allLegs.length === 0) return 0;
-    if (allLegs.some(pLeg => !pLeg.isExpired && !Number.isFinite(pLeg.simIV))) {
-        return null;
-    }
-    const total = allLegs.reduce((sum, pLeg) => sum + (Number.isFinite(pLeg.simIV) ? pLeg.simIV : 0), 0);
-    return total / allLegs.length;
+        .forEach(group => {
+            const activeViewMode = group.viewMode || 'active';
+            group.legs
+                .filter(leg => isOptionLeg(leg))
+                .forEach(leg => {
+                    sawAnyOptionLeg = true;
+
+                    const processedLeg = processLegData(
+                        leg,
+                        simulationDate,
+                        state.ivOffset,
+                        quoteDate,
+                        anchorPrice,
+                        state.interestRate,
+                        activeViewMode,
+                        null,
+                        state.marketDataMode
+                    );
+
+                    if (typeof hasUsableLegIv === 'function' && hasUsableLegIv(leg)) {
+                        totalIv += Math.max(0.001, leg.iv + state.ivOffset);
+                        ivCount += 1;
+                        return;
+                    }
+
+                    // Preserve the old guard for genuinely active options that
+                    // still have no usable IV source.
+                    if (!processedLeg.isExpired) {
+                        sawMissingIvOnActiveLeg = true;
+                    }
+                });
+        });
+
+    if (!sawAnyOptionLeg) return 0;
+    if (sawMissingIvOnActiveLeg) return null;
+    return ivCount > 0 ? (totalIv / ivCount) : 0;
 }
 
 // Return { minS, maxS } using the same logic as the global P&L chart

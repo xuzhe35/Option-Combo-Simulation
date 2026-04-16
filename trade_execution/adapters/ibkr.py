@@ -48,8 +48,41 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.managed_executions_by_perm_id = {}
         self.ib.orderStatusEvent += self._on_managed_order_status
 
+    def _get_valid_managed_reprice_thresholds(self):
+        return (0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05)
+
+    def _format_managed_reprice_threshold(self, value):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = float(self.managed_reprice_threshold)
+        raw = f'{parsed:.2f}' if parsed >= 0.01 else f'{parsed:.4f}'
+        return raw.rstrip('0').rstrip('.')
+
     def _is_reasonable_numeric(self, value):
         return isinstance(value, (int, float)) and isfinite(value) and abs(value) < 1e100
+
+    def _get_partial_fill_progress(self, context):
+        try:
+            filled = float(context.get('filled') or 0)
+            remaining = float(context.get('remaining') or 0)
+        except (TypeError, ValueError):
+            return None
+
+        if filled > 0 and remaining > 0:
+            return filled, remaining
+        return None
+
+    def _build_partial_fill_message_prefix(self, context):
+        progress = self._get_partial_fill_progress(context)
+        if progress is None:
+            return ''
+
+        filled, remaining = progress
+        return (
+            f'Partially filled ({filled:g} filled, {remaining:g} remaining); '
+            f'continuing to supervise and reprice the remaining order. '
+        )
 
     def _extract_market_price(self, ticker):
         price = ticker.marketPrice()
@@ -521,11 +554,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     def _resolve_managed_reprice_threshold(self, request):
         raw = getattr(request, 'managed_reprice_threshold', None)
         try:
-            value = round(float(raw), 2)
+            value = round(float(raw), 4)
         except (TypeError, ValueError):
             return self.managed_reprice_threshold
 
-        for allowed in (0.01, 0.02, 0.05):
+        for allowed in self._get_valid_managed_reprice_thresholds():
             if abs(value - allowed) < 0.0001:
                 return allowed
         return self.managed_reprice_threshold
@@ -571,15 +604,19 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
 
     def _build_default_watching_message(self, context):
         threshold = float(context.get('managedRepriceThreshold') or self.managed_reprice_threshold)
+        partial_fill_prefix = self._build_partial_fill_message_prefix(context)
         if float(context.get('managedConcessionRatio') or 0.0) > 0:
             return (
+                partial_fill_prefix +
                 f'Auto-repricing is active with a {int(float(context.get("managedConcessionRatio")) * 100)}% '
                 f'concession from middle toward the quoted worst price. '
-                f'The backend will refresh the working limit when the target combo price moves by at least {threshold:.2f}.'
+                f'The backend will refresh the working limit when the target combo price moves by at least '
+                f'{self._format_managed_reprice_threshold(threshold)}.'
             )
         return (
+            partial_fill_prefix +
             f'Auto-repricing is active. The backend will refresh the working limit when '
-            f'the target combo price moves by at least {threshold:.2f}.'
+            f'the target combo price moves by at least {self._format_managed_reprice_threshold(threshold)}.'
         )
 
     def _clear_pending_terminal_confirmation(self, context):
@@ -758,16 +795,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 await self._finalize_managed_terminal(context, 'Filled')
                 break
 
-            filled = float(context.get('filled') or 0)
-            remaining = float(context.get('remaining') or 0)
-            if filled > 0 and remaining > 0:
-                await self._stop_managed_context(
-                    context,
-                    'stopped_partial_fill',
-                    'Auto-repricing paused after a partial fill; remaining order stays working at the last limit.',
-                )
-                break
-
             if time.monotonic() >= context.get('timeoutAt', 0):
                 await self._stop_managed_context(
                     context,
@@ -809,8 +836,9 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             if drift + 1e-9 < threshold:
                 context['managedState'] = 'watching'
                 context['managedMessage'] = (
+                    f'{self._build_partial_fill_message_prefix(context)}'
                     f'Watching combo pricing drift. Current difference {drift:.4f} is below '
-                    f'the {threshold:.2f} repricing threshold.'
+                    f'the {self._format_managed_reprice_threshold(threshold)} repricing threshold.'
                 )
                 await self._emit_managed_update(context)
                 continue
@@ -826,7 +854,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             new_limit = self._quantize_limit_price(target_limit_source, context.get('orderAction'))
             if abs(new_limit - float(context.get('workingLimitPrice') or 0)) < 1e-9:
                 context['managedState'] = 'watching'
-                context['managedMessage'] = 'Latest combo target moved, but rounded working limit did not change after tick-size quantization.'
+                context['managedMessage'] = (
+                    f'{self._build_partial_fill_message_prefix(context)}'
+                    'Latest combo target moved, but rounded working limit did not change after tick-size quantization.'
+                )
                 await self._emit_managed_update(context)
                 continue
 
@@ -836,6 +867,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 order.transmit = True
                 context['managedState'] = 'repricing'
                 context['managedMessage'] = (
+                    f'{self._build_partial_fill_message_prefix(context)}'
                     f'Repricing working order from {context.get("workingLimitPrice")} to {new_limit} '
                     f'using target combo price {round(target_limit_source, 4)} '
                     f'(mid {latest_abs_mid}, worst {quote_stats["worstPrice"]}).'
@@ -848,6 +880,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 context['lastRepriceAt'] = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
                 context['managedState'] = 'watching'
                 context['managedMessage'] = (
+                    f'{self._build_partial_fill_message_prefix(context)}'
                     f'Updated working limit to {new_limit} from target combo price {round(target_limit_source, 4)}.'
                 )
                 await self._emit_managed_update(context)
@@ -973,6 +1006,12 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             context['managedState'] = 'watching'
             context['managedMessage'] = (
                 f'Broker order resumed with status {status}; auto-repricing supervision continues.'
+            )
+        elif self._get_partial_fill_progress(context) is not None and context.get('managedState') in {'watching', 'repricing', 'waiting_for_mid'}:
+            context['managedState'] = 'watching'
+            context['managedMessage'] = (
+                f'{self._build_partial_fill_message_prefix(context)}'
+                'Awaiting the next pricing check for the remaining order.'
             )
 
         asyncio.create_task(self._emit_managed_update(context))
@@ -1363,7 +1402,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         else:
             context['managedMessage'] = (
                 f'Resumed auto-repricing supervision for another {int(self.managed_reprice_timeout_seconds)} seconds '
-                f'with drift threshold {float(context.get("managedRepriceThreshold") or self.managed_reprice_threshold):.2f}.'
+                f'with drift threshold '
+                f'{self._format_managed_reprice_threshold(context.get("managedRepriceThreshold") or self.managed_reprice_threshold)}.'
             )
         task = context.get('task')
         if task and not task.done():

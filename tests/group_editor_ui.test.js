@@ -219,7 +219,7 @@ module.exports = {
                         condition: 'gte',
                         price: 672,
                         executionMode: 'submit',
-                        repriceThreshold: 0.02,
+                        repriceThreshold: 0.0001,
                         timeInForce: 'GTC',
                         exitEnabled: true,
                         exitCondition: 'lte',
@@ -235,7 +235,7 @@ module.exports = {
 
                 assert.equal(priceInput.disabled, true);
                 assert.match(priceInput.title, /disable trial trigger/i);
-                assert.equal(repriceThresholdInput.value, '0.02');
+                assert.equal(repriceThresholdInput.value, '0.0001');
                 assert.equal(timeInForceInput.value, 'GTC');
                 assert.equal(exitEnabledInput.checked, true);
                 assert.equal(exitConditionInput.value, 'lte');

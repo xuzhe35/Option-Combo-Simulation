@@ -5,7 +5,7 @@
 (function attachTradeTriggerLogic(globalScope) {
     const VALID_CONDITIONS = ['gte', 'lte'];
     const VALID_EXECUTION_MODES = ['preview', 'submit', 'test_submit'];
-    const VALID_REPRICE_THRESHOLDS = [0.01, 0.02, 0.05];
+    const VALID_REPRICE_THRESHOLDS = [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05];
     const VALID_TIME_IN_FORCE = ['DAY', 'GTC'];
     const VALID_STATUSES = [
         'idle',

@@ -147,6 +147,74 @@ module.exports = {
             },
         },
         {
+            name: 'rebuilds portfolio aggregates consistently from cached group and hedge results',
+            run() {
+                const ctx = loadValuationContext();
+                const globalState = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 95,
+                    baseDate: '2026-03-01',
+                    simulatedDate: '2026-03-14',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    hedges: [
+                        { id: 'h1', pos: -100, cost: 20, currentPrice: 18.5 },
+                    ],
+                    groups: [
+                        {
+                            id: 'g1',
+                            viewMode: 'active',
+                            settleUnderlyingPrice: null,
+                            legs: [
+                                {
+                                    id: 'l1',
+                                    type: 'put',
+                                    pos: -1,
+                                    strike: 100,
+                                    expDate: '2026-03-21',
+                                    iv: 0.2,
+                                    cost: 2.5,
+                                    currentPrice: 6.1,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                        {
+                            id: 'g2',
+                            viewMode: 'active',
+                            settleUnderlyingPrice: null,
+                            legs: [
+                                {
+                                    id: 'l2',
+                                    type: 'stock',
+                                    pos: 10,
+                                    cost: 90,
+                                    currentPrice: 96,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                };
+
+                const fullResult = ctx.OptionComboValuation.computePortfolioDerivedData(globalState);
+                const rebuiltResult = ctx.OptionComboValuation.buildPortfolioDerivedDataFromResults(
+                    globalState,
+                    globalState.groups.map(group => ctx.OptionComboValuation.computeGroupDerivedData(group, globalState)),
+                    globalState.hedges.map(hedge => ctx.OptionComboValuation.computeHedgeDerivedData(hedge))
+                );
+
+                assert.equal(rebuiltResult.groupResults.length, fullResult.groupResults.length);
+                assert.equal(rebuiltResult.hedgeResults.length, fullResult.hedgeResults.length);
+                almostEqual(rebuiltResult.globalTotalCost, fullResult.globalTotalCost);
+                almostEqual(rebuiltResult.globalSimulatedValue, fullResult.globalSimulatedValue);
+                almostEqual(rebuiltResult.globalPnL, fullResult.globalPnL);
+                almostEqual(rebuiltResult.globalLivePnL, fullResult.globalLivePnL);
+                almostEqual(rebuiltResult.globalHedgePnL, fullResult.globalHedgePnL);
+                almostEqual(rebuiltResult.combinedLivePnL, fullResult.combinedLivePnL);
+            },
+        },
+        {
             name: 'marks simulations unavailable when an option leg has missing live IV',
             run() {
                 const ctx = loadValuationContext();

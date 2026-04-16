@@ -43,6 +43,15 @@
         return Number.isFinite(parsed) ? parsed.toFixed(2) : '';
     }
 
+    function formatRepriceThresholdValue(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return '';
+        }
+        const raw = parsed >= 0.01 ? parsed.toFixed(2) : parsed.toFixed(4);
+        return raw.replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
+    }
+
     function getLegAnchorDate(state) {
         if (state && state.marketDataMode === 'historical' && state.historicalQuoteDate) {
             return state.historicalQuoteDate;
@@ -642,7 +651,7 @@
             ? 'Disable Trial Trigger before editing the trigger price.'
             : '';
         executionModeInput.value = trigger.executionMode;
-        repriceThresholdInput.value = Number(trigger.repriceThreshold || 0.01).toFixed(2);
+        repriceThresholdInput.value = formatRepriceThresholdValue(trigger.repriceThreshold || 0.01);
         concessionInput.value = Number(trigger.concessionRatio || 0.0).toFixed(2);
         timeInForceInput.value = String(trigger.timeInForce || 'DAY').toUpperCase();
         exitEnabledInput.checked = trigger.exitEnabled === true;
@@ -705,11 +714,11 @@
             const validThresholds = (typeof OptionComboTradeTriggerLogic !== 'undefined'
                 && Array.isArray(OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS))
                 ? OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS
-                : [0.01, 0.02, 0.05];
+                : [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05];
             trigger.repriceThreshold = validThresholds.some(value => Math.abs(value - parsed) < 0.0001)
                 ? parsed
                 : 0.01;
-            e.target.value = Number(trigger.repriceThreshold).toFixed(2);
+            e.target.value = formatRepriceThresholdValue(trigger.repriceThreshold);
         });
 
         concessionInput.addEventListener('change', (e) => {
@@ -812,7 +821,7 @@
             closeExecution.executionMode = 'preview';
         }
         executionModeInput.value = String(closeExecution.executionMode || 'preview');
-        thresholdInput.value = Number(closeExecution.repriceThreshold || 0.01).toFixed(2);
+        thresholdInput.value = formatRepriceThresholdValue(closeExecution.repriceThreshold || 0.01);
         concessionInput.value = Number(closeExecution.concessionRatio || 0.0).toFixed(2);
         timeInForceInput.value = String(closeExecution.timeInForce || 'DAY').toUpperCase();
 
@@ -877,11 +886,11 @@
             const validThresholds = (typeof OptionComboTradeTriggerLogic !== 'undefined'
                 && Array.isArray(OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS))
                 ? OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS
-                : [0.01, 0.02, 0.05];
+                : [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05];
             closeExecution.repriceThreshold = validThresholds.some(value => Math.abs(value - parsed) < 0.0001)
                 ? parsed
                 : 0.01;
-            e.target.value = Number(closeExecution.repriceThreshold).toFixed(2);
+            e.target.value = formatRepriceThresholdValue(closeExecution.repriceThreshold);
         });
 
         concessionInput.addEventListener('change', (e) => {

@@ -456,7 +456,7 @@ module.exports = {
                             latestComboMid: 2.31,
                             bestComboPrice: 2.05,
                             worstComboPrice: 2.57,
-                            managedRepriceThreshold: 0.01,
+                            managedRepriceThreshold: 0.0001,
                             managedConcessionRatio: 0.2,
                             repricingCount: 2,
                             lastRepriceAt: '2026-03-17T15:30:00Z',
@@ -473,7 +473,7 @@ module.exports = {
                 assert.match(html, /Managed execution: watching/);
                 assert.match(html, /Working LMT \$2\.18/);
                 assert.match(html, /Latest combo mid \$2\.31/);
-                assert.match(html, /Drift threshold 0\.01/);
+                assert.match(html, /Drift threshold 0\.0001/);
                 assert.match(html, /Concession 20%/);
                 assert.match(html, /Quoted combo range: best \$2\.05 to worst \$2\.57/);
                 assert.match(html, /Reprices: 2/);

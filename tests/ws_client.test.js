@@ -1934,6 +1934,359 @@ module.exports = {
             },
         },
         {
+            name: 'uses targeted control-panel refresh hooks for live forward-rate and futures-pool quotes',
+            run() {
+                const state = {
+                    underlyingSymbol: 'CL',
+                    underlyingPrice: 72.5,
+                    simulatedDate: '2026-03-19',
+                    baseDate: '2026-03-19',
+                    forwardRateSamples: [
+                        { id: 'sample_1' },
+                    ],
+                    futuresPool: [
+                        { id: 'future_apr', contractMonth: '202604', bid: null, ask: null, mark: null, lastQuotedAt: null },
+                    ],
+                    groups: [],
+                    hedges: [],
+                };
+
+                let forwardRateRefreshCalls = 0;
+                let futuresPoolRefreshCalls = 0;
+                let fullRefreshCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        OptionComboControlPanelUI: {
+                            refreshForwardRatePanel() {
+                                forwardRateRefreshCalls += 1;
+                            },
+                            refreshFuturesPoolPanel() {
+                                futuresPoolRefreshCalls += 1;
+                            },
+                            refreshBoundDynamicControls() {
+                                fullRefreshCalls += 1;
+                            },
+                        },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    options: {
+                        __forward_sample: {
+                            bid: 0.89,
+                            ask: 0.93,
+                            mark: 0.91,
+                        },
+                    },
+                    futures: {
+                        future_apr: {
+                            bid: 70.00,
+                            ask: 70.20,
+                            mark: 70.10,
+                        },
+                    },
+                });
+
+                assert.equal(forwardRateRefreshCalls, 1);
+                assert.equal(futuresPoolRefreshCalls, 1);
+                assert.equal(fullRefreshCalls, 0);
+            },
+        },
+        {
+            name: 'skips redundant derived updates and panel refreshes for unchanged live payloads',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 500,
+                    simulatedDate: '2026-03-19',
+                    baseDate: '2026-03-19',
+                    forwardRateSamples: [
+                        { id: 'sample_1' },
+                    ],
+                    groups: [
+                        {
+                            id: 'group_live',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_live_call',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 500,
+                                    expDate: '2026-04-17',
+                                    iv: 0.2,
+                                    ivSource: 'manual',
+                                    ivManualOverride: false,
+                                    currentPrice: 0,
+                                    currentPriceSource: '',
+                                    cost: 0,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let updateCalls = 0;
+                let forwardRateRefreshCalls = 0;
+                const elements = {
+                    underlyingPrice: { value: '' },
+                    underlyingPriceSlider: { value: '' },
+                    underlyingPriceDisplay: { textContent: '' },
+                };
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/market_holidays.js',
+                        'js/date_utils.js',
+                        'js/product_registry.js',
+                        'js/pricing_core.js',
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() { updateCalls += 1; },
+                        flashElement() {},
+                        currencyFormatter: { format(value) { return `$${value.toFixed(2)}`; } },
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        OptionComboControlPanelUI: {
+                            refreshForwardRatePanel() {
+                                forwardRateRefreshCalls += 1;
+                            },
+                        },
+                        document: {
+                            activeElement: null,
+                            getElementById(id) { return elements[id] || null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const livePayload = {
+                    underlyingPrice: 512.25,
+                    underlyingQuote: { mark: 512.25, bid: 512.24, ask: 512.26 },
+                    options: {
+                        leg_live_call: {
+                            mark: 12.34,
+                            bid: 12.30,
+                            ask: 12.38,
+                            iv: 0.31,
+                        },
+                        __forward_sample: {
+                            mark: 1.01,
+                            bid: 1.00,
+                            ask: 1.02,
+                        },
+                    },
+                };
+
+                ctx.processLiveMarketData(livePayload);
+                ctx.processLiveMarketData(livePayload);
+
+                assert.equal(state.underlyingPrice, 512.25);
+                assert.equal(state.groups[0].legs[0].currentPrice, 12.34);
+                assert.equal(state.groups[0].legs[0].iv, 0.31);
+                assert.equal(updateCalls, 1);
+                assert.equal(forwardRateRefreshCalls, 1);
+            },
+        },
+        {
+            name: 'uses incremental derived updates for live option quote changes',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 500,
+                    simulatedDate: '2026-03-19',
+                    baseDate: '2026-03-19',
+                    groups: [
+                        {
+                            id: 'group_live_option',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_live_option',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 500,
+                                    expDate: '2026-04-17',
+                                    iv: 0.2,
+                                    ivSource: 'manual',
+                                    ivManualOverride: false,
+                                    currentPrice: 0,
+                                    currentPriceSource: '',
+                                    cost: 0,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let fullUpdateCalls = 0;
+                let incrementalCalls = 0;
+                let lastChangeSet = null;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/market_holidays.js',
+                        'js/date_utils.js',
+                        'js/product_registry.js',
+                        'js/pricing_core.js',
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() { fullUpdateCalls += 1; },
+                        updateLiveQuoteDerivedValues(changeSet) {
+                            incrementalCalls += 1;
+                            lastChangeSet = changeSet;
+                        },
+                        flashElement() {},
+                        currencyFormatter: { format(value) { return `$${value.toFixed(2)}`; } },
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        document: {
+                            activeElement: null,
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_live_option: {
+                            mark: 12.34,
+                            bid: 12.30,
+                            ask: 12.38,
+                            iv: 0.31,
+                        },
+                    },
+                });
+
+                assert.equal(fullUpdateCalls, 0);
+                assert.equal(incrementalCalls, 1);
+                assert.deepEqual(Array.from(lastChangeSet.groupIds), ['group_live_option']);
+                assert.deepEqual(Array.from(lastChangeSet.hedgeIds), []);
+            },
+        },
+        {
+            name: 'uses incremental updates when midpoint-only underlying quotes change',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 500,
+                    simulatedDate: '2026-03-19',
+                    baseDate: '2026-03-19',
+                    groups: [
+                        {
+                            id: 'group_midpoint_underlying',
+                            liveData: true,
+                            livePriceMode: 'midpoint',
+                            legs: [
+                                {
+                                    id: 'leg_underlying_midpoint',
+                                    type: 'stock',
+                                    pos: 1,
+                                    currentPrice: 500,
+                                    currentPriceSource: 'live',
+                                    cost: 495,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                let fullUpdateCalls = 0;
+                let incrementalCalls = 0;
+                let lastChangeSet = null;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/product_registry.js',
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() { fullUpdateCalls += 1; },
+                        updateLiveQuoteDerivedValues(changeSet) {
+                            incrementalCalls += 1;
+                            lastChangeSet = changeSet;
+                        },
+                        flashElement() {},
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        document: {
+                            activeElement: null,
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    underlyingQuote: {
+                        mark: 500,
+                        bid: 499.5,
+                        ask: 500.5,
+                    },
+                });
+
+                ctx.processLiveMarketData({
+                    underlyingQuote: {
+                        mark: 500,
+                        bid: 499.8,
+                        ask: 500.8,
+                    },
+                });
+
+                assert.equal(fullUpdateCalls, 0);
+                assert.equal(incrementalCalls, 2);
+                assert.deepEqual(Array.from(lastChangeSet.groupIds), ['group_midpoint_underlying']);
+                assert.deepEqual(Array.from(lastChangeSet.hedgeIds), []);
+            },
+        },
+        {
             name: 'marks option IV as missing when live quotes arrive without a usable IV',
             run() {
                 const state = {

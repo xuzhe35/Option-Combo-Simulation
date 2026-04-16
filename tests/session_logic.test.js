@@ -213,7 +213,7 @@ module.exports = {
                                     condition: 'gte',
                                     price: 671.01,
                                     executionMode: 'submit',
-                                    repriceThreshold: 0.01,
+                                    repriceThreshold: 0.0001,
                                     timeInForce: 'DAY',
                                     exitEnabled: true,
                                     exitCondition: 'lte',
@@ -229,7 +229,7 @@ module.exports = {
                                     lastError: 'old error',
                                 },
                                 closeExecution: {
-                                    repriceThreshold: 0.02,
+                                    repriceThreshold: 0.0005,
                                     timeInForce: 'GTC',
                                     status: 'submitted',
                                     pendingRequest: true,
@@ -266,6 +266,7 @@ module.exports = {
                 assert.equal(result.groups[0].tradeTrigger.condition, 'gte');
                 assert.equal(result.groups[0].tradeTrigger.price, 671.01);
                 assert.equal(result.groups[0].tradeTrigger.executionMode, 'submit');
+                assert.equal(result.groups[0].tradeTrigger.repriceThreshold, 0.0001);
                 assert.equal(result.groups[0].tradeTrigger.exitEnabled, true);
                 assert.equal(result.groups[0].tradeTrigger.exitPrice, 670.5);
                 assert.equal(result.groups[0].tradeTrigger.isExpanded, false);
@@ -273,7 +274,7 @@ module.exports = {
                 assert.equal(result.groups[0].tradeTrigger.pendingRequest, false);
                 assert.equal(result.groups[0].tradeTrigger.lastPreview, null);
                 assert.equal(result.groups[0].tradeTrigger.lastError, '');
-                assert.equal(result.groups[0].closeExecution.repriceThreshold, 0.02);
+                assert.equal(result.groups[0].closeExecution.repriceThreshold, 0.0005);
                 assert.equal(result.groups[0].closeExecution.executionMode, 'preview');
                 assert.equal(result.groups[0].closeExecution.timeInForce, 'GTC');
                 assert.equal(result.groups[0].closeExecution.isExpanded, false);
@@ -395,7 +396,7 @@ module.exports = {
                             condition: 'gte',
                             price: 671.01,
                             executionMode: 'submit',
-                            repriceThreshold: 0.01,
+                            repriceThreshold: 0.0001,
                             timeInForce: 'DAY',
                             exitEnabled: true,
                             exitCondition: 'lte',
@@ -412,7 +413,7 @@ module.exports = {
                         },
                         closeExecution: {
                             executionMode: 'test_submit',
-                            repriceThreshold: 0.02,
+                            repriceThreshold: 0.0005,
                             timeInForce: 'GTC',
                             status: 'submitted',
                             pendingRequest: true,
@@ -434,6 +435,7 @@ module.exports = {
                 assert.equal(snapshot.groups[0].tradeTrigger.condition, 'gte');
                 assert.equal(snapshot.groups[0].tradeTrigger.price, 671.01);
                 assert.equal(snapshot.groups[0].tradeTrigger.executionMode, 'submit');
+                assert.equal(snapshot.groups[0].tradeTrigger.repriceThreshold, 0.0001);
                 assert.equal(snapshot.groups[0].tradeTrigger.exitEnabled, true);
                 assert.equal(snapshot.groups[0].tradeTrigger.exitPrice, 670.5);
                 assert.equal(snapshot.groups[0].tradeTrigger.isExpanded, false);
@@ -442,7 +444,7 @@ module.exports = {
                 assert.equal(snapshot.groups[0].tradeTrigger.lastTriggeredAt, null);
                 assert.equal(snapshot.groups[0].tradeTrigger.lastPreview, null);
                 assert.equal(snapshot.groups[0].tradeTrigger.lastError, '');
-                assert.equal(snapshot.groups[0].closeExecution.repriceThreshold, 0.02);
+                assert.equal(snapshot.groups[0].closeExecution.repriceThreshold, 0.0005);
                 assert.equal(snapshot.groups[0].closeExecution.executionMode, 'test_submit');
                 assert.equal(snapshot.groups[0].closeExecution.timeInForce, 'GTC');
                 assert.equal(snapshot.groups[0].closeExecution.isExpanded, false);

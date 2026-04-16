@@ -33,6 +33,7 @@ const _liveQuoteRuntime = {
     futureQuotesById: new Map(),
     stockQuotesBySymbol: new Map(),
 };
+const _liveQuoteSnapshotFields = ['bid', 'ask', 'mark', 'iv'];
 
 function _cloneLiveQuoteSnapshot(rawQuote) {
     if (!rawQuote || typeof rawQuote !== 'object') {
@@ -50,6 +51,21 @@ function _cloneLiveQuoteSnapshot(rawQuote) {
     return Object.keys(snapshot).length > 0 ? snapshot : null;
 }
 
+function _areLiveQuoteSnapshotsEqual(left, right) {
+    if (left === right) {
+        return true;
+    }
+    if (!left || !right) {
+        return left === right;
+    }
+    return _liveQuoteSnapshotFields.every((field) => {
+        const leftHasField = Object.prototype.hasOwnProperty.call(left, field);
+        const rightHasField = Object.prototype.hasOwnProperty.call(right, field);
+        return leftHasField === rightHasField
+            && (!leftHasField || left[field] === right[field]);
+    });
+}
+
 function _resetLiveQuoteRuntime() {
     _liveQuoteRuntime.underlyingQuote = null;
     _liveQuoteRuntime.optionQuotesById.clear();
@@ -58,28 +74,48 @@ function _resetLiveQuoteRuntime() {
 }
 
 function _setUnderlyingQuoteSnapshot(rawQuote) {
-    _liveQuoteRuntime.underlyingQuote = _cloneLiveQuoteSnapshot(rawQuote);
+    const nextSnapshot = _cloneLiveQuoteSnapshot(rawQuote);
+    if (_areLiveQuoteSnapshotsEqual(_liveQuoteRuntime.underlyingQuote, nextSnapshot)) {
+        return false;
+    }
+    _liveQuoteRuntime.underlyingQuote = nextSnapshot;
+    return true;
 }
 
 function _setOptionQuoteSnapshot(subId, rawQuote) {
-    if (!subId) return;
+    if (!subId) return false;
     const snapshot = _cloneLiveQuoteSnapshot(rawQuote);
-    if (!snapshot) return;
+    if (!snapshot) return false;
+    const previousSnapshot = _liveQuoteRuntime.optionQuotesById.get(subId) || null;
+    if (_areLiveQuoteSnapshotsEqual(previousSnapshot, snapshot)) {
+        return false;
+    }
     _liveQuoteRuntime.optionQuotesById.set(subId, snapshot);
+    return true;
 }
 
 function _setFutureQuoteSnapshot(subId, rawQuote) {
-    if (!subId) return;
+    if (!subId) return false;
     const snapshot = _cloneLiveQuoteSnapshot(rawQuote);
-    if (!snapshot) return;
+    if (!snapshot) return false;
+    const previousSnapshot = _liveQuoteRuntime.futureQuotesById.get(subId) || null;
+    if (_areLiveQuoteSnapshotsEqual(previousSnapshot, snapshot)) {
+        return false;
+    }
     _liveQuoteRuntime.futureQuotesById.set(subId, snapshot);
+    return true;
 }
 
 function _setStockQuoteSnapshot(symbol, rawQuote) {
-    if (!symbol) return;
+    if (!symbol) return false;
     const snapshot = _cloneLiveQuoteSnapshot(rawQuote);
-    if (!snapshot) return;
+    if (!snapshot) return false;
+    const previousSnapshot = _liveQuoteRuntime.stockQuotesBySymbol.get(symbol) || null;
+    if (_areLiveQuoteSnapshotsEqual(previousSnapshot, snapshot)) {
+        return false;
+    }
     _liveQuoteRuntime.stockQuotesBySymbol.set(symbol, snapshot);
+    return true;
 }
 
 function _formatSymbolPriceInputValue(symbol, value) {
@@ -97,6 +133,117 @@ function _formatSymbolPriceDisplay(symbol, value) {
         return OptionComboProductRegistry.formatPriceDisplay(symbol, value);
     }
     return currencyFormatter.format(value);
+}
+
+function _refreshForwardRatePanelUi() {
+    if (typeof OptionComboControlPanelUI === 'undefined') {
+        return;
+    }
+    if (typeof OptionComboControlPanelUI.refreshForwardRatePanel === 'function') {
+        OptionComboControlPanelUI.refreshForwardRatePanel();
+        return;
+    }
+    if (typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
+        OptionComboControlPanelUI.refreshBoundDynamicControls();
+    }
+}
+
+function _refreshFuturesPoolPanelUi() {
+    if (typeof OptionComboControlPanelUI === 'undefined') {
+        return;
+    }
+    if (typeof OptionComboControlPanelUI.refreshFuturesPoolPanel === 'function') {
+        OptionComboControlPanelUI.refreshFuturesPoolPanel();
+        return;
+    }
+    if (typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
+        OptionComboControlPanelUI.refreshBoundDynamicControls();
+    }
+}
+
+function _normalizeLivePriceMode(group) {
+    if (typeof OptionComboSessionLogic !== 'undefined'
+        && typeof OptionComboSessionLogic.normalizeGroupLivePriceMode === 'function') {
+        return OptionComboSessionLogic.normalizeGroupLivePriceMode(group && group.livePriceMode);
+    }
+    return String(group && group.livePriceMode || '').trim().toLowerCase() === 'midpoint'
+        ? 'midpoint'
+        : 'mark';
+}
+
+function _addAllGroupIds(targetSet) {
+    (state.groups || []).forEach((group) => {
+        if (group && group.id) {
+            targetSet.add(group.id);
+        }
+    });
+}
+
+function _addGroupsAffectedByOptionQuoteIds(targetSet, optionQuoteIds) {
+    if (!(targetSet instanceof Set) || !Array.isArray(optionQuoteIds) || optionQuoteIds.length === 0) {
+        return;
+    }
+
+    const quoteIdSet = new Set(optionQuoteIds.filter(Boolean));
+    if (quoteIdSet.size === 0) {
+        return;
+    }
+
+    (state.groups || []).forEach((group) => {
+        if ((group && group.legs || []).some(leg => quoteIdSet.has(leg && leg.id))) {
+            targetSet.add(group.id);
+        }
+    });
+}
+
+function _addGroupsAffectedByUnderlyingMidpoint(targetSet) {
+    if (!(targetSet instanceof Set)) {
+        return;
+    }
+
+    (state.groups || []).forEach((group) => {
+        if (_normalizeLivePriceMode(group) !== 'midpoint') {
+            return;
+        }
+        if ((group && group.legs || []).some(leg => _isUnderlyingLeg(leg))) {
+            targetSet.add(group.id);
+        }
+    });
+}
+
+function _scheduleDerivedValueRefresh(changeSet, allowIncrementalUpdate) {
+    if (renderScheduled) {
+        return;
+    }
+
+    renderScheduled = true;
+    requestAnimationFrame(() => {
+        try {
+            const groupIds = Array.isArray(changeSet && changeSet.groupIds) ? changeSet.groupIds.filter(Boolean) : [];
+            const hedgeIds = Array.isArray(changeSet && changeSet.hedgeIds) ? changeSet.hedgeIds.filter(Boolean) : [];
+            const hasIncrementalTargets = groupIds.length > 0 || hedgeIds.length > 0;
+            const appRuntime = typeof window !== 'undefined' && window.__optionComboApp && typeof window.__optionComboApp === 'object'
+                ? window.__optionComboApp
+                : null;
+            const incrementalUpdater = typeof updateLiveQuoteDerivedValues === 'function'
+                ? updateLiveQuoteDerivedValues
+                : (appRuntime && typeof appRuntime.updateLiveQuoteDerivedValues === 'function'
+                    ? appRuntime.updateLiveQuoteDerivedValues
+                    : null);
+
+            if (allowIncrementalUpdate && hasIncrementalTargets && typeof incrementalUpdater === 'function') {
+                incrementalUpdater({
+                    groupIds,
+                    hedgeIds,
+                });
+                return;
+            }
+
+            updateDerivedValues();
+        } finally {
+            renderScheduled = false;
+        }
+    });
 }
 
 function getLiveOptionQuote(subId) {
@@ -2385,7 +2532,7 @@ function _collectLiveIvNeighbors(targetLeg) {
     return { lower, upper };
 }
 
-function _applyEstimatedOptionIvFallback() {
+function _applyEstimatedOptionIvFallback(changedGroupIds) {
     if (_isHistoricalMode()) {
         return false;
     }
@@ -2420,10 +2567,16 @@ function _applyEstimatedOptionIvFallback() {
                     leg.ivSource = 'estimated';
                     leg.ivManualOverride = false;
                     changed = true;
+                    if (changedGroupIds instanceof Set && group && group.id) {
+                        changedGroupIds.add(group.id);
+                    }
                 }
             } else if (leg.ivSource === 'estimated') {
                 leg.ivSource = 'missing';
                 changed = true;
+                if (changedGroupIds instanceof Set && group && group.id) {
+                    changedGroupIds.add(group.id);
+                }
             }
         });
     });
@@ -2706,28 +2859,39 @@ function processLiveMarketData(data) {
     let stateChanged = _applyHistoricalReplayMetadata(data);
     stateChanged = _applyHistoricalExpiryUnderlyingAnchors(data) || stateChanged;
     const quoteSourceKind = _getQuoteSourceKind(data);
+    const nextUnderlyingPrice = parseFloat(data && data.underlyingPrice);
+    const hasUnderlyingPrice = Number.isFinite(nextUnderlyingPrice);
+    const incrementalGroupIds = new Set();
+    const incrementalHedgeIds = new Set();
+    const changedOptionQuoteIds = [];
+    const liveMode = !_isHistoricalMode();
+    let optionQuotesChanged = false;
+    let futureQuotesChanged = false;
+    let underlyingQuoteChanged = false;
 
     if (data.underlyingQuote && typeof data.underlyingQuote === 'object') {
-        _setUnderlyingQuoteSnapshot(data.underlyingQuote);
-    } else if (data.underlyingPrice) {
-        _setUnderlyingQuoteSnapshot({ mark: data.underlyingPrice });
+        underlyingQuoteChanged = _setUnderlyingQuoteSnapshot(data.underlyingQuote);
+    } else if (hasUnderlyingPrice) {
+        underlyingQuoteChanged = _setUnderlyingQuoteSnapshot({ mark: nextUnderlyingPrice });
     }
 
     if (data.options) {
         Object.entries(data.options).forEach(([subId, quote]) => {
-            _setOptionQuoteSnapshot(subId, quote);
+            const quoteChanged = _setOptionQuoteSnapshot(subId, quote);
+            optionQuotesChanged = quoteChanged || optionQuotesChanged;
+            if (quoteChanged) {
+                changedOptionQuoteIds.push(subId);
+            }
         });
 
-        if ((state.forwardRateSamples || []).length > 0
-            && typeof OptionComboControlPanelUI !== 'undefined'
-            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
-            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        if (optionQuotesChanged && (state.forwardRateSamples || []).length > 0) {
+            _refreshForwardRatePanelUi();
         }
     }
 
     if (data.futures) {
         Object.entries(data.futures).forEach(([subId, quote]) => {
-            _setFutureQuoteSnapshot(subId, quote);
+            futureQuotesChanged = _setFutureQuoteSnapshot(subId, quote) || futureQuotesChanged;
         });
     }
 
@@ -2737,14 +2901,34 @@ function processLiveMarketData(data) {
         });
     }
 
+    if (liveMode && underlyingQuoteChanged) {
+        _addGroupsAffectedByUnderlyingMidpoint(incrementalGroupIds);
+    }
+    if (liveMode && optionQuotesChanged) {
+        _addGroupsAffectedByOptionQuoteIds(incrementalGroupIds, changedOptionQuoteIds);
+    }
+    if (liveMode && futureQuotesChanged) {
+        _addAllGroupIds(incrementalGroupIds);
+    }
+
     if (data.futures) {
         (state.futuresPool || []).forEach((entry) => {
             const quote = data.futures[entry.id];
             if (!quote) return;
 
-            entry.bid = quote.bid !== undefined ? quote.bid : entry.bid;
-            entry.ask = quote.ask !== undefined ? quote.ask : entry.ask;
-            entry.mark = quote.mark !== undefined ? quote.mark : entry.mark;
+            const nextBid = quote.bid !== undefined ? quote.bid : entry.bid;
+            const nextAsk = quote.ask !== undefined ? quote.ask : entry.ask;
+            const nextMark = quote.mark !== undefined ? quote.mark : entry.mark;
+            const quoteChanged = nextBid !== entry.bid
+                || nextAsk !== entry.ask
+                || nextMark !== entry.mark;
+            if (!quoteChanged) {
+                return;
+            }
+
+            entry.bid = nextBid;
+            entry.ask = nextAsk;
+            entry.mark = nextMark;
             entry.lastQuotedAt = new Date().toISOString();
         });
 
@@ -2772,6 +2956,9 @@ function processLiveMarketData(data) {
                 leg.currentPrice = liveMark;
                 leg.currentPriceSource = quoteSourceKind;
                 stateChanged = true;
+                if (liveMode && group && group.id) {
+                    incrementalGroupIds.add(group.id);
+                }
 
                 const row = document.querySelector(`tr[data-id="${leg.id}"]`);
                 if (row) {
@@ -2784,116 +2971,147 @@ function processLiveMarketData(data) {
             });
         });
 
-        if (typeof OptionComboControlPanelUI !== 'undefined'
-            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
-            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        if (futureQuotesChanged && (state.futuresPool || []).length > 0) {
+            _refreshFuturesPoolPanelUi();
         }
     }
 
-    // Update Underlying Price if present
-    if (data.underlyingPrice) {
-        state.underlyingPrice = data.underlyingPrice;
-        document.getElementById('underlyingPrice').value = _formatSymbolPriceInputValue(state.underlyingSymbol, state.underlyingPrice);
-        document.getElementById('underlyingPriceSlider').value = state.underlyingPrice;
-        document.getElementById('underlyingPriceDisplay').textContent = _formatSymbolPriceDisplay(state.underlyingSymbol, state.underlyingPrice);
+    const currentUnderlyingPrice = parseFloat(state && state.underlyingPrice);
+    const underlyingPriceChanged = hasUnderlyingPrice
+        && (!Number.isFinite(currentUnderlyingPrice)
+            || Math.abs(nextUnderlyingPrice - currentUnderlyingPrice) > 0.000001);
+    if (hasUnderlyingPrice && underlyingPriceChanged) {
+        state.underlyingPrice = nextUnderlyingPrice;
+        const underlyingPriceInput = document.getElementById('underlyingPrice');
+        const underlyingPriceSlider = document.getElementById('underlyingPriceSlider');
+        const underlyingPriceDisplay = document.getElementById('underlyingPriceDisplay');
+        const nextInputValue = _formatSymbolPriceInputValue(state.underlyingSymbol, state.underlyingPrice);
+        const nextDisplayValue = _formatSymbolPriceDisplay(state.underlyingSymbol, state.underlyingPrice);
+        if (underlyingPriceInput && underlyingPriceInput.value !== nextInputValue) {
+            underlyingPriceInput.value = nextInputValue;
+        }
+        if (underlyingPriceSlider && String(underlyingPriceSlider.value) !== String(state.underlyingPrice)) {
+            underlyingPriceSlider.value = state.underlyingPrice;
+        }
+        if (underlyingPriceDisplay && underlyingPriceDisplay.textContent !== nextDisplayValue) {
+            underlyingPriceDisplay.textContent = nextDisplayValue;
+        }
         if (!_isHistoricalMode()) {
             evaluateTrialTradeTriggers();
             evaluateTriggeredOrderExitConditions();
         }
         stateChanged = true;
+        if (liveMode) {
+            _addAllGroupIds(incrementalGroupIds);
+        }
     }
 
-    // Update Option Legs
     if (data.options) {
         state.groups.forEach(group => {
-            if (group.liveData) {
-                group.legs.forEach(leg => {
-                    if (data.options[leg.id] !== undefined) {
-                        const replayQuote = data.options[leg.id] || {};
-                        const liveMark = replayQuote.mark;
-                        const liveIV = replayQuote.iv;
+            if (!group.liveData) {
+                return;
+            }
 
-                        if (replayQuote.missing === true) {
-                            stateChanged = _markOptionQuoteMissing(leg) || stateChanged;
-                            return;
+            group.legs.forEach(leg => {
+                if (data.options[leg.id] === undefined) {
+                    return;
+                }
+
+                const replayQuote = data.options[leg.id] || {};
+                const liveMark = replayQuote.mark;
+                const liveIV = replayQuote.iv;
+
+                if (replayQuote.missing === true) {
+                    const legChanged = _markOptionQuoteMissing(leg);
+                    stateChanged = legChanged || stateChanged;
+                    if (legChanged && liveMode && group && group.id) {
+                        incrementalGroupIds.add(group.id);
+                    }
+                    return;
+                }
+
+                if (liveMark > 0) {
+                    const markChanged = Math.abs(liveMark - leg.currentPrice) > 0.001;
+                    const sourceChanged = leg.currentPriceSource !== quoteSourceKind;
+                    if (markChanged || sourceChanged) {
+                        leg.currentPrice = liveMark;
+                        leg.currentPriceSource = quoteSourceKind;
+                        stateChanged = true;
+                        if (liveMode && group && group.id) {
+                            incrementalGroupIds.add(group.id);
                         }
 
-                        if (liveMark > 0) {
-                            const markChanged = Math.abs(liveMark - leg.currentPrice) > 0.001;
-                            const sourceChanged = leg.currentPriceSource !== quoteSourceKind;
-                            if (markChanged || sourceChanged) {
-                                leg.currentPrice = liveMark;
-                                leg.currentPriceSource = quoteSourceKind;
-                                stateChanged = true;
-
-                                const row = document.querySelector(`tr[data-id="${leg.id}"]`);
-                                if (row) {
-                                    const currentPriceInput = row.querySelector('.current-price-input');
-                                    if (currentPriceInput) {
-                                        currentPriceInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, liveMark);
-                                        flashElement(currentPriceInput);
-                                    }
-                                }
-                            }
-                        }
-
-                        const ivManuallyOverridden = leg.ivManualOverride === true;
-
-                        if (liveIV && liveIV > 0 && !ivManuallyOverridden) {
-                            const nextIvSource = quoteSourceKind === 'historical' ? 'historical' : 'live';
-                            const ivChanged = Math.abs(liveIV - leg.iv) > 0.000001 || leg.ivSource !== nextIvSource || leg.ivManualOverride === true;
-                            leg.iv = liveIV;
-                            leg.ivSource = nextIvSource;
-                            leg.ivManualOverride = false;
-                            stateChanged = stateChanged || ivChanged;
-
-                            const row = document.querySelector(`tr[data-id="${leg.id}"]`);
-                            if (row && ivChanged) {
-                                const ivInput = row.querySelector('.iv-input');
-                                if (ivInput && document.activeElement !== ivInput) {
-                                    const ivDisplay = typeof OptionComboPricingCore !== 'undefined'
-                                        && typeof OptionComboPricingCore.describeLegIvInput === 'function'
-                                        ? OptionComboPricingCore.describeLegIvInput(leg)
-                                        : {
-                                            value: `${(liveIV * 100).toFixed(4)}%`,
-                                            title: 'Live IV from TWS',
-                                        };
-                                    ivInput.value = ivDisplay.value;
-                                    ivInput.title = ivDisplay.title;
-                                    flashElement(ivInput);
-                                }
-                            }
-                        } else if (!(liveIV && liveIV > 0) && !ivManuallyOverridden && leg.ivSource !== 'missing') {
-                            leg.ivSource = 'missing';
-                            stateChanged = true;
-
-                            const row = document.querySelector(`tr[data-id="${leg.id}"]`);
-                            if (row) {
-                                const ivInput = row.querySelector('.iv-input');
-                                if (ivInput && document.activeElement !== ivInput) {
-                                    const ivDisplay = typeof OptionComboPricingCore !== 'undefined'
-                                        && typeof OptionComboPricingCore.describeLegIvInput === 'function'
-                                        ? OptionComboPricingCore.describeLegIvInput(leg)
-                                        : {
-                                            value: 'N/A',
-                                            title: 'Live IV is unavailable from TWS for this contract.',
-                                        };
-                                    ivInput.value = ivDisplay.value;
-                                    ivInput.title = ivDisplay.title;
-                                }
+                        const row = document.querySelector(`tr[data-id="${leg.id}"]`);
+                        if (row) {
+                            const currentPriceInput = row.querySelector('.current-price-input');
+                            if (currentPriceInput) {
+                                currentPriceInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, liveMark);
+                                flashElement(currentPriceInput);
                             }
                         }
                     }
-                });
-            }
+                }
+
+                const ivManuallyOverridden = leg.ivManualOverride === true;
+
+                if (liveIV && liveIV > 0 && !ivManuallyOverridden) {
+                    const nextIvSource = quoteSourceKind === 'historical' ? 'historical' : 'live';
+                    const ivChanged = Math.abs(liveIV - leg.iv) > 0.000001 || leg.ivSource !== nextIvSource || leg.ivManualOverride === true;
+                    leg.iv = liveIV;
+                    leg.ivSource = nextIvSource;
+                    leg.ivManualOverride = false;
+                    stateChanged = stateChanged || ivChanged;
+                    if (ivChanged && liveMode && group && group.id) {
+                        incrementalGroupIds.add(group.id);
+                    }
+
+                    const row = document.querySelector(`tr[data-id="${leg.id}"]`);
+                    if (row && ivChanged) {
+                        const ivInput = row.querySelector('.iv-input');
+                        if (ivInput && document.activeElement !== ivInput) {
+                            const ivDisplay = typeof OptionComboPricingCore !== 'undefined'
+                                && typeof OptionComboPricingCore.describeLegIvInput === 'function'
+                                ? OptionComboPricingCore.describeLegIvInput(leg)
+                                : {
+                                    value: `${(liveIV * 100).toFixed(4)}%`,
+                                    title: 'Live IV from TWS',
+                                };
+                            ivInput.value = ivDisplay.value;
+                            ivInput.title = ivDisplay.title;
+                            flashElement(ivInput);
+                        }
+                    }
+                } else if (!(liveIV && liveIV > 0) && !ivManuallyOverridden && leg.ivSource !== 'missing') {
+                    leg.ivSource = 'missing';
+                    stateChanged = true;
+                    if (liveMode && group && group.id) {
+                        incrementalGroupIds.add(group.id);
+                    }
+
+                    const row = document.querySelector(`tr[data-id="${leg.id}"]`);
+                    if (row) {
+                        const ivInput = row.querySelector('.iv-input');
+                        if (ivInput && document.activeElement !== ivInput) {
+                            const ivDisplay = typeof OptionComboPricingCore !== 'undefined'
+                                && typeof OptionComboPricingCore.describeLegIvInput === 'function'
+                                ? OptionComboPricingCore.describeLegIvInput(leg)
+                                : {
+                                    value: 'N/A',
+                                    title: 'Live IV is unavailable from TWS for this contract.',
+                                };
+                            ivInput.value = ivDisplay.value;
+                            ivInput.title = ivDisplay.title;
+                        }
+                    }
+                }
+            });
         });
 
-        if (_applyEstimatedOptionIvFallback()) {
+        if (_applyEstimatedOptionIvFallback(incrementalGroupIds)) {
             stateChanged = true;
         }
     }
 
-    // Update Hedge Stocks + underlying legs in groups
     if (data.stocks) {
         state.hedges.forEach(hedge => {
             if (hedge.liveData && data.stocks[hedge.symbol] !== undefined) {
@@ -2904,6 +3122,9 @@ function processLiveMarketData(data) {
                     hedge.currentPrice = liveMark;
                     hedge.currentPriceSource = quoteSourceKind;
                     stateChanged = true;
+                    if (liveMode && hedge && hedge.id) {
+                        incrementalHedgeIds.add(hedge.id);
+                    }
 
                     const row = document.querySelector(`tr.hedge-row[data-id="${hedge.id}"]`);
                     if (row) {
@@ -2916,41 +3137,45 @@ function processLiveMarketData(data) {
                 }
             }
         });
-
     }
 
-    if (data.underlyingPrice) {
+    if (hasUnderlyingPrice) {
         const usesFuturesPool = typeof OptionComboProductRegistry !== 'undefined'
             && typeof OptionComboProductRegistry.usesFuturesPool === 'function'
             && OptionComboProductRegistry.usesFuturesPool(state.underlyingSymbol);
         state.groups.forEach(group => {
-            if (group.liveData) {
-                group.legs.forEach(leg => {
-                    if (usesFuturesPool && leg.underlyingFutureId) {
-                        return;
-                    }
-                    if (_isUnderlyingLeg(leg) && (
-                        Math.abs(data.underlyingPrice - leg.currentPrice) > 0.001
-                        || leg.currentPriceSource !== quoteSourceKind
-                    )) {
-                        leg.currentPrice = data.underlyingPrice;
-                        leg.currentPriceSource = quoteSourceKind;
-                        stateChanged = true;
+            if (!group.liveData) {
+                return;
+            }
 
-                        const row = document.querySelector(`tr[data-id="${leg.id}"]`);
-                        if (row) {
-                            const currentPriceInput = row.querySelector('.current-price-input');
-                            if (currentPriceInput) {
-                                currentPriceInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, data.underlyingPrice);
-                                flashElement(currentPriceInput);
-                            }
+            group.legs.forEach(leg => {
+                if (usesFuturesPool && leg.underlyingFutureId) {
+                    return;
+                }
+                if (_isUnderlyingLeg(leg) && (
+                    Math.abs(nextUnderlyingPrice - leg.currentPrice) > 0.001
+                    || leg.currentPriceSource !== quoteSourceKind
+                )) {
+                    leg.currentPrice = nextUnderlyingPrice;
+                    leg.currentPriceSource = quoteSourceKind;
+                    stateChanged = true;
+                    if (liveMode && group && group.id) {
+                        incrementalGroupIds.add(group.id);
+                    }
+
+                    const row = document.querySelector(`tr[data-id="${leg.id}"]`);
+                    if (row) {
+                        const currentPriceInput = row.querySelector('.current-price-input');
+                        if (currentPriceInput) {
+                            currentPriceInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, nextUnderlyingPrice);
+                            flashElement(currentPriceInput);
                         }
                     }
-                });
-            }
+                }
+            });
         });
 
-        if (_applyEstimatedOptionIvFallback()) {
+        if (_applyEstimatedOptionIvFallback(incrementalGroupIds)) {
             stateChanged = true;
         }
     }
@@ -2963,17 +3188,17 @@ function processLiveMarketData(data) {
         stateChanged = true;
     }
 
-    if (_isHistoricalMode() && data.underlyingPrice) {
+    if (_isHistoricalMode() && hasUnderlyingPrice && underlyingPriceChanged) {
         evaluateTrialTradeTriggers();
         evaluateTriggeredOrderExitConditions();
     }
 
-    if (stateChanged && !renderScheduled) {
-        renderScheduled = true;
-        requestAnimationFrame(() => {
-            updateDerivedValues();
-            renderScheduled = false;
-        });
+    const hasIncrementalTargets = incrementalGroupIds.size > 0 || incrementalHedgeIds.size > 0;
+    if (stateChanged || hasIncrementalTargets) {
+        _scheduleDerivedValueRefresh({
+            groupIds: Array.from(incrementalGroupIds),
+            hedgeIds: Array.from(incrementalHedgeIds),
+        }, liveMode && hasIncrementalTargets);
     }
 }
 

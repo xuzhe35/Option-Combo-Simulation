@@ -11,6 +11,15 @@
             : ['call', 'put'].includes(String(leg && leg.type || '').toLowerCase());
     }
 
+    function formatRepriceThresholdValue(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return '';
+        }
+        const raw = parsed >= 0.01 ? parsed.toFixed(2) : parsed.toFixed(4);
+        return raw.replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
+    }
+
     function formatTriggerStatus(trigger) {
         if (!trigger) return 'Idle';
         const brokerStatus = String(trigger.lastPreview && trigger.lastPreview.status || '').trim();
@@ -200,7 +209,7 @@
             ? `<div class="text-muted" style="margin-top: 8px;">Broker status: ${preview.status}${brokerStatusDetails.length > 0 ? ` (${brokerStatusDetails.join(', ')})` : ''}</div>`
             : '';
         const managedStateText = preview.managedMode
-            ? `<div class="text-muted" style="margin-top: 8px;">Managed execution: ${preview.managedState || 'watching'}${Number.isFinite(preview.workingLimitPrice) ? `, Working LMT ${currencyFormatter.format(preview.workingLimitPrice)}` : ''}${Number.isFinite(preview.latestComboMid) ? `, Latest combo mid ${currencyFormatter.format(preview.latestComboMid)}` : ''}${Number.isFinite(preview.managedRepriceThreshold) ? `, Drift threshold ${preview.managedRepriceThreshold.toFixed(2)}` : ''}${Number.isFinite(preview.managedConcessionRatio) && preview.managedConcessionRatio > 0 ? `, Concession ${Math.round(preview.managedConcessionRatio * 100)}%` : ''}</div>`
+            ? `<div class="text-muted" style="margin-top: 8px;">Managed execution: ${preview.managedState || 'watching'}${Number.isFinite(preview.workingLimitPrice) ? `, Working LMT ${currencyFormatter.format(preview.workingLimitPrice)}` : ''}${Number.isFinite(preview.latestComboMid) ? `, Latest combo mid ${currencyFormatter.format(preview.latestComboMid)}` : ''}${Number.isFinite(preview.managedRepriceThreshold) ? `, Drift threshold ${formatRepriceThresholdValue(preview.managedRepriceThreshold)}` : ''}${Number.isFinite(preview.managedConcessionRatio) && preview.managedConcessionRatio > 0 ? `, Concession ${Math.round(preview.managedConcessionRatio * 100)}%` : ''}</div>`
             : '';
         const quoteRangeText = preview.managedMode
             && Number.isFinite(preview.bestComboPrice)
