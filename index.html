@@ -585,12 +585,25 @@
                                         <input type="checkbox" class="group-global-toggle" checked>
                                     </label>
                                     <input type="text" class="group-name-input h3-style" value="New Combo">
-                                    <button class="btn btn-secondary btn-sm trial-trigger-toggle-btn" type="button" style="display: none;">
-                                        Trial Trigger
-                                    </button>
-                                    <button class="btn btn-secondary btn-sm close-group-toggle-btn" type="button" style="display: none;">
-                                        Close Group
-                                    </button>
+                                    <div class="group-order-controls" aria-label="Reorder Group">
+                                        <button class="btn btn-secondary btn-sm move-group-top-btn" type="button" title="Move this group to the top">
+                                            Top
+                                        </button>
+                                        <button class="icon-btn move-group-up-btn" type="button" title="Move this group up" aria-label="Move this group up">
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <polyline points="18 15 12 9 6 15"></polyline>
+                                            </svg>
+                                        </button>
+                                        <button class="icon-btn move-group-down-btn" type="button" title="Move this group down" aria-label="Move this group down">
+                                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <polyline points="6 9 12 15 18 9"></polyline>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                    <div class="group-header-delta-item" style="display: none;">
+                                        <span class="label">Delta:</span>
+                                        <span class="group-header-delta-value font-weight-semibold">N/A</span>
+                                    </div>
                                     <div class="group-header-live-pnl-item" style="display: none;">
                                         <span class="group-header-live-pnl-dot"></span>
                                         <span class="label group-header-live-pnl-label">Live P&amp;L:</span>
@@ -674,6 +687,15 @@
                                         Locks this group's current replay prices into Cost and starts historical position tracking.
                                     </div>
                                 </div>
+                            </div>
+
+                            <div class="group-secondary-actions close-group-toggle-row" style="display: none;">
+                                <button class="btn btn-secondary btn-sm trial-trigger-toggle-btn" type="button" style="display: none;">
+                                    Trial Trigger
+                                </button>
+                                <button class="btn btn-secondary btn-sm close-group-toggle-btn" type="button" style="display: none;">
+                                    Close Group
+                                </button>
                             </div>
 
                             <div class="trial-trigger-container" style="display: none; margin-bottom: 1rem; padding: 0.75rem; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 0.5rem;">

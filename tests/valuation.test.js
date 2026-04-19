@@ -572,6 +572,171 @@ module.exports = {
             },
         },
         {
+            name: 'computes best effort group delta from live option deltas',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(subId) {
+                            if (subId === 'long_call') {
+                                return { delta: 0.42 };
+                            }
+                            if (subId === 'short_put') {
+                                return { delta: -0.18 };
+                            }
+                            return null;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_delta',
+                    viewMode: 'active',
+                    liveData: true,
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'long_call',
+                            type: 'call',
+                            pos: 2,
+                            strike: 620,
+                            expDate: '2026-04-17',
+                            iv: 0.2,
+                            cost: 4.2,
+                            currentPrice: 4.4,
+                            closePrice: null,
+                        },
+                        {
+                            id: 'short_put',
+                            type: 'put',
+                            pos: -1,
+                            strike: 590,
+                            expDate: '2026-04-17',
+                            iv: 0.2,
+                            cost: 3.3,
+                            currentPrice: 3.1,
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                assert.equal(result.groupDeltaDisplayable, true);
+                assert.equal(result.groupDeltaAvailable, true);
+                almostEqual(result.groupDelta, 102);
+            },
+        },
+        {
+            name: 'marks group delta unavailable when any live option delta is missing',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(subId) {
+                            if (subId === 'delta_ok') {
+                                return { delta: 0.25 };
+                            }
+                            if (subId === 'delta_missing') {
+                                return { mark: 1.1 };
+                            }
+                            return null;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_delta_na',
+                    viewMode: 'active',
+                    liveData: true,
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'delta_ok',
+                            type: 'call',
+                            pos: 1,
+                            strike: 620,
+                            expDate: '2026-04-17',
+                            iv: 0.2,
+                            cost: 4.2,
+                            currentPrice: 4.4,
+                            closePrice: null,
+                        },
+                        {
+                            id: 'delta_missing',
+                            type: 'put',
+                            pos: 1,
+                            strike: 590,
+                            expDate: '2026-04-17',
+                            iv: 0.2,
+                            cost: 3.3,
+                            currentPrice: 3.1,
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                assert.equal(result.groupDeltaDisplayable, true);
+                assert.equal(result.groupDeltaAvailable, false);
+                assert.equal(result.groupDelta, null);
+                assert.equal(result.groupDeltaMissingLegCount, 1);
+            },
+        },
+        {
             name: 'keeps assigned short-put premium realized while tracking resulting stock leg',
             run() {
                 const ctx = loadValuationContext();

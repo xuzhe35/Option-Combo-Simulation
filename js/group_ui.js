@@ -139,6 +139,25 @@
         };
     }
 
+    function syncSecondaryActionRow(card) {
+        if (!card) {
+            return;
+        }
+
+        const secondaryActionsRow = card.querySelector('.group-secondary-actions');
+        if (!secondaryActionsRow) {
+            return;
+        }
+
+        const trialToggleBtn = card.querySelector('.trial-trigger-toggle-btn');
+        const closeToggleBtn = card.querySelector('.close-group-toggle-btn');
+        const showRow = !!(
+            (trialToggleBtn && trialToggleBtn.style.display !== 'none')
+            || (closeToggleBtn && closeToggleBtn.style.display !== 'none')
+        );
+        secondaryActionsRow.style.display = showRow ? 'flex' : 'none';
+    }
+
     function buildTriggerPreviewHtml(trigger, currencyFormatter) {
         if (!trigger) return '';
 
@@ -337,6 +356,21 @@
         return formatSignedCurrencyValue(currencyFormatter, value, 'success-text', 'danger-text');
     }
 
+    function formatGroupDeltaValue(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return 'N/A';
+        }
+
+        const fixed = Math.abs(parsed) >= 100
+            ? parsed.toFixed(1)
+            : parsed.toFixed(2);
+        const normalized = fixed
+            .replace(/(\.\d*?[1-9])0+$/, '$1')
+            .replace(/\.0+$/, '');
+        return `${parsed >= 0 ? '+' : ''}${normalized}`;
+    }
+
     function resolveGroupHeaderSummaryState(groupResult) {
         if (groupResult.activeViewMode === 'settlement' && Number.isFinite(groupResult.groupPnL)) {
             return {
@@ -480,6 +514,7 @@
                     ? 'Hide trial-trigger controls'
                     : 'Show trial-trigger controls';
             }
+            syncSecondaryActionRow(card);
 
             const triggerBody = triggerContainer.querySelector('.trial-trigger-body');
             const collapseBtn = triggerContainer.querySelector('.trial-trigger-collapse-btn');
@@ -559,6 +594,7 @@
                     ? 'Hide close-group controls'
                     : 'Show close-group controls';
             }
+            syncSecondaryActionRow(card);
 
             const statusEl = closeContainer.querySelector('.close-group-status');
             if (statusEl) {
@@ -677,6 +713,25 @@
         }
 
         const livePnlItem = card.querySelector('.group-header-live-pnl-item');
+        const deltaItem = card.querySelector('.group-header-delta-item');
+        if (deltaItem) {
+            if (groupResult.groupDeltaDisplayable) {
+                deltaItem.style.display = '';
+                const deltaValueEl = card.querySelector('.group-header-delta-value');
+                if (deltaValueEl) {
+                    deltaValueEl.textContent = groupResult.groupDeltaAvailable
+                        ? formatGroupDeltaValue(groupResult.groupDelta)
+                        : 'N/A';
+                    deltaValueEl.classList.toggle('text-muted', !groupResult.groupDeltaAvailable);
+                }
+                deltaItem.title = groupResult.groupDeltaAvailable
+                    ? 'Best-effort net delta for this group, built from live TWS option delta plus any underlying positions.'
+                    : `Delta is not available yet for ${groupResult.groupDeltaMissingLegCount} leg${groupResult.groupDeltaMissingLegCount === 1 ? '' : 's'}.`;
+            } else {
+                deltaItem.style.display = 'none';
+                deltaItem.removeAttribute('title');
+            }
+        }
         if (livePnlItem) {
             const headerSummaryState = resolveGroupHeaderSummaryState(groupResult);
             if (headerSummaryState) {

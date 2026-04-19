@@ -36,7 +36,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.what_if_timeout_seconds = 4.0
         self.test_only_buy_factor = 0.2
         self.test_only_sell_factor = 5.0
-        self.test_only_min_debit = 0.01
         self.test_only_small_credit_buffer = 0.5
         self.default_price_increment = 0.01
         self.managed_reprice_threshold = float(managed_reprice_threshold)
@@ -47,6 +46,50 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.managed_executions_by_order_id = {}
         self.managed_executions_by_perm_id = {}
         self.ib.orderStatusEvent += self._on_managed_order_status
+
+    def _resolve_combo_price_increment(self, request=None, context=None):
+        profile = {}
+        family = ''
+        raw_increment = None
+
+        if request is not None:
+            profile = getattr(request, 'profile', None) or {}
+            family = self._normalize_symbol(profile.get('family') or getattr(request, 'underlying_symbol', ''))
+            raw_increment = profile.get('priceIncrement') or profile.get('price_increment')
+        elif context is not None:
+            profile = context.get('profile') or {}
+            family = self._normalize_symbol(
+                context.get('family')
+                or profile.get('family')
+                or context.get('underlyingSymbol')
+                or ''
+            )
+            raw_increment = (
+                context.get('priceIncrement')
+                or profile.get('priceIncrement')
+                or profile.get('price_increment')
+            )
+
+        try:
+            parsed = float(raw_increment)
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
+
+        if family == 'HG':
+            return 0.0005
+
+        defaults = self._resolve_family_defaults(family) if family else None
+        if defaults:
+            try:
+                parsed = float(defaults.get('price_increment') or defaults.get('priceIncrement'))
+                if parsed > 0:
+                    return parsed
+            except (TypeError, ValueError):
+                pass
+
+        return float(self.default_price_increment)
 
     def _get_valid_managed_reprice_thresholds(self):
         return (0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05)
@@ -851,7 +894,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 )
                 break
 
-            new_limit = self._quantize_limit_price(target_limit_source, context.get('orderAction'))
+            new_limit = self._quantize_limit_price(
+                target_limit_source,
+                context.get('orderAction'),
+                context.get('priceIncrement'),
+            )
             if abs(new_limit - float(context.get('workingLimitPrice') or 0)) < 1e-9:
                 context['managedState'] = 'watching'
                 context['managedMessage'] = (
@@ -905,6 +952,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'websocket': websocket,
             'groupId': request.group_id,
             'groupName': request.group_name,
+            'underlyingSymbol': request.underlying_symbol,
+            'family': self._normalize_symbol((request.profile or {}).get('family') or request.underlying_symbol),
+            'profile': dict(request.profile or {}),
+            'priceIncrement': self._resolve_combo_price_increment(request=request),
             'executionMode': request.execution_mode,
             'account': str(getattr(order, 'account', '') or request.account or '').strip() or None,
             'executionIntent': request.execution_intent,
@@ -1027,6 +1078,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
 
     def _resolve_limit_pricing(self, request, direct_net_mid, order_action):
         abs_mid = round(abs(direct_net_mid), 4)
+        min_limit_price = self._resolve_combo_price_increment(request=request)
 
         if request.execution_mode != 'test_submit':
             return abs_mid, 'middle', ''
@@ -1036,8 +1088,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             if abs_mid >= 1.0:
                 test_price = min(test_price, abs_mid - 1.0)
             else:
-                test_price = min(test_price, max(abs_mid - 0.05, self.test_only_min_debit))
-            test_price = max(test_price, self.test_only_min_debit)
+                test_price = min(test_price, max(abs_mid - 0.05, min_limit_price))
+            test_price = max(test_price, min_limit_price)
             note = 'Test-only guardrail price intentionally set far below the combo mid to avoid fills.'
         else:
             test_price = abs_mid * self.test_only_sell_factor
@@ -1049,16 +1101,24 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
 
         return round(test_price, 4), 'test_guardrail', note
 
-    def _quantize_limit_price(self, raw_price, order_action):
-        increment = Decimal(str(self.default_price_increment))
-        price_decimal = Decimal(str(max(float(raw_price), float(self.test_only_min_debit))))
+    def _quantize_limit_price(self, raw_price, order_action, price_increment=None):
+        increment = Decimal(str(self._resolve_combo_price_increment(context={
+            'priceIncrement': price_increment,
+        })))
+        min_price = increment
+        price_decimal = Decimal(str(max(float(raw_price), float(min_price))))
         if order_action == 'BUY':
-            quantized = price_decimal.quantize(increment, rounding=ROUND_FLOOR)
+            step_count = (price_decimal / increment).to_integral_value(rounding=ROUND_FLOOR)
         else:
-            quantized = price_decimal.quantize(increment, rounding=ROUND_CEILING)
+            step_count = (price_decimal / increment).to_integral_value(rounding=ROUND_CEILING)
 
-        final_price = max(float(quantized), self.test_only_min_debit)
-        return round(final_price, 2)
+        quantized = step_count * increment
+        if quantized < min_price:
+            min_steps = (min_price / increment).to_integral_value(rounding=ROUND_CEILING)
+            quantized = min_steps * increment
+
+        decimals = max(0, -increment.normalize().as_tuple().exponent)
+        return round(float(quantized), decimals)
 
     async def _build_combo_order_from_request(self, websocket, request):
         if not request.legs:
@@ -1147,12 +1207,13 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         order.action = order_action
         order.orderType = 'LMT'
         order.totalQuantity = quantity
+        price_increment = self._resolve_combo_price_increment(request=request)
         limit_price, pricing_source, pricing_note = self._resolve_limit_pricing(
             request,
             direct_net_mid,
             order_action,
         )
-        order.lmtPrice = self._quantize_limit_price(limit_price, order_action)
+        order.lmtPrice = self._quantize_limit_price(limit_price, order_action, price_increment)
         order.tif = self._resolve_time_in_force(request)
         order.transmit = True
         if str(request.account or '').strip():
@@ -1461,7 +1522,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             quote_stats['bestPrice'],
             quote_stats['worstPrice'],
         )
-        new_limit = self._quantize_limit_price(target_limit_source, context.get('orderAction'))
+        new_limit = self._quantize_limit_price(
+            target_limit_source,
+            context.get('orderAction'),
+            context.get('priceIncrement'),
+        )
 
         order = getattr(context.get('trade'), 'order', None)
         if order is None:

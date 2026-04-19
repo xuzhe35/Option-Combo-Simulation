@@ -83,6 +83,66 @@ module.exports = {
             },
         },
         {
+            name: 'moves a group to the top and re-renders once',
+            run() {
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js']);
+                const state = {
+                    groups: [
+                        { id: 'group_1', name: 'First' },
+                        { id: 'group_2', name: 'Second' },
+                        { id: 'group_3', name: 'Third' },
+                    ],
+                };
+                let renderCalls = 0;
+
+                const moved = ctx.OptionComboGroupEditorUI.moveGroupToTop(state, 'group_3', {
+                    renderGroups() {
+                        renderCalls += 1;
+                    },
+                });
+
+                assert.equal(moved, true);
+                assert.deepEqual(state.groups.map(group => group.id), ['group_3', 'group_1', 'group_2']);
+                assert.equal(renderCalls, 1);
+            },
+        },
+        {
+            name: 'moves groups up and down without re-rendering when already at the edge',
+            run() {
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js']);
+                const state = {
+                    groups: [
+                        { id: 'group_1', name: 'First' },
+                        { id: 'group_2', name: 'Second' },
+                        { id: 'group_3', name: 'Third' },
+                    ],
+                };
+                let renderCalls = 0;
+
+                const movedUp = ctx.OptionComboGroupEditorUI.moveGroupByOffset(state, 'group_2', -1, {
+                    renderGroups() {
+                        renderCalls += 1;
+                    },
+                });
+                const movedPastTop = ctx.OptionComboGroupEditorUI.moveGroupByOffset(state, 'group_2', -1, {
+                    renderGroups() {
+                        renderCalls += 1;
+                    },
+                });
+                const movedDown = ctx.OptionComboGroupEditorUI.moveGroupByOffset(state, 'group_2', 2, {
+                    renderGroups() {
+                        renderCalls += 1;
+                    },
+                });
+
+                assert.equal(movedUp, true);
+                assert.equal(movedPastTop, false);
+                assert.equal(movedDown, true);
+                assert.deepEqual(state.groups.map(group => group.id), ['group_1', 'group_3', 'group_2']);
+                assert.equal(renderCalls, 2);
+            },
+        },
+        {
             name: 're-enables active mode toggle once deterministic costs exist',
             run() {
                 const ctx = loadBrowserScripts([

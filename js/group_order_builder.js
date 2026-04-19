@@ -162,6 +162,7 @@
                 optionExchange: profile.optionExchange,
                 underlyingExchange: profile.underlyingExchange,
                 currency: profile.currency,
+                priceIncrement: profile.comboPriceIncrement,
             },
             legs: buildGroupOrderLegRequests(group, globalState, { intent }),
         };

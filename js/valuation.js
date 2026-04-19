@@ -98,6 +98,44 @@
         return (bid + ask) / 2;
     }
 
+    function isClosedLeg(leg) {
+        return !!(leg && leg.closePrice !== null && leg.closePrice !== '');
+    }
+
+    function resolveLegLiveDelta(processedLeg, leg) {
+        if (!processedLeg || !leg) {
+            return {
+                available: false,
+                value: 0,
+                source: '',
+            };
+        }
+
+        if (processedLeg.isUnderlyingLeg) {
+            return {
+                available: true,
+                value: processedLeg.posMultiplier,
+                source: 'underlying_position',
+            };
+        }
+
+        const snapshot = resolveLiveQuoteSnapshotForLeg(leg);
+        const rawDelta = parseFloat(snapshot && snapshot.delta);
+        if (Number.isFinite(rawDelta)) {
+            return {
+                available: true,
+                value: rawDelta * processedLeg.posMultiplier,
+                source: 'live_option_delta',
+            };
+        }
+
+        return {
+            available: false,
+            value: 0,
+            source: '',
+        };
+    }
+
     function resolveLegSelectedLivePrice(group, leg) {
         const currentPrice = parseFloat(leg && leg.currentPrice);
         const currentPriceSource = String(leg && leg.currentPriceSource || '').trim();
@@ -302,8 +340,9 @@
         const simulationAvailable = Number.isFinite(simPricePerShare);
         const simValue = simulationAvailable ? processedLeg.posMultiplier * simPricePerShare : null;
         const pnl = simulationAvailable ? (simValue - processedLeg.costBasis) : null;
-        const isClosed = (leg.closePrice !== null && leg.closePrice !== '');
+        const isClosed = isClosedLeg(leg);
         const livePnlQuote = resolveLegSelectedLivePrice(group, leg);
+        const liveDelta = resolveLegLiveDelta(processedLeg, leg);
         const hasLivePnl = activeViewMode === 'active'
             && livePnlQuote.available
             && (leg.cost !== 0 || livePnlQuote.price !== 0 || isClosed);
@@ -330,6 +369,10 @@
             liveLegPnL,
             effectiveLivePnL,
             livePnlSource: livePnlQuote.source,
+            deltaEligible: !isClosed,
+            liveDelta: liveDelta.value,
+            liveDeltaAvailable: liveDelta.available,
+            liveDeltaSource: liveDelta.source,
             dteText: `Sim DTE: ${processedLeg.tradDTE} td / ${processedLeg.calDTE} cd`,
             ivText,
             currentPriceDisplay: buildCurrentPriceDisplayState(
@@ -363,6 +406,9 @@
         let groupLivePnL = 0;
         let groupHasLiveData = false;
         let groupUsesPortfolioLivePnl = false;
+        let groupDelta = 0;
+        let groupDeltaLegCount = 0;
+        let groupDeltaMissingLegCount = 0;
         let groupSimulationAvailable = true;
 
         const legResults = group.legs.map((leg) => {
@@ -388,8 +434,22 @@
                 groupUsesPortfolioLivePnl = groupUsesPortfolioLivePnl || legResult.livePnlSource === 'tws_portfolio';
             }
 
+            if (legResult.deltaEligible) {
+                groupDeltaLegCount += 1;
+                if (legResult.liveDeltaAvailable) {
+                    groupDelta += legResult.liveDelta;
+                } else {
+                    groupDeltaMissingLegCount += 1;
+                }
+            }
+
             return legResult;
         });
+
+        const groupDeltaDisplayable = globalState.marketDataMode === 'live'
+            && group.liveData === true
+            && groupDeltaLegCount > 0;
+        const groupDeltaAvailable = groupDeltaDisplayable && groupDeltaMissingLegCount === 0;
 
         return {
             id: group.id,
@@ -410,6 +470,11 @@
             groupLivePnL,
             groupHasLiveData,
             groupUsesPortfolioLivePnl,
+            groupDeltaDisplayable,
+            groupDeltaAvailable,
+            groupDelta: groupDeltaAvailable ? groupDelta : null,
+            groupDeltaLegCount,
+            groupDeltaMissingLegCount,
             amortizedResult: isAmortizedMode ? calculateAmortizedCost(group, evalUnderlyingPrice, globalState) : null,
         };
     }

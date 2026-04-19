@@ -92,6 +92,56 @@ module.exports = {
             },
         },
         {
+            name: 'preserves signed live option delta in quote snapshots',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    groups: [],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_put: {
+                            bid: 2.1,
+                            ask: 2.3,
+                            mark: 2.2,
+                            delta: -0.382145,
+                        },
+                    },
+                });
+
+                const snapshot = ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_put');
+                assert.equal(snapshot.bid, 2.1);
+                assert.equal(snapshot.ask, 2.3);
+                assert.equal(snapshot.mark, 2.2);
+                assert.equal(snapshot.delta, -0.382145);
+            },
+        },
+        {
             name: 'builds CL live subscriptions with FUT underlying and FOP option payloads',
             run() {
                 const state = {

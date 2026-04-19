@@ -44,8 +44,44 @@ module.exports = {
                 assert.equal(payload.timeInForce, 'GTC');
                 assert.equal(payload.managedRepriceThreshold, 0.02);
                 assert.equal(payload.account, 'F1234567');
+                assert.equal(payload.profile.priceIncrement, 0.01);
                 assert.equal(payload.legs[0].pos, 1);
                 assert.equal(payload.legs[1].pos, -1);
+            },
+        },
+        {
+            name: 'includes family-specific combo price increment in payload profiles',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_order_builder.js',
+                ]);
+
+                const payload = ctx.OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(
+                    {
+                        id: 'group_hg',
+                        name: 'HG Builder Test',
+                        legs: [
+                            { id: 'leg_1', type: 'call', pos: 5, strike: 6.25, expDate: '2026-07-28' },
+                            { id: 'leg_2', type: 'put', pos: 5, strike: 6.25, expDate: '2026-07-28' },
+                        ],
+                    },
+                    {
+                        underlyingSymbol: 'HG',
+                        underlyingContractMonth: '202607',
+                        baseDate: '2026-04-16',
+                        simulatedDate: '2026-04-16',
+                    },
+                    {
+                        action: 'submit_combo_order',
+                        executionMode: 'submit',
+                        intent: 'open',
+                        source: 'trial_trigger',
+                    }
+                );
+
+                assert.equal(payload.profile.family, 'HG');
+                assert.equal(payload.profile.priceIncrement, 0.0005);
             },
         },
         {

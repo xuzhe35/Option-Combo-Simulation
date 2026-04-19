@@ -504,9 +504,30 @@ input[type=range]:focus {
 .trial-trigger-toggle-btn,
 .close-group-toggle-btn {
     white-space: nowrap;
-    margin-left: 0.35rem;
 }
 
+.group-order-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-left: 0.35rem;
+    flex: 0 0 auto;
+}
+
+.group-order-controls .move-group-top-btn {
+    white-space: nowrap;
+    padding-inline: 0.6rem;
+}
+
+.group-order-controls .icon-btn {
+    width: 30px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.group-header-delta-item,
 .group-header-live-pnl-item {
     display: inline-flex;
     align-items: center;
@@ -520,6 +541,13 @@ input[type=range]:focus {
     font-size: 0.875rem;
 }
 
+.group-header-delta-item {
+    border-style: solid;
+    border-color: rgba(var(--primary-rgb), 0.18);
+    background: rgba(var(--primary-rgb), 0.04);
+}
+
+.group-header-delta-item .label,
 .group-header-live-pnl-item .label {
     color: var(--text-muted);
 }
@@ -580,6 +608,13 @@ input[type=range]:focus {
 .group-actions {
     display: flex;
     align-items: center;
+}
+
+.group-secondary-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
 }
 
 .ml-2 {
@@ -796,15 +831,11 @@ input[type=range]:focus {
         margin-left: auto;
     }
 
+    .group-header-delta-item,
     .group-header-live-pnl-item {
         margin-left: 0.25rem;
         padding: 0.3rem 0.55rem;
         font-size: 0.82rem;
-    }
-
-    .trial-trigger-toggle-btn,
-    .close-group-toggle-btn {
-        margin-left: 0.2rem;
     }
 
     .portfolio-table th,
@@ -841,6 +872,7 @@ input[type=range]:focus {
         font-size: 1rem;
     }
 
+    .group-header-delta-item,
     .group-header-live-pnl-item {
         margin-left: 0;
     }

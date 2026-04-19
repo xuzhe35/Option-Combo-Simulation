@@ -1,203 +1,326 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-03-27
+**Updated:** 2026-04-19
 
 ## 1. Current Product State
 
-This repo is no longer just a single-page option sandbox.
+This repo is a shared browser workspace with two backend flavors, not just a single-page option sandbox.
 
-Current shipped surface area:
+Current surfaces:
 
-- live portfolio workspace in `index.html`
-- historical replay / backtest workspace in `index.html`
-- experimental projection surface in `chart_lab.html`
-- optional IBKR live quotes and combo execution through `ib_server.py`
+- `index.html` for the main portfolio workspace
+- `chart_lab.html` for the shared workspace plus the experimental Chart Lab tab
+- `ib_server.py` for live IBKR data, combo execution, and shared historical-bar fallback
+- `historical_server.py` for SQLite replay snapshots only
 
 ## 2. What Is Actually Implemented
 
-### Portfolio / charting
+### Shared frontend shell
 
-- per-group P&L chart
-- global portfolio P&L chart
-- per-group amortized chart
-- global amortized chart
-- probability analysis
+- live and historical market-data environments in the same runtime
+- query-param-based locked workspaces:
+  - `entry=live`
+  - `entry=historical`
+- workspace banner / title / subtitle changes driven by `workspaceVariant` and `marketDataModeLocked`
+- JSON import / export
+- direct save-back when the browser File System Access API is available
 
-### Mode system
+### Control panel
 
-- `trial`
-- `active`
-- `amortized`
-- `settlement`
+- underlying symbol plus optional underlying futures month
+- historical start date, replay date, and separate simulation date
+- forward-carry sample panel for index products
+- futures-pool panel for FOP products
+- live-order enable switch
+- live TWS account selector once accounts are discovered
+- configurable browser WS endpoint in `index.html`
 
-### Product families
+### Group surface
 
-- equity / ETF default flow
-- index options: `SPX`, `NDX`
-- futures options: `ES`, `NQ`, `CL`, `GC`, `SI`, `HG`
-- futures underlying legs for supported futures-option families
+- add / remove groups and legs
+- group collapse / expand
+- group reorder: top / up / down
+- per-group include / exclude from global totals
+- per-group live-price display mode:
+  - `mark`
+  - `midpoint`
+- group modes:
+  - `trial`
+  - `active`
+  - `amortized`
+  - `settlement`
+- per-group portfolio average-cost sync toggle
+- assignment / exercise conversion into deliverable underlying legs
+
+### Execution workflows
+
+- trigger conditions in trial mode
+- trigger execution modes:
+  - `preview`
+  - `test_submit`
+  - `submit`
+- close-group execution using the same combo-order pipeline
+- managed repricing controls:
+  - continue
+  - concede
+  - cancel
+- execution-report cost attribution back into the group
+- separate close-price attribution for close-group fills
 
 ### Historical replay
 
-- historical quote loading from SQLite
-- replay-day stepping
-- historical trigger preview / submit simulation
-- replay-day entry locking
-- historical close simulation
-- expiry auto-settlement controls
-
-### Live execution
-
-- combo preview
-- test submit
-- real submit
-- managed repricing
-- close-group execution using the same managed repricing path
-- concession pricing from middle toward worst quoted price
-- assignment / exercise conversion into realized premium plus underlying legs
-- execution-report cost attribution preferred over account-level avg cost for triggered orders
+- SQLite replay snapshots
+- historical date-range metadata
+- replay-date stepping
+- historical risk-free rate hydration
+- historical yield-curve hydration
+- `Enter @ Replay Day`
+- auto-close-at-expiry support
+- `Settle All Groups`
+- replay simulations for trigger and close-group flows instead of real broker routing
 
 ### Chart Lab
 
-- custom daily candle chart
-- live latest-price overlay
-- single-group projection
-- included-global-portfolio projection
-- same simulated date as the main portfolio page
-- IB historical daily bars with SQLite fallback
+- daily candle rendering
+- live/latest price overlay
+- one-group or included-global projection
+- same simulated-date concept as the shared portfolio runtime
 
 ## 3. Important Entry Points
 
-### Main frontend pages
+### Frontend
 
 - `index.html`
 - `chart_lab.html`
 
-### Python backends
+### Backends
 
 - `ib_server.py`
 - `historical_server.py`
+- `historical_replay_service.py`
+- `historical_data.py`
 
 ### Startup scripts
 
-Windows:
+Windows wrappers:
 
 - `start_option_combo.bat`
 - `start_historical_replay.bat`
 - `install_ib_bridge_deps.bat`
+
+Underlying PowerShell scripts:
+
+- `powershell_scripts/start_option_combo.ps1`
+- `powershell_scripts/start_historical_replay.ps1`
 - `powershell_scripts/start_option_combo_codex.ps1`
+- `powershell_scripts/launch_ib_server_codex.ps1`
+- `powershell_scripts/restart_option_combo_codex.ps1`
+- `powershell_scripts/restart_ib_server_codex.ps1`
 - `powershell_scripts/start_ib_server_server_template.ps1`
+- `powershell_scripts/resolve_python.ps1`
+- `powershell_scripts/python_launcher_common.ps1`
 
-macOS:
+POSIX / macOS:
 
+- `start_option_combo.sh`
 - `start_option_combo_mac.command`
 - `install_ib_bridge_deps_mac.command`
 
 ## 4. Where To Look First
 
-If you need the current architecture:
-
-- `ARCHITECTURE.md`
-
-If you need user-facing startup and feature notes:
-
-- `README.md`
-
-If you need repo-specific agent / automation guidance:
-
-- `AGENTS.md`
-
-If docs drift from behavior, trust:
+If docs drift from behavior, trust code in roughly this order:
 
 1. `js/product_registry.js`
 2. `js/pricing_context.js`
 3. `js/pricing_core.js`
 4. `js/valuation.js`
 5. `js/session_logic.js`
-6. `js/ws_client.js`
-7. `ib_server.py`
-8. `historical_replay_service.py`
-9. `trade_execution/adapters/ibkr.py`
+6. `js/group_order_builder.js`
+7. `js/group_editor_ui.js`
+8. `js/group_ui.js`
+9. `js/ws_client.js`
+10. `ib_server.py`
+11. `historical_replay_service.py`
+12. `trade_execution/adapters/ibkr.py`
 
 ## 5. Architectural Hotspots
 
 ### `js/product_registry.js`
 
-Runtime source of truth for:
+Runtime product source of truth for:
 
 - family metadata
-- secType
+- secType / exchanges / trading class
 - multipliers
-- trading classes
-- underlying-leg support
-- amortized support
+- settlement kind
+- amortized-mode support
+- price precision and combo increment
+  - `HG` currently uses a `0.0005` combo price increment
+- default futures-month logic
+
+Important current nuance:
+
+- browser product coverage includes `GC`, `SI`, and `HG`
+- `ib_server.py`'s `SUPPORTED_LIVE_FAMILIES` is narrower and currently hard-codes live-family defaults for `ES`, `NQ`, and `CL`
 
 ### `js/pricing_context.js`
 
-This is where the modern anchor logic lives:
+This is where quote-date, simulation-date, anchor-price, futures-pool, and forward-carry semantics are resolved.
 
-- futures-pool mapping
-- forward-rate sample handling
-- anchor display text
-- scenario price mapping
+Historical-mode date behavior now depends on:
 
-### `js/pricing_core.js`
+- `baseDate`
+- `historicalQuoteDate`
+- `simulatedDate`
 
-Pricing SSOT:
+Do not collapse those concepts together when debugging replay behavior.
 
-- BSM
-- Black-76
-- underlying-leg normalization
-- simulated price dispatch
+### `js/session_logic.js`
 
-### `js/valuation.js`
+State normalization source of truth for:
 
-Portfolio aggregation and group derived values.
+- imported sessions
+- trade trigger defaults
+- close-execution defaults
+- forward-rate sample archiving
+- futures-pool archiving
+- historical auto-close-at-expiry defaults
+- per-group live-price mode and avg-cost sync flags
+
+### `js/group_order_builder.js`
+
+Generic combo-request builder shared by:
+
+- trigger open flow
+- manual close-group flow
+
+This is the right place to check when request payloads drift from frontend state.
+
+### `js/group_editor_ui.js`
+
+This file now owns more than simple form rendering.
+
+It also handles:
+
+- group ordering
+- live-price-mode UI
+- avg-cost sync UI
+- trigger / close-group configuration UI
+- assignment / exercise conversion
+- futures-pool leg selection for FOP products
+
+### `js/group_ui.js`
+
+This is the main renderer for:
+
+- trigger runtime state
+- close-group runtime state
+- preview / submit / fill summaries
+- live P&L and delta badges
+- settlement / amortized banners
 
 ### `js/ws_client.js`
 
-This file is large, but it is the real frontend transport layer for:
+This remains the main frontend transport layer.
 
-- live subscriptions
-- historical replay requests
-- Trigger execution messages
-- close-group execution messages
-- broker sync messages
-- execution-report fill attribution
-- live IV fallback handling (`TWS live` / `estimated` / `manual` / `N/A`)
+Current responsibilities include:
+
+- live subscribe payload assembly
+- historical snapshot requests
+- portfolio average-cost syncing
+- managed-account syncing
+- trigger preview / submit flow
+- close-group preview / submit flow
+- managed resume / concede / cancel requests
+- historical auto-settlement and replay-cost seeding
+- incremental live-quote derived-value refreshes
 
 ### `ib_server.py`
 
-Not just a quote streamer anymore.
+Current server responsibilities:
 
-It now also owns:
+- IB connection lifecycle
+- live quote subscriptions
+- managed-account snapshot fan-out
+- portfolio average-cost snapshot fan-out
+- combo preview / validation / submit dispatch through `trade_execution/`
+- managed order-status updates
+- execution-fill cost attribution
+- historical replay snapshots through `HistoricalReplayService`
+- historical daily bars for Chart Lab
+- SQLite fallback bars when IB historical bars are unavailable
 
-- product-aware IB contract qualification
-- historical daily-bar responses for Chart Lab
-- execution routing bridge into `trade_execution/`
-- combo order status fan-out back to the browser
-- explicit server-side PID/log friendly startup templates via `powershell_scripts/`
-- TWS/Gateway connection timeout is set to 20 seconds (up from the default) to accommodate slower environments such as Docker containers
+Important operational detail:
 
-## 6. Current Known Rough Edges
+- the IB connection is started in the background so replay and fallback paths can still work if TWS is down
+
+### `historical_server.py`
+
+This is intentionally much smaller than `ib_server.py`.
+
+Current responsibilities:
+
+- historical quote snapshots
+- empty portfolio avg-cost payloads for historical mode
+
+Not implemented there today:
+
+- live execution
+- managed accounts
+- Chart Lab bar endpoint
+
+## 6. Current Known Boundaries
 
 - `chart_lab.html` is still experimental.
-- The daily K projection aligns the price axis only; projection width is still normalized P&L, not time.
-- Mixed-expiry projection semantics in Chart Lab still need a more explicit path assumption for later-expiry overlays.
-- `contract_specs/*.xml` are still reference metadata, not runtime truth.
-- Reloading the page does not restore old live managed-order supervision state.
-- A remote/server deployment should run exactly one observable `ib_server.py` instance; if multiple unmanaged Python processes are left alive, broker-status debugging becomes unreliable.
+- Chart Lab always opens `ws://127.0.0.1:<port>`; it does not expose a host override like `index.html`.
+- Chart Lab daily bars come from `request_historical_bars`, which currently exists in `ib_server.py`, not `historical_server.py`.
+- The SQLite daily-bar fallback for Chart Lab is therefore only reachable through `ib_server.py`.
+- `historical_server.py` normalizes its bind host to localhost and is replay-only by design.
+- Reloading the page does not reconstruct an old managed-order supervision session.
+- `contract_specs/*.xml` remain reference material; runtime truth lives in `js/product_registry.js`.
+- If multiple unmanaged `ib_server.py` processes are running, broker-status debugging becomes unreliable because the browser may be talking to a different process than the logs you are inspecting.
 
 ## 7. Practical Maintenance Notes
 
-- On Windows, do not assume bare `python` will work; use `powershell_scripts/resolve_python.ps1`.
-- Script order in `index.html` still matters.
-- The main app and Chart Lab now share frontend state, but Chart Lab keeps its own canvas rendering and WebSocket lifecycle.
-- If a tab switch causes missing visuals, check redraw timing before assuming data loss.
+- On Windows, use `powershell_scripts/resolve_python.ps1`; do not assume bare `python`.
+- `index.html` and `chart_lab.html` are still ordered-script apps. Load order matters.
+- Historical mode is not just a flag flip. The app distinguishes:
+  - historical start date / entry date
+  - replay date
+  - simulation date
+- Live combo submit and test-submit are intentionally gated by:
+  - `allowLiveComboOrders === true`
+  - a selected managed TWS account
+- `historicalAutoCloseAtExpiry` defaults to `true` per group.
+- `syncAvgCostFromPortfolio` defaults to enabled for newly created trial groups.
+- `livePriceMode` affects displayed price and live P&L, but combo-order pricing still uses the existing midpoint-based order-preview/submit flow.
 
-## 8. Suggested Next-Trust Areas
+## 8. Tests
 
-If you are changing these features, read these files together:
+The default local runner is:
+
+```powershell
+node .\tests\run.js
+```
+
+That runner currently includes the main suites wired in `tests/run.js`, such as:
+
+- product registry
+- group order builder
+- trade trigger logic
+- valuation
+- session logic / UI
+- control panel UI
+- group UI / editor UI
+- hedge editor UI
+- WebSocket client
+
+Important nuance:
+
+- there are additional test files under `tests/`
+- not every file in that folder is currently included in `tests/run.js`
+
+## 9. Suggested Read Orders
 
 ### Product / pricing changes
 
@@ -209,21 +332,25 @@ If you are changing these features, read these files together:
 ### Historical replay changes
 
 - `historical_server.py`
-- `historical_data.py`
 - `historical_replay_service.py`
+- `historical_data.py`
 - `js/ws_client.js`
+- `js/control_panel_ui.js`
 
 ### Chart Lab changes
 
 - `chart_lab.html`
 - `chart_lab.css`
 - `js/chart_lab.js`
+- `ib_server.py`
 
 ### Execution changes
 
 - `js/group_order_builder.js`
 - `js/trade_trigger_logic.js`
+- `js/group_editor_ui.js`
+- `js/group_ui.js`
 - `js/ws_client.js`
 - `ib_server.py`
+- `trade_execution/engine.py`
 - `trade_execution/adapters/ibkr.py`
-- `powershell_scripts/start_ib_server_server_template.ps1`

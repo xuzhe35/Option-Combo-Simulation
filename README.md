@@ -2,83 +2,163 @@
 
 ## What This Repo Is
 
-Option Combo Simulator is a local browser app for building, pricing, replaying, and tracking multi-leg option structures. Recent extensive refactoring has matured it into a comprehensive analysis and execution workspace.
+Option Combo Simulator is a local browser workspace for building, pricing, replaying, and monitoring multi-leg option structures.
 
-Current shipped capabilities include:
+Today the repo has three related runtime surfaces:
 
-- **Live & Scenario Analysis**: Multi-group option portfolios supporting `trial`, `active`, `amortized`, and `settlement` view modes.
-- **Advanced Workspace Management**: Collapsible combo and hedge groups for efficient vertical space utilization.
-- **Global Aggregation**: Global portfolio P&L tracking, global amortized aggregation, and probability analysis.
-- **Enhanced Visualization**:
-  - Per-group and global P&L charts.
-  - Dedicated **P/L margin sub-charts** for continuous profit margin tracking.
-  - Assigned-shares cost basis banners in settlement mode.
-- **Session Continuity**: Full Import/Export of workspace state via JSON files, preserving simulated dates and timeline settings.
-- **Historical Replay / Backtest**: A dedicated workspace mode to step through SQLite historical option chains, preview triggers, and simulate executions.
-- **Live Trading Bridge**: Optional Python IBKR bridge offering live quotes, IV tracking, and managed live execution of combo orders.
-  - supports trigger-based combo execution, close-group execution, concession pricing, and assignment/exercise-aware bookkeeping
-- **Chart Lab**: An experimental sandbox projecting multi-leg payoff structures directly onto daily candle charts.
+1. `index.html`
+2. `chart_lab.html`
+3. optional Python backends:
+   - `ib_server.py` for live IBKR market data, combo execution, and shared historical-bar fallback
+   - `historical_server.py` for SQLite quote replay only
 
-There is no frontend build step. The app runs from plain HTML/CSS/JavaScript files loaded in order.
+There is still no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in ordered global-script form.
+
+## Current Shipped Capabilities
+
+- Live workspace and historical replay workspace in the same shared shell.
+- Multi-group portfolio editing with:
+  - collapsible groups
+  - group reordering
+  - per-group include/exclude from global totals
+  - optional live-data toggle per group and hedge
+- Group modes:
+  - `trial`
+  - `active`
+  - `amortized`
+  - `settlement`
+- Group-level execution workflows:
+  - trigger conditions in trial mode
+  - preview / test-submit / submit combo requests
+  - managed reprice / continue / concede / cancel controls
+  - close-group execution using the same combo-order path
+- Cost-tracking helpers:
+  - per-group portfolio average-cost sync
+  - assignment / exercise conversion into deliverable underlying legs
+  - execution-report fill attribution back into entry cost or close price
+- Product-aware pricing controls:
+  - Forward Carry panel for cash-settled index options
+  - Futures Pool panel for FOP underlyings
+  - product-specific price precision and combo tick increments
+- Portfolio visuals:
+  - per-group and global P&L charts
+  - per-group and global amortized analysis
+  - probability analysis
+  - group-level live P&L and delta summaries when available
+- Historical replay:
+  - historical entry date plus replay date timeline
+  - separate simulation date in historical mode
+  - replay-day trigger preview / simulated submit
+  - `Enter @ Replay Day`
+  - optional auto-close-at-expiry settlement
+  - `Settle All Groups`
+- Session persistence:
+  - JSON import / export
+  - direct save-back when the browser File System Access API is available
 
 ## Main Entry Points
 
-### Shared App Shell
+### `index.html`
 
-- `index.html`
+This is the main portfolio workspace.
 
-This is the main portfolio workspace. It supports:
+It supports:
 
-- **Live Workspace Mode**: Connect to IBKR for real-time data and execution.
-- **Historical Replay Mode**: Connect to SQLite to replay historical market conditions.
-- Group editing, charting, custom dual-view probability analysis, and execution controls.
-- Session import / export flow.
+- live IBKR mode
+- SQLite historical replay mode
+- forward-carry samples for index products
+- futures-pool management for FOP products
+- live combo-order account selection
+- configurable browser WebSocket host and port
 
-### Experimental Projection Page
+Locked routes supported today:
 
-- `chart_lab.html`
+- `index.html?entry=live&marketDataMode=live&lockMarketDataMode=1`
+- `index.html?entry=historical&marketDataMode=historical&lockMarketDataMode=1`
 
-This is a sandbox page for the daily K-line payoff projection experiment.
+### `chart_lab.html`
 
-Current state:
+This is a separate page that embeds the shared portfolio shell plus an additional `Chart Lab` tab.
 
-- Reuses the same in-memory app state and `Simulated Date` as the main page.
-- Projects either one group or the included global portfolio onto a price chart.
-- Uses IBKR historical daily bars when available, falling back to SQLite.
-- Aligns price on the candle chart (horizontal projection width is currently normalized P&L, not strict time paths).
+Current behavior:
+
+- loads the same shared frontend runtime as `index.html`
+- adds `js/chart_lab.js`
+- opens its own socket for daily bars and latest underlying price
+- projects one group or the included global portfolio onto a daily candle chart
+- uses the same in-memory state and simulated date as the portfolio view on that page
+
+Important current limitation:
+
+- Chart Lab requests `request_historical_bars`, which is implemented in `ib_server.py`
+- the SQLite daily-bar fallback is also currently served through `ib_server.py`
+- `historical_server.py` does **not** implement the bar endpoint
+
+So if you want Chart Lab bars today, run `ib_server.py`, even if you only need the SQLite fallback path.
+
+## Backend Responsibilities
+
+### `ib_server.py`
+
+Current responsibilities include:
+
+- live underlying / option / futures subscriptions
+- managed account snapshots for live order routing
+- portfolio average-cost snapshots
+- combo validation / preview / submit
+- managed repricing supervision
+- close-group execution
+- execution-status and execution-fill fan-out back to the browser
+- historical replay snapshots through `HistoricalReplayService`
+- historical daily bars for Chart Lab, with SQLite fallback when IB bars are unavailable
+
+`ib_server.py` starts the IB connection in the background so the process can still serve replay and fallback paths even if TWS / Gateway is not available.
+
+### `historical_server.py`
+
+This is the lightweight SQLite replay server.
+
+Current responsibilities:
+
+- `request_historical_snapshot`
+- empty `portfolio_avg_cost_update` responses for historical mode
+
+Important boundaries:
+
+- binds to `127.0.0.1` only
+- ignores non-loopback `server.ws_host` values
+- does not provide live execution
+- does not provide Chart Lab daily bars
 
 ## Startup
 
 ### Windows
 
-Preferred startup scripts:
+User-facing wrappers:
 
 - `start_option_combo.bat`
-  - starts the frontend HTTP server
-  - starts `ib_server.py`
-  - prints the locked live workspace URL to the console
-
 - `start_historical_replay.bat`
-  - starts the frontend HTTP server
-  - starts `historical_server.py`
-  - prints the locked historical replay workspace URL to the console
-
 - `install_ib_bridge_deps.bat`
-  - installs the Python dependencies for the live IBKR bridge
 
+These call the PowerShell implementations in `powershell_scripts/`.
+
+Important PowerShell entry points:
+
+- `powershell_scripts/start_option_combo.ps1`
+- `powershell_scripts/start_historical_replay.ps1`
 - `powershell_scripts/start_option_combo_codex.ps1`
-  - background-friendly startup used for Codex / automation flows
-  - writes PID and log files into the repo root
-
+- `powershell_scripts/launch_ib_server_codex.ps1`
+- `powershell_scripts/restart_option_combo_codex.ps1`
+- `powershell_scripts/restart_ib_server_codex.ps1`
 - `powershell_scripts/start_ib_server_server_template.ps1`
-  - editable server-side template for running a single background `ib_server.py`
-  - writes a dedicated PID file plus stdout/stderr logs
-  - intended for remote / server deployments where you want one observable backend instance
 
-### macOS
+### macOS / POSIX
 
 - `start_option_combo_mac.command`
 - `install_ib_bridge_deps_mac.command`
+- `start_option_combo.sh`
+
+`start_option_combo.sh` mirrors the repo's Python-resolution chain for shell sessions.
 
 ## Manual Local Run
 
@@ -96,29 +176,33 @@ Open one of:
 - `http://localhost:8000/index.html?entry=historical&marketDataMode=historical&lockMarketDataMode=1`
 - `http://localhost:8000/chart_lab.html`
 
-### Frontend + live IBKR bridge
+### Frontend + live / shared backend
 
 ```powershell
 $PYTHON = powershell -NoProfile -ExecutionPolicy Bypass -File .\powershell_scripts\resolve_python.ps1
 & $PYTHON ib_server.py
 ```
 
-The live bridge defaults to:
+Default WebSocket bind:
 
 - `ws://127.0.0.1:8765`
 
-The browser workspace now lets you choose both a WebSocket host and port from the sidebar. That makes it possible to:
+This is the recommended backend when you need any of the following:
 
-- connect one tab to your local `TWS + ib_server.py`
-- connect another tab to a remote `IB Gateway + ib_server.py`
-- keep both running from the same local Chrome session without using Remote Desktop
+- live IBKR data
+- combo execution
+- managed repricing
+- Chart Lab daily bars
+- SQLite fallback bars for Chart Lab
 
-### Frontend + historical replay bridge
+### Frontend + historical replay-only backend
 
 ```powershell
 $PYTHON = powershell -NoProfile -ExecutionPolicy Bypass -File .\powershell_scripts\resolve_python.ps1
 & $PYTHON historical_server.py
 ```
+
+Use this when you only need replay snapshots for the main workspace and do not need Chart Lab bars or live execution.
 
 ## Python Resolution
 
@@ -140,11 +224,20 @@ Use:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\powershell_scripts\resolve_python.ps1
 ```
 
-## Live Bridge Config
+Do not commit personal filesystem paths into tracked config files. Use `config.local.ini` for machine-local overrides.
 
-`ib_server.py` reads its WebSocket bind addresses from `config.ini`:
+## WebSocket and Config Notes
+
+### Live backend
+
+`ib_server.py` reads:
 
 ```ini
+[tws]
+host = 127.0.0.1
+port = 7496
+client_id = 999
+
 [server]
 ws_host = 127.0.0.1
 ws_port = 8765
@@ -152,97 +245,61 @@ ws_port = 8765
 
 Important distinction:
 
-- `tws.host` tells `ib_server.py` how to reach TWS / IB Gateway
-- `server.ws_host` tells your browser how to reach `ib_server.py`
+- `tws.host` / `tws.port` tell `ib_server.py` how to reach TWS or IB Gateway
+- `server.ws_host` / `server.ws_port` tell the browser how to reach `ib_server.py`
 
-`server.ws_host` supports a comma-separated list. This lets one `ib_server.py` process listen on both loopback and a Tailscale / LAN address at the same time.
+`server.ws_host` may be a comma-separated list in `ib_server.py`, so one backend can listen on loopback plus a LAN or Tailscale address at the same time.
 
-Example:
+### Historical backend
 
-```ini
-[server]
-ws_host = 127.0.0.1,100.106.134.104
-ws_port = 8765
-```
+`historical_server.py` reuses `server.ws_port`, but normalizes the bind host to `127.0.0.1` regardless of non-loopback config.
 
-That configuration accepts WebSocket connections on:
+### Browser-side endpoint controls
 
-- `127.0.0.1:8765`
-- `100.106.134.104:8765`
-
-## Remote Access Over Tailscale
-
-One practical deployment pattern is:
-
-1. Run `IB Gateway` and `ib_server.py` on the remote machine.
-2. Keep `tws.host = 127.0.0.1` on that remote machine if Gateway is local to it.
-3. Set `server.ws_host` to include the remote machine's Tailscale IP, optionally alongside `127.0.0.1`.
-4. From your own laptop, open the frontend locally in Chrome.
-5. In the sidebar's `WebSocket Endpoint` controls, enter either:
-   - `127.0.0.1` for your personal local account
-   - the remote Tailscale IP or MagicDNS host for the company account
-
-Current connection model:
-
-- one browser tab connects to one backend at a time
-- using two tabs is the simplest way to operate local and remote accounts side by side
-
-Recommended safety posture:
-
-- do not expose `8765` directly to the public internet
-- prefer Tailscale reachability plus OS firewall restrictions
-- if the remote bridge listens on a non-loopback host, confirm only your tailnet can reach it
-- when running on a server, keep exactly one `ib_server.py` instance active and prefer the PID/log workflow in `powershell_scripts/start_ib_server_server_template.ps1`
+- `index.html` exposes both WebSocket host and port controls
+- `chart_lab.html` currently exposes only the port control and always connects to `127.0.0.1`
 
 ## Product Support
 
-### Equity / ETF option families
+### Browser pricing / valuation support
 
-- default stock / ETF flow
-- equity-style underlying legs supported
-- amortized mode supported
+`js/product_registry.js` currently recognizes:
 
-### Cash-settled index option families
+- equity / ETF default flow
+- cash-settled index options:
+  - `SPX`
+  - `NDX`
+- futures-option families:
+  - `ES`
+  - `NQ`
+  - `CL`
+  - `GC`
+  - `SI`
+  - `HG`
 
-- `SPX`
-- `NDX`
+Current browser-side behavior:
 
-Current behavior:
+- equity-style underlyings supported for stock / ETF products
+- futures underlyings supported for FOP products
+- product-specific price decimals and combo increments supported
+  - `HG` uses 5 displayed decimals with a `0.0005` combo price increment
+- Black-76 used for FOP and index-style paths
+- amortized mode intentionally disabled for non-equity deliverables
 
-- priced through product-aware metadata
-- live-data contract resolution supported through the current IBKR bridge
-- cash-settled behavior modeled
-- amortized mode intentionally disabled
+### Live IBKR backend notes
 
-### Futures option families
+Current live backend wiring includes:
 
-- `ES`
-- `NQ`
-- `CL`
-- `GC`
-- `SI`
-- `HG`
+- stock / ETF flow
+- index exchange fallbacks for `SPX` and `NDX`
+- explicit live-family defaults in `ib_server.py` for:
+  - `ES`
+  - `NQ`
+  - `CL`
 
-Current behavior:
+The frontend registry knows about `GC`, `SI`, and `HG`, but if you are touching live contract-qualification logic, note that `ib_server.py`'s hard-coded family defaults are narrower than the browser registry.
 
-- family-specific multipliers
-- futures underlying legs supported
-- Black-76 pricing path available
-- product-aware IBKR contract building supported
-- amortized mode intentionally disabled
-
-## Historical Replay / Backtest
-
-Historical replay is implemented as a first-class execution environment.
-
-Current behavior includes:
-
-- historical mode cleanly split from live mode
-- replay-day quote snapshots loaded directly from SQLite
-- deterministic replay timeline stepping
-- historical trigger preview, test submit, and simulated fills
-- `"Enter @ Replay Day"` workflow to lock past quotes as entry prices
-- close simulation and expiry auto-settlement controls
+## Historical Replay
 
 Main files:
 
@@ -250,55 +307,73 @@ Main files:
 - `historical_data.py`
 - `historical_replay_service.py`
 
-## Major Files
+Current replay payloads include:
 
-| File | Responsibility |
+- underlying snapshot
+- option snapshots
+- historical effective date metadata
+- available replay date bounds
+- historical risk-free rate
+- historical yield-curve points
+- expiry-date underlying snapshots used for auto-settlement flows
+
+Main workspace behavior in historical mode:
+
+- `baseDate` acts as the historical start / entry date
+- `historicalQuoteDate` acts as the replay date
+- `simulatedDate` can move forward independently for pricing and charts
+- real TWS order routing is blocked
+- trigger and close-group flows become replay simulations instead of live broker actions
+
+## Project Map
+
+| File / Path | Responsibility |
 | --- | --- |
-| `index.html` | Main app shell, templates, shared controls, UI layouts |
-| `chart_lab.html` | Experimental daily candle projection page |
-| `style.css` | Main app styles |
-| `chart_lab.css` | Chart Lab styles |
-| `js/app.js` | Core application bootstrap and query parameter routing |
-| `js/session_logic.js` | Import/Export core capabilities and state restoration |
-| `js/product_registry.js` | Product-family metadata and capability flags |
-| `js/pricing_context.js` | Underlying anchor logic, futures-pool and forward-rate context |
-| `js/pricing_core.js` | Core pricing helpers and simulated pricing logic |
-| `js/valuation.js` | Portfolio/group derived values |
-| `js/chart.js` | P&L, amortized, and margin sub-chart renderers |
-| `js/chart_controls.js` | Group/global chart control plumbing |
-| `js/prob_charts.js` | Probability analysis charts and worker logic |
-| `js/ws_client.js` | Browser WebSocket client for live and historical backends |
-| `js/chart_lab.js` | Daily K projection lab |
-| `ib_server.py` | IBKR live market data and execution bridge |
-| `historical_server.py` | SQLite historical replay backend |
-| `historical_data.py` | SQLite data access module |
-| `historical_replay_service.py` | Historical replay payload assembly |
-| `trade_execution/` | Execution engine routing structure |
-
-## Current Known Boundaries
-
-- `chart_lab.html` is still experimental.
-- The daily K projection currently aligns the price axis only; horizontal projection width is normalized P&L, not time.
-- Mixed-expiry payoff projection still needs a more explicit path assumption if you want a financially rigorous later-expiry overlay.
-- `contract_specs/*.xml` exist as reference material; runtime product behavior is strictly defined in `js/product_registry.js`.
-- Reloading the page does not currently reconstruct an older managed-order supervision session.
+| `index.html` | main portfolio workspace |
+| `chart_lab.html` | shared workspace plus Chart Lab tab |
+| `style.css` | shared styles |
+| `chart_lab.css` | Chart Lab styling |
+| `js/app.js` | state container and orchestration |
+| `js/session_ui.js` | workspace chrome, locked-mode labels, document title |
+| `js/control_panel_ui.js` | market-data mode, date controls, forward-carry panel, futures-pool panel |
+| `js/product_registry.js` | product-family source of truth |
+| `js/pricing_context.js` | quote-date / simulation-date / anchor resolution |
+| `js/pricing_core.js` | pricing SSOT |
+| `js/valuation.js` | group and portfolio derived data |
+| `js/group_order_builder.js` | open/close combo request payload builders |
+| `js/trade_trigger_logic.js` | trigger state and order-trigger rules |
+| `js/group_editor_ui.js` | group editor, trial-trigger UI, close-group UI |
+| `js/group_ui.js` | group DOM writers and execution-status rendering |
+| `js/ws_client.js` | live subscriptions, replay requests, combo-order transport, fill/status updates |
+| `js/chart_lab.js` | Chart Lab socket, daily bars, projection rendering |
+| `trade_execution/` | execution engine and IBKR adapter |
 
 ## Tests
 
 Tests live under `tests/`.
 
-They currently cover key shared logic areas, including:
+The default Node runner is:
 
+```powershell
+node .\tests\run.js
+```
+
+It currently runs the suites wired into `tests/run.js`, including:
+
+- market holidays
 - product registry
-- pricing core / BSM / Black-76 behavior
-- valuation and session logic
-- WebSocket client payload assembly
-- pricing-context and forward-rate functionality
-- group order generation
-- UI helpers
+- distribution proxy config
+- group order builder
+- trade trigger logic
+- BSM / amortized / valuation
+- session logic / session UI / control panel UI
+- group UI / group editor UI / hedge editor UI
+- WebSocket client
+
+Additional test files also exist in `tests/`, but not every file in that directory is currently included by the default runner.
 
 ## Related Docs
 
-- `ARCHITECTURE.md` - Core runtime design, lifecycle events, and exact module responsibilities.
-- `DEV_HANDOVER.md` - Operational developer notes, including the precise state of live features vs. experimental work.
-- `AGENTS.md` - Repo-specific workflow guidelines and script resolution advice for automated agents.
+- `ARCHITECTURE.md` - runtime layout and module responsibilities
+- `DEV_HANDOVER.md` - developer-facing operational notes
+- `AGENTS.md` - repo-specific agent guidance

@@ -1039,6 +1039,17 @@ def _extract_option_iv(ticker):
     return None
 
 
+def _extract_option_delta(ticker):
+    for attr_name in ('modelGreeks', 'bidGreeks', 'askGreeks', 'lastGreeks'):
+        greeks = getattr(ticker, attr_name, None)
+        if not greeks:
+            continue
+        raw = getattr(greeks, 'delta', None)
+        if raw is not None and raw == raw:
+            return round(raw, 6)
+    return None
+
+
 def _log_option_iv_debug_if_needed(sub_id, ticker, iv):
     contract = getattr(ticker, 'contract', None)
     symbol = str(getattr(contract, 'symbol', '') or '').upper()
@@ -1144,6 +1155,7 @@ def on_pending_tickers(tickers):
                         iv = raw
                 if iv is None:
                     iv = _extract_option_iv(ticker)
+                delta = _extract_option_delta(ticker)
                 _log_option_iv_debug_if_needed(sub_id, ticker, iv)
 
                 if quote is not None:
@@ -1151,6 +1163,8 @@ def on_pending_tickers(tickers):
 
                     if iv and iv == iv and iv > 0: # Check for NaN
                         payload["options"][sub_id]["iv"] = iv
+                    if delta is not None:
+                        payload["options"][sub_id]["delta"] = delta
                     has_data = True
                     
         # Send data only to the client that requested it

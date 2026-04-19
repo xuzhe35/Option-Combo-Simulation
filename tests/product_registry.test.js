@@ -120,6 +120,8 @@ module.exports = {
                 assert.equal(registry.getPriceDisplayDecimals('SPY'), 2);
                 assert.equal(registry.getPriceDisplayDecimals('HG'), 5);
                 assert.equal(registry.getPriceInputStep('HG'), '0.00001');
+                assert.equal(registry.getComboPriceIncrement('SPY'), 0.01);
+                assert.equal(registry.getComboPriceIncrement('HG'), 0.0005);
                 assert.equal(registry.formatPriceInputValue('HG', 4.35789), '4.35789');
                 assert.equal(registry.formatPriceDisplay('HG', 4.35789), '$4.35789');
             },

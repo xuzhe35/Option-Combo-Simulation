@@ -33,7 +33,7 @@ const _liveQuoteRuntime = {
     futureQuotesById: new Map(),
     stockQuotesBySymbol: new Map(),
 };
-const _liveQuoteSnapshotFields = ['bid', 'ask', 'mark', 'iv'];
+const _liveQuoteSnapshotFields = ['bid', 'ask', 'mark', 'iv', 'delta'];
 
 function _cloneLiveQuoteSnapshot(rawQuote) {
     if (!rawQuote || typeof rawQuote !== 'object') {
@@ -47,6 +47,10 @@ function _cloneLiveQuoteSnapshot(rawQuote) {
             snapshot[field] = parsed;
         }
     });
+    const delta = parseFloat(rawQuote.delta);
+    if (Number.isFinite(delta)) {
+        snapshot.delta = delta;
+    }
 
     return Object.keys(snapshot).length > 0 ? snapshot : null;
 }

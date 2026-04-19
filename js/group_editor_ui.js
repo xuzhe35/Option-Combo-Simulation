@@ -323,6 +323,41 @@
         deps.renderGroups();
     }
 
+    function moveGroupToIndex(state, groupId, targetIndex, deps) {
+        const groups = Array.isArray(state && state.groups) ? state.groups : [];
+        const currentIndex = groups.findIndex(group => group && group.id === groupId);
+        if (currentIndex < 0) {
+            return false;
+        }
+
+        const boundedIndex = Math.max(0, Math.min(groups.length - 1, targetIndex));
+        if (boundedIndex === currentIndex) {
+            return false;
+        }
+
+        const [group] = groups.splice(currentIndex, 1);
+        groups.splice(boundedIndex, 0, group);
+
+        if (deps && typeof deps.renderGroups === 'function') {
+            deps.renderGroups();
+        }
+        return true;
+    }
+
+    function moveGroupByOffset(state, groupId, offset, deps) {
+        const groups = Array.isArray(state && state.groups) ? state.groups : [];
+        const currentIndex = groups.findIndex(group => group && group.id === groupId);
+        if (currentIndex < 0) {
+            return false;
+        }
+
+        return moveGroupToIndex(state, groupId, currentIndex + (parseInt(offset, 10) || 0), deps);
+    }
+
+    function moveGroupToTop(state, groupId, deps) {
+        return moveGroupToIndex(state, groupId, 0, deps);
+    }
+
     function addLegToGroupById(state, groupId, generateId, deps) {
         const group = state.groups.find(entry => entry.id === groupId);
         if (!group) return;
@@ -440,6 +475,45 @@
                 if (!closeExecution) return;
                 closeExecution.isExpanded = !closeExecution.isExpanded;
                 deps.renderGroups();
+            });
+        }
+
+        const groupIndex = Array.isArray(state && state.groups)
+            ? state.groups.findIndex(entry => entry && entry.id === group.id)
+            : -1;
+        const isFirstGroup = groupIndex <= 0;
+        const isLastGroup = groupIndex < 0 || groupIndex >= ((state.groups || []).length - 1);
+        const moveTopBtn = card.querySelector('.move-group-top-btn');
+        const moveUpBtn = card.querySelector('.move-group-up-btn');
+        const moveDownBtn = card.querySelector('.move-group-down-btn');
+
+        if (moveTopBtn) {
+            moveTopBtn.disabled = isFirstGroup;
+            moveTopBtn.title = isFirstGroup
+                ? 'This group is already at the top'
+                : 'Move this group to the top';
+            moveTopBtn.addEventListener('click', () => {
+                moveGroupToTop(state, group.id, deps);
+            });
+        }
+
+        if (moveUpBtn) {
+            moveUpBtn.disabled = isFirstGroup;
+            moveUpBtn.title = isFirstGroup
+                ? 'This group is already at the top'
+                : 'Move this group up';
+            moveUpBtn.addEventListener('click', () => {
+                moveGroupByOffset(state, group.id, -1, deps);
+            });
+        }
+
+        if (moveDownBtn) {
+            moveDownBtn.disabled = isLastGroup;
+            moveDownBtn.title = isLastGroup
+                ? 'This group is already at the bottom'
+                : 'Move this group down';
+            moveDownBtn.addEventListener('click', () => {
+                moveGroupByOffset(state, group.id, 1, deps);
             });
         }
 
@@ -1284,6 +1358,9 @@
         toggleGroupCollapse,
         addGroup,
         removeGroup,
+        moveGroupToTop,
+        moveGroupByOffset,
+        moveGroupToIndex,
         addLegToGroupById,
         addLegToGroup,
         removeLeg,

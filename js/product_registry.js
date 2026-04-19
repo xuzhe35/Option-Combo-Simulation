@@ -26,6 +26,7 @@
         settlementKind: 'equity-deliverable',
         pricingModel: 'bsm-spot',
         priceDisplayDecimals: 2,
+        comboPriceIncrement: 0.01,
         supportsAmortizedMode: true,
         supportsLegacyLiveData: true,
         supportsUnderlyingLegs: true,
@@ -146,6 +147,7 @@
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
             priceDisplayDecimals: 5,
+            comboPriceIncrement: 0.0005,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -490,6 +492,12 @@
         return `0.${'0'.repeat(Math.max(0, decimals - 1))}1`;
     }
 
+    function getComboPriceIncrement(symbol) {
+        const profile = resolveUnderlyingProfile(symbol);
+        const parsed = parseFloat(profile.comboPriceIncrement);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.01;
+    }
+
     function formatPriceInputValue(symbol, value) {
         const parsed = parseFloat(value);
         if (!Number.isFinite(parsed)) {
@@ -551,6 +559,7 @@
         getUnderlyingLegPriceTitle,
         getPriceDisplayDecimals,
         getPriceInputStep,
+        getComboPriceIncrement,
         formatPriceInputValue,
         formatPriceDisplay,
         getDeliverableLabel,
