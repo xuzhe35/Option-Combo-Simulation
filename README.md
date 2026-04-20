@@ -160,6 +160,12 @@ Important PowerShell entry points:
 
 `start_option_combo.sh` mirrors the repo's Python-resolution chain for shell sessions.
 
+On macOS, the startup scripts:
+
+- prefer `OPTION_COMBO_PYTHON`, `config.local.ini`, `.venv`, and `venv`
+- fall back to `python3.14` through `python3.10`, then `python3` / `python`
+- require Python 3.10 or newer because `ib_async` does not support older interpreters
+
 ## Manual Local Run
 
 ### Frontend only

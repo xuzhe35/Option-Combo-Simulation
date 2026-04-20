@@ -1,10 +1,14 @@
 Portfolio/
 sqlite_spy/
 __pycache__/
+.venv/
+venv/
 *.py[cod]
 server_log.txt
 ib_server.codex*.log
 http_server.codex*.log
+ib_server.log
+http_server.log
 config.local.ini
 *.pid
 *PLANE*
