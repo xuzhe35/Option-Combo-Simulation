@@ -218,6 +218,61 @@ body {
     margin-bottom: 0.5rem;
 }
 
+.control-panel-card {
+    padding: 1.2rem;
+}
+
+.control-panel-section-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.control-panel-section-title {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.control-panel-section-subtitle {
+    margin-top: 0.25rem;
+    max-width: 220px;
+}
+
+.control-panel-section-toggle {
+    flex: 0 0 auto;
+}
+
+.control-panel-section-chevron {
+    transition: transform 0.2s ease;
+}
+
+.control-panel-collapsible-body {
+    display: block;
+}
+
+.control-panel-card.is-collapsed {
+    padding-bottom: 1.2rem;
+}
+
+.control-panel-card.is-collapsed .control-panel-section-header {
+    align-items: center;
+    margin-bottom: 0;
+}
+
+.control-panel-card.is-collapsed .control-panel-section-subtitle {
+    display: none;
+}
+
+.control-panel-card.is-collapsed .control-panel-section-chevron {
+    transform: rotate(-90deg);
+}
+
+.control-panel-card.is-collapsed .control-panel-collapsible-body {
+    display: none;
+}
+
 .section-desc {
     color: var(--text-muted);
     font-size: 0.875rem;
@@ -610,6 +665,24 @@ input[type=range]:focus {
     align-items: center;
 }
 
+.group-card .group-title-area {
+    flex-wrap: nowrap;
+}
+
+.group-card .group-name-input {
+    flex: 1 1 240px;
+    width: auto;
+    min-width: 0;
+    max-width: 340px;
+}
+
+.group-card .group-order-controls,
+.group-card .group-header-delta-item,
+.group-card .group-header-live-pnl-item,
+.group-card .group-actions {
+    flex: 0 0 auto;
+}
+
 .group-secondary-actions {
     display: flex;
     align-items: center;
@@ -831,6 +904,15 @@ input[type=range]:focus {
         margin-left: auto;
     }
 
+    .group-card .group-title-area {
+        flex-wrap: wrap;
+    }
+
+    .group-card .group-name-input {
+        flex-basis: 220px;
+        max-width: 100%;
+    }
+
     .group-header-delta-item,
     .group-header-live-pnl-item {
         margin-left: 0.25rem;
@@ -865,6 +947,11 @@ input[type=range]:focus {
 
     .group-actions {
         justify-content: space-between;
+    }
+
+    .group-card .group-name-input {
+        width: 100%;
+        flex-basis: 100%;
     }
 
     .group-name-input {

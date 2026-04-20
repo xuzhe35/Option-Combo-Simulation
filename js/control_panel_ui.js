@@ -379,6 +379,31 @@
         }
     }
 
+    function _syncPrimaryControlPanelCollapseUi(state) {
+        const card = _getElement('primaryControlPanelCard');
+        const body = _getElement('primaryControlPanelBody');
+        const toggleBtn = _getElement('togglePrimaryControlPanelBtn');
+        const toggleLabel = toggleBtn ? toggleBtn.querySelector('.control-panel-toggle-label') : null;
+        const collapsed = !!(state && state.primaryControlPanelCollapsed === true);
+
+        if (card) {
+            card.classList.toggle('is-collapsed', collapsed);
+        }
+
+        _setHidden(body, collapsed);
+
+        if (toggleBtn) {
+            toggleBtn.title = collapsed
+                ? 'Expand Simulation Controls'
+                : 'Collapse Simulation Controls';
+            toggleBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        }
+
+        if (toggleLabel) {
+            toggleLabel.textContent = collapsed ? 'Expand' : 'Collapse';
+        }
+    }
+
     function _renderFuturesPoolStatus(state) {
         const status = _getElement('futuresPoolStatus');
         if (!status) return;
@@ -1079,6 +1104,26 @@
         }
     }
 
+    function _syncGreeksUi(state) {
+        const toggleBtn = _getElement('toggleGreeksBtn');
+        const status = _getElement('greeksStatusText');
+        const enabled = !!(state && state.greeksEnabled === true);
+
+        if (toggleBtn) {
+            toggleBtn.textContent = enabled ? 'Disable Greeks' : 'Enable Greeks';
+            toggleBtn.className = enabled ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm';
+            toggleBtn.title = enabled
+                ? 'Turn off live Greeks and hide Group Delta to keep the UI lighter.'
+                : 'Turn on live Greeks and show Group Delta in live groups.';
+        }
+
+        if (status) {
+            status.textContent = enabled
+                ? 'Greeks enabled. Group Delta will appear in live groups as live option delta arrives.'
+                : 'Off by default to keep the live UI responsive. Enable only when you want Group Delta.';
+        }
+    }
+
     function _syncHistoricalTimelineUi(state) {
         const replayDateInput = _getElement('historicalReplayDate');
         const replaySlider = _getElement('historicalReplaySlider');
@@ -1183,7 +1228,9 @@
 
     function refreshBoundDynamicControls() {
         if (!_boundState) return;
+        _syncPrimaryControlPanelCollapseUi(_boundState);
         _syncMarketDataModeUI(_boundState);
+        _syncGreeksUi(_boundState);
         _syncHistoricalTimelineUi(_boundState);
         _syncSimulationDateUi(_boundState);
         _syncUnderlyingContractMonthUI(_boundState, false);
@@ -1553,8 +1600,25 @@
         const ivInput = _getElement('ivOffset');
         const ivSlider = _getElement('ivOffsetSlider');
         const ivDisplay = _getElement('ivOffsetDisplay');
+        const toggleGreeksBtn = _getElement('toggleGreeksBtn');
+        const togglePrimaryControlPanelBtn = _getElement('togglePrimaryControlPanelBtn');
         const allowLiveComboOrdersInput = _getElement('allowLiveComboOrders');
         const liveComboOrderAccountSelect = _getElement('liveComboOrderAccountSelect');
+
+        if (typeof state.primaryControlPanelCollapsed !== 'boolean') {
+            state.primaryControlPanelCollapsed = false;
+        }
+        _syncPrimaryControlPanelCollapseUi(state);
+
+        if (togglePrimaryControlPanelBtn
+            && typeof togglePrimaryControlPanelBtn.addEventListener === 'function'
+            && togglePrimaryControlPanelBtn.__primaryControlPanelBound !== true) {
+            togglePrimaryControlPanelBtn.__primaryControlPanelBound = true;
+            togglePrimaryControlPanelBtn.addEventListener('click', () => {
+                state.primaryControlPanelCollapsed = !state.primaryControlPanelCollapsed;
+                _syncPrimaryControlPanelCollapseUi(state);
+            });
+        }
 
         function updateIv(val) {
             const pct = parseFloat(val);
@@ -1573,6 +1637,19 @@
             ivDisplay.textContent = `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`;
             throttledUpdate();
         });
+
+        if (toggleGreeksBtn) {
+            _syncGreeksUi(state);
+            toggleGreeksBtn.addEventListener('click', () => {
+                state.greeksEnabled = !(state.greeksEnabled === true);
+                _syncGreeksUi(state);
+                if (_getMarketDataMode(state) === 'live'
+                    && typeof handleLiveSubscriptions === 'function') {
+                    handleLiveSubscriptions();
+                }
+                updateDerivedValues();
+            });
+        }
 
         if (allowLiveComboOrdersInput) {
             allowLiveComboOrdersInput.checked = state.allowLiveComboOrders === true;
@@ -1610,5 +1687,6 @@
         refreshFuturesPoolPanel,
         resolvePricingInputMode: _getPricingInputMode,
         toggleSidebar,
+        syncPrimaryControlPanelCollapseUi: _syncPrimaryControlPanelCollapseUi,
     };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

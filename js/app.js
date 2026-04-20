@@ -90,6 +90,8 @@ const state = {
     historicalAvailableEndDate: '',
     interestRate: 0.03, // 3% default risk-free rate
     ivOffset: 0.0, // 0%
+    greeksEnabled: false,
+    primaryControlPanelCollapsed: false,
     allowLiveComboOrders: false,
     liveComboOrderAccounts: [],
     liveComboOrderAccountsConnected: false,
@@ -106,6 +108,7 @@ window.__optionComboApp = {
     renderGroups: () => renderGroups(),
     renderHedges: () => renderHedges(),
     updateLiveQuoteDerivedValues: (changeSet) => updateLiveQuoteDerivedValues(changeSet),
+    updateLiveQuoteGroupDeltaValues: (changeSet) => updateLiveQuoteGroupDeltaValues(changeSet),
 };
 
 // Throttle flag for slider-driven updates (one rAF per frame max)
@@ -334,6 +337,14 @@ function applyGroupDerivedData(card, groupResult) {
     });
 }
 
+function applyGroupDeltaSummary(card, groupResult) {
+    if (!card || !groupResult) return;
+    if (typeof OptionComboGroupUI !== 'undefined'
+        && typeof OptionComboGroupUI.applyGroupDeltaSummary === 'function') {
+        OptionComboGroupUI.applyGroupDeltaSummary(card, groupResult);
+    }
+}
+
 function applyGlobalDerivedData(derivedData) {
     OptionComboGlobalUI.applyGlobalDerivedData(derivedData, currencyFormatter, {
         drawGlobalChart,
@@ -463,6 +474,75 @@ function updateLiveQuoteDerivedValues(changeSet = {}) {
         groupIds,
         hedgeIds,
     });
+    return derivedData;
+}
+
+function _hasGroupDeltaSummaryChanged(currentGroupResult, nextGroupDeltaSummary) {
+    if (!currentGroupResult || !nextGroupDeltaSummary) {
+        return true;
+    }
+
+    return currentGroupResult.groupDeltaDisplayable !== nextGroupDeltaSummary.groupDeltaDisplayable
+        || currentGroupResult.groupDeltaAvailable !== nextGroupDeltaSummary.groupDeltaAvailable
+        || currentGroupResult.groupDelta !== nextGroupDeltaSummary.groupDelta
+        || currentGroupResult.groupDeltaLegCount !== nextGroupDeltaSummary.groupDeltaLegCount
+        || currentGroupResult.groupDeltaMissingLegCount !== nextGroupDeltaSummary.groupDeltaMissingLegCount;
+}
+
+function updateLiveQuoteGroupDeltaValues(changeSet = {}) {
+    if (!_latestPortfolioDerivedData
+        || typeof OptionComboValuation === 'undefined'
+        || typeof OptionComboValuation.computeGroupDeltaSummary !== 'function') {
+        return updateDerivedValues();
+    }
+
+    const groupIds = Array.from(new Set(
+        Array.isArray(changeSet.groupIds) ? changeSet.groupIds.filter(Boolean) : []
+    ));
+    if (groupIds.length === 0) {
+        return _latestPortfolioDerivedData;
+    }
+
+    const nextGroupResults = _latestPortfolioDerivedData.groupResults.slice();
+    let changedAny = false;
+
+    groupIds.forEach((groupId) => {
+        const group = state.groups.find(candidate => candidate.id === groupId);
+        const existingIndex = nextGroupResults.findIndex(result => result.id === groupId);
+        if (!group || existingIndex < 0) {
+            return;
+        }
+
+        const currentGroupResult = nextGroupResults[existingIndex];
+        const nextGroupDeltaSummary = OptionComboValuation.computeGroupDeltaSummary(group, state);
+        if (!_hasGroupDeltaSummaryChanged(currentGroupResult, nextGroupDeltaSummary)) {
+            return;
+        }
+
+        nextGroupResults[existingIndex] = {
+            ...currentGroupResult,
+            ...nextGroupDeltaSummary,
+        };
+        changedAny = true;
+    });
+
+    if (!changedAny) {
+        return _latestPortfolioDerivedData;
+    }
+
+    const derivedData = _cachePortfolioDerivedData({
+        ..._latestPortfolioDerivedData,
+        groupResults: nextGroupResults,
+        groupResultsById: new Map(nextGroupResults.map(result => [result.id, result])),
+    });
+
+    groupIds.forEach((groupId) => {
+        const card = document.querySelector(`.group-card[data-group-id="${groupId}"]`);
+        const groupResult = derivedData.groupResultsById.get(groupId);
+        if (!card || !groupResult) return;
+        applyGroupDeltaSummary(card, groupResult);
+    });
+
     return derivedData;
 }
 
@@ -599,6 +679,7 @@ function applyImportedState(normalizedState, importedSessionTitle = '') {
     state.historicalAvailableEndDate = '';
     state.interestRate = normalizedState.interestRate;
     state.ivOffset = normalizedState.ivOffset;
+    state.primaryControlPanelCollapsed = normalizedState.primaryControlPanelCollapsed === true;
     state.allowLiveComboOrders = normalizedState.allowLiveComboOrders === true;
     if (state.marketDataMode !== 'live') {
         state.allowLiveComboOrders = false;

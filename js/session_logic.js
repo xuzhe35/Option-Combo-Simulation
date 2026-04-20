@@ -286,6 +286,10 @@
         return value !== false;
     }
 
+    function normalizeGreeksEnabled(value) {
+        return value === true;
+    }
+
     function groupHasDeterministicCost(group) {
         return (group.legs || []).some(leg => Math.abs(parseFloat(leg.cost) || 0) > 0);
     }
@@ -348,6 +352,8 @@
             historicalAvailableEndDate: '',
             interestRate: importedState.interestRate !== undefined ? importedState.interestRate : 0.03,
             ivOffset: importedState.ivOffset || 0,
+            greeksEnabled: normalizeGreeksEnabled(importedState.greeksEnabled),
+            primaryControlPanelCollapsed: importedState.primaryControlPanelCollapsed === true,
             allowLiveComboOrders: importedState.allowLiveComboOrders === true,
             liveComboOrderAccounts: [],
             liveComboOrderAccountsConnected: false,
@@ -507,6 +513,7 @@
         normalizePortfolioAvgCostSync,
         normalizeGroupLivePriceMode,
         normalizeHistoricalAutoCloseAtExpiry,
+        normalizeGreeksEnabled,
         groupHasDeterministicCost,
         resolveGroupViewModeChange,
         getRenderableGroupViewMode,
