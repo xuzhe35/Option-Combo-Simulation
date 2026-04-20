@@ -134,6 +134,7 @@ module.exports = {
                         underlyingPrice: 500,
                         baseDate: '2026-03-14',
                         marketDataMode: 'historical',
+                        greeksEnabled: true,
                         historicalQuoteDate: '2025-04-07',
                         daysPassed: 3,
                         selectedLiveComboOrderAccount: 'F7654321',
@@ -153,6 +154,7 @@ module.exports = {
                 assert.equal(result.underlyingContractMonth, '202606');
                 assert.equal(result.simulatedDate, '2026-03-17');
                 assert.equal(result.marketDataMode, 'historical');
+                assert.equal(result.greeksEnabled, true);
                 assert.equal(result.historicalQuoteDate, '2025-04-07');
                 assert.equal(result.groups.length, 2);
                 assert.equal(result.hedges.length, 2);
@@ -365,6 +367,7 @@ module.exports = {
                 const ctx = loadSessionLogicContext();
                 const original = {
                     underlyingSymbol: 'SPY',
+                    greeksEnabled: true,
                     forwardRateSamples: [{
                         id: 'sample_1',
                         daysToExpiry: 30,
@@ -431,6 +434,7 @@ module.exports = {
 
                 assert.equal(original.groups[0].name, 'Test');
                 assert.equal(snapshot.groups[0].name, 'Changed');
+                assert.equal(snapshot.greeksEnabled, true);
                 assert.equal(snapshot.groups[0].tradeTrigger.enabled, false);
                 assert.equal(snapshot.groups[0].tradeTrigger.condition, 'gte');
                 assert.equal(snapshot.groups[0].tradeTrigger.price, 671.01);

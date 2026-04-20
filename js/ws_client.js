@@ -33,7 +33,12 @@ const _liveQuoteRuntime = {
     futureQuotesById: new Map(),
     stockQuotesBySymbol: new Map(),
 };
+const _liveQuotePricingSnapshotFields = ['bid', 'ask', 'mark', 'iv'];
 const _liveQuoteSnapshotFields = ['bid', 'ask', 'mark', 'iv', 'delta'];
+
+function _areGreeksEnabled() {
+    return !!(state && state.greeksEnabled === true);
+}
 
 function _cloneLiveQuoteSnapshot(rawQuote) {
     if (!rawQuote || typeof rawQuote !== 'object') {
@@ -48,7 +53,7 @@ function _cloneLiveQuoteSnapshot(rawQuote) {
         }
     });
     const delta = parseFloat(rawQuote.delta);
-    if (Number.isFinite(delta)) {
+    if (_areGreeksEnabled() && Number.isFinite(delta)) {
         snapshot.delta = delta;
     }
 
@@ -70,6 +75,13 @@ function _areLiveQuoteSnapshotsEqual(left, right) {
     });
 }
 
+function _didLiveQuoteFieldChange(left, right, field) {
+    const leftHasField = !!(left && Object.prototype.hasOwnProperty.call(left, field));
+    const rightHasField = !!(right && Object.prototype.hasOwnProperty.call(right, field));
+    return leftHasField !== rightHasField
+        || (leftHasField && left[field] !== right[field]);
+}
+
 function _resetLiveQuoteRuntime() {
     _liveQuoteRuntime.underlyingQuote = null;
     _liveQuoteRuntime.optionQuotesById.clear();
@@ -87,15 +99,39 @@ function _setUnderlyingQuoteSnapshot(rawQuote) {
 }
 
 function _setOptionQuoteSnapshot(subId, rawQuote) {
-    if (!subId) return false;
+    if (!subId) {
+        return {
+            changed: false,
+            pricingChanged: false,
+            deltaChanged: false,
+        };
+    }
     const snapshot = _cloneLiveQuoteSnapshot(rawQuote);
-    if (!snapshot) return false;
+    if (!snapshot) {
+        return {
+            changed: false,
+            pricingChanged: false,
+            deltaChanged: false,
+        };
+    }
     const previousSnapshot = _liveQuoteRuntime.optionQuotesById.get(subId) || null;
-    if (_areLiveQuoteSnapshotsEqual(previousSnapshot, snapshot)) {
-        return false;
+    const pricingChanged = _liveQuotePricingSnapshotFields.some((field) => (
+        _didLiveQuoteFieldChange(previousSnapshot, snapshot, field)
+    ));
+    const deltaChanged = _didLiveQuoteFieldChange(previousSnapshot, snapshot, 'delta');
+    if (!pricingChanged && !deltaChanged) {
+        return {
+            changed: false,
+            pricingChanged: false,
+            deltaChanged: false,
+        };
     }
     _liveQuoteRuntime.optionQuotesById.set(subId, snapshot);
-    return true;
+    return {
+        changed: true,
+        pricingChanged,
+        deltaChanged,
+    };
 }
 
 function _setFutureQuoteSnapshot(subId, rawQuote) {
@@ -225,7 +261,9 @@ function _scheduleDerivedValueRefresh(changeSet, allowIncrementalUpdate) {
         try {
             const groupIds = Array.isArray(changeSet && changeSet.groupIds) ? changeSet.groupIds.filter(Boolean) : [];
             const hedgeIds = Array.isArray(changeSet && changeSet.hedgeIds) ? changeSet.hedgeIds.filter(Boolean) : [];
+            const deltaGroupIds = Array.isArray(changeSet && changeSet.deltaGroupIds) ? changeSet.deltaGroupIds.filter(Boolean) : [];
             const hasIncrementalTargets = groupIds.length > 0 || hedgeIds.length > 0;
+            const standaloneDeltaGroupIds = deltaGroupIds.filter((groupId) => !groupIds.includes(groupId));
             const appRuntime = typeof window !== 'undefined' && window.__optionComboApp && typeof window.__optionComboApp === 'object'
                 ? window.__optionComboApp
                 : null;
@@ -234,11 +272,31 @@ function _scheduleDerivedValueRefresh(changeSet, allowIncrementalUpdate) {
                 : (appRuntime && typeof appRuntime.updateLiveQuoteDerivedValues === 'function'
                     ? appRuntime.updateLiveQuoteDerivedValues
                     : null);
+            const deltaUpdater = typeof updateLiveQuoteGroupDeltaValues === 'function'
+                ? updateLiveQuoteGroupDeltaValues
+                : (appRuntime && typeof appRuntime.updateLiveQuoteGroupDeltaValues === 'function'
+                    ? appRuntime.updateLiveQuoteGroupDeltaValues
+                    : null);
 
             if (allowIncrementalUpdate && hasIncrementalTargets && typeof incrementalUpdater === 'function') {
                 incrementalUpdater({
                     groupIds,
                     hedgeIds,
+                });
+                if (standaloneDeltaGroupIds.length > 0 && typeof deltaUpdater === 'function') {
+                    deltaUpdater({
+                        groupIds: standaloneDeltaGroupIds,
+                    });
+                }
+                return;
+            }
+
+            if (allowIncrementalUpdate
+                && !hasIncrementalTargets
+                && standaloneDeltaGroupIds.length > 0
+                && typeof deltaUpdater === 'function') {
+                deltaUpdater({
+                    groupIds: standaloneDeltaGroupIds,
                 });
                 return;
             }
@@ -1407,6 +1465,7 @@ function handleLiveSubscriptions() {
     const futuresRequests = _buildFuturesPoolRequests(profile || {});
     const payload = {
         action: 'subscribe',
+        greeksEnabled: _areGreeksEnabled(),
         underlying: null,
         options: optionRequests,
         futures: futuresRequests,
@@ -2866,10 +2925,13 @@ function processLiveMarketData(data) {
     const nextUnderlyingPrice = parseFloat(data && data.underlyingPrice);
     const hasUnderlyingPrice = Number.isFinite(nextUnderlyingPrice);
     const incrementalGroupIds = new Set();
+    const deltaOnlyGroupIds = new Set();
     const incrementalHedgeIds = new Set();
     const changedOptionQuoteIds = [];
+    const changedOptionDeltaQuoteIds = [];
     const liveMode = !_isHistoricalMode();
     let optionQuotesChanged = false;
+    let optionDeltaChanged = false;
     let futureQuotesChanged = false;
     let underlyingQuoteChanged = false;
 
@@ -2881,10 +2943,14 @@ function processLiveMarketData(data) {
 
     if (data.options) {
         Object.entries(data.options).forEach(([subId, quote]) => {
-            const quoteChanged = _setOptionQuoteSnapshot(subId, quote);
-            optionQuotesChanged = quoteChanged || optionQuotesChanged;
-            if (quoteChanged) {
+            const quoteChange = _setOptionQuoteSnapshot(subId, quote);
+            optionQuotesChanged = quoteChange.pricingChanged || optionQuotesChanged;
+            optionDeltaChanged = quoteChange.deltaChanged || optionDeltaChanged;
+            if (quoteChange.pricingChanged) {
                 changedOptionQuoteIds.push(subId);
+            }
+            if (quoteChange.deltaChanged) {
+                changedOptionDeltaQuoteIds.push(subId);
             }
         });
 
@@ -2910,6 +2976,9 @@ function processLiveMarketData(data) {
     }
     if (liveMode && optionQuotesChanged) {
         _addGroupsAffectedByOptionQuoteIds(incrementalGroupIds, changedOptionQuoteIds);
+    }
+    if (liveMode && _areGreeksEnabled() && optionDeltaChanged) {
+        _addGroupsAffectedByOptionQuoteIds(deltaOnlyGroupIds, changedOptionDeltaQuoteIds);
     }
     if (liveMode && futureQuotesChanged) {
         _addAllGroupIds(incrementalGroupIds);
@@ -3198,11 +3267,13 @@ function processLiveMarketData(data) {
     }
 
     const hasIncrementalTargets = incrementalGroupIds.size > 0 || incrementalHedgeIds.size > 0;
-    if (stateChanged || hasIncrementalTargets) {
+    const hasDeltaOnlyTargets = deltaOnlyGroupIds.size > 0;
+    if (stateChanged || hasIncrementalTargets || hasDeltaOnlyTargets) {
         _scheduleDerivedValueRefresh({
             groupIds: Array.from(incrementalGroupIds),
+            deltaGroupIds: Array.from(deltaOnlyGroupIds),
             hedgeIds: Array.from(incrementalHedgeIds),
-        }, liveMode && hasIncrementalTargets);
+        }, liveMode && (hasIncrementalTargets || hasDeltaOnlyTargets));
     }
 }
 

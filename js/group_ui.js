@@ -399,6 +399,35 @@
         return null;
     }
 
+    function applyGroupDeltaSummary(card, groupResult) {
+        if (!card || !groupResult) {
+            return;
+        }
+
+        const deltaItem = card.querySelector('.group-header-delta-item');
+        if (!deltaItem) {
+            return;
+        }
+
+        if (groupResult.groupDeltaDisplayable) {
+            deltaItem.style.display = '';
+            const deltaValueEl = card.querySelector('.group-header-delta-value');
+            if (deltaValueEl) {
+                deltaValueEl.textContent = groupResult.groupDeltaAvailable
+                    ? formatGroupDeltaValue(groupResult.groupDelta)
+                    : 'N/A';
+                deltaValueEl.classList.toggle('text-muted', !groupResult.groupDeltaAvailable);
+            }
+            deltaItem.title = groupResult.groupDeltaAvailable
+                ? 'Best-effort net delta for this group, built from live TWS option delta plus any underlying positions.'
+                : `Delta is not available yet for ${groupResult.groupDeltaMissingLegCount} leg${groupResult.groupDeltaMissingLegCount === 1 ? '' : 's'}.`;
+            return;
+        }
+
+        deltaItem.style.display = 'none';
+        deltaItem.removeAttribute('title');
+    }
+
     function buildSimulatedPriceHtml(currencyFormatter, leg, processedLeg, simPricePerShare, usesScenarioUnderlying) {
         if (!Number.isFinite(simPricePerShare)) {
             return `<span class="text-muted">N/A</span> <span class="badge bg-secondary" style="font-size: 0.65rem; vertical-align: middle;">IV N/A</span>`;
@@ -713,25 +742,7 @@
         }
 
         const livePnlItem = card.querySelector('.group-header-live-pnl-item');
-        const deltaItem = card.querySelector('.group-header-delta-item');
-        if (deltaItem) {
-            if (groupResult.groupDeltaDisplayable) {
-                deltaItem.style.display = '';
-                const deltaValueEl = card.querySelector('.group-header-delta-value');
-                if (deltaValueEl) {
-                    deltaValueEl.textContent = groupResult.groupDeltaAvailable
-                        ? formatGroupDeltaValue(groupResult.groupDelta)
-                        : 'N/A';
-                    deltaValueEl.classList.toggle('text-muted', !groupResult.groupDeltaAvailable);
-                }
-                deltaItem.title = groupResult.groupDeltaAvailable
-                    ? 'Best-effort net delta for this group, built from live TWS option delta plus any underlying positions.'
-                    : `Delta is not available yet for ${groupResult.groupDeltaMissingLegCount} leg${groupResult.groupDeltaMissingLegCount === 1 ? '' : 's'}.`;
-            } else {
-                deltaItem.style.display = 'none';
-                deltaItem.removeAttribute('title');
-            }
-        }
+        applyGroupDeltaSummary(card, groupResult);
         if (livePnlItem) {
             const headerSummaryState = resolveGroupHeaderSummaryState(groupResult);
             if (headerSummaryState) {
@@ -772,6 +783,7 @@
 
     globalScope.OptionComboGroupUI = {
         applyGroupDerivedData,
+        applyGroupDeltaSummary,
         buildTriggerPreviewHtml,
         buildGroupLivePnlHtml,
         formatTriggerStatus,

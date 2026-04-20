@@ -94,6 +94,8 @@ module.exports = {
                     ivOffset: createElement({ value: '0' }),
                     ivOffsetSlider: createElement({ value: '0' }),
                     ivOffsetDisplay: createElement({ textContent: '0.00%' }),
+                    toggleGreeksBtn: createElement({ textContent: '' }),
+                    greeksStatusText: createElement({ textContent: '' }),
                     allowLiveComboOrders: createElement({ checked: false }),
                     liveComboOrderAccountControls: createElement({ hidden: true, style: {} }),
                     liveComboOrderAccountSelect: createElement({ value: '', disabled: true }),
@@ -140,6 +142,7 @@ module.exports = {
                     historicalAvailableEndDate: '',
                     interestRate: 0.03,
                     ivOffset: 0,
+                    greeksEnabled: false,
                     allowLiveComboOrders: false,
                     liveComboOrderAccounts: ['DU111111', 'F222222'],
                     liveComboOrderAccountsConnected: true,
@@ -175,6 +178,9 @@ module.exports = {
                         return 0;
                     },
                 });
+
+                assert.equal(elements.toggleGreeksBtn.textContent, 'Enable Greeks');
+                assert.match(elements.greeksStatusText.textContent, /off by default/i);
 
                 elements.underlyingSymbol.listeners.change({ target: { value: 'qqq' } });
                 assert.equal(state.underlyingSymbol, 'QQQ');
@@ -288,6 +294,15 @@ module.exports = {
                 assert.equal(state.ivOffset, 0.025);
                 assert.equal(elements.ivOffsetDisplay.textContent, '+2.50%');
 
+                const updateCallsBeforeGreeksToggle = updateCalls;
+                const subscriptionCallsBeforeGreeksToggle = subscriptionCalls;
+                elements.toggleGreeksBtn.listeners.click();
+                assert.equal(state.greeksEnabled, true);
+                assert.equal(elements.toggleGreeksBtn.textContent, 'Disable Greeks');
+                assert.match(elements.greeksStatusText.textContent, /greeks enabled/i);
+                assert.equal(subscriptionCalls, subscriptionCallsBeforeGreeksToggle + 1);
+                assert.equal(updateCalls, updateCallsBeforeGreeksToggle + 1);
+
                 elements.allowLiveComboOrders.listeners.change({ target: { checked: true } });
                 assert.equal(state.allowLiveComboOrders, true);
                 assert.equal(managedAccountSnapshotCalls, 1);
@@ -312,7 +327,7 @@ module.exports = {
                 assert.equal(state.forwardRateSamples.length, 1);
                 assert.equal(state.forwardRateSamples[0].daysToExpiry, 30);
                 assert.match(elements.forwardRateStatus.textContent, /waiting for live call\/put quotes/i);
-                assert.equal(subscriptionCalls, 12);
+                assert.equal(subscriptionCalls, 13);
 
                 state.forwardRateSamples[0].dailyCarry = 0.00021;
                 state.forwardRateSamples[0].impliedRate = 0.07665;

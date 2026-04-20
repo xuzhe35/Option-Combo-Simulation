@@ -605,6 +605,7 @@ module.exports = {
 
                 const globalState = {
                     marketDataMode: 'live',
+                    greeksEnabled: true,
                     underlyingSymbol: 'SPY',
                     underlyingPrice: 610,
                     baseDate: '2026-03-27',
@@ -646,8 +647,12 @@ module.exports = {
                     ],
                 };
 
+                const deltaSummary = ctx.OptionComboValuation.computeGroupDeltaSummary(group, globalState);
                 const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
 
+                assert.equal(deltaSummary.groupDeltaDisplayable, true);
+                assert.equal(deltaSummary.groupDeltaAvailable, true);
+                almostEqual(deltaSummary.groupDelta, 102);
                 assert.equal(result.groupDeltaDisplayable, true);
                 assert.equal(result.groupDeltaAvailable, true);
                 almostEqual(result.groupDelta, 102);
@@ -687,6 +692,7 @@ module.exports = {
 
                 const globalState = {
                     marketDataMode: 'live',
+                    greeksEnabled: true,
                     underlyingSymbol: 'SPY',
                     underlyingPrice: 610,
                     baseDate: '2026-03-27',
@@ -728,12 +734,87 @@ module.exports = {
                     ],
                 };
 
+                const deltaSummary = ctx.OptionComboValuation.computeGroupDeltaSummary(group, globalState);
                 const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
 
+                assert.equal(deltaSummary.groupDeltaDisplayable, true);
+                assert.equal(deltaSummary.groupDeltaAvailable, false);
+                assert.equal(deltaSummary.groupDelta, null);
+                assert.equal(deltaSummary.groupDeltaMissingLegCount, 1);
                 assert.equal(result.groupDeltaDisplayable, true);
                 assert.equal(result.groupDeltaAvailable, false);
                 assert.equal(result.groupDelta, null);
                 assert.equal(result.groupDeltaMissingLegCount, 1);
+            },
+        },
+        {
+            name: 'keeps group delta hidden while greeks are disabled',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote() {
+                            return { delta: 0.42 };
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    marketDataMode: 'live',
+                    greeksEnabled: false,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_delta_disabled',
+                    viewMode: 'active',
+                    liveData: true,
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'long_call',
+                            type: 'call',
+                            pos: 1,
+                            strike: 620,
+                            expDate: '2026-04-17',
+                            iv: 0.2,
+                            cost: 4.2,
+                            currentPrice: 4.4,
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const deltaSummary = ctx.OptionComboValuation.computeGroupDeltaSummary(group, globalState);
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                assert.equal(deltaSummary.groupDeltaDisplayable, false);
+                assert.equal(deltaSummary.groupDeltaAvailable, false);
+                assert.equal(deltaSummary.groupDelta, null);
+                assert.equal(result.groupDeltaDisplayable, false);
+                assert.equal(result.groupDeltaAvailable, false);
+                assert.equal(result.groupDelta, null);
             },
         },
         {

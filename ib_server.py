@@ -58,6 +58,8 @@ ib = IB()
 connected_clients = set()
 # Map websocket -> { leg_id: Ticker }
 client_subscriptions = {}
+# Map websocket -> per-client live-data preferences
+client_subscription_settings = {}
 qualified_underlyings = {}
 portfolio_avg_cost_cache = {}
 combo_order_tracking_by_order_id = {}
@@ -1084,6 +1086,51 @@ def _log_option_iv_debug_if_needed(sub_id, ticker, iv):
         getattr(ticker, 'impliedVolatility', None),
     )
 
+
+def _get_client_subscription_settings(websocket):
+    settings = client_subscription_settings.get(websocket)
+    if not isinstance(settings, dict):
+        settings = {'greeks_enabled': False}
+        client_subscription_settings[websocket] = settings
+    elif 'greeks_enabled' not in settings:
+        settings['greeks_enabled'] = False
+    return settings
+
+
+def _client_wants_greeks(websocket):
+    return _get_client_subscription_settings(websocket).get('greeks_enabled') is True
+
+
+def _collect_changed_ticker_keys(tickers):
+    changed_ticker_ids = set()
+    changed_contract_ids = set()
+
+    for ticker in tickers or []:
+        if ticker is None:
+            continue
+
+        changed_ticker_ids.add(id(ticker))
+        contract = getattr(ticker, 'contract', None)
+        con_id = getattr(contract, 'conId', None)
+        if con_id:
+            changed_contract_ids.add(con_id)
+
+    return changed_ticker_ids, changed_contract_ids
+
+
+def _ticker_matches_change(ticker, changed_ticker_ids, changed_contract_ids, process_all=False):
+    if process_all:
+        return True
+    if ticker is None:
+        return False
+    if id(ticker) in changed_ticker_ids:
+        return True
+
+    contract = getattr(ticker, 'contract', None)
+    con_id = getattr(contract, 'conId', None)
+    return con_id in changed_contract_ids if con_id else False
+
+
 def on_pending_tickers(tickers):
     """
     Callback fired by ib_async when streaming data ticks arrive.
@@ -1091,13 +1138,17 @@ def on_pending_tickers(tickers):
     """
     if not connected_clients:
         return
-        
+
+    changed_ticker_ids, changed_contract_ids = _collect_changed_ticker_keys(tickers)
+    process_all = not (changed_ticker_ids or changed_contract_ids)
+
     for ws in list(connected_clients):
         # Build a custom payload for this specific client based on their subscriptions
         subs = client_subscriptions.get(ws, {})
         if not subs:
             continue
-            
+
+        wants_greeks = _client_wants_greeks(ws)
         payload = {
             "underlyingPrice": None,
             "underlyingQuote": None,
@@ -1110,18 +1161,21 @@ def on_pending_tickers(tickers):
         
         if 'underlying' in subs:
             ticker = subs['underlying']
-            sec_type = getattr(getattr(ticker, 'contract', None), 'secType', '')
-            quote = _extract_quote_snapshot(ticker, sec_type)
-            if quote is not None:
-                payload["underlyingPrice"] = quote["mark"]
-                payload["underlyingQuote"] = quote
-                has_data = True
+            if _ticker_matches_change(ticker, changed_ticker_ids, changed_contract_ids, process_all):
+                sec_type = getattr(getattr(ticker, 'contract', None), 'secType', '')
+                quote = _extract_quote_snapshot(ticker, sec_type)
+                if quote is not None:
+                    payload["underlyingPrice"] = quote["mark"]
+                    payload["underlyingQuote"] = quote
+                    has_data = True
 
         for sub_id, ticker in subs.items():
             if sub_id == 'underlying':
                 continue  # already handled above
+            if not _ticker_matches_change(ticker, changed_ticker_ids, changed_contract_ids, process_all):
+                continue
 
-            elif sub_id.startswith('stock_'):
+            if sub_id.startswith('stock_'):
                 # --- Stock / ETF hedge ---
                 stock_sym = sub_id.replace('stock_', '')
                 quote = _extract_quote_snapshot(ticker, 'STK')
@@ -1140,6 +1194,8 @@ def on_pending_tickers(tickers):
                 # --- Option leg ---
                 sec_type = getattr(getattr(ticker, 'contract', None), 'secType', 'OPT')
                 quote = _extract_quote_snapshot(ticker, sec_type)
+                if quote is None:
+                    continue
 
                 # Extract IV: prefer modelGreeks.impliedVol (from Generic Tick 106),
                 # fall back to ticker.impliedVolatility if available.
@@ -1155,17 +1211,16 @@ def on_pending_tickers(tickers):
                         iv = raw
                 if iv is None:
                     iv = _extract_option_iv(ticker)
-                delta = _extract_option_delta(ticker)
+                delta = _extract_option_delta(ticker) if wants_greeks else None
                 _log_option_iv_debug_if_needed(sub_id, ticker, iv)
 
-                if quote is not None:
-                    payload["options"][sub_id] = quote
+                payload["options"][sub_id] = quote
 
-                    if iv and iv == iv and iv > 0: # Check for NaN
-                        payload["options"][sub_id]["iv"] = iv
-                    if delta is not None:
-                        payload["options"][sub_id]["delta"] = delta
-                    has_data = True
+                if iv and iv == iv and iv > 0: # Check for NaN
+                    payload["options"][sub_id]["iv"] = iv
+                if delta is not None:
+                    payload["options"][sub_id]["delta"] = delta
+                has_data = True
                     
         # Send data only to the client that requested it
         if has_data:
@@ -1363,6 +1418,7 @@ async def handle_ws_client(websocket):
     logging.info(f"Client connected: {client_ip}")
     connected_clients.add(websocket)
     client_subscriptions[websocket] = {}
+    client_subscription_settings[websocket] = {'greeks_enabled': False}
     _send_portfolio_avg_cost_snapshot(websocket)
     _send_managed_accounts_snapshot(websocket)
     
@@ -1417,12 +1473,15 @@ async def handle_ws_client(websocket):
                 options_data = data.get('options', [])
                 futures_data = data.get('futures', [])
                 stocks_data = data.get('stocks', [])
+                greeks_enabled = _normalize_bool(data.get('greeksEnabled'), False)
                 underlying_request = _build_underlying_request(raw_underlying, options_data)
+                _get_client_subscription_settings(websocket)['greeks_enabled'] = greeks_enabled
 
                 logging.info(
                     f"Received subscription request from {client_ip} "
                     f"for underlying {_describe_contract_request(underlying_request)}, "
-                    f"{len(options_data)} options, {len(futures_data)} futures, and {len(stocks_data)} stocks"
+                    f"{len(options_data)} options, {len(futures_data)} futures, and {len(stocks_data)} stocks "
+                    f"(greeks={'on' if greeks_enabled else 'off'})"
                 )
 
                 try:
@@ -1459,8 +1518,8 @@ async def handle_ws_client(websocket):
                         logging.error(f"Failed to qualify option leg {leg_id}: {_describe_contract_request(opt)}")
                         continue
 
-                    # Generic tick 106 requests option IV/model data; IB also serves it for FOP.
-                    opt_ticker = ib.reqMktData(qualified_option, '106', False, False)
+                    generic_ticks = '106' if greeks_enabled else ''
+                    opt_ticker = ib.reqMktData(qualified_option, generic_ticks, False, False)
                     client_subscriptions[websocket][leg_id] = opt_ticker
 
                 # Process explicitly subscribed futures.
@@ -1621,6 +1680,7 @@ async def handle_ws_client(websocket):
         if websocket in connected_clients:
             connected_clients.remove(websocket)
         client_subscriptions.pop(websocket, None)
+        client_subscription_settings.pop(websocket, None)
 
 async def main():
     ib_connect_task = None

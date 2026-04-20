@@ -96,6 +96,7 @@ module.exports = {
             run() {
                 const state = {
                     marketDataMode: 'live',
+                    greeksEnabled: true,
                     groups: [],
                     hedges: [],
                 };
@@ -142,6 +143,186 @@ module.exports = {
             },
         },
         {
+            name: 'routes delta-only option updates through lightweight group delta refresh',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    simulatedDate: '2026-03-16',
+                    baseDate: '2026-03-16',
+                    groups: [
+                        {
+                            id: 'group_delta_only',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_put',
+                                    type: 'put',
+                                    pos: 1,
+                                    strike: 600,
+                                    expDate: '2026-04-17',
+                                    iv: 0.2,
+                                    ivSource: 'live',
+                                    currentPrice: 2.2,
+                                    currentPriceSource: 'live',
+                                    cost: 2.2,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                const derivedRefreshes = [];
+                const deltaRefreshes = [];
+                let fullRefreshCalls = 0;
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {
+                            fullRefreshCalls += 1;
+                        },
+                        updateLiveQuoteDerivedValues(changeSet) {
+                            derivedRefreshes.push(changeSet);
+                        },
+                        updateLiveQuoteGroupDeltaValues(changeSet) {
+                            deltaRefreshes.push(changeSet);
+                        },
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_put: {
+                            bid: 2.1,
+                            ask: 2.3,
+                            mark: 2.2,
+                            iv: 0.2,
+                            delta: -0.35,
+                        },
+                    },
+                });
+
+                assert.equal(fullRefreshCalls, 0);
+                assert.equal(derivedRefreshes.length, 1);
+                assert.deepEqual(Array.from(derivedRefreshes[0].groupIds), ['group_delta_only']);
+                assert.deepEqual(Array.from(derivedRefreshes[0].hedgeIds), []);
+                assert.equal(deltaRefreshes.length, 0);
+
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_put: {
+                            bid: 2.1,
+                            ask: 2.3,
+                            mark: 2.2,
+                            iv: 0.2,
+                            delta: -0.37,
+                        },
+                    },
+                });
+
+                assert.equal(fullRefreshCalls, 0);
+                assert.equal(derivedRefreshes.length, 1);
+                assert.equal(deltaRefreshes.length, 1);
+                assert.deepEqual(Array.from(deltaRefreshes[0].groupIds), ['group_delta_only']);
+
+                const snapshot = ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_put');
+                assert.equal(snapshot.delta, -0.37);
+            },
+        },
+        {
+            name: 'ignores option delta when greeks are disabled',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    greeksEnabled: false,
+                    groups: [],
+                    hedges: [],
+                };
+
+                let fullRefreshCalls = 0;
+                let deltaRefreshCalls = 0;
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {
+                            fullRefreshCalls += 1;
+                        },
+                        updateLiveQuoteDerivedValues() {
+                            throw new Error('delta-disabled path should not trigger pricing refreshes');
+                        },
+                        updateLiveQuoteGroupDeltaValues() {
+                            deltaRefreshCalls += 1;
+                        },
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_put: {
+                            bid: 2.1,
+                            ask: 2.3,
+                            mark: 2.2,
+                            delta: -0.382145,
+                        },
+                    },
+                });
+
+                const snapshot = ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_put');
+                assert.equal(snapshot.bid, 2.1);
+                assert.equal(snapshot.ask, 2.3);
+                assert.equal(snapshot.mark, 2.2);
+                assert.equal(Object.prototype.hasOwnProperty.call(snapshot, 'delta'), false);
+                assert.equal(fullRefreshCalls, 0);
+                assert.equal(deltaRefreshCalls, 0);
+            },
+        },
+        {
             name: 'builds CL live subscriptions with FUT underlying and FOP option payloads',
             run() {
                 const state = {
@@ -150,6 +331,7 @@ module.exports = {
                     underlyingPrice: 72.5,
                     simulatedDate: '2026-03-17',
                     baseDate: '2026-03-17',
+                    greeksEnabled: false,
                     futuresPool: [
                         { id: 'future_jul', contractMonth: '202607' },
                     ],
@@ -217,6 +399,7 @@ module.exports = {
 
                 const firstMessage = JSON.parse(MockWebSocket.instance.sent[0]);
                 assert.equal(firstMessage.action, 'subscribe');
+                assert.equal(firstMessage.greeksEnabled, false);
                 assert.equal(firstMessage.underlying.secType, 'FUT');
                 assert.equal(firstMessage.underlying.symbol, 'CL');
                 assert.equal(firstMessage.underlying.exchange, 'NYMEX');
@@ -1717,6 +1900,7 @@ module.exports = {
                     underlyingPrice: 5800,
                     simulatedDate: '2026-03-17',
                     baseDate: '2026-03-17',
+                    greeksEnabled: true,
                     forwardRateSamples: [
                         {
                             id: 'sample_30d',
@@ -1774,6 +1958,7 @@ module.exports = {
 
                 const firstMessage = JSON.parse(MockWebSocket.instance.sent[0]);
                 assert.equal(firstMessage.action, 'subscribe');
+                assert.equal(firstMessage.greeksEnabled, true);
                 assert.equal(firstMessage.underlying.secType, 'IND');
                 assert.equal(firstMessage.options.length, 2);
                 assert.equal(firstMessage.options[0].id, '__forward_rate_sample_30d_call');

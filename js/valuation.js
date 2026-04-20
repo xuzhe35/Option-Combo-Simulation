@@ -12,7 +12,12 @@
         throw new Error('pricing_core.js and amortized.js must be loaded before valuation.js');
     }
 
-    const { processLegData, computeSimulatedPrice } = pricingCore;
+    const {
+        processLegData,
+        computeSimulatedPrice,
+        getMultiplier,
+        getUnderlyingLegMultiplier,
+    } = pricingCore;
     const { calculateAmortizedCost, calculateCombinedAmortizedCost } = amortized;
 
     function isSettlementScenarioMode(viewMode) {
@@ -25,6 +30,10 @@
 
     function isUnderlyingLeg(leg) {
         return productRegistry.isUnderlyingLeg(leg);
+    }
+
+    function isGreeksEnabled(globalState) {
+        return !!(globalState && globalState.greeksEnabled === true);
     }
 
     function formatPriceInputValue(symbol, value) {
@@ -102,8 +111,13 @@
         return !!(leg && leg.closePrice !== null && leg.closePrice !== '');
     }
 
-    function resolveLegLiveDelta(processedLeg, leg) {
-        if (!processedLeg || !leg) {
+    function normalizeLegPosition(value) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function resolveLegLiveDeltaSummary(leg, underlyingProfile, greeksEnabled) {
+        if (!leg) {
             return {
                 available: false,
                 value: 0,
@@ -111,10 +125,18 @@
             };
         }
 
-        if (processedLeg.isUnderlyingLeg) {
+        if (greeksEnabled !== true) {
+            return {
+                available: false,
+                value: 0,
+                source: '',
+            };
+        }
+
+        if (isUnderlyingLeg(leg)) {
             return {
                 available: true,
-                value: processedLeg.posMultiplier,
+                value: normalizeLegPosition(leg.pos) * getUnderlyingLegMultiplier(underlyingProfile),
                 source: 'underlying_position',
             };
         }
@@ -124,7 +146,7 @@
         if (Number.isFinite(rawDelta)) {
             return {
                 available: true,
-                value: rawDelta * processedLeg.posMultiplier,
+                value: rawDelta * normalizeLegPosition(leg.pos) * getMultiplier(underlyingProfile),
                 source: 'live_option_delta',
             };
         }
@@ -134,6 +156,68 @@
             value: 0,
             source: '',
         };
+    }
+
+    function resolveLegLiveDelta(leg, underlyingProfile, greeksEnabled) {
+        return resolveLegLiveDeltaSummary(leg, underlyingProfile, greeksEnabled);
+    }
+
+    function buildGroupDeltaSummary(group, globalState, deltaLegResults) {
+        if (!isGreeksEnabled(globalState)) {
+            return {
+                groupDeltaDisplayable: false,
+                groupDeltaAvailable: false,
+                groupDelta: null,
+                groupDeltaLegCount: 0,
+                groupDeltaMissingLegCount: 0,
+            };
+        }
+
+        let groupDelta = 0;
+        let groupDeltaLegCount = 0;
+        let groupDeltaMissingLegCount = 0;
+
+        (Array.isArray(deltaLegResults) ? deltaLegResults : []).forEach((legResult) => {
+            if (!legResult || legResult.deltaEligible !== true) {
+                return;
+            }
+
+            groupDeltaLegCount += 1;
+            if (legResult.liveDeltaAvailable) {
+                groupDelta += legResult.liveDelta;
+            } else {
+                groupDeltaMissingLegCount += 1;
+            }
+        });
+
+        const groupDeltaDisplayable = globalState.marketDataMode === 'live'
+            && group.liveData === true
+            && groupDeltaLegCount > 0;
+        const groupDeltaAvailable = groupDeltaDisplayable && groupDeltaMissingLegCount === 0;
+
+        return {
+            groupDeltaDisplayable,
+            groupDeltaAvailable,
+            groupDelta: groupDeltaAvailable ? groupDelta : null,
+            groupDeltaLegCount,
+            groupDeltaMissingLegCount,
+        };
+    }
+
+    function computeGroupDeltaSummary(group, globalState, underlyingProfile = null) {
+        const resolvedProfile = underlyingProfile || (productRegistry
+            ? productRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol)
+            : null);
+        const greeksEnabled = isGreeksEnabled(globalState);
+        const deltaLegResults = (Array.isArray(group && group.legs) ? group.legs : []).map((leg) => {
+            const liveDelta = resolveLegLiveDeltaSummary(leg, resolvedProfile, greeksEnabled);
+            return {
+                deltaEligible: !isClosedLeg(leg),
+                liveDelta: liveDelta.value,
+                liveDeltaAvailable: liveDelta.available,
+            };
+        });
+        return buildGroupDeltaSummary(group, globalState, deltaLegResults);
     }
 
     function resolveLegSelectedLivePrice(group, leg) {
@@ -299,6 +383,7 @@
     }
 
     function computeLegDerivedData(group, leg, globalState, activeViewMode, anchorUnderlyingPrice, usesScenarioUnderlying, underlyingProfile) {
+        const greeksEnabled = isGreeksEnabled(globalState);
         const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
             ? pricingContext.resolveSimulationDate(globalState)
             : globalState.simulatedDate;
@@ -342,7 +427,7 @@
         const pnl = simulationAvailable ? (simValue - processedLeg.costBasis) : null;
         const isClosed = isClosedLeg(leg);
         const livePnlQuote = resolveLegSelectedLivePrice(group, leg);
-        const liveDelta = resolveLegLiveDelta(processedLeg, leg);
+        const liveDelta = resolveLegLiveDelta(leg, underlyingProfile, greeksEnabled);
         const hasLivePnl = activeViewMode === 'active'
             && livePnlQuote.available
             && (leg.cost !== 0 || livePnlQuote.price !== 0 || isClosed);
@@ -406,9 +491,6 @@
         let groupLivePnL = 0;
         let groupHasLiveData = false;
         let groupUsesPortfolioLivePnl = false;
-        let groupDelta = 0;
-        let groupDeltaLegCount = 0;
-        let groupDeltaMissingLegCount = 0;
         let groupSimulationAvailable = true;
 
         const legResults = group.legs.map((leg) => {
@@ -434,22 +516,9 @@
                 groupUsesPortfolioLivePnl = groupUsesPortfolioLivePnl || legResult.livePnlSource === 'tws_portfolio';
             }
 
-            if (legResult.deltaEligible) {
-                groupDeltaLegCount += 1;
-                if (legResult.liveDeltaAvailable) {
-                    groupDelta += legResult.liveDelta;
-                } else {
-                    groupDeltaMissingLegCount += 1;
-                }
-            }
-
             return legResult;
         });
-
-        const groupDeltaDisplayable = globalState.marketDataMode === 'live'
-            && group.liveData === true
-            && groupDeltaLegCount > 0;
-        const groupDeltaAvailable = groupDeltaDisplayable && groupDeltaMissingLegCount === 0;
+        const groupDeltaSummary = buildGroupDeltaSummary(group, globalState, legResults);
 
         return {
             id: group.id,
@@ -470,11 +539,7 @@
             groupLivePnL,
             groupHasLiveData,
             groupUsesPortfolioLivePnl,
-            groupDeltaDisplayable,
-            groupDeltaAvailable,
-            groupDelta: groupDeltaAvailable ? groupDelta : null,
-            groupDeltaLegCount,
-            groupDeltaMissingLegCount,
+            ...groupDeltaSummary,
             amortizedResult: isAmortizedMode ? calculateAmortizedCost(group, evalUnderlyingPrice, globalState) : null,
         };
     }
@@ -536,6 +601,7 @@
         buildCurrentPriceDisplayState,
         computeHedgeDerivedData,
         computeLegDerivedData,
+        computeGroupDeltaSummary,
         computeGroupDerivedData,
         buildPortfolioDerivedDataFromResults,
         computePortfolioDerivedData,
