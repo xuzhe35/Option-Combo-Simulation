@@ -50,6 +50,7 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            comboPriceIncrement: 0.25,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,

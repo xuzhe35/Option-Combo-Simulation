@@ -3082,6 +3082,232 @@ module.exports = {
             },
         },
         {
+            name: 'promotes terminal combo order status updates into explicit trigger errors',
+            run() {
+                const state = {
+                    groups: [
+                        {
+                            id: 'group_1',
+                            tradeTrigger: {
+                                enabled: false,
+                                pendingRequest: false,
+                                status: 'submitted',
+                                lastPreview: {
+                                    executionMode: 'submit',
+                                    status: 'PendingSubmit',
+                                    orderId: 42567,
+                                },
+                                lastError: '',
+                            },
+                        },
+                    ],
+                };
+
+                let renderCalls = 0;
+                let updateCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {
+                            renderCalls += 1;
+                        },
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const handled = ctx._applyComboOrderStatusUpdate({
+                    action: 'combo_order_status_update',
+                    groupId: 'group_1',
+                    orderStatus: {
+                        executionMode: 'submit',
+                        orderId: 42567,
+                        permId: 429367627,
+                        status: 'Inactive',
+                        filled: 0,
+                        remaining: 1,
+                        statusMessage: 'IB 201: Order rejected - reason: Available Funds are insufficient.',
+                    },
+                });
+
+                assert.equal(handled, true);
+                assert.equal(state.groups[0].tradeTrigger.status, 'error');
+                assert.match(
+                    state.groups[0].tradeTrigger.lastError,
+                    /available funds are insufficient/i
+                );
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.permId, 429367627);
+                assert.equal(renderCalls, 1);
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
+            name: 'does not mark managed terminal confirmation updates as trigger errors',
+            run() {
+                const state = {
+                    groups: [
+                        {
+                            id: 'group_1',
+                            tradeTrigger: {
+                                enabled: false,
+                                pendingRequest: false,
+                                status: 'submitted',
+                                lastPreview: {
+                                    executionMode: 'submit',
+                                    status: 'Submitted',
+                                    orderId: 42567,
+                                    managedMode: true,
+                                    managedState: 'watching',
+                                },
+                                lastError: '',
+                            },
+                        },
+                    ],
+                };
+
+                let renderCalls = 0;
+                let updateCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {
+                            renderCalls += 1;
+                        },
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const handled = ctx._applyComboOrderStatusUpdate({
+                    action: 'combo_order_status_update',
+                    groupId: 'group_1',
+                    orderStatus: {
+                        executionMode: 'submit',
+                        orderId: 42567,
+                        status: 'Inactive',
+                        managedMode: true,
+                        managedState: 'confirming_terminal',
+                        managedMessage: 'Observed broker status Inactive; pausing briefly to confirm.',
+                    },
+                });
+
+                assert.equal(handled, true);
+                assert.equal(state.groups[0].tradeTrigger.status, 'submitted');
+                assert.equal(state.groups[0].tradeTrigger.lastError, '');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.managedState, 'confirming_terminal');
+                assert.equal(renderCalls, 1);
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
+            name: 'restores submitted trigger status after managed updates recover from a transient error state',
+            run() {
+                const state = {
+                    groups: [
+                        {
+                            id: 'group_1',
+                            tradeTrigger: {
+                                enabled: false,
+                                pendingRequest: false,
+                                status: 'error',
+                                lastPreview: {
+                                    executionMode: 'submit',
+                                    status: 'Inactive',
+                                    orderId: 42567,
+                                    managedMode: true,
+                                    managedState: 'confirming_terminal',
+                                },
+                                lastError: 'IB 201: transient inactive during modify/replace',
+                            },
+                        },
+                    ],
+                };
+
+                let renderCalls = 0;
+                let updateCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {
+                            renderCalls += 1;
+                        },
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const handled = ctx._applyComboOrderStatusUpdate({
+                    action: 'combo_order_status_update',
+                    groupId: 'group_1',
+                    orderStatus: {
+                        orderId: 42567,
+                        status: 'Filled',
+                        managedMode: true,
+                        managedState: 'filled',
+                        managedMessage: 'Order fully filled; auto-repricing is complete.',
+                        filled: 8,
+                        remaining: 0,
+                    },
+                });
+
+                assert.equal(handled, true);
+                assert.equal(state.groups[0].tradeTrigger.status, 'submitted');
+                assert.equal(state.groups[0].tradeTrigger.lastError, '');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.status, 'Filled');
+                assert.equal(state.groups[0].tradeTrigger.lastPreview.managedState, 'filled');
+                assert.equal(renderCalls, 1);
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
             name: 'merges managed execution drift updates into the live order preview',
             run() {
                 const state = {

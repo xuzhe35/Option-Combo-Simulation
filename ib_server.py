@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import re
 import signal
 import sqlite3
 import configparser
@@ -12,6 +13,14 @@ from ib_async import *
 import websockets
 
 from historical_replay_service import HistoricalReplayService, normalize_replay_date
+from iv_term_structure_service import (
+    DEFAULT_BUCKET_DEFINITIONS as IV_TERM_STRUCTURE_BUCKET_DEFINITIONS,
+    build_expiry_strike_selections as build_iv_term_structure_expiry_strike_selections,
+    DEFAULT_MAX_DTE as IV_TERM_STRUCTURE_DEFAULT_MAX_DTE,
+    DEFAULT_STRIKE_RADIUS as IV_TERM_STRUCTURE_DEFAULT_STRIKE_RADIUS,
+    choose_trading_class as choose_iv_term_structure_trading_class,
+    filter_expiry_rows as filter_iv_term_structure_expiry_rows,
+)
 from trade_execution.engine import ExecutionEngine
 from trade_execution.adapters.ibkr import IbkrExecutionAdapter
 
@@ -60,6 +69,8 @@ connected_clients = set()
 client_subscriptions = {}
 # Map websocket -> per-client live-data preferences
 client_subscription_settings = {}
+ib_connect_task = None
+iv_term_structure_sync_tasks = {}
 qualified_underlyings = {}
 portfolio_avg_cost_cache = {}
 combo_order_tracking_by_order_id = {}
@@ -80,6 +91,7 @@ SUPPORTED_LIVE_FAMILIES = {
         'currency': 'USD',
         'multiplier': '50',
         'trading_class': 'E3A',
+        'price_increment': 0.25,
     },
     'NQ': {
         'underlying_sec_type': 'FUT',
@@ -114,9 +126,14 @@ def _record_combo_order_submission(websocket, request, result):
         'websocket': websocket,
         'groupId': request.group_id,
         'groupName': request.group_name,
+        'account': str(request.account or '').strip() or None,
         'executionMode': request.execution_mode,
         'executionIntent': request.execution_intent,
         'requestSource': request.request_source,
+        'orderId': result.order_id,
+        'permId': result.perm_id,
+        'status': result.status,
+        'statusMessage': result.status_message,
         'legs': list(getattr(result, 'tracking_legs', []) or []),
         'fillTotals': {},
         'seenExecIds': set(),
@@ -331,6 +348,95 @@ def _resolve_combo_order_tracking(order_id, perm_id):
     return tracking
 
 
+def _coerce_int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _update_combo_order_tracking_snapshot(tracking, order=None, order_status=None, trade=None, status_message=None):
+    if tracking is None:
+        return
+
+    if trade is not None:
+        tracking['trade'] = trade
+        if order is None:
+            order = getattr(trade, 'order', None)
+        if order_status is None:
+            order_status = getattr(trade, 'orderStatus', None)
+
+    if order is not None:
+        account = str(getattr(order, 'account', '') or '').strip()
+        if account:
+            tracking['account'] = account
+
+        order_id = getattr(order, 'orderId', None)
+        if order_id is not None:
+            tracking['orderId'] = order_id
+
+    if order_status is not None:
+        for field in (
+            'permId',
+            'status',
+            'filled',
+            'remaining',
+            'avgFillPrice',
+            'lastFillPrice',
+            'whyHeld',
+            'mktCapPrice',
+        ):
+            value = getattr(order_status, field, None)
+            if value is not None:
+                tracking[field] = value
+
+    if status_message:
+        tracking['statusMessage'] = status_message
+
+
+def _normalize_ib_error_text(error_string):
+    text = str(error_string or '').strip()
+    if not text:
+        return ''
+
+    text = re.sub(r'<br\s*/?>', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _format_ib_order_error_message(error_code, error_string):
+    normalized_text = _normalize_ib_error_text(error_string)
+    if error_code not in (None, '', 0, '0'):
+        code_text = f'IB {_coerce_int_or_none(error_code) or error_code}'
+        return f'{code_text}: {normalized_text}' if normalized_text else f'{code_text}.'
+    return normalized_text
+
+
+def _infer_combo_order_error_status(error_code, current_status):
+    status = str(current_status or '').strip()
+    if status in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}:
+        return status
+
+    parsed_code = _coerce_int_or_none(error_code)
+    if parsed_code == 202:
+        return 'Cancelled'
+    if parsed_code is not None and parsed_code >= 200:
+        return 'Inactive'
+    return status or None
+
+
+def _record_combo_order_error(tracking, error_code, error_string):
+    message = _format_ib_order_error_message(error_code, error_string)
+    if not message:
+        return ''
+
+    tracking['statusMessage'] = message
+    implied_status = _infer_combo_order_error_status(error_code, tracking.get('status'))
+    if implied_status:
+        tracking['status'] = implied_status
+    return message
+
+
 def _normalize_execution_side(value):
     return str(value or '').strip().upper()
 
@@ -403,13 +509,34 @@ def _build_combo_order_fill_cost_payload(tracking, order_id, perm_id):
     }
 
 
+def _extract_trade_status_message(trade):
+    trade_log = list(getattr(trade, 'log', None) or [])
+    for entry in reversed(trade_log):
+        message = str(getattr(entry, 'message', '') or '').strip()
+        error_code = getattr(entry, 'errorCode', None)
+        if message:
+            if error_code not in (None, '', 0, '0'):
+                return f'IB {error_code}: {message}'
+            return message
+
+    advanced_error = str(getattr(trade, 'advancedError', '') or '').strip()
+    if advanced_error:
+        return advanced_error
+
+    for entry in reversed(trade_log):
+        error_code = getattr(entry, 'errorCode', None)
+        if error_code not in (None, '', 0, '0'):
+            return f'IB error code {error_code}.'
+
+    return ''
+
+
 def _build_combo_order_status_payload(trade, tracking):
     order = getattr(trade, 'order', None)
     order_status = getattr(trade, 'orderStatus', None)
-    trade_log = getattr(trade, 'log', None) or []
-    last_message = ''
-    if trade_log:
-        last_message = getattr(trade_log[-1], 'message', '') or ''
+    status_message = _extract_trade_status_message(trade)
+    if not status_message:
+        status_message = str(tracking.get('statusMessage') or '').strip()
 
     payload = {
         'action': 'combo_order_status_update',
@@ -417,19 +544,20 @@ def _build_combo_order_status_payload(trade, tracking):
         'orderStatus': {
             'groupId': tracking.get('groupId'),
             'groupName': tracking.get('groupName'),
+            'account': tracking.get('account') or getattr(order, 'account', None),
             'executionMode': tracking.get('executionMode'),
             'executionIntent': tracking.get('executionIntent'),
             'requestSource': tracking.get('requestSource'),
-            'orderId': getattr(order, 'orderId', None),
-            'permId': getattr(order_status, 'permId', None),
-            'status': getattr(order_status, 'status', None),
-            'filled': getattr(order_status, 'filled', None),
-            'remaining': getattr(order_status, 'remaining', None),
-            'avgFillPrice': getattr(order_status, 'avgFillPrice', None),
-            'lastFillPrice': getattr(order_status, 'lastFillPrice', None),
-            'whyHeld': getattr(order_status, 'whyHeld', None),
-            'mktCapPrice': getattr(order_status, 'mktCapPrice', None),
-            'statusMessage': last_message or None,
+            'orderId': tracking.get('orderId') if tracking.get('orderId') is not None else getattr(order, 'orderId', None),
+            'permId': tracking.get('permId') if tracking.get('permId') is not None else getattr(order_status, 'permId', None),
+            'status': tracking.get('status') if tracking.get('status') is not None else getattr(order_status, 'status', None),
+            'filled': tracking.get('filled') if tracking.get('filled') is not None else getattr(order_status, 'filled', None),
+            'remaining': tracking.get('remaining') if tracking.get('remaining') is not None else getattr(order_status, 'remaining', None),
+            'avgFillPrice': tracking.get('avgFillPrice') if tracking.get('avgFillPrice') is not None else getattr(order_status, 'avgFillPrice', None),
+            'lastFillPrice': tracking.get('lastFillPrice') if tracking.get('lastFillPrice') is not None else getattr(order_status, 'lastFillPrice', None),
+            'whyHeld': tracking.get('whyHeld') if tracking.get('whyHeld') is not None else getattr(order_status, 'whyHeld', None),
+            'mktCapPrice': tracking.get('mktCapPrice') if tracking.get('mktCapPrice') is not None else getattr(order_status, 'mktCapPrice', None),
+            'statusMessage': status_message or None,
         },
     }
     managed_snapshot = execution_engine.get_managed_order_snapshot(
@@ -440,6 +568,24 @@ def _build_combo_order_status_payload(trade, tracking):
         payload['orderStatus'].update(managed_snapshot)
     else:
         payload['orderStatus']['managedMode'] = False
+
+    for field in (
+        'account',
+        'orderId',
+        'permId',
+        'status',
+        'filled',
+        'remaining',
+        'avgFillPrice',
+        'lastFillPrice',
+        'whyHeld',
+        'mktCapPrice',
+    ):
+        value = tracking.get(field)
+        if value is not None:
+            payload['orderStatus'][field] = value
+
+    payload['orderStatus']['statusMessage'] = status_message or None
     return payload
 
 
@@ -459,6 +605,13 @@ def on_combo_order_status(trade):
     if websocket is None:
         return
 
+    _update_combo_order_tracking_snapshot(
+        tracking,
+        order=order,
+        order_status=order_status,
+        trade=trade,
+        status_message=_extract_trade_status_message(trade),
+    )
     payload = _build_combo_order_status_payload(trade, tracking)
     logging.info(
         f"Broadcasting combo order status update: groupId={tracking.get('groupId')} "
@@ -470,6 +623,33 @@ def on_combo_order_status(trade):
 
 
 ib.orderStatusEvent += on_combo_order_status
+
+
+def on_combo_order_error(reqId, errorCode, errorString, contract):
+    order_id = _coerce_int_or_none(reqId)
+    tracking = _resolve_combo_order_tracking(order_id, None)
+    if tracking is None:
+        return
+
+    message = _record_combo_order_error(tracking, errorCode, errorString)
+    if not message:
+        return
+
+    websocket = tracking.get('websocket')
+    if websocket is None:
+        return
+
+    payload = _build_combo_order_status_payload(tracking.get('trade'), tracking)
+    logging.info(
+        f"Broadcasting combo order error update: groupId={tracking.get('groupId')} "
+        f"orderId={payload['orderStatus'].get('orderId')} permId={payload['orderStatus'].get('permId')} "
+        f"status={payload['orderStatus'].get('status')} "
+        f"statusMessage={payload['orderStatus'].get('statusMessage')!r}"
+    )
+    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
+
+
+ib.errorEvent += on_combo_order_error
 
 
 def on_combo_order_exec_details(trade, fill):
@@ -583,6 +763,31 @@ async def connect_ib():
         finally:
             # Always remove the temporary listener so it doesn't fire during normal operation
             ib.errorEvent -= _capture_error
+
+
+def _build_ib_connection_status_payload(message=''):
+    task = ib_connect_task
+    connected = bool(ib.isConnected())
+    return {
+        'action': 'ib_connection_status',
+        'connected': connected,
+        'connecting': bool(task and not task.done() and not connected),
+        'host': TWS_HOST,
+        'port': TWS_PORT,
+        'clientId': TWS_CLIENT_ID,
+        'message': str(message or '').strip(),
+    }
+
+
+async def _ensure_ib_connect_task():
+    global ib_connect_task
+    if ib.isConnected():
+        return 'IB is already connected.'
+    if ib_connect_task is None or ib_connect_task.done():
+        ib_connect_task = asyncio.create_task(connect_ib())
+        logging.info("Started manual/background IB connection task.")
+        return 'Connecting to IB TWS/Gateway...'
+    return 'IB connection attempt is already running.'
 
 def _extract_market_price(ticker):
     """Extract the best available price from a market-data ticker.
@@ -919,13 +1124,13 @@ async def _qualify_one(contract, contract_request=None):
                 )
                 break
 
-    if (not results or results[0] is None) and sec_type == 'FOP' and underlying_contract_month and getattr(contract, 'tradingClass', ''):
+    if (not results or results[0] is None) and sec_type in ('OPT', 'FOP') and getattr(contract, 'tradingClass', ''):
         original_trading_class = contract.tradingClass
         contract.tradingClass = ''
         results = await ib.qualifyContractsAsync(contract)
         if results and results[0] is not None:
             logging.info(
-                f"Qualified {_describe_contract_request(contract_request)} using underConId fallback "
+                f"Qualified {_describe_contract_request(contract_request)} using tradingClass fallback "
                 f"without tradingClass {original_trading_class}"
             )
     if not results or results[0] is None:
@@ -961,6 +1166,863 @@ def _build_underlying_request(raw_underlying, options_data):
         'multiplier': defaults['multiplier'],
         'contractMonth': option_contract_month,
     }
+
+
+def _format_iv_term_structure_strike_token(value):
+    try:
+        strike = float(value)
+    except (TypeError, ValueError):
+        return ''
+
+    if strike != strike:
+        return ''
+    if strike.is_integer():
+        return str(int(strike))
+    return f"{strike:.4f}".rstrip('0').rstrip('.')
+
+
+def _build_iv_term_structure_sub_id(symbol, expiry, strike, right):
+    return "__ivts__|{symbol}|{expiry}|{strike}|{right}".format(
+        symbol=_normalize_symbol(symbol) or 'UNKNOWN',
+        expiry=str(expiry or '').strip() or 'UNKNOWN',
+        strike=_format_iv_term_structure_strike_token(strike) or 'UNKNOWN',
+        right=_normalize_symbol(right) or 'UNKNOWN',
+    )
+
+
+def _filter_iv_term_structure_option_chains(option_chains, option_template):
+    chains = list(option_chains or [])
+    if not chains:
+        return []
+
+    template = option_template if isinstance(option_template, dict) else {}
+    template_multiplier = str(template.get('multiplier') or '').strip()
+    template_exchange = str(template.get('exchange') or '').strip().upper()
+    template_trading_class = str(template.get('tradingClass') or template.get('trading_class') or '').strip().upper()
+
+    if template_multiplier:
+        multiplier_matches = [
+            chain for chain in chains
+            if str(getattr(chain, 'multiplier', '') or '').strip() == template_multiplier
+        ]
+        if multiplier_matches:
+            chains = multiplier_matches
+
+    if template_exchange:
+        exchange_matches = [
+            chain for chain in chains
+            if str(getattr(chain, 'exchange', '') or '').strip().upper() == template_exchange
+        ]
+        if exchange_matches:
+            chains = exchange_matches
+
+    if template_trading_class:
+        trading_class_matches = [
+            chain for chain in chains
+            if str(getattr(chain, 'tradingClass', '') or '').strip().upper() == template_trading_class
+        ]
+        if trading_class_matches:
+            chains = trading_class_matches
+
+    return chains
+
+
+def _merge_iv_term_structure_chain_fields(option_chains, option_template):
+    chains = _filter_iv_term_structure_option_chains(option_chains, option_template)
+    expirations = set()
+    strikes = set()
+    chain_trading_classes = []
+
+    for chain in chains:
+        expirations.update(str(value or '').strip() for value in getattr(chain, 'expirations', []) or [])
+        strikes.update(getattr(chain, 'strikes', []) or [])
+        chain_trading_classes.append(str(getattr(chain, 'tradingClass', '') or '').strip())
+
+    return {
+        'chains': chains,
+        'expirations': sorted(expirations),
+        'strikes': sorted(strikes),
+        'tradingClass': choose_iv_term_structure_trading_class(
+            chain_trading_classes,
+            requested_trading_class=(option_template or {}).get('tradingClass') or (option_template or {}).get('trading_class') or '',
+        ),
+    }
+
+
+def _resolve_iv_term_structure_secdef_exchange(option_template, underlying_request):
+    template = option_template if isinstance(option_template, dict) else {}
+    underlying = underlying_request if isinstance(underlying_request, dict) else {}
+    option_sec_type = _normalize_symbol(template.get('secType') or template.get('sec_type'))
+    underlying_sec_type = _normalize_symbol(underlying.get('secType') or underlying.get('sec_type'))
+
+    if option_sec_type == 'FOP' or underlying_sec_type == 'FUT':
+        return str(template.get('exchange') or underlying.get('exchange') or '').strip()
+
+    # IBKR expects futFopExchange='' for equity/ETF/index option chains.
+    return ''
+
+
+async def _fetch_iv_term_structure_contract_rows_for_expiry(
+    option_symbol,
+    option_sec_type,
+    option_exchange,
+    option_currency,
+    option_multiplier,
+    expiry,
+    option_trading_class='',
+    qualified_underlying=None,
+    timeout_seconds=8.0,
+):
+    probe = Contract(
+        secType=option_sec_type,
+        symbol=option_symbol,
+        lastTradeDateOrContractMonth=str(expiry or '').strip(),
+        exchange=option_exchange,
+        currency=option_currency,
+        multiplier=str(option_multiplier or ''),
+    )
+    if option_trading_class:
+        probe.tradingClass = option_trading_class
+    if qualified_underlying is not None and getattr(qualified_underlying, 'conId', None):
+        probe.underConId = qualified_underlying.conId
+
+    try:
+        contract_details_list = await asyncio.wait_for(
+            ib.reqContractDetailsAsync(probe),
+            timeout=max(0.5, float(timeout_seconds or 0.0)),
+        )
+    except asyncio.TimeoutError:
+        logging.warning(
+            "IV term structure contract-details lookup timed out for %s %s",
+            _normalize_symbol(option_symbol) or '<missing>',
+            str(expiry or '').strip() or '<missing>',
+        )
+        return []
+    except Exception as exc:
+        logging.warning(
+            "IV term structure contract-details lookup failed for %s %s: %s",
+            _normalize_symbol(option_symbol) or '<missing>',
+            str(expiry or '').strip() or '<missing>',
+            exc,
+        )
+        return []
+
+    rows = []
+    normalized_expiry = _to_expiry(expiry)
+    requested_under_con_id = getattr(qualified_underlying, 'conId', None)
+    requested_multiplier = str(option_multiplier or '').strip()
+
+    for detail in contract_details_list or []:
+        candidate = getattr(detail, 'contract', None)
+        if candidate is None:
+            continue
+
+        candidate_expiry = _extract_contract_expiry(candidate)
+        if normalized_expiry and candidate_expiry and candidate_expiry != normalized_expiry:
+            continue
+
+        candidate_under_con_id = getattr(candidate, 'underConId', None)
+        if requested_under_con_id and candidate_under_con_id and candidate_under_con_id != requested_under_con_id:
+            continue
+
+        candidate_multiplier = str(getattr(candidate, 'multiplier', '') or '').strip()
+        if requested_multiplier and candidate_multiplier and candidate_multiplier != requested_multiplier:
+            continue
+
+        strike = _to_strike(getattr(candidate, 'strike', None))
+        if strike is None:
+            continue
+
+        rows.append({
+            'expiry': candidate_expiry or normalized_expiry,
+            'strike': strike,
+            'tradingClass': str(getattr(candidate, 'tradingClass', '') or '').strip(),
+        })
+
+    return rows
+
+
+async def _fetch_iv_term_structure_contract_rows_for_exact_strike(
+    option_symbol,
+    option_sec_type,
+    option_exchange,
+    option_currency,
+    option_multiplier,
+    expiry,
+    strike,
+    option_trading_class='',
+    qualified_underlying=None,
+    timeout_seconds=3.0,
+):
+    probe = Contract(
+        secType=option_sec_type,
+        symbol=option_symbol,
+        lastTradeDateOrContractMonth=str(expiry or '').strip(),
+        strike=float(strike),
+        exchange=option_exchange,
+        currency=option_currency,
+        multiplier=str(option_multiplier or ''),
+    )
+    if option_trading_class:
+        probe.tradingClass = option_trading_class
+    if qualified_underlying is not None and getattr(qualified_underlying, 'conId', None):
+        probe.underConId = qualified_underlying.conId
+
+    try:
+        contract_details_list = await asyncio.wait_for(
+            ib.reqContractDetailsAsync(probe),
+            timeout=max(0.25, float(timeout_seconds or 0.0)),
+        )
+    except asyncio.TimeoutError:
+        return []
+    except Exception:
+        return []
+
+    rows = []
+    normalized_expiry = _to_expiry(expiry)
+    requested_under_con_id = getattr(qualified_underlying, 'conId', None)
+    requested_multiplier = str(option_multiplier or '').strip()
+
+    for detail in contract_details_list or []:
+        candidate = getattr(detail, 'contract', None)
+        if candidate is None:
+            continue
+
+        candidate_expiry = _extract_contract_expiry(candidate)
+        if normalized_expiry and candidate_expiry and candidate_expiry != normalized_expiry:
+            continue
+
+        candidate_under_con_id = getattr(candidate, 'underConId', None)
+        if requested_under_con_id and candidate_under_con_id and candidate_under_con_id != requested_under_con_id:
+            continue
+
+        candidate_multiplier = str(getattr(candidate, 'multiplier', '') or '').strip()
+        if requested_multiplier and candidate_multiplier and candidate_multiplier != requested_multiplier:
+            continue
+
+        candidate_strike = _to_strike(getattr(candidate, 'strike', None))
+        if candidate_strike is None or _serialize_finite_number(candidate_strike) != _serialize_finite_number(strike):
+            continue
+
+        rows.append({
+            'expiry': candidate_expiry or normalized_expiry,
+            'strike': candidate_strike,
+            'tradingClass': str(getattr(candidate, 'tradingClass', '') or '').strip(),
+        })
+
+    return rows
+
+
+async def _resolve_iv_term_structure_expiry_selection_from_candidates(
+    option_symbol,
+    option_sec_type,
+    option_exchange,
+    option_currency,
+    option_multiplier,
+    expiry,
+    underlying_price,
+    candidate_strikes,
+    strike_radius,
+    option_trading_class='',
+    qualified_underlying=None,
+):
+    normalized_candidates = []
+    seen = set()
+    for raw_strike in candidate_strikes or []:
+        strike = _to_strike(raw_strike)
+        serialized = _serialize_finite_number(strike)
+        if serialized is None or serialized in seen:
+            continue
+        seen.add(serialized)
+        normalized_candidates.append(serialized)
+
+    if not normalized_candidates:
+        return {}
+
+    normalized_candidates.sort()
+    try:
+        target_price = float(underlying_price)
+    except (TypeError, ValueError):
+        return {}
+    if not (target_price == target_price):
+        return {}
+
+    nearest_index = min(
+        range(len(normalized_candidates)),
+        key=lambda index: (abs(normalized_candidates[index] - target_price), normalized_candidates[index]),
+    )
+    search_indices = []
+    for offset in range(len(normalized_candidates)):
+        left_index = nearest_index - offset
+        right_index = nearest_index + offset
+        if left_index >= 0 and left_index not in search_indices:
+            search_indices.append(left_index)
+        if offset and right_index < len(normalized_candidates) and right_index not in search_indices:
+            search_indices.append(right_index)
+
+    probe_cache = {}
+
+    async def probe_index(index):
+        if index not in probe_cache:
+            probe_cache[index] = await _fetch_iv_term_structure_contract_rows_for_exact_strike(
+                option_symbol,
+                option_sec_type,
+                option_exchange,
+                option_currency,
+                option_multiplier,
+                expiry,
+                normalized_candidates[index],
+                option_trading_class=option_trading_class,
+                qualified_underlying=qualified_underlying,
+            )
+        return probe_cache[index]
+
+    atm_index = None
+    for index in search_indices:
+        rows = await probe_index(index)
+        if rows:
+            atm_index = index
+            break
+
+    if atm_index is None:
+        return {}
+
+    selected_indices = [atm_index]
+    safe_radius = max(0, int(strike_radius or 0))
+
+    lower_index = atm_index - 1
+    while lower_index >= 0 and len([idx for idx in selected_indices if idx < atm_index]) < safe_radius:
+        rows = await probe_index(lower_index)
+        if rows:
+            selected_indices.append(lower_index)
+        lower_index -= 1
+
+    upper_index = atm_index + 1
+    while upper_index < len(normalized_candidates) and len([idx for idx in selected_indices if idx > atm_index]) < safe_radius:
+        rows = await probe_index(upper_index)
+        if rows:
+            selected_indices.append(upper_index)
+        upper_index += 1
+
+    selected_indices = sorted(set(selected_indices))
+    selected_rows = []
+    for index in selected_indices:
+        selected_rows.extend(await probe_index(index))
+
+    return {
+        'atm_strike': normalized_candidates[atm_index],
+        'window_strikes': [normalized_candidates[index] for index in selected_indices],
+        'tradingClass': choose_iv_term_structure_trading_class(
+            [row.get('tradingClass') for row in selected_rows],
+            option_trading_class,
+        ),
+    }
+
+
+def _build_iv_term_structure_expiry_bundle(
+    expiry_row,
+    option_symbol,
+    option_sec_type,
+    option_exchange,
+    option_currency,
+    option_multiplier,
+    underlying_symbol,
+    underlying_exchange,
+    fallback_trading_class,
+    expiry_selection=None,
+):
+    expiry = str((expiry_row or {}).get('expiry') or '').strip()
+    dte = int((expiry_row or {}).get('dte') or 0)
+    selection = expiry_selection if isinstance(expiry_selection, dict) else {}
+    atm_strike = _serialize_finite_number(selection.get('atm_strike'))
+    window_strikes = selection.get('window_strikes') if isinstance(selection.get('window_strikes'), (list, tuple)) else []
+    expiry_trading_class = (
+        str(selection.get('tradingClass') or '').strip()
+        or str(fallback_trading_class or '').strip()
+    )
+
+    atm_call_sub_id = _build_iv_term_structure_sub_id(option_symbol, expiry, atm_strike, 'C') if atm_strike is not None else ''
+    atm_put_sub_id = _build_iv_term_structure_sub_id(option_symbol, expiry, atm_strike, 'P') if atm_strike is not None else ''
+
+    expiry_payload_row = {
+        'expiry': expiry,
+        'dte': dte,
+        'atmStrike': atm_strike,
+        'atmCallSubId': atm_call_sub_id,
+        'atmPutSubId': atm_put_sub_id,
+    }
+
+    option_descriptors = {}
+    option_requests = []
+
+    if expiry and atm_strike is not None and window_strikes:
+        for strike in window_strikes:
+            serialized_strike = _serialize_finite_number(strike)
+            if serialized_strike is None:
+                continue
+
+            for right in ('C', 'P'):
+                sub_id = _build_iv_term_structure_sub_id(option_symbol, expiry, serialized_strike, right)
+                option_request = {
+                    'id': sub_id,
+                    'secType': option_sec_type,
+                    'symbol': option_symbol,
+                    'underlyingSymbol': underlying_symbol,
+                    'exchange': option_exchange,
+                    'underlyingExchange': underlying_exchange,
+                    'currency': option_currency,
+                    'multiplier': option_multiplier,
+                    'tradingClass': expiry_trading_class,
+                    'right': right,
+                    'strike': serialized_strike,
+                    'expDate': expiry,
+                    'contractMonth': expiry[:6],
+                }
+                option_descriptors[sub_id] = {
+                    'expiry': expiry,
+                    'dte': dte,
+                    'strike': serialized_strike,
+                    'right': right,
+                    'isAtm': serialized_strike == atm_strike,
+                }
+                option_requests.append(option_request)
+
+    return {
+        'expiryPayloadRow': expiry_payload_row,
+        'optionDescriptors': option_descriptors,
+        'optionRequests': option_requests,
+    }
+
+
+def _prioritize_iv_term_structure_expiry_rows(expiry_rows):
+    rows = [row for row in (expiry_rows or []) if isinstance(row, dict)]
+    if not rows:
+        return []
+
+    prioritized = []
+    seen_expiries = set()
+
+    for bucket in IV_TERM_STRUCTURE_BUCKET_DEFINITIONS or []:
+        target_days = int((bucket or {}).get('targetDays') or 0)
+        best_row = None
+        best_key = None
+        for row in rows:
+            expiry = str(row.get('expiry') or '').strip()
+            if not expiry or expiry in seen_expiries:
+                continue
+            dte = int(row.get('dte') or 0)
+            row_key = (abs(dte - target_days), dte, expiry)
+            if best_key is None or row_key < best_key:
+                best_key = row_key
+                best_row = row
+        if best_row is not None:
+            expiry = str(best_row.get('expiry') or '').strip()
+            seen_expiries.add(expiry)
+            prioritized.append(best_row)
+
+    for row in rows:
+        expiry = str(row.get('expiry') or '').strip()
+        if not expiry or expiry in seen_expiries:
+            continue
+        seen_expiries.add(expiry)
+        prioritized.append(row)
+
+    return prioritized
+
+
+async def _subscribe_iv_term_structure_option_request(websocket, option_request):
+    sub_id = option_request.get('id')
+    try:
+        option_contract = _build_contract_from_request(option_request)
+    except Exception as exc:
+        logging.warning(
+            "Skipping IV term structure option %s because the contract request was invalid: %s",
+            sub_id or '<missing>',
+            exc,
+        )
+        return False
+
+    qualified_option = await _qualify_one(option_contract, option_request)
+    if qualified_option is None:
+        return False
+
+    option_ticker = ib.reqMktData(qualified_option, '106', False, False)
+    if websocket not in client_subscriptions:
+        ib.cancelMktData(option_ticker.contract)
+        return False
+
+    client_subscriptions[websocket][sub_id] = option_ticker
+    return True
+
+
+def _track_iv_term_structure_sync_task(websocket, task):
+    iv_term_structure_sync_tasks[websocket] = task
+
+    def _clear(done_task):
+        current = iv_term_structure_sync_tasks.get(websocket)
+        if current is done_task:
+            iv_term_structure_sync_tasks.pop(websocket, None)
+        try:
+            done_task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logging.exception("IV term structure background sync task failed")
+
+    task.add_done_callback(_clear)
+
+
+async def _cancel_iv_term_structure_sync_task(websocket):
+    task = iv_term_structure_sync_tasks.pop(websocket, None)
+    if task is None:
+        return
+    if task.done():
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logging.exception("IV term structure background sync task failed")
+        return
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logging.exception("IV term structure background sync task failed during cancellation")
+
+
+async def _run_iv_term_structure_option_sync(websocket, symbol, sync_context):
+    subscribed_option_count = 0
+    expected_option_count = 0
+
+    try:
+        expiry_rows = []
+        option_symbol = _normalize_symbol(symbol)
+        option_sec_type = 'OPT'
+        option_exchange = 'SMART'
+        option_currency = 'USD'
+        option_multiplier = '100'
+        underlying_symbol = option_symbol
+        underlying_exchange = 'SMART'
+        option_trading_class = ''
+        qualified_underlying = None
+        underlying_price = None
+        strike_radius = IV_TERM_STRUCTURE_DEFAULT_STRIKE_RADIUS
+        global_candidate_strikes = []
+
+        if isinstance(sync_context, dict):
+            expiry_rows = list(sync_context.get('expiryRows') or [])
+            option_symbol = _normalize_symbol(sync_context.get('optionSymbol') or symbol)
+            option_sec_type = _normalize_symbol(sync_context.get('optionSecType') or 'OPT')
+            option_exchange = str(sync_context.get('optionExchange') or 'SMART').strip() or 'SMART'
+            option_currency = str(sync_context.get('optionCurrency') or 'USD').strip() or 'USD'
+            option_multiplier = str(sync_context.get('optionMultiplier') or '100').strip() or '100'
+            underlying_symbol = _normalize_symbol(sync_context.get('underlyingSymbol') or option_symbol)
+            underlying_exchange = str(sync_context.get('underlyingExchange') or option_exchange).strip() or option_exchange
+            option_trading_class = str(sync_context.get('optionTradingClass') or '').strip()
+            qualified_underlying = sync_context.get('qualifiedUnderlying')
+            underlying_price = sync_context.get('underlyingPrice')
+            strike_radius = _coerce_positive_int(sync_context.get('strikeRadius'), IV_TERM_STRUCTURE_DEFAULT_STRIKE_RADIUS)
+            global_candidate_strikes = list(sync_context.get('globalCandidateStrikes') or [])
+
+        prioritized_expiry_rows = _prioritize_iv_term_structure_expiry_rows(expiry_rows)
+        resolved_expiry_count = 0
+        total_expiry_count = len(prioritized_expiry_rows)
+        progress_lock = asyncio.Lock()
+        concurrency_limit = min(6, max(1, total_expiry_count))
+        semaphore = asyncio.Semaphore(concurrency_limit)
+
+        async def process_expiry(expiry_row):
+            nonlocal resolved_expiry_count
+            nonlocal expected_option_count
+            nonlocal subscribed_option_count
+
+            if websocket not in client_subscriptions:
+                return
+
+            expiry = str((expiry_row or {}).get('expiry') or '').strip()
+            if not expiry:
+                return
+
+            try:
+                async with semaphore:
+                    expiry_contract_rows = await _fetch_iv_term_structure_contract_rows_for_expiry(
+                        option_symbol,
+                        option_sec_type,
+                        option_exchange,
+                        option_currency,
+                        option_multiplier,
+                        expiry,
+                        option_trading_class=option_trading_class,
+                        qualified_underlying=qualified_underlying,
+                    )
+                expiry_selection = build_iv_term_structure_expiry_strike_selections(
+                    expiry_contract_rows,
+                    underlying_price,
+                    strike_radius,
+                ).get(expiry) or {}
+                if not expiry_selection.get('atm_strike'):
+                    expiry_selection = await _resolve_iv_term_structure_expiry_selection_from_candidates(
+                        option_symbol,
+                        option_sec_type,
+                        option_exchange,
+                        option_currency,
+                        option_multiplier,
+                        expiry,
+                        underlying_price,
+                        global_candidate_strikes,
+                        strike_radius,
+                        option_trading_class=option_trading_class,
+                        qualified_underlying=qualified_underlying,
+                    )
+                bundle = _build_iv_term_structure_expiry_bundle(
+                    expiry_row,
+                    option_symbol,
+                    option_sec_type,
+                    option_exchange,
+                    option_currency,
+                    option_multiplier,
+                    underlying_symbol,
+                    underlying_exchange,
+                    option_trading_class,
+                    expiry_selection=expiry_selection,
+                )
+                option_requests = bundle.get('optionRequests') or []
+
+                async with progress_lock:
+                    resolved_expiry_count += 1
+                    expected_option_count += len(option_requests)
+                    resolved_count = resolved_expiry_count
+                    expected_count = expected_option_count
+                    subscribed_count = subscribed_option_count
+
+                await send_message_safe(websocket, json.dumps({
+                    'action': 'iv_term_structure_catalog_patch',
+                    'symbol': option_symbol,
+                    'expiryRows': [bundle.get('expiryPayloadRow') or {}],
+                    'optionDescriptors': bundle.get('optionDescriptors') or {},
+                    'resolvedExpiryCount': resolved_count,
+                    'totalExpiryCount': total_expiry_count,
+                    'subscribedOptionCount': subscribed_count,
+                    'expectedOptionCount': expected_count,
+                    'subscriptionPending': resolved_count < total_expiry_count,
+                }))
+
+                local_subscribed = 0
+                for option_request in option_requests:
+                    if websocket not in client_subscriptions:
+                        break
+                    if await _subscribe_iv_term_structure_option_request(websocket, option_request):
+                        local_subscribed += 1
+
+                if local_subscribed:
+                    async with progress_lock:
+                        subscribed_option_count += local_subscribed
+                        resolved_count = resolved_expiry_count
+                        expected_count = expected_option_count
+                        subscribed_count = subscribed_option_count
+                    await send_message_safe(websocket, json.dumps({
+                        'action': 'iv_term_structure_catalog_patch',
+                        'symbol': option_symbol,
+                        'expiryRows': [],
+                        'optionDescriptors': {},
+                        'resolvedExpiryCount': resolved_count,
+                        'totalExpiryCount': total_expiry_count,
+                        'subscribedOptionCount': subscribed_count,
+                        'expectedOptionCount': expected_count,
+                        'subscriptionPending': resolved_count < total_expiry_count,
+                    }))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception(
+                    "IV term structure expiry worker failed for %s %s",
+                    option_symbol or '<missing>',
+                    expiry or '<missing>',
+                )
+
+        if prioritized_expiry_rows:
+            await asyncio.gather(*(process_expiry(expiry_row) for expiry_row in prioritized_expiry_rows))
+
+        await send_message_safe(websocket, json.dumps({
+            'action': 'iv_term_structure_sync_complete',
+            'symbol': option_symbol,
+            'subscribedOptionCount': subscribed_option_count,
+            'expectedOptionCount': expected_option_count,
+        }))
+    except asyncio.CancelledError:
+        logging.info(
+            "Cancelled IV term structure background sync for %s",
+            _normalize_symbol(symbol) or '<missing>',
+        )
+        raise
+    except Exception as exc:
+        logging.exception(
+            "IV term structure background sync failed for %s",
+            _normalize_symbol(symbol) or '<missing>',
+        )
+        await send_message_safe(websocket, json.dumps({
+            'action': 'iv_term_structure_error',
+            'symbol': _normalize_symbol(symbol),
+            'message': f'Background IV option subscription failed: {exc}',
+        }))
+
+
+async def _handle_iv_term_structure_subscription(websocket, client_ip, data):
+    if not ib.isConnected():
+        await send_message_safe(websocket, json.dumps({
+            'action': 'iv_term_structure_error',
+            'symbol': _normalize_symbol((data.get('underlying') or {}).get('symbol')),
+            'message': 'IB is not connected.',
+        }))
+        return
+
+    raw_underlying = data.get('underlying')
+    underlying_request = _build_underlying_request(raw_underlying, [])
+    option_template = data.get('optionTemplate') if isinstance(data.get('optionTemplate'), dict) else {}
+    max_dte = _coerce_positive_int(data.get('maxDte'), IV_TERM_STRUCTURE_DEFAULT_MAX_DTE)
+    strike_radius = _coerce_positive_int(data.get('strikeRadius'), IV_TERM_STRUCTURE_DEFAULT_STRIKE_RADIUS)
+    anchor_date = normalize_replay_date(data.get('anchorDate')) or datetime.utcnow().strftime('%Y-%m-%d')
+
+    underlying_symbol = _normalize_symbol(
+        option_template.get('underlyingSymbol')
+        or (underlying_request or {}).get('symbol')
+        or option_template.get('symbol')
+    )
+
+    logging.info(
+        "Received IV term structure subscription request from %s for %s maxDte=%s strikeRadius=%s",
+        client_ip,
+        underlying_symbol or '<missing>',
+        max_dte,
+        strike_radius,
+    )
+
+    try:
+        underlying_contract = _build_contract_from_request(underlying_request)
+    except Exception as exc:
+        await send_message_safe(websocket, json.dumps({
+            'action': 'iv_term_structure_error',
+            'symbol': underlying_symbol,
+            'message': f'Invalid underlying request: {exc}',
+        }))
+        return
+
+    await _cancel_iv_term_structure_sync_task(websocket)
+    unsubscribe_client_safely(websocket)
+    _get_client_subscription_settings(websocket)['greeks_enabled'] = False
+
+    qualified_underlying = await _qualify_one(underlying_contract, underlying_request)
+    if qualified_underlying is None:
+        await send_message_safe(websocket, json.dumps({
+            'action': 'iv_term_structure_error',
+            'symbol': underlying_symbol,
+            'message': f'Failed to qualify underlying {_describe_contract_request(underlying_request)}.',
+        }))
+        return
+
+    underlying_ticker = ib.reqMktData(qualified_underlying, '', False, False)
+    client_subscriptions[websocket]['underlying'] = underlying_ticker
+    await asyncio.sleep(0.75)
+    underlying_quote = _extract_quote_snapshot(underlying_ticker, getattr(qualified_underlying, 'secType', ''))
+    underlying_price = None if underlying_quote is None else underlying_quote.get('mark')
+
+    if underlying_price is None:
+        await send_message_safe(websocket, json.dumps({
+            'action': 'iv_term_structure_error',
+            'symbol': underlying_symbol,
+            'message': f'No live underlying quote is available yet for {underlying_symbol or "the requested symbol"}.',
+        }))
+        return
+
+    request_option_chains = getattr(ib, 'reqSecDefOptParamsAsync', None)
+    if not callable(request_option_chains):
+        await send_message_safe(websocket, json.dumps({
+            'action': 'iv_term_structure_error',
+            'symbol': underlying_symbol,
+            'message': 'The current ib_async build does not expose reqSecDefOptParamsAsync.',
+        }))
+        return
+
+    fut_fop_exchange = _resolve_iv_term_structure_secdef_exchange(option_template, underlying_request)
+    option_chains = await request_option_chains(
+        underlying_symbol,
+        fut_fop_exchange,
+        _normalize_symbol(getattr(qualified_underlying, 'secType', '') or (underlying_request or {}).get('secType')),
+        getattr(qualified_underlying, 'conId', 0),
+    )
+    merged_chain_fields = _merge_iv_term_structure_chain_fields(option_chains, option_template)
+    expiry_rows = filter_iv_term_structure_expiry_rows(
+        merged_chain_fields['expirations'],
+        anchor_date,
+        max_dte,
+    )
+    expiry_payload_rows = []
+    option_descriptors = {}
+
+    option_symbol = _normalize_symbol(option_template.get('symbol') or underlying_symbol)
+    option_sec_type = _normalize_symbol(option_template.get('secType') or option_template.get('sec_type') or 'OPT')
+    option_exchange = option_template.get('exchange') or 'SMART'
+    option_currency = option_template.get('currency') or (underlying_request or {}).get('currency') or 'USD'
+    option_multiplier = str(option_template.get('multiplier') or '100')
+    option_trading_class = merged_chain_fields.get('tradingClass') or option_template.get('tradingClass') or option_template.get('trading_class') or ''
+    underlying_exchange = option_template.get('underlyingExchange') or (underlying_request or {}).get('exchange') or option_exchange
+
+    for expiry_row in expiry_rows:
+        bundle = _build_iv_term_structure_expiry_bundle(
+            expiry_row,
+            option_symbol,
+            option_sec_type,
+            option_exchange,
+            option_currency,
+            option_multiplier,
+            underlying_symbol,
+            underlying_exchange,
+            option_trading_class,
+            expiry_selection={},
+        )
+        expiry_payload_rows.append(bundle['expiryPayloadRow'])
+
+    payload = {
+        'action': 'iv_term_structure_snapshot',
+        'symbol': option_symbol,
+        'anchorDate': anchor_date,
+        'maxDte': max_dte,
+        'strikeRadius': strike_radius,
+        'underlyingPrice': underlying_price,
+        'underlyingQuote': underlying_quote,
+        'expiryRows': expiry_payload_rows,
+        'optionDescriptors': option_descriptors,
+        'subscribedOptionCount': 0,
+        'expectedOptionCount': 0,
+        'subscriptionPending': bool(expiry_payload_rows),
+    }
+    if not expiry_payload_rows:
+        payload['warning'] = f'No option expiries were available within {max_dte} calendar days.'
+
+    await send_message_safe(websocket, json.dumps(payload))
+    if expiry_payload_rows:
+        task = asyncio.create_task(
+            _run_iv_term_structure_option_sync(websocket, option_symbol, {
+                'expiryRows': expiry_rows,
+                'optionSymbol': option_symbol,
+                'optionSecType': option_sec_type,
+                'optionExchange': option_exchange,
+                'optionCurrency': option_currency,
+                'optionMultiplier': option_multiplier,
+                'underlyingSymbol': underlying_symbol,
+                'underlyingExchange': underlying_exchange,
+                'optionTradingClass': option_trading_class,
+                'qualifiedUnderlying': qualified_underlying,
+                'underlyingPrice': underlying_price,
+                'strikeRadius': strike_radius,
+                'globalCandidateStrikes': merged_chain_fields.get('strikes') or [],
+            })
+        )
+        _track_iv_term_structure_sync_task(websocket, task)
 
 def _describe_contract_request(contract_data):
     if isinstance(contract_data, dict):
@@ -1439,6 +2501,7 @@ async def handle_ws_client(websocket):
                     f"{len(options_data)} options"
                 )
 
+                await _cancel_iv_term_structure_sync_task(websocket)
                 unsubscribe_client_safely(websocket)
 
                 try:
@@ -1491,6 +2554,7 @@ async def handle_ws_client(websocket):
                     continue
 
                 # Unsubscribe old streams for this specific client safely
+                await _cancel_iv_term_structure_sync_task(websocket)
                 unsubscribe_client_safely(websocket)
 
                 qualified_underlying = await _qualify_one(underlying_contract, underlying_request)
@@ -1563,6 +2627,16 @@ async def handle_ws_client(websocket):
                     stock_ticker.updateEvent += make_stock_tick_handler(stock_sym, websocket)
                     client_subscriptions[websocket][f"stock_{stock_sym}"] = stock_ticker
                     logging.info(f"Subscribed to stock: {stock_sym}")
+
+            elif data.get('action') == 'subscribe_iv_term_structure':
+                await _handle_iv_term_structure_subscription(websocket, client_ip, data)
+
+            elif data.get('action') == 'request_ib_connection_status':
+                await send_message_safe(websocket, json.dumps(_build_ib_connection_status_payload()))
+
+            elif data.get('action') == 'connect_ib':
+                message = await _ensure_ib_connect_task()
+                await send_message_safe(websocket, json.dumps(_build_ib_connection_status_payload(message)))
 
             elif data.get('action') == 'sync_underlying':
                 raw_underlying = data.get('underlying')
@@ -1674,6 +2748,7 @@ async def handle_ws_client(websocket):
     finally:
         logging.info(f"Client disconnected: {client_ip}")
         # Clean up all tracking logic for this exact websocket
+        await _cancel_iv_term_structure_sync_task(websocket)
         unsubscribe_client_safely(websocket)
         _purge_combo_order_tracking_for_websocket(websocket)
         execution_engine.cancel_managed_for_websocket(websocket)
@@ -1683,7 +2758,7 @@ async def handle_ws_client(websocket):
         client_subscription_settings.pop(websocket, None)
 
 async def main():
-    ib_connect_task = None
+    global ib_connect_task
     try:
         # Register the tick callback
         ib.pendingTickersEvent += on_pending_tickers

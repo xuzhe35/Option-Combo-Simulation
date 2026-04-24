@@ -1,0 +1,21 @@
+{
+  "title": "IV Term Structure",
+  "maxDte": 200,
+  "strikeRadius": 1,
+  "bucketDefinitions": [
+    { "label": "1D", "targetDays": 1 },
+    { "label": "3D", "targetDays": 3 },
+    { "label": "1W", "targetDays": 7 },
+    { "label": "3W", "targetDays": 21 },
+    { "label": "1M", "targetDays": 30 },
+    { "label": "3M", "targetDays": 90 },
+    { "label": "6M", "targetDays": 180 }
+  ],
+  "symbols": [
+    { "symbol": "SPY", "historyPath": "iv_term_structure/data/SPY.json" },
+    { "symbol": "QQQ", "historyPath": "iv_term_structure/data/QQQ.json" },
+    { "symbol": "GLD", "historyPath": "iv_term_structure/data/GLD.json" },
+    { "symbol": "SLV", "historyPath": "iv_term_structure/data/SLV.json" },
+    { "symbol": "USO", "historyPath": "iv_term_structure/data/USO.json" }
+  ]
+}

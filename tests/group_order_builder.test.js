@@ -50,6 +50,41 @@ module.exports = {
             },
         },
         {
+            name: 'includes ES quarter-point combo price increment in payload profiles',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_order_builder.js',
+                ]);
+
+                const payload = ctx.OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(
+                    {
+                        id: 'group_es',
+                        name: 'ES Builder Test',
+                        legs: [
+                            { id: 'leg_1', type: 'call', pos: 1, strike: 5400, expDate: '2026-06-19' },
+                            { id: 'leg_2', type: 'call', pos: -1, strike: 5450, expDate: '2026-06-19' },
+                        ],
+                    },
+                    {
+                        underlyingSymbol: 'ES',
+                        underlyingContractMonth: '202606',
+                        baseDate: '2026-04-16',
+                        simulatedDate: '2026-04-16',
+                    },
+                    {
+                        action: 'submit_combo_order',
+                        executionMode: 'submit',
+                        intent: 'open',
+                        source: 'trial_trigger',
+                    }
+                );
+
+                assert.equal(payload.profile.family, 'ES');
+                assert.equal(payload.profile.priceIncrement, 0.25);
+            },
+        },
+        {
             name: 'includes family-specific combo price increment in payload profiles',
             run() {
                 const ctx = loadBrowserScripts([

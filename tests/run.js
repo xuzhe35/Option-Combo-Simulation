@@ -2,6 +2,7 @@ const suites = [
     require('./market_holidays.test'),
     require('./product_registry.test'),
     require('./distribution_proxy_config.test'),
+    require('./iv_term_structure_core.test'),
     require('./group_order_builder.test'),
     require('./trade_trigger_logic.test'),
     require('./bsm.test'),

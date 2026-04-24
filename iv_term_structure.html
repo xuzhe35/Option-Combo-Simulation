@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IV Term Structure</title>
+    <link rel="icon" href="favicon.ico" sizes="any">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="stylesheet" href="iv_term_structure.css?v=20260423d">
+</head>
+
+<body>
+    <div class="ivts-shell">
+        <header class="ivts-header">
+            <div>
+                <p class="ivts-kicker">Live ETF Volatility Monitor</p>
+                <h1>IV Term Structure</h1>
+                <p class="ivts-subtitle">
+                    Manual per-symbol sync for ATM term structure monitoring. Each ETF keeps its own history file.
+                </p>
+            </div>
+            <div class="ivts-header-meta">
+                <div class="ivts-header-chip">
+                    <span class="ivts-label">Config</span>
+                    <span id="ivtsConfigStatus">Loading...</span>
+                </div>
+                <div class="ivts-header-chip">
+                    <span class="ivts-label">Socket</span>
+                    <span id="ivtsSocketStatus">ws://127.0.0.1:8765</span>
+                </div>
+                <div class="ivts-header-chip ivts-header-chip-action">
+                    <span class="ivts-label">IB</span>
+                    <span id="ivtsIbStatus">Checking...</span>
+                    <button id="ivtsIbConnectButton" class="ivts-btn ivts-btn-primary ivts-header-btn" type="button">Connect IB</button>
+                </div>
+            </div>
+        </header>
+
+        <main>
+            <section id="ivtsCards" class="ivts-card-grid"></section>
+        </main>
+    </div>
+
+    <input type="file" id="ivtsHistoryFileInput" accept=".json" hidden>
+
+    <script src="js/product_registry.js?v=20260423"></script>
+    <script src="js/iv_term_structure_core.js?v=20260423"></script>
+    <script src="js/iv_term_structure.js?v=20260424b"></script>
+</body>
+
+</html>

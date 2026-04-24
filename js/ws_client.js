@@ -1967,6 +1967,16 @@ function _markExecutionError(group, message, runtimeKind) {
     _markTradeTriggerError(group, message);
 }
 
+function _isSoftTerminalBrokerStatus(status) {
+    return ['Cancelled', 'Inactive', 'ApiCancelled'].includes(String(status || '').trim());
+}
+
+function _isManagedTerminalConfirmation(preview) {
+    return !!(preview
+        && preview.managedMode === true
+        && String(preview.managedState || '').trim() === 'confirming_terminal');
+}
+
 function _groupHasOpenPositions(group) {
     if (typeof OptionComboSessionLogic !== 'undefined'
         && typeof OptionComboSessionLogic.groupHasOpenPosition === 'function') {
@@ -2188,14 +2198,14 @@ function _applyComboOrderResult(data) {
     const orderStatus = String((runtime.lastPreview && runtime.lastPreview.status) || '').trim();
     const statusMessage = String((runtime.lastPreview && runtime.lastPreview.statusMessage) || '').trim();
     if (data.action === 'combo_order_submit_result'
-        && ['Cancelled', 'Inactive', 'ApiCancelled'].includes(orderStatus)) {
+        && _isSoftTerminalBrokerStatus(orderStatus)
+        && !_isManagedTerminalConfirmation(runtime.lastPreview)) {
         runtime.lastError = statusMessage || `TWS returned ${orderStatus}.`;
         runtime.status = 'error';
     } else if (data.action === 'combo_order_submit_result') {
+        const executionMode = String((runtime.lastPreview && runtime.lastPreview.executionMode) || '').trim();
         runtime.lastError = '';
-        runtime.status = runtime.lastPreview && runtime.lastPreview.executionMode === 'test_submit'
-            ? 'test_submitted'
-            : 'submitted';
+        runtime.status = executionMode === 'test_submit' ? 'test_submitted' : 'submitted';
     } else {
         runtime.lastError = '';
         runtime.status = 'previewed';
@@ -2253,10 +2263,21 @@ function _applyComboOrderStatusUpdate(data) {
         ...update,
     };
 
-    if (update.executionMode === 'test_submit') {
-        runtime.status = 'test_submitted';
-    } else if (update.executionMode === 'submit') {
-        runtime.status = 'submitted';
+    const brokerStatus = String(runtime.lastPreview.status || '').trim();
+    const statusMessage = String(runtime.lastPreview.statusMessage || '').trim();
+    const executionMode = String(runtime.lastPreview.executionMode || '').trim();
+
+    if (_isSoftTerminalBrokerStatus(brokerStatus)
+        && !_isManagedTerminalConfirmation(runtime.lastPreview)) {
+        runtime.lastError = statusMessage || `TWS returned ${brokerStatus}.`;
+        runtime.status = 'error';
+    } else {
+        runtime.lastError = '';
+        if (executionMode === 'test_submit') {
+            runtime.status = 'test_submitted';
+        } else if (executionMode === 'submit') {
+            runtime.status = 'submitted';
+        }
     }
 
     if (String(runtime.lastPreview.status || '').trim() === 'Filled'

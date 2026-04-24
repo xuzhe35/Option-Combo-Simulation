@@ -105,6 +105,27 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     def _is_reasonable_numeric(self, value):
         return isinstance(value, (int, float)) and isfinite(value) and abs(value) < 1e100
 
+    def _extract_trade_status_message(self, trade):
+        trade_log = list(getattr(trade, 'log', None) or [])
+        for entry in reversed(trade_log):
+            message = str(getattr(entry, 'message', '') or '').strip()
+            error_code = getattr(entry, 'errorCode', None)
+            if message:
+                if error_code not in (None, '', 0, '0'):
+                    return f'IB {error_code}: {message}'
+                return message
+
+        advanced_error = str(getattr(trade, 'advancedError', '') or '').strip()
+        if advanced_error:
+            return advanced_error
+
+        for entry in reversed(trade_log):
+            error_code = getattr(entry, 'errorCode', None)
+            if error_code not in (None, '', 0, '0'):
+                return f'IB error code {error_code}.'
+
+        return ''
+
     def _get_partial_fill_progress(self, context):
         try:
             filled = float(context.get('filled') or 0)
@@ -1358,10 +1379,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             resolved_legs,
         )
         order_status = getattr(trade, 'orderStatus', None)
-        trade_log = getattr(trade, 'log', None) or []
-        status_message = ''
-        if trade_log:
-            status_message = getattr(trade_log[-1], 'message', '') or ''
+        status_message = self._extract_trade_status_message(trade)
         if managed_context is not None:
             preview.managed_mode = True
             preview.managed_state = managed_context.get('managedState')
