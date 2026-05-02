@@ -101,7 +101,7 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 - Before changing startup behavior, read the scripts in `powershell_scripts/` plus the macOS/POSIX wrappers.
 - If a task mentions Python resolution problems, debug the existing launcher chain before debugging `PATH`.
 - If a task touches product-family behavior, read `js/product_registry.js` first.
-- If a task touches pricing, date semantics, or replay valuation, read `js/pricing_context.js`, `js/pricing_core.js`, and `js/valuation.js`.
+- If a task touches pricing, date semantics, or replay valuation, read `js/pricing_context.js`, `js/pricing_core.js`, and `js/valuation.js`.\n- If a task touches delta hedging semantics, read `js/delta_hedge_logic.js` and `js/delta_hedge_ui.js`.
 - If a task touches chart or projection semantics, read both the main charting files and `js/chart_lab.js`.
 - If a task touches historical replay, check whether the change belongs in `historical_server.py`, `historical_replay_service.py`, or the shared live frontend flow via `js/ws_client.js`.
 - If a task touches IV term structure, read `iv_term_structure.html`, `js/iv_term_structure.js`, `js/iv_term_structure_core.js`, `iv_term_structure_service.py`, and the IV sections in `ib_server.py`.

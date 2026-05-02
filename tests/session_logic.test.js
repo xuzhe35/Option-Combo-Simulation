@@ -6,6 +6,17 @@ module.exports = {
     name: 'session_logic.js',
     tests: [
         {
+            name: 'defaults group live price mode to midpoint',
+            run() {
+                const ctx = loadSessionLogicContext();
+
+                assert.equal(ctx.OptionComboSessionLogic.normalizeGroupLivePriceMode(), 'midpoint');
+                assert.equal(ctx.OptionComboSessionLogic.normalizeGroupLivePriceMode(''), 'midpoint');
+                assert.equal(ctx.OptionComboSessionLogic.normalizeGroupLivePriceMode('unknown'), 'midpoint');
+                assert.equal(ctx.OptionComboSessionLogic.normalizeGroupLivePriceMode('mark'), 'mark');
+            },
+        },
+        {
             name: 'forces zero-cost groups into trial for render unless settlement',
             run() {
                 const ctx = loadSessionLogicContext();
@@ -135,6 +146,7 @@ module.exports = {
                         baseDate: '2026-03-14',
                         marketDataMode: 'historical',
                         greeksEnabled: true,
+                        allowLiveHedgeOrders: true,
                         historicalQuoteDate: '2025-04-07',
                         daysPassed: 3,
                         selectedLiveComboOrderAccount: 'F7654321',
@@ -172,6 +184,7 @@ module.exports = {
                 assert.equal(result.liveComboOrderAccounts.length, 0);
                 assert.equal(result.liveComboOrderAccountsConnected, false);
                 assert.equal(result.selectedLiveComboOrderAccount, 'F7654321');
+                assert.equal(result.allowLiveHedgeOrders, false);
                 assert.equal(result.hedges[1].id, 'id_3');
             },
         },
@@ -259,7 +272,7 @@ module.exports = {
                 assert.equal(result.groups[0].id, 'gid_1');
                 assert.equal(result.groups[0].includedInGlobal, false);
                 assert.equal(result.groups[0].isCollapsed, true);
-                assert.equal(result.groups[0].livePriceMode, 'mark');
+                assert.equal(result.groups[0].livePriceMode, 'midpoint');
                 assert.equal(result.groups[0].historicalAutoCloseAtExpiry, false);
                 assert.equal(result.groups[0].syncAvgCostFromPortfolio, false);
                 assert.equal(result.groups[0].viewMode, 'settlement');
@@ -362,12 +375,108 @@ module.exports = {
             },
         },
         {
+            name: 'normalizes imported delta hedge config',
+            run() {
+                const ctx = loadSessionLogicContext();
+                let idCounter = 0;
+                const nextId = () => `dh_${++idCounter}`;
+                const addDays = (dateStr, days) => {
+                    const d = new Date(`${dateStr}T00:00:00Z`);
+                    d.setUTCDate(d.getUTCDate() + days);
+                    return d.toISOString().slice(0, 10);
+                };
+
+                const result = ctx.OptionComboSessionLogic.normalizeImportedState(
+                    {
+                        groups: [],
+                        hedges: [],
+                    },
+                    {
+                        underlyingSymbol: 'SPY',
+                        baseDate: '2026-03-01',
+                        deltaHedge: {
+                            enabled: true,
+                            targetDelta: '10',
+                            tolerance: '25',
+                            proactiveBuffer: '5',
+                            hedgeInstrument: {
+                                secType: 'fut',
+                                symbol: 'es',
+                                exchange: 'cme',
+                                currency: '',
+                                contractMonth: '202606',
+                                multiplier: '50',
+                                deltaPerUnit: '1',
+                            },
+                            orderType: 'mkt',
+                            maxOrderQuantity: '3',
+                            autoMaxNotional: '25000',
+                            cooldownSeconds: '120',
+                            autoSubmitEnabled: true,
+                            autoCancelStaleOrders: false,
+                            autoMaxOrdersPerDay: '4',
+                            autoPreviewMaxAgeSeconds: '15',
+                            pendingOrder: {
+                                orderId: 123,
+                            },
+                        },
+                    },
+                    '2026-03-01',
+                    nextId,
+                    addDays
+                );
+
+                assert.equal(result.deltaHedge.enabled, true);
+                assert.equal(result.deltaHedge.targetDelta, 10);
+                assert.equal(result.deltaHedge.tolerance, 25);
+                assert.equal(result.deltaHedge.proactiveBuffer, 5);
+                assert.equal(result.deltaHedge.hedgeInstrument.secType, 'FUT');
+                assert.equal(result.deltaHedge.hedgeInstrument.symbol, 'ES');
+                assert.equal(result.deltaHedge.hedgeInstrument.exchange, 'CME');
+                assert.equal(result.deltaHedge.hedgeInstrument.currency, 'USD');
+                assert.equal(result.deltaHedge.hedgeInstrument.contractMonth, '202606');
+                assert.equal(result.deltaHedge.hedgeInstrument.multiplier, 50);
+                assert.equal(result.deltaHedge.orderType, 'MKT');
+                assert.equal(result.deltaHedge.maxOrderQuantity, 3);
+                assert.equal(result.deltaHedge.autoMaxNotional, 25000);
+                assert.equal(result.deltaHedge.cooldownSeconds, 120);
+                assert.equal(result.deltaHedge.autoSubmitEnabled, false);
+                assert.equal(result.deltaHedge.autoCancelStaleOrders, false);
+                assert.equal(result.deltaHedge.autoMaxOrdersPerDay, 4);
+                assert.equal(result.deltaHedge.autoPreviewMaxAgeSeconds, 15);
+                assert.equal('pendingOrder' in result.deltaHedge, false);
+            },
+        },
+        {
             name: 'builds export state as a detached snapshot and strips runtime trade trigger state',
             run() {
                 const ctx = loadSessionLogicContext();
                 const original = {
                     underlyingSymbol: 'SPY',
                     greeksEnabled: true,
+                    allowLiveHedgeOrders: true,
+                    deltaHedge: {
+                        enabled: true,
+                        targetDelta: '5',
+                        tolerance: '30',
+                        proactiveBuffer: '3',
+                        hedgeInstrument: {
+                            secType: 'stk',
+                            symbol: 'spy',
+                            multiplier: '1',
+                            deltaPerUnit: '1',
+                        },
+                        orderType: 'lmt',
+                        autoMaxNotional: '25000',
+                        autoSubmitEnabled: true,
+                        autoCancelStaleOrders: false,
+                        autoMaxOrdersPerDay: '4',
+                        autoPreviewMaxAgeSeconds: '15',
+                        pendingOrder: {
+                            orderId: 123,
+                        },
+                        lastError: 'stale runtime error',
+                    },
                     forwardRateSamples: [{
                         id: 'sample_1',
                         daysToExpiry: 30,
@@ -435,6 +544,7 @@ module.exports = {
                 assert.equal(original.groups[0].name, 'Test');
                 assert.equal(snapshot.groups[0].name, 'Changed');
                 assert.equal(snapshot.greeksEnabled, true);
+                assert.equal(snapshot.allowLiveHedgeOrders, false);
                 assert.equal(snapshot.groups[0].tradeTrigger.enabled, false);
                 assert.equal(snapshot.groups[0].tradeTrigger.condition, 'gte');
                 assert.equal(snapshot.groups[0].tradeTrigger.price, 671.01);
@@ -456,6 +566,20 @@ module.exports = {
                 assert.equal(snapshot.groups[0].closeExecution.pendingRequest, false);
                 assert.equal(snapshot.groups[0].closeExecution.lastPreview, null);
                 assert.equal(snapshot.groups[0].closeExecution.lastError, '');
+                assert.equal(snapshot.deltaHedge.enabled, true);
+                assert.equal(snapshot.deltaHedge.targetDelta, 5);
+                assert.equal(snapshot.deltaHedge.tolerance, 30);
+                assert.equal(snapshot.deltaHedge.proactiveBuffer, 3);
+                assert.equal(snapshot.deltaHedge.hedgeInstrument.secType, 'STK');
+                assert.equal(snapshot.deltaHedge.hedgeInstrument.symbol, 'SPY');
+                assert.equal(snapshot.deltaHedge.orderType, 'LMT');
+                assert.equal(snapshot.deltaHedge.autoMaxNotional, 25000);
+                assert.equal(snapshot.deltaHedge.autoSubmitEnabled, false);
+                assert.equal(snapshot.deltaHedge.autoCancelStaleOrders, false);
+                assert.equal(snapshot.deltaHedge.autoMaxOrdersPerDay, 4);
+                assert.equal(snapshot.deltaHedge.autoPreviewMaxAgeSeconds, 15);
+                assert.equal('pendingOrder' in snapshot.deltaHedge, false);
+                assert.equal('lastError' in snapshot.deltaHedge, false);
                 assert.equal(snapshot.forwardRateSamples[0].dailyCarry, 0.00042);
                 assert.equal(snapshot.forwardRateSamples[0].lastComputedAt, '2026-03-01T12:00:00Z');
                 assert.equal(snapshot.futuresPool[0].contractMonth, '202604');

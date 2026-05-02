@@ -95,15 +95,15 @@
 
     function _ensureLivePriceMode(group) {
         if (!group || typeof group !== 'object') {
-            return 'mark';
+            return 'midpoint';
         }
         if (typeof OptionComboSessionLogic !== 'undefined'
             && typeof OptionComboSessionLogic.normalizeGroupLivePriceMode === 'function') {
             group.livePriceMode = OptionComboSessionLogic.normalizeGroupLivePriceMode(group.livePriceMode);
         } else {
-            group.livePriceMode = String(group.livePriceMode || '').trim().toLowerCase() === 'midpoint'
-                ? 'midpoint'
-                : 'mark';
+            group.livePriceMode = String(group.livePriceMode || '').trim().toLowerCase() === 'mark'
+                ? 'mark'
+                : 'midpoint';
         }
         return group.livePriceMode;
     }
@@ -304,7 +304,7 @@
             name: `Combo Group ${state.groups.length + 1}`,
             includedInGlobal: true,
             isCollapsed: false,
-            livePriceMode: 'mark',
+            livePriceMode: 'midpoint',
             settleUnderlyingPrice: null,
             historicalAutoCloseAtExpiry: true,
             tradeTrigger: _ensureTradeTrigger({}),

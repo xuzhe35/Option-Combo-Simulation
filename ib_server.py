@@ -75,6 +75,17 @@ qualified_underlyings = {}
 portfolio_avg_cost_cache = {}
 combo_order_tracking_by_order_id = {}
 combo_order_tracking_by_perm_id = {}
+hedge_order_tracking_by_order_id = {}
+hedge_order_tracking_by_perm_id = {}
+HEDGE_TERMINAL_STATUSES = {
+    'filled',
+    'cancelled',
+    'canceled',
+    'apicancelled',
+    'api_cancelled',
+    'inactive',
+    'rejected',
+}
 option_iv_debug_last_logged = {}
 historical_replay_service = HistoricalReplayService(
     HISTORICAL_SQLITE_DB,
@@ -144,6 +155,121 @@ def _record_combo_order_submission(websocket, request, result):
         combo_order_tracking_by_perm_id[result.perm_id] = tracking
 
 
+def _record_hedge_order_submission(websocket, request, result):
+    preview = getattr(result, 'preview', None)
+    tracking = {
+        'websocket': websocket,
+        'hedgeId': request.hedge_id,
+        'hedgeName': request.hedge_name,
+        'account': str(request.account or getattr(preview, 'account', '') or '').strip() or None,
+        'executionMode': request.execution_mode,
+        'requestSource': request.request_source,
+        'orderId': result.order_id,
+        'permId': result.perm_id,
+        'status': result.status,
+        'statusMessage': result.status_message,
+        'secType': getattr(preview, 'sec_type', None) or request.sec_type,
+        'symbol': getattr(preview, 'symbol', None) or request.symbol,
+        'localSymbol': getattr(preview, 'local_symbol', None) or request.symbol,
+        'exchange': getattr(preview, 'exchange', None) or request.exchange,
+        'currency': getattr(preview, 'currency', None) or request.currency,
+        'conId': getattr(preview, 'con_id', None),
+        'orderAction': getattr(preview, 'order_action', None) or request.order_action,
+        'quantity': getattr(preview, 'quantity', None) or request.quantity,
+        'orderType': getattr(preview, 'order_type', None) or request.order_type,
+        'limitPrice': getattr(preview, 'limit_price', None) if getattr(preview, 'limit_price', None) is not None else request.limit_price,
+        'timeInForce': getattr(preview, 'time_in_force', None) or request.time_in_force,
+        'contractMonth': getattr(preview, 'contract_month', None) or request.contract_month,
+        'multiplier': getattr(preview, 'multiplier', None) or request.multiplier,
+        'currentNetDelta': getattr(preview, 'current_net_delta', None)
+            if getattr(preview, 'current_net_delta', None) is not None else request.current_net_delta,
+        'projectedNetDelta': getattr(preview, 'projected_net_delta', None)
+            if getattr(preview, 'projected_net_delta', None) is not None else request.projected_net_delta,
+        'targetLower': getattr(preview, 'target_lower', None)
+            if getattr(preview, 'target_lower', None) is not None else request.target_lower,
+        'targetUpper': getattr(preview, 'target_upper', None)
+            if getattr(preview, 'target_upper', None) is not None else request.target_upper,
+        'fillTotals': {
+            'filledQuantity': 0.0,
+            'filledNotional': 0.0,
+        },
+        'seenExecIds': set(),
+    }
+    if result.order_id is not None:
+        hedge_order_tracking_by_order_id[result.order_id] = tracking
+    if result.perm_id is not None:
+        hedge_order_tracking_by_perm_id[result.perm_id] = tracking
+
+
+def _normalize_order_status_text(value):
+    return str(value or '').strip().lower().replace(' ', '_')
+
+
+def _is_terminal_hedge_tracking(tracking):
+    if not tracking:
+        return True
+    status = _normalize_order_status_text(tracking.get('status'))
+    if status in HEDGE_TERMINAL_STATUSES:
+        return True
+    trade = tracking.get('trade')
+    order_status = getattr(trade, 'orderStatus', None) if trade is not None else None
+    trade_status = _normalize_order_status_text(getattr(order_status, 'status', None))
+    return trade_status in HEDGE_TERMINAL_STATUSES
+
+
+def _has_active_hedge_order_for_request(websocket, request):
+    hedge_id = str(getattr(request, 'hedge_id', '') or '').strip()
+    if not hedge_id:
+        return False
+
+    seen_tracking_ids = set()
+    for tracking in list(hedge_order_tracking_by_order_id.values()) + list(hedge_order_tracking_by_perm_id.values()):
+        tracking_identity = id(tracking)
+        if tracking_identity in seen_tracking_ids:
+            continue
+        seen_tracking_ids.add(tracking_identity)
+        if tracking.get('websocket') is not websocket:
+            continue
+        if str(tracking.get('hedgeId') or '').strip() != hedge_id:
+            continue
+        if _is_terminal_hedge_tracking(tracking):
+            continue
+        order_id = tracking.get('orderId')
+        status = tracking.get('status') or 'Submitted'
+        return f'Active hedge order already exists for {hedge_id}: orderId={order_id}, status={status}.'
+    return False
+
+
+def _iter_unique_hedge_order_trackings():
+    seen_tracking_ids = set()
+    for tracking in list(hedge_order_tracking_by_order_id.values()) + list(hedge_order_tracking_by_perm_id.values()):
+        tracking_identity = id(tracking)
+        if tracking_identity in seen_tracking_ids:
+            continue
+        seen_tracking_ids.add(tracking_identity)
+        yield tracking
+
+
+def _build_active_hedge_orders_snapshot(websocket, data=None):
+    requested_hedge_id = str((data or {}).get('hedgeId') or '').strip()
+    requested_account = str((data or {}).get('account') or '').strip()
+    orders = []
+    for tracking in _iter_unique_hedge_order_trackings():
+        if _is_terminal_hedge_tracking(tracking):
+            continue
+        if requested_hedge_id and str(tracking.get('hedgeId') or '').strip() != requested_hedge_id:
+            continue
+        if requested_account and str(tracking.get('account') or '').strip() != requested_account:
+            continue
+        tracking['websocket'] = websocket
+        orders.append(_build_hedge_order_status_payload(tracking.get('trade'), tracking)['orderStatus'])
+
+    return {
+        'action': 'active_hedge_orders_snapshot',
+        'orders': orders,
+    }
+
+
 async def _emit_combo_order_update(websocket, payload):
     await send_message_safe(websocket, json.dumps(payload))
 
@@ -166,6 +292,8 @@ execution_engine = ExecutionEngine(
     execution_adapter,
     logger=logging.getLogger('trade_execution.engine'),
     on_submit_result=_record_combo_order_submission,
+    on_hedge_submit_result=_record_hedge_order_submission,
+    has_active_hedge_order=_has_active_hedge_order_for_request,
 )
 
 
@@ -348,6 +476,19 @@ def _resolve_combo_order_tracking(order_id, perm_id):
     return tracking
 
 
+def _resolve_hedge_order_tracking(order_id, perm_id):
+    tracking = None
+    if order_id is not None:
+        tracking = hedge_order_tracking_by_order_id.get(order_id)
+    if tracking is None and perm_id is not None:
+        tracking = hedge_order_tracking_by_perm_id.get(perm_id)
+    if tracking is not None and order_id is not None:
+        hedge_order_tracking_by_order_id[order_id] = tracking
+    if tracking is not None and perm_id is not None:
+        hedge_order_tracking_by_perm_id[perm_id] = tracking
+    return tracking
+
+
 def _coerce_int_or_none(value):
     try:
         return int(value)
@@ -374,6 +515,56 @@ def _update_combo_order_tracking_snapshot(tracking, order=None, order_status=Non
         order_id = getattr(order, 'orderId', None)
         if order_id is not None:
             tracking['orderId'] = order_id
+
+    if order_status is not None:
+        for field in (
+            'permId',
+            'status',
+            'filled',
+            'remaining',
+            'avgFillPrice',
+            'lastFillPrice',
+            'whyHeld',
+            'mktCapPrice',
+        ):
+            value = getattr(order_status, field, None)
+            if value is not None:
+                tracking[field] = value
+
+    if status_message:
+        tracking['statusMessage'] = status_message
+
+
+def _update_hedge_order_tracking_snapshot(tracking, order=None, order_status=None, trade=None, status_message=None):
+    if tracking is None:
+        return
+
+    if trade is not None:
+        tracking['trade'] = trade
+        if order is None:
+            order = getattr(trade, 'order', None)
+        if order_status is None:
+            order_status = getattr(trade, 'orderStatus', None)
+
+    if order is not None:
+        account = str(getattr(order, 'account', '') or '').strip()
+        if account:
+            tracking['account'] = account
+
+        order_id = getattr(order, 'orderId', None)
+        if order_id is not None:
+            tracking['orderId'] = order_id
+
+        for source_field, target_field in (
+            ('action', 'orderAction'),
+            ('totalQuantity', 'quantity'),
+            ('orderType', 'orderType'),
+            ('lmtPrice', 'limitPrice'),
+            ('tif', 'timeInForce'),
+        ):
+            value = getattr(order, source_field, None)
+            if value is not None:
+                tracking[target_field] = value
 
     if order_status is not None:
         for field in (
@@ -509,6 +700,118 @@ def _build_combo_order_fill_cost_payload(tracking, order_id, perm_id):
     }
 
 
+def _build_hedge_order_fill_payload(tracking, order_id, perm_id, execution_id, execution_side, fill_quantity, fill_price):
+    fill_total = tracking.get('fillTotals') or {}
+    total_quantity = float(fill_total.get('filledQuantity') or 0)
+    total_notional = float(fill_total.get('filledNotional') or 0)
+    avg_fill_price = round(total_notional / total_quantity, 4) if total_quantity > 0 else None
+
+    return {
+        'action': 'hedge_order_fill_update',
+        'hedgeId': tracking.get('hedgeId'),
+        'orderFill': {
+            'hedgeId': tracking.get('hedgeId'),
+            'hedgeName': tracking.get('hedgeName'),
+            'account': tracking.get('account'),
+            'executionMode': tracking.get('executionMode'),
+            'requestSource': tracking.get('requestSource'),
+            'orderId': order_id,
+            'permId': perm_id,
+            'secType': tracking.get('secType'),
+            'symbol': tracking.get('symbol'),
+            'localSymbol': tracking.get('localSymbol') or '',
+            'exchange': tracking.get('exchange') or '',
+            'currency': tracking.get('currency') or '',
+            'conId': tracking.get('conId'),
+            'orderAction': tracking.get('orderAction'),
+            'quantity': tracking.get('quantity'),
+            'orderType': tracking.get('orderType'),
+            'limitPrice': tracking.get('limitPrice'),
+            'timeInForce': tracking.get('timeInForce'),
+            'executionId': execution_id or None,
+            'executionSide': execution_side,
+            'lastFillQuantity': round(fill_quantity, 8),
+            'lastFillPrice': round(fill_price, 4),
+            'filledQuantity': round(total_quantity, 8),
+            'avgFillPrice': avg_fill_price,
+            'costSource': 'execution_report',
+            'currentNetDelta': tracking.get('currentNetDelta'),
+            'projectedNetDelta': tracking.get('projectedNetDelta'),
+            'targetLower': tracking.get('targetLower'),
+            'targetUpper': tracking.get('targetUpper'),
+        },
+    }
+
+
+def _record_hedge_order_fill(tracking, execution, contract):
+    if tracking is None or execution is None or contract is None:
+        return None
+
+    exec_id = str(getattr(execution, 'execId', '') or '').strip()
+    seen_exec_ids = tracking.setdefault('seenExecIds', set())
+    if exec_id and exec_id in seen_exec_ids:
+        return None
+
+    try:
+        filled_quantity = abs(float(getattr(execution, 'shares', 0) or 0))
+        fill_price = abs(float(getattr(execution, 'price', 0) or 0))
+    except (TypeError, ValueError):
+        return None
+
+    if filled_quantity <= 0 or fill_price <= 0:
+        return None
+
+    if exec_id:
+        seen_exec_ids.add(exec_id)
+
+    order_id = getattr(execution, 'orderId', None)
+    if order_id is None:
+        order_id = tracking.get('orderId')
+    perm_id = getattr(execution, 'permId', None)
+    if perm_id is None:
+        perm_id = tracking.get('permId')
+
+    con_id = getattr(contract, 'conId', None)
+    if con_id is not None:
+        tracking['conId'] = con_id
+    for source_field, target_field in (
+        ('localSymbol', 'localSymbol'),
+        ('symbol', 'symbol'),
+        ('secType', 'secType'),
+        ('exchange', 'exchange'),
+        ('currency', 'currency'),
+    ):
+        value = getattr(contract, source_field, None)
+        if value:
+            tracking[target_field] = value
+
+    fill_total = tracking.setdefault('fillTotals', {
+        'filledQuantity': 0.0,
+        'filledNotional': 0.0,
+    })
+    fill_total['filledQuantity'] = float(fill_total.get('filledQuantity') or 0) + filled_quantity
+    fill_total['filledNotional'] = float(fill_total.get('filledNotional') or 0) + filled_quantity * fill_price
+
+    tracking['filled'] = round(fill_total['filledQuantity'], 8)
+    tracking['avgFillPrice'] = round(fill_total['filledNotional'] / fill_total['filledQuantity'], 4)
+    tracking['lastFillPrice'] = round(fill_price, 4)
+    try:
+        order_quantity = float(tracking.get('quantity') or 0)
+        tracking['remaining'] = round(max(order_quantity - fill_total['filledQuantity'], 0), 8)
+    except (TypeError, ValueError):
+        pass
+
+    return _build_hedge_order_fill_payload(
+        tracking,
+        order_id,
+        perm_id,
+        exec_id,
+        _normalize_execution_side(getattr(execution, 'side', None)),
+        filled_quantity,
+        fill_price,
+    )
+
+
 def _extract_trade_status_message(trade):
     trade_log = list(getattr(trade, 'log', None) or [])
     for entry in reversed(trade_log):
@@ -589,6 +892,72 @@ def _build_combo_order_status_payload(trade, tracking):
     return payload
 
 
+def _build_hedge_order_status_payload(trade, tracking):
+    order = getattr(trade, 'order', None) if trade is not None else None
+    order_status = getattr(trade, 'orderStatus', None) if trade is not None else None
+    status_message = _extract_trade_status_message(trade) if trade is not None else ''
+    if not status_message:
+        status_message = str(tracking.get('statusMessage') or '').strip()
+
+    payload = {
+        'action': 'hedge_order_status_update',
+        'hedgeId': tracking.get('hedgeId'),
+        'orderStatus': {
+            'hedgeId': tracking.get('hedgeId'),
+            'hedgeName': tracking.get('hedgeName'),
+            'account': tracking.get('account') or getattr(order, 'account', None),
+            'executionMode': tracking.get('executionMode'),
+            'requestSource': tracking.get('requestSource'),
+            'secType': tracking.get('secType'),
+            'symbol': tracking.get('symbol'),
+            'localSymbol': tracking.get('localSymbol') or '',
+            'exchange': tracking.get('exchange') or '',
+            'currency': tracking.get('currency') or '',
+            'conId': tracking.get('conId'),
+            'orderAction': tracking.get('orderAction'),
+            'quantity': tracking.get('quantity'),
+            'orderType': tracking.get('orderType'),
+            'limitPrice': tracking.get('limitPrice'),
+            'timeInForce': tracking.get('timeInForce'),
+            'contractMonth': tracking.get('contractMonth') or '',
+            'multiplier': tracking.get('multiplier') or '',
+            'orderId': tracking.get('orderId') if tracking.get('orderId') is not None else getattr(order, 'orderId', None),
+            'permId': tracking.get('permId') if tracking.get('permId') is not None else getattr(order_status, 'permId', None),
+            'status': tracking.get('status') if tracking.get('status') is not None else getattr(order_status, 'status', None),
+            'filled': tracking.get('filled') if tracking.get('filled') is not None else getattr(order_status, 'filled', None),
+            'remaining': tracking.get('remaining') if tracking.get('remaining') is not None else getattr(order_status, 'remaining', None),
+            'avgFillPrice': tracking.get('avgFillPrice') if tracking.get('avgFillPrice') is not None else getattr(order_status, 'avgFillPrice', None),
+            'lastFillPrice': tracking.get('lastFillPrice') if tracking.get('lastFillPrice') is not None else getattr(order_status, 'lastFillPrice', None),
+            'whyHeld': tracking.get('whyHeld') if tracking.get('whyHeld') is not None else getattr(order_status, 'whyHeld', None),
+            'mktCapPrice': tracking.get('mktCapPrice') if tracking.get('mktCapPrice') is not None else getattr(order_status, 'mktCapPrice', None),
+            'currentNetDelta': tracking.get('currentNetDelta'),
+            'projectedNetDelta': tracking.get('projectedNetDelta'),
+            'targetLower': tracking.get('targetLower'),
+            'targetUpper': tracking.get('targetUpper'),
+            'statusMessage': status_message or None,
+        },
+    }
+
+    for field in (
+        'account',
+        'orderId',
+        'permId',
+        'status',
+        'filled',
+        'remaining',
+        'avgFillPrice',
+        'lastFillPrice',
+        'whyHeld',
+        'mktCapPrice',
+    ):
+        value = tracking.get(field)
+        if value is not None:
+            payload['orderStatus'][field] = value
+
+    payload['orderStatus']['statusMessage'] = status_message or None
+    return payload
+
+
 def on_combo_order_status(trade):
     order = getattr(trade, 'order', None)
     order_status = getattr(trade, 'orderStatus', None)
@@ -625,6 +994,43 @@ def on_combo_order_status(trade):
 ib.orderStatusEvent += on_combo_order_status
 
 
+def on_hedge_order_status(trade):
+    order = getattr(trade, 'order', None)
+    order_status = getattr(trade, 'orderStatus', None)
+    if order is None or order_status is None:
+        return
+
+    order_id = getattr(order, 'orderId', None)
+    perm_id = getattr(order_status, 'permId', None)
+    tracking = _resolve_hedge_order_tracking(order_id, perm_id)
+    if tracking is None:
+        return
+
+    _update_hedge_order_tracking_snapshot(
+        tracking,
+        order=order,
+        order_status=order_status,
+        trade=trade,
+        status_message=_extract_trade_status_message(trade),
+    )
+
+    websocket = tracking.get('websocket')
+    if websocket is None:
+        return
+
+    payload = _build_hedge_order_status_payload(trade, tracking)
+    logging.info(
+        f"Broadcasting hedge order status update: hedgeId={tracking.get('hedgeId')} "
+        f"orderId={payload['orderStatus'].get('orderId')} permId={payload['orderStatus'].get('permId')} "
+        f"status={payload['orderStatus'].get('status')} "
+        f"filled={payload['orderStatus'].get('filled')} remaining={payload['orderStatus'].get('remaining')}"
+    )
+    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
+
+
+ib.orderStatusEvent += on_hedge_order_status
+
+
 def on_combo_order_error(reqId, errorCode, errorString, contract):
     order_id = _coerce_int_or_none(reqId)
     tracking = _resolve_combo_order_tracking(order_id, None)
@@ -650,6 +1056,37 @@ def on_combo_order_error(reqId, errorCode, errorString, contract):
 
 
 ib.errorEvent += on_combo_order_error
+
+
+def _record_hedge_order_error(tracking, error_code, error_string):
+    return _record_combo_order_error(tracking, error_code, error_string)
+
+
+def on_hedge_order_error(reqId, errorCode, errorString, contract):
+    order_id = _coerce_int_or_none(reqId)
+    tracking = _resolve_hedge_order_tracking(order_id, None)
+    if tracking is None:
+        return
+
+    message = _record_hedge_order_error(tracking, errorCode, errorString)
+    if not message:
+        return
+
+    websocket = tracking.get('websocket')
+    if websocket is None:
+        return
+
+    payload = _build_hedge_order_status_payload(tracking.get('trade'), tracking)
+    logging.info(
+        f"Broadcasting hedge order error update: hedgeId={tracking.get('hedgeId')} "
+        f"orderId={payload['orderStatus'].get('orderId')} permId={payload['orderStatus'].get('permId')} "
+        f"status={payload['orderStatus'].get('status')} "
+        f"statusMessage={payload['orderStatus'].get('statusMessage')!r}"
+    )
+    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
+
+
+ib.errorEvent += on_hedge_order_error
 
 
 def on_combo_order_exec_details(trade, fill):
@@ -727,6 +1164,48 @@ def on_combo_order_exec_details(trade, fill):
 
 
 ib.execDetailsEvent += on_combo_order_exec_details
+
+
+def on_hedge_order_exec_details(trade, fill):
+    execution = getattr(fill, 'execution', None)
+    contract = getattr(fill, 'contract', None) or getattr(trade, 'contract', None)
+    if execution is None or contract is None:
+        return
+
+    if str(getattr(contract, 'secType', '') or '').upper() == 'BAG':
+        return
+
+    order_id = getattr(execution, 'orderId', None)
+    perm_id = getattr(execution, 'permId', None)
+    if order_id is None:
+        order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
+    if perm_id is None:
+        perm_id = getattr(getattr(trade, 'orderStatus', None), 'permId', None)
+
+    tracking = _resolve_hedge_order_tracking(order_id, perm_id)
+    if tracking is None or tracking.get('executionMode') != 'submit':
+        return
+
+    payload = _record_hedge_order_fill(tracking, execution, contract)
+    if payload is None:
+        return
+
+    websocket = tracking.get('websocket')
+    if websocket is None:
+        return
+
+    logging.info(
+        f"Broadcasting hedge execution fill: hedgeId={tracking.get('hedgeId')} "
+        f"orderId={payload['orderFill'].get('orderId')} permId={payload['orderFill'].get('permId')} "
+        f"localSymbol={payload['orderFill'].get('localSymbol')} "
+        f"side={payload['orderFill'].get('executionSide')} "
+        f"qty={payload['orderFill'].get('filledQuantity')} "
+        f"avgFillPrice={payload['orderFill'].get('avgFillPrice')}"
+    )
+    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
+
+
+ib.execDetailsEvent += on_hedge_order_exec_details
 
 async def connect_ib():
     """Connect to IB TWS/Gateway. Retries indefinitely — one connection per session.
@@ -2475,6 +2954,39 @@ def _purge_combo_order_tracking_for_websocket(ws):
     for perm_id in stale_perm_ids:
         combo_order_tracking_by_perm_id.pop(perm_id, None)
 
+
+def _purge_hedge_order_tracking_for_websocket(ws):
+    for tracking in _iter_unique_hedge_order_trackings():
+        if tracking.get('websocket') is not ws:
+            continue
+        if _is_terminal_hedge_tracking(tracking):
+            order_id = tracking.get('orderId')
+            perm_id = tracking.get('permId')
+            if order_id is not None:
+                hedge_order_tracking_by_order_id.pop(order_id, None)
+            if perm_id is not None:
+                hedge_order_tracking_by_perm_id.pop(perm_id, None)
+        else:
+            tracking['websocket'] = None
+
+
+async def _dispatch_execution_action(websocket, data, client_ip='Unknown'):
+    if hasattr(execution_engine, 'handle_hedge_action'):
+        payload = await execution_engine.handle_hedge_action(
+            websocket,
+            data,
+            client_ip=client_ip,
+        )
+        if payload is not None:
+            return payload
+
+    return await execution_engine.handle_combo_action(
+        websocket,
+        data,
+        client_ip=client_ip,
+    )
+
+
 async def handle_ws_client(websocket):
     client_ip = websocket.remote_address[0] if websocket.remote_address else 'Unknown'
     logging.info(f"Client connected: {client_ip}")
@@ -2734,8 +3246,15 @@ async def handle_ws_client(websocket):
                 logging.info(f"Received managed accounts snapshot request from {client_ip}")
                 _send_managed_accounts_snapshot(websocket)
 
+            elif data.get('action') == 'request_active_hedge_orders_snapshot':
+                logging.info(f"Received active hedge orders snapshot request from {client_ip}")
+                await send_message_safe(
+                    websocket,
+                    json.dumps(_build_active_hedge_orders_snapshot(websocket, data)),
+                )
+
             else:
-                payload = await execution_engine.handle_combo_action(
+                payload = await _dispatch_execution_action(
                     websocket,
                     data,
                     client_ip=client_ip,
@@ -2751,6 +3270,7 @@ async def handle_ws_client(websocket):
         await _cancel_iv_term_structure_sync_task(websocket)
         unsubscribe_client_safely(websocket)
         _purge_combo_order_tracking_for_websocket(websocket)
+        _purge_hedge_order_tracking_for_websocket(websocket)
         execution_engine.cancel_managed_for_websocket(websocket)
         if websocket in connected_clients:
             connected_clients.remove(websocket)

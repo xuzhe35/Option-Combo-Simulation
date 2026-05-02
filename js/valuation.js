@@ -70,9 +70,9 @@
             && typeof globalScope.OptionComboSessionLogic.normalizeGroupLivePriceMode === 'function') {
             return globalScope.OptionComboSessionLogic.normalizeGroupLivePriceMode(group && group.livePriceMode);
         }
-        return String(group && group.livePriceMode || '').trim().toLowerCase() === 'midpoint'
-            ? 'midpoint'
-            : 'mark';
+        return String(group && group.livePriceMode || '').trim().toLowerCase() === 'mark'
+            ? 'mark'
+            : 'midpoint';
     }
 
     function resolveLiveQuoteSnapshotForLeg(leg) {
@@ -114,6 +114,18 @@
     function normalizeLegPosition(value) {
         const parsed = parseFloat(value);
         return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function normalizeFiniteNumber(value, fallback = 0) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function computeHedgeDelta(hedge) {
+        const position = normalizeFiniteNumber(hedge && hedge.pos, 0);
+        const multiplier = normalizeFiniteNumber(hedge && hedge.multiplier, 1);
+        const deltaPerUnit = normalizeFiniteNumber(hedge && hedge.deltaPerUnit, 1);
+        return position * multiplier * deltaPerUnit;
     }
 
     function resolveLegLiveDeltaSummary(leg, underlyingProfile, greeksEnabled) {
@@ -232,26 +244,31 @@
         }
 
         const livePriceMode = resolveGroupLivePriceMode(group);
-        if (livePriceMode === 'mark') {
-            const portfolioMarketPrice = parseFloat(leg && leg.portfolioMarketPrice);
-            if (Number.isFinite(portfolioMarketPrice) && portfolioMarketPrice > 0) {
-                return {
-                    available: true,
-                    price: portfolioMarketPrice,
-                    source: 'tws_portfolio',
-                };
-            }
+        const midpointPrice = resolveSnapshotMidpoint(resolveLiveQuoteSnapshotForLeg(leg));
+        const portfolioMarketPrice = parseFloat(leg && leg.portfolioMarketPrice);
+
+        if (livePriceMode === 'mark' && Number.isFinite(portfolioMarketPrice) && portfolioMarketPrice > 0) {
+            return {
+                available: true,
+                price: portfolioMarketPrice,
+                source: 'tws_portfolio',
+            };
         }
 
-        if (livePriceMode === 'midpoint') {
-            const midpointPrice = resolveSnapshotMidpoint(resolveLiveQuoteSnapshotForLeg(leg));
-            if (Number.isFinite(midpointPrice) && midpointPrice > 0) {
-                return {
-                    available: true,
-                    price: midpointPrice,
-                    source: 'live_midpoint',
-                };
-            }
+        if (Number.isFinite(midpointPrice) && midpointPrice > 0) {
+            return {
+                available: true,
+                price: midpointPrice,
+                source: 'live_midpoint',
+            };
+        }
+
+        if (Number.isFinite(portfolioMarketPrice) && portfolioMarketPrice > 0) {
+            return {
+                available: true,
+                price: portfolioMarketPrice,
+                source: 'tws_portfolio',
+            };
         }
 
         if (leg && currentPriceSource !== 'missing' && Number.isFinite(currentPrice) && currentPrice > 0) {
@@ -374,11 +391,14 @@
     function computeHedgeDerivedData(hedge) {
         const hasLivePnl = hedge.currentPriceSource !== 'missing' && hedge.currentPrice > 0;
         const pnl = hasLivePnl ? (hedge.currentPrice - hedge.cost) * hedge.pos : 0;
+        const hedgeDelta = computeHedgeDelta(hedge);
 
         return {
             id: hedge.id,
             pnl,
             hasLivePnl,
+            hedgeDelta,
+            hedgeDeltaAvailable: Number.isFinite(hedgeDelta),
         };
     }
 
@@ -560,6 +580,7 @@
 
         const globalHedgePnL = hedgeResults.reduce((sum, result) => sum + result.pnl, 0);
         const hasAnyHedgeLivePnL = hedgeResults.some(result => result.hasLivePnl);
+        const portfolioDeltaSummary = buildPortfolioDeltaSummary(globalState, includedGroupResults, hedgeResults);
 
         const supportsAmortizedMode = !underlyingProfile || underlyingProfile.supportsAmortizedMode !== false;
         const amortizedGroups = supportsAmortizedMode
@@ -583,10 +604,37 @@
             globalHedgePnL,
             hasAnyHedgeLivePnL,
             combinedLivePnL: globalLivePnL + globalHedgePnL,
+            ...portfolioDeltaSummary,
             amortizedGroups,
             combinedAmortizedResult: amortizedGroups.length > 0
                 ? calculateCombinedAmortizedCost(amortizedGroups, globalState)
                 : null,
+        };
+    }
+
+    function buildPortfolioDeltaSummary(globalState, includedGroupResults, hedgeResults) {
+        const deltaGroupResults = (Array.isArray(includedGroupResults) ? includedGroupResults : [])
+            .filter(result => Number(result && result.groupDeltaLegCount || 0) > 0);
+        const portfolioDeltaIncludedGroupCount = deltaGroupResults.length;
+        const portfolioDeltaMissingGroupCount = deltaGroupResults.filter(result => result.groupDeltaAvailable !== true).length;
+        const portfolioDeltaDisplayable = isGreeksEnabled(globalState)
+            && globalState.marketDataMode === 'live'
+            && (portfolioDeltaIncludedGroupCount > 0 || (hedgeResults || []).length > 0);
+        const portfolioDeltaAvailable = portfolioDeltaDisplayable && portfolioDeltaMissingGroupCount === 0;
+        const portfolioHedgeDelta = (Array.isArray(hedgeResults) ? hedgeResults : [])
+            .reduce((sum, result) => sum + normalizeFiniteNumber(result && result.hedgeDelta, 0), 0);
+        const portfolioOptionDelta = portfolioDeltaAvailable
+            ? deltaGroupResults.reduce((sum, result) => sum + normalizeFiniteNumber(result && result.groupDelta, 0), 0)
+            : null;
+
+        return {
+            portfolioOptionDelta,
+            portfolioHedgeDelta,
+            portfolioNetDelta: portfolioDeltaAvailable ? portfolioOptionDelta + portfolioHedgeDelta : null,
+            portfolioDeltaAvailable,
+            portfolioDeltaMissingGroupCount,
+            portfolioDeltaIncludedGroupCount,
+            portfolioDeltaDisplayable,
         };
     }
 
@@ -603,6 +651,7 @@
         computeLegDerivedData,
         computeGroupDeltaSummary,
         computeGroupDerivedData,
+        buildPortfolioDeltaSummary,
         buildPortfolioDerivedDataFromResults,
         computePortfolioDerivedData,
     };

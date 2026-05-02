@@ -499,6 +499,148 @@ module.exports = {
             },
         },
         {
+            name: 'defaults live pnl pricing to bid ask midpoint before portfolio mark',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/session_logic.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(subId) {
+                            if (subId === 'spx_default_midpoint') {
+                                return { bid: 533, ask: 535.5, mark: 221.3 };
+                            }
+                            return null;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    underlyingSymbol: 'SPX',
+                    underlyingPrice: 7270,
+                    baseDate: '2026-05-01',
+                    simulatedDate: '2026-05-01',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_default_midpoint',
+                    viewMode: 'active',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'spx_default_midpoint',
+                            type: 'call',
+                            pos: 5,
+                            strike: 6790,
+                            expDate: '2026-06-17',
+                            iv: 0.2,
+                            cost: 213.34,
+                            currentPrice: 221.3,
+                            currentPriceSource: 'live',
+                            portfolioMarketPrice: 221.3,
+                            portfolioMarketPriceSource: 'tws_portfolio',
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                almostEqual(result.legResults[0].liveLegPnL, 160455);
+                assert.equal(result.legResults[0].livePnlSource, 'live_midpoint');
+                assert.equal(result.legResults[0].currentPriceDisplay.value, '534.25');
+                assert.equal(result.groupUsesPortfolioLivePnl, false);
+            },
+        },
+        {
+            name: 'falls back to portfolio mark when midpoint is unavailable',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/session_logic.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(subId) {
+                            if (subId === 'spx_no_midpoint') {
+                                return { bid: 0, ask: 0, mark: 221.3 };
+                            }
+                            return null;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    underlyingSymbol: 'SPX',
+                    underlyingPrice: 7270,
+                    baseDate: '2026-05-01',
+                    simulatedDate: '2026-05-01',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_mark_fallback',
+                    viewMode: 'active',
+                    livePriceMode: 'midpoint',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'spx_no_midpoint',
+                            type: 'call',
+                            pos: 5,
+                            strike: 6790,
+                            expDate: '2026-06-17',
+                            iv: 0.2,
+                            cost: 213.34,
+                            currentPrice: 0,
+                            currentPriceSource: 'missing',
+                            portfolioMarketPrice: 221.3,
+                            portfolioMarketPriceSource: 'tws_portfolio',
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                almostEqual(result.legResults[0].liveLegPnL, 3980);
+                assert.equal(result.legResults[0].livePnlSource, 'tws_portfolio');
+                assert.equal(result.groupUsesPortfolioLivePnl, true);
+            },
+        },
+        {
             name: 'uses live bid ask midpoint when the group price source is midpoint',
             run() {
                 const ctx = loadBrowserScripts([
@@ -815,6 +957,197 @@ module.exports = {
                 assert.equal(result.groupDeltaDisplayable, false);
                 assert.equal(result.groupDeltaAvailable, false);
                 assert.equal(result.groupDelta, null);
+            },
+        },
+        {
+            name: 'computes portfolio net delta from included groups and existing hedges',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(subId) {
+                            if (subId === 'included_call') {
+                                return { delta: 0.4 };
+                            }
+                            if (subId === 'excluded_call') {
+                                return { delta: 0.9 };
+                            }
+                            return null;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    hedges: [
+                        { id: 'h_existing', pos: -25, cost: 600, currentPrice: 610 },
+                    ],
+                    groups: [
+                        {
+                            id: 'g_included_delta',
+                            includedInGlobal: true,
+                            viewMode: 'active',
+                            liveData: true,
+                            settleUnderlyingPrice: null,
+                            legs: [{
+                                id: 'included_call',
+                                type: 'call',
+                                pos: 2,
+                                strike: 620,
+                                expDate: '2026-04-17',
+                                iv: 0.2,
+                                cost: 4.2,
+                                currentPrice: 4.4,
+                                closePrice: null,
+                            }],
+                        },
+                        {
+                            id: 'g_excluded_delta',
+                            includedInGlobal: false,
+                            viewMode: 'active',
+                            liveData: true,
+                            settleUnderlyingPrice: null,
+                            legs: [{
+                                id: 'excluded_call',
+                                type: 'call',
+                                pos: 10,
+                                strike: 620,
+                                expDate: '2026-04-17',
+                                iv: 0.2,
+                                cost: 4.2,
+                                currentPrice: 4.4,
+                                closePrice: null,
+                            }],
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computePortfolioDerivedData(globalState);
+
+                assert.equal(result.portfolioDeltaDisplayable, true);
+                assert.equal(result.portfolioDeltaAvailable, true);
+                assert.equal(result.portfolioDeltaIncludedGroupCount, 1);
+                assert.equal(result.portfolioDeltaMissingGroupCount, 0);
+                almostEqual(result.portfolioOptionDelta, 80);
+                almostEqual(result.portfolioHedgeDelta, -25);
+                almostEqual(result.portfolioNetDelta, 55);
+                almostEqual(result.hedgeResults[0].hedgeDelta, -25);
+            },
+        },
+        {
+            name: 'missing included group delta blocks portfolio net delta',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(subId) {
+                            if (subId === 'delta_ok') {
+                                return { delta: 0.25 };
+                            }
+                            if (subId === 'delta_missing') {
+                                return { mark: 1.1 };
+                            }
+                            return null;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    hedges: [
+                        { id: 'h_existing', pos: -25, cost: 600, currentPrice: 610 },
+                    ],
+                    groups: [
+                        {
+                            id: 'g_delta_ok',
+                            includedInGlobal: true,
+                            viewMode: 'active',
+                            liveData: true,
+                            settleUnderlyingPrice: null,
+                            legs: [{
+                                id: 'delta_ok',
+                                type: 'call',
+                                pos: 1,
+                                strike: 620,
+                                expDate: '2026-04-17',
+                                iv: 0.2,
+                                cost: 4.2,
+                                currentPrice: 4.4,
+                                closePrice: null,
+                            }],
+                        },
+                        {
+                            id: 'g_delta_missing',
+                            includedInGlobal: true,
+                            viewMode: 'active',
+                            liveData: true,
+                            settleUnderlyingPrice: null,
+                            legs: [{
+                                id: 'delta_missing',
+                                type: 'put',
+                                pos: 1,
+                                strike: 590,
+                                expDate: '2026-04-17',
+                                iv: 0.2,
+                                cost: 3.3,
+                                currentPrice: 3.1,
+                                closePrice: null,
+                            }],
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computePortfolioDerivedData(globalState);
+
+                assert.equal(result.portfolioDeltaDisplayable, true);
+                assert.equal(result.portfolioDeltaAvailable, false);
+                assert.equal(result.portfolioDeltaIncludedGroupCount, 2);
+                assert.equal(result.portfolioDeltaMissingGroupCount, 1);
+                assert.equal(result.portfolioOptionDelta, null);
+                almostEqual(result.portfolioHedgeDelta, -25);
+                assert.equal(result.portfolioNetDelta, null);
             },
         },
         {

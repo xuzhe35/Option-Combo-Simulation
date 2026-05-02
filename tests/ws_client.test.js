@@ -652,6 +652,912 @@ module.exports = {
             },
         },
         {
+            name: 'requests delta hedge broker preview through validate then preview only',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 480,
+                    simulatedDate: '2026-03-17',
+                    baseDate: '2026-03-17',
+                    selectedLiveComboOrderAccount: 'DU12345',
+                    liveComboOrderAccounts: ['DU12345'],
+                    liveComboOrderAccountsConnected: true,
+                    deltaHedge: {
+                        enabled: true,
+                        orderType: 'LMT',
+                        limitPrice: 481.25,
+                        hedgeInstrument: {
+                            secType: 'STK',
+                            symbol: 'SPY',
+                            exchange: 'SMART',
+                            currency: 'USD',
+                            multiplier: 1,
+                            deltaPerUnit: 1,
+                        },
+                    },
+                    groups: [],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const uiUpdates = [];
+                let autoSupervisorCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/delta_hedge_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        OptionComboDeltaHedgeUI: {
+                            applyBrokerPreviewState(appState) {
+                                uiUpdates.push(appState.deltaHedge.status);
+                            },
+                            applyRecommendationPreview() {},
+                        },
+                        runDeltaHedgeAutoSupervisor() {
+                            autoSupervisorCalls += 1;
+                        },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                MockWebSocket.instance.sent.length = 0;
+
+                const requested = ctx.requestDeltaHedgeBrokerPreview({
+                    actionable: true,
+                    side: 'SELL',
+                    quantity: 55,
+                    currentNetDelta: 55,
+                    projectedNetDelta: 0,
+                    targetLower: -25,
+                    targetUpper: 25,
+                });
+
+                assert.equal(requested, true);
+                assert.equal(state.deltaHedge.status, 'pending_validation');
+                assert.equal(MockWebSocket.instance.sent.length, 1);
+                const validatePayload = JSON.parse(MockWebSocket.instance.sent[0]);
+                assert.equal(validatePayload.action, 'validate_hedge_order');
+                assert.equal(validatePayload.executionMode, 'preview');
+                assert.equal(validatePayload.orderAction, 'SELL');
+                assert.equal(validatePayload.quantity, 55);
+                assert.equal(validatePayload.orderType, 'LMT');
+                assert.equal(validatePayload.limitPrice, 481.25);
+                assert.equal(validatePayload.account, 'DU12345');
+                assert.notEqual(validatePayload.action, 'submit_hedge_order');
+
+                MockWebSocket.instance.onmessage({
+                    data: JSON.stringify({
+                        action: 'hedge_order_validation_result',
+                        hedgeId: validatePayload.hedgeId,
+                        validation: {
+                            valid: true,
+                            hedgeId: validatePayload.hedgeId,
+                            executionMode: 'preview',
+                            secType: 'STK',
+                            symbol: 'SPY',
+                            localSymbol: 'SPY',
+                            conId: 756733,
+                        },
+                    }),
+                });
+
+                assert.equal(state.deltaHedge.status, 'pending_preview');
+                assert.equal(MockWebSocket.instance.sent.length, 2);
+                const previewPayload = JSON.parse(MockWebSocket.instance.sent[1]);
+                assert.equal(previewPayload.action, 'preview_hedge_order');
+                assert.equal(previewPayload.executionMode, 'preview');
+                assert.notEqual(previewPayload.action, 'submit_hedge_order');
+
+                MockWebSocket.instance.onmessage({
+                    data: JSON.stringify({
+                        action: 'hedge_order_preview_result',
+                        hedgeId: validatePayload.hedgeId,
+                        preview: {
+                            hedgeId: validatePayload.hedgeId,
+                            executionMode: 'preview',
+                            secType: 'STK',
+                            symbol: 'SPY',
+                            localSymbol: 'SPY',
+                            orderAction: 'SELL',
+                            quantity: 55,
+                            orderType: 'LMT',
+                            limitPrice: 481.25,
+                            projectedNetDelta: 0,
+                            conId: 756733,
+                        },
+                    }),
+                });
+
+                assert.equal(state.deltaHedge.status, 'previewed');
+                assert.equal(state.deltaHedge.pendingRequest, false);
+                assert.equal(state.deltaHedge.lastPreview.symbol, 'SPY');
+                assert.equal(typeof state.deltaHedge.lastPreviewAt, 'string');
+                assert.match(state.deltaHedge.lastPreviewAt, /^\d{4}-\d{2}-\d{2}T/);
+                assert.equal(autoSupervisorCalls, 1);
+                assert.equal(uiUpdates.includes('previewed'), true);
+            },
+        },
+        {
+            name: 'blocks delta hedge broker preview until a TWS account is selected',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    selectedLiveComboOrderAccount: '',
+                    liveComboOrderAccounts: ['DU111111', 'F222222'],
+                    liveComboOrderAccountsConnected: true,
+                    deltaHedge: {
+                        enabled: true,
+                        orderType: 'LMT',
+                        limitPrice: 481.25,
+                        hedgeInstrument: {
+                            secType: 'STK',
+                            symbol: 'SPY',
+                            exchange: 'SMART',
+                            currency: 'USD',
+                        },
+                    },
+                    groups: [],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/delta_hedge_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                MockWebSocket.instance.sent.length = 0;
+
+                const requested = ctx.requestDeltaHedgeBrokerPreview({
+                    actionable: true,
+                    side: 'SELL',
+                    quantity: 55,
+                    currentNetDelta: 55,
+                    projectedNetDelta: 0,
+                    targetLower: -25,
+                    targetUpper: 25,
+                });
+
+                assert.equal(requested, false);
+                assert.equal(state.deltaHedge.status, 'error');
+                assert.match(state.deltaHedge.lastError, /select a tws account/i);
+                assert.equal(MockWebSocket.instance.sent.length, 1);
+                assert.equal(JSON.parse(MockWebSocket.instance.sent[0]).action, 'request_managed_accounts_snapshot');
+            },
+        },
+        {
+            name: 'blocks delta hedge submit until live hedge gate is enabled',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    allowLiveHedgeOrders: false,
+                    selectedLiveComboOrderAccount: 'DU12345',
+                    liveComboOrderAccounts: ['DU12345'],
+                    liveComboOrderAccountsConnected: true,
+                    deltaHedge: {
+                        enabled: true,
+                        status: 'previewed',
+                        orderType: 'LMT',
+                        limitPrice: 481.25,
+                        lastPreview: {
+                            executionMode: 'preview',
+                            orderAction: 'SELL',
+                            quantity: 55,
+                            orderType: 'LMT',
+                            limitPrice: 481.25,
+                        },
+                        hedgeInstrument: {
+                            secType: 'STK',
+                            symbol: 'SPY',
+                            exchange: 'SMART',
+                            currency: 'USD',
+                            multiplier: 1,
+                            deltaPerUnit: 1,
+                        },
+                    },
+                    groups: [],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/delta_hedge_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                MockWebSocket.instance.sent.length = 0;
+
+                const requested = ctx.requestDeltaHedgeSubmit({
+                    actionable: true,
+                    side: 'SELL',
+                    quantity: 55,
+                    currentNetDelta: 55,
+                    projectedNetDelta: 0,
+                    targetLower: -25,
+                    targetUpper: 25,
+                });
+
+                assert.equal(requested, false);
+                assert.equal(MockWebSocket.instance.sent.length, 0);
+                assert.equal(state.deltaHedge.status, 'error');
+                assert.match(state.deltaHedge.lastError, /live hedge order switch is off/i);
+            },
+        },
+        {
+            name: 'submits delta hedge after broker preview and locks resting order',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    allowLiveHedgeOrders: true,
+                    selectedLiveComboOrderAccount: 'DU12345',
+                    liveComboOrderAccounts: ['DU12345'],
+                    liveComboOrderAccountsConnected: true,
+                    deltaHedge: {
+                        enabled: true,
+                        status: 'previewed',
+                        orderType: 'LMT',
+                        limitPrice: 481.25,
+                        lastPreview: {
+                            hedgeId: 'delta_hedge_stk_spy_spot',
+                            executionMode: 'preview',
+                            orderAction: 'SELL',
+                            quantity: 55,
+                            orderType: 'LMT',
+                            limitPrice: 481.25,
+                            conId: 756733,
+                            projectedNetDelta: 0,
+                        },
+                        hedgeInstrument: {
+                            secType: 'STK',
+                            symbol: 'SPY',
+                            exchange: 'SMART',
+                            currency: 'USD',
+                            multiplier: 1,
+                            deltaPerUnit: 1,
+                        },
+                    },
+                    groups: [],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/delta_hedge_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                MockWebSocket.instance.sent.length = 0;
+
+                const requested = ctx.requestDeltaHedgeSubmit({
+                    actionable: true,
+                    side: 'SELL',
+                    quantity: 55,
+                    currentNetDelta: 55,
+                    projectedNetDelta: 0,
+                    targetLower: -25,
+                    targetUpper: 25,
+                });
+
+                assert.equal(requested, true);
+                assert.equal(state.deltaHedge.status, 'placing');
+                assert.equal(MockWebSocket.instance.sent.length, 1);
+                const submitPayload = JSON.parse(MockWebSocket.instance.sent[0]);
+                assert.equal(submitPayload.action, 'submit_hedge_order');
+                assert.equal(submitPayload.executionMode, 'submit');
+                assert.equal(submitPayload.requestSource, 'delta_hedge_manual_submit');
+                assert.equal(submitPayload.orderAction, 'SELL');
+                assert.equal(submitPayload.quantity, 55);
+                assert.equal(submitPayload.limitPrice, 481.25);
+
+                MockWebSocket.instance.onmessage({
+                    data: JSON.stringify({
+                        action: 'hedge_order_submit_result',
+                        order: {
+                            hedgeId: submitPayload.hedgeId,
+                            executionMode: 'submit',
+                            secType: 'STK',
+                            symbol: 'SPY',
+                            localSymbol: 'SPY',
+                            orderAction: 'SELL',
+                            quantity: 55,
+                            orderType: 'LMT',
+                            limitPrice: 481.25,
+                            projectedNetDelta: 0,
+                            conId: 756733,
+                            orderId: 3101,
+                            permId: 90001,
+                            status: 'Submitted',
+                        },
+                    }),
+                });
+
+                assert.equal(state.deltaHedge.status, 'submitted');
+                assert.equal(state.deltaHedge.orderState, 'resting_locked');
+                assert.equal(state.deltaHedge.restingOrder.orderId, 3101);
+                assert.equal(state.deltaHedge.restingOrder.permId, 90001);
+                assert.equal(state.deltaHedge.restingOrder.side, 'SELL');
+                assert.equal(state.deltaHedge.restingOrder.quantity, 55);
+                assert.equal(state.deltaHedge.restingOrder.remainingQuantity, 55);
+            },
+        },
+        {
+            name: 'applies hedge fill updates to resting order and hedge rows once',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    allowLiveHedgeOrders: true,
+                    deltaHedge: {
+                        status: 'submitted',
+                        orderState: 'resting_locked',
+                        restingOrder: {
+                            orderId: 3101,
+                            permId: 90001,
+                            side: 'SELL',
+                            quantity: 55,
+                            filledQuantity: 0,
+                            remainingQuantity: 55,
+                            status: 'Submitted',
+                        },
+                    },
+                    groups: [],
+                    hedges: [],
+                };
+                let renderHedgeCalls = 0;
+                let derivedCalls = 0;
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/delta_hedge_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        renderHedges() {
+                            renderHedgeCalls += 1;
+                            derivedCalls += 1;
+                        },
+                        updateDerivedValues() { derivedCalls += 1; },
+                        handleLiveSubscriptions() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const fillMessage = {
+                    action: 'hedge_order_fill_update',
+                    orderFill: {
+                        hedgeId: 'delta_hedge_stk_spy_spot',
+                        orderId: 3101,
+                        permId: 90001,
+                        secType: 'STK',
+                        symbol: 'SPY',
+                        orderAction: 'SELL',
+                        quantity: 55,
+                        executionId: 'exec-1',
+                        lastFillQuantity: 20,
+                        lastFillPrice: 481.2,
+                        filledQuantity: 20,
+                        avgFillPrice: 481.2,
+                        costSource: 'execution_report',
+                    },
+                };
+
+                assert.equal(ctx._handleHedgeOrderMessage(fillMessage), true);
+                assert.equal(state.deltaHedge.restingOrder.filledQuantity, 20);
+                assert.equal(state.deltaHedge.restingOrder.remainingQuantity, 35);
+                assert.equal(state.deltaHedge.status, 'partial_fill_needs_review');
+                assert.equal(state.deltaHedge.orderState, 'stale_needs_review');
+                assert.equal(state.deltaHedge.restingOrder.staleReason, 'partial_fill_needs_review');
+                assert.equal(state.hedges.length, 1);
+                assert.equal(state.hedges[0].id, 'delta_hedge_stk_spy_spot');
+                assert.equal(state.hedges[0].symbol, 'SPY');
+                assert.equal(state.hedges[0].pos, -20);
+                assert.equal(state.hedges[0].cost, 481.2);
+                assert.equal(state.hedges[0].currentPrice, 481.2);
+
+                assert.equal(ctx._handleHedgeOrderMessage(fillMessage), true);
+                assert.equal(state.hedges[0].pos, -20);
+                assert.equal(renderHedgeCalls, 1);
+                assert.equal(derivedCalls, 1);
+            },
+        },
+        {
+            name: 'marks partial hedge status updates as needing manual review',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    deltaHedge: {
+                        status: 'submitted',
+                        orderState: 'resting_locked',
+                        restingOrder: {
+                            orderId: 3101,
+                            permId: 90001,
+                            side: 'SELL',
+                            quantity: 55,
+                            filledQuantity: 0,
+                            remainingQuantity: 55,
+                            status: 'Submitted',
+                        },
+                    },
+                    groups: [],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/delta_hedge_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                assert.equal(ctx._handleHedgeOrderMessage({
+                    action: 'hedge_order_status_update',
+                    orderStatus: {
+                        orderId: 3101,
+                        permId: 90001,
+                        status: 'Submitted',
+                        filled: 20,
+                        remaining: 35,
+                        avgFillPrice: 481.2,
+                    },
+                }), true);
+
+                assert.equal(state.deltaHedge.status, 'partial_fill_needs_review');
+                assert.equal(state.deltaHedge.orderState, 'stale_needs_review');
+                assert.equal(state.deltaHedge.restingOrder.staleReason, 'partial_fill_needs_review');
+                assert.equal(ctx.OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder(state.deltaHedge), true);
+            },
+        },
+        {
+            name: 'recovers active hedge order snapshot into resting lock',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    deltaHedge: {
+                        enabled: true,
+                        orderType: 'LMT',
+                        limitPrice: 481.25,
+                        hedgeInstrument: {
+                            secType: 'STK',
+                            symbol: 'SPY',
+                            exchange: 'SMART',
+                            currency: 'USD',
+                            multiplier: 1,
+                            deltaPerUnit: 1,
+                        },
+                    },
+                    groups: [],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/delta_hedge_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                assert.equal(ctx._handleHedgeOrderMessage({
+                    action: 'active_hedge_orders_snapshot',
+                    orders: [{
+                        hedgeId: 'delta_hedge_stk_spy_spot',
+                        secType: 'STK',
+                        symbol: 'SPY',
+                        localSymbol: 'SPY',
+                        orderAction: 'BUY',
+                        quantity: 12,
+                        orderType: 'LMT',
+                        limitPrice: 481.25,
+                        orderId: 3101,
+                        permId: 90001,
+                        status: 'Submitted',
+                        remaining: 12,
+                    }],
+                }), true);
+
+                assert.equal(state.deltaHedge.status, 'submitted');
+                assert.equal(state.deltaHedge.orderState, 'resting_locked');
+                assert.equal(state.deltaHedge.restingOrder.orderId, 3101);
+                assert.equal(state.deltaHedge.restingOrder.side, 'BUY');
+                assert.equal(ctx.OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder(state.deltaHedge), true);
+            },
+        },
+        {
+            name: 'terminal hedge status releases resting order lock',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    deltaHedge: {
+                        status: 'submitted',
+                        orderState: 'resting_locked',
+                        restingOrder: {
+                            orderId: 3101,
+                            permId: 90001,
+                            side: 'SELL',
+                            quantity: 55,
+                            filledQuantity: 20,
+                            remainingQuantity: 35,
+                            status: 'Submitted',
+                        },
+                    },
+                    groups: [],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/delta_hedge_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                assert.equal(ctx._handleHedgeOrderMessage({
+                    action: 'hedge_order_status_update',
+                    orderStatus: {
+                        orderId: 3101,
+                        permId: 90001,
+                        status: 'Filled',
+                        filled: 55,
+                        remaining: 0,
+                        avgFillPrice: 481.2,
+                    },
+                }), true);
+
+                assert.equal(state.deltaHedge.status, 'filled');
+                assert.equal(state.deltaHedge.orderState, 'filled');
+                assert.equal(state.deltaHedge.restingOrder.status, 'Filled');
+                assert.equal(state.deltaHedge.restingOrder.remainingQuantity, 0);
+                assert.equal(ctx.OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder(state.deltaHedge), false);
+            },
+        },
+        {
+            name: 'requests hedge order cancel without live submit gate',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    allowLiveHedgeOrders: false,
+                    deltaHedge: {
+                        status: 'submitted',
+                        orderState: 'resting_locked',
+                        restingOrder: {
+                            hedgeId: 'delta_hedge_stk_spy_spot',
+                            orderId: 3101,
+                            permId: 90001,
+                            side: 'SELL',
+                            quantity: 55,
+                            remainingQuantity: 35,
+                            status: 'Submitted',
+                        },
+                    },
+                    groups: [],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/delta_hedge_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                MockWebSocket.instance.sent.length = 0;
+
+                assert.equal(ctx.requestDeltaHedgeCancel(), true);
+                assert.equal(state.deltaHedge.status, 'cancel_pending');
+                assert.equal(MockWebSocket.instance.sent.length, 1);
+                const payload = JSON.parse(MockWebSocket.instance.sent[0]);
+                assert.equal(payload.action, 'cancel_hedge_order');
+                assert.equal(payload.orderId, 3101);
+                assert.equal(payload.permId, 90001);
+            },
+        },
+        {
+            name: 'applies hedge order cancel result as cancel pending until terminal status',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    deltaHedge: {
+                        status: 'cancel_pending',
+                        orderState: 'resting_locked',
+                        restingOrder: {
+                            orderId: 3101,
+                            permId: 90001,
+                            side: 'SELL',
+                            quantity: 55,
+                            remainingQuantity: 35,
+                            status: 'Submitted',
+                        },
+                    },
+                    groups: [],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/delta_hedge_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                assert.equal(ctx._handleHedgeOrderMessage({
+                    action: 'hedge_order_cancel_result',
+                    orderStatus: {
+                        orderId: 3101,
+                        permId: 90001,
+                        status: 'PendingCancel',
+                        remaining: 35,
+                        cancelRequested: true,
+                    },
+                }), true);
+
+                assert.equal(state.deltaHedge.status, 'cancel_pending');
+                assert.equal(state.deltaHedge.orderState, 'resting_locked');
+                assert.equal(state.deltaHedge.restingOrder.status, 'PendingCancel');
+                assert.equal(state.deltaHedge.restingOrder.cancelRequested, true);
+            },
+        },
+        {
             name: 'promotes a filled trial group into active mode after avg cost sync completes',
             run() {
                 const state = {

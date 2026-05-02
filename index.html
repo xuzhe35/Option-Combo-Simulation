@@ -345,6 +345,143 @@
                             <button id="toggleGreeksBtn" type="button" class="btn btn-secondary btn-sm">Enable Greeks</button>
                         </div>
                     </div>
+
+                    <div class="panel-card" id="deltaHedgePanel" style="padding: 0.875rem 1rem;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem;">
+                            <div>
+                                <div style="font-size: 0.9rem; font-weight: 600;">Delta Hedge</div>
+                                <div id="deltaHedgeRecommendationStatus" class="text-muted small" style="margin-top: 0.35rem;">Disabled</div>
+                            </div>
+                            <label style="display: flex; align-items: center; gap: 0.45rem; cursor: pointer; font-size: 0.8rem; font-weight: 600;">
+                                <input type="checkbox" id="deltaHedgeEnabled" style="accent-color: var(--primary-color);">
+                                Enable
+                            </label>
+                        </div>
+
+                        <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.5rem;">
+                            <label class="small text-muted" for="deltaHedgeTargetDelta">
+                                Target
+                                <input type="number" id="deltaHedgeTargetDelta" class="number-input" value="0" step="1" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeTolerance">
+                                Tolerance
+                                <input type="number" id="deltaHedgeTolerance" class="number-input" value="50" min="0" step="1" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeProactiveBuffer">
+                                Arm Buffer
+                                <input type="number" id="deltaHedgeProactiveBuffer" class="number-input" value="0" min="0" step="1" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeSecType">
+                                Type
+                                <select id="deltaHedgeSecType" class="number-input" style="width: 100%; margin-top: 0.25rem;">
+                                    <option value="STK">STK</option>
+                                    <option value="FUT">FUT</option>
+                                </select>
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeSymbol">
+                                Symbol
+                                <input type="text" id="deltaHedgeSymbol" class="number-input" value="" placeholder="Required" style="width: 100%; margin-top: 0.25rem; text-transform: uppercase;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeExchange">
+                                Exchange
+                                <input type="text" id="deltaHedgeExchange" class="number-input" value="SMART" style="width: 100%; margin-top: 0.25rem; text-transform: uppercase;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeOrderType">
+                                Order
+                                <select id="deltaHedgeOrderType" class="number-input" style="width: 100%; margin-top: 0.25rem;">
+                                    <option value="LMT">LMT</option>
+                                    <option value="MKT">MKT</option>
+                                </select>
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeLimitPrice" id="deltaHedgeLimitPriceGroup">
+                                Limit
+                                <input type="number" id="deltaHedgeLimitPrice" class="number-input" value="" min="0" step="0.01" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                            <div class="small text-muted">
+                                Account
+                                <div id="deltaHedgeAccountDisplay" class="number-input" style="width: 100%; margin-top: 0.25rem; min-height: 34px; display: flex; align-items: center; color: var(--text-primary);">
+                                    Waiting for account
+                                </div>
+                            </div>
+                            <label class="small text-muted" for="deltaHedgeContractMonth" id="deltaHedgeContractMonthGroup" hidden>
+                                Month
+                                <input type="text" id="deltaHedgeContractMonth" class="number-input" value="" placeholder="YYYYMM" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeMultiplier">
+                                Multiplier
+                                <input type="number" id="deltaHedgeMultiplier" class="number-input" value="1" min="0" step="1" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeDeltaPerUnit">
+                                Delta / Unit
+                                <input type="number" id="deltaHedgeDeltaPerUnit" class="number-input" value="1" min="0" step="0.01" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                        </div>
+
+                        <div style="border-top: 1px solid var(--border-color); margin-top: 0.75rem; padding-top: 0.75rem; display: grid; gap: 0.35rem;">
+                            <div class="summary-item" style="margin: 0;">
+                                <span class="label">Option Delta</span>
+                                <span class="value" id="deltaHedgeOptionDelta">--</span>
+                            </div>
+                            <div class="summary-item" style="margin: 0;">
+                                <span class="label">Hedge Delta</span>
+                                <span class="value" id="deltaHedgeExistingHedgeDelta">--</span>
+                            </div>
+                            <div class="summary-item" style="margin: 0;">
+                                <span class="label">Net Delta</span>
+                                <span class="value" id="deltaHedgeNetDelta">--</span>
+                            </div>
+                            <div class="summary-item" style="margin: 0;">
+                                <span class="label">Projected</span>
+                                <span class="value" id="deltaHedgeProjectedDelta">--</span>
+                            </div>
+                        </div>
+
+                        <button type="button" class="btn btn-secondary btn-sm" id="deltaHedgeRecommendationPreviewBtn" style="width: 100%; margin-top: 0.75rem;">Recommendation Preview</button>
+                        <div id="deltaHedgeRecommendationSummary" class="text-muted small" style="margin-top: 0.5rem;"></div>
+                        <button type="button" class="btn btn-secondary btn-sm" id="deltaHedgeBrokerPreviewBtn" style="width: 100%; margin-top: 0.75rem;">Broker Preview / What-If</button>
+                        <label style="display: flex; align-items: center; gap: 0.45rem; cursor: pointer; font-size: 0.8rem; font-weight: 600; margin-top: 0.75rem;">
+                            <input type="checkbox" id="deltaHedgeAllowLiveOrders" style="accent-color: var(--danger-color);">
+                            Enable Live Hedge Orders
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 0.45rem; cursor: pointer; font-size: 0.8rem; font-weight: 600; margin-top: 0.5rem;">
+                            <input type="checkbox" id="deltaHedgeAutoSubmitEnabled" style="accent-color: var(--danger-color);">
+                            Auto Submit
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 0.45rem; cursor: pointer; font-size: 0.8rem; font-weight: 600; margin-top: 0.5rem;">
+                            <input type="checkbox" id="deltaHedgeAutoCancelStaleOrders" style="accent-color: var(--danger-color);">
+                            Auto Cancel Stale
+                        </label>
+                        <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.5rem; margin-top: 0.5rem;">
+                            <label class="small text-muted" for="deltaHedgeMaxOrderQuantity">
+                                Max Qty
+                                <input type="number" id="deltaHedgeMaxOrderQuantity" class="number-input" value="" min="1" step="1" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeAutoMaxNotional">
+                                Max Notional
+                                <input type="number" id="deltaHedgeAutoMaxNotional" class="number-input" value="" min="1" step="1" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeAutoMaxOrdersPerDay">
+                                Max / Day
+                                <input type="number" id="deltaHedgeAutoMaxOrdersPerDay" class="number-input" value="3" min="1" step="1" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeCooldownSeconds">
+                                Cooldown
+                                <input type="number" id="deltaHedgeCooldownSeconds" class="number-input" value="60" min="1" step="1" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                            <label class="small text-muted" for="deltaHedgeAutoPreviewMaxAgeSeconds">
+                                Preview Age
+                                <input type="number" id="deltaHedgeAutoPreviewMaxAgeSeconds" class="number-input" value="30" min="1" step="1" style="width: 100%; margin-top: 0.25rem;">
+                            </label>
+                        </div>
+                        <div id="deltaHedgeAutoStatus" class="text-muted small" style="margin-top: 0.5rem;"></div>
+                        <button type="button" class="btn btn-danger btn-sm" id="deltaHedgeSubmitBtn" disabled style="width: 100%; margin-top: 0.5rem;">Place Hedge</button>
+                        <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.5rem; margin-top: 0.5rem;">
+                            <button type="button" class="btn btn-secondary btn-sm" id="deltaHedgeCancelBtn" disabled>Cancel</button>
+                            <button type="button" class="btn btn-secondary btn-sm" id="deltaHedgeClearBtn" disabled>Clear</button>
+                        </div>
+                        <div id="deltaHedgeBrokerPreviewStatus" class="text-muted small" style="margin-top: 0.5rem;"></div>
+                        <div id="deltaHedgeBrokerPreviewDetails" class="text-muted small" style="margin-top: 0.35rem;"></div>
+                    </div>
                 </aside>
 
                 <!-- Portfolio Area (Right Main Content) -->
@@ -873,8 +1010,8 @@
                                             <th>
                                                 <label style="display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; flex-wrap: nowrap; white-space: nowrap; margin: 0;">
                                                     <select class="group-live-price-mode-select" style="font-size: 0.75rem; padding: 0.15rem 0.35rem; border: 1px solid var(--border-color); border-radius: 999px; background: #fff;">
-                                                        <option value="mark">Mark</option>
                                                         <option value="midpoint">Midpoint</option>
+                                                        <option value="mark">Portfolio Mark</option>
                                                     </select>
                                                     <span>/ COST</span>
                                                 </label>
@@ -1185,6 +1322,7 @@
     <script src="js/pricing_context.js?v=20260322-histsimdate"></script>
     <script src="js/group_order_builder.js"></script>
     <script src="js/trade_trigger_logic.js"></script>
+    <script src="js/delta_hedge_logic.js"></script>
     <script src="js/distribution_proxy_config.js"></script>
     <script src="js/pricing_core.js?v=20260322-expiryfreeze"></script>
     <script src="js/bsm.js"></script>
@@ -1201,6 +1339,7 @@
     <script src="js/hedge_ui.js"></script>
     <script src="js/group_ui.js?v=20260326-mobilemeta"></script>
     <script src="js/global_ui.js"></script>
+    <script src="js/delta_hedge_ui.js"></script>
     <script src="js/app.js?v=20260322-phase4"></script>
     <script src="js/ws_client.js?v=20260322-riskfree"></script>
 </body>

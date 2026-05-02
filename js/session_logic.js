@@ -60,6 +60,40 @@
         };
     }
 
+    function _createDefaultDeltaHedgeConfig() {
+        if (typeof globalScope.OptionComboDeltaHedgeLogic !== 'undefined'
+            && typeof globalScope.OptionComboDeltaHedgeLogic.createDefaultDeltaHedgeConfig === 'function') {
+            return globalScope.OptionComboDeltaHedgeLogic.createDefaultDeltaHedgeConfig();
+        }
+
+        return {
+            enabled: false,
+            targetDelta: 0,
+            tolerance: 50,
+            proactiveBuffer: 0,
+            hedgeInstrument: {
+                secType: 'STK',
+                symbol: '',
+                exchange: 'SMART',
+                currency: 'USD',
+                contractMonth: '',
+                multiplier: 1,
+                deltaPerUnit: 1,
+                conversionRatio: 1,
+            },
+            orderType: 'LMT',
+            limitPrice: null,
+            limitOffset: 0,
+            maxOrderQuantity: null,
+            autoMaxNotional: null,
+            cooldownSeconds: 60,
+            autoSubmitEnabled: false,
+            autoCancelStaleOrders: true,
+            autoMaxOrdersPerDay: 3,
+            autoPreviewMaxAgeSeconds: 30,
+        };
+    }
+
     function _normalizeTradeTrigger(trigger) {
         if (typeof globalScope.OptionComboTradeTriggerLogic !== 'undefined'
             && typeof globalScope.OptionComboTradeTriggerLogic.normalizeTradeTrigger === 'function') {
@@ -111,6 +145,134 @@
     function _toFiniteNumberOrNull(value) {
         const parsed = parseFloat(value);
         return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function _toFiniteNumberOrDefault(value, fallback) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function _toPositiveNumberOrDefault(value, fallback) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+    }
+
+    function _toPositiveIntegerOrDefault(value, fallback) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+    }
+
+    function _pickFirstDefined(primary, fallback) {
+        return primary !== undefined ? primary : fallback;
+    }
+
+    function _normalizeDeltaHedgeInstrument(instrument) {
+        const defaults = _createDefaultDeltaHedgeConfig().hedgeInstrument;
+        const raw = instrument && typeof instrument === 'object' ? instrument : {};
+        const secType = String(_pickFirstDefined(raw.secType, raw.sec_type) || defaults.secType).trim().toUpperCase();
+        return {
+            secType: ['STK', 'FUT'].includes(secType) ? secType : '',
+            symbol: String(raw.symbol || defaults.symbol).trim().toUpperCase(),
+            exchange: String(raw.exchange || defaults.exchange).trim().toUpperCase() || defaults.exchange,
+            currency: String(raw.currency || defaults.currency).trim().toUpperCase() || defaults.currency,
+            contractMonth: String(_pickFirstDefined(raw.contractMonth, raw.contract_month) || defaults.contractMonth).trim(),
+            multiplier: _toPositiveNumberOrDefault(raw.multiplier, defaults.multiplier),
+            deltaPerUnit: _toPositiveNumberOrDefault(
+                _pickFirstDefined(raw.deltaPerUnit, raw.delta_per_unit),
+                defaults.deltaPerUnit
+            ),
+            conversionRatio: _toPositiveNumberOrDefault(
+                _pickFirstDefined(raw.conversionRatio, raw.conversion_ratio),
+                defaults.conversionRatio
+            ),
+        };
+    }
+
+    function _normalizeDeltaHedgeConfig(deltaHedge) {
+        if (typeof globalScope.OptionComboDeltaHedgeLogic !== 'undefined'
+            && typeof globalScope.OptionComboDeltaHedgeLogic.normalizeDeltaHedgeConfig === 'function') {
+            return globalScope.OptionComboDeltaHedgeLogic.normalizeDeltaHedgeConfig(deltaHedge);
+        }
+
+        const defaults = _createDefaultDeltaHedgeConfig();
+        const raw = deltaHedge && typeof deltaHedge === 'object' ? deltaHedge : {};
+        const orderType = String(_pickFirstDefined(raw.orderType, raw.order_type) || defaults.orderType).trim().toUpperCase();
+        return {
+            enabled: raw.enabled === true,
+            targetDelta: _toFiniteNumberOrDefault(
+                _pickFirstDefined(raw.targetDelta, raw.target_delta),
+                defaults.targetDelta
+            ),
+            tolerance: _toPositiveNumberOrDefault(raw.tolerance, defaults.tolerance),
+            proactiveBuffer: Math.max(0, _toFiniteNumberOrDefault(
+                _pickFirstDefined(raw.proactiveBuffer, raw.proactive_buffer),
+                defaults.proactiveBuffer
+            )),
+            hedgeInstrument: _normalizeDeltaHedgeInstrument(
+                _pickFirstDefined(raw.hedgeInstrument, raw.hedge_instrument)
+            ),
+            orderType: ['LMT', 'MKT'].includes(orderType) ? orderType : defaults.orderType,
+            limitPrice: _toFiniteNumberOrDefault(
+                _pickFirstDefined(raw.limitPrice, raw.limit_price),
+                defaults.limitPrice
+            ),
+            limitOffset: _toFiniteNumberOrDefault(
+                _pickFirstDefined(raw.limitOffset, raw.limit_offset),
+                defaults.limitOffset
+            ),
+            maxOrderQuantity: _toPositiveIntegerOrDefault(
+                _pickFirstDefined(raw.maxOrderQuantity, raw.max_order_quantity),
+                defaults.maxOrderQuantity
+            ),
+            autoMaxNotional: _toPositiveNumberOrDefault(
+                _pickFirstDefined(raw.autoMaxNotional, raw.auto_max_notional),
+                defaults.autoMaxNotional
+            ),
+            cooldownSeconds: _toPositiveIntegerOrDefault(
+                _pickFirstDefined(raw.cooldownSeconds, raw.cooldown_seconds),
+                defaults.cooldownSeconds
+            ),
+            autoSubmitEnabled: false,
+            autoCancelStaleOrders: raw.autoCancelStaleOrders !== false && raw.auto_cancel_stale_orders !== false,
+            autoMaxOrdersPerDay: _toPositiveIntegerOrDefault(
+                _pickFirstDefined(raw.autoMaxOrdersPerDay, raw.auto_max_orders_per_day),
+                defaults.autoMaxOrdersPerDay
+            ),
+            autoPreviewMaxAgeSeconds: _toPositiveIntegerOrDefault(
+                _pickFirstDefined(raw.autoPreviewMaxAgeSeconds, raw.auto_preview_max_age_seconds),
+                defaults.autoPreviewMaxAgeSeconds
+            ),
+        };
+    }
+
+    function _buildArchivableDeltaHedgeConfig(deltaHedge) {
+        const normalized = _normalizeDeltaHedgeConfig(deltaHedge);
+        return {
+            enabled: normalized.enabled,
+            targetDelta: normalized.targetDelta,
+            tolerance: normalized.tolerance,
+            proactiveBuffer: normalized.proactiveBuffer,
+            hedgeInstrument: {
+                secType: normalized.hedgeInstrument.secType,
+                symbol: normalized.hedgeInstrument.symbol,
+                exchange: normalized.hedgeInstrument.exchange,
+                currency: normalized.hedgeInstrument.currency,
+                contractMonth: normalized.hedgeInstrument.contractMonth,
+                multiplier: normalized.hedgeInstrument.multiplier,
+                deltaPerUnit: normalized.hedgeInstrument.deltaPerUnit,
+                conversionRatio: normalized.hedgeInstrument.conversionRatio,
+            },
+            orderType: normalized.orderType,
+            limitPrice: normalized.limitPrice,
+            limitOffset: normalized.limitOffset,
+            maxOrderQuantity: normalized.maxOrderQuantity,
+            autoMaxNotional: normalized.autoMaxNotional,
+            cooldownSeconds: normalized.cooldownSeconds,
+            autoSubmitEnabled: false,
+            autoCancelStaleOrders: normalized.autoCancelStaleOrders !== false,
+            autoMaxOrdersPerDay: normalized.autoMaxOrdersPerDay,
+            autoPreviewMaxAgeSeconds: normalized.autoPreviewMaxAgeSeconds,
+        };
     }
 
     function _createDefaultForwardRateSample() {
@@ -277,9 +439,9 @@
     }
 
     function normalizeGroupLivePriceMode(value) {
-        return String(value || '').trim().toLowerCase() === 'midpoint'
-            ? 'midpoint'
-            : 'mark';
+        return String(value || '').trim().toLowerCase() === 'mark'
+            ? 'mark'
+            : 'midpoint';
     }
 
     function normalizeHistoricalAutoCloseAtExpiry(value) {
@@ -321,6 +483,8 @@
         const snapshot = JSON.parse(JSON.stringify(state));
         snapshot.liveComboOrderAccounts = [];
         snapshot.liveComboOrderAccountsConnected = false;
+        snapshot.allowLiveHedgeOrders = false;
+        snapshot.deltaHedge = _buildArchivableDeltaHedgeConfig(snapshot.deltaHedge);
         snapshot.groups = (snapshot.groups || []).map(group => ({
             ...group,
             tradeTrigger: _buildArchivableTradeTrigger(group.tradeTrigger),
@@ -353,8 +517,10 @@
             interestRate: importedState.interestRate !== undefined ? importedState.interestRate : 0.03,
             ivOffset: importedState.ivOffset || 0,
             greeksEnabled: normalizeGreeksEnabled(importedState.greeksEnabled),
+            deltaHedge: _normalizeDeltaHedgeConfig(importedState.deltaHedge),
             primaryControlPanelCollapsed: importedState.primaryControlPanelCollapsed === true,
             allowLiveComboOrders: importedState.allowLiveComboOrders === true,
+            allowLiveHedgeOrders: false,
             liveComboOrderAccounts: [],
             liveComboOrderAccountsConnected: false,
             selectedLiveComboOrderAccount: typeof importedState.selectedLiveComboOrderAccount === 'string'
@@ -365,6 +531,8 @@
             groups: currentState.groups.slice(),
             hedges: currentState.hedges.slice(),
         };
+        nextState.deltaHedge.autoSubmitEnabled = false;
+        nextState.deltaHedge.autoLastDecision = null;
         const importedFutureIdMap = new Map();
 
         if (importedState.simulatedDate) {
@@ -426,7 +594,7 @@
                 name: 'Legacy Combo',
                 includedInGlobal: true,
                 isCollapsed: false,
-                livePriceMode: 'mark',
+                livePriceMode: 'midpoint',
                 settleUnderlyingPrice: null,
                 historicalAutoCloseAtExpiry: true,
                 tradeTrigger: _createDefaultTradeTrigger(),
@@ -440,7 +608,7 @@
                 id: generateId(),
                 includedInGlobal: isGroupIncludedInGlobal(g),
                 isCollapsed: g.isCollapsed === true,
-                livePriceMode: normalizeGroupLivePriceMode(g.livePriceMode),
+                livePriceMode: 'midpoint',
                 settleUnderlyingPrice: g.settleUnderlyingPrice !== undefined ? g.settleUnderlyingPrice : null,
                 historicalAutoCloseAtExpiry: normalizeHistoricalAutoCloseAtExpiry(g.historicalAutoCloseAtExpiry),
                 tradeTrigger: _buildArchivableTradeTrigger(g.tradeTrigger),
@@ -520,6 +688,9 @@
         buildExportState,
         normalizeImportedState,
         buildArchivableTradeTrigger: _buildArchivableTradeTrigger,
+        createDefaultDeltaHedgeConfig: _createDefaultDeltaHedgeConfig,
+        normalizeDeltaHedgeConfig: _normalizeDeltaHedgeConfig,
+        buildArchivableDeltaHedgeConfig: _buildArchivableDeltaHedgeConfig,
         createDefaultCloseExecution: _createDefaultCloseExecution,
         normalizeCloseExecution: _normalizeCloseExecution,
         buildArchivableCloseExecution: _buildArchivableCloseExecution,

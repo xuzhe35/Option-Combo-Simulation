@@ -33,7 +33,7 @@ Current surfaces:
 - futures-pool panel for FOP products
 - live-order enable switch
 - live TWS account selector once accounts are discovered
-- configurable browser WS endpoint in `index.html`
+- configurable browser WS endpoint in `index.html`\n- delta hedge configuration and manual execution panel
 
 ### Group surface
 
@@ -138,10 +138,11 @@ If docs drift from behavior, trust code in roughly this order:
 6. `js/group_order_builder.js`
 7. `js/group_editor_ui.js`
 8. `js/group_ui.js`
-9. `js/ws_client.js`
-10. `ib_server.py`
-11. `historical_replay_service.py`
-12. `trade_execution/adapters/ibkr.py`
+9. `js/delta_hedge_logic.js`
+10. `js/ws_client.js`
+11. `ib_server.py`
+12. `historical_replay_service.py`
+13. `trade_execution/adapters/ibkr.py`
 
 ## 5. Architectural Hotspots
 
@@ -218,6 +219,14 @@ This is the main renderer for:
 - preview / submit / fill summaries
 - live P&L and delta badges
 - settlement / amortized banners
+
+### `js/delta_hedge_logic.js`
+
+This is the main logic handler for delta hedging configuration, recommendation calculations, broker submission logic, and the background auto-hedge timer loop.
+
+### `js/delta_hedge_ui.js`
+
+This module handles the Delta Hedge panel UI, binding configuration fields, and updating the recommendation/preview status in the DOM.
 
 ### `js/ws_client.js`
 
@@ -313,6 +322,7 @@ That runner currently includes the main suites wired in `tests/run.js`, such as:
 - control panel UI
 - group UI / editor UI
 - hedge editor UI
+- delta hedge logic and UI
 - WebSocket client
 
 Important nuance:
@@ -348,6 +358,8 @@ Important nuance:
 
 - `js/group_order_builder.js`
 - `js/trade_trigger_logic.js`
+- `js/delta_hedge_logic.js`
+- `js/delta_hedge_ui.js`
 - `js/group_editor_ui.js`
 - `js/group_ui.js`
 - `js/ws_client.js`

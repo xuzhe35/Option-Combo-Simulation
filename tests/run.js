@@ -5,6 +5,8 @@ const suites = [
     require('./iv_term_structure_core.test'),
     require('./group_order_builder.test'),
     require('./trade_trigger_logic.test'),
+    require('./delta_hedge_logic.test'),
+    require('./delta_hedge_ui.test'),
     require('./bsm.test'),
     require('./amortized.test'),
     require('./valuation.test'),

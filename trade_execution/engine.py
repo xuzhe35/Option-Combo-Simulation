@@ -1,13 +1,22 @@
 import logging
 
-from trade_execution.models import ComboOrderRequest
+from trade_execution.models import ComboOrderRequest, HedgeOrderRequest
 
 
 class ExecutionEngine:
-    def __init__(self, adapter, logger=None, on_submit_result=None):
+    def __init__(
+        self,
+        adapter,
+        logger=None,
+        on_submit_result=None,
+        on_hedge_submit_result=None,
+        has_active_hedge_order=None,
+    ):
         self.adapter = adapter
         self.logger = logger or logging.getLogger(__name__)
         self.on_submit_result = on_submit_result
+        self.on_hedge_submit_result = on_hedge_submit_result
+        self.has_active_hedge_order = has_active_hedge_order
 
     def _build_error_payload(self, group_id, message, request_action=None, execution_intent=None, request_source=None):
         payload = {
@@ -43,6 +52,24 @@ class ExecutionEngine:
             "orderStatus": snapshot,
         }
 
+    def _build_hedge_error_payload(self, hedge_id, message, request_action=None, request_source=None):
+        payload = {
+            "action": "hedge_order_error",
+            "hedgeId": hedge_id,
+            "message": message,
+            "requestAction": request_action,
+        }
+        if request_source:
+            payload["requestSource"] = request_source
+        return payload
+
+    def _build_hedge_cancel_payload(self, hedge_id, snapshot):
+        return {
+            "action": "hedge_order_cancel_result",
+            "hedgeId": hedge_id,
+            "orderStatus": snapshot,
+        }
+
     def _log_request_received(self, client_ip, raw_data):
         legs = raw_data.get("legs") or []
         self.logger.info(
@@ -69,6 +96,117 @@ class ExecutionEngine:
     def cancel_managed_for_websocket(self, websocket):
         if hasattr(self.adapter, "cancel_managed_for_websocket"):
             self.adapter.cancel_managed_for_websocket(websocket)
+
+    async def handle_hedge_action(self, websocket, raw_data, client_ip="Unknown"):
+        if not isinstance(raw_data, dict):
+            return self._build_hedge_error_payload(None, "Invalid hedge order payload.", None)
+
+        action = raw_data.get("action")
+        hedge_actions = (
+            "validate_hedge_order",
+            "preview_hedge_order",
+            "submit_hedge_order",
+            "cancel_hedge_order",
+        )
+        if action not in hedge_actions:
+            return None
+
+        if action == "cancel_hedge_order":
+            try:
+                snapshot = await self.adapter.cancel_hedge_order(websocket, raw_data)
+                payload = self._build_hedge_cancel_payload(raw_data.get("hedgeId"), snapshot)
+                self.logger.info(
+                    f"Hedge cancel response sent to {client_ip}: "
+                    f"hedgeId={raw_data.get('hedgeId')} action={payload.get('action')}"
+                )
+                return payload
+            except Exception as exc:
+                self.logger.exception(f"Hedge {action} failed for {client_ip}")
+                return self._build_hedge_error_payload(
+                    raw_data.get("hedgeId"),
+                    str(exc),
+                    action,
+                    raw_data.get("requestSource") or raw_data.get("source"),
+                )
+
+        try:
+            request = HedgeOrderRequest.from_payload(raw_data)
+        except Exception as exc:
+            self.logger.exception("Failed to parse hedge order request")
+            return self._build_hedge_error_payload(
+                raw_data.get("hedgeId"),
+                str(exc),
+                action,
+                raw_data.get("requestSource") or raw_data.get("source"),
+            )
+
+        try:
+            if action == "validate_hedge_order":
+                validation = await self.adapter.validate_hedge_order(websocket, request)
+                payload = {
+                    "action": "hedge_order_validation_result",
+                    "hedgeId": request.hedge_id,
+                    "validation": validation.to_payload(),
+                }
+                self.logger.info(
+                    f"Hedge validation response sent to {client_ip}: "
+                    f"hedgeId={request.hedge_id} action={payload.get('action')}"
+                )
+                return payload
+
+            if action == "preview_hedge_order":
+                preview = await self.adapter.preview_hedge_order(websocket, request)
+                payload = {
+                    "action": "hedge_order_preview_result",
+                    "hedgeId": request.hedge_id,
+                    "preview": preview.to_payload(),
+                }
+                self.logger.info(
+                    f"Hedge preview response sent to {client_ip}: "
+                    f"hedgeId={request.hedge_id} action={payload.get('action')}"
+                )
+                return payload
+
+            if action == "submit_hedge_order" and callable(self.has_active_hedge_order):
+                duplicate = self.has_active_hedge_order(websocket, request)
+                if duplicate:
+                    message = (
+                        duplicate
+                        if isinstance(duplicate, str)
+                        else "An active hedge order already exists for this session."
+                    )
+                    return self._build_hedge_error_payload(
+                        request.hedge_id,
+                        message,
+                        action,
+                        request.request_source,
+                    )
+
+            result = await self.adapter.submit_hedge_order(websocket, request)
+            payload = {
+                "action": "hedge_order_submit_result",
+                "hedgeId": request.hedge_id,
+                "order": result.to_payload(),
+            }
+            if callable(self.on_hedge_submit_result):
+                try:
+                    self.on_hedge_submit_result(websocket, request, result)
+                except Exception:
+                    self.logger.exception("Failed to record submitted hedge order for status tracking")
+            self.logger.info(
+                f"Hedge submit response sent to {client_ip}: "
+                f"hedgeId={request.hedge_id} action={payload.get('action')} "
+                f"status={(payload.get('order') or {}).get('status')}"
+            )
+            return payload
+        except Exception as exc:
+            self.logger.exception(f"Hedge {action} failed for {client_ip}")
+            return self._build_hedge_error_payload(
+                request.hedge_id,
+                str(exc),
+                action,
+                request.request_source,
+            )
 
     async def handle_combo_action(self, websocket, raw_data, client_ip="Unknown"):
         if not isinstance(raw_data, dict):

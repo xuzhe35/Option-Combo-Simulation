@@ -1,3 +1,4 @@
+import asyncio
 import pathlib
 import sys
 import types
@@ -58,7 +59,12 @@ if 'ib_async' not in sys.modules:
 
 
 from trade_execution.adapters.ibkr import IbkrExecutionAdapter
-from trade_execution.models import ComboOrderRequest
+from trade_execution.models import (
+    ComboOrderRequest,
+    HedgeOrderPreview,
+    HedgeOrderRequest,
+    HedgeSubmitResult,
+)
 import ib_server
 
 
@@ -237,6 +243,251 @@ class IbServerOrderErrorTests(unittest.TestCase):
         )
 
 
+class IbServerHedgeOrderTrackingTests(unittest.TestCase):
+    def setUp(self):
+        ib_server.hedge_order_tracking_by_order_id.clear()
+        ib_server.hedge_order_tracking_by_perm_id.clear()
+
+    def tearDown(self):
+        ib_server.hedge_order_tracking_by_order_id.clear()
+        ib_server.hedge_order_tracking_by_perm_id.clear()
+
+    def _build_request(self):
+        return HedgeOrderRequest(
+            hedge_id='delta_spy',
+            hedge_name='SPY Delta Hedge',
+            sec_type='STK',
+            symbol='SPY',
+            exchange='SMART',
+            currency='USD',
+            order_action='SELL',
+            quantity=4,
+            order_type='LMT',
+            limit_price=481.25,
+            time_in_force='DAY',
+            execution_mode='submit',
+            account='DU12345',
+            request_source='delta_hedge_manual',
+            current_net_delta=150.0,
+            projected_net_delta=10.0,
+            target_lower=-25.0,
+            target_upper=25.0,
+        )
+
+    def _build_result(self):
+        preview = HedgeOrderPreview(
+            hedge_id='delta_spy',
+            hedge_name='SPY Delta Hedge',
+            sec_type='STK',
+            symbol='SPY',
+            local_symbol='SPY',
+            exchange='SMART',
+            currency='USD',
+            order_action='SELL',
+            quantity=4,
+            order_type='LMT',
+            limit_price=481.25,
+            time_in_force='DAY',
+            execution_mode='submit',
+            account='DU12345',
+            request_source='delta_hedge_manual',
+            con_id=756733,
+            current_net_delta=150.0,
+            projected_net_delta=10.0,
+            target_lower=-25.0,
+            target_upper=25.0,
+        )
+        return HedgeSubmitResult(
+            preview=preview,
+            order_id=1001,
+            perm_id=2002,
+            status='Submitted',
+            status_message='Submitted to IB',
+        )
+
+    def _record_submission(self, websocket=None):
+        websocket = websocket or object()
+        request = self._build_request()
+        result = self._build_result()
+        ib_server._record_hedge_order_submission(websocket, request, result)
+        return websocket, request, result
+
+    def test_record_hedge_order_submission_tracks_by_order_and_perm_id(self):
+        websocket, request, result = self._record_submission()
+
+        tracking = ib_server.hedge_order_tracking_by_order_id[1001]
+        self.assertIs(ib_server.hedge_order_tracking_by_perm_id[2002], tracking)
+        self.assertIs(tracking['websocket'], websocket)
+        self.assertEqual(tracking['hedgeId'], request.hedge_id)
+        self.assertEqual(tracking['hedgeName'], request.hedge_name)
+        self.assertEqual(tracking['account'], 'DU12345')
+        self.assertEqual(tracking['secType'], 'STK')
+        self.assertEqual(tracking['symbol'], 'SPY')
+        self.assertEqual(tracking['conId'], 756733)
+        self.assertEqual(tracking['orderAction'], 'SELL')
+        self.assertEqual(tracking['quantity'], 4)
+        self.assertEqual(tracking['limitPrice'], 481.25)
+        self.assertEqual(tracking['projectedNetDelta'], 10.0)
+        self.assertEqual(tracking['targetLower'], -25.0)
+        self.assertEqual(tracking['status'], result.status)
+        self.assertEqual(tracking['statusMessage'], result.status_message)
+        self.assertEqual(tracking['fillTotals']['filledQuantity'], 0.0)
+        self.assertEqual(tracking['seenExecIds'], set())
+
+    def test_build_hedge_order_status_payload_uses_independent_action(self):
+        self._record_submission()
+        tracking = ib_server.hedge_order_tracking_by_order_id[1001]
+        trade = SimpleNamespace(
+            order=SimpleNamespace(orderId=1001, account='DU12345'),
+            orderStatus=SimpleNamespace(
+                permId=2002,
+                status='Submitted',
+                filled=1.0,
+                remaining=3.0,
+                avgFillPrice=481.25,
+                lastFillPrice=481.25,
+                whyHeld='',
+                mktCapPrice=0.0,
+            ),
+            log=[SimpleNamespace(message='', errorCode=0)],
+            advancedError='',
+        )
+
+        ib_server._update_hedge_order_tracking_snapshot(
+            tracking,
+            order=trade.order,
+            order_status=trade.orderStatus,
+            trade=trade,
+        )
+        payload = ib_server._build_hedge_order_status_payload(trade, tracking)
+
+        self.assertEqual(payload['action'], 'hedge_order_status_update')
+        self.assertEqual(payload['hedgeId'], 'delta_spy')
+        self.assertEqual(payload['orderStatus']['hedgeId'], 'delta_spy')
+        self.assertEqual(payload['orderStatus']['account'], 'DU12345')
+        self.assertEqual(payload['orderStatus']['secType'], 'STK')
+        self.assertEqual(payload['orderStatus']['symbol'], 'SPY')
+        self.assertEqual(payload['orderStatus']['orderAction'], 'SELL')
+        self.assertEqual(payload['orderStatus']['quantity'], 4)
+        self.assertEqual(payload['orderStatus']['orderId'], 1001)
+        self.assertEqual(payload['orderStatus']['permId'], 2002)
+        self.assertEqual(payload['orderStatus']['status'], 'Submitted')
+        self.assertEqual(payload['orderStatus']['filled'], 1.0)
+        self.assertEqual(payload['orderStatus']['remaining'], 3.0)
+        self.assertEqual(payload['orderStatus']['projectedNetDelta'], 10.0)
+
+    def test_record_hedge_order_fill_accumulates_and_deduplicates_exec_ids(self):
+        self._record_submission()
+        tracking = ib_server.hedge_order_tracking_by_order_id[1001]
+        execution = SimpleNamespace(
+            orderId=1001,
+            permId=2002,
+            execId='0001.01',
+            side='SLD',
+            shares=2,
+            price=481.5,
+        )
+        contract = SimpleNamespace(
+            conId=756733,
+            localSymbol='SPY',
+            symbol='SPY',
+            secType='STK',
+            exchange='SMART',
+            currency='USD',
+        )
+
+        payload = ib_server._record_hedge_order_fill(tracking, execution, contract)
+        duplicate_payload = ib_server._record_hedge_order_fill(tracking, execution, contract)
+
+        self.assertEqual(payload['action'], 'hedge_order_fill_update')
+        self.assertEqual(payload['hedgeId'], 'delta_spy')
+        self.assertEqual(payload['orderFill']['orderId'], 1001)
+        self.assertEqual(payload['orderFill']['permId'], 2002)
+        self.assertEqual(payload['orderFill']['executionSide'], 'SLD')
+        self.assertEqual(payload['orderFill']['filledQuantity'], 2.0)
+        self.assertEqual(payload['orderFill']['avgFillPrice'], 481.5)
+        self.assertEqual(payload['orderFill']['lastFillPrice'], 481.5)
+        self.assertEqual(payload['orderFill']['executionId'], '0001.01')
+        self.assertIsNone(duplicate_payload)
+        self.assertEqual(tracking['fillTotals']['filledQuantity'], 2.0)
+        self.assertEqual(tracking['fillTotals']['filledNotional'], 963.0)
+
+    def test_purge_hedge_order_tracking_for_websocket_detaches_active_orders(self):
+        websocket, _request, _result = self._record_submission()
+        other_websocket = object()
+        other_request = self._build_request()
+        other_result = self._build_result()
+        other_result.order_id = 1002
+        other_result.perm_id = 2003
+        ib_server._record_hedge_order_submission(other_websocket, other_request, other_result)
+
+        ib_server._purge_hedge_order_tracking_for_websocket(websocket)
+
+        self.assertIn(1001, ib_server.hedge_order_tracking_by_order_id)
+        self.assertIn(2002, ib_server.hedge_order_tracking_by_perm_id)
+        self.assertIsNone(ib_server.hedge_order_tracking_by_order_id[1001]['websocket'])
+        self.assertIn(1002, ib_server.hedge_order_tracking_by_order_id)
+        self.assertIn(2003, ib_server.hedge_order_tracking_by_perm_id)
+        self.assertIs(ib_server.hedge_order_tracking_by_order_id[1002]['websocket'], other_websocket)
+
+    def test_active_hedge_orders_snapshot_reattaches_matching_orders(self):
+        old_websocket, _request, _result = self._record_submission()
+        ib_server._purge_hedge_order_tracking_for_websocket(old_websocket)
+        new_websocket = object()
+
+        payload = ib_server._build_active_hedge_orders_snapshot(new_websocket, {
+            'hedgeId': 'delta_spy',
+            'account': 'DU12345',
+        })
+
+        self.assertEqual(payload['action'], 'active_hedge_orders_snapshot')
+        self.assertEqual(len(payload['orders']), 1)
+        self.assertEqual(payload['orders'][0]['hedgeId'], 'delta_spy')
+        self.assertEqual(payload['orders'][0]['orderId'], 1001)
+        self.assertIs(ib_server.hedge_order_tracking_by_order_id[1001]['websocket'], new_websocket)
+
+    def test_detached_hedge_tracking_still_records_status_and_fills(self):
+        old_websocket, _request, _result = self._record_submission()
+        ib_server._purge_hedge_order_tracking_for_websocket(old_websocket)
+        tracking = ib_server.hedge_order_tracking_by_order_id[1001]
+
+        trade = SimpleNamespace(
+            order=SimpleNamespace(orderId=1001, account='DU12345'),
+            orderStatus=SimpleNamespace(
+                permId=2002,
+                status='Submitted',
+                filled=1.0,
+                remaining=3.0,
+                avgFillPrice=481.25,
+                lastFillPrice=481.25,
+                whyHeld='',
+                mktCapPrice=0.0,
+            ),
+            contract=SimpleNamespace(secType='STK', conId=756733, localSymbol='SPY', symbol='SPY'),
+            log=[],
+            advancedError='',
+        )
+        fill = SimpleNamespace(
+            contract=trade.contract,
+            execution=SimpleNamespace(
+                orderId=1001,
+                permId=2002,
+                execId='detached.1',
+                side='SLD',
+                shares=1,
+                price=481.25,
+            ),
+        )
+
+        ib_server.on_hedge_order_status(trade)
+        ib_server.on_hedge_order_exec_details(trade, fill)
+
+        self.assertEqual(tracking['status'], 'Submitted')
+        self.assertEqual(tracking['filled'], 1.0)
+        self.assertEqual(tracking['remaining'], 3.0)
+        self.assertEqual(tracking['fillTotals']['filledQuantity'], 1.0)
+
+
 class IbServerIvTermStructureTests(unittest.TestCase):
     def test_secdef_exchange_is_blank_for_equity_and_etf_option_chains(self):
         exchange = ib_server._resolve_iv_term_structure_secdef_exchange(
@@ -269,6 +520,79 @@ class IbServerIvTermStructureTests(unittest.TestCase):
         )
 
         self.assertEqual(exchange, 'CME')
+
+
+class IbServerExecutionDispatchTests(unittest.TestCase):
+    def setUp(self):
+        self._original_execution_engine = ib_server.execution_engine
+
+    def tearDown(self):
+        ib_server.execution_engine = self._original_execution_engine
+
+    def test_dispatch_routes_hedge_actions_before_combo_actions(self):
+        class _ExecutionEngineStub:
+            def __init__(self):
+                self.calls = []
+
+            async def handle_hedge_action(self, websocket, data, client_ip='Unknown'):
+                self.calls.append(('hedge', websocket, data, client_ip))
+                return {
+                    'action': 'hedge_order_preview_result',
+                    'hedgeId': data.get('hedgeId'),
+                }
+
+            async def handle_combo_action(self, websocket, data, client_ip='Unknown'):
+                self.calls.append(('combo', websocket, data, client_ip))
+                return {
+                    'action': 'combo_order_preview_result',
+                    'groupId': data.get('groupId'),
+                }
+
+        stub = _ExecutionEngineStub()
+        ib_server.execution_engine = stub
+        payload = asyncio.run(ib_server._dispatch_execution_action(
+            None,
+            {
+                'action': 'preview_hedge_order',
+                'hedgeId': 'delta_spy',
+            },
+            client_ip='127.0.0.1',
+        ))
+
+        self.assertEqual(payload['action'], 'hedge_order_preview_result')
+        self.assertEqual(payload['hedgeId'], 'delta_spy')
+        self.assertEqual([call[0] for call in stub.calls], ['hedge'])
+
+    def test_dispatch_preserves_combo_action_fallback(self):
+        class _ExecutionEngineStub:
+            def __init__(self):
+                self.calls = []
+
+            async def handle_hedge_action(self, websocket, data, client_ip='Unknown'):
+                self.calls.append(('hedge', websocket, data, client_ip))
+                return None
+
+            async def handle_combo_action(self, websocket, data, client_ip='Unknown'):
+                self.calls.append(('combo', websocket, data, client_ip))
+                return {
+                    'action': 'combo_order_preview_result',
+                    'groupId': data.get('groupId'),
+                }
+
+        stub = _ExecutionEngineStub()
+        ib_server.execution_engine = stub
+        payload = asyncio.run(ib_server._dispatch_execution_action(
+            None,
+            {
+                'action': 'preview_combo_order',
+                'groupId': 'group_1',
+            },
+            client_ip='127.0.0.1',
+        ))
+
+        self.assertEqual(payload['action'], 'combo_order_preview_result')
+        self.assertEqual(payload['groupId'], 'group_1')
+        self.assertEqual([call[0] for call in stub.calls], ['hedge', 'combo'])
 
 
 if __name__ == '__main__':

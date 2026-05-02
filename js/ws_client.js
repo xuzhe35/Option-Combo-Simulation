@@ -206,9 +206,9 @@ function _normalizeLivePriceMode(group) {
         && typeof OptionComboSessionLogic.normalizeGroupLivePriceMode === 'function') {
         return OptionComboSessionLogic.normalizeGroupLivePriceMode(group && group.livePriceMode);
     }
-    return String(group && group.livePriceMode || '').trim().toLowerCase() === 'midpoint'
-        ? 'midpoint'
-        : 'mark';
+    return String(group && group.livePriceMode || '').trim().toLowerCase() === 'mark'
+        ? 'mark'
+        : 'midpoint';
 }
 
 function _addAllGroupIds(targetSet) {
@@ -365,6 +365,274 @@ function _getLiveComboOrderAccountRequirementMessage() {
         return 'Select a TWS account before sending live combo orders.';
     }
     return 'Waiting for TWS account list before sending live combo orders.';
+}
+
+function _getLiveHedgeOrderAccountRequirementMessage() {
+    const accounts = Array.isArray(state && state.liveComboOrderAccounts)
+        ? state.liveComboOrderAccounts.filter((account) => _normalizeLiveComboOrderAccount(account))
+        : [];
+    if (state && state.liveComboOrderAccountsConnected === true && accounts.length > 0) {
+        return 'Select a TWS account before sending hedge broker preview.';
+    }
+    return 'Waiting for TWS account list before sending hedge broker preview.';
+}
+
+function _normalizeDeltaHedgeConfig(config) {
+    if (typeof OptionComboDeltaHedgeLogic !== 'undefined'
+        && typeof OptionComboDeltaHedgeLogic.normalizeDeltaHedgeConfig === 'function') {
+        return OptionComboDeltaHedgeLogic.normalizeDeltaHedgeConfig(config);
+    }
+    return config && typeof config === 'object' ? config : {};
+}
+
+function _getDeltaHedgeRuntime() {
+    if (!state.deltaHedge || typeof state.deltaHedge !== 'object') {
+        state.deltaHedge = {};
+    }
+    state.deltaHedge = _normalizeDeltaHedgeConfig(state.deltaHedge);
+    if (!state.deltaHedge.status) {
+        state.deltaHedge.status = 'idle';
+    }
+    return state.deltaHedge;
+}
+
+function _refreshDeltaHedgeBrokerPreviewUi() {
+    if (typeof OptionComboDeltaHedgeUI !== 'undefined'
+        && typeof OptionComboDeltaHedgeUI.applyBrokerPreviewState === 'function') {
+        OptionComboDeltaHedgeUI.applyBrokerPreviewState(state);
+    }
+}
+
+function _markDeltaHedgeError(message) {
+    const runtime = _getDeltaHedgeRuntime();
+    runtime.pendingRequest = false;
+    runtime.status = 'error';
+    runtime.lastError = message || 'Delta hedge broker preview failed.';
+    _refreshDeltaHedgeBrokerPreviewUi();
+    return false;
+}
+
+function _hasActiveDeltaHedgeRestingOrder(runtime) {
+    if (typeof OptionComboDeltaHedgeLogic !== 'undefined'
+        && typeof OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder === 'function') {
+        return OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder(runtime);
+    }
+    return Boolean(runtime && runtime.restingOrder && runtime.restingOrder.orderId);
+}
+
+function _buildDeltaHedgeRuntimeHedgeId(config) {
+    const instrument = config && config.hedgeInstrument || {};
+    const secType = String(instrument.secType || '').trim().toUpperCase();
+    const symbol = String(instrument.symbol || '').trim().toUpperCase();
+    const contractMonth = String(instrument.contractMonth || '').trim();
+    if (!secType || !symbol) {
+        return '';
+    }
+    return String(config.hedgeId || [
+        'delta_hedge',
+        secType.toLowerCase(),
+        symbol.toLowerCase(),
+        contractMonth || 'spot',
+    ].join('_'));
+}
+
+function _buildDeltaHedgeOrderPayload(recommendation, action = 'validate_hedge_order', options = {}) {
+    const runtime = _getDeltaHedgeRuntime();
+    const config = _normalizeDeltaHedgeConfig(runtime);
+    const instrument = config.hedgeInstrument || {};
+    const orderType = String(config.orderType || 'LMT').trim().toUpperCase() === 'MKT' ? 'MKT' : 'LMT';
+    const quantity = Math.round(Math.abs(Number(recommendation && recommendation.quantity)));
+    const side = String(recommendation && recommendation.side || '').trim().toUpperCase();
+    const symbol = String(instrument.symbol || '').trim().toUpperCase();
+    const secType = String(instrument.secType || '').trim().toUpperCase();
+    const contractMonth = String(instrument.contractMonth || '').trim();
+    const selectedAccount = _getSelectedLiveComboOrderAccount();
+
+    if (!recommendation || recommendation.actionable !== true) {
+        throw new Error('Delta hedge recommendation is not actionable.');
+    }
+    if (!['BUY', 'SELL'].includes(side)) {
+        throw new Error('Delta hedge recommendation side is invalid.');
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+        throw new Error('Delta hedge recommendation quantity is invalid.');
+    }
+    if (!['STK', 'FUT'].includes(secType) || !symbol) {
+        throw new Error('Delta hedge instrument is incomplete.');
+    }
+    if (!selectedAccount) {
+        throw new Error(_getLiveHedgeOrderAccountRequirementMessage());
+    }
+
+    let limitPrice = null;
+    if (orderType === 'LMT') {
+        limitPrice = Number(config.limitPrice);
+        if (!Number.isFinite(limitPrice) || limitPrice <= 0) {
+            throw new Error('LMT hedge broker preview requires a positive limit price.');
+        }
+    }
+
+    const hedgeId = _buildDeltaHedgeRuntimeHedgeId(config);
+
+    const isSubmit = action === 'submit_hedge_order';
+    const payload = {
+        action,
+        hedgeId,
+        hedgeName: `${symbol} Delta Hedge`,
+        secType,
+        symbol,
+        exchange: String(instrument.exchange || 'SMART').trim().toUpperCase() || 'SMART',
+        currency: String(instrument.currency || 'USD').trim().toUpperCase() || 'USD',
+        contractMonth,
+        multiplier: instrument.multiplier !== undefined && instrument.multiplier !== null
+            ? String(instrument.multiplier)
+            : '',
+        deltaPerUnit: Number.isFinite(Number(instrument.deltaPerUnit)) ? Number(instrument.deltaPerUnit) : null,
+        orderAction: side,
+        quantity,
+        orderType,
+        timeInForce: 'DAY',
+        executionMode: isSubmit ? 'submit' : 'preview',
+        account: selectedAccount,
+        requestSource: options.requestSource || (isSubmit ? 'delta_hedge_manual_submit' : 'delta_hedge_manual_preview'),
+        currentNetDelta: Number.isFinite(Number(recommendation.currentNetDelta)) ? Number(recommendation.currentNetDelta) : null,
+        projectedNetDelta: Number.isFinite(Number(recommendation.projectedNetDelta)) ? Number(recommendation.projectedNetDelta) : null,
+        targetLower: Number.isFinite(Number(recommendation.targetLower)) ? Number(recommendation.targetLower) : null,
+        targetUpper: Number.isFinite(Number(recommendation.targetUpper)) ? Number(recommendation.targetUpper) : null,
+    };
+
+    if (limitPrice !== null) {
+        payload.limitPrice = limitPrice;
+    }
+    return payload;
+}
+
+function requestDeltaHedgeBrokerPreview(recommendation, options = {}) {
+    const runtime = _getDeltaHedgeRuntime();
+
+    if (_isHistoricalMode()) {
+        return _markDeltaHedgeError('Delta hedge broker preview requires live mode.');
+    }
+    if (!isWsConnected || !ws) {
+        return _markDeltaHedgeError('WebSocket is not connected.');
+    }
+    if (runtime.pendingRequest === true) {
+        return false;
+    }
+
+    let payload;
+    try {
+        payload = _buildDeltaHedgeOrderPayload(
+            recommendation || runtime.lastRecommendation,
+            'validate_hedge_order',
+            options
+        );
+    } catch (error) {
+        const message = error && error.message ? error.message : 'Unable to build hedge broker preview payload.';
+        if (/account/i.test(message)) {
+            requestManagedAccountsSnapshot();
+        }
+        return _markDeltaHedgeError(message);
+    }
+
+    const nextRuntime = _getDeltaHedgeRuntime();
+    nextRuntime.pendingRequest = true;
+    nextRuntime.status = 'pending_validation';
+    nextRuntime.lastError = '';
+    nextRuntime.pendingPreviewPayload = payload;
+    nextRuntime.lastValidation = null;
+    ws.send(JSON.stringify(payload));
+    _refreshDeltaHedgeBrokerPreviewUi();
+    return true;
+}
+
+function requestDeltaHedgeSubmit(recommendation, options = {}) {
+    const runtime = _getDeltaHedgeRuntime();
+
+    if (_isHistoricalMode()) {
+        return _markDeltaHedgeError('Delta hedge submit requires live mode.');
+    }
+    if (!isWsConnected || !ws) {
+        return _markDeltaHedgeError('WebSocket is not connected.');
+    }
+    if (state && state.allowLiveHedgeOrders !== true) {
+        return _markDeltaHedgeError('Live hedge order switch is OFF.');
+    }
+    if (runtime.pendingRequest === true) {
+        return false;
+    }
+    if (_hasActiveDeltaHedgeRestingOrder(runtime)) {
+        return _markDeltaHedgeError('A hedge order is already resting or needs review.');
+    }
+    if (runtime.status !== 'previewed' || !runtime.lastPreview) {
+        return _markDeltaHedgeError('Broker preview is required before submitting a hedge order.');
+    }
+
+    let payload;
+    try {
+        payload = _buildDeltaHedgeOrderPayload(
+            recommendation || runtime.lastRecommendation,
+            'submit_hedge_order',
+            options
+        );
+    } catch (error) {
+        const message = error && error.message ? error.message : 'Unable to build hedge submit payload.';
+        if (/account/i.test(message)) {
+            requestManagedAccountsSnapshot();
+        }
+        return _markDeltaHedgeError(message);
+    }
+
+    const nextRuntime = _getDeltaHedgeRuntime();
+    nextRuntime.pendingRequest = true;
+    nextRuntime.status = 'placing';
+    nextRuntime.orderState = 'placing';
+    nextRuntime.lastError = '';
+    nextRuntime.pendingSubmitPayload = payload;
+    nextRuntime.lastOrderEventAt = new Date().toISOString();
+    ws.send(JSON.stringify(payload));
+    _refreshDeltaHedgeBrokerPreviewUi();
+    return true;
+}
+
+function requestDeltaHedgeCancel(options = {}) {
+    const runtime = _getDeltaHedgeRuntime();
+    if (_isHistoricalMode()) {
+        return _markDeltaHedgeError('Delta hedge cancel requires live mode.');
+    }
+    if (!isWsConnected || !ws) {
+        return _markDeltaHedgeError('WebSocket is not connected.');
+    }
+    if (runtime.pendingRequest === true) {
+        return false;
+    }
+    if (!_hasActiveDeltaHedgeRestingOrder(runtime)) {
+        return _markDeltaHedgeError('No active hedge order is available to cancel.');
+    }
+
+    const restingOrder = runtime.restingOrder || {};
+    const orderId = restingOrder.orderId ?? runtime.lastPreview?.orderId ?? null;
+    const permId = restingOrder.permId ?? runtime.lastPreview?.permId ?? null;
+    if (orderId === null && permId === null) {
+        return _markDeltaHedgeError('Hedge order id is unavailable.');
+    }
+
+    const payload = {
+        action: 'cancel_hedge_order',
+        hedgeId: restingOrder.hedgeId || runtime.lastPreview?.hedgeId || runtime.pendingSubmitPayload?.hedgeId || null,
+        orderId,
+        permId,
+        requestSource: options.requestSource || 'delta_hedge_manual_cancel',
+        reason: options.reason || 'manual_cancel',
+    };
+
+    runtime.pendingRequest = true;
+    runtime.status = 'cancel_pending';
+    runtime.lastError = '';
+    runtime.lastOrderEventAt = new Date().toISOString();
+    ws.send(JSON.stringify(payload));
+    _refreshDeltaHedgeBrokerPreviewUi();
+    return true;
 }
 
 function _getHistoricalReplayDate() {
@@ -532,6 +800,7 @@ function connectWebSocket() {
         console.log(`WebSocket Connected to IB Gateway Backend at ${wsUrl}`);
         updateWsStatusUI('connected');
         handleLiveSubscriptions();
+        requestActiveHedgeOrdersSnapshot();
     };
 
     ws.onclose = () => {
@@ -565,6 +834,9 @@ function connectWebSocket() {
                 return;
             }
             if (_handlePortfolioAvgCostMessage(data)) {
+                return;
+            }
+            if (_handleHedgeOrderMessage(data)) {
                 return;
             }
             if (_handleComboOrderMessage(data)) {
@@ -620,6 +892,27 @@ function requestManagedAccountsSnapshot() {
     ws.send(JSON.stringify({
         action: 'request_managed_accounts_snapshot',
     }));
+    return true;
+}
+
+function requestActiveHedgeOrdersSnapshot() {
+    if (!isWsConnected || !ws || _isHistoricalMode()) {
+        return false;
+    }
+
+    const runtime = _getDeltaHedgeRuntime();
+    const account = _getSelectedLiveComboOrderAccount();
+    const payload = {
+        action: 'request_active_hedge_orders_snapshot',
+    };
+    const hedgeId = _buildDeltaHedgeRuntimeHedgeId(runtime);
+    if (hedgeId) {
+        payload.hedgeId = hedgeId;
+    }
+    if (account) {
+        payload.account = account;
+    }
+    ws.send(JSON.stringify(payload));
     return true;
 }
 
@@ -1333,6 +1626,9 @@ window.resetWsPort = resetWsPort;
 window.applyWsEndpoint = applyWsEndpoint;
 window.resetWsEndpoint = resetWsEndpoint;
 window.requestPortfolioAvgCostSnapshot = requestPortfolioAvgCostSnapshot;
+window.requestDeltaHedgeBrokerPreview = requestDeltaHedgeBrokerPreview;
+window.requestDeltaHedgeSubmit = requestDeltaHedgeSubmit;
+window.requestDeltaHedgeCancel = requestDeltaHedgeCancel;
 window.requestContinueManagedComboOrder = requestContinueManagedComboOrder;
 window.requestConcedeManagedComboOrder = requestConcedeManagedComboOrder;
 window.requestCancelManagedComboOrder = requestCancelManagedComboOrder;
@@ -2453,6 +2749,521 @@ function _applyComboOrderError(data) {
     return true;
 }
 
+function _applyHedgeOrderValidationResult(data) {
+    const runtime = _getDeltaHedgeRuntime();
+    const validation = data.validation || {};
+
+    runtime.pendingRequest = false;
+    runtime.lastValidation = validation;
+    if (validation.valid !== true) {
+        runtime.status = 'error';
+        runtime.lastError = data.message || 'Hedge validation failed.';
+        _refreshDeltaHedgeBrokerPreviewUi();
+        return true;
+    }
+
+    if (!isWsConnected || !ws) {
+        runtime.status = 'error';
+        runtime.lastError = 'WebSocket is not connected.';
+        _refreshDeltaHedgeBrokerPreviewUi();
+        return true;
+    }
+
+    const pendingPayload = runtime.pendingPreviewPayload;
+    if (!pendingPayload || typeof pendingPayload !== 'object') {
+        runtime.status = 'error';
+        runtime.lastError = 'Missing pending hedge preview payload.';
+        _refreshDeltaHedgeBrokerPreviewUi();
+        return true;
+    }
+
+    const previewPayload = {
+        ...pendingPayload,
+        action: 'preview_hedge_order',
+        executionMode: 'preview',
+    };
+    runtime.pendingRequest = true;
+    runtime.status = 'pending_preview';
+    runtime.lastError = '';
+    runtime.pendingPreviewPayload = previewPayload;
+    ws.send(JSON.stringify(previewPayload));
+    _refreshDeltaHedgeBrokerPreviewUi();
+    return true;
+}
+
+function _applyHedgeOrderPreviewResult(data) {
+    const runtime = _getDeltaHedgeRuntime();
+    const preview = data.preview || data.order || {};
+    runtime.pendingRequest = false;
+    runtime.status = 'previewed';
+    runtime.lastError = '';
+    runtime.lastPreview = preview;
+    runtime.lastPreviewAt = new Date().toISOString();
+    runtime.pendingPreviewPayload = null;
+    _refreshDeltaHedgeBrokerPreviewUi();
+    if (typeof window !== 'undefined' && typeof window.runDeltaHedgeAutoSupervisor === 'function') {
+        window.runDeltaHedgeAutoSupervisor();
+    }
+    return true;
+}
+
+function _toFiniteNumberOrNull(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function _toPositiveIntegerOrNull(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+}
+
+function _normalizeHedgeBrokerStatus(value) {
+    return String(value || '').trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+function _isTerminalHedgeBrokerStatus(value) {
+    return ['filled', 'cancelled', 'canceled', 'rejected', 'inactive', 'api_cancelled']
+        .includes(_normalizeHedgeBrokerStatus(value));
+}
+
+function _isCancelPendingHedgeBrokerStatus(value) {
+    return ['pendingcancel', 'pending_cancel', 'cancel_pending', 'cancelling']
+        .includes(_normalizeHedgeBrokerStatus(value));
+}
+
+function _mapTerminalHedgeOrderState(value) {
+    const status = _normalizeHedgeBrokerStatus(value);
+    if (status === 'cancelled' || status === 'api_cancelled') {
+        return 'canceled';
+    }
+    if (status === 'filled' || status === 'rejected' || status === 'inactive' || status === 'canceled') {
+        return status;
+    }
+    return '';
+}
+
+function _stampDeltaHedgeOrderEvent(runtime) {
+    if (!runtime || typeof runtime !== 'object') {
+        return;
+    }
+    runtime.lastOrderEventAt = new Date().toISOString();
+}
+
+function _isPartialRemainingHedgeOrder(order) {
+    const filledQuantity = Number(order && order.filledQuantity);
+    const remainingQuantity = Number(order && order.remainingQuantity);
+    return Number.isFinite(filledQuantity)
+        && filledQuantity > 0
+        && Number.isFinite(remainingQuantity)
+        && remainingQuantity > 0;
+}
+
+function _markDeltaHedgePartialFillNeedsReview(runtime) {
+    if (!runtime || !runtime.restingOrder) {
+        return;
+    }
+    runtime.status = 'partial_fill_needs_review';
+    runtime.orderState = 'stale_needs_review';
+    runtime.restingOrder = {
+        ...runtime.restingOrder,
+        staleReason: 'partial_fill_needs_review',
+    };
+}
+
+function _buildDeltaHedgeRestingOrder(order, fallbackPayload) {
+    const rawOrder = order && typeof order === 'object' ? order : {};
+    const fallback = fallbackPayload && typeof fallbackPayload === 'object' ? fallbackPayload : {};
+    const quantity = _toPositiveIntegerOrNull(rawOrder.quantity ?? fallback.quantity) || 0;
+    const filledQuantity = _toPositiveIntegerOrNull(
+        rawOrder.filledQuantity ?? rawOrder.filled ?? fallback.filledQuantity
+    ) || 0;
+    const remainingQuantity = _toPositiveIntegerOrNull(
+        rawOrder.remainingQuantity ?? rawOrder.remaining
+    );
+
+    return {
+        hedgeId: rawOrder.hedgeId || fallback.hedgeId || null,
+        orderId: rawOrder.orderId ?? fallback.orderId ?? null,
+        permId: rawOrder.permId ?? fallback.permId ?? null,
+        conId: rawOrder.conId ?? fallback.conId ?? null,
+        symbol: String(rawOrder.symbol || fallback.symbol || '').trim().toUpperCase(),
+        localSymbol: rawOrder.localSymbol || fallback.localSymbol || '',
+        secType: String(rawOrder.secType || fallback.secType || '').trim().toUpperCase(),
+        side: String(rawOrder.orderAction || fallback.orderAction || '').trim().toUpperCase(),
+        quantity,
+        filledQuantity,
+        remainingQuantity: remainingQuantity !== null
+            ? remainingQuantity
+            : Math.max(quantity - filledQuantity, 0),
+        orderType: String(rawOrder.orderType || fallback.orderType || 'LMT').trim().toUpperCase(),
+        limitPrice: _toFiniteNumberOrNull(rawOrder.limitPrice ?? fallback.limitPrice),
+        referencePrice: _toFiniteNumberOrNull(fallback.referencePrice),
+        placedAtNetDelta: _toFiniteNumberOrNull(rawOrder.currentNetDelta ?? fallback.currentNetDelta),
+        projectedNetDeltaAfterFullFill: _toFiniteNumberOrNull(
+            rawOrder.projectedNetDelta ?? fallback.projectedNetDelta
+        ),
+        targetLower: _toFiniteNumberOrNull(rawOrder.targetLower ?? fallback.targetLower),
+        targetUpper: _toFiniteNumberOrNull(rawOrder.targetUpper ?? fallback.targetUpper),
+        placedAt: new Date().toISOString(),
+        status: String(rawOrder.status || 'Submitted'),
+        staleReason: '',
+    };
+}
+
+function _getDeltaHedgeFillKey(fill) {
+    const executionId = String(fill && fill.executionId || '').trim();
+    if (executionId) {
+        return `exec:${executionId}`;
+    }
+    return [
+        'fill',
+        fill && fill.orderId,
+        fill && fill.permId,
+        fill && fill.filledQuantity,
+        fill && fill.avgFillPrice,
+    ].join(':');
+}
+
+function _resolveHedgeFillSignedQuantity(fill) {
+    const quantity = Number(fill && (fill.lastFillQuantity ?? fill.fillQuantity ?? fill.filledQuantity));
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+        return 0;
+    }
+    const action = String(fill && (fill.orderAction || fill.executionSide) || '').trim().toUpperCase();
+    if (action === 'SELL' || action === 'SLD') {
+        return -quantity;
+    }
+    if (action === 'BUY' || action === 'BOT') {
+        return quantity;
+    }
+    return 0;
+}
+
+function _mergeHedgeCost(existing, signedQuantity, fillPrice) {
+    const oldPos = Number(existing && existing.pos);
+    const oldCost = Number(existing && existing.cost);
+    if (!Number.isFinite(fillPrice) || fillPrice <= 0) {
+        return Number.isFinite(oldCost) ? oldCost : 0;
+    }
+    if (!Number.isFinite(oldPos) || oldPos === 0 || Math.sign(oldPos) === Math.sign(signedQuantity)) {
+        const oldAbs = Number.isFinite(oldPos) ? Math.abs(oldPos) : 0;
+        const fillAbs = Math.abs(signedQuantity);
+        const totalAbs = oldAbs + fillAbs;
+        if (totalAbs <= 0) {
+            return fillPrice;
+        }
+        return ((oldAbs * (Number.isFinite(oldCost) ? oldCost : fillPrice)) + (fillAbs * fillPrice)) / totalAbs;
+    }
+
+    const nextPos = oldPos + signedQuantity;
+    if (nextPos === 0 || Math.sign(nextPos) === Math.sign(oldPos)) {
+        return Number.isFinite(oldCost) ? oldCost : fillPrice;
+    }
+    return fillPrice;
+}
+
+function _buildDeltaHedgeFillRowId(fill) {
+    const explicitId = String(fill && fill.hedgeId || '').trim();
+    if (explicitId) {
+        return explicitId;
+    }
+    const secType = String(fill && fill.secType || 'STK').trim().toLowerCase() || 'stk';
+    const symbol = String(fill && fill.symbol || '').trim().toLowerCase() || 'unknown';
+    const contractMonth = String(fill && fill.contractMonth || '').trim().toLowerCase() || 'spot';
+    return ['delta_hedge', secType, symbol, contractMonth].join('_');
+}
+
+function _applyHedgeFillToRows(fill) {
+    const signedQuantity = _resolveHedgeFillSignedQuantity(fill);
+    const fillPrice = Number(fill && (fill.lastFillPrice ?? fill.avgFillPrice));
+    if (!Number.isFinite(signedQuantity) || signedQuantity === 0) {
+        return false;
+    }
+
+    if (!Array.isArray(state.hedges)) {
+        state.hedges = [];
+    }
+    const hedgeId = _buildDeltaHedgeFillRowId(fill);
+    let hedge = state.hedges.find(candidate => candidate && candidate.id === hedgeId);
+    const nextCostSource = String(fill && fill.costSource || 'execution_report');
+    if (!hedge) {
+        hedge = {
+            id: hedgeId,
+            symbol: String(fill && fill.symbol || '').trim().toUpperCase(),
+            pos: 0,
+            cost: Number.isFinite(fillPrice) ? fillPrice : 0,
+            currentPrice: Number.isFinite(fillPrice) ? fillPrice : 0,
+            currentPriceSource: nextCostSource,
+            liveData: true,
+            multiplier: Number.isFinite(Number(fill && fill.multiplier)) ? Number(fill.multiplier) : 1,
+            deltaPerUnit: Number.isFinite(Number(fill && fill.deltaPerUnit)) ? Number(fill.deltaPerUnit) : 1,
+        };
+        state.hedges.push(hedge);
+    }
+
+    const oldPos = Number(hedge.pos) || 0;
+    hedge.cost = _mergeHedgeCost(hedge, signedQuantity, fillPrice);
+    hedge.pos = oldPos + signedQuantity;
+    if (Number.isFinite(fillPrice) && fillPrice > 0) {
+        hedge.currentPrice = fillPrice;
+        hedge.currentPriceSource = nextCostSource;
+    }
+    if (fill && fill.symbol) {
+        hedge.symbol = String(fill.symbol).trim().toUpperCase();
+    }
+    hedge.liveData = true;
+    return true;
+}
+
+function _applyHedgeOrderSubmitResult(data) {
+    const runtime = _getDeltaHedgeRuntime();
+    const order = data.order || data.preview || {};
+    runtime.pendingRequest = false;
+    _stampDeltaHedgeOrderEvent(runtime);
+    runtime.status = 'submitted';
+    runtime.orderState = 'resting_locked';
+    runtime.lastError = '';
+    runtime.lastPreview = order;
+    runtime.restingOrder = _buildDeltaHedgeRestingOrder(order, runtime.pendingSubmitPayload);
+    runtime.pendingSubmitPayload = null;
+    _refreshDeltaHedgeBrokerPreviewUi();
+    return true;
+}
+
+function _applyHedgeOrderStatusUpdate(data) {
+    const runtime = _getDeltaHedgeRuntime();
+    const orderStatus = data.orderStatus || {};
+    const status = String(orderStatus.status || '').trim();
+    runtime.lastPreview = {
+        ...(runtime.lastPreview || {}),
+        ...orderStatus,
+    };
+    runtime.restingOrder = {
+        ...(runtime.restingOrder || {}),
+        orderId: orderStatus.orderId ?? (runtime.restingOrder && runtime.restingOrder.orderId) ?? null,
+        permId: orderStatus.permId ?? (runtime.restingOrder && runtime.restingOrder.permId) ?? null,
+        status: status || (runtime.restingOrder && runtime.restingOrder.status) || '',
+        filledQuantity: _toPositiveIntegerOrNull(orderStatus.filled)
+            ?? (runtime.restingOrder && runtime.restingOrder.filledQuantity)
+            ?? 0,
+        remainingQuantity: _toPositiveIntegerOrNull(orderStatus.remaining)
+            ?? (runtime.restingOrder && runtime.restingOrder.remainingQuantity)
+            ?? null,
+        avgFillPrice: _toFiniteNumberOrNull(orderStatus.avgFillPrice)
+            ?? (runtime.restingOrder && runtime.restingOrder.avgFillPrice)
+            ?? null,
+        lastFillPrice: _toFiniteNumberOrNull(orderStatus.lastFillPrice)
+            ?? (runtime.restingOrder && runtime.restingOrder.lastFillPrice)
+            ?? null,
+        cancelRequested: orderStatus.cancelRequested === true
+            || (runtime.restingOrder && runtime.restingOrder.cancelRequested === true),
+    };
+    runtime.pendingRequest = false;
+    _stampDeltaHedgeOrderEvent(runtime);
+    if (_isTerminalHedgeBrokerStatus(status)) {
+        const terminalState = _mapTerminalHedgeOrderState(status);
+        runtime.status = terminalState || _normalizeHedgeBrokerStatus(status);
+        runtime.orderState = terminalState || runtime.status;
+    } else if (_isCancelPendingHedgeBrokerStatus(status) || orderStatus.cancelRequested === true) {
+        runtime.status = 'cancel_pending';
+        runtime.orderState = 'resting_locked';
+    } else if (_isPartialRemainingHedgeOrder(runtime.restingOrder)) {
+        _markDeltaHedgePartialFillNeedsReview(runtime);
+    } else {
+        runtime.status = 'submitted';
+        runtime.orderState = 'resting_locked';
+    }
+    runtime.lastError = '';
+    _refreshDeltaHedgeBrokerPreviewUi();
+    if (typeof window !== 'undefined' && typeof window.runDeltaHedgeAutoSupervisor === 'function') {
+        window.runDeltaHedgeAutoSupervisor();
+    }
+    return true;
+}
+
+function _applyHedgeOrderCancelResult(data) {
+    const result = {
+        ...data,
+        orderStatus: data.orderStatus || {},
+    };
+    if (!result.orderStatus.status) {
+        result.orderStatus.status = 'PendingCancel';
+    }
+    result.orderStatus.cancelRequested = true;
+    return _applyHedgeOrderStatusUpdate(result);
+}
+
+function _applyHedgeOrderFillUpdate(data) {
+    const runtime = _getDeltaHedgeRuntime();
+    const fill = data.orderFill || {};
+    const fillKey = _getDeltaHedgeFillKey(fill);
+    if (!runtime.seenHedgeFillKeys || typeof runtime.seenHedgeFillKeys !== 'object') {
+        runtime.seenHedgeFillKeys = {};
+    }
+    if (runtime.seenHedgeFillKeys[fillKey]) {
+        return true;
+    }
+    runtime.seenHedgeFillKeys[fillKey] = true;
+
+    const changedHedgeRows = _applyHedgeFillToRows(fill);
+    _stampDeltaHedgeOrderEvent(runtime);
+    runtime.restingOrder = {
+        ...(runtime.restingOrder || {}),
+        orderId: fill.orderId ?? (runtime.restingOrder && runtime.restingOrder.orderId) ?? null,
+        permId: fill.permId ?? (runtime.restingOrder && runtime.restingOrder.permId) ?? null,
+        side: String(fill.orderAction || (runtime.restingOrder && runtime.restingOrder.side) || '').trim().toUpperCase(),
+        quantity: _toPositiveIntegerOrNull(fill.quantity)
+            ?? (runtime.restingOrder && runtime.restingOrder.quantity)
+            ?? 0,
+        filledQuantity: _toPositiveIntegerOrNull(fill.filledQuantity)
+            ?? (runtime.restingOrder && runtime.restingOrder.filledQuantity)
+            ?? 0,
+        remainingQuantity: Math.max(
+            (_toPositiveIntegerOrNull(fill.quantity) ?? (runtime.restingOrder && runtime.restingOrder.quantity) ?? 0)
+            - (_toPositiveIntegerOrNull(fill.filledQuantity) ?? 0),
+            0
+        ),
+        avgFillPrice: _toFiniteNumberOrNull(fill.avgFillPrice)
+            ?? (runtime.restingOrder && runtime.restingOrder.avgFillPrice)
+            ?? null,
+        lastFillPrice: _toFiniteNumberOrNull(fill.lastFillPrice)
+            ?? (runtime.restingOrder && runtime.restingOrder.lastFillPrice)
+            ?? null,
+        status: (runtime.restingOrder && runtime.restingOrder.status) || 'Submitted',
+        staleReason: (runtime.restingOrder && runtime.restingOrder.staleReason) || '',
+    };
+    if (_isPartialRemainingHedgeOrder(runtime.restingOrder)) {
+        _markDeltaHedgePartialFillNeedsReview(runtime);
+    } else {
+        runtime.status = 'submitted';
+        runtime.orderState = 'resting_locked';
+    }
+    runtime.lastError = '';
+    if (changedHedgeRows) {
+        if (typeof renderHedges === 'function') {
+            renderHedges();
+        } else if (typeof updateDerivedValues === 'function') {
+            updateDerivedValues();
+        }
+        if (typeof handleLiveSubscriptions === 'function') {
+            handleLiveSubscriptions();
+        }
+    }
+    _refreshDeltaHedgeBrokerPreviewUi();
+    if (typeof window !== 'undefined' && typeof window.runDeltaHedgeAutoSupervisor === 'function') {
+        window.runDeltaHedgeAutoSupervisor();
+    }
+    return true;
+}
+
+function _selectRecoverableHedgeOrder(orders, runtime) {
+    const list = Array.isArray(orders) ? orders : [];
+    if (list.length === 0) {
+        return null;
+    }
+    const config = _normalizeDeltaHedgeConfig(runtime);
+    const expectedHedgeId = _buildDeltaHedgeRuntimeHedgeId(config);
+    const instrument = config.hedgeInstrument || {};
+    const expectedSecType = String(instrument.secType || '').trim().toUpperCase();
+    const expectedSymbol = String(instrument.symbol || '').trim().toUpperCase();
+    const expectedContractMonth = String(instrument.contractMonth || '').trim();
+
+    return list.find((order) => {
+        if (!order || typeof order !== 'object') {
+            return false;
+        }
+        if (_isTerminalHedgeBrokerStatus(order.status)) {
+            return false;
+        }
+        const hedgeId = String(order.hedgeId || '').trim();
+        if (expectedHedgeId && hedgeId && hedgeId === expectedHedgeId) {
+            return true;
+        }
+        const secType = String(order.secType || '').trim().toUpperCase();
+        const symbol = String(order.symbol || '').trim().toUpperCase();
+        const contractMonth = String(order.contractMonth || '').trim();
+        return expectedSecType
+            && expectedSymbol
+            && secType === expectedSecType
+            && symbol === expectedSymbol
+            && contractMonth === expectedContractMonth;
+    }) || null;
+}
+
+function _applyActiveHedgeOrdersSnapshot(data) {
+    const runtime = _getDeltaHedgeRuntime();
+    if (_hasActiveDeltaHedgeRestingOrder(runtime)) {
+        return true;
+    }
+    const order = _selectRecoverableHedgeOrder(data && data.orders, runtime);
+    if (!order) {
+        return true;
+    }
+
+    runtime.pendingRequest = false;
+    runtime.lastError = '';
+    runtime.status = 'submitted';
+    runtime.orderState = 'resting_locked';
+    runtime.lastPreview = {
+        ...(runtime.lastPreview || {}),
+        ...order,
+    };
+    runtime.restingOrder = _buildDeltaHedgeRestingOrder(order, order);
+    if (_isPartialRemainingHedgeOrder(runtime.restingOrder)) {
+        _markDeltaHedgePartialFillNeedsReview(runtime);
+    }
+    _refreshDeltaHedgeBrokerPreviewUi();
+    if (typeof window !== 'undefined' && typeof window.runDeltaHedgeAutoSupervisor === 'function') {
+        window.runDeltaHedgeAutoSupervisor();
+    }
+    return true;
+}
+
+function _applyHedgeOrderError(data) {
+    _markDeltaHedgeError(data.message || 'Hedge order request failed.');
+    return true;
+}
+
+function _handleHedgeOrderMessage(data) {
+    if (!data || typeof data !== 'object' || !data.action) {
+        return false;
+    }
+
+    if (data.action === 'hedge_order_validation_result') {
+        return _applyHedgeOrderValidationResult(data);
+    }
+
+    if (data.action === 'hedge_order_preview_result') {
+        return _applyHedgeOrderPreviewResult(data);
+    }
+
+    if (data.action === 'hedge_order_submit_result') {
+        return _applyHedgeOrderSubmitResult(data);
+    }
+
+    if (data.action === 'hedge_order_status_update') {
+        return _applyHedgeOrderStatusUpdate(data);
+    }
+
+    if (data.action === 'hedge_order_cancel_result') {
+        return _applyHedgeOrderCancelResult(data);
+    }
+
+    if (data.action === 'hedge_order_fill_update') {
+        return _applyHedgeOrderFillUpdate(data);
+    }
+
+    if (data.action === 'active_hedge_orders_snapshot') {
+        return _applyActiveHedgeOrdersSnapshot(data);
+    }
+
+    if (data.action === 'hedge_order_error') {
+        return _applyHedgeOrderError(data);
+    }
+
+    return false;
+}
+
 function _handleComboOrderMessage(data) {
     if (!data || typeof data !== 'object' || !data.action) {
         return false;
@@ -2534,6 +3345,10 @@ function _applyManagedAccountsUpdate(data) {
         if (typeof OptionComboControlPanelUI !== 'undefined'
             && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
             OptionComboControlPanelUI.refreshBoundDynamicControls();
+        }
+        if (typeof OptionComboDeltaHedgeUI !== 'undefined'
+            && typeof OptionComboDeltaHedgeUI.refreshDeltaHedgePanel === 'function') {
+            OptionComboDeltaHedgeUI.refreshDeltaHedgePanel(state);
         }
     }
 

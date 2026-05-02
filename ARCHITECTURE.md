@@ -38,6 +38,7 @@ The main app shell owns:
 - trial trigger controls
 - close-group execution controls
 - live account selection and WebSocket endpoint controls
+- delta hedge configuration panel
 
 Locked routes:
 
@@ -84,28 +85,30 @@ Current `index.html` load order:
 6. `js/pricing_context.js`
 7. `js/group_order_builder.js`
 8. `js/trade_trigger_logic.js`
-9. `js/distribution_proxy_config.js`
-10. `js/pricing_core.js`
-11. `js/bsm.js`
-12. `js/chart.js`
-13. `js/prob_charts.js`
-14. `js/chart_controls.js`
-15. `js/amortized.js`
-16. `js/valuation.js`
-17. `js/session_logic.js`
-18. `js/session_ui.js`
-19. `js/control_panel_ui.js`
-20. `js/hedge_editor_ui.js`
-21. `js/group_editor_ui.js`
-22. `js/hedge_ui.js`
-23. `js/group_ui.js`
-24. `js/global_ui.js`
-25. `js/app.js`
-26. `js/ws_client.js`
+9. `js/delta_hedge_logic.js`
+10. `js/distribution_proxy_config.js`
+11. `js/pricing_core.js`
+12. `js/bsm.js`
+13. `js/chart.js`
+14. `js/prob_charts.js`
+15. `js/chart_controls.js`
+16. `js/amortized.js`
+17. `js/valuation.js`
+18. `js/session_logic.js`
+19. `js/session_ui.js`
+20. `js/control_panel_ui.js`
+21. `js/hedge_editor_ui.js`
+22. `js/group_editor_ui.js`
+23. `js/hedge_ui.js`
+24. `js/group_ui.js`
+25. `js/global_ui.js`
+26. `js/delta_hedge_ui.js`
+27. `js/app.js`
+28. `js/ws_client.js`
 
 `chart_lab.html` uses the same order, then adds:
 
-27. `js/chart_lab.js`
+29. `js/chart_lab.js`
 
 `iv_term_structure.html` uses its own small runtime:
 
@@ -177,6 +180,7 @@ Notes:
 - `js/valuation.js`
 - `js/session_logic.js`
 - `js/trade_trigger_logic.js`
+- `js/delta_hedge_logic.js`
 - `js/group_order_builder.js`
 
 Responsibilities:
@@ -185,6 +189,7 @@ Responsibilities:
 - global aggregation
 - session import/export normalization
 - trigger configuration and runtime state rules
+- delta hedge runtime state rules and recommendation logic
 - open-combo and close-combo payload assembly
 
 ### 4.5 UI binding and DOM writes
@@ -196,6 +201,7 @@ Responsibilities:
 - `js/group_ui.js`
 - `js/hedge_ui.js`
 - `js/global_ui.js`
+- `js/delta_hedge_ui.js`
 
 Responsibilities:
 
@@ -204,6 +210,7 @@ Responsibilities:
 - mode toggles
 - live status rendering
 - execution status rendering
+- delta hedge panel rendering
 - derived-value writes back into the DOM
 
 ### 4.6 Charts and analysis
@@ -340,6 +347,7 @@ Responsibilities:
 - `selectedLiveComboOrderAccount`
 - `groups`
 - `hedges`
+- `deltaHedge`
 
 Important group fields include:
 

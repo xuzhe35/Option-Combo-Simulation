@@ -91,8 +91,10 @@ const state = {
     interestRate: 0.03, // 3% default risk-free rate
     ivOffset: 0.0, // 0%
     greeksEnabled: false,
+    deltaHedge: OptionComboSessionLogic.createDefaultDeltaHedgeConfig(),
     primaryControlPanelCollapsed: false,
     allowLiveComboOrders: false,
+    allowLiveHedgeOrders: false,
     liveComboOrderAccounts: [],
     liveComboOrderAccountsConnected: false,
     selectedLiveComboOrderAccount: '',
@@ -109,6 +111,7 @@ window.__optionComboApp = {
     renderHedges: () => renderHedges(),
     updateLiveQuoteDerivedValues: (changeSet) => updateLiveQuoteDerivedValues(changeSet),
     updateLiveQuoteGroupDeltaValues: (changeSet) => updateLiveQuoteGroupDeltaValues(changeSet),
+    runDeltaHedgeAutoSupervisor: () => runDeltaHedgeAutoSupervisor(),
 };
 
 // Throttle flag for slider-driven updates (one rAF per frame max)
@@ -132,6 +135,9 @@ document.addEventListener('DOMContentLoaded', () => {
     renderGroups();
     renderHedges();
     updateDerivedValues();
+    setInterval(() => {
+        runDeltaHedgeAutoSupervisor();
+    }, 5000);
 });
 
 // Calculate unique ID
@@ -184,6 +190,21 @@ function bindControlPanelEvents() {
         diffDays,
         calendarToTradingDays,
     });
+    if (typeof OptionComboDeltaHedgeUI !== 'undefined'
+        && typeof OptionComboDeltaHedgeUI.bindDeltaHedgePanel === 'function') {
+        OptionComboDeltaHedgeUI.bindDeltaHedgePanel(state, {
+            updateDerivedValues,
+            requestBrokerPreview: typeof requestDeltaHedgeBrokerPreview === 'function'
+                ? requestDeltaHedgeBrokerPreview
+                : null,
+            requestSubmit: typeof requestDeltaHedgeSubmit === 'function'
+                ? requestDeltaHedgeSubmit
+                : null,
+            requestCancel: typeof requestDeltaHedgeCancel === 'function'
+                ? requestDeltaHedgeCancel
+                : null,
+        });
+    }
 }
 
 // -------------------------------------------------------------
@@ -403,6 +424,14 @@ function _applyPortfolioDerivedData(derivedData, options = {}) {
     }
 
     applyGlobalDerivedData(derivedData);
+    if (typeof OptionComboDeltaHedgeUI !== 'undefined'
+        && typeof OptionComboDeltaHedgeUI.applyRecommendationPreview === 'function') {
+        OptionComboDeltaHedgeUI.applyRecommendationPreview(state, derivedData);
+        if (typeof OptionComboDeltaHedgeUI.applyBrokerPreviewState === 'function') {
+            OptionComboDeltaHedgeUI.applyBrokerPreviewState(state);
+        }
+        runDeltaHedgeAutoSupervisor(derivedData);
+    }
 }
 
 function updateDerivedValues() {
@@ -477,6 +506,155 @@ function updateLiveQuoteDerivedValues(changeSet = {}) {
     return derivedData;
 }
 
+function _getAutoOrderDateKey(now = new Date()) {
+    const date = now instanceof Date ? now : new Date(now);
+    return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : '';
+}
+
+function _recordDeltaHedgeAutoSubmitAttempt(decision, now = new Date()) {
+    if (!state.deltaHedge || typeof state.deltaHedge !== 'object') {
+        return;
+    }
+    const dateKey = decision && decision.dateKey
+        ? decision.dateKey
+        : _getAutoOrderDateKey(now);
+    const currentDateKey = String(state.deltaHedge.autoOrderCountDate || '');
+    const currentCount = currentDateKey === dateKey
+        ? Math.max(0, Math.floor(Number(state.deltaHedge.autoOrderCount) || 0))
+        : 0;
+    const timestamp = now.toISOString();
+    state.deltaHedge.autoOrderCountDate = dateKey;
+    state.deltaHedge.autoOrderCount = currentCount + 1;
+    state.deltaHedge.lastAutoOrderAt = timestamp;
+    state.deltaHedge.lastOrderEventAt = timestamp;
+    state.deltaHedge.autoLastSubmittedKey = decision && decision.executionKey
+        ? decision.executionKey
+        : '';
+}
+
+function _appendDeltaHedgeAutoDecisionLog(decision, now = new Date()) {
+    if (!state.deltaHedge || typeof state.deltaHedge !== 'object' || !decision) {
+        return;
+    }
+    const log = Array.isArray(state.deltaHedge.autoDecisionLog)
+        ? state.deltaHedge.autoDecisionLog.slice(-99)
+        : [];
+    log.push({
+        at: now.toISOString(),
+        action: decision.action || '',
+        reason: decision.reason || '',
+        executionKey: decision.executionKey || '',
+        orderCount: Number.isFinite(Number(decision.orderCount)) ? Number(decision.orderCount) : null,
+    });
+    state.deltaHedge.autoDecisionLog = log;
+}
+
+function runDeltaHedgeAutoSupervisor(derivedData = _latestPortfolioDerivedData) {
+    if (typeof OptionComboDeltaHedgeLogic === 'undefined'
+        || typeof OptionComboDeltaHedgeLogic.evaluateDeltaHedgeAutomation !== 'function') {
+        return null;
+    }
+    if (!state.deltaHedge || typeof state.deltaHedge !== 'object') {
+        return null;
+    }
+
+    const runtime = state.deltaHedge;
+    const recommendation = runtime.lastRecommendation
+        || (typeof OptionComboDeltaHedgeUI !== 'undefined'
+            && typeof OptionComboDeltaHedgeUI.applyRecommendationPreview === 'function'
+            ? OptionComboDeltaHedgeUI.applyRecommendationPreview(state, derivedData || {})
+            : null);
+    const hasActiveRestingOrder = typeof OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder === 'function'
+        && OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder(runtime);
+    const now = new Date();
+    const decision = OptionComboDeltaHedgeLogic.evaluateDeltaHedgeAutomation({
+        deltaHedge: runtime,
+        recommendation,
+        liveMode: state.marketDataMode !== 'historical',
+        greeksEnabled: state.greeksEnabled === true,
+        allowLiveHedgeOrders: state.allowLiveHedgeOrders === true,
+        selectedAccount: state.selectedLiveComboOrderAccount,
+        pendingRequest: runtime.pendingRequest === true,
+        hasActiveRestingOrder,
+        lastPreview: runtime.lastPreview,
+        lastPreviewAt: runtime.lastPreviewAt,
+        now,
+    });
+
+    runtime.autoLastDecision = decision;
+    runtime.autoStatus = decision.reason || decision.action || '';
+    if (runtime.autoSubmitEnabled === true) {
+        _appendDeltaHedgeAutoDecisionLog(decision, now);
+    }
+    if (typeof OptionComboDeltaHedgeUI !== 'undefined'
+        && typeof OptionComboDeltaHedgeUI.applyAutomationState === 'function') {
+        OptionComboDeltaHedgeUI.applyAutomationState(state);
+    }
+
+    if (decision.action === 'request_preview'
+        && typeof requestDeltaHedgeBrokerPreview === 'function'
+        && recommendation
+        && recommendation.actionable === true) {
+        const lastPreviewAttemptMs = Date.parse(runtime.lastAutoPreviewAttemptAt || '');
+        if (Number.isFinite(lastPreviewAttemptMs) && now.getTime() - lastPreviewAttemptMs < 5000) {
+            return decision;
+        }
+        runtime.lastAutoPreviewAttemptAt = now.toISOString();
+        requestDeltaHedgeBrokerPreview(recommendation, {
+            requestSource: 'delta_hedge_auto_preview',
+        });
+        return decision;
+    }
+
+    if (decision.action === 'cancel_stale_order'
+        && typeof requestDeltaHedgeCancel === 'function') {
+        const canceled = requestDeltaHedgeCancel({
+            requestSource: 'delta_hedge_auto_stale_cancel',
+            reason: 'auto_stale_cancel',
+        });
+        if (canceled) {
+            runtime.autoLastDecision = {
+                ...decision,
+                action: 'cancel_requested',
+            };
+            runtime.autoStatus = 'cancel_requested';
+            if (typeof OptionComboDeltaHedgeUI !== 'undefined'
+                && typeof OptionComboDeltaHedgeUI.applyAutomationState === 'function') {
+                OptionComboDeltaHedgeUI.applyAutomationState(state);
+            }
+        }
+        return decision;
+    }
+
+    if (decision.action === 'submit'
+        && typeof requestDeltaHedgeSubmit === 'function'
+        && recommendation
+        && recommendation.actionable === true) {
+        const submitted = requestDeltaHedgeSubmit(recommendation, {
+            requestSource: 'delta_hedge_auto_submit',
+        });
+        if (submitted) {
+            _recordDeltaHedgeAutoSubmitAttempt(decision, now);
+            runtime.autoLastDecision = {
+                ...decision,
+                action: 'submitted',
+            };
+            runtime.autoStatus = 'submitted';
+            if (typeof OptionComboDeltaHedgeUI !== 'undefined'
+                && typeof OptionComboDeltaHedgeUI.applyAutomationState === 'function') {
+                OptionComboDeltaHedgeUI.applyAutomationState(state);
+            }
+        }
+        return decision;
+    }
+
+    return decision;
+}
+
+if (typeof window !== 'undefined') {
+    window.runDeltaHedgeAutoSupervisor = runDeltaHedgeAutoSupervisor;
+}
+
 function _hasGroupDeltaSummaryChanged(currentGroupResult, nextGroupDeltaSummary) {
     if (!currentGroupResult || !nextGroupDeltaSummary) {
         return true;
@@ -530,11 +708,19 @@ function updateLiveQuoteGroupDeltaValues(changeSet = {}) {
         return _latestPortfolioDerivedData;
     }
 
-    const derivedData = _cachePortfolioDerivedData({
-        ..._latestPortfolioDerivedData,
-        groupResults: nextGroupResults,
-        groupResultsById: new Map(nextGroupResults.map(result => [result.id, result])),
-    });
+    const derivedData = _cachePortfolioDerivedData(
+        typeof OptionComboValuation.buildPortfolioDerivedDataFromResults === 'function'
+            ? OptionComboValuation.buildPortfolioDerivedDataFromResults(
+                state,
+                nextGroupResults,
+                _latestPortfolioDerivedData.hedgeResults || []
+            )
+            : {
+                ..._latestPortfolioDerivedData,
+                groupResults: nextGroupResults,
+                groupResultsById: new Map(nextGroupResults.map(result => [result.id, result])),
+            }
+    );
 
     groupIds.forEach((groupId) => {
         const card = document.querySelector(`.group-card[data-group-id="${groupId}"]`);
@@ -542,6 +728,11 @@ function updateLiveQuoteGroupDeltaValues(changeSet = {}) {
         if (!card || !groupResult) return;
         applyGroupDeltaSummary(card, groupResult);
     });
+
+    if (typeof OptionComboDeltaHedgeUI !== 'undefined'
+        && typeof OptionComboDeltaHedgeUI.applyRecommendationPreview === 'function') {
+        OptionComboDeltaHedgeUI.applyRecommendationPreview(state, derivedData);
+    }
 
     return derivedData;
 }
@@ -679,11 +870,14 @@ function applyImportedState(normalizedState, importedSessionTitle = '') {
     state.historicalAvailableEndDate = '';
     state.interestRate = normalizedState.interestRate;
     state.ivOffset = normalizedState.ivOffset;
+    state.greeksEnabled = normalizedState.greeksEnabled === true;
+    state.deltaHedge = OptionComboSessionLogic.normalizeDeltaHedgeConfig(normalizedState.deltaHedge);
     state.primaryControlPanelCollapsed = normalizedState.primaryControlPanelCollapsed === true;
     state.allowLiveComboOrders = normalizedState.allowLiveComboOrders === true;
     if (state.marketDataMode !== 'live') {
         state.allowLiveComboOrders = false;
     }
+    state.allowLiveHedgeOrders = normalizedState.allowLiveHedgeOrders === true && state.marketDataMode === 'live';
     state.liveComboOrderAccounts = Array.isArray(normalizedState.liveComboOrderAccounts)
         ? normalizedState.liveComboOrderAccounts.slice()
         : [];
