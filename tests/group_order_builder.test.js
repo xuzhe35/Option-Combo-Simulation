@@ -207,5 +207,40 @@ module.exports = {
                 assert.equal(payload.legs[0].pos, -400);
             },
         },
+        {
+            name: 'falls back to default equity contracts when product registry is unavailable',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/group_order_builder.js',
+                ]);
+
+                const payload = ctx.OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(
+                    {
+                        id: 'group_no_registry',
+                        name: 'No Registry',
+                        legs: [
+                            { id: 'leg_1', type: 'call', pos: 1, strike: 500, expDate: '2026-04-17' },
+                            { id: 'leg_2', type: 'stock', pos: 100, strike: 0, expDate: '' },
+                        ],
+                    },
+                    {
+                        underlyingSymbol: 'SPY',
+                        underlyingContractMonth: '',
+                        baseDate: '2026-03-15',
+                        simulatedDate: '2026-03-15',
+                    },
+                    {
+                        executionMode: 'preview',
+                        intent: 'open',
+                    }
+                );
+
+                assert.equal(payload.profile.family, 'DEFAULT_EQUITY');
+                assert.equal(payload.legs[0].secType, 'OPT');
+                assert.equal(payload.legs[0].symbol, 'SPY');
+                assert.equal(payload.legs[1].secType, 'STK');
+                assert.equal(payload.legs[1].symbol, 'SPY');
+            },
+        },
     ],
 };

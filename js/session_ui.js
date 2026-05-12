@@ -3,28 +3,40 @@
  */
 
 (function attachSessionUI(globalScope) {
+    function getProductRegistry() {
+        return globalScope.OptionComboProductRegistry && typeof globalScope.OptionComboProductRegistry === 'object'
+            ? globalScope.OptionComboProductRegistry
+            : null;
+    }
+
+    function getControlPanelUi() {
+        return globalScope.OptionComboControlPanelUI && typeof globalScope.OptionComboControlPanelUI === 'object'
+            ? globalScope.OptionComboControlPanelUI
+            : null;
+    }
+
     function formatUnderlyingPriceInputValue(symbol, value) {
-        if (globalScope.OptionComboProductRegistry
-            && typeof globalScope.OptionComboProductRegistry.formatPriceInputValue === 'function') {
-            return globalScope.OptionComboProductRegistry.formatPriceInputValue(symbol, value);
+        const registry = getProductRegistry();
+        if (registry && typeof registry.formatPriceInputValue === 'function') {
+            return registry.formatPriceInputValue(symbol, value);
         }
         const parsed = parseFloat(value);
         return Number.isFinite(parsed) ? parsed.toFixed(2) : '';
     }
 
     function formatUnderlyingPriceDisplay(symbol, value) {
-        if (globalScope.OptionComboProductRegistry
-            && typeof globalScope.OptionComboProductRegistry.formatPriceDisplay === 'function') {
-            return globalScope.OptionComboProductRegistry.formatPriceDisplay(symbol, value);
+        const registry = getProductRegistry();
+        if (registry && typeof registry.formatPriceDisplay === 'function') {
+            return registry.formatPriceDisplay(symbol, value);
         }
         const parsed = parseFloat(value);
         return Number.isFinite(parsed) ? `$${parsed.toFixed(2)}` : '$0.00';
     }
 
     function getUnderlyingPriceInputStep(symbol) {
-        if (globalScope.OptionComboProductRegistry
-            && typeof globalScope.OptionComboProductRegistry.getPriceInputStep === 'function') {
-            return globalScope.OptionComboProductRegistry.getPriceInputStep(symbol);
+        const registry = getProductRegistry();
+        if (registry && typeof registry.getPriceInputStep === 'function') {
+            return registry.getPriceInputStep(symbol);
         }
         return '0.01';
     }
@@ -282,15 +294,16 @@
         }
 
         if (underlyingContractMonthInput) {
-            const profile = typeof OptionComboProductRegistry === 'undefined'
-                ? null
-                : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
+            const registry = getProductRegistry();
+            const profile = registry && typeof registry.resolveUnderlyingProfile === 'function'
+                ? registry.resolveUnderlyingProfile(state.underlyingSymbol)
+                : null;
             const expectsFutureUnderlying = profile?.underlyingSecType === 'FUT';
             const defaultContractMonth = !expectsFutureUnderlying
-                || typeof OptionComboProductRegistry === 'undefined'
-                || typeof OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth !== 'function'
+                || !registry
+                || typeof registry.resolveDefaultUnderlyingContractMonth !== 'function'
                 ? ''
-                : OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(
+                : registry.resolveDefaultUnderlyingContractMonth(
                     state.underlyingSymbol,
                     marketDataMode === 'historical'
                         ? (replayDate || state.baseDate)
@@ -339,9 +352,9 @@
             allowLiveComboOrdersInput.disabled = marketDataMode !== 'live';
         }
 
-        if (typeof globalScope.OptionComboControlPanelUI !== 'undefined'
-            && typeof globalScope.OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
-            globalScope.OptionComboControlPanelUI.refreshBoundDynamicControls();
+        const controlPanelUi = getControlPanelUi();
+        if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
+            controlPanelUi.refreshBoundDynamicControls();
         }
     }
 

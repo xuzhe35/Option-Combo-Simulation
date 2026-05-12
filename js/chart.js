@@ -3,6 +3,18 @@
  * Draws a Profit & Loss curve for a given Option Combo group over a price range.
  */
 
+function _getChartPricingContextApi() {
+    return typeof OptionComboPricingContext !== 'undefined' && OptionComboPricingContext
+        ? OptionComboPricingContext
+        : null;
+}
+
+function _getChartProductRegistryApi() {
+    return typeof OptionComboProductRegistry !== 'undefined' && OptionComboProductRegistry
+        ? OptionComboProductRegistry
+        : null;
+}
+
 class PnLChart {
     /**
      * @param {HTMLCanvasElement} canvas 
@@ -132,12 +144,11 @@ class PnLChart {
         // Process all legs globally before the 500-point chart array loop
         // Use per-leg _viewMode (injected by Global Chart flattener) if available, else group-level
         const activeViewMode = group.viewMode || 'active';
-        const pricingContext = typeof OptionComboPricingContext === 'undefined'
-            ? null
-            : OptionComboPricingContext;
-        const underlyingProfile = typeof OptionComboProductRegistry === 'undefined'
-            ? null
-            : OptionComboProductRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol);
+        const pricingContext = _getChartPricingContextApi();
+        const productRegistry = _getChartProductRegistryApi();
+        const underlyingProfile = productRegistry && typeof productRegistry.resolveUnderlyingProfile === 'function'
+            ? productRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol)
+            : null;
         const simulationDate = pricingContext
             && typeof pricingContext.resolveSimulationDate === 'function'
             ? pricingContext.resolveSimulationDate(globalState)
@@ -477,9 +488,10 @@ class PnLChart {
             this.ctx.stroke();
 
             // Draw Tooltip Box
-            const currentUnderlying = typeof OptionComboPricingContext !== 'undefined'
-                && typeof OptionComboPricingContext.resolveAnchorUnderlyingPrice === 'function'
-                ? OptionComboPricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
+            const chartPricingContext = _getChartPricingContextApi();
+            const currentUnderlying = chartPricingContext
+                && typeof chartPricingContext.resolveAnchorUnderlyingPrice === 'function'
+                ? chartPricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
                 : globalState.underlyingPrice;
             let percentChange = 0;
             if (currentUnderlying > 0) {
@@ -562,9 +574,10 @@ class PnLChart {
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'top';
 
-        const currentUnderlying = typeof OptionComboPricingContext !== 'undefined'
-            && typeof OptionComboPricingContext.resolveAnchorUnderlyingPrice === 'function'
-            ? OptionComboPricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
+        const pricingContext = _getChartPricingContextApi();
+        const currentUnderlying = pricingContext
+            && typeof pricingContext.resolveAnchorUnderlyingPrice === 'function'
+            ? pricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
             : globalState.underlyingPrice;
 
         for (let i = 0; i <= tickCountX; i++) {

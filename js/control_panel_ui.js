@@ -12,6 +12,39 @@
             : globalScope.OptionComboProductRegistry;
     }
 
+    function _getSessionUi() {
+        return globalScope.OptionComboSessionUI && typeof globalScope.OptionComboSessionUI === 'object'
+            ? globalScope.OptionComboSessionUI
+            : null;
+    }
+
+    function _getDateUtils() {
+        return globalScope.OptionComboDateUtils && typeof globalScope.OptionComboDateUtils === 'object'
+            ? globalScope.OptionComboDateUtils
+            : null;
+    }
+
+    function _getIndexForwardRateApi() {
+        return globalScope.OptionComboIndexForwardRate && typeof globalScope.OptionComboIndexForwardRate === 'object'
+            ? globalScope.OptionComboIndexForwardRate
+            : null;
+    }
+
+    function _getWsLiveQuotesApi() {
+        return globalScope.OptionComboWsLiveQuotes && typeof globalScope.OptionComboWsLiveQuotes === 'object'
+            ? globalScope.OptionComboWsLiveQuotes
+            : null;
+    }
+
+    function _runUiRefreshSafely(label, callback) {
+        try {
+            return callback();
+        } catch (error) {
+            console.error(`UI refresh failed (${label}):`, error);
+            return undefined;
+        }
+    }
+
     function _getPricingInputMode(symbol) {
         const registry = _getRegistry();
         if (!registry || typeof registry.resolvePricingInputMode !== 'function') {
@@ -92,11 +125,13 @@
     }
 
     function _syncWorkspaceChrome(state) {
-        if (typeof globalScope.OptionComboSessionUI === 'undefined'
-            || typeof globalScope.OptionComboSessionUI.syncWorkspaceChrome !== 'function') {
+        const sessionUi = _getSessionUi();
+        if (!sessionUi || typeof sessionUi.syncWorkspaceChrome !== 'function') {
             return;
         }
-        globalScope.OptionComboSessionUI.syncWorkspaceChrome(state);
+        _runUiRefreshSafely('workspaceChrome', () => {
+            sessionUi.syncWorkspaceChrome(state);
+        });
     }
 
     function _normalizeDateStr(value) {
@@ -142,9 +177,9 @@
             return [];
         }
 
-        if (typeof OptionComboDateUtils !== 'undefined'
-            && typeof OptionComboDateUtils.listTradingDays === 'function') {
-            return OptionComboDateUtils.listTradingDays(startDate, endDate);
+        const dateUtils = _getDateUtils();
+        if (dateUtils && typeof dateUtils.listTradingDays === 'function') {
+            return dateUtils.listTradingDays(startDate, endDate);
         }
 
         if (startDate === endDate) {
@@ -578,10 +613,12 @@
             meta.style.minWidth = '0';
             meta.style.lineHeight = '1.25';
             meta.style.wordBreak = 'break-word';
-            const sampleRuntime = typeof OptionComboIndexForwardRate !== 'undefined'
-                && typeof OptionComboIndexForwardRate.refreshForwardRateSample === 'function'
-                && typeof OptionComboWsLiveQuotes !== 'undefined'
-                ? OptionComboIndexForwardRate.refreshForwardRateSample(sample, state, OptionComboWsLiveQuotes)
+            const indexForwardRateApi = _getIndexForwardRateApi();
+            const wsLiveQuotesApi = _getWsLiveQuotesApi();
+            const sampleRuntime = indexForwardRateApi
+                && wsLiveQuotesApi
+                && typeof indexForwardRateApi.refreshForwardRateSample === 'function'
+                ? indexForwardRateApi.refreshForwardRateSample(sample, state, wsLiveQuotesApi)
                 : null;
             const snapshot = sampleRuntime && sampleRuntime.snapshot;
             const statusLabel = _describeForwardRateSampleState(sample, sampleRuntime);
@@ -1157,9 +1194,9 @@
         const replayIndex = timelineDates.indexOf(effectiveReplayDate);
         const tradingOffset = replayIndex >= 0 ? replayIndex : 0;
         const calendarOffset = effectiveReplayDate && state.baseDate
-            && typeof OptionComboDateUtils !== 'undefined'
-            && typeof OptionComboDateUtils.diffDays === 'function'
-            ? OptionComboDateUtils.diffDays(state.baseDate, effectiveReplayDate)
+            && _getDateUtils()
+            && typeof _getDateUtils().diffDays === 'function'
+            ? _getDateUtils().diffDays(state.baseDate, effectiveReplayDate)
             : 0;
 
         replayDateInput.min = state.baseDate || '';
@@ -1209,13 +1246,14 @@
 
         simDateInput.min = state.baseDate || '';
         simDateInput.max = '';
-        const days = typeof OptionComboDateUtils !== 'undefined'
-            && typeof OptionComboDateUtils.diffDays === 'function'
-            ? OptionComboDateUtils.diffDays(state.baseDate, state.simulatedDate)
+        const dateUtils = _getDateUtils();
+        const days = dateUtils
+            && typeof dateUtils.diffDays === 'function'
+            ? dateUtils.diffDays(state.baseDate, state.simulatedDate)
             : 0;
-        const tradDays = typeof OptionComboDateUtils !== 'undefined'
-            && typeof OptionComboDateUtils.calendarToTradingDays === 'function'
-            ? OptionComboDateUtils.calendarToTradingDays(state.baseDate, state.simulatedDate)
+        const tradDays = dateUtils
+            && typeof dateUtils.calendarToTradingDays === 'function'
+            ? dateUtils.calendarToTradingDays(state.baseDate, state.simulatedDate)
             : days;
         simDateInput.value = state.simulatedDate || state.baseDate || '';
         dpSlider.min = '0';

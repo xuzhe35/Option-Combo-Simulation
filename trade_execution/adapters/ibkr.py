@@ -5,19 +5,48 @@ from datetime import datetime
 from math import gcd, isfinite
 from decimal import Decimal, ROUND_FLOOR, ROUND_CEILING
 
-from ib_async import ComboLeg, Contract, Order, Stock, TagValue
+from ib_async import ComboLeg, Contract, Order, TagValue
 
 from trade_execution.adapters.base import BrokerExecutionAdapter
+from trade_execution.adapters.ibkr_contracts import (
+    _build_contract_from_request,
+    _describe_contract_request,
+    _qualify_one,
+    _qualify_underlying_future,
+    _request_temporary_ticker,
+    _resolve_existing_order_ticker,
+    _resolve_family_defaults,
+    _resolve_index_exchange_candidates,
+    _resolve_leg_contract_and_mark,
+    _resolve_weekly_fop_trading_class,
+    _to_contract_month,
+    _to_expiry,
+    _validate_leg_contract,
+)
+from trade_execution.adapters.ibkr_hedge import (
+    _build_hedge_contract_from_request,
+    _build_hedge_order,
+    _build_hedge_order_from_request,
+    _build_hedge_order_snapshot,
+    _cleanup_hedge_order_context,
+    _on_hedge_order_status,
+    _qualify_hedge_contract,
+    _register_hedge_order_context,
+    _resolve_hedge_order_tracking,
+    _validate_hedge_order_request,
+    cancel_hedge_order,
+    preview_hedge_order,
+    submit_hedge_order,
+    validate_hedge_order,
+)
 from trade_execution.models import (
     ComboOrderPreview,
     ComboPreviewLeg,
     ComboSubmitResult,
     ComboValidationLeg,
     ComboValidationResult,
-    HedgeOrderPreview,
-    HedgeSubmitResult,
-    HedgeValidationResult,
 )
+from trade_execution.order_tracking import extract_trade_status_message, resolve_tracking
 
 
 class IbkrExecutionAdapter(BrokerExecutionAdapter):
@@ -118,25 +147,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         return isinstance(value, (int, float)) and isfinite(value) and abs(value) < 1e100
 
     def _extract_trade_status_message(self, trade):
-        trade_log = list(getattr(trade, 'log', None) or [])
-        for entry in reversed(trade_log):
-            message = str(getattr(entry, 'message', '') or '').strip()
-            error_code = getattr(entry, 'errorCode', None)
-            if message:
-                if error_code not in (None, '', 0, '0'):
-                    return f'IB {error_code}: {message}'
-                return message
-
-        advanced_error = str(getattr(trade, 'advancedError', '') or '').strip()
-        if advanced_error:
-            return advanced_error
-
-        for entry in reversed(trade_log):
-            error_code = getattr(entry, 'errorCode', None)
-            if error_code not in (None, '', 0, '0'):
-                return f'IB error code {error_code}.'
-
-        return ''
+        return extract_trade_status_message(trade)
 
     def _get_partial_fill_progress(self, context):
         try:
@@ -218,451 +229,26 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     def _normalize_symbol(self, value):
         return str(value or '').strip().upper()
 
-    def _to_contract_month(self, value):
-        cleaned = str(value or '').replace('-', '')
-        return cleaned[:6]
-
-    def _to_expiry(self, value):
-        return str(value or '').replace('-', '')
-
-    def _resolve_family_defaults(self, symbol):
-        return self.supported_live_families.get(self._normalize_symbol(symbol))
-
-    def _resolve_index_exchange_candidates(self, symbol, requested_exchange):
-        normalized_symbol = self._normalize_symbol(symbol)
-        requested = str(requested_exchange or '').strip()
-        candidates = []
-
-        if requested:
-            candidates.append(requested)
-
-        for exchange in self.index_exchange_fallbacks.get(normalized_symbol, ()):
-            if exchange not in candidates:
-                candidates.append(exchange)
-
-        if '' not in candidates:
-            candidates.append('')
-
-        return candidates
-
-    def _resolve_weekly_fop_trading_class(self, symbol, expiry, current_trading_class):
-        defaults = self._resolve_family_defaults(symbol)
-        if not defaults:
-            return current_trading_class
-
-        base_trading_class = current_trading_class or defaults.get('trading_class') or ''
-        if not base_trading_class or len(base_trading_class) < 2:
-            return base_trading_class
-
-        try:
-            expiry_date = datetime.strptime(expiry, '%Y%m%d')
-        except (TypeError, ValueError):
-            return base_trading_class
-
-        weekday_suffix = {
-            0: 'A',
-            1: 'B',
-            2: 'C',
-            3: 'D',
-        }.get(expiry_date.weekday())
-
-        if weekday_suffix:
-            return f"{base_trading_class[:-1]}{weekday_suffix}"
-        return base_trading_class
-
-    async def _qualify_underlying_future(self, symbol, contract_month, exchange, currency, multiplier):
-        cache_key = (
-            self._normalize_symbol(symbol),
-            self._to_contract_month(contract_month),
-            exchange or '',
-            currency or 'USD',
-            str(multiplier or ''),
-        )
-        if cache_key in self.qualified_underlyings:
-            return self.qualified_underlyings[cache_key]
-
-        future_contract = Contract(
-            secType='FUT',
-            symbol=cache_key[0],
-            lastTradeDateOrContractMonth=cache_key[1],
-            exchange=cache_key[2],
-            currency=cache_key[3],
-            multiplier=cache_key[4],
-        )
-        results = await self.ib.qualifyContractsAsync(future_contract)
-        if not results or results[0] is None:
-            return None
-
-        self.qualified_underlyings[cache_key] = results[0]
-        return results[0]
-
-    def _build_contract_from_request(self, leg_request):
-        sec_type = self._normalize_symbol(leg_request.sec_type)
-        symbol = self._normalize_symbol(leg_request.symbol)
-        exchange = leg_request.exchange or ''
-        currency = leg_request.currency or 'USD'
-        multiplier = str(leg_request.multiplier or '')
-        trading_class = leg_request.trading_class or ''
-        strike = leg_request.strike
-        right = self._normalize_symbol(leg_request.right)
-        expiry = self._to_expiry(leg_request.exp_date)
-        contract_month = self._to_contract_month(leg_request.contract_month)
-        trading_class = self._resolve_weekly_fop_trading_class(symbol, expiry, trading_class)
-
-        if sec_type == 'STK':
-            return Stock(symbol, exchange or 'SMART', currency)
-
-        if sec_type == 'IND':
-            return Contract(secType='IND', symbol=symbol, exchange=exchange, currency=currency)
-
-        if sec_type == 'FUT':
-            return Contract(
-                secType='FUT',
-                symbol=symbol,
-                lastTradeDateOrContractMonth=contract_month,
-                exchange=exchange,
-                currency=currency,
-                multiplier=multiplier,
-            )
-
-        if sec_type in ('OPT', 'FOP'):
-            return Contract(
-                secType=sec_type,
-                symbol=symbol,
-                lastTradeDateOrContractMonth=expiry or contract_month,
-                strike=float(strike),
-                right=right,
-                exchange=exchange,
-                currency=currency,
-                multiplier=multiplier,
-                tradingClass=trading_class,
-            )
-
-        raise ValueError(f"Unsupported secType in request: {sec_type!r}")
-
-    def _build_hedge_contract_from_request(self, request):
-        sec_type = self._normalize_symbol(request.sec_type)
-        symbol = self._normalize_symbol(request.symbol)
-        exchange = request.exchange or ''
-        currency = request.currency or 'USD'
-
-        if sec_type == 'STK':
-            contract = Stock(symbol, exchange or 'SMART', currency)
-            if not getattr(contract, 'secType', None):
-                contract.secType = 'STK'
-            return contract
-
-        if sec_type == 'FUT':
-            contract_month = self._to_contract_month(request.contract_month)
-            if not contract_month:
-                raise ValueError('FUT hedge orders require contractMonth.')
-            return Contract(
-                secType='FUT',
-                symbol=symbol,
-                lastTradeDateOrContractMonth=contract_month,
-                exchange=exchange,
-                currency=currency,
-                multiplier=str(request.multiplier or ''),
-            )
-
-        raise ValueError(f"Unsupported hedge secType: {sec_type!r}")
-
-    def _validate_hedge_order_request(self, request):
-        sec_type = self._normalize_symbol(request.sec_type)
-        if sec_type not in {'STK', 'FUT'}:
-            raise ValueError('Hedge orders currently support STK and FUT only.')
-
-        if not self._normalize_symbol(request.symbol):
-            raise ValueError('Hedge order symbol is required.')
-
-        order_action = self._normalize_symbol(request.order_action)
-        if order_action not in {'BUY', 'SELL'}:
-            raise ValueError('Hedge order action must be BUY or SELL.')
-
-        try:
-            quantity = int(request.quantity)
-        except (TypeError, ValueError):
-            quantity = 0
-        if quantity <= 0:
-            raise ValueError('Hedge order quantity must be positive.')
-
-        order_type = self._normalize_symbol(request.order_type)
-        if order_type not in {'LMT', 'MKT'}:
-            raise ValueError('Hedge order type must be LMT or MKT.')
-
-        if order_type == 'LMT':
-            try:
-                limit_price = float(request.limit_price)
-            except (TypeError, ValueError):
-                limit_price = 0.0
-            if limit_price <= 0:
-                raise ValueError('LMT hedge orders require a positive limitPrice.')
-
-    async def _qualify_hedge_contract(self, request):
-        contract = self._build_hedge_contract_from_request(request)
-        self.logger.info(
-            f"Validating hedge contract: hedgeId={request.hedge_id} "
-            f"secType={request.sec_type} symbol={request.symbol}"
-        )
-        results = await self.ib.qualifyContractsAsync(contract)
-        if not results or results[0] is None:
-            raise ValueError(f"Failed to qualify hedge contract {request.sec_type} {request.symbol}.")
-        return results[0]
-
-    def _build_hedge_order(self, request):
-        self._validate_hedge_order_request(request)
-        order = Order()
-        order.action = self._normalize_symbol(request.order_action)
-        order.orderType = self._normalize_symbol(request.order_type)
-        order.totalQuantity = int(request.quantity)
-        order.tif = self._resolve_time_in_force(request)
-        order.transmit = True
-        if order.orderType == 'LMT':
-            order.lmtPrice = round(float(request.limit_price), 4)
-        if str(request.account or '').strip():
-            order.account = str(request.account).strip()
-        return order
-
-    async def _build_hedge_order_from_request(self, request):
-        self._validate_hedge_order_request(request)
-        qualified_contract = await self._qualify_hedge_contract(request)
-        order = self._build_hedge_order(request)
-        preview = HedgeOrderPreview(
-            hedge_id=request.hedge_id,
-            hedge_name=request.hedge_name,
-            sec_type=getattr(qualified_contract, 'secType', '') or self._normalize_symbol(request.sec_type),
-            symbol=getattr(qualified_contract, 'symbol', '') or self._normalize_symbol(request.symbol),
-            local_symbol=getattr(qualified_contract, 'localSymbol', '') or getattr(qualified_contract, 'symbol', ''),
-            exchange=getattr(qualified_contract, 'exchange', '') or request.exchange,
-            currency=getattr(qualified_contract, 'currency', '') or request.currency,
-            order_action=order.action,
-            quantity=int(order.totalQuantity),
-            order_type=order.orderType,
-            limit_price=getattr(order, 'lmtPrice', None) if order.orderType == 'LMT' else None,
-            time_in_force=order.tif,
-            execution_mode=request.execution_mode or 'preview',
-            account=str(getattr(order, 'account', '') or request.account or '').strip(),
-            request_source=request.request_source or 'delta_hedge_manual',
-            contract_month=getattr(qualified_contract, 'lastTradeDateOrContractMonth', '') or request.contract_month,
-            multiplier=str(getattr(qualified_contract, 'multiplier', '') or request.multiplier or ''),
-            con_id=getattr(qualified_contract, 'conId', None),
-            current_net_delta=request.current_net_delta,
-            projected_net_delta=request.projected_net_delta,
-            target_lower=request.target_lower,
-            target_upper=request.target_upper,
-        )
-        return {
-            'contract': qualified_contract,
-            'order': order,
-            'preview': preview,
-        }
-
-    def _register_hedge_order_context(self, websocket, request, contract, trade, preview):
-        order = getattr(trade, 'order', None)
-        order_status = getattr(trade, 'orderStatus', None)
-        context = {
-            'websocket': websocket,
-            'hedgeId': request.hedge_id,
-            'hedgeName': request.hedge_name,
-            'account': str(getattr(order, 'account', '') or request.account or '').strip() or None,
-            'executionMode': request.execution_mode or 'submit',
-            'requestSource': request.request_source or 'delta_hedge_manual',
-            'contract': contract,
-            'trade': trade,
-            'secType': preview.sec_type,
-            'symbol': preview.symbol,
-            'localSymbol': preview.local_symbol,
-            'exchange': preview.exchange,
-            'currency': preview.currency,
-            'conId': preview.con_id,
-            'orderAction': preview.order_action,
-            'quantity': preview.quantity,
-            'orderType': preview.order_type,
-            'limitPrice': preview.limit_price,
-            'timeInForce': preview.time_in_force,
-            'contractMonth': preview.contract_month,
-            'multiplier': preview.multiplier,
-            'orderId': getattr(order, 'orderId', None),
-            'permId': getattr(order_status, 'permId', None),
-            'status': getattr(order_status, 'status', None),
-            'filled': getattr(order_status, 'filled', None),
-            'remaining': getattr(order_status, 'remaining', None),
-            'avgFillPrice': getattr(order_status, 'avgFillPrice', None),
-            'lastFillPrice': getattr(order_status, 'lastFillPrice', None),
-            'whyHeld': getattr(order_status, 'whyHeld', None),
-            'mktCapPrice': getattr(order_status, 'mktCapPrice', None),
-            'cancelRequested': False,
-        }
-        if context['orderId'] is not None:
-            self.hedge_orders_by_order_id[context['orderId']] = context
-        if context['permId'] is not None:
-            self.hedge_orders_by_perm_id[context['permId']] = context
-        return context
-
-    def _on_hedge_order_status(self, trade):
-        order = getattr(trade, 'order', None)
-        order_status = getattr(trade, 'orderStatus', None)
-        if order is None or order_status is None:
-            return
-
-        order_id = getattr(order, 'orderId', None)
-        perm_id = getattr(order_status, 'permId', None)
-        context = self._resolve_hedge_order_tracking(order_id, perm_id)
-        if context is None:
-            return
-
-        context['trade'] = trade
-        context['orderId'] = order_id
-        context['permId'] = perm_id
-        context['account'] = str(getattr(order, 'account', '') or context.get('account') or '').strip() or None
-        context['status'] = getattr(order_status, 'status', None)
-        context['filled'] = getattr(order_status, 'filled', None)
-        context['remaining'] = getattr(order_status, 'remaining', None)
-        context['avgFillPrice'] = getattr(order_status, 'avgFillPrice', None)
-        context['lastFillPrice'] = getattr(order_status, 'lastFillPrice', None)
-        context['whyHeld'] = getattr(order_status, 'whyHeld', None)
-        context['mktCapPrice'] = getattr(order_status, 'mktCapPrice', None)
-
-        if perm_id is not None:
-            self.hedge_orders_by_perm_id[perm_id] = context
-
-    def _describe_contract_request(self, leg_request):
-        return f"{self._normalize_symbol(leg_request.sec_type) or 'UNKNOWN'} {self._normalize_symbol(leg_request.symbol) or '<missing>'}".strip()
-
-    async def _qualify_one(self, contract, leg_request):
-        sec_type = self._normalize_symbol(leg_request.sec_type)
-        underlying_contract_month = ''
-
-        if sec_type == 'FOP':
-            underlying_contract_month = self._to_contract_month(leg_request.underlying_contract_month)
-            if underlying_contract_month:
-                defaults = self._resolve_family_defaults(leg_request.symbol)
-                underlying_symbol = self._normalize_symbol(
-                    leg_request.underlying_symbol
-                    or (defaults or {}).get('underlying_symbol')
-                    or leg_request.symbol
-                )
-                underlying_exchange = (
-                    leg_request.underlying_exchange
-                    or (defaults or {}).get('exchange')
-                    or leg_request.exchange
-                    or ''
-                )
-                underlying_currency = leg_request.currency or (defaults or {}).get('currency') or 'USD'
-                underlying_multiplier = str(
-                    leg_request.underlying_multiplier
-                    or (defaults or {}).get('multiplier')
-                    or leg_request.multiplier
-                    or ''
-                )
-                qualified_underlying = await self._qualify_underlying_future(
-                    underlying_symbol,
-                    underlying_contract_month,
-                    underlying_exchange,
-                    underlying_currency,
-                    underlying_multiplier,
-                )
-                if qualified_underlying is None:
-                    self.logger.error(
-                        f"Failed to qualify underlying FUT {underlying_symbol} {underlying_contract_month} "
-                        f"for option {self._describe_contract_request(leg_request)}"
-                    )
-                    return None
-                contract.underConId = qualified_underlying.conId
-
-        results = await self.ib.qualifyContractsAsync(contract)
-        if (not results or results[0] is None) and sec_type == 'IND':
-            original_exchange = contract.exchange
-            for candidate_exchange in self._resolve_index_exchange_candidates(contract.symbol, original_exchange):
-                if candidate_exchange == original_exchange:
-                    continue
-
-                contract.exchange = candidate_exchange
-                results = await self.ib.qualifyContractsAsync(contract)
-                if results and results[0] is not None:
-                    self.logger.info(
-                        f"Qualified {self._describe_contract_request(leg_request)} using IND exchange fallback "
-                        f"{candidate_exchange or '<blank>'} instead of {original_exchange or '<blank>'}"
-                    )
-                    break
-
-        if (not results or results[0] is None) and sec_type == 'FOP' and underlying_contract_month and getattr(contract, 'tradingClass', ''):
-            original_trading_class = contract.tradingClass
-            contract.tradingClass = ''
-            results = await self.ib.qualifyContractsAsync(contract)
-            if results and results[0] is not None:
-                self.logger.info(
-                    f"Qualified {self._describe_contract_request(leg_request)} using underConId fallback "
-                    f"without tradingClass {original_trading_class}"
-                )
-
-        if not results or results[0] is None:
-            return None
-
-        return results[0]
-
-    async def _request_temporary_ticker(self, contract, generic_ticks=''):
-        ticker = self.ib.reqMktData(contract, generic_ticks, False, False)
-        await asyncio.sleep(0.75)
-        return ticker
-
-    def _resolve_existing_order_ticker(self, websocket, leg_request):
-        subs = self.client_subscriptions.get(websocket, {})
-        if leg_request.id and leg_request.id in subs:
-            return subs[leg_request.id]
-
-        if self._normalize_symbol(leg_request.sec_type) in ('STK', 'FUT', 'IND'):
-            return subs.get('underlying')
-
-        return None
-
-    async def _resolve_leg_contract_and_mark(self, websocket, leg_request):
-        contract = self._build_contract_from_request(leg_request)
-        self.logger.info(
-            f"Resolving combo leg market data: id={leg_request.id} "
-            f"{self._describe_contract_request(leg_request)}"
-        )
-        qualified_contract = await self._qualify_one(contract, leg_request)
-        if qualified_contract is None:
-            raise ValueError(f"Failed to qualify {self._describe_contract_request(leg_request)}")
-
-        ticker = self._resolve_existing_order_ticker(websocket, leg_request)
-        created_temp_ticker = False
-        if ticker is None:
-            ticker = await self._request_temporary_ticker(
-                qualified_contract,
-                '106' if self._normalize_symbol(leg_request.sec_type) in ('OPT', 'FOP') else ''
-            )
-            created_temp_ticker = True
-
-        try:
-            sec_type = self._normalize_symbol(leg_request.sec_type)
-            quote = self._extract_quote_snapshot(ticker, sec_type)
-            if quote is None:
-                raise ValueError(f"No live mark available for {self._describe_contract_request(leg_request)}")
-            self.logger.info(
-                f"Resolved combo leg: id={leg_request.id} conId={qualified_contract.conId} "
-                f"localSymbol={getattr(qualified_contract, 'localSymbol', '')} "
-                f"bid={quote['bid']} ask={quote['ask']} mark={quote['mark']}"
-            )
-            return qualified_contract, quote
-        finally:
-            if created_temp_ticker:
-                try:
-                    self.ib.cancelMktData(qualified_contract)
-                except Exception:
-                    pass
-
-    async def _validate_leg_contract(self, leg_request):
-        contract = self._build_contract_from_request(leg_request)
-        self.logger.info(
-            f"Validating combo leg contract: id={leg_request.id} "
-            f"{self._describe_contract_request(leg_request)}"
-        )
-        qualified_contract = await self._qualify_one(contract, leg_request)
-        if qualified_contract is None:
-            raise ValueError(f"Failed to qualify {self._describe_contract_request(leg_request)}")
-        return qualified_contract
+    _to_contract_month = _to_contract_month
+    _to_expiry = _to_expiry
+    _resolve_family_defaults = _resolve_family_defaults
+    _resolve_index_exchange_candidates = _resolve_index_exchange_candidates
+    _resolve_weekly_fop_trading_class = _resolve_weekly_fop_trading_class
+    _qualify_underlying_future = _qualify_underlying_future
+    _build_contract_from_request = _build_contract_from_request
+    _build_hedge_contract_from_request = _build_hedge_contract_from_request
+    _validate_hedge_order_request = _validate_hedge_order_request
+    _qualify_hedge_contract = _qualify_hedge_contract
+    _build_hedge_order = _build_hedge_order
+    _build_hedge_order_from_request = _build_hedge_order_from_request
+    _register_hedge_order_context = _register_hedge_order_context
+    _on_hedge_order_status = _on_hedge_order_status
+    _describe_contract_request = _describe_contract_request
+    _qualify_one = _qualify_one
+    _request_temporary_ticker = _request_temporary_ticker
+    _resolve_existing_order_ticker = _resolve_existing_order_ticker
+    _resolve_leg_contract_and_mark = _resolve_leg_contract_and_mark
+    _validate_leg_contract = _validate_leg_contract
 
     def _serialize_what_if(self, order_state):
         if order_state is None:
@@ -758,70 +344,16 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         return str(status or '').strip() in {'Cancelled', 'ApiCancelled', 'Inactive'}
 
     def _resolve_order_tracking(self, order_id, perm_id):
-        context = None
-        if order_id is not None:
-            context = self.managed_executions_by_order_id.get(order_id)
-        if context is None and perm_id is not None:
-            context = self.managed_executions_by_perm_id.get(perm_id)
-        if context is not None:
-            if order_id is not None:
-                self.managed_executions_by_order_id[order_id] = context
-            if perm_id is not None:
-                self.managed_executions_by_perm_id[perm_id] = context
-        return context
+        return resolve_tracking(
+            self.managed_executions_by_order_id,
+            self.managed_executions_by_perm_id,
+            order_id,
+            perm_id,
+        )
 
-    def _resolve_hedge_order_tracking(self, order_id, perm_id):
-        context = None
-        if order_id is not None:
-            context = self.hedge_orders_by_order_id.get(order_id)
-        if context is None and perm_id is not None:
-            context = self.hedge_orders_by_perm_id.get(perm_id)
-        if context is not None:
-            if order_id is not None:
-                self.hedge_orders_by_order_id[order_id] = context
-            if perm_id is not None:
-                self.hedge_orders_by_perm_id[perm_id] = context
-        return context
-
-    def _cleanup_hedge_order_context(self, context):
-        order_id = context.get('orderId')
-        perm_id = context.get('permId')
-        if order_id is not None:
-            self.hedge_orders_by_order_id.pop(order_id, None)
-        if perm_id is not None:
-            self.hedge_orders_by_perm_id.pop(perm_id, None)
-
-    def _build_hedge_order_snapshot(self, context):
-        return {
-            'hedgeId': context.get('hedgeId'),
-            'hedgeName': context.get('hedgeName'),
-            'account': context.get('account'),
-            'executionMode': context.get('executionMode'),
-            'requestSource': context.get('requestSource'),
-            'secType': context.get('secType'),
-            'symbol': context.get('symbol'),
-            'localSymbol': context.get('localSymbol'),
-            'exchange': context.get('exchange'),
-            'currency': context.get('currency'),
-            'conId': context.get('conId'),
-            'orderAction': context.get('orderAction'),
-            'quantity': context.get('quantity'),
-            'orderType': context.get('orderType'),
-            'limitPrice': context.get('limitPrice'),
-            'timeInForce': context.get('timeInForce'),
-            'contractMonth': context.get('contractMonth'),
-            'multiplier': context.get('multiplier'),
-            'orderId': context.get('orderId'),
-            'permId': context.get('permId'),
-            'status': context.get('status'),
-            'filled': context.get('filled'),
-            'remaining': context.get('remaining'),
-            'avgFillPrice': context.get('avgFillPrice'),
-            'lastFillPrice': context.get('lastFillPrice'),
-            'whyHeld': context.get('whyHeld'),
-            'mktCapPrice': context.get('mktCapPrice'),
-            'cancelRequested': bool(context.get('cancelRequested')),
-        }
+    _resolve_hedge_order_tracking = _resolve_hedge_order_tracking
+    _cleanup_hedge_order_context = _cleanup_hedge_order_context
+    _build_hedge_order_snapshot = _build_hedge_order_snapshot
 
     def _build_managed_snapshot(self, context):
         managed_state = context.get('managedState')
@@ -1570,133 +1102,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             legs=validation_legs,
         )
 
-    async def validate_hedge_order(self, websocket, request):
-        self._validate_hedge_order_request(request)
-        qualified_contract = await self._qualify_hedge_contract(request)
-        self.logger.info(
-            f"Hedge validation passed for hedgeId={request.hedge_id}: "
-            f"secType={getattr(qualified_contract, 'secType', '')} "
-            f"symbol={getattr(qualified_contract, 'symbol', '')} "
-            f"conId={getattr(qualified_contract, 'conId', None)}"
-        )
-        return HedgeValidationResult(
-            hedge_id=request.hedge_id,
-            hedge_name=request.hedge_name,
-            execution_mode=request.execution_mode or 'preview',
-            valid=True,
-            sec_type=getattr(qualified_contract, 'secType', '') or self._normalize_symbol(request.sec_type),
-            symbol=getattr(qualified_contract, 'symbol', '') or self._normalize_symbol(request.symbol),
-            local_symbol=getattr(qualified_contract, 'localSymbol', '') or getattr(qualified_contract, 'symbol', ''),
-            con_id=getattr(qualified_contract, 'conId', None),
-        )
-
-    async def preview_hedge_order(self, websocket, request):
-        build_result = await self._build_hedge_order_from_request(request)
-        contract = build_result['contract']
-        order = build_result['order']
-        preview = build_result['preview']
-        what_if = None
-        if hasattr(self.ib, 'whatIfOrderAsync'):
-            self.logger.info(
-                f"Running IB hedge what-if for hedgeId={request.hedge_id} "
-                f"orderAction={order.action} qty={order.totalQuantity} orderType={order.orderType}"
-            )
-            try:
-                what_if = await asyncio.wait_for(
-                    self.ib.whatIfOrderAsync(contract, order),
-                    timeout=self.what_if_timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                self.logger.warning(
-                    f"IB hedge what-if timed out for hedgeId={request.hedge_id} after "
-                    f"{self.what_if_timeout_seconds:.1f}s; returning preview without what-if details"
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    f"IB hedge what-if failed for hedgeId={request.hedge_id}: {exc}; "
-                    f"returning preview without what-if details"
-                )
-        preview.what_if = self._serialize_what_if(what_if)
-        self.logger.info(
-            f"Hedge preview-ready hedgeId={request.hedge_id}: "
-            f"secType={preview.sec_type} symbol={preview.symbol} "
-            f"action={preview.order_action} qty={preview.quantity} "
-            f"orderType={preview.order_type} limit={preview.limit_price}"
-        )
-        return preview
-
-    async def submit_hedge_order(self, websocket, request):
-        if not str(request.account or '').strip():
-            raise ValueError('Hedge live submit requires an explicit account.')
-        build_result = await self._build_hedge_order_from_request(request)
-        contract = build_result['contract']
-        order = build_result['order']
-        preview = build_result['preview']
-        self.logger.info(
-            f"Submitting hedge order hedgeId={request.hedge_id}: "
-            f"secType={preview.sec_type} symbol={preview.symbol} "
-            f"action={order.action} qty={order.totalQuantity} "
-            f"orderType={order.orderType} limit={getattr(order, 'lmtPrice', None)} "
-            f"tif={order.tif} account={getattr(order, 'account', '') or ''}"
-        )
-        trade = self.ib.placeOrder(contract, order)
-        order_status = getattr(trade, 'orderStatus', None)
-        status_message = self._extract_trade_status_message(trade)
-        self._register_hedge_order_context(websocket, request, contract, trade, preview)
-        result = HedgeSubmitResult(
-            preview=preview,
-            order_id=getattr(getattr(trade, 'order', None), 'orderId', None),
-            perm_id=getattr(order_status, 'permId', None),
-            status=getattr(order_status, 'status', None),
-            status_message=status_message or None,
-        )
-        self.logger.info(
-            f"Hedge order submitted for hedgeId={request.hedge_id}: "
-            f"orderId={result.order_id} permId={result.perm_id} "
-            f"status={result.status} statusMessage={result.status_message!r}"
-        )
-        return result
-
-    async def cancel_hedge_order(self, websocket, raw_data):
-        try:
-            order_id = int(raw_data.get('orderId')) if raw_data.get('orderId') not in (None, '') else None
-        except (TypeError, ValueError):
-            order_id = None
-        try:
-            perm_id = int(raw_data.get('permId')) if raw_data.get('permId') not in (None, '') else None
-        except (TypeError, ValueError):
-            perm_id = None
-
-        context = self._resolve_hedge_order_tracking(order_id, perm_id)
-        if context is None:
-            raise ValueError('No hedge order is available to cancel.')
-
-        if context.get('websocket') is not websocket:
-            raise ValueError('Hedge order belongs to a different session.')
-
-        status = str(context.get('status') or '').strip()
-        if self._is_terminal_order_status(status):
-            raise ValueError(f'Cannot cancel hedge order after terminal broker status {status}.')
-
-        trade = context.get('trade')
-        order = getattr(trade, 'order', None) if trade is not None else None
-        if order is None:
-            raise ValueError('No live broker hedge order is available to cancel.')
-
-        if context.get('cancelRequested'):
-            return self._build_hedge_order_snapshot(context)
-
-        reason = str(raw_data.get('reason') or 'manual_cancel').strip()
-        context['cancelRequested'] = True
-        context['status'] = 'PendingCancel'
-        context['cancelReason'] = reason
-        self.ib.cancelOrder(order)
-        self.logger.info(
-            f"Requested hedge order cancellation for hedgeId={context.get('hedgeId')} "
-            f"orderId={context.get('orderId')} permId={context.get('permId')} "
-            f"account={context.get('account') or ''} reason={reason}"
-        )
-        return self._build_hedge_order_snapshot(context)
+    validate_hedge_order = validate_hedge_order
+    preview_hedge_order = preview_hedge_order
+    submit_hedge_order = submit_hedge_order
+    cancel_hedge_order = cancel_hedge_order
 
     async def preview_combo_order(self, websocket, request):
         build_result = await self._build_combo_order_from_request(websocket, request)

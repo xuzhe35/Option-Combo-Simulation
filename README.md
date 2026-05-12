@@ -207,7 +207,7 @@ The macOS/POSIX launchers prefer `OPTION_COMBO_PYTHON`, `config.local.ini`, `.ve
 
 ## Runtime Log Cleanup
 
-Launcher logs and pid files are local runtime artifacts and are ignored by Git.
+Launcher logs and pid files now live under `logs/` and are ignored by Git.
 Use the cleanup helper periodically to keep debug logs small:
 
 ```bash
@@ -223,6 +223,7 @@ cleanup_logs.bat
 ```
 
 By default the helper removes matching `http_server` / `ib_server` logs and stale pid files older than 14 days.
+It also scans legacy runtime artifacts that may still be sitting at the project root from older launcher versions.
 
 Useful options:
 
@@ -459,13 +460,20 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
 | `js/valuation.js` | group and portfolio derived data |
 | `js/group_order_builder.js` | open/close combo request payload builders |
 | `js/trade_trigger_logic.js` | trigger state and order-trigger rules |
+| `js/page_capabilities.js` | page kind and optional-feature capability gating |
+| `js/combo_order_transport.js` | combo trigger / close-group request-response state machine |
+| `js/delta_hedge_transport.js` | delta hedge broker transport state machine |
 | `js/group_editor_ui.js` | group editor, trial-trigger UI, close-group UI |
 | `js/group_ui.js` | group DOM writers and execution-status rendering |
-| `js/ws_client.js` | live subscriptions, replay requests, combo-order transport, fill/status updates |
+| `js/ws_client.js` | websocket connect/reconnect, subscriptions, replay requests, generic message dispatch |
 | `js/chart_lab.js` | Chart Lab socket, daily bars, projection rendering |
 | `js/iv_term_structure.js` | standalone IV term-structure UI and socket handling |
 | `js/iv_term_structure_core.js` | DOM-free IV term-structure aggregation helpers |
 | `ib_server.py` | live/shared backend |
+| `ib_server_ws.py` | live backend WebSocket session routing |
+| `ib_server_market_data.py` | live quote helpers and historical-bars request helpers |
+| `ib_server_iv_term_structure.py` | IV term-structure live backend helpers |
+| `ib_server_order_tracking.py` | combo/hedge tracking payload builders and event-consumer handlers |
 | `historical_server.py` | historical replay-only backend |
 | `historical_replay_service.py` | replay payload builder |
 | `historical_data.py` | SQLite historical data access |
@@ -494,10 +502,15 @@ It currently runs the suites wired into `tests/run.js`, including:
 - BSM / amortized / valuation
 - session logic / session UI / control panel UI
 - group UI / group editor UI / hedge editor UI
+- combo order transport
 - WebSocket client
 
 Python tests also exist for selected backend helpers:
 
+- `tests/ib_server_ws_test.py`
+- `tests/ib_server_order_tracking_test.py`
+- `tests/order_tracking_test.py`
+- `tests/ibkr_hedge_adapter_test.py`
 - `tests/ibkr_adapter_pricing_test.py`
 - `tests/iv_term_structure_service_test.py`
 

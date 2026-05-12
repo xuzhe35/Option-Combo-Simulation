@@ -102,8 +102,10 @@ resolve_python() {
 
 PYTHON_BIN="$(resolve_python)"
 
-HTTP_LOG="$SCRIPT_DIR/http_server.log"
-IB_LOG="$SCRIPT_DIR/ib_server.log"
+RUNTIME_DIR="$SCRIPT_DIR/logs"
+mkdir -p "$RUNTIME_DIR"
+HTTP_LOG="$RUNTIME_DIR/http_server.log"
+IB_LOG="$RUNTIME_DIR/ib_server.log"
 
 "$PYTHON_BIN" -m http.server 8000 >>"$HTTP_LOG" 2>&1 &
 HTTP_PID=$!

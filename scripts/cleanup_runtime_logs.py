@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_DIR = ROOT / "logs"
 
 LOG_PATTERNS = (
     "http_server.log",
@@ -91,32 +92,43 @@ def iter_targets(include_active_pid: bool) -> list[CleanupTarget]:
     targets: dict[Path, str] = {}
     active_pid_stems = set()
 
-    for path in ROOT.glob("*.pid"):
-        if not path.is_file():
+    search_roots = [RUNTIME_DIR, ROOT]
+
+    for search_root in search_roots:
+        if not search_root.exists():
             continue
-        pid = read_pid(path)
-        if pid is not None and is_process_running(pid):
-            active_pid_stems.add(path.stem)
-
-    for pattern in LOG_PATTERNS:
-        for path in ROOT.glob(pattern):
-            if path.is_file():
-                if not include_active_pid:
-                    stem_parts = path.name.split(".")
-                    if len(stem_parts) >= 3:
-                        pid_stem = ".".join(stem_parts[:2])
-                        if pid_stem in active_pid_stems:
-                            continue
-                targets[path] = "log"
-
-    for pattern in PID_PATTERNS:
-        for path in ROOT.glob(pattern):
+        for path in search_root.glob("*.pid"):
             if not path.is_file():
                 continue
             pid = read_pid(path)
-            if path.stem in active_pid_stems and not include_active_pid:
+            if pid is not None and is_process_running(pid):
+                active_pid_stems.add(path.stem)
+
+    for pattern in LOG_PATTERNS:
+        for search_root in search_roots:
+            if not search_root.exists():
                 continue
-            targets[path] = "pid"
+            for path in search_root.glob(pattern):
+                if path.is_file():
+                    if not include_active_pid:
+                        stem_parts = path.name.split(".")
+                        if len(stem_parts) >= 3:
+                            pid_stem = ".".join(stem_parts[:2])
+                            if pid_stem in active_pid_stems:
+                                continue
+                    targets[path] = "log"
+
+    for pattern in PID_PATTERNS:
+        for search_root in search_roots:
+            if not search_root.exists():
+                continue
+            for path in search_root.glob(pattern):
+                if not path.is_file():
+                    continue
+                pid = read_pid(path)
+                if path.stem in active_pid_stems and not include_active_pid:
+                    continue
+                targets[path] = "pid"
 
     result = []
     for path, kind in sorted(targets.items()):

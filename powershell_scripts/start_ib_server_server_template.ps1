@@ -25,13 +25,17 @@ if ([string]::IsNullOrWhiteSpace($PythonExecutable)) {
     $PythonExecutable = (Resolve-OptionComboPython -ProjectRoot $ProjectRoot).Path
 }
 
-$stdoutPath = Join-Path $ProjectRoot $StdoutLogName
-$stderrPath = Join-Path $ProjectRoot $StderrLogName
-$pidPath = Join-Path $ProjectRoot $PidFileName
+$runtimeDir = Join-Path $ProjectRoot 'logs'
+New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+$stdoutPath = Join-Path $runtimeDir $StdoutLogName
+$stderrPath = Join-Path $runtimeDir $StderrLogName
+$pidPath = Join-Path $runtimeDir $PidFileName
+$legacyPidPath = Join-Path $ProjectRoot $PidFileName
 
-if ($StopExistingProcess -and (Test-Path $pidPath)) {
+if ($StopExistingProcess -and ((Test-Path $pidPath) -or (Test-Path $legacyPidPath))) {
     try {
-        $existingPidRaw = (Get-Content $pidPath -ErrorAction Stop | Select-Object -First 1).Trim()
+        $existingPidSource = if (Test-Path $pidPath) { $pidPath } else { $legacyPidPath }
+        $existingPidRaw = (Get-Content $existingPidSource -ErrorAction Stop | Select-Object -First 1).Trim()
         if ($existingPidRaw) {
             $existingPid = [int]$existingPidRaw
             $existingProcess = Get-Process -Id $existingPid -ErrorAction SilentlyContinue

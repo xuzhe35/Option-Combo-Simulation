@@ -5,9 +5,11 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Resolve-OptionComboPython -ProjectRoot $projectRoot).Path
 $workdir = $projectRoot
-$stdout = Join-Path $workdir 'ib_server.codex.log'
-$stderr = Join-Path $workdir 'ib_server.codex.err.log'
-$pidFile = Join-Path $workdir 'ib_server.codex.pid'
+$runtimeDir = Join-Path $workdir 'logs'
+New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+$stdout = Join-Path $runtimeDir 'ib_server.codex.log'
+$stderr = Join-Path $runtimeDir 'ib_server.codex.err.log'
+$pidFile = Join-Path $runtimeDir 'ib_server.codex.pid'
 
 $proc = Start-Process -FilePath $python `
     -ArgumentList 'ib_server.py' `

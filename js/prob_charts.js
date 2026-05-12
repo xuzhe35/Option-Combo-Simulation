@@ -24,6 +24,24 @@ function _isGroupIncludedInGlobal(group) {
     return group.includedInGlobal !== false;
 }
 
+function _getProbabilityPricingContextApi() {
+    return typeof OptionComboPricingContext !== 'undefined' && OptionComboPricingContext
+        ? OptionComboPricingContext
+        : null;
+}
+
+function _getProbabilityProductRegistryApi() {
+    return typeof OptionComboProductRegistry !== 'undefined' && OptionComboProductRegistry
+        ? OptionComboProductRegistry
+        : null;
+}
+
+function _getDistributionProxyConfigApi() {
+    return typeof OptionComboDistributionProxyConfig !== 'undefined' && OptionComboDistributionProxyConfig
+        ? OptionComboDistributionProxyConfig
+        : null;
+}
+
 // -----------------------------------------------------------------------
 // 1.  Monte Carlo Web Worker  (inline blob — works under file:// protocol)
 // -----------------------------------------------------------------------
@@ -232,17 +250,17 @@ function _lognormalDensity(s, S0, portfolioIV, loc, nDays) {
 }
 
 function _getProbabilityAnchorPrice() {
-    if (typeof OptionComboPricingContext !== 'undefined'
-        && typeof OptionComboPricingContext.resolveAnchorUnderlyingPrice === 'function') {
-        return OptionComboPricingContext.resolveAnchorUnderlyingPrice(state, state.underlyingPrice);
+    const pricingContext = _getProbabilityPricingContextApi();
+    if (pricingContext && typeof pricingContext.resolveAnchorUnderlyingPrice === 'function') {
+        return pricingContext.resolveAnchorUnderlyingPrice(state, state.underlyingPrice);
     }
     return state.underlyingPrice;
 }
 
 function _getProbabilityAnchorInfo() {
-    if (typeof OptionComboPricingContext !== 'undefined'
-        && typeof OptionComboPricingContext.resolveAnchorDisplayInfo === 'function') {
-        return OptionComboPricingContext.resolveAnchorDisplayInfo(state, state.underlyingPrice);
+    const pricingContext = _getProbabilityPricingContextApi();
+    if (pricingContext && typeof pricingContext.resolveAnchorDisplayInfo === 'function') {
+        return pricingContext.resolveAnchorDisplayInfo(state, state.underlyingPrice);
     }
 
     const price = _getProbabilityAnchorPrice();
@@ -269,18 +287,17 @@ function _computePortfolioPnLAtPrice(price) {
     let totalValue = 0;
     let totalCost = 0;
     const anchorPrice = _getProbabilityAnchorPrice();
-    const pricingContext = typeof OptionComboPricingContext === 'undefined'
-        ? null
-        : OptionComboPricingContext;
+    const pricingContext = _getProbabilityPricingContextApi();
     const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
         ? pricingContext.resolveSimulationDate(state)
         : state.simulatedDate;
     const quoteDate = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
         ? pricingContext.resolveQuoteDate(state)
         : state.baseDate;
-    const underlyingProfile = typeof OptionComboProductRegistry === 'undefined'
-        ? null
-        : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
+    const productRegistry = _getProbabilityProductRegistryApi();
+    const underlyingProfile = productRegistry && typeof productRegistry.resolveUnderlyingProfile === 'function'
+        ? productRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
+        : null;
 
     state.groups.filter(_isGroupIncludedInGlobal).forEach(group => {
         const activeViewMode = group.viewMode || 'active';
@@ -800,9 +817,7 @@ function updateProbCharts() {
     }
 
     // Guard: need at least 1 calendar day of horizon
-    const pricingContext = typeof OptionComboPricingContext === 'undefined'
-        ? null
-        : OptionComboPricingContext;
+    const pricingContext = _getProbabilityPricingContextApi();
     const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
         ? pricingContext.resolveSimulationDate(state)
         : state.simulatedDate;
@@ -836,15 +851,18 @@ function updateProbCharts() {
     const anchorPrice = _getProbabilityAnchorPrice();
     const anchorInfo = _getProbabilityAnchorInfo();
 
-    const underlyingProfile = typeof OptionComboProductRegistry === 'undefined'
-        ? null
-        : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
+    const productRegistry = _getProbabilityProductRegistryApi();
+    const underlyingProfile = productRegistry && typeof productRegistry.resolveUnderlyingProfile === 'function'
+        ? productRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
+        : null;
 
     // t-distribution parameters lookup
     const underlying = state.underlyingSymbol || 'SPY';
-    const distributionSymbol = typeof OptionComboDistributionProxyConfig === 'undefined'
-        ? underlying
-        : OptionComboDistributionProxyConfig.resolveDistributionSymbol(underlying, underlyingProfile);
+    const distributionProxyConfig = _getDistributionProxyConfigApi();
+    const distributionSymbol = distributionProxyConfig
+        && typeof distributionProxyConfig.resolveDistributionSymbol === 'function'
+        ? distributionProxyConfig.resolveDistributionSymbol(underlying, underlyingProfile)
+        : underlying;
     const params = T_DIST_PARAMS_DB[distributionSymbol];
 
     if (!params) {

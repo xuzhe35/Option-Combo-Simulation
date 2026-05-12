@@ -1,6 +1,6 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-04-19
+**Updated:** 2026-05-04
 
 ## 1. Current Product State
 
@@ -10,7 +10,11 @@ Current surfaces:
 
 - `index.html` for the main portfolio workspace
 - `chart_lab.html` for the shared workspace plus the experimental Chart Lab tab
-- `ib_server.py` for live IBKR data, combo execution, and shared historical-bar fallback
+- `ib_server.py` as the live-backend composition entry point
+- `ib_server_ws.py` for live backend WebSocket session routing
+- `ib_server_order_tracking.py` for combo/hedge tracking payloads and IB event consumers
+- `ib_server_market_data.py` for live quote fanout and historical-bars helpers
+- `ib_server_iv_term_structure.py` for IV term-structure live sync helpers
 - `historical_server.py` for SQLite replay snapshots only
 
 ## 2. What Is Actually Implemented
@@ -96,6 +100,9 @@ Current surfaces:
 ### Backends
 
 - `ib_server.py`
+- `ib_server_ws.py`
+- `ib_server_market_data.py`
+- `ib_server_iv_term_structure.py`
 - `historical_server.py`
 - `historical_replay_service.py`
 - `historical_data.py`
@@ -139,10 +146,12 @@ If docs drift from behavior, trust code in roughly this order:
 7. `js/group_editor_ui.js`
 8. `js/group_ui.js`
 9. `js/delta_hedge_logic.js`
-10. `js/ws_client.js`
-11. `ib_server.py`
-12. `historical_replay_service.py`
-13. `trade_execution/adapters/ibkr.py`
+10. `js/combo_order_transport.js`
+11. `js/ws_client.js`
+12. `ib_server_order_tracking.py`
+13. `ib_server.py`
+14. `historical_replay_service.py`
+15. `trade_execution/adapters/ibkr.py`
 
 ## 5. Architectural Hotspots
 
@@ -238,11 +247,19 @@ Current responsibilities include:
 - historical snapshot requests
 - portfolio average-cost syncing
 - managed-account syncing
+- websocket connect / reconnect and generic message fanout
+- historical auto-settlement and replay-cost seeding
+- incremental live-quote derived-value refreshes
+
+### `js/combo_order_transport.js`
+
+This module now owns the combo-order request/response state machine for:
+
 - trigger preview / submit flow
 - close-group preview / submit flow
 - managed resume / concede / cancel requests
-- historical auto-settlement and replay-cost seeding
-- incremental live-quote derived-value refreshes
+- combo preview/result/status/error/fill reducers
+- historical trigger preview and historical close-group settlement shortcuts
 
 ### `ib_server.py`
 
@@ -253,8 +270,6 @@ Current server responsibilities:
 - managed-account snapshot fan-out
 - portfolio average-cost snapshot fan-out
 - combo preview / validation / submit dispatch through `trade_execution/`
-- managed order-status updates
-- execution-fill cost attribution
 - historical replay snapshots through `HistoricalReplayService`
 - historical daily bars for Chart Lab
 - SQLite fallback bars when IB historical bars are unavailable
@@ -262,6 +277,16 @@ Current server responsibilities:
 Important operational detail:
 
 - the IB connection is started in the background so replay and fallback paths can still work if TWS is down
+
+### `ib_server_order_tracking.py`
+
+This module now owns the combo/hedge tracking consumer layer for:
+
+- tracking lookup and snapshot update helpers
+- combo / hedge order-status payload assembly
+- combo / hedge error and fill payload assembly
+- IB `orderStatus`, `error`, and `execDetails` event-consumer handler factories
+- active hedge snapshot rebuilding after websocket reconnects
 
 ### `historical_server.py`
 
@@ -292,7 +317,9 @@ Not implemented there today:
 ## 7. Practical Maintenance Notes
 
 - On Windows, use `powershell_scripts/resolve_python.ps1`; do not assume bare `python`.
+- Codex launcher logs and pid files now live under `logs/`; `scripts/cleanup_runtime_logs.py` also cleans legacy root-level runtime files.
 - `index.html` and `chart_lab.html` are still ordered-script apps. Load order matters.
+- combo-order transport now loads before `js/ws_client.js`; if combo preview/submit flows go `undefined`, check script order first.
 - Historical mode is not just a flag flip. The app distinguishes:
   - historical start date / entry date
   - replay date
@@ -303,6 +330,7 @@ Not implemented there today:
 - `historicalAutoCloseAtExpiry` defaults to `true` per group.
 - `syncAvgCostFromPortfolio` defaults to enabled for newly created trial groups.
 - `livePriceMode` affects displayed price and live P&L, but combo-order pricing still uses the existing midpoint-based order-preview/submit flow.
+- Shared backend runtime payload contracts now live in `runtime_contracts.py`; shared combo/hedge tracking shape lives in `trade_execution/order_tracking.py`.
 
 ## 8. Tests
 
@@ -329,6 +357,10 @@ Important nuance:
 
 - there are additional test files under `tests/`
 - not every file in that folder is currently included in `tests/run.js`
+- WebSocket routing coverage for the live backend now lives in `tests/ib_server_ws_test.py`
+- combo-order transport coverage now lives in `tests/combo_order_transport.test.js`
+- live tracking-consumer coverage now lives in `tests/ib_server_order_tracking_test.py`
+- shared combo/hedge tracking helper coverage now lives in `tests/order_tracking_test.py`
 
 ## 9. Suggested Read Orders
 
@@ -362,7 +394,9 @@ Important nuance:
 - `js/delta_hedge_ui.js`
 - `js/group_editor_ui.js`
 - `js/group_ui.js`
+- `js/combo_order_transport.js`
 - `js/ws_client.js`
+- `ib_server_order_tracking.py`
 - `ib_server.py`
 - `trade_execution/engine.py`
 - `trade_execution/adapters/ibkr.py`

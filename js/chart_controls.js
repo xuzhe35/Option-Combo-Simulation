@@ -19,18 +19,30 @@ function _isGroupIncludedInGlobal(group) {
     return group.includedInGlobal !== false;
 }
 
+function _getPricingContextApi() {
+    return typeof OptionComboPricingContext !== 'undefined' && OptionComboPricingContext
+        ? OptionComboPricingContext
+        : null;
+}
+
+function _getProductRegistryApi() {
+    return typeof OptionComboProductRegistry !== 'undefined' && OptionComboProductRegistry
+        ? OptionComboProductRegistry
+        : null;
+}
+
 function _getChartAnchorPrice() {
-    if (typeof OptionComboPricingContext !== 'undefined'
-        && typeof OptionComboPricingContext.resolveAnchorUnderlyingPrice === 'function') {
-        return OptionComboPricingContext.resolveAnchorUnderlyingPrice(state, state.underlyingPrice);
+    const pricingContext = _getPricingContextApi();
+    if (pricingContext && typeof pricingContext.resolveAnchorUnderlyingPrice === 'function') {
+        return pricingContext.resolveAnchorUnderlyingPrice(state, state.underlyingPrice);
     }
     return state.underlyingPrice;
 }
 
 function _getChartAnchorDisplayInfo() {
-    if (typeof OptionComboPricingContext !== 'undefined'
-        && typeof OptionComboPricingContext.resolveAnchorDisplayInfo === 'function') {
-        return OptionComboPricingContext.resolveAnchorDisplayInfo(state, state.underlyingPrice);
+    const pricingContext = _getPricingContextApi();
+    if (pricingContext && typeof pricingContext.resolveAnchorDisplayInfo === 'function') {
+        return pricingContext.resolveAnchorDisplayInfo(state, state.underlyingPrice);
     }
 
     return {
@@ -516,13 +528,12 @@ window.addEventListener('resize', () => {
 // simIV becomes 0 for pricing purposes, but probability analysis still needs a
 // forward-looking volatility input from today's market.
 function computePortfolioMeanSimIV() {
-    const isOptionLeg = typeof OptionComboProductRegistry !== 'undefined'
-        && typeof OptionComboProductRegistry.isOptionLeg === 'function'
-        ? OptionComboProductRegistry.isOptionLeg
+    const productRegistry = _getProductRegistryApi();
+    const isOptionLeg = productRegistry
+        && typeof productRegistry.isOptionLeg === 'function'
+        ? productRegistry.isOptionLeg
         : (leg => ['call', 'put'].includes(String(leg && leg.type || '').toLowerCase()));
-    const pricingContext = typeof OptionComboPricingContext === 'undefined'
-        ? null
-        : OptionComboPricingContext;
+    const pricingContext = _getPricingContextApi();
     const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
         ? pricingContext.resolveSimulationDate(state)
         : state.simulatedDate;

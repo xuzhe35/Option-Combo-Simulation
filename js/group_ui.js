@@ -3,9 +3,26 @@
  */
 
 (function attachGroupUi(globalScope) {
-    const productRegistry = globalScope.OptionComboProductRegistry;
+    function _getProductRegistryApi() {
+        return globalScope.OptionComboProductRegistry && typeof globalScope.OptionComboProductRegistry === 'object'
+            ? globalScope.OptionComboProductRegistry
+            : null;
+    }
+
+    function _getSessionLogicApi() {
+        return globalScope.OptionComboSessionLogic && typeof globalScope.OptionComboSessionLogic === 'object'
+            ? globalScope.OptionComboSessionLogic
+            : null;
+    }
+
+    function _getPricingCoreApi() {
+        return globalScope.OptionComboPricingCore && typeof globalScope.OptionComboPricingCore === 'object'
+            ? globalScope.OptionComboPricingCore
+            : null;
+    }
 
     function isOptionLeg(leg) {
+        const productRegistry = _getProductRegistryApi();
         return productRegistry && typeof productRegistry.isOptionLeg === 'function'
             ? productRegistry.isOptionLeg(leg)
             : ['call', 'put'].includes(String(leg && leg.type || '').toLowerCase());
@@ -468,11 +485,12 @@
                 const ivInput = tr.querySelector('.iv-input');
                 if (dteDisplay) dteDisplay.textContent = legResult.dteText;
                 if (ivDisplay) ivDisplay.textContent = legResult.ivText;
+                const pricingCore = _getPricingCoreApi();
                 if (ivInput
                     && document.activeElement !== ivInput
-                    && typeof OptionComboPricingCore !== 'undefined'
-                    && typeof OptionComboPricingCore.describeLegIvInput === 'function') {
-                    const ivInputDisplay = OptionComboPricingCore.describeLegIvInput(legResult.leg);
+                    && pricingCore
+                    && typeof pricingCore.describeLegIvInput === 'function') {
+                    const ivInputDisplay = pricingCore.describeLegIvInput(legResult.leg);
                     ivInput.value = ivInputDisplay.value;
                     ivInput.title = ivInputDisplay.title;
                 }
@@ -602,9 +620,10 @@
         const closeContainer = card.querySelector('.close-group-container');
         if (closeContainer) {
             const closeExecution = groupResult.group.closeExecution || null;
-            const hasOpenPosition = typeof OptionComboSessionLogic !== 'undefined'
-                && typeof OptionComboSessionLogic.groupHasOpenPosition === 'function'
-                ? OptionComboSessionLogic.groupHasOpenPosition(groupResult.group)
+            const sessionLogic = _getSessionLogicApi();
+            const hasOpenPosition = sessionLogic
+                && typeof sessionLogic.groupHasOpenPosition === 'function'
+                ? sessionLogic.groupHasOpenPosition(groupResult.group)
                 : (groupResult.group.legs || []).some(leg => Math.abs(parseFloat(leg && leg.pos) || 0) > 0.0001);
             const closeUiState = resolveCloseGroupUiState(
                 groupResult.activeViewMode,

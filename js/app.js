@@ -19,6 +19,14 @@ const percentFormatter = new Intl.NumberFormat('en-US', {
 const today = new Date();
 const initialDateStr = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
 
+/**
+ * @typedef {Object} OptionComboBootstrapRuntimeConfig
+ * @property {'live'|'historical'} marketDataMode
+ * @property {''|'live'|'historical'} workspaceVariant
+ * @property {boolean} marketDataModeLocked
+ */
+
+/** @returns {OptionComboBootstrapRuntimeConfig} */
 function resolveBootstrapRuntimeConfig() {
     const bootstrap = (typeof window !== 'undefined' && window.OptionComboBootstrap && typeof window.OptionComboBootstrap === 'object')
         ? window.OptionComboBootstrap
@@ -167,11 +175,77 @@ function groupHasOpenPosition(group) {
     return OptionComboSessionLogic.groupHasOpenPosition(group);
 }
 
+function _getProductRegistryApi() {
+    return typeof OptionComboProductRegistry !== 'undefined' && OptionComboProductRegistry
+        ? OptionComboProductRegistry
+        : null;
+}
+
+function _getPageCapabilitiesApi() {
+    return typeof OptionComboPageCapabilities !== 'undefined' && OptionComboPageCapabilities
+        ? OptionComboPageCapabilities
+        : null;
+}
+
+function _getDeltaHedgeUiApi() {
+    return typeof OptionComboDeltaHedgeUI !== 'undefined' && OptionComboDeltaHedgeUI
+        ? OptionComboDeltaHedgeUI
+        : null;
+}
+
+function _getDeltaHedgeLogicApi() {
+    return typeof OptionComboDeltaHedgeLogic !== 'undefined' && OptionComboDeltaHedgeLogic
+        ? OptionComboDeltaHedgeLogic
+        : null;
+}
+
+function _getValuationApi() {
+    return typeof OptionComboValuation !== 'undefined' && OptionComboValuation
+        ? OptionComboValuation
+        : null;
+}
+
+function _getSessionUiApi() {
+    return typeof OptionComboSessionUI !== 'undefined' && OptionComboSessionUI
+        ? OptionComboSessionUI
+        : null;
+}
+
+function _getGroupUiApi() {
+    return typeof OptionComboGroupUI !== 'undefined' && OptionComboGroupUI
+        ? OptionComboGroupUI
+        : null;
+}
+
+function _getHedgeUiApi() {
+    return typeof OptionComboHedgeUI !== 'undefined' && OptionComboHedgeUI
+        ? OptionComboHedgeUI
+        : null;
+}
+
+function _runUiRefreshSafely(label, callback, fallbackValue) {
+    try {
+        return callback();
+    } catch (error) {
+        console.error(`UI refresh failed (${label}):`, error);
+        return fallbackValue;
+    }
+}
+
 function getUnderlyingProfile() {
-    if (typeof OptionComboProductRegistry === 'undefined') {
+    const productRegistry = _getProductRegistryApi();
+    if (!productRegistry || typeof productRegistry.resolveUnderlyingProfile !== 'function') {
         return null;
     }
-    return OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
+    return productRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
+}
+
+function _pageHasFeature(featureName, fallback = true) {
+    const pageCapabilities = _getPageCapabilitiesApi();
+    if (!pageCapabilities || typeof pageCapabilities.hasFeature !== 'function') {
+        return fallback === true;
+    }
+    return pageCapabilities.hasFeature(featureName);
 }
 
 // -------------------------------------------------------------
@@ -190,9 +264,11 @@ function bindControlPanelEvents() {
         diffDays,
         calendarToTradingDays,
     });
-    if (typeof OptionComboDeltaHedgeUI !== 'undefined'
-        && typeof OptionComboDeltaHedgeUI.bindDeltaHedgePanel === 'function') {
-        OptionComboDeltaHedgeUI.bindDeltaHedgePanel(state, {
+    const deltaHedgeUi = _getDeltaHedgeUiApi();
+    if (_pageHasFeature('deltaHedgePanel')
+        && deltaHedgeUi
+        && typeof deltaHedgeUi.bindDeltaHedgePanel === 'function') {
+        deltaHedgeUi.bindDeltaHedgePanel(state, {
             updateDerivedValues,
             requestBrokerPreview: typeof requestDeltaHedgeBrokerPreview === 'function'
                 ? requestDeltaHedgeBrokerPreview
@@ -288,14 +364,16 @@ function renderGroups() {
         getRenderableGroupViewMode: OptionComboSessionLogic.getRenderableGroupViewMode,
         isGroupIncludedInGlobal: OptionComboSessionLogic.isGroupIncludedInGlobal,
         supportsAmortizedMode(symbol) {
-            return typeof OptionComboProductRegistry === 'undefined'
+            const productRegistry = _getProductRegistryApi();
+            return !productRegistry || typeof productRegistry.supportsAmortizedMode !== 'function'
                 ? true
-                : OptionComboProductRegistry.supportsAmortizedMode(symbol);
+                : productRegistry.supportsAmortizedMode(symbol);
         },
         supportsUnderlyingLegs(symbol) {
-            return typeof OptionComboProductRegistry === 'undefined'
+            const productRegistry = _getProductRegistryApi();
+            return !productRegistry || typeof productRegistry.supportsUnderlyingLegs !== 'function'
                 ? true
-                : OptionComboProductRegistry.supportsUnderlyingLegs(symbol);
+                : productRegistry.supportsUnderlyingLegs(symbol);
         },
         requestPortfolioAvgCostSnapshot,
         requestContinueManagedComboOrder,
@@ -315,9 +393,11 @@ function renderGroups() {
 // -------------------------------------------------------------
 
 function setGroupViewMode(btn, mode) {
+    const productRegistry = _getProductRegistryApi();
     if (mode === 'amortized'
-        && typeof OptionComboProductRegistry !== 'undefined'
-        && !OptionComboProductRegistry.supportsAmortizedMode(state.underlyingSymbol)) {
+        && productRegistry
+        && typeof productRegistry.supportsAmortizedMode === 'function'
+        && !productRegistry.supportsAmortizedMode(state.underlyingSymbol)) {
         return;
     }
 
@@ -340,36 +420,46 @@ function setGroupViewMode(btn, mode) {
 }
 
 function applyHedgeDerivedData(derivedData) {
-    OptionComboHedgeUI.applyHedgeDerivedData(derivedData, currencyFormatter);
+    _runUiRefreshSafely('hedgeDerivedData', () => {
+        OptionComboHedgeUI.applyHedgeDerivedData(derivedData, currencyFormatter);
+    });
 }
 
 function applyHedgeRowDerivedData(row, hedgeResult) {
     if (!row || !hedgeResult) return;
-    if (typeof OptionComboHedgeUI !== 'undefined'
-        && typeof OptionComboHedgeUI.applyHedgeRowDerivedData === 'function') {
-        OptionComboHedgeUI.applyHedgeRowDerivedData(row, hedgeResult, currencyFormatter);
+    const hedgeUi = _getHedgeUiApi();
+    if (hedgeUi && typeof hedgeUi.applyHedgeRowDerivedData === 'function') {
+        _runUiRefreshSafely('hedgeRowDerivedData', () => {
+            hedgeUi.applyHedgeRowDerivedData(row, hedgeResult, currencyFormatter);
+        });
     }
 }
 
 function applyGroupDerivedData(card, groupResult) {
-    OptionComboGroupUI.applyGroupDerivedData(card, groupResult, currencyFormatter, {
-        drawGroupChart,
-        drawAmortizationChart,
+    _runUiRefreshSafely('groupDerivedData', () => {
+        OptionComboGroupUI.applyGroupDerivedData(card, groupResult, currencyFormatter, {
+            drawGroupChart,
+            drawAmortizationChart,
+        });
     });
 }
 
 function applyGroupDeltaSummary(card, groupResult) {
     if (!card || !groupResult) return;
-    if (typeof OptionComboGroupUI !== 'undefined'
-        && typeof OptionComboGroupUI.applyGroupDeltaSummary === 'function') {
-        OptionComboGroupUI.applyGroupDeltaSummary(card, groupResult);
+    const groupUi = _getGroupUiApi();
+    if (groupUi && typeof groupUi.applyGroupDeltaSummary === 'function') {
+        _runUiRefreshSafely('groupDeltaSummary', () => {
+            groupUi.applyGroupDeltaSummary(card, groupResult);
+        });
     }
 }
 
 function applyGlobalDerivedData(derivedData) {
-    OptionComboGlobalUI.applyGlobalDerivedData(derivedData, currencyFormatter, {
-        drawGlobalChart,
-        drawGlobalAmortizedChart,
+    _runUiRefreshSafely('globalDerivedData', () => {
+        OptionComboGlobalUI.applyGlobalDerivedData(derivedData, currencyFormatter, {
+            drawGlobalChart,
+            drawGlobalAmortizedChart,
+        });
     });
 }
 
@@ -379,9 +469,11 @@ function _cachePortfolioDerivedData(derivedData) {
 }
 
 function _syncWorkspaceChrome() {
-    if (typeof OptionComboSessionUI !== 'undefined'
-        && typeof OptionComboSessionUI.syncWorkspaceChrome === 'function') {
-        OptionComboSessionUI.syncWorkspaceChrome(state);
+    const sessionUi = _getSessionUiApi();
+    if (sessionUi && typeof sessionUi.syncWorkspaceChrome === 'function') {
+        _runUiRefreshSafely('workspaceChrome', () => {
+            sessionUi.syncWorkspaceChrome(state);
+        });
     }
 }
 
@@ -424,13 +516,21 @@ function _applyPortfolioDerivedData(derivedData, options = {}) {
     }
 
     applyGlobalDerivedData(derivedData);
-    if (typeof OptionComboDeltaHedgeUI !== 'undefined'
-        && typeof OptionComboDeltaHedgeUI.applyRecommendationPreview === 'function') {
-        OptionComboDeltaHedgeUI.applyRecommendationPreview(state, derivedData);
-        if (typeof OptionComboDeltaHedgeUI.applyBrokerPreviewState === 'function') {
-            OptionComboDeltaHedgeUI.applyBrokerPreviewState(state);
+    const deltaHedgeUi = _getDeltaHedgeUiApi();
+    if (_pageHasFeature('deltaHedgePanel')
+        && deltaHedgeUi
+        && typeof deltaHedgeUi.applyRecommendationPreview === 'function') {
+        _runUiRefreshSafely('deltaHedgeRecommendationPreview', () => {
+            deltaHedgeUi.applyRecommendationPreview(state, derivedData);
+        });
+        if (typeof deltaHedgeUi.applyBrokerPreviewState === 'function') {
+            _runUiRefreshSafely('deltaHedgeBrokerPreviewState', () => {
+                deltaHedgeUi.applyBrokerPreviewState(state);
+            });
         }
-        runDeltaHedgeAutoSupervisor(derivedData);
+        _runUiRefreshSafely('deltaHedgeAutoSupervisor', () => {
+            runDeltaHedgeAutoSupervisor(derivedData);
+        });
     }
 }
 
@@ -445,11 +545,12 @@ function updateDerivedValues() {
 }
 
 function updateLiveQuoteDerivedValues(changeSet = {}) {
+    const valuationApi = _getValuationApi();
     if (!_latestPortfolioDerivedData
-        || typeof OptionComboValuation === 'undefined'
-        || typeof OptionComboValuation.computeGroupDerivedData !== 'function'
-        || typeof OptionComboValuation.computeHedgeDerivedData !== 'function'
-        || typeof OptionComboValuation.buildPortfolioDerivedDataFromResults !== 'function') {
+        || !valuationApi
+        || typeof valuationApi.computeGroupDerivedData !== 'function'
+        || typeof valuationApi.computeHedgeDerivedData !== 'function'
+        || typeof valuationApi.buildPortfolioDerivedDataFromResults !== 'function') {
         return updateDerivedValues();
     }
 
@@ -470,7 +571,7 @@ function updateLiveQuoteDerivedValues(changeSet = {}) {
     groupIds.forEach((groupId) => {
         const group = state.groups.find(candidate => candidate.id === groupId);
         if (!group) return;
-        const nextGroupResult = OptionComboValuation.computeGroupDerivedData(group, state);
+        const nextGroupResult = valuationApi.computeGroupDerivedData(group, state);
         const existingIndex = nextGroupResults.findIndex(result => result.id === groupId);
         if (existingIndex >= 0) {
             nextGroupResults[existingIndex] = nextGroupResult;
@@ -482,7 +583,7 @@ function updateLiveQuoteDerivedValues(changeSet = {}) {
     hedgeIds.forEach((hedgeId) => {
         const hedge = state.hedges.find(candidate => candidate.id === hedgeId);
         if (!hedge) return;
-        const nextHedgeResult = OptionComboValuation.computeHedgeDerivedData(hedge);
+        const nextHedgeResult = valuationApi.computeHedgeDerivedData(hedge);
         const existingIndex = nextHedgeResults.findIndex(result => result.id === hedgeId);
         if (existingIndex >= 0) {
             nextHedgeResults[existingIndex] = nextHedgeResult;
@@ -492,7 +593,7 @@ function updateLiveQuoteDerivedValues(changeSet = {}) {
     });
 
     const derivedData = _cachePortfolioDerivedData(
-        OptionComboValuation.buildPortfolioDerivedDataFromResults(
+        valuationApi.buildPortfolioDerivedDataFromResults(
             state,
             nextGroupResults,
             nextHedgeResults
@@ -550,8 +651,11 @@ function _appendDeltaHedgeAutoDecisionLog(decision, now = new Date()) {
 }
 
 function runDeltaHedgeAutoSupervisor(derivedData = _latestPortfolioDerivedData) {
-    if (typeof OptionComboDeltaHedgeLogic === 'undefined'
-        || typeof OptionComboDeltaHedgeLogic.evaluateDeltaHedgeAutomation !== 'function') {
+    const deltaHedgeLogic = _getDeltaHedgeLogicApi();
+    if (!_pageHasFeature('deltaHedgePanel')) {
+        return null;
+    }
+    if (!deltaHedgeLogic || typeof deltaHedgeLogic.evaluateDeltaHedgeAutomation !== 'function') {
         return null;
     }
     if (!state.deltaHedge || typeof state.deltaHedge !== 'object') {
@@ -559,15 +663,20 @@ function runDeltaHedgeAutoSupervisor(derivedData = _latestPortfolioDerivedData) 
     }
 
     const runtime = state.deltaHedge;
+    const deltaHedgeUi = _getDeltaHedgeUiApi();
     const recommendation = runtime.lastRecommendation
-        || (typeof OptionComboDeltaHedgeUI !== 'undefined'
-            && typeof OptionComboDeltaHedgeUI.applyRecommendationPreview === 'function'
-            ? OptionComboDeltaHedgeUI.applyRecommendationPreview(state, derivedData || {})
+        || (deltaHedgeUi
+            && typeof deltaHedgeUi.applyRecommendationPreview === 'function'
+            ? _runUiRefreshSafely(
+                'deltaHedgeRecommendationPreview',
+                () => deltaHedgeUi.applyRecommendationPreview(state, derivedData || {}),
+                null
+            )
             : null);
-    const hasActiveRestingOrder = typeof OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder === 'function'
-        && OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder(runtime);
+    const hasActiveRestingOrder = typeof deltaHedgeLogic.hasActiveRestingHedgeOrder === 'function'
+        && deltaHedgeLogic.hasActiveRestingHedgeOrder(runtime);
     const now = new Date();
-    const decision = OptionComboDeltaHedgeLogic.evaluateDeltaHedgeAutomation({
+    const decision = deltaHedgeLogic.evaluateDeltaHedgeAutomation({
         deltaHedge: runtime,
         recommendation,
         liveMode: state.marketDataMode !== 'historical',
@@ -586,9 +695,10 @@ function runDeltaHedgeAutoSupervisor(derivedData = _latestPortfolioDerivedData) 
     if (runtime.autoSubmitEnabled === true) {
         _appendDeltaHedgeAutoDecisionLog(decision, now);
     }
-    if (typeof OptionComboDeltaHedgeUI !== 'undefined'
-        && typeof OptionComboDeltaHedgeUI.applyAutomationState === 'function') {
-        OptionComboDeltaHedgeUI.applyAutomationState(state);
+    if (deltaHedgeUi && typeof deltaHedgeUi.applyAutomationState === 'function') {
+        _runUiRefreshSafely('deltaHedgeAutomationState', () => {
+            deltaHedgeUi.applyAutomationState(state);
+        });
     }
 
     if (decision.action === 'request_preview'
@@ -618,9 +728,10 @@ function runDeltaHedgeAutoSupervisor(derivedData = _latestPortfolioDerivedData) 
                 action: 'cancel_requested',
             };
             runtime.autoStatus = 'cancel_requested';
-            if (typeof OptionComboDeltaHedgeUI !== 'undefined'
-                && typeof OptionComboDeltaHedgeUI.applyAutomationState === 'function') {
-                OptionComboDeltaHedgeUI.applyAutomationState(state);
+            if (deltaHedgeUi && typeof deltaHedgeUi.applyAutomationState === 'function') {
+                _runUiRefreshSafely('deltaHedgeAutomationState', () => {
+                    deltaHedgeUi.applyAutomationState(state);
+                });
             }
         }
         return decision;
@@ -640,9 +751,10 @@ function runDeltaHedgeAutoSupervisor(derivedData = _latestPortfolioDerivedData) 
                 action: 'submitted',
             };
             runtime.autoStatus = 'submitted';
-            if (typeof OptionComboDeltaHedgeUI !== 'undefined'
-                && typeof OptionComboDeltaHedgeUI.applyAutomationState === 'function') {
-                OptionComboDeltaHedgeUI.applyAutomationState(state);
+            if (deltaHedgeUi && typeof deltaHedgeUi.applyAutomationState === 'function') {
+                _runUiRefreshSafely('deltaHedgeAutomationState', () => {
+                    deltaHedgeUi.applyAutomationState(state);
+                });
             }
         }
         return decision;
@@ -668,9 +780,10 @@ function _hasGroupDeltaSummaryChanged(currentGroupResult, nextGroupDeltaSummary)
 }
 
 function updateLiveQuoteGroupDeltaValues(changeSet = {}) {
+    const valuationApi = _getValuationApi();
     if (!_latestPortfolioDerivedData
-        || typeof OptionComboValuation === 'undefined'
-        || typeof OptionComboValuation.computeGroupDeltaSummary !== 'function') {
+        || !valuationApi
+        || typeof valuationApi.computeGroupDeltaSummary !== 'function') {
         return updateDerivedValues();
     }
 
@@ -692,7 +805,7 @@ function updateLiveQuoteGroupDeltaValues(changeSet = {}) {
         }
 
         const currentGroupResult = nextGroupResults[existingIndex];
-        const nextGroupDeltaSummary = OptionComboValuation.computeGroupDeltaSummary(group, state);
+        const nextGroupDeltaSummary = valuationApi.computeGroupDeltaSummary(group, state);
         if (!_hasGroupDeltaSummaryChanged(currentGroupResult, nextGroupDeltaSummary)) {
             return;
         }
@@ -709,8 +822,8 @@ function updateLiveQuoteGroupDeltaValues(changeSet = {}) {
     }
 
     const derivedData = _cachePortfolioDerivedData(
-        typeof OptionComboValuation.buildPortfolioDerivedDataFromResults === 'function'
-            ? OptionComboValuation.buildPortfolioDerivedDataFromResults(
+        typeof valuationApi.buildPortfolioDerivedDataFromResults === 'function'
+            ? valuationApi.buildPortfolioDerivedDataFromResults(
                 state,
                 nextGroupResults,
                 _latestPortfolioDerivedData.hedgeResults || []
@@ -729,9 +842,13 @@ function updateLiveQuoteGroupDeltaValues(changeSet = {}) {
         applyGroupDeltaSummary(card, groupResult);
     });
 
-    if (typeof OptionComboDeltaHedgeUI !== 'undefined'
-        && typeof OptionComboDeltaHedgeUI.applyRecommendationPreview === 'function') {
-        OptionComboDeltaHedgeUI.applyRecommendationPreview(state, derivedData);
+    const deltaHedgeUi = _getDeltaHedgeUiApi();
+    if (_pageHasFeature('deltaHedgePanel')
+        && deltaHedgeUi
+        && typeof deltaHedgeUi.applyRecommendationPreview === 'function') {
+        _runUiRefreshSafely('deltaHedgeRecommendationPreview', () => {
+            deltaHedgeUi.applyRecommendationPreview(state, derivedData);
+        });
     }
 
     return derivedData;
@@ -890,21 +1007,28 @@ function applyImportedState(normalizedState, importedSessionTitle = '') {
     state.groups = normalizedState.groups;
     state.hedges = normalizedState.hedges;
 
+    const productRegistry = _getProductRegistryApi();
     if (!state.underlyingContractMonth
-        && typeof OptionComboProductRegistry !== 'undefined'
-        && typeof OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth === 'function') {
-        state.underlyingContractMonth = OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(
+        && productRegistry
+        && typeof productRegistry.resolveDefaultUnderlyingContractMonth === 'function') {
+        state.underlyingContractMonth = productRegistry.resolveDefaultUnderlyingContractMonth(
             state.underlyingSymbol,
             state.simulatedDate || state.baseDate
         );
     }
 }
 
+function _parseImportedJsonText(rawText) {
+    const text = typeof rawText === 'string' ? rawText : '';
+    // Windows-authored JSON files may include a UTF-8 BOM prefix.
+    return JSON.parse(text.replace(/^\uFEFF/, ''));
+}
+
 function processImportedFile(file) {
     const reader = new FileReader();
     reader.onload = function (e) {
         try {
-            const importedState = JSON.parse(e.target.result);
+            const importedState = _parseImportedJsonText(e && e.target ? e.target.result : '');
 
             if (importedState && typeof importedState === 'object') {
                 const normalizedState = OptionComboSessionLogic.normalizeImportedState(

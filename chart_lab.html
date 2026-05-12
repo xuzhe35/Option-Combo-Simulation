@@ -12,7 +12,7 @@
     <link rel="stylesheet" href="chart_lab.css?v=20260323-prototype">
 </head>
 
-<body>
+<body data-option-combo-page="chart-lab">
     <div class="app-container">
         <header class="app-header">
             <div class="header-content">
@@ -262,8 +262,7 @@
 
                         <div class="summary-item" id="globalLivePnLRow"
                             style="display: none; border-top: 1px dashed var(--border-color); padding-top: 0.5rem; margin-top: 0.25rem;">
-                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🟢 Options
-                                Live P&L</span>
+                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🟢 Live P&L:</span>
                             <span class="value font-weight-semibold" id="globalLivePnL">$0.00</span>
                         </div>
 
@@ -275,8 +274,7 @@
 
                         <div class="summary-item" id="totalLivePnLRow"
                             style="display: none; border-top: 1px solid var(--border-color); padding-top: 0.5rem; margin-top: 0.25rem;">
-                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🔥 Total Live
-                                P&L</span>
+                            <span class="label" style="display: flex; align-items: center; gap: 0.35rem;">🔥 Total:</span>
                             <span class="value font-weight-semibold" id="totalLivePnL">$0.00</span>
                         </div>
                     </div>
@@ -1157,8 +1155,8 @@
     <script src="js/product_registry.js"></script>
     <script src="js/index_forward_rate.js"></script>
     <script src="js/pricing_context.js?v=20260322-histsimdate"></script>
-    <script src="js/group_order_builder.js"></script>
     <script src="js/trade_trigger_logic.js"></script>
+    <script src="js/group_order_builder.js"></script>
     <script src="js/distribution_proxy_config.js"></script>
     <script src="js/pricing_core.js?v=20260322-expiryfreeze"></script>
     <script src="js/bsm.js"></script>
@@ -1171,11 +1169,14 @@
     <script src="js/session_ui.js?v=20260322-histsimdate"></script>
     <script src="js/control_panel_ui.js?v=20260322-riskfree"></script>
     <script src="js/hedge_editor_ui.js"></script>
-    <script src="js/group_editor_ui.js?v=20260322-phase4"></script>
+    <script src="js/group_editor_ui.js?v=20260505-importfix"></script>
     <script src="js/hedge_ui.js"></script>
     <script src="js/group_ui.js?v=20260322-phase4"></script>
     <script src="js/global_ui.js"></script>
-    <script src="js/app.js?v=20260322-phase4"></script>
+    <script src="js/page_capabilities.js"></script>
+    <script src="js/combo_order_transport.js"></script>
+    <script src="js/delta_hedge_transport.js"></script>
+    <script src="js/app.js?v=20260505-importfix"></script>
     <script src="js/ws_client.js?v=20260322-riskfree"></script>
     <script src="js/chart_lab.js?v=20260324-global-projection"></script>
 </body>

@@ -36,10 +36,121 @@ const _liveQuoteRuntime = {
 const _liveQuotePricingSnapshotFields = ['bid', 'ask', 'mark', 'iv'];
 const _liveQuoteSnapshotFields = ['bid', 'ask', 'mark', 'iv', 'delta'];
 
+/**
+ * @typedef {Object} OptionComboLiveQuoteSnapshot
+ * @property {number=} bid
+ * @property {number=} ask
+ * @property {number=} mark
+ * @property {number=} iv
+ * @property {number=} delta
+ */
+
+/**
+ * @typedef {Object} OptionComboLiveQuoteChangeSet
+ * @property {string[]=} groupIds
+ * @property {string[]=} hedgeIds
+ * @property {string[]=} deltaGroupIds
+ */
+
+/**
+ * @typedef {Object} OptionComboDeltaHedgeTransportApi
+ * @property {(recommendation: object, options?: object) => boolean} requestBrokerPreview
+ * @property {(recommendation: object, options?: object) => boolean} requestSubmit
+ * @property {(options?: object) => boolean} requestCancel
+ */
+
 function _areGreeksEnabled() {
     return !!(state && state.greeksEnabled === true);
 }
 
+function _getProductRegistryApi() {
+    return window.OptionComboProductRegistry && typeof window.OptionComboProductRegistry === 'object'
+        ? window.OptionComboProductRegistry
+        : null;
+}
+
+function _getControlPanelUiApi() {
+    return window.OptionComboControlPanelUI && typeof window.OptionComboControlPanelUI === 'object'
+        ? window.OptionComboControlPanelUI
+        : null;
+}
+
+function _getSessionLogicApi() {
+    return window.OptionComboSessionLogic && typeof window.OptionComboSessionLogic === 'object'
+        ? window.OptionComboSessionLogic
+        : null;
+}
+
+function _getDateUtilsApi() {
+    return window.OptionComboDateUtils && typeof window.OptionComboDateUtils === 'object'
+        ? window.OptionComboDateUtils
+        : null;
+}
+
+function _getPricingContextApi() {
+    return window.OptionComboPricingContext && typeof window.OptionComboPricingContext === 'object'
+        ? window.OptionComboPricingContext
+        : null;
+}
+
+function _getDeltaHedgeLogicApi() {
+    return window.OptionComboDeltaHedgeLogic && typeof window.OptionComboDeltaHedgeLogic === 'object'
+        ? window.OptionComboDeltaHedgeLogic
+        : null;
+}
+
+function _getDeltaHedgeUiApi() {
+    return window.OptionComboDeltaHedgeUI && typeof window.OptionComboDeltaHedgeUI === 'object'
+        ? window.OptionComboDeltaHedgeUI
+        : null;
+}
+
+function _getDeltaHedgeTransportFactory() {
+    return window.OptionComboDeltaHedgeTransport && typeof window.OptionComboDeltaHedgeTransport === 'object'
+        ? window.OptionComboDeltaHedgeTransport
+        : null;
+}
+
+function _getComboOrderTransportFactory() {
+    return window.OptionComboComboOrderTransport && typeof window.OptionComboComboOrderTransport === 'object'
+        ? window.OptionComboComboOrderTransport
+        : null;
+}
+
+function _getIndexForwardRateApi() {
+    return window.OptionComboIndexForwardRate && typeof window.OptionComboIndexForwardRate === 'object'
+        ? window.OptionComboIndexForwardRate
+        : null;
+}
+
+function _getGroupOrderBuilderApi() {
+    return window.OptionComboGroupOrderBuilder && typeof window.OptionComboGroupOrderBuilder === 'object'
+        ? window.OptionComboGroupOrderBuilder
+        : null;
+}
+
+function _getTradeTriggerLogicApi() {
+    return window.OptionComboTradeTriggerLogic && typeof window.OptionComboTradeTriggerLogic === 'object'
+        ? window.OptionComboTradeTriggerLogic
+        : null;
+}
+
+function _getPricingCoreApi() {
+    return window.OptionComboPricingCore && typeof window.OptionComboPricingCore === 'object'
+        ? window.OptionComboPricingCore
+        : null;
+}
+
+function _runUiRefreshSafely(label, callback) {
+    try {
+        return callback();
+    } catch (error) {
+        console.error(`UI refresh failed (${label}):`, error);
+        return undefined;
+    }
+}
+
+/** @returns {OptionComboLiveQuoteSnapshot | null} */
 function _cloneLiveQuoteSnapshot(rawQuote) {
     if (!rawQuote || typeof rawQuote !== 'object') {
         return null;
@@ -159,52 +270,62 @@ function _setStockQuoteSnapshot(symbol, rawQuote) {
 }
 
 function _formatSymbolPriceInputValue(symbol, value) {
-    if (typeof OptionComboProductRegistry !== 'undefined'
-        && typeof OptionComboProductRegistry.formatPriceInputValue === 'function') {
-        return OptionComboProductRegistry.formatPriceInputValue(symbol, value);
+    const registry = _getProductRegistryApi();
+    if (registry && typeof registry.formatPriceInputValue === 'function') {
+        return registry.formatPriceInputValue(symbol, value);
     }
     const parsed = parseFloat(value);
     return Number.isFinite(parsed) ? parsed.toFixed(2) : '';
 }
 
 function _formatSymbolPriceDisplay(symbol, value) {
-    if (typeof OptionComboProductRegistry !== 'undefined'
-        && typeof OptionComboProductRegistry.formatPriceDisplay === 'function') {
-        return OptionComboProductRegistry.formatPriceDisplay(symbol, value);
+    const registry = _getProductRegistryApi();
+    if (registry && typeof registry.formatPriceDisplay === 'function') {
+        return registry.formatPriceDisplay(symbol, value);
     }
     return currencyFormatter.format(value);
 }
 
 function _refreshForwardRatePanelUi() {
-    if (typeof OptionComboControlPanelUI === 'undefined') {
+    const controlPanelUi = _getControlPanelUiApi();
+    if (!controlPanelUi) {
         return;
     }
-    if (typeof OptionComboControlPanelUI.refreshForwardRatePanel === 'function') {
-        OptionComboControlPanelUI.refreshForwardRatePanel();
+    if (typeof controlPanelUi.refreshForwardRatePanel === 'function') {
+        _runUiRefreshSafely('forwardRatePanel', () => {
+            controlPanelUi.refreshForwardRatePanel();
+        });
         return;
     }
-    if (typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
-        OptionComboControlPanelUI.refreshBoundDynamicControls();
+    if (typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
+        _runUiRefreshSafely('boundDynamicControls', () => {
+            controlPanelUi.refreshBoundDynamicControls();
+        });
     }
 }
 
 function _refreshFuturesPoolPanelUi() {
-    if (typeof OptionComboControlPanelUI === 'undefined') {
+    const controlPanelUi = _getControlPanelUiApi();
+    if (!controlPanelUi) {
         return;
     }
-    if (typeof OptionComboControlPanelUI.refreshFuturesPoolPanel === 'function') {
-        OptionComboControlPanelUI.refreshFuturesPoolPanel();
+    if (typeof controlPanelUi.refreshFuturesPoolPanel === 'function') {
+        _runUiRefreshSafely('futuresPoolPanel', () => {
+            controlPanelUi.refreshFuturesPoolPanel();
+        });
         return;
     }
-    if (typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
-        OptionComboControlPanelUI.refreshBoundDynamicControls();
+    if (typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
+        _runUiRefreshSafely('boundDynamicControls', () => {
+            controlPanelUi.refreshBoundDynamicControls();
+        });
     }
 }
 
 function _normalizeLivePriceMode(group) {
-    if (typeof OptionComboSessionLogic !== 'undefined'
-        && typeof OptionComboSessionLogic.normalizeGroupLivePriceMode === 'function') {
-        return OptionComboSessionLogic.normalizeGroupLivePriceMode(group && group.livePriceMode);
+    const sessionLogic = _getSessionLogicApi();
+    if (sessionLogic && typeof sessionLogic.normalizeGroupLivePriceMode === 'function') {
+        return sessionLogic.normalizeGroupLivePriceMode(group && group.livePriceMode);
     }
     return String(group && group.livePriceMode || '').trim().toLowerCase() === 'mark'
         ? 'mark'
@@ -378,9 +499,9 @@ function _getLiveHedgeOrderAccountRequirementMessage() {
 }
 
 function _normalizeDeltaHedgeConfig(config) {
-    if (typeof OptionComboDeltaHedgeLogic !== 'undefined'
-        && typeof OptionComboDeltaHedgeLogic.normalizeDeltaHedgeConfig === 'function') {
-        return OptionComboDeltaHedgeLogic.normalizeDeltaHedgeConfig(config);
+    const deltaHedgeLogic = _getDeltaHedgeLogicApi();
+    if (deltaHedgeLogic && typeof deltaHedgeLogic.normalizeDeltaHedgeConfig === 'function') {
+        return deltaHedgeLogic.normalizeDeltaHedgeConfig(config);
     }
     return config && typeof config === 'object' ? config : {};
 }
@@ -397,9 +518,11 @@ function _getDeltaHedgeRuntime() {
 }
 
 function _refreshDeltaHedgeBrokerPreviewUi() {
-    if (typeof OptionComboDeltaHedgeUI !== 'undefined'
-        && typeof OptionComboDeltaHedgeUI.applyBrokerPreviewState === 'function') {
-        OptionComboDeltaHedgeUI.applyBrokerPreviewState(state);
+    const deltaHedgeUi = _getDeltaHedgeUiApi();
+    if (deltaHedgeUi && typeof deltaHedgeUi.applyBrokerPreviewState === 'function') {
+        _runUiRefreshSafely('deltaHedgeBrokerPreviewState', () => {
+            deltaHedgeUi.applyBrokerPreviewState(state);
+        });
     }
 }
 
@@ -413,9 +536,9 @@ function _markDeltaHedgeError(message) {
 }
 
 function _hasActiveDeltaHedgeRestingOrder(runtime) {
-    if (typeof OptionComboDeltaHedgeLogic !== 'undefined'
-        && typeof OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder === 'function') {
-        return OptionComboDeltaHedgeLogic.hasActiveRestingHedgeOrder(runtime);
+    const deltaHedgeLogic = _getDeltaHedgeLogicApi();
+    if (deltaHedgeLogic && typeof deltaHedgeLogic.hasActiveRestingHedgeOrder === 'function') {
+        return deltaHedgeLogic.hasActiveRestingHedgeOrder(runtime);
     }
     return Boolean(runtime && runtime.restingOrder && runtime.restingOrder.orderId);
 }
@@ -436,203 +559,97 @@ function _buildDeltaHedgeRuntimeHedgeId(config) {
     ].join('_'));
 }
 
-function _buildDeltaHedgeOrderPayload(recommendation, action = 'validate_hedge_order', options = {}) {
-    const runtime = _getDeltaHedgeRuntime();
-    const config = _normalizeDeltaHedgeConfig(runtime);
-    const instrument = config.hedgeInstrument || {};
-    const orderType = String(config.orderType || 'LMT').trim().toUpperCase() === 'MKT' ? 'MKT' : 'LMT';
-    const quantity = Math.round(Math.abs(Number(recommendation && recommendation.quantity)));
-    const side = String(recommendation && recommendation.side || '').trim().toUpperCase();
-    const symbol = String(instrument.symbol || '').trim().toUpperCase();
-    const secType = String(instrument.secType || '').trim().toUpperCase();
-    const contractMonth = String(instrument.contractMonth || '').trim();
-    const selectedAccount = _getSelectedLiveComboOrderAccount();
+let _deltaHedgeTransportApi = null;
+let _comboOrderTransportApi = null;
 
-    if (!recommendation || recommendation.actionable !== true) {
-        throw new Error('Delta hedge recommendation is not actionable.');
+/** @returns {OptionComboDeltaHedgeTransportApi | null} */
+function _buildDeltaHedgeTransportApi() {
+    const transportFactory = _getDeltaHedgeTransportFactory();
+    if (!transportFactory || typeof transportFactory.createApi !== 'function') {
+        return null;
     }
-    if (!['BUY', 'SELL'].includes(side)) {
-        throw new Error('Delta hedge recommendation side is invalid.');
-    }
-    if (!Number.isFinite(quantity) || quantity <= 0) {
-        throw new Error('Delta hedge recommendation quantity is invalid.');
-    }
-    if (!['STK', 'FUT'].includes(secType) || !symbol) {
-        throw new Error('Delta hedge instrument is incomplete.');
-    }
-    if (!selectedAccount) {
-        throw new Error(_getLiveHedgeOrderAccountRequirementMessage());
-    }
+    return transportFactory.createApi({
+        state,
+        isHistoricalMode: _isHistoricalMode,
+        isWsConnected() {
+            return Boolean(isWsConnected && ws);
+        },
+        sendPayload(payload) {
+            ws.send(JSON.stringify(payload));
+        },
+        getSelectedLiveComboOrderAccount: _getSelectedLiveComboOrderAccount,
+        getLiveHedgeOrderAccountRequirementMessage: _getLiveHedgeOrderAccountRequirementMessage,
+        refreshBrokerPreviewUi: _refreshDeltaHedgeBrokerPreviewUi,
+        requestManagedAccountsSnapshot,
+    });
+}
 
-    let limitPrice = null;
-    if (orderType === 'LMT') {
-        limitPrice = Number(config.limitPrice);
-        if (!Number.isFinite(limitPrice) || limitPrice <= 0) {
-            throw new Error('LMT hedge broker preview requires a positive limit price.');
-        }
+function _getDeltaHedgeTransportApi() {
+    if (_deltaHedgeTransportApi === null) {
+        _deltaHedgeTransportApi = _buildDeltaHedgeTransportApi();
     }
-
-    const hedgeId = _buildDeltaHedgeRuntimeHedgeId(config);
-
-    const isSubmit = action === 'submit_hedge_order';
-    const payload = {
-        action,
-        hedgeId,
-        hedgeName: `${symbol} Delta Hedge`,
-        secType,
-        symbol,
-        exchange: String(instrument.exchange || 'SMART').trim().toUpperCase() || 'SMART',
-        currency: String(instrument.currency || 'USD').trim().toUpperCase() || 'USD',
-        contractMonth,
-        multiplier: instrument.multiplier !== undefined && instrument.multiplier !== null
-            ? String(instrument.multiplier)
-            : '',
-        deltaPerUnit: Number.isFinite(Number(instrument.deltaPerUnit)) ? Number(instrument.deltaPerUnit) : null,
-        orderAction: side,
-        quantity,
-        orderType,
-        timeInForce: 'DAY',
-        executionMode: isSubmit ? 'submit' : 'preview',
-        account: selectedAccount,
-        requestSource: options.requestSource || (isSubmit ? 'delta_hedge_manual_submit' : 'delta_hedge_manual_preview'),
-        currentNetDelta: Number.isFinite(Number(recommendation.currentNetDelta)) ? Number(recommendation.currentNetDelta) : null,
-        projectedNetDelta: Number.isFinite(Number(recommendation.projectedNetDelta)) ? Number(recommendation.projectedNetDelta) : null,
-        targetLower: Number.isFinite(Number(recommendation.targetLower)) ? Number(recommendation.targetLower) : null,
-        targetUpper: Number.isFinite(Number(recommendation.targetUpper)) ? Number(recommendation.targetUpper) : null,
-    };
-
-    if (limitPrice !== null) {
-        payload.limitPrice = limitPrice;
-    }
-    return payload;
+    return _deltaHedgeTransportApi;
 }
 
 function requestDeltaHedgeBrokerPreview(recommendation, options = {}) {
-    const runtime = _getDeltaHedgeRuntime();
-
-    if (_isHistoricalMode()) {
-        return _markDeltaHedgeError('Delta hedge broker preview requires live mode.');
+    const transportApi = _getDeltaHedgeTransportApi();
+    if (!transportApi || typeof transportApi.requestBrokerPreview !== 'function') {
+        return _markDeltaHedgeError('Delta hedge transport is unavailable.');
     }
-    if (!isWsConnected || !ws) {
-        return _markDeltaHedgeError('WebSocket is not connected.');
-    }
-    if (runtime.pendingRequest === true) {
-        return false;
-    }
-
-    let payload;
-    try {
-        payload = _buildDeltaHedgeOrderPayload(
-            recommendation || runtime.lastRecommendation,
-            'validate_hedge_order',
-            options
-        );
-    } catch (error) {
-        const message = error && error.message ? error.message : 'Unable to build hedge broker preview payload.';
-        if (/account/i.test(message)) {
-            requestManagedAccountsSnapshot();
-        }
-        return _markDeltaHedgeError(message);
-    }
-
-    const nextRuntime = _getDeltaHedgeRuntime();
-    nextRuntime.pendingRequest = true;
-    nextRuntime.status = 'pending_validation';
-    nextRuntime.lastError = '';
-    nextRuntime.pendingPreviewPayload = payload;
-    nextRuntime.lastValidation = null;
-    ws.send(JSON.stringify(payload));
-    _refreshDeltaHedgeBrokerPreviewUi();
-    return true;
+    return transportApi.requestBrokerPreview(recommendation, options);
 }
 
 function requestDeltaHedgeSubmit(recommendation, options = {}) {
-    const runtime = _getDeltaHedgeRuntime();
-
-    if (_isHistoricalMode()) {
-        return _markDeltaHedgeError('Delta hedge submit requires live mode.');
+    const transportApi = _getDeltaHedgeTransportApi();
+    if (!transportApi || typeof transportApi.requestSubmit !== 'function') {
+        return _markDeltaHedgeError('Delta hedge transport is unavailable.');
     }
-    if (!isWsConnected || !ws) {
-        return _markDeltaHedgeError('WebSocket is not connected.');
-    }
-    if (state && state.allowLiveHedgeOrders !== true) {
-        return _markDeltaHedgeError('Live hedge order switch is OFF.');
-    }
-    if (runtime.pendingRequest === true) {
-        return false;
-    }
-    if (_hasActiveDeltaHedgeRestingOrder(runtime)) {
-        return _markDeltaHedgeError('A hedge order is already resting or needs review.');
-    }
-    if (runtime.status !== 'previewed' || !runtime.lastPreview) {
-        return _markDeltaHedgeError('Broker preview is required before submitting a hedge order.');
-    }
-
-    let payload;
-    try {
-        payload = _buildDeltaHedgeOrderPayload(
-            recommendation || runtime.lastRecommendation,
-            'submit_hedge_order',
-            options
-        );
-    } catch (error) {
-        const message = error && error.message ? error.message : 'Unable to build hedge submit payload.';
-        if (/account/i.test(message)) {
-            requestManagedAccountsSnapshot();
-        }
-        return _markDeltaHedgeError(message);
-    }
-
-    const nextRuntime = _getDeltaHedgeRuntime();
-    nextRuntime.pendingRequest = true;
-    nextRuntime.status = 'placing';
-    nextRuntime.orderState = 'placing';
-    nextRuntime.lastError = '';
-    nextRuntime.pendingSubmitPayload = payload;
-    nextRuntime.lastOrderEventAt = new Date().toISOString();
-    ws.send(JSON.stringify(payload));
-    _refreshDeltaHedgeBrokerPreviewUi();
-    return true;
+    return transportApi.requestSubmit(recommendation, options);
 }
 
 function requestDeltaHedgeCancel(options = {}) {
-    const runtime = _getDeltaHedgeRuntime();
-    if (_isHistoricalMode()) {
-        return _markDeltaHedgeError('Delta hedge cancel requires live mode.');
+    const transportApi = _getDeltaHedgeTransportApi();
+    if (!transportApi || typeof transportApi.requestCancel !== 'function') {
+        return _markDeltaHedgeError('Delta hedge transport is unavailable.');
     }
-    if (!isWsConnected || !ws) {
-        return _markDeltaHedgeError('WebSocket is not connected.');
-    }
-    if (runtime.pendingRequest === true) {
-        return false;
-    }
-    if (!_hasActiveDeltaHedgeRestingOrder(runtime)) {
-        return _markDeltaHedgeError('No active hedge order is available to cancel.');
-    }
+    return transportApi.requestCancel(options);
+}
 
-    const restingOrder = runtime.restingOrder || {};
-    const orderId = restingOrder.orderId ?? runtime.lastPreview?.orderId ?? null;
-    const permId = restingOrder.permId ?? runtime.lastPreview?.permId ?? null;
-    if (orderId === null && permId === null) {
-        return _markDeltaHedgeError('Hedge order id is unavailable.');
+function _buildComboOrderTransportApi() {
+    const transportFactory = _getComboOrderTransportFactory();
+    if (!transportFactory || typeof transportFactory.createApi !== 'function') {
+        return null;
     }
+    return transportFactory.createApi({
+        state,
+        isHistoricalMode: _isHistoricalMode,
+        isWsConnected() {
+            return Boolean(isWsConnected && ws);
+        },
+        sendPayload(payload) {
+            ws.send(JSON.stringify(payload));
+        },
+        renderGroups,
+        updateDerivedValues,
+        requestManagedAccountsSnapshot,
+        hasSelectedLiveComboOrderAccount: _hasSelectedLiveComboOrderAccount,
+        getLiveComboOrderAccountRequirementMessage: _getLiveComboOrderAccountRequirementMessage,
+        findGroupById: _findGroupById,
+        groupHasCostForAllPositionedLegs: _groupHasCostForAllPositionedLegs,
+        resolveHistoricalReplayClosePrice: _resolveHistoricalReplayClosePrice,
+        getHistoricalReplayDate: _getHistoricalReplayDate,
+        buildHistoricalTriggerOrderPreview: _buildHistoricalTriggerOrderPreview,
+        applyHistoricalComboFill: _applyHistoricalComboFill,
+        formatSymbolPriceInputValue: _formatSymbolPriceInputValue,
+        flashElement,
+    });
+}
 
-    const payload = {
-        action: 'cancel_hedge_order',
-        hedgeId: restingOrder.hedgeId || runtime.lastPreview?.hedgeId || runtime.pendingSubmitPayload?.hedgeId || null,
-        orderId,
-        permId,
-        requestSource: options.requestSource || 'delta_hedge_manual_cancel',
-        reason: options.reason || 'manual_cancel',
-    };
-
-    runtime.pendingRequest = true;
-    runtime.status = 'cancel_pending';
-    runtime.lastError = '';
-    runtime.lastOrderEventAt = new Date().toISOString();
-    ws.send(JSON.stringify(payload));
-    _refreshDeltaHedgeBrokerPreviewUi();
-    return true;
+function _getComboOrderTransportApi() {
+    if (_comboOrderTransportApi === null) {
+        _comboOrderTransportApi = _buildComboOrderTransportApi();
+    }
+    return _comboOrderTransportApi;
 }
 
 function _getHistoricalReplayDate() {
@@ -656,9 +673,9 @@ function _getQuoteSourceKind(data) {
 }
 
 function _getQuoteReferenceDate() {
-    if (typeof OptionComboPricingContext !== 'undefined'
-        && typeof OptionComboPricingContext.resolveQuoteDate === 'function') {
-        return OptionComboPricingContext.resolveQuoteDate(state);
+    const pricingContext = _getPricingContextApi();
+    if (pricingContext && typeof pricingContext.resolveQuoteDate === 'function') {
+        return pricingContext.resolveQuoteDate(state);
     }
     return _isHistoricalMode()
         ? (_getHistoricalReplayDate() || state.baseDate || '')
@@ -666,7 +683,10 @@ function _getQuoteReferenceDate() {
 }
 
 function _isUnderlyingLeg(legOrType) {
-    return OptionComboProductRegistry.isUnderlyingLeg(legOrType);
+    const registry = _getProductRegistryApi();
+    return registry && typeof registry.isUnderlyingLeg === 'function'
+        ? registry.isUnderlyingLeg(legOrType)
+        : false;
 }
 
 function _normalizeWsPort(rawValue) {
@@ -806,9 +826,11 @@ function connectWebSocket() {
     ws.onclose = () => {
         isWsConnected = false;
         state.liveComboOrderAccountsConnected = false;
-        if (typeof OptionComboControlPanelUI !== 'undefined'
-            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
-            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        const controlPanelUi = _getControlPanelUiApi();
+        if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
+            _runUiRefreshSafely('boundDynamicControls', () => {
+                controlPanelUi.refreshBoundDynamicControls();
+            });
         }
         const delaySec = Math.round(_wsReconnectDelay / 1000);
         console.log(`WebSocket Disconnected. Reconnecting in ${delaySec}s...`);
@@ -820,9 +842,11 @@ function connectWebSocket() {
     ws.onerror = (error) => {
         console.error("WebSocket Error:", error);
         state.liveComboOrderAccountsConnected = false;
-        if (typeof OptionComboControlPanelUI !== 'undefined'
-            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
-            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        const controlPanelUi = _getControlPanelUiApi();
+        if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
+            _runUiRefreshSafely('boundDynamicControls', () => {
+                controlPanelUi.refreshBoundDynamicControls();
+            });
         }
         updateWsStatusUI('error');
     };
@@ -917,139 +941,27 @@ function requestActiveHedgeOrdersSnapshot() {
 }
 
 function requestContinueManagedComboOrder(group, runtimeKind = 'tradeTrigger') {
-    if (!group || !isWsConnected || !ws) {
+    const transportApi = _getComboOrderTransportApi();
+    if (!transportApi || typeof transportApi.requestContinueManagedComboOrder !== 'function') {
         return false;
     }
-
-    const executionRuntime = _getExecutionRuntimeByKind(group, runtimeKind);
-    const preview = executionRuntime && executionRuntime.lastPreview;
-    if (!executionRuntime || !preview || !preview.orderId) {
-        _markExecutionError(group, 'No resumable managed combo order was found.', runtimeKind);
-        renderGroups();
-        return false;
-    }
-
-    if (executionRuntime.pendingRequest) {
-        return false;
-    }
-
-    executionRuntime.pendingRequest = true;
-    executionRuntime.lastError = '';
-    executionRuntime.status = 'pending_resume';
-    ws.send(JSON.stringify({
-        action: 'resume_managed_combo_order',
-        groupId: group.id,
-        orderId: preview.orderId,
-        permId: preview.permId || null,
-        executionIntent: runtimeKind === 'closeExecution' ? 'close' : 'open',
-        requestSource: runtimeKind === 'closeExecution' ? 'close_group' : 'trial_trigger',
-    }));
-    renderGroups();
-    return true;
+    return transportApi.requestContinueManagedComboOrder(group, runtimeKind);
 }
 
 function requestConcedeManagedComboOrder(group, concessionRatio, runtimeKind = 'tradeTrigger') {
-    if (!group || !isWsConnected || !ws) {
+    const transportApi = _getComboOrderTransportApi();
+    if (!transportApi || typeof transportApi.requestConcedeManagedComboOrder !== 'function') {
         return false;
     }
-
-    const executionRuntime = _getExecutionRuntimeByKind(group, runtimeKind);
-    const preview = executionRuntime && executionRuntime.lastPreview;
-    if (!executionRuntime || !preview || !preview.orderId) {
-        _markExecutionError(group, 'No live combo order is available for concession repricing.', runtimeKind);
-        renderGroups();
-        return false;
-    }
-
-    if (executionRuntime.pendingRequest) {
-        return false;
-    }
-
-    const parsedRatio = parseFloat(concessionRatio);
-    if (!Number.isFinite(parsedRatio)) {
-        _markExecutionError(group, 'Invalid concession ratio.', runtimeKind);
-        renderGroups();
-        return false;
-    }
-
-    executionRuntime.pendingRequest = true;
-    executionRuntime.lastError = '';
-    executionRuntime.status = 'pending_concede';
-    ws.send(JSON.stringify({
-        action: 'concede_managed_combo_order',
-        groupId: group.id,
-        orderId: preview.orderId,
-        permId: preview.permId || null,
-        concessionRatio: parsedRatio,
-        executionIntent: runtimeKind === 'closeExecution' ? 'close' : 'open',
-        requestSource: runtimeKind === 'closeExecution' ? 'close_group' : 'trial_trigger',
-    }));
-    renderGroups();
-    return true;
+    return transportApi.requestConcedeManagedComboOrder(group, concessionRatio, runtimeKind);
 }
 
 function requestCancelManagedComboOrder(group, reason = 'manual_cancel', runtimeKind = 'tradeTrigger') {
-    if (!group) {
+    const transportApi = _getComboOrderTransportApi();
+    if (!transportApi || typeof transportApi.requestCancelManagedComboOrder !== 'function') {
         return false;
     }
-
-    const executionRuntime = _getExecutionRuntimeByKind(group, runtimeKind);
-    const preview = executionRuntime && executionRuntime.lastPreview;
-    if (!executionRuntime || !preview || !preview.orderId) {
-        _markExecutionError(group, 'No cancellable combo order was found.', runtimeKind);
-        renderGroups();
-        return false;
-    }
-
-    if (executionRuntime.pendingRequest) {
-        return false;
-    }
-
-    if (_isHistoricalMode()) {
-        const brokerStatus = String(preview.status || '').trim();
-        if (['Filled', 'Cancelled', 'ApiCancelled', 'Inactive'].includes(brokerStatus)) {
-            _markExecutionError(group, 'This historical replay order is already closed.', runtimeKind);
-            renderGroups();
-            return false;
-        }
-
-        executionRuntime.pendingRequest = false;
-        executionRuntime.lastError = '';
-        executionRuntime.lastPreview = {
-            ...preview,
-            status: 'Cancelled',
-            remaining: 0,
-            filled: Number.isFinite(preview.filled) ? preview.filled : 0,
-            managedMode: false,
-            managedState: 'cancelled',
-            statusMessage: `Historical replay simulated order cancelled on ${_getHistoricalReplayDate() || 'the selected day'} (${reason}).`,
-        };
-        executionRuntime.status = preview.executionMode === 'test_submit'
-            ? 'test_submitted'
-            : (preview.executionMode === 'preview' ? 'previewed' : 'submitted');
-        renderGroups();
-        updateDerivedValues();
-        return true;
-    }
-
-    if (!isWsConnected || !ws) {
-        return false;
-    }
-
-    executionRuntime.pendingRequest = true;
-    executionRuntime.lastError = '';
-    executionRuntime.status = 'pending_cancel';
-    ws.send(JSON.stringify({
-        action: 'cancel_managed_combo_order',
-        groupId: group.id,
-        orderId: preview.orderId,
-        permId: preview.permId || null,
-        reason,
-        executionIntent: runtimeKind === 'closeExecution' ? 'close' : 'open',
-        requestSource: runtimeKind === 'closeExecution' ? 'close_group' : 'trial_trigger',
-    }));
-    renderGroups();
-    return true;
+    return transportApi.requestCancelManagedComboOrder(group, reason, runtimeKind);
 }
 
 function _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode = 'submit') {
@@ -1057,12 +969,12 @@ function _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode 
         return null;
     }
 
-    if (typeof OptionComboGroupOrderBuilder === 'undefined'
-        || typeof OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload !== 'function') {
+    const groupOrderBuilder = _getGroupOrderBuilderApi();
+    if (!groupOrderBuilder || typeof groupOrderBuilder.buildGroupOrderRequestPayload !== 'function') {
         return null;
     }
 
-    return OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(group, state, {
+    return groupOrderBuilder.buildGroupOrderRequestPayload(group, state, {
         action: executionMode === 'preview' ? 'preview_combo_order' : 'submit_combo_order',
         executionMode,
         intent: 'close',
@@ -1402,155 +1314,29 @@ function _buildHistoricalTriggerOrderPreview(group, executionMode) {
 }
 
 function _applyHistoricalTriggerOrderPreview(group, executionMode) {
-    const trigger = _getTradeTrigger(group);
-    if (!trigger) {
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.applyHistoricalTriggerOrderPreview !== 'function') {
         return false;
     }
-
-    const result = _buildHistoricalTriggerOrderPreview(group, executionMode);
-    if (!result || !result.preview) {
-        _markTradeTriggerError(group, result && result.error
-            ? result.error
-            : 'Unable to build a historical replay combo order preview.');
-        renderGroups();
-        return false;
-    }
-
-    const applyResult = _applyComboOrderResult({
-        action: executionMode === 'preview' ? 'combo_order_preview_result' : 'combo_order_submit_result',
-        groupId: group.id,
-        preview: executionMode === 'preview' ? result.preview : undefined,
-        order: executionMode === 'preview' ? undefined : result.preview,
-    });
-    if (executionMode === 'submit') {
-        _applyHistoricalComboFill(group, 'tradeTrigger', result.preview);
-    }
-    return applyResult;
+    return testApi.applyHistoricalTriggerOrderPreview(group, executionMode);
 }
 
 function _settleHistoricalReplayGroup(group) {
-    const closeExecution = _getCloseExecution(group);
-    if (!closeExecution) {
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.settleHistoricalReplayGroup !== 'function') {
         return false;
     }
-
-    if (!_groupHasOpenPositions(group)) {
-        _markCloseExecutionError(group, 'This group has no open position to close.');
-        return false;
-    }
-
-    if (!_groupHasCostForAllPositionedLegs(group)) {
-        _markCloseExecutionError(group, 'Historical settlement needs a locked entry cost for every open leg. Use Enter @ Replay Day or let base-day quotes seed the costs first.');
-        return false;
-    }
-
-    const missingLegs = [];
-    const settledLegs = [];
-
-    (group.legs || []).forEach((leg) => {
-        const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
-        if (pos < 0.0001 || (leg.closePrice !== null && leg.closePrice !== '' && leg.closePrice !== undefined)) {
-            return;
-        }
-
-        const closePrice = _resolveHistoricalReplayClosePrice(leg, true);
-        if (!Number.isFinite(closePrice) || closePrice < 0) {
-            missingLegs.push(leg);
-            return;
-        }
-
-        leg.closePrice = closePrice;
-        settledLegs.push(leg);
-    });
-
-    if (missingLegs.length > 0) {
-        _markCloseExecutionError(group, `Historical close price is unavailable for ${missingLegs.length} leg(s) on ${_getHistoricalReplayDate() || 'the selected day'}.`);
-        return false;
-    }
-
-    group.settleUnderlyingPrice = Number.isFinite(state.underlyingPrice) ? state.underlyingPrice : group.settleUnderlyingPrice;
-    group.viewMode = 'settlement';
-
-    closeExecution.pendingRequest = false;
-    closeExecution.lastError = '';
-    closeExecution.status = 'submitted';
-    closeExecution.lastPreview = _buildHistoricalClosePreview(group, settledLegs);
-
-    renderGroups();
-    if (typeof updateDerivedValues === 'function') {
-        updateDerivedValues();
-    }
-    return true;
+    return testApi.settleHistoricalReplayGroup(group);
 }
 
 function requestCloseGroupComboOrder(group) {
-    if (!group) return false;
-    if (_isHistoricalMode()) {
-        const didSettle = _settleHistoricalReplayGroup(group);
-        if (!didSettle) {
-            renderGroups();
-        }
-        return didSettle;
-    }
-    if (!isWsConnected || !ws) {
-        _markCloseExecutionError(group, 'WebSocket is not connected.');
-        renderGroups();
+    const transportApi = _getComboOrderTransportApi();
+    if (!transportApi || typeof transportApi.requestCloseGroupComboOrder !== 'function') {
         return false;
     }
-    if (!_groupHasOpenPositions(group)) {
-        _markCloseExecutionError(group, 'This group has no open position to close.');
-        renderGroups();
-        return false;
-    }
-    if (typeof OptionComboSessionLogic !== 'undefined'
-        && typeof OptionComboSessionLogic.getRenderableGroupViewMode === 'function'
-        && OptionComboSessionLogic.getRenderableGroupViewMode(group) !== 'active') {
-        _markCloseExecutionError(group, 'Close Group is only available when this group is in Active mode.');
-        renderGroups();
-        return false;
-    }
-
-    const closeExecution = _getCloseExecution(group);
-    if (!closeExecution || closeExecution.pendingRequest) {
-        return false;
-    }
-
-    const executionMode = closeExecution.executionMode === 'submit' || closeExecution.executionMode === 'test_submit'
-        ? closeExecution.executionMode
-        : 'preview';
-
-    if ((executionMode === 'submit' || executionMode === 'test_submit') && state.allowLiveComboOrders !== true) {
-        _markCloseExecutionError(group, 'Global live combo order switch is OFF.');
-        renderGroups();
-        return false;
-    }
-    if ((executionMode === 'submit' || executionMode === 'test_submit') && !_hasSelectedLiveComboOrderAccount()) {
-        _markCloseExecutionError(group, _getLiveComboOrderAccountRequirementMessage());
-        if (state.allowLiveComboOrders === true) {
-            requestManagedAccountsSnapshot();
-        }
-        renderGroups();
-        return false;
-    }
-
-    const payload = _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode);
-    if (!payload) {
-        _markCloseExecutionError(group, 'Unable to build close-group combo order payload.');
-        renderGroups();
-        return false;
-    }
-
-    closeExecution.pendingRequest = true;
-    closeExecution.lastError = '';
-    if (executionMode === 'preview') {
-        closeExecution.status = 'pending_preview';
-    } else {
-        payload.action = 'validate_combo_order';
-        closeExecution.status = 'pending_validation';
-    }
-    ws.send(JSON.stringify(payload));
-    renderGroups();
-    return true;
+    return transportApi.requestCloseGroupComboOrder(group);
 }
 
 function requestHistoricalReplayEntryGroup(group) {
@@ -1650,9 +1436,9 @@ function _normalizeHistoricalDateKey(value) {
     const rawValue = String(value || '').trim();
     if (!rawValue) return '';
 
-    if (typeof OptionComboDateUtils !== 'undefined'
-        && typeof OptionComboDateUtils.normalizeDateInput === 'function') {
-        const normalized = String(OptionComboDateUtils.normalizeDateInput(rawValue) || '').trim();
+    const dateUtils = _getDateUtilsApi();
+    if (dateUtils && typeof dateUtils.normalizeDateInput === 'function') {
+        const normalized = String(dateUtils.normalizeDateInput(rawValue) || '').trim();
         if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
             return normalized;
         }
@@ -1696,10 +1482,11 @@ function _buildFuturesPoolRequests(profile) {
 }
 
 function _buildUnderlyingRequest(profile, optionRequests, futuresRequests) {
+    const registry = _getProductRegistryApi();
     const defaultUnderlyingContractMonth = profile?.underlyingSecType === 'FUT'
-        && typeof OptionComboProductRegistry !== 'undefined'
-        && typeof OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth === 'function'
-        ? OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(
+        && registry
+        && typeof registry.resolveDefaultUnderlyingContractMonth === 'function'
+        ? registry.resolveDefaultUnderlyingContractMonth(
             state.underlyingSymbol,
             _getQuoteReferenceDate()
         )
@@ -1744,12 +1531,14 @@ function _buildHistoricalSnapshotPayload(underlyingRequest, optionRequests, futu
 function handleLiveSubscriptions() {
     if (!isWsConnected || !ws) return;
     _resetLiveQuoteRuntime();
-    const profile = typeof OptionComboProductRegistry === 'undefined'
-        ? null
-        : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
+    const registry = _getProductRegistryApi();
+    const profile = registry && typeof registry.resolveUnderlyingProfile === 'function'
+        ? registry.resolveUnderlyingProfile(state.underlyingSymbol)
+        : null;
     if (!_isHistoricalMode()
-        && typeof OptionComboProductRegistry !== 'undefined'
-        && !OptionComboProductRegistry.supportsLegacyLiveData(state.underlyingSymbol)) {
+        && registry
+        && typeof registry.supportsLegacyLiveData === 'function'
+        && !registry.supportsLegacyLiveData(state.underlyingSymbol)) {
         if (!_legacyLiveDataWarningShown) {
             console.warn(`Legacy live-data subscriptions are not implemented for ${state.underlyingSymbol}. Use manual prices for now.`);
             _legacyLiveDataWarningShown = true;
@@ -1769,21 +1558,22 @@ function handleLiveSubscriptions() {
     };
 
     if (profile?.underlyingSecType === 'IND'
-        && typeof OptionComboIndexForwardRate !== 'undefined'
-        && typeof OptionComboIndexForwardRate.buildSampleSubscriptionId === 'function') {
+        && _getIndexForwardRateApi()
+        && typeof _getIndexForwardRateApi().buildSampleSubscriptionId === 'function') {
+        const indexForwardRateApi = _getIndexForwardRateApi();
         (state.forwardRateSamples || []).forEach((sample) => {
             if (!sample || !sample.expDate || !Number.isFinite(parseFloat(sample.strike))) {
                 return;
             }
 
-            const optionContractSpec = typeof OptionComboProductRegistry !== 'undefined'
-                && typeof OptionComboProductRegistry.resolveOptionContractSpec === 'function'
-                ? OptionComboProductRegistry.resolveOptionContractSpec(state.underlyingSymbol, sample.expDate)
+            const optionContractSpec = registry
+                && typeof registry.resolveOptionContractSpec === 'function'
+                ? registry.resolveOptionContractSpec(state.underlyingSymbol, sample.expDate)
                 : null;
 
             ['call', 'put'].forEach((rightLabel) => {
                 optionRequests.push({
-                    id: OptionComboIndexForwardRate.buildSampleSubscriptionId(sample, rightLabel),
+                    id: indexForwardRateApi.buildSampleSubscriptionId(sample, rightLabel),
                     secType: profile?.optionSecType || 'OPT',
                     symbol: optionContractSpec?.symbol || profile?.optionSymbol || state.underlyingSymbol,
                     underlyingSymbol: profile?.underlyingSymbol || state.underlyingSymbol,
@@ -1809,9 +1599,9 @@ function handleLiveSubscriptions() {
             group.legs.forEach(leg => {
                 if (!_isUnderlyingLeg(leg)) {
                     const selectedFuture = _resolveFuturesPoolEntryById(leg.underlyingFutureId);
-                    const optionContractSpec = typeof OptionComboProductRegistry !== 'undefined'
-                        && typeof OptionComboProductRegistry.resolveOptionContractSpec === 'function'
-                        ? OptionComboProductRegistry.resolveOptionContractSpec(state.underlyingSymbol, leg.expDate)
+                    const optionContractSpec = registry
+                        && typeof registry.resolveOptionContractSpec === 'function'
+                        ? registry.resolveOptionContractSpec(state.underlyingSymbol, leg.expDate)
                         : null;
                     optionRequests.push({
                         id: leg.id,
@@ -1831,9 +1621,9 @@ function handleLiveSubscriptions() {
                         contractMonth: _toContractMonth(leg.expDate),
                         underlyingContractMonth: selectedFuture?.contractMonth
                             || state.underlyingContractMonth
-                            || (typeof OptionComboProductRegistry !== 'undefined'
-                                && typeof OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth === 'function'
-                                ? OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(
+                            || (registry
+                                && typeof registry.resolveDefaultUnderlyingContractMonth === 'function'
+                                ? registry.resolveDefaultUnderlyingContractMonth(
                                     state.underlyingSymbol,
                                     _getQuoteReferenceDate()
                                 )
@@ -1885,30 +1675,30 @@ function requestUnderlyingPriceSync() {
         return;
     }
 
-    if (typeof OptionComboProductRegistry !== 'undefined'
-        && !OptionComboProductRegistry.supportsLegacyLiveData(state.underlyingSymbol)) {
+    const registry = _getProductRegistryApi();
+    if (registry
+        && typeof registry.supportsLegacyLiveData === 'function'
+        && !registry.supportsLegacyLiveData(state.underlyingSymbol)) {
         alert(`Live underlying sync is not implemented yet for ${state.underlyingSymbol}. Please enter the underlying price manually.`);
         return;
     }
 
+    const fallbackProfile = {
+        family: 'DEFAULT_EQUITY',
+        underlyingSecType: 'STK',
+        underlyingSymbol: state.underlyingSymbol,
+        underlyingExchange: 'SMART',
+        currency: 'USD',
+    };
+    const profile = registry && typeof registry.resolveUnderlyingProfile === 'function'
+        ? registry.resolveUnderlyingProfile(state.underlyingSymbol)
+        : fallbackProfile;
     const payload = {
         action: 'sync_underlying',
         underlying: _buildUnderlyingRequest(
-            typeof OptionComboProductRegistry === 'undefined'
-                ? {
-                    family: 'DEFAULT_EQUITY',
-                    underlyingSecType: 'STK',
-                    underlyingSymbol: state.underlyingSymbol,
-                    underlyingExchange: 'SMART',
-                    currency: 'USD',
-                }
-                : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol),
+            profile,
             [],
-            _buildFuturesPoolRequests(
-                typeof OptionComboProductRegistry === 'undefined'
-                    ? { underlyingSecType: 'STK' }
-                    : OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
-            )
+            _buildFuturesPoolRequests(profile)
         )
     };
 
@@ -1920,9 +1710,9 @@ function _findGroupById(groupId) {
 }
 
 function _isPortfolioAvgCostSyncEnabled(group) {
-    if (typeof OptionComboSessionLogic !== 'undefined'
-        && typeof OptionComboSessionLogic.isPortfolioAvgCostSyncEnabled === 'function') {
-        return OptionComboSessionLogic.isPortfolioAvgCostSyncEnabled(group);
+    const sessionLogic = _getSessionLogicApi();
+    if (sessionLogic && typeof sessionLogic.isPortfolioAvgCostSyncEnabled === 'function') {
+        return sessionLogic.isPortfolioAvgCostSyncEnabled(group);
     }
     return !!(group && group.syncAvgCostFromPortfolio);
 }
@@ -1940,9 +1730,10 @@ function _normalizeSecType(value) {
 }
 
 function _resolveLegContractDescriptor(leg) {
-    const profile = typeof OptionComboProductRegistry !== 'undefined'
-        && typeof OptionComboProductRegistry.resolveUnderlyingProfile === 'function'
-        ? OptionComboProductRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
+    const registry = _getProductRegistryApi();
+    const profile = registry
+        && typeof registry.resolveUnderlyingProfile === 'function'
+        ? registry.resolveUnderlyingProfile(state.underlyingSymbol)
         : {
             optionSecType: 'OPT',
             underlyingSecType: 'STK',
@@ -1950,9 +1741,9 @@ function _resolveLegContractDescriptor(leg) {
             underlyingSymbol: state.underlyingSymbol,
         };
 
-    const optionContractSpec = typeof OptionComboProductRegistry !== 'undefined'
-        && typeof OptionComboProductRegistry.resolveOptionContractSpec === 'function'
-        ? OptionComboProductRegistry.resolveOptionContractSpec(state.underlyingSymbol, leg && leg.expDate)
+    const optionContractSpec = registry
+        && typeof registry.resolveOptionContractSpec === 'function'
+        ? registry.resolveOptionContractSpec(state.underlyingSymbol, leg && leg.expDate)
         : null;
 
     if (_isUnderlyingLeg(leg)) {
@@ -2106,18 +1897,19 @@ function _applyPortfolioAvgCostUpdate(data) {
             }
         });
 
-        if (typeof OptionComboSessionLogic !== 'undefined'
-            && typeof OptionComboSessionLogic.groupHasDeterministicCost === 'function'
-            && typeof OptionComboSessionLogic.getRenderableGroupViewMode === 'function') {
+        const sessionLogic = _getSessionLogicApi();
+        if (sessionLogic
+            && typeof sessionLogic.groupHasDeterministicCost === 'function'
+            && typeof sessionLogic.getRenderableGroupViewMode === 'function') {
             const trigger = _getTradeTrigger(group);
             const brokerStatus = String(trigger && trigger.lastPreview && trigger.lastPreview.status || '').trim();
             const executionMode = String(trigger && trigger.lastPreview && trigger.lastPreview.executionMode || '').trim();
-            const renderMode = OptionComboSessionLogic.getRenderableGroupViewMode(group);
+            const renderMode = sessionLogic.getRenderableGroupViewMode(group);
 
             if (renderMode === 'trial'
                 && brokerStatus === 'Filled'
                 && executionMode === 'submit'
-                && OptionComboSessionLogic.groupHasDeterministicCost(group)) {
+                && sessionLogic.groupHasDeterministicCost(group)) {
                 group.viewMode = 'active';
                 stateChanged = true;
             }
@@ -2146,10 +1938,11 @@ function _groupHasCostForAllPositionedLegs(group) {
 }
 
 function _shouldHistoricalAutoCloseAtExpiry(group) {
+    const sessionLogic = _getSessionLogicApi();
     if (group && typeof group === 'object'
-        && typeof OptionComboSessionLogic !== 'undefined'
-        && typeof OptionComboSessionLogic.normalizeHistoricalAutoCloseAtExpiry === 'function') {
-        group.historicalAutoCloseAtExpiry = OptionComboSessionLogic.normalizeHistoricalAutoCloseAtExpiry(
+        && sessionLogic
+        && typeof sessionLogic.normalizeHistoricalAutoCloseAtExpiry === 'function') {
+        group.historicalAutoCloseAtExpiry = sessionLogic.normalizeHistoricalAutoCloseAtExpiry(
             group.historicalAutoCloseAtExpiry
         );
         return group.historicalAutoCloseAtExpiry;
@@ -2165,12 +1958,19 @@ function _shouldHistoricalAutoCloseAtExpiry(group) {
 
 function _getTradeTrigger(group) {
     if (!group) return null;
-    return OptionComboTradeTriggerLogic.ensureGroupTradeTrigger(group);
+    const tradeTriggerLogic = _getTradeTriggerLogicApi();
+    return tradeTriggerLogic && typeof tradeTriggerLogic.ensureGroupTradeTrigger === 'function'
+        ? tradeTriggerLogic.ensureGroupTradeTrigger(group)
+        : null;
 }
 
 function _getCloseExecution(group) {
     if (!group) return null;
-    group.closeExecution = OptionComboSessionLogic.normalizeCloseExecution(group.closeExecution);
+    const sessionLogic = _getSessionLogicApi();
+    if (!sessionLogic || typeof sessionLogic.normalizeCloseExecution !== 'function') {
+        return group.closeExecution || null;
+    }
+    group.closeExecution = sessionLogic.normalizeCloseExecution(group.closeExecution);
     return group.closeExecution;
 }
 
@@ -2181,58 +1981,15 @@ function _getExecutionRuntimeByKind(group, runtimeKind) {
 }
 
 function _resolveExecutionRuntime(group, payload) {
-    const descriptor = payload && typeof payload === 'object' ? payload : {};
-    const requestSource = String(descriptor.requestSource || descriptor.source || '').trim().toLowerCase();
-    const executionIntent = String(descriptor.executionIntent || descriptor.intent || '').trim().toLowerCase();
-    const tradeTrigger = _getTradeTrigger(group);
-    const closeExecution = _getCloseExecution(group);
-    const descriptorOrderId = descriptor.orderId;
-    const descriptorPermId = descriptor.permId;
-
-    let runtimeKind = null;
-    if (requestSource === 'close_group' || executionIntent === 'close') {
-        runtimeKind = 'closeExecution';
-    } else if (requestSource === 'trial_trigger' || executionIntent === 'open') {
-        runtimeKind = 'tradeTrigger';
-    } else {
-        const closePreview = closeExecution && closeExecution.lastPreview && typeof closeExecution.lastPreview === 'object'
-            ? closeExecution.lastPreview
-            : null;
-        const triggerPreview = tradeTrigger && tradeTrigger.lastPreview && typeof tradeTrigger.lastPreview === 'object'
-            ? tradeTrigger.lastPreview
-            : null;
-        const closeMatchesOrder = !!(
-            closePreview
-            && (
-                (descriptorOrderId != null && closePreview.orderId === descriptorOrderId)
-                || (descriptorPermId != null && closePreview.permId === descriptorPermId)
-            )
-        );
-        const triggerMatchesOrder = !!(
-            triggerPreview
-            && (
-                (descriptorOrderId != null && triggerPreview.orderId === descriptorOrderId)
-                || (descriptorPermId != null && triggerPreview.permId === descriptorPermId)
-            )
-        );
-
-        if (closeMatchesOrder && !triggerMatchesOrder) {
-            runtimeKind = 'closeExecution';
-        } else if (triggerMatchesOrder && !closeMatchesOrder) {
-            runtimeKind = 'tradeTrigger';
-        } else if (closeExecution && closeExecution.pendingRequest === true && !(tradeTrigger && tradeTrigger.pendingRequest === true)) {
-            runtimeKind = 'closeExecution';
-        } else if (tradeTrigger && tradeTrigger.pendingRequest === true && !(closeExecution && closeExecution.pendingRequest === true)) {
-            runtimeKind = 'tradeTrigger';
-        } else {
-            runtimeKind = 'tradeTrigger';
-        }
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.resolveExecutionRuntime !== 'function') {
+        return {
+            runtime: _getTradeTrigger(group),
+            runtimeKind: 'tradeTrigger',
+        };
     }
-
-    return {
-        runtime: runtimeKind === 'closeExecution' ? closeExecution : tradeTrigger,
-        runtimeKind,
-    };
+    return testApi.resolveExecutionRuntime(group, payload);
 }
 
 function _markTradeTriggerError(group, message) {
@@ -2274,9 +2031,9 @@ function _isManagedTerminalConfirmation(preview) {
 }
 
 function _groupHasOpenPositions(group) {
-    if (typeof OptionComboSessionLogic !== 'undefined'
-        && typeof OptionComboSessionLogic.groupHasOpenPosition === 'function') {
-        return OptionComboSessionLogic.groupHasOpenPosition(group);
+    const sessionLogic = _getSessionLogicApi();
+    if (sessionLogic && typeof sessionLogic.groupHasOpenPosition === 'function') {
+        return sessionLogic.groupHasOpenPosition(group);
     }
 
     return (group.legs || []).some((leg) => {
@@ -2287,14 +2044,14 @@ function _groupHasOpenPositions(group) {
 }
 
 function _maybePromoteFilledTrialGroupToActive(group, runtime) {
-    if (typeof OptionComboSessionLogic === 'undefined'
-        || typeof OptionComboSessionLogic.getRenderableGroupViewMode !== 'function') {
+    const sessionLogic = _getSessionLogicApi();
+    if (!sessionLogic || typeof sessionLogic.getRenderableGroupViewMode !== 'function') {
         return;
     }
 
     const brokerStatus = String(runtime && runtime.lastPreview && runtime.lastPreview.status || '').trim();
     const executionMode = String(runtime && runtime.lastPreview && runtime.lastPreview.executionMode || '').trim();
-    const renderMode = OptionComboSessionLogic.getRenderableGroupViewMode(group);
+    const renderMode = sessionLogic.getRenderableGroupViewMode(group);
 
     if (renderMode === 'trial'
         && brokerStatus === 'Filled'
@@ -2325,9 +2082,10 @@ function _sendValidatedComboSubmit(group, executionMode) {
         return false;
     }
 
-    const payload = typeof OptionComboTradeTriggerLogic !== 'undefined'
-        && typeof OptionComboTradeTriggerLogic.buildComboOrderRequestPayload === 'function'
-        ? OptionComboTradeTriggerLogic.buildComboOrderRequestPayload(group, state, executionMode)
+    const tradeTriggerLogic = _getTradeTriggerLogicApi();
+    const payload = tradeTriggerLogic
+        && typeof tradeTriggerLogic.buildComboOrderRequestPayload === 'function'
+        ? tradeTriggerLogic.buildComboOrderRequestPayload(group, state, executionMode)
         : null;
 
     if (!payload) {
@@ -2350,403 +2108,83 @@ function _sendValidatedComboSubmit(group, executionMode) {
 }
 
 function _requestTrialGroupComboOrder(group) {
-    if (!group) return;
-    const trigger = _getTradeTrigger(group);
-    if (!trigger) return;
-
-    const executionMode = trigger.executionMode === 'submit' || trigger.executionMode === 'test_submit'
-        ? trigger.executionMode
-        : 'preview';
-
-    if (_isHistoricalMode()) {
-        trigger.pendingRequest = true;
-        trigger.status = executionMode === 'submit'
-            ? 'pending_submit'
-            : (executionMode === 'test_submit' ? 'pending_test_submit' : 'pending_preview');
-        trigger.lastError = '';
-        trigger.lastTriggeredAt = new Date().toISOString();
-        trigger.lastTriggerPrice = state.underlyingPrice;
-        _applyHistoricalTriggerOrderPreview(group, executionMode);
+    const transportApi = _getComboOrderTransportApi();
+    if (!transportApi || typeof transportApi.requestTrialGroupComboOrder !== 'function') {
         return;
     }
-
-    if (!isWsConnected || !ws) {
-        _markTradeTriggerError(group, 'WebSocket is not connected.');
-        renderGroups();
-        return;
-    }
-
-    if ((executionMode === 'submit' || executionMode === 'test_submit') && state.allowLiveComboOrders !== true) {
-        _markTradeTriggerError(group, 'Global live combo order switch is OFF.');
-        renderGroups();
-        return;
-    }
-    if ((executionMode === 'submit' || executionMode === 'test_submit') && !_hasSelectedLiveComboOrderAccount()) {
-        _markTradeTriggerError(group, _getLiveComboOrderAccountRequirementMessage());
-        if (state.allowLiveComboOrders === true) {
-            requestManagedAccountsSnapshot();
-        }
-        renderGroups();
-        return;
-    }
-
-    const payload = typeof OptionComboTradeTriggerLogic !== 'undefined'
-        && typeof OptionComboTradeTriggerLogic.buildComboOrderRequestPayload === 'function'
-        ? OptionComboTradeTriggerLogic.buildComboOrderRequestPayload(group, state, executionMode)
-        : null;
-
-    if (!payload) {
-        _markTradeTriggerError(group, 'Unable to build combo order payload.');
-        renderGroups();
-        return;
-    }
-
-    trigger.pendingRequest = true;
-    if (executionMode === 'submit' || executionMode === 'test_submit') {
-        payload.action = 'validate_combo_order';
-        trigger.status = 'pending_validation';
-    } else {
-        trigger.status = 'pending_preview';
-    }
-    trigger.lastError = '';
-    trigger.lastTriggeredAt = new Date().toISOString();
-    trigger.lastTriggerPrice = state.underlyingPrice;
-
-    ws.send(JSON.stringify(payload));
-    renderGroups();
+    transportApi.requestTrialGroupComboOrder(group);
 }
 
 function _applyComboOrderValidationResult(data) {
-    const group = _findGroupById(data.groupId);
-    if (!group) return true;
-
-    const validation = data.validation || {};
-    const { runtime, runtimeKind } = _resolveExecutionRuntime(group, validation);
-    if (!runtime) return true;
-
-    if (validation.valid !== true) {
-        _markExecutionError(group, 'Combo validation failed.', runtimeKind);
-        renderGroups();
-        return true;
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.applyComboOrderValidationResult !== 'function') {
+        return false;
     }
-
-    if (!isWsConnected || !ws) {
-        _markExecutionError(group, 'WebSocket is not connected.', runtimeKind);
-        renderGroups();
-        return true;
-    }
-
-    const nextMode = validation.executionMode === 'test_submit' ? 'test_submit' : 'submit';
-    if (_isHistoricalMode()) {
-        if (runtimeKind === 'closeExecution') {
-            requestCloseGroupComboOrder(group);
-            return true;
-        }
-        runtime.pendingRequest = false;
-        _sendValidatedComboSubmit(group, nextMode);
-        return true;
-    }
-    if (state.allowLiveComboOrders !== true) {
-        _markExecutionError(group, 'Global live combo order switch is OFF.', runtimeKind);
-        renderGroups();
-        return true;
-    }
-    if (!_hasSelectedLiveComboOrderAccount()) {
-        _markExecutionError(group, _getLiveComboOrderAccountRequirementMessage(), runtimeKind);
-        requestManagedAccountsSnapshot();
-        renderGroups();
-        return true;
-    }
-
-    runtime.pendingRequest = false;
-    if (runtimeKind === 'closeExecution') {
-        const payload = _buildCloseGroupComboOrderPayload(group, runtime, nextMode);
-        if (!payload) {
-            _markCloseExecutionError(group, 'Unable to build close-group combo submit payload.');
-            renderGroups();
-            return true;
-        }
-
-        runtime.pendingRequest = true;
-        runtime.lastError = '';
-        runtime.status = 'pending_submit';
-        ws.send(JSON.stringify(payload));
-        renderGroups();
-        return true;
-    }
-
-    return _sendValidatedComboSubmit(group, nextMode);
+    return testApi.applyComboOrderValidationResult(data);
 }
 
 function _applyComboOrderResult(data) {
-    const group = _findGroupById(data.groupId);
-    if (!group) return true;
-
-    const payload = data.preview || data.order || {};
-    const { runtime, runtimeKind } = _resolveExecutionRuntime(group, payload);
-    if (!runtime) return true;
-
-    runtime.pendingRequest = false;
-    if (runtimeKind === 'tradeTrigger') {
-        runtime.enabled = false;
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.applyComboOrderResult !== 'function') {
+        return false;
     }
-    runtime.lastPreview = payload || null;
-    const orderStatus = String((runtime.lastPreview && runtime.lastPreview.status) || '').trim();
-    const statusMessage = String((runtime.lastPreview && runtime.lastPreview.statusMessage) || '').trim();
-    if (data.action === 'combo_order_submit_result'
-        && _isSoftTerminalBrokerStatus(orderStatus)
-        && !_isManagedTerminalConfirmation(runtime.lastPreview)) {
-        runtime.lastError = statusMessage || `TWS returned ${orderStatus}.`;
-        runtime.status = 'error';
-    } else if (data.action === 'combo_order_submit_result') {
-        const executionMode = String((runtime.lastPreview && runtime.lastPreview.executionMode) || '').trim();
-        runtime.lastError = '';
-        runtime.status = executionMode === 'test_submit' ? 'test_submitted' : 'submitted';
-    } else {
-        runtime.lastError = '';
-        runtime.status = 'previewed';
-    }
-
-    if (data.action === 'combo_order_submit_result'
-        && String(runtime.lastPreview && runtime.lastPreview.status || '').trim() === 'Filled'
-        && String(runtime.lastPreview && runtime.lastPreview.executionMode || '').trim() === 'submit') {
-        if (runtimeKind !== 'closeExecution') {
-            _maybePromoteFilledTrialGroupToActive(group, runtime);
-        }
-    }
-
-    renderGroups();
-    updateDerivedValues();
-    return true;
+    return testApi.applyComboOrderResult(data);
 }
 
 function _applyComboOrderStatusUpdate(data) {
-    const group = _findGroupById(data.groupId);
-    if (!group) return true;
-
-    const update = data.orderStatus || {};
-    const { runtime, runtimeKind } = _resolveExecutionRuntime(group, update);
-    if (!runtime) return true;
-
-    if (!runtime.lastPreview || typeof runtime.lastPreview !== 'object') {
-        runtime.lastPreview = {};
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.applyComboOrderStatusUpdate !== 'function') {
+        return false;
     }
-
-    if (update.managedMode === false) {
-        const {
-            managedMode,
-            managedState,
-            workingLimitPrice,
-            latestComboMid,
-            bestComboPrice,
-            worstComboPrice,
-            managedRepriceThreshold,
-            managedConcessionRatio,
-            repricingCount,
-            maxRepriceCount,
-            lastRepriceAt,
-            managedMessage,
-            canContinueRepricing,
-            canConcedePricing,
-            continueActionLabel,
-            ...nonManagedPreview
-        } = runtime.lastPreview;
-        runtime.lastPreview = nonManagedPreview;
-    }
-
-    runtime.lastPreview = {
-        ...runtime.lastPreview,
-        ...update,
-    };
-
-    const brokerStatus = String(runtime.lastPreview.status || '').trim();
-    const statusMessage = String(runtime.lastPreview.statusMessage || '').trim();
-    const executionMode = String(runtime.lastPreview.executionMode || '').trim();
-
-    if (_isSoftTerminalBrokerStatus(brokerStatus)
-        && !_isManagedTerminalConfirmation(runtime.lastPreview)) {
-        runtime.lastError = statusMessage || `TWS returned ${brokerStatus}.`;
-        runtime.status = 'error';
-    } else {
-        runtime.lastError = '';
-        if (executionMode === 'test_submit') {
-            runtime.status = 'test_submitted';
-        } else if (executionMode === 'submit') {
-            runtime.status = 'submitted';
-        }
-    }
-
-    if (String(runtime.lastPreview.status || '').trim() === 'Filled'
-        && String(runtime.lastPreview.executionMode || '').trim() === 'submit') {
-        if (runtimeKind !== 'closeExecution') {
-            _maybePromoteFilledTrialGroupToActive(group, runtime);
-        }
-    }
-
-    renderGroups();
-    updateDerivedValues();
-    return true;
+    return testApi.applyComboOrderStatusUpdate(data);
 }
 
 function _applyComboOrderResumeResult(data) {
-    const group = _findGroupById(data.groupId);
-    if (!group) return true;
-
-    const orderStatus = data.orderStatus || {};
-    const { runtime } = _resolveExecutionRuntime(group, orderStatus);
-    if (!runtime) return true;
-
-    runtime.pendingRequest = false;
-    runtime.lastError = '';
-    if (!runtime.lastPreview || typeof runtime.lastPreview !== 'object') {
-        runtime.lastPreview = {};
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.applyComboOrderResumeResult !== 'function') {
+        return false;
     }
-    runtime.lastPreview = {
-        ...runtime.lastPreview,
-        ...orderStatus,
-    };
-    runtime.status = 'submitted';
-    renderGroups();
-    updateDerivedValues();
-    return true;
+    return testApi.applyComboOrderResumeResult(data);
 }
 
 function _applyComboOrderConcedeResult(data) {
-    const group = _findGroupById(data.groupId);
-    if (!group) return true;
-
-    const orderStatus = data.orderStatus || {};
-    const { runtime } = _resolveExecutionRuntime(group, orderStatus);
-    if (!runtime) return true;
-
-    runtime.pendingRequest = false;
-    runtime.lastError = '';
-    if (!runtime.lastPreview || typeof runtime.lastPreview !== 'object') {
-        runtime.lastPreview = {};
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.applyComboOrderConcedeResult !== 'function') {
+        return false;
     }
-    runtime.lastPreview = {
-        ...runtime.lastPreview,
-        ...orderStatus,
-    };
-    runtime.status = 'submitted';
-    renderGroups();
-    updateDerivedValues();
-    return true;
+    return testApi.applyComboOrderConcedeResult(data);
 }
 
 function _applyComboOrderCancelResult(data) {
-    const group = _findGroupById(data.groupId);
-    if (!group) return true;
-
-    const orderStatus = data.orderStatus || {};
-    const { runtime } = _resolveExecutionRuntime(group, orderStatus);
-    if (!runtime) return true;
-
-    runtime.pendingRequest = false;
-    runtime.lastError = '';
-    if (!runtime.lastPreview || typeof runtime.lastPreview !== 'object') {
-        runtime.lastPreview = {};
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.applyComboOrderCancelResult !== 'function') {
+        return false;
     }
-    runtime.lastPreview = {
-        ...runtime.lastPreview,
-        ...orderStatus,
-    };
-    runtime.status = 'pending_cancel';
-    renderGroups();
-    updateDerivedValues();
-    return true;
+    return testApi.applyComboOrderCancelResult(data);
 }
 
 function _applyComboOrderFillCostUpdate(data) {
-    const group = _findGroupById(data.groupId);
-    if (!group) return true;
-
-    const orderFill = data.orderFill || {};
-    const { runtime, runtimeKind } = _resolveExecutionRuntime(group, orderFill);
-    const legs = Array.isArray(orderFill.legs) ? orderFill.legs : [];
-    if (legs.length === 0) {
-        return true;
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.applyComboOrderFillCostUpdate !== 'function') {
+        return false;
     }
-
-    let stateChanged = false;
-    legs.forEach(fillLeg => {
-        const leg = (group.legs || []).find(item => item.id === fillLeg.id);
-        if (!leg) {
-            return;
-        }
-
-        const nextCost = Math.abs(parseFloat(fillLeg.avgFillPrice));
-        if (!Number.isFinite(nextCost) || nextCost <= 0) {
-            return;
-        }
-
-        if (runtimeKind === 'closeExecution') {
-            if (Math.abs((parseFloat(leg.closePrice) || 0) - nextCost) <= 0.0001
-                && leg.closePriceSource === 'execution_report') {
-                return;
-            }
-
-            leg.closePrice = nextCost;
-            leg.closePriceSource = 'execution_report';
-            leg.closeExecutionOrderId = orderFill.orderId || null;
-            leg.closeExecutionPermId = orderFill.permId || null;
-        } else {
-            if (Math.abs((parseFloat(leg.cost) || 0) - nextCost) <= 0.0001
-                && leg.costSource === 'execution_report') {
-                return;
-            }
-
-            leg.cost = nextCost;
-            leg.costSource = 'execution_report';
-            leg.executionReportedCost = true;
-            leg.executionReportOrderId = orderFill.orderId || null;
-            leg.executionReportPermId = orderFill.permId || null;
-        }
-        stateChanged = true;
-
-        const row = document.querySelector(`tr[data-id="${leg.id}"]`);
-        if (row) {
-            const targetInput = runtimeKind === 'closeExecution'
-                ? row.querySelector('.close-price-input')
-                : row.querySelector('.cost-input');
-            if (targetInput) {
-                targetInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, nextCost);
-                flashElement(targetInput);
-            }
-        }
-    });
-
-    if (!stateChanged) {
-        return true;
-    }
-
-    if (runtime && (!runtime.lastPreview || typeof runtime.lastPreview !== 'object')) {
-        runtime.lastPreview = {};
-    }
-    if (runtime && runtime.lastPreview) {
-        if (runtimeKind === 'closeExecution') {
-            runtime.lastPreview.closePriceSource = 'execution_report';
-        } else {
-            runtime.lastPreview.costSource = 'execution_report';
-        }
-    }
-
-    if (runtimeKind !== 'closeExecution') {
-        _maybePromoteFilledTrialGroupToActive(group, runtime);
-    }
-
-    renderGroups();
-    return true;
+    return testApi.applyComboOrderFillCostUpdate(data);
 }
 
 function _applyComboOrderError(data) {
-    const group = _findGroupById(data.groupId);
-    if (!group) return true;
-
-    const { runtimeKind } = _resolveExecutionRuntime(group, data);
-    _markExecutionError(group, data.message || 'Combo order request failed.', runtimeKind);
-    renderGroups();
-    return true;
+    const transportApi = _getComboOrderTransportApi();
+    const testApi = transportApi && transportApi._test;
+    if (!testApi || typeof testApi.applyComboOrderError !== 'function') {
+        return false;
+    }
+    return testApi.applyComboOrderError(data);
 }
 
 function _applyHedgeOrderValidationResult(data) {
@@ -3265,43 +2703,11 @@ function _handleHedgeOrderMessage(data) {
 }
 
 function _handleComboOrderMessage(data) {
-    if (!data || typeof data !== 'object' || !data.action) {
+    const transportApi = _getComboOrderTransportApi();
+    if (!transportApi || typeof transportApi.handleMessage !== 'function') {
         return false;
     }
-
-    if (data.action === 'combo_order_validation_result') {
-        return _applyComboOrderValidationResult(data);
-    }
-
-    if (data.action === 'combo_order_preview_result' || data.action === 'combo_order_submit_result') {
-        return _applyComboOrderResult(data);
-    }
-
-    if (data.action === 'combo_order_status_update') {
-        return _applyComboOrderStatusUpdate(data);
-    }
-
-    if (data.action === 'combo_order_resume_result') {
-        return _applyComboOrderResumeResult(data);
-    }
-
-    if (data.action === 'combo_order_concede_result') {
-        return _applyComboOrderConcedeResult(data);
-    }
-
-    if (data.action === 'combo_order_cancel_result') {
-        return _applyComboOrderCancelResult(data);
-    }
-
-    if (data.action === 'combo_order_fill_cost_update') {
-        return _applyComboOrderFillCostUpdate(data);
-    }
-
-    if (data.action === 'combo_order_error') {
-        return _applyComboOrderError(data);
-    }
-
-    return false;
+    return transportApi.handleMessage(data);
 }
 
 function _handlePortfolioAvgCostMessage(data) {
@@ -3342,13 +2748,17 @@ function _applyManagedAccountsUpdate(data) {
     state.selectedLiveComboOrderAccount = nextSelection;
 
     if (accountsChanged || selectionChanged || connectedChanged) {
-        if (typeof OptionComboControlPanelUI !== 'undefined'
-            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
-            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        const controlPanelUi = _getControlPanelUiApi();
+        if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
+            _runUiRefreshSafely('boundDynamicControls', () => {
+                controlPanelUi.refreshBoundDynamicControls();
+            });
         }
-        if (typeof OptionComboDeltaHedgeUI !== 'undefined'
-            && typeof OptionComboDeltaHedgeUI.refreshDeltaHedgePanel === 'function') {
-            OptionComboDeltaHedgeUI.refreshDeltaHedgePanel(state);
+        const deltaHedgeUi = _getDeltaHedgeUiApi();
+        if (deltaHedgeUi && typeof deltaHedgeUi.refreshDeltaHedgePanel === 'function') {
+            _runUiRefreshSafely('deltaHedgePanel', () => {
+                deltaHedgeUi.refreshDeltaHedgePanel(state);
+            });
         }
     }
 
@@ -3364,9 +2774,7 @@ function _handleManagedAccountsMessage(data) {
 }
 
 function evaluateTrialTradeTriggers() {
-    const evaluator = typeof OptionComboTradeTriggerLogic !== 'undefined'
-        ? OptionComboTradeTriggerLogic
-        : null;
+    const evaluator = _getTradeTriggerLogicApi();
     if (!evaluator || typeof evaluator.shouldFireTradeTrigger !== 'function') {
         return;
     }
@@ -3383,9 +2791,7 @@ function evaluateTrialTradeTriggers() {
 }
 
 function evaluateTriggeredOrderExitConditions() {
-    const evaluator = typeof OptionComboTradeTriggerLogic !== 'undefined'
-        ? OptionComboTradeTriggerLogic
-        : null;
+    const evaluator = _getTradeTriggerLogicApi();
     if (!evaluator || typeof evaluator.shouldCancelTriggeredOrder !== 'function') {
         return;
     }
@@ -3527,9 +2933,11 @@ function _applyHistoricalReplayMetadata(data) {
                 stateChanged = true;
             }
         }
-        if (typeof OptionComboControlPanelUI !== 'undefined'
-            && typeof OptionComboControlPanelUI.refreshBoundDynamicControls === 'function') {
-            OptionComboControlPanelUI.refreshBoundDynamicControls();
+        const controlPanelUi = _getControlPanelUiApi();
+        if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
+            _runUiRefreshSafely('boundDynamicControls', () => {
+                controlPanelUi.refreshBoundDynamicControls();
+            });
         }
     }
 
@@ -3978,9 +3386,10 @@ function processLiveMarketData(data) {
                     if (row && ivChanged) {
                         const ivInput = row.querySelector('.iv-input');
                         if (ivInput && document.activeElement !== ivInput) {
-                            const ivDisplay = typeof OptionComboPricingCore !== 'undefined'
-                                && typeof OptionComboPricingCore.describeLegIvInput === 'function'
-                                ? OptionComboPricingCore.describeLegIvInput(leg)
+                            const pricingCore = _getPricingCoreApi();
+                            const ivDisplay = pricingCore
+                                && typeof pricingCore.describeLegIvInput === 'function'
+                                ? pricingCore.describeLegIvInput(leg)
                                 : {
                                     value: `${(liveIV * 100).toFixed(4)}%`,
                                     title: 'Live IV from TWS',
@@ -4001,9 +3410,10 @@ function processLiveMarketData(data) {
                     if (row) {
                         const ivInput = row.querySelector('.iv-input');
                         if (ivInput && document.activeElement !== ivInput) {
-                            const ivDisplay = typeof OptionComboPricingCore !== 'undefined'
-                                && typeof OptionComboPricingCore.describeLegIvInput === 'function'
-                                ? OptionComboPricingCore.describeLegIvInput(leg)
+                            const pricingCore = _getPricingCoreApi();
+                            const ivDisplay = pricingCore
+                                && typeof pricingCore.describeLegIvInput === 'function'
+                                ? pricingCore.describeLegIvInput(leg)
                                 : {
                                     value: 'N/A',
                                     title: 'Live IV is unavailable from TWS for this contract.',
@@ -4049,9 +3459,10 @@ function processLiveMarketData(data) {
     }
 
     if (hasUnderlyingPrice) {
-        const usesFuturesPool = typeof OptionComboProductRegistry !== 'undefined'
-            && typeof OptionComboProductRegistry.usesFuturesPool === 'function'
-            && OptionComboProductRegistry.usesFuturesPool(state.underlyingSymbol);
+        const registry = _getProductRegistryApi();
+        const usesFuturesPool = registry
+            && typeof registry.usesFuturesPool === 'function'
+            && registry.usesFuturesPool(state.underlyingSymbol);
         state.groups.forEach(group => {
             if (!group.liveData) {
                 return;

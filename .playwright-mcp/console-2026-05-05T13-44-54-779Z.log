@@ -1,0 +1,185 @@
+[     202ms] [LOG] iframe loaded: http://127.0.0.1:8000/index.html @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     207ms] [LOG] WebSocket Connected to IB Gateway Backend at ws://127.0.0.1:8765 @ http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:819
+[     207ms] [LOG] handleLiveSubscriptions: start @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     207ms] [LOG] handleLiveSubscriptions: ok @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     211ms] [LOG] fetch: status=200, length=5613 @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     211ms] [LOG] first-char-code: 123 @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     211ms] [LOG] normalizeImportedState: start @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     212ms] [LOG] normalizeImportedState: ok @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     212ms] [LOG] applyImportedState: start @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     213ms] [LOG] applyImportedState: ok @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     213ms] [LOG] syncControlPanel: start @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     214ms] [LOG] syncControlPanel: ok @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     214ms] [LOG] renderGroups: start @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     217ms] [LOG] renderGroups: error -> ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at reader.onload (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:1042:17) @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     218ms] [LOG] console.error: JSON Import Error: | ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at reader.onload (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:1042:17) @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     218ms] [ERROR] JSON Import Error: ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at reader.onload (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:1042:17) @ http://127.0.0.1:8000/logs/debug_import_runner.html:57
+[     218ms] [LOG] alert: Error parsing JSON file or loading state. Check the console for details. @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     218ms] [LOG] processImportedFile: returned @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     218ms] [LOG] state: symbol=SPY, groups=1, selectedAccount=U17775528 @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     474ms] [LOG] renderGroups: start @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     476ms] [LOG] renderGroups: error -> ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     476ms] [LOG] console.error: Error parsing WS message: | ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[     476ms] [ERROR] Error parsing WS message: ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:57
+[   26881ms] [LOG] renderGroups: start @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[   26882ms] [LOG] renderGroups: error -> ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[   26882ms] [LOG] console.error: Error parsing WS message: | ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[   26882ms] [ERROR] Error parsing WS message: ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:57
+[   26900ms] [LOG] renderGroups: start @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[   26900ms] [LOG] renderGroups: error -> ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[   26901ms] [LOG] console.error: Error parsing WS message: | ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[   26901ms] [ERROR] Error parsing WS message: ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:57
+[   26901ms] [LOG] renderGroups: start @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[   26901ms] [LOG] renderGroups: error -> ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[   26902ms] [LOG] console.error: Error parsing WS message: | ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:23
+[   26902ms] [ERROR] Error parsing WS message: ReferenceError: pricingCore is not defined
+    at bindLegRow (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:1198:31)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:735:13
+    at Array.forEach (<anonymous>)
+    at bindGroupLegs (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:730:20)
+    at http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:503:13
+    at Array.forEach (<anonymous>)
+    at Object.renderGroups (http://127.0.0.1:8000/js/group_editor_ui.js?v=20260322-phase4:492:22)
+    at renderGroups (http://127.0.0.1:8000/js/app.js?v=20260322-phase4:357:30)
+    at wrappedMethod (http://127.0.0.1:8000/logs/debug_import_runner.html:36:37)
+    at _applyPortfolioAvgCostUpdate (http://127.0.0.1:8000/js/ws_client.js?v=20260322-riskfree:1921:13) @ http://127.0.0.1:8000/logs/debug_import_runner.html:57

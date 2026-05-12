@@ -5,9 +5,34 @@
 (function attachGroupOrderBuilder(globalScope) {
     const VALID_EXECUTION_INTENTS = ['open', 'close'];
 
+    /**
+     * @typedef {Object} OptionComboGroupOrderLegRequest
+     * @property {string} id
+     * @property {string} type
+     * @property {number} pos
+     * @property {string} secType
+     * @property {string} symbol
+     */
+
+    /**
+     * @typedef {Object} OptionComboGroupOrderRequestPayload
+     * @property {string} action
+     * @property {string} groupId
+     * @property {string} executionMode
+     * @property {string} executionIntent
+     * @property {string} requestSource
+     * @property {OptionComboGroupOrderLegRequest[]} legs
+     */
+
+    function _getProductRegistryApi() {
+        return globalScope.OptionComboProductRegistry && typeof globalScope.OptionComboProductRegistry === 'object'
+            ? globalScope.OptionComboProductRegistry
+            : null;
+    }
+
     function _resolveUnderlyingProfile(globalState) {
-        if (typeof OptionComboProductRegistry === 'undefined'
-            || typeof OptionComboProductRegistry.resolveUnderlyingProfile !== 'function') {
+        const productRegistry = _getProductRegistryApi();
+        if (!productRegistry || typeof productRegistry.resolveUnderlyingProfile !== 'function') {
             return {
                 family: 'DEFAULT_EQUITY',
                 optionSecType: 'OPT',
@@ -21,11 +46,16 @@
             };
         }
 
-        return OptionComboProductRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol);
+        return productRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol);
     }
 
     function _isUnderlyingLeg(leg) {
-        return OptionComboProductRegistry.isUnderlyingLeg(leg);
+        const productRegistry = _getProductRegistryApi();
+        if (productRegistry && typeof productRegistry.isUnderlyingLeg === 'function') {
+            return productRegistry.isUnderlyingLeg(leg);
+        }
+        const legType = String(leg && leg.type || '').trim().toLowerCase();
+        return legType === 'stock' || legType === 'future';
     }
 
     function _resolveDefaultUnderlyingContractMonth(globalState) {
@@ -33,12 +63,12 @@
             return globalState.underlyingContractMonth;
         }
 
-        if (typeof OptionComboProductRegistry === 'undefined'
-            || typeof OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth !== 'function') {
+        const productRegistry = _getProductRegistryApi();
+        if (!productRegistry || typeof productRegistry.resolveDefaultUnderlyingContractMonth !== 'function') {
             return '';
         }
 
-        return OptionComboProductRegistry.resolveDefaultUnderlyingContractMonth(
+        return productRegistry.resolveDefaultUnderlyingContractMonth(
             globalState.underlyingSymbol,
             globalState.simulatedDate || globalState.baseDate
         );
@@ -82,14 +112,15 @@
         const profile = _resolveUnderlyingProfile(globalState);
         const defaultUnderlyingContractMonth = _resolveDefaultUnderlyingContractMonth(globalState);
         const intent = _resolveExecutionIntent(options && options.intent);
+        const productRegistry = _getProductRegistryApi();
 
         return (group.legs || [])
             .filter((leg) => _shouldIncludeLegForIntent(leg, intent))
             .map((leg) => {
                 const targetPos = _resolveTargetPosition(leg.pos, intent);
-                const optionContractSpec = typeof OptionComboProductRegistry !== 'undefined'
-                    && typeof OptionComboProductRegistry.resolveOptionContractSpec === 'function'
-                    ? OptionComboProductRegistry.resolveOptionContractSpec(globalState.underlyingSymbol, leg.expDate)
+                const optionContractSpec = productRegistry
+                    && typeof productRegistry.resolveOptionContractSpec === 'function'
+                    ? productRegistry.resolveOptionContractSpec(globalState.underlyingSymbol, leg.expDate)
                     : null;
 
                 if (_isUnderlyingLeg(leg)) {
@@ -134,6 +165,7 @@
             });
     }
 
+    /** @returns {OptionComboGroupOrderRequestPayload} */
     function buildGroupOrderRequestPayload(group, globalState, options) {
         const requestOptions = options && typeof options === 'object' ? options : {};
         const intent = _resolveExecutionIntent(requestOptions.intent);

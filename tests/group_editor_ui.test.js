@@ -633,5 +633,18 @@ module.exports = {
                 assert.equal(cancelCalls, 1);
             },
         },
+        {
+            name: 'describes option-leg iv input without requiring pricing core globals',
+            run() {
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js']);
+
+                const display = ctx.OptionComboGroupEditorUI._test.describeLegIvInput({
+                    iv: 0.14670187233332188,
+                });
+
+                assert.equal(display.value, '14.6702%');
+                assert.equal(display.title, 'Manual IV');
+            },
+        },
     ],
 };

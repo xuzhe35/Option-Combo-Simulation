@@ -473,6 +473,63 @@ module.exports = {
             },
         },
         {
+            name: 'tolerates managed-account panel refresh failures while keeping account state',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    liveComboOrderAccounts: [],
+                    liveComboOrderAccountsConnected: false,
+                    selectedLiveComboOrderAccount: '',
+                    groups: [],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        OptionComboControlPanelUI: {
+                            refreshBoundDynamicControls() {
+                                throw new Error('account refresh exploded');
+                            },
+                        },
+                        OptionComboDeltaHedgeUI: {
+                            refreshDeltaHedgePanel() {
+                                throw new Error('delta hedge panel exploded');
+                            },
+                        },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                assert.doesNotThrow(() => {
+                    ctx._handleManagedAccountsMessage({
+                        action: 'managed_accounts_update',
+                        ibConnected: true,
+                        accounts: ['DU12345'],
+                    });
+                });
+
+                assert.deepEqual(state.liveComboOrderAccounts, ['DU12345']);
+                assert.equal(state.liveComboOrderAccountsConnected, true);
+                assert.equal(state.selectedLiveComboOrderAccount, 'DU12345');
+            },
+        },
+        {
             name: 'builds historical replay snapshot requests for selected SPY option legs',
             run() {
                 const state = {

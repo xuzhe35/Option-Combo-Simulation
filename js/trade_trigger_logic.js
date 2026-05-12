@@ -22,6 +22,18 @@
         'error',
     ];
 
+    function _getSessionLogicApi() {
+        return globalScope.OptionComboSessionLogic && typeof globalScope.OptionComboSessionLogic === 'object'
+            ? globalScope.OptionComboSessionLogic
+            : null;
+    }
+
+    function _getGroupOrderBuilderApi() {
+        return globalScope.OptionComboGroupOrderBuilder && typeof globalScope.OptionComboGroupOrderBuilder === 'object'
+            ? globalScope.OptionComboGroupOrderBuilder
+            : null;
+    }
+
     function createDefaultTradeTrigger() {
         return {
             enabled: false,
@@ -102,9 +114,9 @@
     }
 
     function getRenderableGroupViewMode(group) {
-        if (typeof OptionComboSessionLogic !== 'undefined'
-            && typeof OptionComboSessionLogic.getRenderableGroupViewMode === 'function') {
-            return OptionComboSessionLogic.getRenderableGroupViewMode(group);
+        const sessionLogic = _getSessionLogicApi();
+        if (sessionLogic && typeof sessionLogic.getRenderableGroupViewMode === 'function') {
+            return sessionLogic.getRenderableGroupViewMode(group);
         }
 
         return (group && group.viewMode) || 'active';
@@ -183,9 +195,9 @@
     }
 
     function buildComboOrderLegRequests(group, globalState) {
-        if (typeof OptionComboGroupOrderBuilder !== 'undefined'
-            && typeof OptionComboGroupOrderBuilder.buildGroupOrderLegRequests === 'function') {
-            return OptionComboGroupOrderBuilder.buildGroupOrderLegRequests(group, globalState, { intent: 'open' });
+        const groupOrderBuilder = _getGroupOrderBuilderApi();
+        if (groupOrderBuilder && typeof groupOrderBuilder.buildGroupOrderLegRequests === 'function') {
+            return groupOrderBuilder.buildGroupOrderLegRequests(group, globalState, { intent: 'open' });
         }
 
         return [];
@@ -194,9 +206,9 @@
     function buildComboOrderRequestPayload(group, globalState, executionModeOverride) {
         const trigger = normalizeTradeTrigger(group && group.tradeTrigger);
         const executionMode = executionModeOverride || trigger.executionMode || 'preview';
-        if (typeof OptionComboGroupOrderBuilder !== 'undefined'
-            && typeof OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload === 'function') {
-            return OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(group, globalState, {
+        const groupOrderBuilder = _getGroupOrderBuilderApi();
+        if (groupOrderBuilder && typeof groupOrderBuilder.buildGroupOrderRequestPayload === 'function') {
+            return groupOrderBuilder.buildGroupOrderRequestPayload(group, globalState, {
                 action: executionMode === 'preview' ? 'preview_combo_order' : 'submit_combo_order',
                 executionMode,
                 intent: 'open',

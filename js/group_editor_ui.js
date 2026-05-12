@@ -3,8 +3,29 @@
  */
 
 (function attachGroupEditorUI(globalScope) {
-    const productRegistry = globalScope.OptionComboProductRegistry;
-    const pricingCore = globalScope.OptionComboPricingCore;
+    function _getProductRegistryApi() {
+        return globalScope.OptionComboProductRegistry && typeof globalScope.OptionComboProductRegistry === 'object'
+            ? globalScope.OptionComboProductRegistry
+            : null;
+    }
+
+    function _getPricingCoreApi() {
+        return globalScope.OptionComboPricingCore && typeof globalScope.OptionComboPricingCore === 'object'
+            ? globalScope.OptionComboPricingCore
+            : null;
+    }
+
+    function _getSessionLogicApi() {
+        return globalScope.OptionComboSessionLogic && typeof globalScope.OptionComboSessionLogic === 'object'
+            ? globalScope.OptionComboSessionLogic
+            : null;
+    }
+
+    function _getTradeTriggerLogicApi() {
+        return globalScope.OptionComboTradeTriggerLogic && typeof globalScope.OptionComboTradeTriggerLogic === 'object'
+            ? globalScope.OptionComboTradeTriggerLogic
+            : null;
+    }
 
     function parseIvPercentInput(rawValue) {
         const normalized = String(rawValue || '')
@@ -14,33 +35,54 @@
     }
 
     function isUnderlyingLeg(leg) {
-        return productRegistry.isUnderlyingLeg(leg);
+        const productRegistry = _getProductRegistryApi();
+        if (productRegistry && typeof productRegistry.isUnderlyingLeg === 'function') {
+            return productRegistry.isUnderlyingLeg(leg);
+        }
+        return ['stock', 'future'].includes(String(leg && leg.type || '').toLowerCase());
     }
 
     function getUnderlyingLegLabel(symbol) {
+        const productRegistry = _getProductRegistryApi();
         return productRegistry && typeof productRegistry.getUnderlyingLegLabel === 'function'
             ? productRegistry.getUnderlyingLegLabel(symbol)
             : 'Underlying';
     }
 
     function getPricingInputMode(symbol) {
+        const productRegistry = _getProductRegistryApi();
         return productRegistry && typeof productRegistry.resolvePricingInputMode === 'function'
             ? productRegistry.resolvePricingInputMode(symbol)
             : 'STK';
     }
 
     function getPriceInputStep(symbol) {
+        const productRegistry = _getProductRegistryApi();
         return productRegistry && typeof productRegistry.getPriceInputStep === 'function'
             ? productRegistry.getPriceInputStep(symbol)
             : '0.01';
     }
 
     function formatPriceInputValue(symbol, value) {
+        const productRegistry = _getProductRegistryApi();
         if (productRegistry && typeof productRegistry.formatPriceInputValue === 'function') {
             return productRegistry.formatPriceInputValue(symbol, value);
         }
         const parsed = parseFloat(value);
         return Number.isFinite(parsed) ? parsed.toFixed(2) : '';
+    }
+
+    function _describeLegIvInput(leg) {
+        const pricingCore = _getPricingCoreApi();
+        if (pricingCore && typeof pricingCore.describeLegIvInput === 'function') {
+            return pricingCore.describeLegIvInput(leg);
+        }
+
+        const iv = Math.max(parseFloat(leg && leg.iv) || 0, 0);
+        return {
+            value: `${(iv * 100).toFixed(4)}%`,
+            title: 'Manual IV',
+        };
     }
 
     function formatRepriceThresholdValue(value) {
@@ -82,14 +124,32 @@
     }
 
     function _ensureTradeTrigger(group) {
-        return OptionComboTradeTriggerLogic.ensureGroupTradeTrigger(group);
+        const tradeTriggerLogic = _getTradeTriggerLogicApi();
+        if (tradeTriggerLogic && typeof tradeTriggerLogic.ensureGroupTradeTrigger === 'function') {
+            return tradeTriggerLogic.ensureGroupTradeTrigger(group);
+        }
+        if (!group || typeof group !== 'object') {
+            return null;
+        }
+        if (!group.tradeTrigger || typeof group.tradeTrigger !== 'object') {
+            group.tradeTrigger = {
+                enabled: false,
+                pendingRequest: false,
+                status: 'idle',
+            };
+        }
+        return group.tradeTrigger;
     }
 
     function _ensurePortfolioAvgCostSync(group) {
         if (!group || typeof group !== 'object') {
             return false;
         }
-        group.syncAvgCostFromPortfolio = OptionComboSessionLogic.normalizePortfolioAvgCostSync(group);
+        const sessionLogic = _getSessionLogicApi();
+        group.syncAvgCostFromPortfolio = sessionLogic
+            && typeof sessionLogic.normalizePortfolioAvgCostSync === 'function'
+            ? sessionLogic.normalizePortfolioAvgCostSync(group)
+            : group.syncAvgCostFromPortfolio === true;
         return group.syncAvgCostFromPortfolio;
     }
 
@@ -97,9 +157,9 @@
         if (!group || typeof group !== 'object') {
             return 'midpoint';
         }
-        if (typeof OptionComboSessionLogic !== 'undefined'
-            && typeof OptionComboSessionLogic.normalizeGroupLivePriceMode === 'function') {
-            group.livePriceMode = OptionComboSessionLogic.normalizeGroupLivePriceMode(group.livePriceMode);
+        const sessionLogic = _getSessionLogicApi();
+        if (sessionLogic && typeof sessionLogic.normalizeGroupLivePriceMode === 'function') {
+            group.livePriceMode = sessionLogic.normalizeGroupLivePriceMode(group.livePriceMode);
         } else {
             group.livePriceMode = String(group.livePriceMode || '').trim().toLowerCase() === 'mark'
                 ? 'mark'
@@ -112,7 +172,11 @@
         if (!group || typeof group !== 'object') {
             return null;
         }
-        group.closeExecution = OptionComboSessionLogic.normalizeCloseExecution(group.closeExecution);
+        const sessionLogic = _getSessionLogicApi();
+        group.closeExecution = sessionLogic
+            && typeof sessionLogic.normalizeCloseExecution === 'function'
+            ? sessionLogic.normalizeCloseExecution(group.closeExecution)
+            : group.closeExecution || null;
         return group.closeExecution;
     }
 
@@ -120,9 +184,9 @@
         if (!group || typeof group !== 'object') {
             return true;
         }
-        if (typeof OptionComboSessionLogic !== 'undefined'
-            && typeof OptionComboSessionLogic.normalizeHistoricalAutoCloseAtExpiry === 'function') {
-            group.historicalAutoCloseAtExpiry = OptionComboSessionLogic.normalizeHistoricalAutoCloseAtExpiry(
+        const sessionLogic = _getSessionLogicApi();
+        if (sessionLogic && typeof sessionLogic.normalizeHistoricalAutoCloseAtExpiry === 'function') {
+            group.historicalAutoCloseAtExpiry = sessionLogic.normalizeHistoricalAutoCloseAtExpiry(
                 group.historicalAutoCloseAtExpiry
             );
         } else {
@@ -142,6 +206,7 @@
     }
 
     function _getSettlementUnitsPerContract(state, deps) {
+        const pricingCore = _getPricingCoreApi();
         if (pricingCore && typeof pricingCore.getSettlementUnitsPerContract === 'function') {
             return pricingCore.getSettlementUnitsPerContract(
                 deps && typeof deps.getUnderlyingProfile === 'function'
@@ -167,6 +232,20 @@
             return -pos * settlementUnitsPerContract;
         }
         return 0;
+    }
+
+    function _getValidTradeTriggerThresholds() {
+        const tradeTriggerLogic = _getTradeTriggerLogicApi();
+        return tradeTriggerLogic && Array.isArray(tradeTriggerLogic.VALID_REPRICE_THRESHOLDS)
+            ? tradeTriggerLogic.VALID_REPRICE_THRESHOLDS
+            : [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05];
+    }
+
+    function _getValidTradeTriggerTifs() {
+        const tradeTriggerLogic = _getTradeTriggerLogicApi();
+        return tradeTriggerLogic && Array.isArray(tradeTriggerLogic.VALID_TIME_IN_FORCE)
+            ? tradeTriggerLogic.VALID_TIME_IN_FORCE
+            : ['DAY', 'GTC'];
     }
 
     function _resolveAssignmentActionLabel(leg) {
@@ -785,10 +864,7 @@
 
         repriceThresholdInput.addEventListener('change', (e) => {
             const parsed = parseFloat(e.target.value);
-            const validThresholds = (typeof OptionComboTradeTriggerLogic !== 'undefined'
-                && Array.isArray(OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS))
-                ? OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS
-                : [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05];
+            const validThresholds = _getValidTradeTriggerThresholds();
             trigger.repriceThreshold = validThresholds.some(value => Math.abs(value - parsed) < 0.0001)
                 ? parsed
                 : 0.01;
@@ -806,10 +882,7 @@
 
         timeInForceInput.addEventListener('change', (e) => {
             const nextTif = String(e.target.value || '').trim().toUpperCase();
-            const validTifs = (typeof OptionComboTradeTriggerLogic !== 'undefined'
-                && Array.isArray(OptionComboTradeTriggerLogic.VALID_TIME_IN_FORCE))
-                ? OptionComboTradeTriggerLogic.VALID_TIME_IN_FORCE
-                : ['DAY', 'GTC'];
+            const validTifs = _getValidTradeTriggerTifs();
             trigger.timeInForce = validTifs.includes(nextTif) ? nextTif : 'DAY';
             e.target.value = trigger.timeInForce;
         });
@@ -957,10 +1030,7 @@
 
         thresholdInput.addEventListener('change', (e) => {
             const parsed = parseFloat(e.target.value);
-            const validThresholds = (typeof OptionComboTradeTriggerLogic !== 'undefined'
-                && Array.isArray(OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS))
-                ? OptionComboTradeTriggerLogic.VALID_REPRICE_THRESHOLDS
-                : [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05];
+            const validThresholds = _getValidTradeTriggerThresholds();
             closeExecution.repriceThreshold = validThresholds.some(value => Math.abs(value - parsed) < 0.0001)
                 ? parsed
                 : 0.01;
@@ -978,10 +1048,7 @@
 
         timeInForceInput.addEventListener('change', (e) => {
             const nextTif = String(e.target.value || '').trim().toUpperCase();
-            const validTifs = (typeof OptionComboTradeTriggerLogic !== 'undefined'
-                && Array.isArray(OptionComboTradeTriggerLogic.VALID_TIME_IN_FORCE))
-                ? OptionComboTradeTriggerLogic.VALID_TIME_IN_FORCE
-                : ['DAY', 'GTC'];
+            const validTifs = _getValidTradeTriggerTifs();
             closeExecution.timeInForce = validTifs.includes(nextTif) ? nextTif : 'DAY';
             e.target.value = closeExecution.timeInForce;
         });
@@ -1141,12 +1208,7 @@
                 deps.updateDerivedValues();
             });
 
-            const ivDisplay = pricingCore && typeof pricingCore.describeLegIvInput === 'function'
-                ? pricingCore.describeLegIvInput(leg)
-                : {
-                    value: `${(leg.iv * 100).toFixed(4)}%`,
-                    title: 'Manual IV',
-                };
+            const ivDisplay = _describeLegIvInput(leg);
             ivInput.value = ivDisplay.value;
             ivInput.title = ivDisplay.title;
             ivInput.addEventListener('focus', (e) => {
@@ -1168,9 +1230,7 @@
             ivInput.addEventListener('change', (e) => {
                 const parsed = parseIvPercentInput(e.target.value);
                 if (!Number.isFinite(parsed)) {
-                    const resetDisplay = pricingCore && typeof pricingCore.describeLegIvInput === 'function'
-                        ? pricingCore.describeLegIvInput(leg)
-                        : { value: `${(leg.iv * 100).toFixed(4)}%`, title: 'Manual IV' };
+                    const resetDisplay = _describeLegIvInput(leg);
                     e.target.value = resetDisplay.value;
                     e.target.title = resetDisplay.title;
                     return;
@@ -1179,9 +1239,7 @@
                 leg.iv = Math.max(parsed / 100.0, 0.001);
                 leg.ivSource = 'manual';
                 leg.ivManualOverride = true;
-                const nextDisplay = pricingCore && typeof pricingCore.describeLegIvInput === 'function'
-                    ? pricingCore.describeLegIvInput(leg)
-                    : { value: `${(leg.iv * 100).toFixed(4)}%`, title: 'Manual IV' };
+                const nextDisplay = _describeLegIvInput(leg);
                 e.target.value = nextDisplay.value;
                 e.target.title = nextDisplay.title;
                 deps.updateDerivedValues();
@@ -1369,6 +1427,9 @@
         applyOptionAssignmentConversion,
         bindTrialTriggerControls,
         bindCloseGroupControls,
+        _test: {
+            describeLegIvInput: _describeLegIvInput,
+        },
     };
     globalScope.toggleGroupCollapse = toggleGroupCollapse;
 })(typeof globalThis !== 'undefined' ? globalThis : window);

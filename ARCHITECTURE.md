@@ -83,8 +83,8 @@ Current `index.html` load order:
 4. `js/product_registry.js`
 5. `js/index_forward_rate.js`
 6. `js/pricing_context.js`
-7. `js/group_order_builder.js`
-8. `js/trade_trigger_logic.js`
+7. `js/trade_trigger_logic.js`
+8. `js/group_order_builder.js`
 9. `js/delta_hedge_logic.js`
 10. `js/distribution_proxy_config.js`
 11. `js/pricing_core.js`
@@ -102,13 +102,21 @@ Current `index.html` load order:
 23. `js/hedge_ui.js`
 24. `js/group_ui.js`
 25. `js/global_ui.js`
-26. `js/delta_hedge_ui.js`
-27. `js/app.js`
-28. `js/ws_client.js`
+26. `js/page_capabilities.js`
+27. `js/combo_order_transport.js`
+28. `js/delta_hedge_transport.js`
+29. `js/delta_hedge_ui.js`
+30. `js/app.js`
+31. `js/ws_client.js`
 
-`chart_lab.html` uses the same order, then adds:
+`chart_lab.html` keeps the same shared shell ordering where relevant, but intentionally omits the Delta Hedge modules. Its tail order is:
 
-29. `js/chart_lab.js`
+1. `js/page_capabilities.js`
+2. `js/combo_order_transport.js`
+3. `js/delta_hedge_transport.js`
+4. `js/app.js`
+5. `js/ws_client.js`
+6. `js/chart_lab.js`
 
 `iv_term_structure.html` uses its own small runtime:
 
@@ -252,19 +260,27 @@ Responsibilities:
 - per-symbol historical sample documents
 - testable DOM-free JS and Python selection helpers
 
-### 4.8 State container and orchestration
+### 4.8 State container, capabilities, and transport orchestration
 
+- `js/page_capabilities.js`
 - `js/app.js`
+- `js/combo_order_transport.js`
+- `js/delta_hedge_transport.js`
+- `js/ws_client.js`
 
 Responsibilities:
 
+- page-kind capability gating for ordered global-script pages
 - owns the in-memory `state`
 - initializes UI
 - coordinates render passes
+- hosts the websocket connection lifecycle
+- delegates combo-order request/response state to `js/combo_order_transport.js`
+- delegates delta-hedge broker request/response state to `js/delta_hedge_transport.js`
 - imports and exports JSON sessions
 - exposes `window.__optionComboApp`
 
-This file is an orchestration bridge, not the main place for business logic.
+`js/app.js` and `js/ws_client.js` are orchestration bridges, not the main place for combo-order or delta-hedge transport state machines.
 
 ### 4.9 Live / shared backend stack
 
@@ -415,7 +431,34 @@ Live backend nuance:
 
 ## 7. Backend WebSocket Responsibilities
 
-`ib_server.py` handles these high-level message families:
+`ib_server.py` is now the live-backend composition layer. It owns:
+
+- process startup and shutdown
+- IB lifecycle and reconnect task wiring
+- shared callback registration
+- helper assembly for the WebSocket handler environment
+
+Supporting live-backend helper modules:
+
+- `ib_server_ws.py`
+  - WebSocket session lifecycle
+  - action dispatch and connection cleanup
+- `ib_server_order_tracking.py`
+  - combo / hedge order tracking lookup helpers
+  - order-status / error / fill payload builders
+  - IB event-consumer handler factories
+  - active hedge snapshot assembly
+- `ib_server_market_data.py`
+  - quote extraction
+  - pending-ticker fanout
+  - historical-bars request serialization
+  - market-data subscription cleanup helpers
+- `ib_server_iv_term_structure.py`
+  - IV term-structure subscription workflow
+  - expiry/strike selection bundling
+  - background sync task lifecycle
+
+`ib_server_ws.py` owns the client session lifecycle and WebSocket action dispatch for these high-level message families:
 
 - `subscribe`
   - live underlying/options/futures/stocks
@@ -431,12 +474,21 @@ Live backend nuance:
 - `request_ib_connection_status`
 - `connect_ib`
 - `subscribe_iv_term_structure`
-- combo actions routed through `ExecutionEngine`
+- combo and hedge execution actions routed through `ExecutionEngine`
   - validate
   - preview
   - test submit
   - live submit
   - resume / concede / cancel managed orders
+
+The split is intentional:
+
+- `ib_server.py` should remain the entry-point/orchestration layer
+- `ib_server_ws.py` should remain the request-routing and connection-cleanup layer
+- `ib_server_order_tracking.py` should remain the combo/hedge tracking-consumer layer
+- `ib_server_market_data.py` should remain the live quote / bars helper layer
+- `ib_server_iv_term_structure.py` should remain the IV sync helper layer
+- execution-specific action semantics should remain behind `ExecutionEngine`
 
 `historical_server.py` handles:
 
@@ -516,12 +568,12 @@ Current boundaries:
 
 ### Background / Codex launchers
 
-- `powershell_scripts/start_option_combo_codex.ps1` starts HTTP and IB services with redirected logs and pid files
+- `powershell_scripts/start_option_combo_codex.ps1` starts HTTP and IB services with redirected logs and pid files under `logs/`
 - `powershell_scripts/launch_ib_server_codex.ps1` starts only `ib_server.py`
 - matching restart scripts stop existing pid-tracked processes and relaunch
-- generated `*.codex*.log`, `*.log`, and `*.pid` files are ignored by Git
+- generated `logs/*.log` and `logs/*.pid` files are ignored by Git
 
-Use `cleanup_logs.bat` or `cleanup_logs_mac.command` for periodic runtime log cleanup.
+Use `cleanup_logs.bat` or `cleanup_logs_mac.command` for periodic runtime log cleanup. The cleanup helper also scans legacy root-level runtime logs from pre-`logs/` launcher layouts.
 
 ## 11. Current Known Boundaries
 

@@ -2,7 +2,10 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $workdir = $projectRoot
+$runtimeDir = Join-Path $workdir 'logs'
 $pidFiles = @(
+    (Join-Path $runtimeDir 'http_server.codex.pid'),
+    (Join-Path $runtimeDir 'ib_server.codex.pid'),
     (Join-Path $workdir 'http_server.codex.pid'),
     (Join-Path $workdir 'ib_server.codex.pid')
 )

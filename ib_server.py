@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import random
-import re
 import signal
 import sqlite3
 import configparser
@@ -13,13 +12,68 @@ from ib_async import *
 import websockets
 
 from historical_replay_service import HistoricalReplayService, normalize_replay_date
+from ib_server_order_tracking import (
+    build_active_hedge_orders_snapshot as build_active_hedge_orders_snapshot_via_module,
+    build_combo_order_error_handler,
+    build_combo_order_exec_details_handler,
+    build_combo_order_fill_cost_payload as build_combo_order_fill_cost_payload_via_module,
+    build_combo_order_status_payload as build_combo_order_status_payload_via_module,
+    build_combo_order_status_handler,
+    build_hedge_order_fill_payload as build_hedge_order_fill_payload_via_module,
+    build_hedge_order_status_payload as build_hedge_order_status_payload_via_module,
+    build_hedge_order_error_handler,
+    build_hedge_order_exec_details_handler,
+    build_hedge_order_status_handler,
+    is_terminal_hedge_tracking as is_terminal_hedge_tracking_via_module,
+    iter_unique_hedge_order_trackings as iter_unique_hedge_order_trackings_via_module,
+    record_combo_order_error as record_combo_order_error_via_module,
+    record_hedge_order_error as record_hedge_order_error_via_module,
+    record_hedge_order_fill as record_hedge_order_fill_via_module,
+    resolve_combo_order_tracking as resolve_combo_order_tracking_via_module,
+    resolve_hedge_order_tracking as resolve_hedge_order_tracking_via_module,
+    update_combo_order_tracking_snapshot as update_combo_order_tracking_snapshot_via_module,
+    update_hedge_order_tracking_snapshot as update_hedge_order_tracking_snapshot_via_module,
+)
+from ib_server_iv_term_structure import (
+    build_iv_term_structure_expiry_bundle as _build_iv_term_structure_expiry_bundle,
+    build_iv_term_structure_sub_id as _build_iv_term_structure_sub_id,
+    cancel_iv_term_structure_sync_task as cancel_iv_term_structure_sync_task,
+    filter_iv_term_structure_option_chains as _filter_iv_term_structure_option_chains,
+    format_iv_term_structure_strike_token as _format_iv_term_structure_strike_token,
+    handle_iv_term_structure_subscription as handle_iv_term_structure_subscription,
+    merge_iv_term_structure_chain_fields as _merge_iv_term_structure_chain_fields,
+    prioritize_iv_term_structure_expiry_rows as _prioritize_iv_term_structure_expiry_rows,
+    resolve_iv_term_structure_expiry_selection_from_candidates as resolve_iv_term_structure_expiry_selection_from_candidates,
+    resolve_iv_term_structure_secdef_exchange as resolve_iv_term_structure_secdef_exchange,
+    run_iv_term_structure_option_sync as run_iv_term_structure_option_sync,
+    subscribe_iv_term_structure_option_request as subscribe_iv_term_structure_option_request,
+    track_iv_term_structure_sync_task as track_iv_term_structure_sync_task,
+    fetch_iv_term_structure_contract_rows_for_exact_strike as fetch_iv_term_structure_contract_rows_for_exact_strike,
+    fetch_iv_term_structure_contract_rows_for_expiry as fetch_iv_term_structure_contract_rows_for_expiry,
+)
+from ib_server_market_data import (
+    build_pending_tickers_handler,
+    coerce_positive_int,
+    extract_market_price,
+    extract_option_delta,
+    extract_option_iv,
+    extract_quote_snapshot,
+    get_client_subscription_settings,
+    log_option_iv_debug_if_needed,
+    normalize_bool,
+    request_ib_historical_bars,
+    unsubscribe_client_safely as unsubscribe_client_safely_via_market_data,
+)
+from ib_server_ws import (
+    build_ws_client_handler,
+    dispatch_execution_action as dispatch_ws_execution_action,
+    purge_combo_order_tracking_for_websocket as purge_combo_order_tracking_for_websocket,
+    purge_hedge_order_tracking_for_websocket as purge_hedge_order_tracking_for_websocket,
+)
 from iv_term_structure_service import (
     DEFAULT_BUCKET_DEFINITIONS as IV_TERM_STRUCTURE_BUCKET_DEFINITIONS,
-    build_expiry_strike_selections as build_iv_term_structure_expiry_strike_selections,
     DEFAULT_MAX_DTE as IV_TERM_STRUCTURE_DEFAULT_MAX_DTE,
     DEFAULT_STRIKE_RADIUS as IV_TERM_STRUCTURE_DEFAULT_STRIKE_RADIUS,
-    choose_trading_class as choose_iv_term_structure_trading_class,
-    filter_expiry_rows as filter_iv_term_structure_expiry_rows,
 )
 from trade_execution.engine import ExecutionEngine
 from trade_execution.adapters.ibkr import IbkrExecutionAdapter
@@ -77,15 +131,6 @@ combo_order_tracking_by_order_id = {}
 combo_order_tracking_by_perm_id = {}
 hedge_order_tracking_by_order_id = {}
 hedge_order_tracking_by_perm_id = {}
-HEDGE_TERMINAL_STATUSES = {
-    'filled',
-    'cancelled',
-    'canceled',
-    'apicancelled',
-    'api_cancelled',
-    'inactive',
-    'rejected',
-}
 option_iv_debug_last_logged = {}
 historical_replay_service = HistoricalReplayService(
     HISTORICAL_SQLITE_DB,
@@ -201,20 +246,117 @@ def _record_hedge_order_submission(websocket, request, result):
         hedge_order_tracking_by_perm_id[result.perm_id] = tracking
 
 
-def _normalize_order_status_text(value):
-    return str(value or '').strip().lower().replace(' ', '_')
+def _build_order_tracking_environment():
+    return {
+        'combo_order_tracking_by_order_id': combo_order_tracking_by_order_id,
+        'combo_order_tracking_by_perm_id': combo_order_tracking_by_perm_id,
+        'hedge_order_tracking_by_order_id': hedge_order_tracking_by_order_id,
+        'hedge_order_tracking_by_perm_id': hedge_order_tracking_by_perm_id,
+        'execution_engine': execution_engine,
+        'send_message_safe': send_message_safe,
+    }
+
+
+def _resolve_combo_order_tracking(order_id, perm_id):
+    return resolve_combo_order_tracking_via_module(
+        _build_order_tracking_environment(),
+        order_id,
+        perm_id,
+    )
+
+
+def _resolve_hedge_order_tracking(order_id, perm_id):
+    return resolve_hedge_order_tracking_via_module(
+        _build_order_tracking_environment(),
+        order_id,
+        perm_id,
+    )
+
+
+def _update_combo_order_tracking_snapshot(
+    tracking,
+    *,
+    order=None,
+    order_status=None,
+    trade=None,
+    status_message=None,
+):
+    update_combo_order_tracking_snapshot_via_module(
+        tracking,
+        order=order,
+        order_status=order_status,
+        trade=trade,
+        status_message=status_message,
+    )
+
+
+def _update_hedge_order_tracking_snapshot(
+    tracking,
+    *,
+    order=None,
+    order_status=None,
+    trade=None,
+    status_message=None,
+):
+    update_hedge_order_tracking_snapshot_via_module(
+        tracking,
+        order=order,
+        order_status=order_status,
+        trade=trade,
+        status_message=status_message,
+    )
+
+
+def _record_combo_order_error(tracking, error_code, error_string):
+    return record_combo_order_error_via_module(tracking, error_code, error_string)
+
+
+def _record_hedge_order_error(tracking, error_code, error_string):
+    return record_hedge_order_error_via_module(tracking, error_code, error_string)
+
+
+def _build_combo_order_status_payload(trade, tracking):
+    return build_combo_order_status_payload_via_module(
+        _build_order_tracking_environment(),
+        trade,
+        tracking,
+    )
+
+
+def _build_hedge_order_status_payload(trade, tracking):
+    return build_hedge_order_status_payload_via_module(trade, tracking)
+
+
+def _build_combo_order_fill_cost_payload(tracking, order_id, perm_id):
+    return build_combo_order_fill_cost_payload_via_module(tracking, order_id, perm_id)
+
+
+def _build_hedge_order_fill_payload(
+    tracking,
+    order_id,
+    perm_id,
+    execution_id,
+    execution_side,
+    fill_quantity,
+    fill_price,
+):
+    return build_hedge_order_fill_payload_via_module(
+        tracking,
+        order_id,
+        perm_id,
+        execution_id,
+        execution_side,
+        fill_quantity,
+        fill_price,
+    )
+
+
+def _record_hedge_order_fill(tracking, execution, contract):
+    return record_hedge_order_fill_via_module(tracking, execution, contract)
 
 
 def _is_terminal_hedge_tracking(tracking):
-    if not tracking:
-        return True
-    status = _normalize_order_status_text(tracking.get('status'))
-    if status in HEDGE_TERMINAL_STATUSES:
-        return True
-    trade = tracking.get('trade')
-    order_status = getattr(trade, 'orderStatus', None) if trade is not None else None
-    trade_status = _normalize_order_status_text(getattr(order_status, 'status', None))
-    return trade_status in HEDGE_TERMINAL_STATUSES
+    return is_terminal_hedge_tracking_via_module(_build_order_tracking_environment(), tracking)
 
 
 def _has_active_hedge_order_for_request(websocket, request):
@@ -241,33 +383,15 @@ def _has_active_hedge_order_for_request(websocket, request):
 
 
 def _iter_unique_hedge_order_trackings():
-    seen_tracking_ids = set()
-    for tracking in list(hedge_order_tracking_by_order_id.values()) + list(hedge_order_tracking_by_perm_id.values()):
-        tracking_identity = id(tracking)
-        if tracking_identity in seen_tracking_ids:
-            continue
-        seen_tracking_ids.add(tracking_identity)
-        yield tracking
+    yield from iter_unique_hedge_order_trackings_via_module(_build_order_tracking_environment())
 
 
 def _build_active_hedge_orders_snapshot(websocket, data=None):
-    requested_hedge_id = str((data or {}).get('hedgeId') or '').strip()
-    requested_account = str((data or {}).get('account') or '').strip()
-    orders = []
-    for tracking in _iter_unique_hedge_order_trackings():
-        if _is_terminal_hedge_tracking(tracking):
-            continue
-        if requested_hedge_id and str(tracking.get('hedgeId') or '').strip() != requested_hedge_id:
-            continue
-        if requested_account and str(tracking.get('account') or '').strip() != requested_account:
-            continue
-        tracking['websocket'] = websocket
-        orders.append(_build_hedge_order_status_payload(tracking.get('trade'), tracking)['orderStatus'])
-
-    return {
-        'action': 'active_hedge_orders_snapshot',
-        'orders': orders,
-    }
+    return build_active_hedge_orders_snapshot_via_module(
+        _build_order_tracking_environment(),
+        websocket,
+        data,
+    )
 
 
 async def _emit_combo_order_update(websocket, payload):
@@ -416,6 +540,13 @@ def _build_managed_accounts_payload():
     return payload
 
 
+async def send_message_safe(ws, message):
+    try:
+        await ws.send(message)
+    except Exception:
+        pass
+
+
 def _broadcast_managed_accounts_snapshot():
     if not connected_clients:
         return
@@ -463,748 +594,24 @@ def on_update_portfolio_item(portfolio_item):
 ib.updatePortfolioEvent += on_update_portfolio_item
 
 
-def _resolve_combo_order_tracking(order_id, perm_id):
-    tracking = None
-    if order_id is not None:
-        tracking = combo_order_tracking_by_order_id.get(order_id)
-    if tracking is None and perm_id is not None:
-        tracking = combo_order_tracking_by_perm_id.get(perm_id)
-    if tracking is not None and order_id is not None:
-        combo_order_tracking_by_order_id[order_id] = tracking
-    if tracking is not None and perm_id is not None:
-        combo_order_tracking_by_perm_id[perm_id] = tracking
-    return tracking
+_tracking_env = _build_order_tracking_environment()
 
-
-def _resolve_hedge_order_tracking(order_id, perm_id):
-    tracking = None
-    if order_id is not None:
-        tracking = hedge_order_tracking_by_order_id.get(order_id)
-    if tracking is None and perm_id is not None:
-        tracking = hedge_order_tracking_by_perm_id.get(perm_id)
-    if tracking is not None and order_id is not None:
-        hedge_order_tracking_by_order_id[order_id] = tracking
-    if tracking is not None and perm_id is not None:
-        hedge_order_tracking_by_perm_id[perm_id] = tracking
-    return tracking
-
-
-def _coerce_int_or_none(value):
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _update_combo_order_tracking_snapshot(tracking, order=None, order_status=None, trade=None, status_message=None):
-    if tracking is None:
-        return
-
-    if trade is not None:
-        tracking['trade'] = trade
-        if order is None:
-            order = getattr(trade, 'order', None)
-        if order_status is None:
-            order_status = getattr(trade, 'orderStatus', None)
-
-    if order is not None:
-        account = str(getattr(order, 'account', '') or '').strip()
-        if account:
-            tracking['account'] = account
-
-        order_id = getattr(order, 'orderId', None)
-        if order_id is not None:
-            tracking['orderId'] = order_id
-
-    if order_status is not None:
-        for field in (
-            'permId',
-            'status',
-            'filled',
-            'remaining',
-            'avgFillPrice',
-            'lastFillPrice',
-            'whyHeld',
-            'mktCapPrice',
-        ):
-            value = getattr(order_status, field, None)
-            if value is not None:
-                tracking[field] = value
-
-    if status_message:
-        tracking['statusMessage'] = status_message
-
-
-def _update_hedge_order_tracking_snapshot(tracking, order=None, order_status=None, trade=None, status_message=None):
-    if tracking is None:
-        return
-
-    if trade is not None:
-        tracking['trade'] = trade
-        if order is None:
-            order = getattr(trade, 'order', None)
-        if order_status is None:
-            order_status = getattr(trade, 'orderStatus', None)
-
-    if order is not None:
-        account = str(getattr(order, 'account', '') or '').strip()
-        if account:
-            tracking['account'] = account
-
-        order_id = getattr(order, 'orderId', None)
-        if order_id is not None:
-            tracking['orderId'] = order_id
-
-        for source_field, target_field in (
-            ('action', 'orderAction'),
-            ('totalQuantity', 'quantity'),
-            ('orderType', 'orderType'),
-            ('lmtPrice', 'limitPrice'),
-            ('tif', 'timeInForce'),
-        ):
-            value = getattr(order, source_field, None)
-            if value is not None:
-                tracking[target_field] = value
-
-    if order_status is not None:
-        for field in (
-            'permId',
-            'status',
-            'filled',
-            'remaining',
-            'avgFillPrice',
-            'lastFillPrice',
-            'whyHeld',
-            'mktCapPrice',
-        ):
-            value = getattr(order_status, field, None)
-            if value is not None:
-                tracking[field] = value
-
-    if status_message:
-        tracking['statusMessage'] = status_message
-
-
-def _normalize_ib_error_text(error_string):
-    text = str(error_string or '').strip()
-    if not text:
-        return ''
-
-    text = re.sub(r'<br\s*/?>', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
-
-
-def _format_ib_order_error_message(error_code, error_string):
-    normalized_text = _normalize_ib_error_text(error_string)
-    if error_code not in (None, '', 0, '0'):
-        code_text = f'IB {_coerce_int_or_none(error_code) or error_code}'
-        return f'{code_text}: {normalized_text}' if normalized_text else f'{code_text}.'
-    return normalized_text
-
-
-def _infer_combo_order_error_status(error_code, current_status):
-    status = str(current_status or '').strip()
-    if status in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}:
-        return status
-
-    parsed_code = _coerce_int_or_none(error_code)
-    if parsed_code == 202:
-        return 'Cancelled'
-    if parsed_code is not None and parsed_code >= 200:
-        return 'Inactive'
-    return status or None
-
-
-def _record_combo_order_error(tracking, error_code, error_string):
-    message = _format_ib_order_error_message(error_code, error_string)
-    if not message:
-        return ''
-
-    tracking['statusMessage'] = message
-    implied_status = _infer_combo_order_error_status(error_code, tracking.get('status'))
-    if implied_status:
-        tracking['status'] = implied_status
-    return message
-
-
-def _normalize_execution_side(value):
-    return str(value or '').strip().upper()
-
-
-def _resolve_tracking_leg_for_fill(tracking, con_id, execution_side):
-    legs = list(tracking.get('legs') or [])
-    if not legs or con_id is None:
-        return None
-
-    side_matches = [
-        leg for leg in legs
-        if leg.get('conId') == con_id
-        and _normalize_execution_side(leg.get('expectedExecutionSide')) == execution_side
-    ]
-    if len(side_matches) == 1:
-        return side_matches[0]
-    if len(side_matches) > 1:
-        return None
-
-    conid_matches = [leg for leg in legs if leg.get('conId') == con_id]
-    if len(conid_matches) == 1:
-        return conid_matches[0]
-    return None
-
-
-def _build_combo_order_fill_cost_payload(tracking, order_id, perm_id):
-    fill_totals = tracking.get('fillTotals') or {}
-    legs = []
-    for leg in tracking.get('legs') or []:
-        leg_id = leg.get('id')
-        fill_total = fill_totals.get(leg_id)
-        if not fill_total:
-            continue
-        filled_quantity = float(fill_total.get('filledQuantity') or 0)
-        filled_notional = float(fill_total.get('filledNotional') or 0)
-        if filled_quantity <= 0 or filled_notional <= 0:
-            continue
-
-        avg_fill_price = round(filled_notional / filled_quantity, 4)
-        legs.append({
-            'id': leg_id,
-            'conId': leg.get('conId'),
-            'localSymbol': leg.get('localSymbol') or '',
-            'symbol': leg.get('symbol') or '',
-            'secType': leg.get('secType') or '',
-            'right': leg.get('right') or '',
-            'strike': leg.get('strike'),
-            'expDate': leg.get('expDate') or '',
-            'targetPosition': leg.get('targetPosition'),
-            'executionSide': leg.get('expectedExecutionSide'),
-            'filledQuantity': round(filled_quantity, 8),
-            'avgFillPrice': avg_fill_price,
-            'costSource': 'execution_report',
-        })
-
-    return {
-        'action': 'combo_order_fill_cost_update',
-        'groupId': tracking.get('groupId'),
-        'orderFill': {
-            'groupId': tracking.get('groupId'),
-            'groupName': tracking.get('groupName'),
-            'executionMode': tracking.get('executionMode'),
-            'executionIntent': tracking.get('executionIntent'),
-            'requestSource': tracking.get('requestSource'),
-            'orderId': order_id,
-            'permId': perm_id,
-            'costSource': 'execution_report',
-            'legs': legs,
-        },
-    }
-
-
-def _build_hedge_order_fill_payload(tracking, order_id, perm_id, execution_id, execution_side, fill_quantity, fill_price):
-    fill_total = tracking.get('fillTotals') or {}
-    total_quantity = float(fill_total.get('filledQuantity') or 0)
-    total_notional = float(fill_total.get('filledNotional') or 0)
-    avg_fill_price = round(total_notional / total_quantity, 4) if total_quantity > 0 else None
-
-    return {
-        'action': 'hedge_order_fill_update',
-        'hedgeId': tracking.get('hedgeId'),
-        'orderFill': {
-            'hedgeId': tracking.get('hedgeId'),
-            'hedgeName': tracking.get('hedgeName'),
-            'account': tracking.get('account'),
-            'executionMode': tracking.get('executionMode'),
-            'requestSource': tracking.get('requestSource'),
-            'orderId': order_id,
-            'permId': perm_id,
-            'secType': tracking.get('secType'),
-            'symbol': tracking.get('symbol'),
-            'localSymbol': tracking.get('localSymbol') or '',
-            'exchange': tracking.get('exchange') or '',
-            'currency': tracking.get('currency') or '',
-            'conId': tracking.get('conId'),
-            'orderAction': tracking.get('orderAction'),
-            'quantity': tracking.get('quantity'),
-            'orderType': tracking.get('orderType'),
-            'limitPrice': tracking.get('limitPrice'),
-            'timeInForce': tracking.get('timeInForce'),
-            'executionId': execution_id or None,
-            'executionSide': execution_side,
-            'lastFillQuantity': round(fill_quantity, 8),
-            'lastFillPrice': round(fill_price, 4),
-            'filledQuantity': round(total_quantity, 8),
-            'avgFillPrice': avg_fill_price,
-            'costSource': 'execution_report',
-            'currentNetDelta': tracking.get('currentNetDelta'),
-            'projectedNetDelta': tracking.get('projectedNetDelta'),
-            'targetLower': tracking.get('targetLower'),
-            'targetUpper': tracking.get('targetUpper'),
-        },
-    }
-
-
-def _record_hedge_order_fill(tracking, execution, contract):
-    if tracking is None or execution is None or contract is None:
-        return None
-
-    exec_id = str(getattr(execution, 'execId', '') or '').strip()
-    seen_exec_ids = tracking.setdefault('seenExecIds', set())
-    if exec_id and exec_id in seen_exec_ids:
-        return None
-
-    try:
-        filled_quantity = abs(float(getattr(execution, 'shares', 0) or 0))
-        fill_price = abs(float(getattr(execution, 'price', 0) or 0))
-    except (TypeError, ValueError):
-        return None
-
-    if filled_quantity <= 0 or fill_price <= 0:
-        return None
-
-    if exec_id:
-        seen_exec_ids.add(exec_id)
-
-    order_id = getattr(execution, 'orderId', None)
-    if order_id is None:
-        order_id = tracking.get('orderId')
-    perm_id = getattr(execution, 'permId', None)
-    if perm_id is None:
-        perm_id = tracking.get('permId')
-
-    con_id = getattr(contract, 'conId', None)
-    if con_id is not None:
-        tracking['conId'] = con_id
-    for source_field, target_field in (
-        ('localSymbol', 'localSymbol'),
-        ('symbol', 'symbol'),
-        ('secType', 'secType'),
-        ('exchange', 'exchange'),
-        ('currency', 'currency'),
-    ):
-        value = getattr(contract, source_field, None)
-        if value:
-            tracking[target_field] = value
-
-    fill_total = tracking.setdefault('fillTotals', {
-        'filledQuantity': 0.0,
-        'filledNotional': 0.0,
-    })
-    fill_total['filledQuantity'] = float(fill_total.get('filledQuantity') or 0) + filled_quantity
-    fill_total['filledNotional'] = float(fill_total.get('filledNotional') or 0) + filled_quantity * fill_price
-
-    tracking['filled'] = round(fill_total['filledQuantity'], 8)
-    tracking['avgFillPrice'] = round(fill_total['filledNotional'] / fill_total['filledQuantity'], 4)
-    tracking['lastFillPrice'] = round(fill_price, 4)
-    try:
-        order_quantity = float(tracking.get('quantity') or 0)
-        tracking['remaining'] = round(max(order_quantity - fill_total['filledQuantity'], 0), 8)
-    except (TypeError, ValueError):
-        pass
-
-    return _build_hedge_order_fill_payload(
-        tracking,
-        order_id,
-        perm_id,
-        exec_id,
-        _normalize_execution_side(getattr(execution, 'side', None)),
-        filled_quantity,
-        fill_price,
-    )
-
-
-def _extract_trade_status_message(trade):
-    trade_log = list(getattr(trade, 'log', None) or [])
-    for entry in reversed(trade_log):
-        message = str(getattr(entry, 'message', '') or '').strip()
-        error_code = getattr(entry, 'errorCode', None)
-        if message:
-            if error_code not in (None, '', 0, '0'):
-                return f'IB {error_code}: {message}'
-            return message
-
-    advanced_error = str(getattr(trade, 'advancedError', '') or '').strip()
-    if advanced_error:
-        return advanced_error
-
-    for entry in reversed(trade_log):
-        error_code = getattr(entry, 'errorCode', None)
-        if error_code not in (None, '', 0, '0'):
-            return f'IB error code {error_code}.'
-
-    return ''
-
-
-def _build_combo_order_status_payload(trade, tracking):
-    order = getattr(trade, 'order', None)
-    order_status = getattr(trade, 'orderStatus', None)
-    status_message = _extract_trade_status_message(trade)
-    if not status_message:
-        status_message = str(tracking.get('statusMessage') or '').strip()
-
-    payload = {
-        'action': 'combo_order_status_update',
-        'groupId': tracking.get('groupId'),
-        'orderStatus': {
-            'groupId': tracking.get('groupId'),
-            'groupName': tracking.get('groupName'),
-            'account': tracking.get('account') or getattr(order, 'account', None),
-            'executionMode': tracking.get('executionMode'),
-            'executionIntent': tracking.get('executionIntent'),
-            'requestSource': tracking.get('requestSource'),
-            'orderId': tracking.get('orderId') if tracking.get('orderId') is not None else getattr(order, 'orderId', None),
-            'permId': tracking.get('permId') if tracking.get('permId') is not None else getattr(order_status, 'permId', None),
-            'status': tracking.get('status') if tracking.get('status') is not None else getattr(order_status, 'status', None),
-            'filled': tracking.get('filled') if tracking.get('filled') is not None else getattr(order_status, 'filled', None),
-            'remaining': tracking.get('remaining') if tracking.get('remaining') is not None else getattr(order_status, 'remaining', None),
-            'avgFillPrice': tracking.get('avgFillPrice') if tracking.get('avgFillPrice') is not None else getattr(order_status, 'avgFillPrice', None),
-            'lastFillPrice': tracking.get('lastFillPrice') if tracking.get('lastFillPrice') is not None else getattr(order_status, 'lastFillPrice', None),
-            'whyHeld': tracking.get('whyHeld') if tracking.get('whyHeld') is not None else getattr(order_status, 'whyHeld', None),
-            'mktCapPrice': tracking.get('mktCapPrice') if tracking.get('mktCapPrice') is not None else getattr(order_status, 'mktCapPrice', None),
-            'statusMessage': status_message or None,
-        },
-    }
-    managed_snapshot = execution_engine.get_managed_order_snapshot(
-        payload['orderStatus'].get('orderId'),
-        payload['orderStatus'].get('permId'),
-    )
-    if managed_snapshot:
-        payload['orderStatus'].update(managed_snapshot)
-    else:
-        payload['orderStatus']['managedMode'] = False
-
-    for field in (
-        'account',
-        'orderId',
-        'permId',
-        'status',
-        'filled',
-        'remaining',
-        'avgFillPrice',
-        'lastFillPrice',
-        'whyHeld',
-        'mktCapPrice',
-    ):
-        value = tracking.get(field)
-        if value is not None:
-            payload['orderStatus'][field] = value
-
-    payload['orderStatus']['statusMessage'] = status_message or None
-    return payload
-
-
-def _build_hedge_order_status_payload(trade, tracking):
-    order = getattr(trade, 'order', None) if trade is not None else None
-    order_status = getattr(trade, 'orderStatus', None) if trade is not None else None
-    status_message = _extract_trade_status_message(trade) if trade is not None else ''
-    if not status_message:
-        status_message = str(tracking.get('statusMessage') or '').strip()
-
-    payload = {
-        'action': 'hedge_order_status_update',
-        'hedgeId': tracking.get('hedgeId'),
-        'orderStatus': {
-            'hedgeId': tracking.get('hedgeId'),
-            'hedgeName': tracking.get('hedgeName'),
-            'account': tracking.get('account') or getattr(order, 'account', None),
-            'executionMode': tracking.get('executionMode'),
-            'requestSource': tracking.get('requestSource'),
-            'secType': tracking.get('secType'),
-            'symbol': tracking.get('symbol'),
-            'localSymbol': tracking.get('localSymbol') or '',
-            'exchange': tracking.get('exchange') or '',
-            'currency': tracking.get('currency') or '',
-            'conId': tracking.get('conId'),
-            'orderAction': tracking.get('orderAction'),
-            'quantity': tracking.get('quantity'),
-            'orderType': tracking.get('orderType'),
-            'limitPrice': tracking.get('limitPrice'),
-            'timeInForce': tracking.get('timeInForce'),
-            'contractMonth': tracking.get('contractMonth') or '',
-            'multiplier': tracking.get('multiplier') or '',
-            'orderId': tracking.get('orderId') if tracking.get('orderId') is not None else getattr(order, 'orderId', None),
-            'permId': tracking.get('permId') if tracking.get('permId') is not None else getattr(order_status, 'permId', None),
-            'status': tracking.get('status') if tracking.get('status') is not None else getattr(order_status, 'status', None),
-            'filled': tracking.get('filled') if tracking.get('filled') is not None else getattr(order_status, 'filled', None),
-            'remaining': tracking.get('remaining') if tracking.get('remaining') is not None else getattr(order_status, 'remaining', None),
-            'avgFillPrice': tracking.get('avgFillPrice') if tracking.get('avgFillPrice') is not None else getattr(order_status, 'avgFillPrice', None),
-            'lastFillPrice': tracking.get('lastFillPrice') if tracking.get('lastFillPrice') is not None else getattr(order_status, 'lastFillPrice', None),
-            'whyHeld': tracking.get('whyHeld') if tracking.get('whyHeld') is not None else getattr(order_status, 'whyHeld', None),
-            'mktCapPrice': tracking.get('mktCapPrice') if tracking.get('mktCapPrice') is not None else getattr(order_status, 'mktCapPrice', None),
-            'currentNetDelta': tracking.get('currentNetDelta'),
-            'projectedNetDelta': tracking.get('projectedNetDelta'),
-            'targetLower': tracking.get('targetLower'),
-            'targetUpper': tracking.get('targetUpper'),
-            'statusMessage': status_message or None,
-        },
-    }
-
-    for field in (
-        'account',
-        'orderId',
-        'permId',
-        'status',
-        'filled',
-        'remaining',
-        'avgFillPrice',
-        'lastFillPrice',
-        'whyHeld',
-        'mktCapPrice',
-    ):
-        value = tracking.get(field)
-        if value is not None:
-            payload['orderStatus'][field] = value
-
-    payload['orderStatus']['statusMessage'] = status_message or None
-    return payload
-
-
-def on_combo_order_status(trade):
-    order = getattr(trade, 'order', None)
-    order_status = getattr(trade, 'orderStatus', None)
-    if order is None or order_status is None:
-        return
-
-    order_id = getattr(order, 'orderId', None)
-    perm_id = getattr(order_status, 'permId', None)
-    tracking = _resolve_combo_order_tracking(order_id, perm_id)
-    if tracking is None:
-        return
-
-    websocket = tracking.get('websocket')
-    if websocket is None:
-        return
-
-    _update_combo_order_tracking_snapshot(
-        tracking,
-        order=order,
-        order_status=order_status,
-        trade=trade,
-        status_message=_extract_trade_status_message(trade),
-    )
-    payload = _build_combo_order_status_payload(trade, tracking)
-    logging.info(
-        f"Broadcasting combo order status update: groupId={tracking.get('groupId')} "
-        f"orderId={payload['orderStatus'].get('orderId')} permId={payload['orderStatus'].get('permId')} "
-        f"status={payload['orderStatus'].get('status')} "
-        f"filled={payload['orderStatus'].get('filled')} remaining={payload['orderStatus'].get('remaining')}"
-    )
-    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
-
-
+on_combo_order_status = build_combo_order_status_handler(_tracking_env)
 ib.orderStatusEvent += on_combo_order_status
 
-
-def on_hedge_order_status(trade):
-    order = getattr(trade, 'order', None)
-    order_status = getattr(trade, 'orderStatus', None)
-    if order is None or order_status is None:
-        return
-
-    order_id = getattr(order, 'orderId', None)
-    perm_id = getattr(order_status, 'permId', None)
-    tracking = _resolve_hedge_order_tracking(order_id, perm_id)
-    if tracking is None:
-        return
-
-    _update_hedge_order_tracking_snapshot(
-        tracking,
-        order=order,
-        order_status=order_status,
-        trade=trade,
-        status_message=_extract_trade_status_message(trade),
-    )
-
-    websocket = tracking.get('websocket')
-    if websocket is None:
-        return
-
-    payload = _build_hedge_order_status_payload(trade, tracking)
-    logging.info(
-        f"Broadcasting hedge order status update: hedgeId={tracking.get('hedgeId')} "
-        f"orderId={payload['orderStatus'].get('orderId')} permId={payload['orderStatus'].get('permId')} "
-        f"status={payload['orderStatus'].get('status')} "
-        f"filled={payload['orderStatus'].get('filled')} remaining={payload['orderStatus'].get('remaining')}"
-    )
-    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
-
-
+on_hedge_order_status = build_hedge_order_status_handler(_tracking_env)
 ib.orderStatusEvent += on_hedge_order_status
 
-
-def on_combo_order_error(reqId, errorCode, errorString, contract):
-    order_id = _coerce_int_or_none(reqId)
-    tracking = _resolve_combo_order_tracking(order_id, None)
-    if tracking is None:
-        return
-
-    message = _record_combo_order_error(tracking, errorCode, errorString)
-    if not message:
-        return
-
-    websocket = tracking.get('websocket')
-    if websocket is None:
-        return
-
-    payload = _build_combo_order_status_payload(tracking.get('trade'), tracking)
-    logging.info(
-        f"Broadcasting combo order error update: groupId={tracking.get('groupId')} "
-        f"orderId={payload['orderStatus'].get('orderId')} permId={payload['orderStatus'].get('permId')} "
-        f"status={payload['orderStatus'].get('status')} "
-        f"statusMessage={payload['orderStatus'].get('statusMessage')!r}"
-    )
-    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
-
-
+on_combo_order_error = build_combo_order_error_handler(_tracking_env)
 ib.errorEvent += on_combo_order_error
 
-
-def _record_hedge_order_error(tracking, error_code, error_string):
-    return _record_combo_order_error(tracking, error_code, error_string)
-
-
-def on_hedge_order_error(reqId, errorCode, errorString, contract):
-    order_id = _coerce_int_or_none(reqId)
-    tracking = _resolve_hedge_order_tracking(order_id, None)
-    if tracking is None:
-        return
-
-    message = _record_hedge_order_error(tracking, errorCode, errorString)
-    if not message:
-        return
-
-    websocket = tracking.get('websocket')
-    if websocket is None:
-        return
-
-    payload = _build_hedge_order_status_payload(tracking.get('trade'), tracking)
-    logging.info(
-        f"Broadcasting hedge order error update: hedgeId={tracking.get('hedgeId')} "
-        f"orderId={payload['orderStatus'].get('orderId')} permId={payload['orderStatus'].get('permId')} "
-        f"status={payload['orderStatus'].get('status')} "
-        f"statusMessage={payload['orderStatus'].get('statusMessage')!r}"
-    )
-    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
-
-
+on_hedge_order_error = build_hedge_order_error_handler(_tracking_env)
 ib.errorEvent += on_hedge_order_error
 
-
-def on_combo_order_exec_details(trade, fill):
-    execution = getattr(fill, 'execution', None)
-    contract = getattr(fill, 'contract', None) or getattr(trade, 'contract', None)
-    if execution is None or contract is None:
-        return
-
-    if str(getattr(contract, 'secType', '') or '').upper() == 'BAG':
-        return
-
-    order_id = getattr(execution, 'orderId', None)
-    perm_id = getattr(execution, 'permId', None)
-    if order_id is None:
-        order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
-    if perm_id is None:
-        perm_id = getattr(getattr(trade, 'orderStatus', None), 'permId', None)
-
-    tracking = _resolve_combo_order_tracking(order_id, perm_id)
-    if tracking is None or tracking.get('executionMode') != 'submit':
-        return
-
-    websocket = tracking.get('websocket')
-    if websocket is None:
-        return
-
-    exec_id = str(getattr(execution, 'execId', '') or '').strip()
-    seen_exec_ids = tracking.setdefault('seenExecIds', set())
-    if exec_id and exec_id in seen_exec_ids:
-        return
-
-    con_id = getattr(contract, 'conId', None)
-    execution_side = _normalize_execution_side(getattr(execution, 'side', None))
-    leg = _resolve_tracking_leg_for_fill(tracking, con_id, execution_side)
-    if leg is None:
-        logging.warning(
-            f"Unable to attribute combo fill leg for groupId={tracking.get('groupId')} "
-            f"orderId={order_id} permId={perm_id} conId={con_id} side={execution_side}"
-        )
-        return
-
-    try:
-        filled_quantity = abs(float(getattr(execution, 'shares', 0) or 0))
-        fill_price = abs(float(getattr(execution, 'price', 0) or 0))
-    except (TypeError, ValueError):
-        return
-
-    if filled_quantity <= 0 or fill_price <= 0:
-        return
-
-    if exec_id:
-        seen_exec_ids.add(exec_id)
-
-    leg_id = leg.get('id')
-    if not leg_id:
-        return
-
-    fill_totals = tracking.setdefault('fillTotals', {})
-    fill_total = fill_totals.setdefault(leg_id, {
-        'filledQuantity': 0.0,
-        'filledNotional': 0.0,
-    })
-    fill_total['filledQuantity'] += filled_quantity
-    fill_total['filledNotional'] += filled_quantity * fill_price
-
-    avg_fill_price = round(fill_total['filledNotional'] / fill_total['filledQuantity'], 4)
-    logging.info(
-        f"Broadcasting combo execution fill cost: groupId={tracking.get('groupId')} "
-        f"orderId={order_id} permId={perm_id} legId={leg_id} "
-        f"localSymbol={leg.get('localSymbol')} side={execution_side} "
-        f"qty={fill_total['filledQuantity']} avgFillPrice={avg_fill_price}"
-    )
-    payload = _build_combo_order_fill_cost_payload(tracking, order_id, perm_id)
-    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
-
-
+on_combo_order_exec_details = build_combo_order_exec_details_handler(_tracking_env)
 ib.execDetailsEvent += on_combo_order_exec_details
 
-
-def on_hedge_order_exec_details(trade, fill):
-    execution = getattr(fill, 'execution', None)
-    contract = getattr(fill, 'contract', None) or getattr(trade, 'contract', None)
-    if execution is None or contract is None:
-        return
-
-    if str(getattr(contract, 'secType', '') or '').upper() == 'BAG':
-        return
-
-    order_id = getattr(execution, 'orderId', None)
-    perm_id = getattr(execution, 'permId', None)
-    if order_id is None:
-        order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
-    if perm_id is None:
-        perm_id = getattr(getattr(trade, 'orderStatus', None), 'permId', None)
-
-    tracking = _resolve_hedge_order_tracking(order_id, perm_id)
-    if tracking is None or tracking.get('executionMode') != 'submit':
-        return
-
-    payload = _record_hedge_order_fill(tracking, execution, contract)
-    if payload is None:
-        return
-
-    websocket = tracking.get('websocket')
-    if websocket is None:
-        return
-
-    logging.info(
-        f"Broadcasting hedge execution fill: hedgeId={tracking.get('hedgeId')} "
-        f"orderId={payload['orderFill'].get('orderId')} permId={payload['orderFill'].get('permId')} "
-        f"localSymbol={payload['orderFill'].get('localSymbol')} "
-        f"side={payload['orderFill'].get('executionSide')} "
-        f"qty={payload['orderFill'].get('filledQuantity')} "
-        f"avgFillPrice={payload['orderFill'].get('avgFillPrice')}"
-    )
-    asyncio.create_task(send_message_safe(websocket, json.dumps(payload)))
-
-
+on_hedge_order_exec_details = build_hedge_order_exec_details_handler(_tracking_env)
 ib.execDetailsEvent += on_hedge_order_exec_details
 
 async def connect_ib():
@@ -1647,98 +1054,29 @@ def _build_underlying_request(raw_underlying, options_data):
     }
 
 
-def _format_iv_term_structure_strike_token(value):
-    try:
-        strike = float(value)
-    except (TypeError, ValueError):
-        return ''
-
-    if strike != strike:
-        return ''
-    if strike.is_integer():
-        return str(int(strike))
-    return f"{strike:.4f}".rstrip('0').rstrip('.')
+_resolve_iv_term_structure_secdef_exchange = resolve_iv_term_structure_secdef_exchange
 
 
-def _build_iv_term_structure_sub_id(symbol, expiry, strike, right):
-    return "__ivts__|{symbol}|{expiry}|{strike}|{right}".format(
-        symbol=_normalize_symbol(symbol) or 'UNKNOWN',
-        expiry=str(expiry or '').strip() or 'UNKNOWN',
-        strike=_format_iv_term_structure_strike_token(strike) or 'UNKNOWN',
-        right=_normalize_symbol(right) or 'UNKNOWN',
-    )
-
-
-def _filter_iv_term_structure_option_chains(option_chains, option_template):
-    chains = list(option_chains or [])
-    if not chains:
-        return []
-
-    template = option_template if isinstance(option_template, dict) else {}
-    template_multiplier = str(template.get('multiplier') or '').strip()
-    template_exchange = str(template.get('exchange') or '').strip().upper()
-    template_trading_class = str(template.get('tradingClass') or template.get('trading_class') or '').strip().upper()
-
-    if template_multiplier:
-        multiplier_matches = [
-            chain for chain in chains
-            if str(getattr(chain, 'multiplier', '') or '').strip() == template_multiplier
-        ]
-        if multiplier_matches:
-            chains = multiplier_matches
-
-    if template_exchange:
-        exchange_matches = [
-            chain for chain in chains
-            if str(getattr(chain, 'exchange', '') or '').strip().upper() == template_exchange
-        ]
-        if exchange_matches:
-            chains = exchange_matches
-
-    if template_trading_class:
-        trading_class_matches = [
-            chain for chain in chains
-            if str(getattr(chain, 'tradingClass', '') or '').strip().upper() == template_trading_class
-        ]
-        if trading_class_matches:
-            chains = trading_class_matches
-
-    return chains
-
-
-def _merge_iv_term_structure_chain_fields(option_chains, option_template):
-    chains = _filter_iv_term_structure_option_chains(option_chains, option_template)
-    expirations = set()
-    strikes = set()
-    chain_trading_classes = []
-
-    for chain in chains:
-        expirations.update(str(value or '').strip() for value in getattr(chain, 'expirations', []) or [])
-        strikes.update(getattr(chain, 'strikes', []) or [])
-        chain_trading_classes.append(str(getattr(chain, 'tradingClass', '') or '').strip())
-
+def _build_iv_term_structure_environment():
     return {
-        'chains': chains,
-        'expirations': sorted(expirations),
-        'strikes': sorted(strikes),
-        'tradingClass': choose_iv_term_structure_trading_class(
-            chain_trading_classes,
-            requested_trading_class=(option_template or {}).get('tradingClass') or (option_template or {}).get('trading_class') or '',
-        ),
+        'ib': ib,
+        'client_subscriptions': client_subscriptions,
+        'client_subscription_settings': client_subscription_settings,
+        'iv_term_structure_sync_tasks': iv_term_structure_sync_tasks,
+        'send_message_safe': send_message_safe,
+        'build_underlying_request': _build_underlying_request,
+        'build_contract_from_request': _build_contract_from_request,
+        'qualify_one': _qualify_one,
+        'unsubscribe_client_safely': unsubscribe_client_safely,
+        'get_client_subscription_settings': _get_client_subscription_settings,
+        'extract_quote_snapshot': _extract_quote_snapshot,
+        'describe_contract_request': _describe_contract_request,
+        'coerce_positive_int': _coerce_positive_int,
+        'normalize_replay_date': normalize_replay_date,
+        'iv_term_structure_default_max_dte': IV_TERM_STRUCTURE_DEFAULT_MAX_DTE,
+        'iv_term_structure_default_strike_radius': IV_TERM_STRUCTURE_DEFAULT_STRIKE_RADIUS,
+        'iv_term_structure_bucket_definitions': IV_TERM_STRUCTURE_BUCKET_DEFINITIONS,
     }
-
-
-def _resolve_iv_term_structure_secdef_exchange(option_template, underlying_request):
-    template = option_template if isinstance(option_template, dict) else {}
-    underlying = underlying_request if isinstance(underlying_request, dict) else {}
-    option_sec_type = _normalize_symbol(template.get('secType') or template.get('sec_type'))
-    underlying_sec_type = _normalize_symbol(underlying.get('secType') or underlying.get('sec_type'))
-
-    if option_sec_type == 'FOP' or underlying_sec_type == 'FUT':
-        return str(template.get('exchange') or underlying.get('exchange') or '').strip()
-
-    # IBKR expects futFopExchange='' for equity/ETF/index option chains.
-    return ''
 
 
 async def _fetch_iv_term_structure_contract_rows_for_expiry(
@@ -1752,73 +1090,18 @@ async def _fetch_iv_term_structure_contract_rows_for_expiry(
     qualified_underlying=None,
     timeout_seconds=8.0,
 ):
-    probe = Contract(
-        secType=option_sec_type,
-        symbol=option_symbol,
-        lastTradeDateOrContractMonth=str(expiry or '').strip(),
-        exchange=option_exchange,
-        currency=option_currency,
-        multiplier=str(option_multiplier or ''),
+    return await fetch_iv_term_structure_contract_rows_for_expiry(
+        _build_iv_term_structure_environment(),
+        option_symbol,
+        option_sec_type,
+        option_exchange,
+        option_currency,
+        option_multiplier,
+        expiry,
+        option_trading_class=option_trading_class,
+        qualified_underlying=qualified_underlying,
+        timeout_seconds=timeout_seconds,
     )
-    if option_trading_class:
-        probe.tradingClass = option_trading_class
-    if qualified_underlying is not None and getattr(qualified_underlying, 'conId', None):
-        probe.underConId = qualified_underlying.conId
-
-    try:
-        contract_details_list = await asyncio.wait_for(
-            ib.reqContractDetailsAsync(probe),
-            timeout=max(0.5, float(timeout_seconds or 0.0)),
-        )
-    except asyncio.TimeoutError:
-        logging.warning(
-            "IV term structure contract-details lookup timed out for %s %s",
-            _normalize_symbol(option_symbol) or '<missing>',
-            str(expiry or '').strip() or '<missing>',
-        )
-        return []
-    except Exception as exc:
-        logging.warning(
-            "IV term structure contract-details lookup failed for %s %s: %s",
-            _normalize_symbol(option_symbol) or '<missing>',
-            str(expiry or '').strip() or '<missing>',
-            exc,
-        )
-        return []
-
-    rows = []
-    normalized_expiry = _to_expiry(expiry)
-    requested_under_con_id = getattr(qualified_underlying, 'conId', None)
-    requested_multiplier = str(option_multiplier or '').strip()
-
-    for detail in contract_details_list or []:
-        candidate = getattr(detail, 'contract', None)
-        if candidate is None:
-            continue
-
-        candidate_expiry = _extract_contract_expiry(candidate)
-        if normalized_expiry and candidate_expiry and candidate_expiry != normalized_expiry:
-            continue
-
-        candidate_under_con_id = getattr(candidate, 'underConId', None)
-        if requested_under_con_id and candidate_under_con_id and candidate_under_con_id != requested_under_con_id:
-            continue
-
-        candidate_multiplier = str(getattr(candidate, 'multiplier', '') or '').strip()
-        if requested_multiplier and candidate_multiplier and candidate_multiplier != requested_multiplier:
-            continue
-
-        strike = _to_strike(getattr(candidate, 'strike', None))
-        if strike is None:
-            continue
-
-        rows.append({
-            'expiry': candidate_expiry or normalized_expiry,
-            'strike': strike,
-            'tradingClass': str(getattr(candidate, 'tradingClass', '') or '').strip(),
-        })
-
-    return rows
 
 
 async def _fetch_iv_term_structure_contract_rows_for_exact_strike(
@@ -1833,63 +1116,19 @@ async def _fetch_iv_term_structure_contract_rows_for_exact_strike(
     qualified_underlying=None,
     timeout_seconds=3.0,
 ):
-    probe = Contract(
-        secType=option_sec_type,
-        symbol=option_symbol,
-        lastTradeDateOrContractMonth=str(expiry or '').strip(),
-        strike=float(strike),
-        exchange=option_exchange,
-        currency=option_currency,
-        multiplier=str(option_multiplier or ''),
+    return await fetch_iv_term_structure_contract_rows_for_exact_strike(
+        _build_iv_term_structure_environment(),
+        option_symbol,
+        option_sec_type,
+        option_exchange,
+        option_currency,
+        option_multiplier,
+        expiry,
+        strike,
+        option_trading_class=option_trading_class,
+        qualified_underlying=qualified_underlying,
+        timeout_seconds=timeout_seconds,
     )
-    if option_trading_class:
-        probe.tradingClass = option_trading_class
-    if qualified_underlying is not None and getattr(qualified_underlying, 'conId', None):
-        probe.underConId = qualified_underlying.conId
-
-    try:
-        contract_details_list = await asyncio.wait_for(
-            ib.reqContractDetailsAsync(probe),
-            timeout=max(0.25, float(timeout_seconds or 0.0)),
-        )
-    except asyncio.TimeoutError:
-        return []
-    except Exception:
-        return []
-
-    rows = []
-    normalized_expiry = _to_expiry(expiry)
-    requested_under_con_id = getattr(qualified_underlying, 'conId', None)
-    requested_multiplier = str(option_multiplier or '').strip()
-
-    for detail in contract_details_list or []:
-        candidate = getattr(detail, 'contract', None)
-        if candidate is None:
-            continue
-
-        candidate_expiry = _extract_contract_expiry(candidate)
-        if normalized_expiry and candidate_expiry and candidate_expiry != normalized_expiry:
-            continue
-
-        candidate_under_con_id = getattr(candidate, 'underConId', None)
-        if requested_under_con_id and candidate_under_con_id and candidate_under_con_id != requested_under_con_id:
-            continue
-
-        candidate_multiplier = str(getattr(candidate, 'multiplier', '') or '').strip()
-        if requested_multiplier and candidate_multiplier and candidate_multiplier != requested_multiplier:
-            continue
-
-        candidate_strike = _to_strike(getattr(candidate, 'strike', None))
-        if candidate_strike is None or _serialize_finite_number(candidate_strike) != _serialize_finite_number(strike):
-            continue
-
-        rows.append({
-            'expiry': candidate_expiry or normalized_expiry,
-            'strike': candidate_strike,
-            'tradingClass': str(getattr(candidate, 'tradingClass', '') or '').strip(),
-        })
-
-    return rows
 
 
 async def _resolve_iv_term_structure_expiry_selection_from_candidates(
@@ -1905,603 +1144,61 @@ async def _resolve_iv_term_structure_expiry_selection_from_candidates(
     option_trading_class='',
     qualified_underlying=None,
 ):
-    normalized_candidates = []
-    seen = set()
-    for raw_strike in candidate_strikes or []:
-        strike = _to_strike(raw_strike)
-        serialized = _serialize_finite_number(strike)
-        if serialized is None or serialized in seen:
-            continue
-        seen.add(serialized)
-        normalized_candidates.append(serialized)
-
-    if not normalized_candidates:
-        return {}
-
-    normalized_candidates.sort()
-    try:
-        target_price = float(underlying_price)
-    except (TypeError, ValueError):
-        return {}
-    if not (target_price == target_price):
-        return {}
-
-    nearest_index = min(
-        range(len(normalized_candidates)),
-        key=lambda index: (abs(normalized_candidates[index] - target_price), normalized_candidates[index]),
+    return await resolve_iv_term_structure_expiry_selection_from_candidates(
+        _build_iv_term_structure_environment(),
+        option_symbol,
+        option_sec_type,
+        option_exchange,
+        option_currency,
+        option_multiplier,
+        expiry,
+        underlying_price,
+        candidate_strikes,
+        strike_radius,
+        option_trading_class=option_trading_class,
+        qualified_underlying=qualified_underlying,
     )
-    search_indices = []
-    for offset in range(len(normalized_candidates)):
-        left_index = nearest_index - offset
-        right_index = nearest_index + offset
-        if left_index >= 0 and left_index not in search_indices:
-            search_indices.append(left_index)
-        if offset and right_index < len(normalized_candidates) and right_index not in search_indices:
-            search_indices.append(right_index)
-
-    probe_cache = {}
-
-    async def probe_index(index):
-        if index not in probe_cache:
-            probe_cache[index] = await _fetch_iv_term_structure_contract_rows_for_exact_strike(
-                option_symbol,
-                option_sec_type,
-                option_exchange,
-                option_currency,
-                option_multiplier,
-                expiry,
-                normalized_candidates[index],
-                option_trading_class=option_trading_class,
-                qualified_underlying=qualified_underlying,
-            )
-        return probe_cache[index]
-
-    atm_index = None
-    for index in search_indices:
-        rows = await probe_index(index)
-        if rows:
-            atm_index = index
-            break
-
-    if atm_index is None:
-        return {}
-
-    selected_indices = [atm_index]
-    safe_radius = max(0, int(strike_radius or 0))
-
-    lower_index = atm_index - 1
-    while lower_index >= 0 and len([idx for idx in selected_indices if idx < atm_index]) < safe_radius:
-        rows = await probe_index(lower_index)
-        if rows:
-            selected_indices.append(lower_index)
-        lower_index -= 1
-
-    upper_index = atm_index + 1
-    while upper_index < len(normalized_candidates) and len([idx for idx in selected_indices if idx > atm_index]) < safe_radius:
-        rows = await probe_index(upper_index)
-        if rows:
-            selected_indices.append(upper_index)
-        upper_index += 1
-
-    selected_indices = sorted(set(selected_indices))
-    selected_rows = []
-    for index in selected_indices:
-        selected_rows.extend(await probe_index(index))
-
-    return {
-        'atm_strike': normalized_candidates[atm_index],
-        'window_strikes': [normalized_candidates[index] for index in selected_indices],
-        'tradingClass': choose_iv_term_structure_trading_class(
-            [row.get('tradingClass') for row in selected_rows],
-            option_trading_class,
-        ),
-    }
-
-
-def _build_iv_term_structure_expiry_bundle(
-    expiry_row,
-    option_symbol,
-    option_sec_type,
-    option_exchange,
-    option_currency,
-    option_multiplier,
-    underlying_symbol,
-    underlying_exchange,
-    fallback_trading_class,
-    expiry_selection=None,
-):
-    expiry = str((expiry_row or {}).get('expiry') or '').strip()
-    dte = int((expiry_row or {}).get('dte') or 0)
-    selection = expiry_selection if isinstance(expiry_selection, dict) else {}
-    atm_strike = _serialize_finite_number(selection.get('atm_strike'))
-    window_strikes = selection.get('window_strikes') if isinstance(selection.get('window_strikes'), (list, tuple)) else []
-    expiry_trading_class = (
-        str(selection.get('tradingClass') or '').strip()
-        or str(fallback_trading_class or '').strip()
-    )
-
-    atm_call_sub_id = _build_iv_term_structure_sub_id(option_symbol, expiry, atm_strike, 'C') if atm_strike is not None else ''
-    atm_put_sub_id = _build_iv_term_structure_sub_id(option_symbol, expiry, atm_strike, 'P') if atm_strike is not None else ''
-
-    expiry_payload_row = {
-        'expiry': expiry,
-        'dte': dte,
-        'atmStrike': atm_strike,
-        'atmCallSubId': atm_call_sub_id,
-        'atmPutSubId': atm_put_sub_id,
-    }
-
-    option_descriptors = {}
-    option_requests = []
-
-    if expiry and atm_strike is not None and window_strikes:
-        for strike in window_strikes:
-            serialized_strike = _serialize_finite_number(strike)
-            if serialized_strike is None:
-                continue
-
-            for right in ('C', 'P'):
-                sub_id = _build_iv_term_structure_sub_id(option_symbol, expiry, serialized_strike, right)
-                option_request = {
-                    'id': sub_id,
-                    'secType': option_sec_type,
-                    'symbol': option_symbol,
-                    'underlyingSymbol': underlying_symbol,
-                    'exchange': option_exchange,
-                    'underlyingExchange': underlying_exchange,
-                    'currency': option_currency,
-                    'multiplier': option_multiplier,
-                    'tradingClass': expiry_trading_class,
-                    'right': right,
-                    'strike': serialized_strike,
-                    'expDate': expiry,
-                    'contractMonth': expiry[:6],
-                }
-                option_descriptors[sub_id] = {
-                    'expiry': expiry,
-                    'dte': dte,
-                    'strike': serialized_strike,
-                    'right': right,
-                    'isAtm': serialized_strike == atm_strike,
-                }
-                option_requests.append(option_request)
-
-    return {
-        'expiryPayloadRow': expiry_payload_row,
-        'optionDescriptors': option_descriptors,
-        'optionRequests': option_requests,
-    }
-
-
-def _prioritize_iv_term_structure_expiry_rows(expiry_rows):
-    rows = [row for row in (expiry_rows or []) if isinstance(row, dict)]
-    if not rows:
-        return []
-
-    prioritized = []
-    seen_expiries = set()
-
-    for bucket in IV_TERM_STRUCTURE_BUCKET_DEFINITIONS or []:
-        target_days = int((bucket or {}).get('targetDays') or 0)
-        best_row = None
-        best_key = None
-        for row in rows:
-            expiry = str(row.get('expiry') or '').strip()
-            if not expiry or expiry in seen_expiries:
-                continue
-            dte = int(row.get('dte') or 0)
-            row_key = (abs(dte - target_days), dte, expiry)
-            if best_key is None or row_key < best_key:
-                best_key = row_key
-                best_row = row
-        if best_row is not None:
-            expiry = str(best_row.get('expiry') or '').strip()
-            seen_expiries.add(expiry)
-            prioritized.append(best_row)
-
-    for row in rows:
-        expiry = str(row.get('expiry') or '').strip()
-        if not expiry or expiry in seen_expiries:
-            continue
-        seen_expiries.add(expiry)
-        prioritized.append(row)
-
-    return prioritized
 
 
 async def _subscribe_iv_term_structure_option_request(websocket, option_request):
-    sub_id = option_request.get('id')
-    try:
-        option_contract = _build_contract_from_request(option_request)
-    except Exception as exc:
-        logging.warning(
-            "Skipping IV term structure option %s because the contract request was invalid: %s",
-            sub_id or '<missing>',
-            exc,
-        )
-        return False
-
-    qualified_option = await _qualify_one(option_contract, option_request)
-    if qualified_option is None:
-        return False
-
-    option_ticker = ib.reqMktData(qualified_option, '106', False, False)
-    if websocket not in client_subscriptions:
-        ib.cancelMktData(option_ticker.contract)
-        return False
-
-    client_subscriptions[websocket][sub_id] = option_ticker
-    return True
+    return await subscribe_iv_term_structure_option_request(
+        _build_iv_term_structure_environment(),
+        websocket,
+        option_request,
+    )
 
 
 def _track_iv_term_structure_sync_task(websocket, task):
-    iv_term_structure_sync_tasks[websocket] = task
-
-    def _clear(done_task):
-        current = iv_term_structure_sync_tasks.get(websocket)
-        if current is done_task:
-            iv_term_structure_sync_tasks.pop(websocket, None)
-        try:
-            done_task.result()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logging.exception("IV term structure background sync task failed")
-
-    task.add_done_callback(_clear)
+    track_iv_term_structure_sync_task(
+        _build_iv_term_structure_environment(),
+        websocket,
+        task,
+    )
 
 
 async def _cancel_iv_term_structure_sync_task(websocket):
-    task = iv_term_structure_sync_tasks.pop(websocket, None)
-    if task is None:
-        return
-    if task.done():
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logging.exception("IV term structure background sync task failed")
-        return
-
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        logging.exception("IV term structure background sync task failed during cancellation")
+    await cancel_iv_term_structure_sync_task(
+        _build_iv_term_structure_environment(),
+        websocket,
+    )
 
 
 async def _run_iv_term_structure_option_sync(websocket, symbol, sync_context):
-    subscribed_option_count = 0
-    expected_option_count = 0
-
-    try:
-        expiry_rows = []
-        option_symbol = _normalize_symbol(symbol)
-        option_sec_type = 'OPT'
-        option_exchange = 'SMART'
-        option_currency = 'USD'
-        option_multiplier = '100'
-        underlying_symbol = option_symbol
-        underlying_exchange = 'SMART'
-        option_trading_class = ''
-        qualified_underlying = None
-        underlying_price = None
-        strike_radius = IV_TERM_STRUCTURE_DEFAULT_STRIKE_RADIUS
-        global_candidate_strikes = []
-
-        if isinstance(sync_context, dict):
-            expiry_rows = list(sync_context.get('expiryRows') or [])
-            option_symbol = _normalize_symbol(sync_context.get('optionSymbol') or symbol)
-            option_sec_type = _normalize_symbol(sync_context.get('optionSecType') or 'OPT')
-            option_exchange = str(sync_context.get('optionExchange') or 'SMART').strip() or 'SMART'
-            option_currency = str(sync_context.get('optionCurrency') or 'USD').strip() or 'USD'
-            option_multiplier = str(sync_context.get('optionMultiplier') or '100').strip() or '100'
-            underlying_symbol = _normalize_symbol(sync_context.get('underlyingSymbol') or option_symbol)
-            underlying_exchange = str(sync_context.get('underlyingExchange') or option_exchange).strip() or option_exchange
-            option_trading_class = str(sync_context.get('optionTradingClass') or '').strip()
-            qualified_underlying = sync_context.get('qualifiedUnderlying')
-            underlying_price = sync_context.get('underlyingPrice')
-            strike_radius = _coerce_positive_int(sync_context.get('strikeRadius'), IV_TERM_STRUCTURE_DEFAULT_STRIKE_RADIUS)
-            global_candidate_strikes = list(sync_context.get('globalCandidateStrikes') or [])
-
-        prioritized_expiry_rows = _prioritize_iv_term_structure_expiry_rows(expiry_rows)
-        resolved_expiry_count = 0
-        total_expiry_count = len(prioritized_expiry_rows)
-        progress_lock = asyncio.Lock()
-        concurrency_limit = min(6, max(1, total_expiry_count))
-        semaphore = asyncio.Semaphore(concurrency_limit)
-
-        async def process_expiry(expiry_row):
-            nonlocal resolved_expiry_count
-            nonlocal expected_option_count
-            nonlocal subscribed_option_count
-
-            if websocket not in client_subscriptions:
-                return
-
-            expiry = str((expiry_row or {}).get('expiry') or '').strip()
-            if not expiry:
-                return
-
-            try:
-                async with semaphore:
-                    expiry_contract_rows = await _fetch_iv_term_structure_contract_rows_for_expiry(
-                        option_symbol,
-                        option_sec_type,
-                        option_exchange,
-                        option_currency,
-                        option_multiplier,
-                        expiry,
-                        option_trading_class=option_trading_class,
-                        qualified_underlying=qualified_underlying,
-                    )
-                expiry_selection = build_iv_term_structure_expiry_strike_selections(
-                    expiry_contract_rows,
-                    underlying_price,
-                    strike_radius,
-                ).get(expiry) or {}
-                if not expiry_selection.get('atm_strike'):
-                    expiry_selection = await _resolve_iv_term_structure_expiry_selection_from_candidates(
-                        option_symbol,
-                        option_sec_type,
-                        option_exchange,
-                        option_currency,
-                        option_multiplier,
-                        expiry,
-                        underlying_price,
-                        global_candidate_strikes,
-                        strike_radius,
-                        option_trading_class=option_trading_class,
-                        qualified_underlying=qualified_underlying,
-                    )
-                bundle = _build_iv_term_structure_expiry_bundle(
-                    expiry_row,
-                    option_symbol,
-                    option_sec_type,
-                    option_exchange,
-                    option_currency,
-                    option_multiplier,
-                    underlying_symbol,
-                    underlying_exchange,
-                    option_trading_class,
-                    expiry_selection=expiry_selection,
-                )
-                option_requests = bundle.get('optionRequests') or []
-
-                async with progress_lock:
-                    resolved_expiry_count += 1
-                    expected_option_count += len(option_requests)
-                    resolved_count = resolved_expiry_count
-                    expected_count = expected_option_count
-                    subscribed_count = subscribed_option_count
-
-                await send_message_safe(websocket, json.dumps({
-                    'action': 'iv_term_structure_catalog_patch',
-                    'symbol': option_symbol,
-                    'expiryRows': [bundle.get('expiryPayloadRow') or {}],
-                    'optionDescriptors': bundle.get('optionDescriptors') or {},
-                    'resolvedExpiryCount': resolved_count,
-                    'totalExpiryCount': total_expiry_count,
-                    'subscribedOptionCount': subscribed_count,
-                    'expectedOptionCount': expected_count,
-                    'subscriptionPending': resolved_count < total_expiry_count,
-                }))
-
-                local_subscribed = 0
-                for option_request in option_requests:
-                    if websocket not in client_subscriptions:
-                        break
-                    if await _subscribe_iv_term_structure_option_request(websocket, option_request):
-                        local_subscribed += 1
-
-                if local_subscribed:
-                    async with progress_lock:
-                        subscribed_option_count += local_subscribed
-                        resolved_count = resolved_expiry_count
-                        expected_count = expected_option_count
-                        subscribed_count = subscribed_option_count
-                    await send_message_safe(websocket, json.dumps({
-                        'action': 'iv_term_structure_catalog_patch',
-                        'symbol': option_symbol,
-                        'expiryRows': [],
-                        'optionDescriptors': {},
-                        'resolvedExpiryCount': resolved_count,
-                        'totalExpiryCount': total_expiry_count,
-                        'subscribedOptionCount': subscribed_count,
-                        'expectedOptionCount': expected_count,
-                        'subscriptionPending': resolved_count < total_expiry_count,
-                    }))
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logging.exception(
-                    "IV term structure expiry worker failed for %s %s",
-                    option_symbol or '<missing>',
-                    expiry or '<missing>',
-                )
-
-        if prioritized_expiry_rows:
-            await asyncio.gather(*(process_expiry(expiry_row) for expiry_row in prioritized_expiry_rows))
-
-        await send_message_safe(websocket, json.dumps({
-            'action': 'iv_term_structure_sync_complete',
-            'symbol': option_symbol,
-            'subscribedOptionCount': subscribed_option_count,
-            'expectedOptionCount': expected_option_count,
-        }))
-    except asyncio.CancelledError:
-        logging.info(
-            "Cancelled IV term structure background sync for %s",
-            _normalize_symbol(symbol) or '<missing>',
-        )
-        raise
-    except Exception as exc:
-        logging.exception(
-            "IV term structure background sync failed for %s",
-            _normalize_symbol(symbol) or '<missing>',
-        )
-        await send_message_safe(websocket, json.dumps({
-            'action': 'iv_term_structure_error',
-            'symbol': _normalize_symbol(symbol),
-            'message': f'Background IV option subscription failed: {exc}',
-        }))
+    await run_iv_term_structure_option_sync(
+        _build_iv_term_structure_environment(),
+        websocket,
+        symbol,
+        sync_context,
+    )
 
 
 async def _handle_iv_term_structure_subscription(websocket, client_ip, data):
-    if not ib.isConnected():
-        await send_message_safe(websocket, json.dumps({
-            'action': 'iv_term_structure_error',
-            'symbol': _normalize_symbol((data.get('underlying') or {}).get('symbol')),
-            'message': 'IB is not connected.',
-        }))
-        return
-
-    raw_underlying = data.get('underlying')
-    underlying_request = _build_underlying_request(raw_underlying, [])
-    option_template = data.get('optionTemplate') if isinstance(data.get('optionTemplate'), dict) else {}
-    max_dte = _coerce_positive_int(data.get('maxDte'), IV_TERM_STRUCTURE_DEFAULT_MAX_DTE)
-    strike_radius = _coerce_positive_int(data.get('strikeRadius'), IV_TERM_STRUCTURE_DEFAULT_STRIKE_RADIUS)
-    anchor_date = normalize_replay_date(data.get('anchorDate')) or datetime.utcnow().strftime('%Y-%m-%d')
-
-    underlying_symbol = _normalize_symbol(
-        option_template.get('underlyingSymbol')
-        or (underlying_request or {}).get('symbol')
-        or option_template.get('symbol')
-    )
-
-    logging.info(
-        "Received IV term structure subscription request from %s for %s maxDte=%s strikeRadius=%s",
+    await handle_iv_term_structure_subscription(
+        _build_iv_term_structure_environment(),
+        websocket,
         client_ip,
-        underlying_symbol or '<missing>',
-        max_dte,
-        strike_radius,
+        data,
     )
-
-    try:
-        underlying_contract = _build_contract_from_request(underlying_request)
-    except Exception as exc:
-        await send_message_safe(websocket, json.dumps({
-            'action': 'iv_term_structure_error',
-            'symbol': underlying_symbol,
-            'message': f'Invalid underlying request: {exc}',
-        }))
-        return
-
-    await _cancel_iv_term_structure_sync_task(websocket)
-    unsubscribe_client_safely(websocket)
-    _get_client_subscription_settings(websocket)['greeks_enabled'] = False
-
-    qualified_underlying = await _qualify_one(underlying_contract, underlying_request)
-    if qualified_underlying is None:
-        await send_message_safe(websocket, json.dumps({
-            'action': 'iv_term_structure_error',
-            'symbol': underlying_symbol,
-            'message': f'Failed to qualify underlying {_describe_contract_request(underlying_request)}.',
-        }))
-        return
-
-    underlying_ticker = ib.reqMktData(qualified_underlying, '', False, False)
-    client_subscriptions[websocket]['underlying'] = underlying_ticker
-    await asyncio.sleep(0.75)
-    underlying_quote = _extract_quote_snapshot(underlying_ticker, getattr(qualified_underlying, 'secType', ''))
-    underlying_price = None if underlying_quote is None else underlying_quote.get('mark')
-
-    if underlying_price is None:
-        await send_message_safe(websocket, json.dumps({
-            'action': 'iv_term_structure_error',
-            'symbol': underlying_symbol,
-            'message': f'No live underlying quote is available yet for {underlying_symbol or "the requested symbol"}.',
-        }))
-        return
-
-    request_option_chains = getattr(ib, 'reqSecDefOptParamsAsync', None)
-    if not callable(request_option_chains):
-        await send_message_safe(websocket, json.dumps({
-            'action': 'iv_term_structure_error',
-            'symbol': underlying_symbol,
-            'message': 'The current ib_async build does not expose reqSecDefOptParamsAsync.',
-        }))
-        return
-
-    fut_fop_exchange = _resolve_iv_term_structure_secdef_exchange(option_template, underlying_request)
-    option_chains = await request_option_chains(
-        underlying_symbol,
-        fut_fop_exchange,
-        _normalize_symbol(getattr(qualified_underlying, 'secType', '') or (underlying_request or {}).get('secType')),
-        getattr(qualified_underlying, 'conId', 0),
-    )
-    merged_chain_fields = _merge_iv_term_structure_chain_fields(option_chains, option_template)
-    expiry_rows = filter_iv_term_structure_expiry_rows(
-        merged_chain_fields['expirations'],
-        anchor_date,
-        max_dte,
-    )
-    expiry_payload_rows = []
-    option_descriptors = {}
-
-    option_symbol = _normalize_symbol(option_template.get('symbol') or underlying_symbol)
-    option_sec_type = _normalize_symbol(option_template.get('secType') or option_template.get('sec_type') or 'OPT')
-    option_exchange = option_template.get('exchange') or 'SMART'
-    option_currency = option_template.get('currency') or (underlying_request or {}).get('currency') or 'USD'
-    option_multiplier = str(option_template.get('multiplier') or '100')
-    option_trading_class = merged_chain_fields.get('tradingClass') or option_template.get('tradingClass') or option_template.get('trading_class') or ''
-    underlying_exchange = option_template.get('underlyingExchange') or (underlying_request or {}).get('exchange') or option_exchange
-
-    for expiry_row in expiry_rows:
-        bundle = _build_iv_term_structure_expiry_bundle(
-            expiry_row,
-            option_symbol,
-            option_sec_type,
-            option_exchange,
-            option_currency,
-            option_multiplier,
-            underlying_symbol,
-            underlying_exchange,
-            option_trading_class,
-            expiry_selection={},
-        )
-        expiry_payload_rows.append(bundle['expiryPayloadRow'])
-
-    payload = {
-        'action': 'iv_term_structure_snapshot',
-        'symbol': option_symbol,
-        'anchorDate': anchor_date,
-        'maxDte': max_dte,
-        'strikeRadius': strike_radius,
-        'underlyingPrice': underlying_price,
-        'underlyingQuote': underlying_quote,
-        'expiryRows': expiry_payload_rows,
-        'optionDescriptors': option_descriptors,
-        'subscribedOptionCount': 0,
-        'expectedOptionCount': 0,
-        'subscriptionPending': bool(expiry_payload_rows),
-    }
-    if not expiry_payload_rows:
-        payload['warning'] = f'No option expiries were available within {max_dte} calendar days.'
-
-    await send_message_safe(websocket, json.dumps(payload))
-    if expiry_payload_rows:
-        task = asyncio.create_task(
-            _run_iv_term_structure_option_sync(websocket, option_symbol, {
-                'expiryRows': expiry_rows,
-                'optionSymbol': option_symbol,
-                'optionSecType': option_sec_type,
-                'optionExchange': option_exchange,
-                'optionCurrency': option_currency,
-                'optionMultiplier': option_multiplier,
-                'underlyingSymbol': underlying_symbol,
-                'underlyingExchange': underlying_exchange,
-                'optionTradingClass': option_trading_class,
-                'qualifiedUnderlying': qualified_underlying,
-                'underlyingPrice': underlying_price,
-                'strikeRadius': strike_radius,
-                'globalCandidateStrikes': merged_chain_fields.get('strikes') or [],
-            })
-        )
-        _track_iv_term_structure_sync_task(websocket, task)
 
 def _describe_contract_request(contract_data):
     if isinstance(contract_data, dict):
@@ -2511,366 +1208,45 @@ def _describe_contract_request(contract_data):
     return _normalize_symbol(contract_data) or '<missing>'
 
 
-def _extract_option_mark(ticker):
-    bid = getattr(ticker, 'bid', None)
-    ask = getattr(ticker, 'ask', None)
-    if bid and ask and bid == bid and ask == ask and bid > 0 and ask > 0:
-        return round((bid + ask) / 2, 4)
-
-    if hasattr(ticker, 'modelGreeks') and ticker.modelGreeks:
-        opt_price = getattr(ticker.modelGreeks, 'optPrice', None)
-        if opt_price is not None and opt_price == opt_price and opt_price > 0:
-            return round(opt_price, 4)
-
-    fallback = ticker.marketPrice()
-    if fallback == fallback and fallback > 0:
-        return round(fallback, 4)
-    return None
-
-
-def _sanitize_quote_value(raw_value):
-    try:
-        value = float(raw_value)
-    except (TypeError, ValueError):
-        return None
-
-    if value != value or value <= 0:
-        return None
-    return round(value, 4)
-
-
-def _extract_quote_snapshot(ticker, sec_type=''):
-    normalized_sec_type = _normalize_symbol(sec_type)
-    bid = _sanitize_quote_value(getattr(ticker, 'bid', None))
-    ask = _sanitize_quote_value(getattr(ticker, 'ask', None))
-
-    if normalized_sec_type in ('OPT', 'FOP'):
-        mark = _extract_option_mark(ticker)
-    else:
-        market_price = _extract_market_price(ticker)
-        mark = round(market_price, 4) if market_price is not None else None
-
-    if mark is None and bid is not None and ask is not None:
-        mark = round((bid + ask) / 2, 4)
-    if mark is None:
-        return None
-
-    if bid is None:
-        bid = mark
-    if ask is None:
-        ask = mark
-
-    return {
-        'bid': bid,
-        'ask': ask,
-        'mark': round(mark, 4),
-    }
-
-
-def _extract_option_iv(ticker):
-    for attr_name in ('modelGreeks', 'bidGreeks', 'askGreeks', 'lastGreeks'):
-        greeks = getattr(ticker, attr_name, None)
-        if not greeks:
-            continue
-        raw = getattr(greeks, 'impliedVol', None)
-        if raw is not None and raw == raw and raw > 0:
-            return raw
-
-    raw = getattr(ticker, 'impliedVolatility', None)
-    if raw is not None and raw == raw and raw > 0:
-        return raw
-    return None
-
-
-def _extract_option_delta(ticker):
-    for attr_name in ('modelGreeks', 'bidGreeks', 'askGreeks', 'lastGreeks'):
-        greeks = getattr(ticker, attr_name, None)
-        if not greeks:
-            continue
-        raw = getattr(greeks, 'delta', None)
-        if raw is not None and raw == raw:
-            return round(raw, 6)
-    return None
+_extract_quote_snapshot = extract_quote_snapshot
+_extract_option_iv = extract_option_iv
+_extract_option_delta = extract_option_delta
+_coerce_positive_int = coerce_positive_int
+_normalize_bool = normalize_bool
 
 
 def _log_option_iv_debug_if_needed(sub_id, ticker, iv):
-    contract = getattr(ticker, 'contract', None)
-    symbol = str(getattr(contract, 'symbol', '') or '').upper()
-    if symbol != 'SLV':
-        return
+    log_option_iv_debug_if_needed(sub_id, ticker, iv, option_iv_debug_last_logged)
 
-    con_id = getattr(contract, 'conId', None) or sub_id
-    now = datetime.utcnow().timestamp()
-    last_logged_at = option_iv_debug_last_logged.get(con_id, 0)
-    if now - last_logged_at < 15:
-        return
-    option_iv_debug_last_logged[con_id] = now
 
-    def _extract_greek_iv(attr_name):
-        greeks = getattr(ticker, attr_name, None)
-        if not greeks:
-            return None
-        return getattr(greeks, 'impliedVol', None)
-
-    logging.info(
-        "SLV IV debug: subId=%s localSymbol=%s iv=%s bid=%s ask=%s "
-        "modelIV=%s bidIV=%s askIV=%s lastIV=%s impliedVolatility=%s",
-        sub_id,
-        getattr(contract, 'localSymbol', None),
-        iv,
-        getattr(ticker, 'bid', None),
-        getattr(ticker, 'ask', None),
-        _extract_greek_iv('modelGreeks'),
-        _extract_greek_iv('bidGreeks'),
-        _extract_greek_iv('askGreeks'),
-        _extract_greek_iv('lastGreeks'),
-        getattr(ticker, 'impliedVolatility', None),
-    )
+def _build_market_data_environment():
+    return {
+        'ib': ib,
+        'connected_clients': connected_clients,
+        'client_subscriptions': client_subscriptions,
+        'client_subscription_settings': client_subscription_settings,
+        'send_message_safe': send_message_safe,
+        'log_option_iv_debug_if_needed': _log_option_iv_debug_if_needed,
+        'build_contract_from_request': _build_contract_from_request,
+        'qualify_one': _qualify_one,
+        'describe_contract_request': _describe_contract_request,
+        'normalize_symbol': _normalize_symbol,
+    }
 
 
 def _get_client_subscription_settings(websocket):
-    settings = client_subscription_settings.get(websocket)
-    if not isinstance(settings, dict):
-        settings = {'greeks_enabled': False}
-        client_subscription_settings[websocket] = settings
-    elif 'greeks_enabled' not in settings:
-        settings['greeks_enabled'] = False
-    return settings
+    return get_client_subscription_settings(websocket, client_subscription_settings)
 
 
-def _client_wants_greeks(websocket):
-    return _get_client_subscription_settings(websocket).get('greeks_enabled') is True
+on_pending_tickers = build_pending_tickers_handler(_build_market_data_environment())
 
-
-def _collect_changed_ticker_keys(tickers):
-    changed_ticker_ids = set()
-    changed_contract_ids = set()
-
-    for ticker in tickers or []:
-        if ticker is None:
-            continue
-
-        changed_ticker_ids.add(id(ticker))
-        contract = getattr(ticker, 'contract', None)
-        con_id = getattr(contract, 'conId', None)
-        if con_id:
-            changed_contract_ids.add(con_id)
-
-    return changed_ticker_ids, changed_contract_ids
-
-
-def _ticker_matches_change(ticker, changed_ticker_ids, changed_contract_ids, process_all=False):
-    if process_all:
-        return True
-    if ticker is None:
-        return False
-    if id(ticker) in changed_ticker_ids:
-        return True
-
-    contract = getattr(ticker, 'contract', None)
-    con_id = getattr(contract, 'conId', None)
-    return con_id in changed_contract_ids if con_id else False
-
-
-def on_pending_tickers(tickers):
-    """
-    Callback fired by ib_async when streaming data ticks arrive.
-    We batch process these and send customized state to each connected WS client.
-    """
-    if not connected_clients:
-        return
-
-    changed_ticker_ids, changed_contract_ids = _collect_changed_ticker_keys(tickers)
-    process_all = not (changed_ticker_ids or changed_contract_ids)
-
-    for ws in list(connected_clients):
-        # Build a custom payload for this specific client based on their subscriptions
-        subs = client_subscriptions.get(ws, {})
-        if not subs:
-            continue
-
-        wants_greeks = _client_wants_greeks(ws)
-        payload = {
-            "underlyingPrice": None,
-            "underlyingQuote": None,
-            "options": {},
-            "futures": {},
-            "stocks": {}
-        }
-        
-        has_data = False
-        
-        if 'underlying' in subs:
-            ticker = subs['underlying']
-            if _ticker_matches_change(ticker, changed_ticker_ids, changed_contract_ids, process_all):
-                sec_type = getattr(getattr(ticker, 'contract', None), 'secType', '')
-                quote = _extract_quote_snapshot(ticker, sec_type)
-                if quote is not None:
-                    payload["underlyingPrice"] = quote["mark"]
-                    payload["underlyingQuote"] = quote
-                    has_data = True
-
-        for sub_id, ticker in subs.items():
-            if sub_id == 'underlying':
-                continue  # already handled above
-            if not _ticker_matches_change(ticker, changed_ticker_ids, changed_contract_ids, process_all):
-                continue
-
-            if sub_id.startswith('stock_'):
-                # --- Stock / ETF hedge ---
-                stock_sym = sub_id.replace('stock_', '')
-                quote = _extract_quote_snapshot(ticker, 'STK')
-                if quote is not None:
-                    payload["stocks"][stock_sym] = quote
-                    has_data = True
-
-            elif sub_id.startswith('future_'):
-                future_id = sub_id.replace('future_', '')
-                quote = _extract_quote_snapshot(ticker, 'FUT')
-                if quote is not None:
-                    payload["futures"][future_id] = quote
-                    has_data = True
-
-            else:
-                # --- Option leg ---
-                sec_type = getattr(getattr(ticker, 'contract', None), 'secType', 'OPT')
-                quote = _extract_quote_snapshot(ticker, sec_type)
-                if quote is None:
-                    continue
-
-                # Extract IV: prefer modelGreeks.impliedVol (from Generic Tick 106),
-                # fall back to ticker.impliedVolatility if available.
-                # Both can be NaN, so filter explicitly.
-                iv = None
-                if hasattr(ticker, 'modelGreeks') and ticker.modelGreeks:
-                    raw = getattr(ticker.modelGreeks, 'impliedVol', None)
-                    if raw is not None and raw == raw and raw > 0:  # filter NaN
-                        iv = raw
-                if iv is None:
-                    raw = getattr(ticker, 'impliedVolatility', None)
-                    if raw is not None and raw == raw and raw > 0:
-                        iv = raw
-                if iv is None:
-                    iv = _extract_option_iv(ticker)
-                delta = _extract_option_delta(ticker) if wants_greeks else None
-                _log_option_iv_debug_if_needed(sub_id, ticker, iv)
-
-                payload["options"][sub_id] = quote
-
-                if iv and iv == iv and iv > 0: # Check for NaN
-                    payload["options"][sub_id]["iv"] = iv
-                if delta is not None:
-                    payload["options"][sub_id]["delta"] = delta
-                has_data = True
-                    
-        # Send data only to the client that requested it
-        if has_data:
-            message = json.dumps(payload)
-            # asyncio.create_task ensures we don't block the tick event thread
-            asyncio.create_task(send_message_safe(ws, message))
-
-async def send_message_safe(ws, message):
-    try:
-        await ws.send(message)
-    except Exception as e:
-        # Ignore normal disconnect errors; the finally block in handle_ws_client will clean up
-        pass
 
 def unsubscribe_client_safely(ws):
-    """
-    Removes a client's subscriptions. If no other client is watching a specific 
-    Ticker contract anymore, we tell IB to cancel the market data stream.
-    """
-    subs = client_subscriptions.get(ws, {})
-    if not subs:
-        return
-        
-    # Count how many total clients are watching each contract ID
-    active_contracts = {}
-    for other_ws, other_subs in client_subscriptions.items():
-        if other_ws != ws:
-            for t in other_subs.values():
-                active_contracts[t.contract.conId] = True
-                
-    # Cancel the data stream if this client was the last one watching it
-    for ticker in subs.values():
-        if ticker.contract.conId not in active_contracts:
-            ib.cancelMktData(ticker.contract)
-            
-    client_subscriptions[ws] = {}
-
-
-def _coerce_positive_int(value, default_value):
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default_value
-    return parsed if parsed > 0 else default_value
-
-
-def _normalize_bool(value, default_value=True):
-    if value is None:
-        return default_value
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in ('1', 'true', 'yes', 'y', 'on'):
-        return True
-    if text in ('0', 'false', 'no', 'n', 'off'):
-        return False
-    return default_value
-
-
-def _serialize_historical_bar_time(raw_value):
-    if raw_value is None:
-        return ''
-    if hasattr(raw_value, 'date'):
-        try:
-            return raw_value.date().isoformat()
-        except Exception:
-            pass
-
-    text = str(raw_value).strip()
-    if not text:
-        return ''
-
-    normalized = text.replace('/', '-')
-    for fmt in ('%Y-%m-%d', '%Y%m%d', '%Y-%m-%d %H:%M:%S', '%Y%m%d %H:%M:%S'):
-        try:
-            parsed = datetime.strptime(normalized, fmt)
-            return parsed.date().isoformat()
-        except ValueError:
-            continue
-    return normalized
-
-
-def _serialize_historical_bar(bar):
-    try:
-        open_value = float(getattr(bar, 'open', None))
-        high_value = float(getattr(bar, 'high', None))
-        low_value = float(getattr(bar, 'low', None))
-        close_value = float(getattr(bar, 'close', None))
-    except (TypeError, ValueError):
-        return None
-
-    time_value = _serialize_historical_bar_time(getattr(bar, 'date', None))
-    if not time_value:
-        return None
-
-    volume_raw = getattr(bar, 'volume', None)
-    try:
-        volume_value = int(volume_raw) if volume_raw is not None else None
-    except (TypeError, ValueError):
-        volume_value = None
-
-    return {
-        'time': time_value,
-        'open': open_value,
-        'high': high_value,
-        'low': low_value,
-        'close': close_value,
-        'volume': volume_value,
-    }
+    unsubscribe_client_safely_via_market_data(
+        ws,
+        client_subscriptions=client_subscriptions,
+        ib=ib,
+    )
 
 
 async def _request_ib_historical_bars(
@@ -2881,401 +1257,82 @@ async def _request_ib_historical_bars(
     use_rth=True,
     limit=260,
 ):
-    if not ib.isConnected():
-        raise RuntimeError('IB is not connected.')
-
-    contract = _build_contract_from_request(underlying_request)
-    qualified_underlying = await _qualify_one(contract, underlying_request)
-    if qualified_underlying is None:
-        raise RuntimeError(
-            f"Failed to qualify underlying {_describe_contract_request(underlying_request)}"
-        )
-
-    sec_type = _normalize_symbol(getattr(qualified_underlying, 'secType', ''))
-    what_to_show = 'MIDPOINT' if sec_type in ('IND', 'CASH') else 'TRADES'
-
-    request_historical = getattr(ib, 'reqHistoricalDataAsync', None)
-    if not callable(request_historical):
-        raise RuntimeError('The current ib_async build does not expose reqHistoricalDataAsync.')
-
-    raw_bars = await request_historical(
-        qualified_underlying,
-        endDateTime='',
-        durationStr=duration_str,
-        barSizeSetting=bar_size,
-        whatToShow=what_to_show,
-        useRTH=use_rth,
-        formatDate=1,
-        keepUpToDate=False,
+    return await request_ib_historical_bars(
+        _build_market_data_environment(),
+        underlying_request,
+        bar_size=bar_size,
+        duration_str=duration_str,
+        use_rth=use_rth,
+        limit=limit,
     )
 
-    serialized_bars = []
-    for raw_bar in raw_bars or []:
-        serialized_bar = _serialize_historical_bar(raw_bar)
-        if serialized_bar is not None:
-            serialized_bars.append(serialized_bar)
 
-    if limit and len(serialized_bars) > limit:
-        serialized_bars = serialized_bars[-limit:]
-
-    if not serialized_bars:
-        raise RuntimeError(
-            f"IB returned no historical bars for {_describe_contract_request(underlying_request)}."
-        )
-
-    if isinstance(underlying_request, dict):
-        requested_symbol = underlying_request.get('symbol')
-    else:
-        requested_symbol = underlying_request
-
+def _build_ws_handler_environment():
     return {
-        'action': 'historical_bars_response',
-        'symbol': _normalize_symbol(getattr(qualified_underlying, 'symbol', '') or requested_symbol),
-        'barSize': bar_size,
-        'durationStr': duration_str,
-        'dataSource': 'ibkr',
-        'useRTH': use_rth,
-        'bars': serialized_bars,
+        'connected_clients': connected_clients,
+        'client_subscriptions': client_subscriptions,
+        'client_subscription_settings': client_subscription_settings,
+        'historical_replay_service': historical_replay_service,
+        'execution_engine': execution_engine,
+        'send_portfolio_avg_cost_snapshot': _send_portfolio_avg_cost_snapshot,
+        'send_managed_accounts_snapshot': _send_managed_accounts_snapshot,
+        'build_underlying_request': _build_underlying_request,
+        'normalize_replay_date': normalize_replay_date,
+        'describe_contract_request': _describe_contract_request,
+        'cancel_iv_term_structure_sync_task': _cancel_iv_term_structure_sync_task,
+        'unsubscribe_client_safely': unsubscribe_client_safely,
+        'send_message_safe': send_message_safe,
+        'normalize_bool': _normalize_bool,
+        'build_contract_from_request': _build_contract_from_request,
+        'get_client_subscription_settings': _get_client_subscription_settings,
+        'qualify_one': _qualify_one,
+        'handle_iv_term_structure_subscription': _handle_iv_term_structure_subscription,
+        'build_ib_connection_status_payload': _build_ib_connection_status_payload,
+        'ensure_ib_connect_task': _ensure_ib_connect_task,
+        'extract_quote_snapshot': _extract_quote_snapshot,
+        'request_ib_historical_bars': _request_ib_historical_bars,
+        'coerce_positive_int': _coerce_positive_int,
+        'normalize_symbol': _normalize_symbol,
+        'build_active_hedge_orders_snapshot': _build_active_hedge_orders_snapshot,
+        'combo_order_tracking_by_order_id': combo_order_tracking_by_order_id,
+        'combo_order_tracking_by_perm_id': combo_order_tracking_by_perm_id,
+        'hedge_order_tracking_by_order_id': hedge_order_tracking_by_order_id,
+        'hedge_order_tracking_by_perm_id': hedge_order_tracking_by_perm_id,
+        'iter_unique_hedge_order_trackings': _iter_unique_hedge_order_trackings,
+        'is_terminal_hedge_tracking': _is_terminal_hedge_tracking,
+        'extract_market_price': _extract_market_price,
+        'ib': ib,
     }
 
 
 def _purge_combo_order_tracking_for_websocket(ws):
-    stale_order_ids = [
-        order_id for order_id, tracking in combo_order_tracking_by_order_id.items()
-        if tracking.get('websocket') is ws
-    ]
-    for order_id in stale_order_ids:
-        combo_order_tracking_by_order_id.pop(order_id, None)
-
-    stale_perm_ids = [
-        perm_id for perm_id, tracking in combo_order_tracking_by_perm_id.items()
-        if tracking.get('websocket') is ws
-    ]
-    for perm_id in stale_perm_ids:
-        combo_order_tracking_by_perm_id.pop(perm_id, None)
+    purge_combo_order_tracking_for_websocket(
+        ws,
+        combo_order_tracking_by_order_id,
+        combo_order_tracking_by_perm_id,
+    )
 
 
 def _purge_hedge_order_tracking_for_websocket(ws):
-    for tracking in _iter_unique_hedge_order_trackings():
-        if tracking.get('websocket') is not ws:
-            continue
-        if _is_terminal_hedge_tracking(tracking):
-            order_id = tracking.get('orderId')
-            perm_id = tracking.get('permId')
-            if order_id is not None:
-                hedge_order_tracking_by_order_id.pop(order_id, None)
-            if perm_id is not None:
-                hedge_order_tracking_by_perm_id.pop(perm_id, None)
-        else:
-            tracking['websocket'] = None
+    purge_hedge_order_tracking_for_websocket(
+        ws,
+        iter_unique_hedge_order_trackings=_iter_unique_hedge_order_trackings,
+        is_terminal_hedge_tracking=_is_terminal_hedge_tracking,
+        hedge_order_tracking_by_order_id=hedge_order_tracking_by_order_id,
+        hedge_order_tracking_by_perm_id=hedge_order_tracking_by_perm_id,
+    )
 
 
 async def _dispatch_execution_action(websocket, data, client_ip='Unknown'):
-    if hasattr(execution_engine, 'handle_hedge_action'):
-        payload = await execution_engine.handle_hedge_action(
-            websocket,
-            data,
-            client_ip=client_ip,
-        )
-        if payload is not None:
-            return payload
-
-    return await execution_engine.handle_combo_action(
+    return await dispatch_ws_execution_action(
+        _build_ws_handler_environment(),
         websocket,
         data,
         client_ip=client_ip,
     )
 
 
-async def handle_ws_client(websocket):
-    client_ip = websocket.remote_address[0] if websocket.remote_address else 'Unknown'
-    logging.info(f"Client connected: {client_ip}")
-    connected_clients.add(websocket)
-    client_subscriptions[websocket] = {}
-    client_subscription_settings[websocket] = {'greeks_enabled': False}
-    _send_portfolio_avg_cost_snapshot(websocket)
-    _send_managed_accounts_snapshot(websocket)
-    
-    try:
-        async for message in websocket:
-            data = json.loads(message)
-
-            if data.get('action') == 'request_historical_snapshot':
-                raw_underlying = data.get('underlying')
-                options_data = data.get('options', [])
-                requested_date = normalize_replay_date(data.get('replayDate'))
-                underlying_request = _build_underlying_request(raw_underlying, options_data)
-
-                logging.info(
-                    f"Received historical snapshot request from {client_ip} "
-                    f"for date {requested_date or '<latest>'}, "
-                    f"underlying {_describe_contract_request(underlying_request)}, "
-                    f"{len(options_data)} options"
-                )
-
-                await _cancel_iv_term_structure_sync_task(websocket)
-                unsubscribe_client_safely(websocket)
-
-                try:
-                    payload = historical_replay_service.build_snapshot_payload(
-                        requested_date,
-                        underlying_request if isinstance(underlying_request, dict) else {},
-                        options_data,
-                    )
-                except (sqlite3.Error, ValueError) as exc:
-                    logging.exception("Historical replay snapshot failed")
-                    await send_message_safe(websocket, json.dumps({
-                        "action": "historical_replay_error",
-                        "message": str(exc),
-                    }))
-                    continue
-
-                if payload is None:
-                    await send_message_safe(websocket, json.dumps({
-                        "action": "historical_replay_error",
-                        "message": (
-                            f"No underlying historical quote was found for "
-                            f"{_describe_contract_request(underlying_request)} "
-                            f"on {requested_date or 'the latest available date'}."
-                        ),
-                    }))
-                    continue
-
-                await send_message_safe(websocket, json.dumps(payload))
-
-            elif data.get('action') == 'subscribe':
-                raw_underlying = data.get('underlying')
-                options_data = data.get('options', [])
-                futures_data = data.get('futures', [])
-                stocks_data = data.get('stocks', [])
-                greeks_enabled = _normalize_bool(data.get('greeksEnabled'), False)
-                underlying_request = _build_underlying_request(raw_underlying, options_data)
-                _get_client_subscription_settings(websocket)['greeks_enabled'] = greeks_enabled
-
-                logging.info(
-                    f"Received subscription request from {client_ip} "
-                    f"for underlying {_describe_contract_request(underlying_request)}, "
-                    f"{len(options_data)} options, {len(futures_data)} futures, and {len(stocks_data)} stocks "
-                    f"(greeks={'on' if greeks_enabled else 'off'})"
-                )
-
-                try:
-                    underlying_contract = _build_contract_from_request(underlying_request)
-                except Exception as e:
-                    logging.error(f"Invalid underlying request from {client_ip}: {underlying_request!r} ({e})")
-                    continue
-
-                # Unsubscribe old streams for this specific client safely
-                await _cancel_iv_term_structure_sync_task(websocket)
-                unsubscribe_client_safely(websocket)
-
-                qualified_underlying = await _qualify_one(underlying_contract, underlying_request)
-                if qualified_underlying is None:
-                    logging.warning(
-                        f"Failed to qualify underlying {_describe_contract_request(underlying_request)}; "
-                        f"continuing with option subscriptions only"
-                    )
-                else:
-                    # Subscribe underlying price stream.
-                    ticker = ib.reqMktData(qualified_underlying, '', False, False)
-                    client_subscriptions[websocket]['underlying'] = ticker
-
-                # Process options / FOP legs.
-                for opt in options_data:
-                    leg_id = opt['id']
-                    try:
-                        opt_contract = _build_contract_from_request(opt)
-                    except Exception as e:
-                        logging.error(f"Invalid option request for leg {leg_id}: {opt!r} ({e})")
-                        continue
-
-                    qualified_option = await _qualify_one(opt_contract, opt)
-                    if qualified_option is None:
-                        logging.error(f"Failed to qualify option leg {leg_id}: {_describe_contract_request(opt)}")
-                        continue
-
-                    generic_ticks = '106' if greeks_enabled else ''
-                    opt_ticker = ib.reqMktData(qualified_option, generic_ticks, False, False)
-                    client_subscriptions[websocket][leg_id] = opt_ticker
-
-                # Process explicitly subscribed futures.
-                for future_req in futures_data:
-                    future_id = future_req.get('id')
-                    if not future_id:
-                        continue
-
-                    try:
-                        future_contract = _build_contract_from_request(future_req)
-                    except Exception as e:
-                        logging.error(f"Invalid future request {future_req!r} ({e})")
-                        continue
-
-                    qualified_future = await _qualify_one(future_contract, future_req)
-                    if qualified_future is None:
-                        logging.error(f"Failed to qualify future subscription {future_id}: {_describe_contract_request(future_req)}")
-                        continue
-
-                    future_ticker = ib.reqMktData(qualified_future, '', False, False)
-                    client_subscriptions[websocket][f"future_{future_id}"] = future_ticker
-
-                # Process stock hedges.
-                for stock_sym in stocks_data:
-                    stock_contract = Stock(stock_sym, 'SMART', 'USD')
-                    qualified_stock = await _qualify_one(stock_contract)
-                    if qualified_stock is None:
-                        logging.error(f"Failed to qualify hedge stock {stock_sym}")
-                        continue
-
-                    stock_ticker = ib.reqMktData(qualified_stock, '', False, False)
-                    
-                    def make_stock_tick_handler(s, ws):
-                        def _on_stock_tick(t):
-                            price = _extract_market_price(t)
-                            if price is not None:
-                                payload = {"options": {}, "stocks": {s: {"mark": price}}}
-                                asyncio.create_task(send_message_safe(ws, json.dumps(payload)))
-                        return _on_stock_tick
-                    
-                    stock_ticker.updateEvent += make_stock_tick_handler(stock_sym, websocket)
-                    client_subscriptions[websocket][f"stock_{stock_sym}"] = stock_ticker
-                    logging.info(f"Subscribed to stock: {stock_sym}")
-
-            elif data.get('action') == 'subscribe_iv_term_structure':
-                await _handle_iv_term_structure_subscription(websocket, client_ip, data)
-
-            elif data.get('action') == 'request_ib_connection_status':
-                await send_message_safe(websocket, json.dumps(_build_ib_connection_status_payload()))
-
-            elif data.get('action') == 'connect_ib':
-                message = await _ensure_ib_connect_task()
-                await send_message_safe(websocket, json.dumps(_build_ib_connection_status_payload(message)))
-
-            elif data.get('action') == 'sync_underlying':
-                raw_underlying = data.get('underlying')
-                underlying_request = _build_underlying_request(raw_underlying, [])
-                try:
-                    contract = _build_contract_from_request(underlying_request)
-                except Exception as e:
-                    logging.error(f"Invalid manual sync request: {underlying_request!r} ({e})")
-                    continue
-
-                qualified_underlying = await _qualify_one(contract, underlying_request)
-                if qualified_underlying is None:
-                    logging.error(f"Failed to manual sync underlying {_describe_contract_request(underlying_request)}")
-                else:
-                    ticker = ib.reqMktData(qualified_underlying, '', False, False)
-                    # Wait momentarily for IB to populate a snapshot-like first tick.
-                    await asyncio.sleep(0.5)
-                    quote = _extract_quote_snapshot(ticker, getattr(qualified_underlying, 'secType', ''))
-
-                    if quote is not None:
-                        payload = {
-                            "underlyingPrice": quote["mark"],
-                            "underlyingQuote": quote,
-                            "options": {}
-                        }
-                        await send_message_safe(websocket, json.dumps(payload))
-
-            elif data.get('action') == 'request_historical_bars':
-                raw_underlying = data.get('underlying')
-                options_data = data.get('options', [])
-                underlying_request = _build_underlying_request(raw_underlying, options_data)
-                bar_size = str(data.get('barSize') or '1 day').strip() or '1 day'
-                duration_str = str(data.get('durationStr') or '2 Y').strip() or '2 Y'
-                use_rth = _normalize_bool(data.get('useRTH'), True)
-                limit = _coerce_positive_int(data.get('limit'), 260)
-                request_id = str(data.get('requestId') or '').strip()
-
-                logging.info(
-                    f"Received historical bars request from {client_ip} "
-                    f"for {_describe_contract_request(underlying_request)} "
-                    f"barSize={bar_size} duration={duration_str} useRTH={use_rth} limit={limit}"
-                )
-
-                payload = None
-                ib_error_message = ''
-                try:
-                    payload = await _request_ib_historical_bars(
-                        underlying_request,
-                        bar_size=bar_size,
-                        duration_str=duration_str,
-                        use_rth=use_rth,
-                        limit=limit,
-                    )
-                except Exception as exc:
-                    ib_error_message = str(exc)
-                    logging.warning(
-                        "Historical bars request via IB failed for %s: %s",
-                        _describe_contract_request(underlying_request),
-                        exc,
-                    )
-
-                if payload is None and bar_size == '1 day':
-                    fallback_symbol = _normalize_symbol(
-                        (underlying_request or {}).get('symbol')
-                        if isinstance(underlying_request, dict)
-                        else underlying_request
-                    )
-                    payload = historical_replay_service.build_underlying_daily_bars_payload(
-                        fallback_symbol,
-                        limit=limit,
-                    )
-                    if payload is not None:
-                        payload['fallbackReason'] = ib_error_message or 'IB historical bars unavailable.'
-
-                if payload is None:
-                    await send_message_safe(websocket, json.dumps({
-                        'action': 'historical_bars_error',
-                        'requestId': request_id,
-                        'message': ib_error_message or (
-                            f"No historical bars were available for "
-                            f"{_describe_contract_request(underlying_request)}."
-                        ),
-                    }))
-                    continue
-
-                if request_id:
-                    payload['requestId'] = request_id
-                await send_message_safe(websocket, json.dumps(payload))
-
-            elif data.get('action') == 'request_portfolio_avg_cost_snapshot':
-                logging.info(f"Received portfolio avg cost snapshot request from {client_ip}")
-                _send_portfolio_avg_cost_snapshot(websocket)
-
-            elif data.get('action') == 'request_managed_accounts_snapshot':
-                logging.info(f"Received managed accounts snapshot request from {client_ip}")
-                _send_managed_accounts_snapshot(websocket)
-
-            elif data.get('action') == 'request_active_hedge_orders_snapshot':
-                logging.info(f"Received active hedge orders snapshot request from {client_ip}")
-                await send_message_safe(
-                    websocket,
-                    json.dumps(_build_active_hedge_orders_snapshot(websocket, data)),
-                )
-
-            else:
-                payload = await _dispatch_execution_action(
-                    websocket,
-                    data,
-                    client_ip=client_ip,
-                )
-                if payload is not None:
-                    await send_message_safe(websocket, json.dumps(payload))
-
-    except websockets.exceptions.ConnectionClosed:
-        pass
-    finally:
-        logging.info(f"Client disconnected: {client_ip}")
-        # Clean up all tracking logic for this exact websocket
-        await _cancel_iv_term_structure_sync_task(websocket)
-        unsubscribe_client_safely(websocket)
-        _purge_combo_order_tracking_for_websocket(websocket)
-        _purge_hedge_order_tracking_for_websocket(websocket)
-        execution_engine.cancel_managed_for_websocket(websocket)
-        if websocket in connected_clients:
-            connected_clients.remove(websocket)
-        client_subscriptions.pop(websocket, None)
-        client_subscription_settings.pop(websocket, None)
+handle_ws_client = build_ws_client_handler(_build_ws_handler_environment())
 
 async def main():
     global ib_connect_task

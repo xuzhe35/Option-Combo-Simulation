@@ -5,6 +5,8 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Resolve-OptionComboPython -ProjectRoot $projectRoot).Path
 $workdir = $projectRoot
+$runtimeDir = Join-Path $workdir 'logs'
+New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
 $services = @(
     @{
@@ -24,9 +26,9 @@ $services = @(
 )
 
 $results = foreach ($service in $services) {
-    $stdout = Join-Path $workdir $service.Stdout
-    $stderr = Join-Path $workdir $service.Stderr
-    $pidFile = Join-Path $workdir $service.Pid
+    $stdout = Join-Path $runtimeDir $service.Stdout
+    $stderr = Join-Path $runtimeDir $service.Stderr
+    $pidFile = Join-Path $runtimeDir $service.Pid
 
     $proc = Start-Process -FilePath $python `
         -ArgumentList $service.Arguments `

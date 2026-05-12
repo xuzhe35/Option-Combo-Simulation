@@ -193,5 +193,37 @@ module.exports = {
                 );
             },
         },
+        {
+            name: 'falls back safely when session logic and order builder modules are unavailable',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/trade_trigger_logic.js',
+                ]);
+
+                const renderMode = ctx.OptionComboTradeTriggerLogic.getRenderableGroupViewMode({
+                    viewMode: 'trial',
+                });
+                const legRequests = ctx.OptionComboTradeTriggerLogic.buildComboOrderLegRequests(
+                    { legs: [{ id: 'leg_1', type: 'call', pos: 1 }] },
+                    { underlyingSymbol: 'SPY' }
+                );
+                const payload = ctx.OptionComboTradeTriggerLogic.buildComboOrderRequestPayload(
+                    {
+                        id: 'group_1',
+                        name: 'No Builder',
+                        tradeTrigger: {
+                            enabled: true,
+                            executionMode: 'preview',
+                        },
+                        legs: [{ id: 'leg_1', type: 'call', pos: 1 }],
+                    },
+                    { underlyingSymbol: 'SPY' }
+                );
+
+                assert.equal(renderMode, 'trial');
+                assert.deepEqual(Array.from(legRequests), []);
+                assert.equal(payload, null);
+            },
+        },
     ],
 };
