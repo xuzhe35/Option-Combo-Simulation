@@ -57,6 +57,37 @@ module.exports = {
             },
         },
         {
+            name: 'resolves MES and MNQ as micro futures-option families',
+            run() {
+                const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
+                const registry = ctx.OptionComboProductRegistry;
+
+                const profileMes = registry.resolveUnderlyingProfile('MES');
+                assert.equal(profileMes.optionSecType, 'FOP');
+                assert.equal(profileMes.underlyingSecType, 'FUT');
+                assert.equal(profileMes.optionExchange, 'CME');
+                assert.equal(profileMes.underlyingExchange, 'CME');
+                assert.equal(profileMes.optionMultiplier, 5);
+                assert.equal(profileMes.underlyingLegMultiplier, 5);
+                assert.equal(profileMes.settlementUnitsPerContract, 1);
+                assert.equal(profileMes.supportsAmortizedMode, false);
+                assert.equal(profileMes.supportsLegacyLiveData, true);
+                assert.equal(profileMes.supportsUnderlyingLegs, true);
+
+                const profileMnq = registry.resolveUnderlyingProfile('MNQ');
+                assert.equal(profileMnq.optionSecType, 'FOP');
+                assert.equal(profileMnq.underlyingSecType, 'FUT');
+                assert.equal(profileMnq.optionExchange, 'CME');
+                assert.equal(profileMnq.underlyingExchange, 'CME');
+                assert.equal(profileMnq.optionMultiplier, 2);
+                assert.equal(profileMnq.underlyingLegMultiplier, 2);
+                assert.equal(profileMnq.settlementUnitsPerContract, 1);
+                assert.equal(profileMnq.supportsAmortizedMode, false);
+                assert.equal(profileMnq.supportsLegacyLiveData, true);
+                assert.equal(profileMnq.supportsUnderlyingLegs, true);
+            },
+        },
+        {
             name: 'resolves ES and NQ weekly FOP trading classes from expiry weekday',
             run() {
                 const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
@@ -69,6 +100,18 @@ module.exports = {
             },
         },
         {
+            name: 'does not synthesize unverified MES and MNQ weekly trading classes',
+            run() {
+                const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
+                const registry = ctx.OptionComboProductRegistry;
+
+                assert.equal(registry.resolveTradingClass('MES', '2026-03-16'), null);
+                assert.equal(registry.resolveTradingClass('MNQ', '2026-03-19'), null);
+                assert.equal(registry.resolveOptionContractSpec('MES', '2026-03-16').tradingClass, null);
+                assert.equal(registry.resolveOptionContractSpec('MNQ', '2026-03-19').tradingClass, null);
+            },
+        },
+        {
             name: 'resolves default underlying futures month for ES and NQ families',
             run() {
                 const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
@@ -77,6 +120,9 @@ module.exports = {
                 assert.equal(registry.resolveDefaultUnderlyingContractMonth('ES', '2026-03-15'), '202603');
                 assert.equal(registry.resolveDefaultUnderlyingContractMonth('ES', '2026-03-21'), '202606');
                 assert.equal(registry.resolveDefaultUnderlyingContractMonth('NQ', '2026-09-10'), '202609');
+                assert.equal(registry.resolveDefaultUnderlyingContractMonth('MES', '2026-03-15'), '202603');
+                assert.equal(registry.resolveDefaultUnderlyingContractMonth('MES', '2026-03-21'), '202606');
+                assert.equal(registry.resolveDefaultUnderlyingContractMonth('MNQ', '2026-09-10'), '202609');
                 assert.equal(registry.resolveDefaultUnderlyingContractMonth('CL', '2026-03-15'), '202604');
                 assert.equal(registry.resolveDefaultUnderlyingContractMonth('CL', '2026-03-23'), '202605');
                 assert.equal(registry.resolveDefaultUnderlyingContractMonth('SPY', '2026-03-15'), '');
@@ -136,8 +182,12 @@ module.exports = {
                 assert.equal(registry.resolvePricingInputMode('SPY'), 'STK');
                 assert.equal(registry.resolvePricingInputMode('SPX'), 'INDEX');
                 assert.equal(registry.resolvePricingInputMode('CL'), 'FOP');
+                assert.equal(registry.resolvePricingInputMode('MES'), 'FOP');
+                assert.equal(registry.resolvePricingInputMode('MNQ'), 'FOP');
                 assert.equal(registry.usesForwardRateSamples('NDX'), true);
                 assert.equal(registry.usesFuturesPool('HG'), true);
+                assert.equal(registry.usesFuturesPool('MES'), true);
+                assert.equal(registry.usesFuturesPool('MNQ'), true);
             },
         },
         {

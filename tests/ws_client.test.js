@@ -420,6 +420,109 @@ module.exports = {
             },
         },
         {
+            name: 'builds MES and MNQ live subscriptions with micro FUT and FOP multipliers',
+            run() {
+                [
+                    { symbol: 'MES', multiplier: '5', strike: 5400 },
+                    { symbol: 'MNQ', multiplier: '2', strike: 19500 },
+                ].forEach(({ symbol, multiplier, strike }) => {
+                    const state = {
+                        underlyingSymbol: symbol,
+                        underlyingContractMonth: '',
+                        underlyingPrice: strike,
+                        simulatedDate: '2026-04-16',
+                        baseDate: '2026-04-16',
+                        greeksEnabled: false,
+                        futuresPool: [
+                            { id: 'future_jun', contractMonth: '202606' },
+                        ],
+                        groups: [
+                            {
+                                id: `group_${symbol.toLowerCase()}`,
+                                liveData: true,
+                                legs: [
+                                    {
+                                        id: `leg_${symbol.toLowerCase()}_call`,
+                                        type: 'call',
+                                        pos: 1,
+                                        strike,
+                                        expDate: '2026-06-19',
+                                        underlyingFutureId: 'future_jun',
+                                    },
+                                ],
+                            },
+                        ],
+                        hedges: [],
+                    };
+
+                    class MockWebSocket {
+                        constructor() {
+                            this.sent = [];
+                            MockWebSocket.instance = this;
+                        }
+
+                        send(message) {
+                            this.sent.push(message);
+                        }
+
+                        close() {}
+                    }
+
+                    const ctx = loadBrowserScripts(
+                        [
+                            'js/session_logic.js',
+                            'js/product_registry.js',
+                            'js/ws_client.js',
+                        ],
+                        {
+                            state,
+                            renderGroups() {},
+                            updateDerivedValues() {},
+                            flashElement() {},
+                            document: {
+                                getElementById() { return null; },
+                                querySelector() { return null; },
+                            },
+                            localStorage: {
+                                getItem() { return null; },
+                                setItem() {},
+                            },
+                            location: {
+                                protocol: 'file:',
+                                hostname: '',
+                            },
+                            WebSocket: MockWebSocket,
+                        }
+                    );
+
+                    ctx.connectWebSocket();
+                    MockWebSocket.instance.onopen();
+
+                    const firstMessage = JSON.parse(MockWebSocket.instance.sent[0]);
+                    assert.equal(firstMessage.action, 'subscribe');
+                    assert.equal(firstMessage.underlying.secType, 'FUT');
+                    assert.equal(firstMessage.underlying.symbol, symbol);
+                    assert.equal(firstMessage.underlying.exchange, 'CME');
+                    assert.equal(firstMessage.underlying.contractMonth, '202606');
+                    assert.equal(firstMessage.underlying.multiplier, multiplier);
+                    assert.equal(firstMessage.futures.length, 1);
+                    assert.equal(firstMessage.futures[0].secType, 'FUT');
+                    assert.equal(firstMessage.futures[0].symbol, symbol);
+                    assert.equal(firstMessage.futures[0].exchange, 'CME');
+                    assert.equal(firstMessage.futures[0].contractMonth, '202606');
+                    assert.equal(firstMessage.futures[0].multiplier, multiplier);
+                    assert.equal(firstMessage.options.length, 1);
+                    assert.equal(firstMessage.options[0].secType, 'FOP');
+                    assert.equal(firstMessage.options[0].symbol, symbol);
+                    assert.equal(firstMessage.options[0].exchange, 'CME');
+                    assert.equal(firstMessage.options[0].multiplier, multiplier);
+                    assert.equal(firstMessage.options[0].underlyingMultiplier, multiplier);
+                    assert.equal(firstMessage.options[0].underlyingContractMonth, '202606');
+                    assert.equal(Object.prototype.hasOwnProperty.call(firstMessage.options[0], 'tradingClass'), false);
+                });
+            },
+        },
+        {
             name: 'applies managed account snapshots and auto-selects the only available account',
             run() {
                 const state = {

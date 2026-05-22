@@ -10,9 +10,11 @@
 (function attachDistributionProxyConfig(globalScope) {
     const DISTRIBUTION_PROXY_MAP = Object.freeze({
         ES: 'SPY',
+        MES: 'SPY',
         SPX: 'SPY',
         SPXW: 'SPY',
         NQ: 'QQQ',
+        MNQ: 'QQQ',
         NDX: 'QQQ',
         NDXP: 'QQQ',
         GC: 'GLD',

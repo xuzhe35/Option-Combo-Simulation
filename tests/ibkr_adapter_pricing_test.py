@@ -60,6 +60,7 @@ if 'ib_async' not in sys.modules:
 
 from trade_execution.adapters.ibkr import IbkrExecutionAdapter
 from trade_execution.models import (
+    ComboLegRequest,
     ComboOrderRequest,
     HedgeOrderPreview,
     HedgeOrderRequest,
@@ -146,6 +147,42 @@ class IbkrAdapterPricingTests(unittest.TestCase):
         )
 
         self.assertEqual(adapter._resolve_combo_price_increment(request=request), 0.25)
+
+    def test_build_contract_from_request_preserves_micro_fop_multipliers_without_trading_class(self):
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families=ib_server.SUPPORTED_LIVE_FAMILIES,
+            index_exchange_fallbacks={},
+        )
+
+        for symbol, multiplier in (('MES', '5'), ('MNQ', '2')):
+            leg_request = ComboLegRequest.from_payload({
+                'id': f'leg_{symbol.lower()}',
+                'type': 'call',
+                'pos': 1,
+                'secType': 'FOP',
+                'symbol': symbol,
+                'underlyingSymbol': symbol,
+                'exchange': 'CME',
+                'underlyingExchange': 'CME',
+                'currency': 'USD',
+                'multiplier': multiplier,
+                'underlyingMultiplier': multiplier,
+                'right': 'C',
+                'strike': '5400',
+                'expDate': '20260619',
+                'contractMonth': '202606',
+                'underlyingContractMonth': '202606',
+            })
+
+            contract = adapter._build_contract_from_request(leg_request)
+            self.assertEqual(getattr(contract, 'secType', ''), 'FOP')
+            self.assertEqual(getattr(contract, 'symbol', ''), symbol)
+            self.assertEqual(getattr(contract, 'exchange', ''), 'CME')
+            self.assertEqual(getattr(contract, 'multiplier', ''), multiplier)
+            self.assertEqual(getattr(contract, 'tradingClass', ''), '')
 
     def test_quantize_limit_price_respects_es_quarter_point_increment(self):
         quantized = self.adapter._quantize_limit_price(3.18, 'BUY', 0.25)
@@ -520,6 +557,40 @@ class IbServerIvTermStructureTests(unittest.TestCase):
         )
 
         self.assertEqual(exchange, 'CME')
+
+
+class IbServerMicroFamilyDefaultsTests(unittest.TestCase):
+    def test_supported_live_families_include_micro_equity_index_futures_options(self):
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MES']['underlying_sec_type'], 'FUT')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MES']['option_sec_type'], 'FOP')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MES']['underlying_symbol'], 'MES')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MES']['option_symbol'], 'MES')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MES']['exchange'], 'CME')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MES']['multiplier'], '5')
+        self.assertNotIn('trading_class', ib_server.SUPPORTED_LIVE_FAMILIES['MES'])
+
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MNQ']['underlying_sec_type'], 'FUT')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MNQ']['option_sec_type'], 'FOP')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MNQ']['underlying_symbol'], 'MNQ')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MNQ']['option_symbol'], 'MNQ')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MNQ']['exchange'], 'CME')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MNQ']['multiplier'], '2')
+        self.assertNotIn('trading_class', ib_server.SUPPORTED_LIVE_FAMILIES['MNQ'])
+
+    def test_build_underlying_request_uses_micro_family_multipliers(self):
+        mes_request = ib_server._build_underlying_request('MES', [{'contractMonth': '202606'}])
+        self.assertEqual(mes_request['secType'], 'FUT')
+        self.assertEqual(mes_request['symbol'], 'MES')
+        self.assertEqual(mes_request['exchange'], 'CME')
+        self.assertEqual(mes_request['multiplier'], '5')
+        self.assertEqual(mes_request['contractMonth'], '202606')
+
+        mnq_request = ib_server._build_underlying_request('MNQ', [{'expDate': '20260918'}])
+        self.assertEqual(mnq_request['secType'], 'FUT')
+        self.assertEqual(mnq_request['symbol'], 'MNQ')
+        self.assertEqual(mnq_request['exchange'], 'CME')
+        self.assertEqual(mnq_request['multiplier'], '2')
+        self.assertEqual(mnq_request['contractMonth'], '202609')
 
 
 class IbServerExecutionDispatchTests(unittest.TestCase):

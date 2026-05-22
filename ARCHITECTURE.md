@@ -408,6 +408,8 @@ Browser-side support in `js/product_registry.js`:
 - futures options:
   - `ES`
   - `NQ`
+  - `MES`
+  - `MNQ`
   - `CL`
   - `GC`
   - `SI`
@@ -425,9 +427,10 @@ Current architecture includes:
 
 Live backend nuance:
 
-- `ib_server.py` has explicit `SUPPORTED_LIVE_FAMILIES` defaults for `ES`, `NQ`, and `CL`.
+- `ib_server.py` has explicit `SUPPORTED_LIVE_FAMILIES` defaults for `ES`, `NQ`, `MES`, `MNQ`, and `CL`.
 - `SPX` and `NDX` use index exchange fallbacks.
 - The browser registry knows about `GC`, `SI`, and `HG`; live contract qualification may still require extra verification for those families.
+- `MES` and `MNQ` backend defaults intentionally omit unverified trading classes and rely on underConId-assisted qualification paths.
 
 ## 7. Backend WebSocket Responsibilities
 

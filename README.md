@@ -363,6 +363,8 @@ Important distinction:
 - futures-option families:
   - `ES`
   - `NQ`
+  - `MES`
+  - `MNQ`
   - `CL`
   - `GC`
   - `SI`
@@ -387,9 +389,11 @@ Current live backend wiring includes:
 - explicit live-family defaults in `ib_server.py` for:
   - `ES`
   - `NQ`
+  - `MES`
+  - `MNQ`
   - `CL`
 
-The frontend registry knows about `GC`, `SI`, and `HG`, but if you are touching live contract-qualification logic, note that `ib_server.py`'s hard-coded family defaults are narrower than the browser registry.
+The frontend registry knows about `GC`, `SI`, and `HG`, but if you are touching live contract-qualification logic, note that those families still need TWS verification before adding backend defaults.
 
 ## Historical Replay
 

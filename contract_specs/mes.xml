@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<contract-spec id="MES" version="1" status="provisional">
+  <identity>
+    <code>MES</code>
+    <display-name>Micro E-mini S&amp;P 500 futures option</display-name>
+    <instrument-group>equity-index</instrument-group>
+    <product-type>futures-option</product-type>
+    <ib-product-type>Equity Index</ib-product-type>
+  </identity>
+  <ib-contract>
+    <sec-type>FOP</sec-type>
+    <symbol>MES</symbol>
+    <exchange>CME</exchange>
+    <routing-exchange>CME</routing-exchange>
+    <currency>USD</currency>
+    <multiplier>5</multiplier>
+    <contract-month-format>YYYYMM</contract-month-format>
+    <expiry-format>YYYYMMDD</expiry-format>
+  </ib-contract>
+  <underlying>
+    <sec-type>FUT</sec-type>
+    <symbol>MES</symbol>
+    <exchange>CME</exchange>
+    <currency>USD</currency>
+    <multiplier>5</multiplier>
+    <contract-month-example status="derived-from-quarterly-cycle">202603</contract-month-example>
+  </underlying>
+  <variable-fields>
+    <contract-month format="YYYYMM" required="true" />
+    <expiry format="YYYYMMDD" required="true" />
+    <last-trading-datetime format="YYYYMMDD HH:mm:ss" timezone="America/Chicago" required="false" />
+    <right allowed-values="C,P" required="true" />
+    <strike format="decimal" required="true" />
+    <underlying-expiry format="YYYYMM" required="false" />
+    <trading-class required="false" status="needs-tws-verification" />
+    <local-symbol required="false" />
+    <con-id required="false" />
+  </variable-fields>
+  <settlement>
+    <exercise-style status="cme-reference">Varies by expiry class</exercise-style>
+    <settlement-method status="cme-reference">Physical Delivery</settlement-method>
+    <delivery-type status="cme-reference">futures-position</delivery-type>
+    <unit>index-points</unit>
+    <min-tick status="cme-reference">0.25</min-tick>
+  </settlement>
+  <notes>
+    <note>Micro E-mini S&amp;P 500 options are one-tenth the size of ES options.</note>
+    <note>Do not infer IB tradingClass from ES until verified in TWS for a concrete contract.</note>
+    <note>Keep contract month, expiry, right, strike, trading class, local symbol, and conId as runtime selectors when locking a concrete contract.</note>
+  </notes>
+</contract-spec>

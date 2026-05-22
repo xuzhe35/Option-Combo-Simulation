@@ -170,8 +170,9 @@ Runtime product source of truth for:
 
 Important current nuance:
 
-- browser product coverage includes `GC`, `SI`, and `HG`
-- `ib_server.py`'s `SUPPORTED_LIVE_FAMILIES` is narrower and currently hard-codes live-family defaults for `ES`, `NQ`, and `CL`
+- browser product coverage includes `MES`, `MNQ`, `GC`, `SI`, and `HG`
+- `ib_server.py`'s `SUPPORTED_LIVE_FAMILIES` currently hard-codes live-family defaults for `ES`, `NQ`, `MES`, `MNQ`, and `CL`
+- `MES` / `MNQ` live defaults intentionally omit unverified `trading_class` values until concrete TWS contract descriptions are confirmed
 
 ### `js/pricing_context.js`
 

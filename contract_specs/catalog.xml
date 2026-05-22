@@ -2,6 +2,8 @@
 <contract-catalog version="1">
   <contract id="ES" file="es.xml" />
   <contract id="NQ" file="nq.xml" />
+  <contract id="MES" file="mes.xml" />
+  <contract id="MNQ" file="mnq.xml" />
   <contract id="SPX" file="spx.xml" />
   <contract id="NDX" file="ndx.xml" />
   <contract id="CL" file="cl.xml" />

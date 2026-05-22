@@ -120,6 +120,57 @@ module.exports = {
             },
         },
         {
+            name: 'builds MES and MNQ order payloads with micro futures multipliers',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_order_builder.js',
+                ]);
+
+                [
+                    { symbol: 'MES', multiplier: '5', strike: 5400 },
+                    { symbol: 'MNQ', multiplier: '2', strike: 19500 },
+                ].forEach(({ symbol, multiplier, strike }) => {
+                    const payload = ctx.OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(
+                        {
+                            id: `group_${symbol.toLowerCase()}`,
+                            name: `${symbol} Builder Test`,
+                            legs: [
+                                { id: `leg_${symbol.toLowerCase()}_future`, type: 'underlying', pos: 1 },
+                                { id: `leg_${symbol.toLowerCase()}_call`, type: 'call', pos: -1, strike, expDate: '2026-06-19' },
+                            ],
+                        },
+                        {
+                            underlyingSymbol: symbol,
+                            underlyingContractMonth: '202606',
+                            baseDate: '2026-04-16',
+                            simulatedDate: '2026-04-16',
+                        },
+                        {
+                            action: 'submit_combo_order',
+                            executionMode: 'submit',
+                            intent: 'open',
+                            source: 'trial_trigger',
+                        }
+                    );
+
+                    assert.equal(payload.profile.family, symbol);
+                    assert.equal(payload.profile.optionExchange, 'CME');
+                    assert.equal(payload.profile.underlyingExchange, 'CME');
+                    assert.equal(payload.legs[0].secType, 'FUT');
+                    assert.equal(payload.legs[0].symbol, symbol);
+                    assert.equal(payload.legs[0].multiplier, multiplier);
+                    assert.equal(payload.legs[1].secType, 'FOP');
+                    assert.equal(payload.legs[1].symbol, symbol);
+                    assert.equal(payload.legs[1].multiplier, multiplier);
+                    assert.equal(payload.legs[1].underlyingMultiplier, multiplier);
+                    assert.equal(payload.legs[1].underlyingContractMonth, '202606');
+                    assert.equal(Object.prototype.hasOwnProperty.call(payload.legs[1], 'tradingClass'), true);
+                    assert.equal(payload.legs[1].tradingClass, undefined);
+                });
+            },
+        },
+        {
             name: 'builds close-intent leg requests by reversing group positions',
             run() {
                 const ctx = loadBrowserScripts([

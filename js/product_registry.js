@@ -76,6 +76,44 @@
             deliverableUnitSingular: 'futures contract',
             deliverableUnitPlural: 'futures contracts',
         },
+        MES: {
+            family: 'MES',
+            displayName: 'Micro E-mini S&P 500 futures option',
+            optionSecType: 'FOP',
+            underlyingSecType: 'FUT',
+            optionExchange: 'CME',
+            underlyingExchange: 'CME',
+            optionMultiplier: 5,
+            underlyingLegMultiplier: 5,
+            settlementUnitsPerContract: 1,
+            settlementKind: 'futures-deliverable',
+            pricingModel: 'black76',
+            comboPriceIncrement: 0.25,
+            supportsAmortizedMode: false,
+            supportsLegacyLiveData: true,
+            supportsUnderlyingLegs: true,
+            deliverableUnitSingular: 'futures contract',
+            deliverableUnitPlural: 'futures contracts',
+        },
+        MNQ: {
+            family: 'MNQ',
+            displayName: 'Micro E-mini Nasdaq-100 futures option',
+            optionSecType: 'FOP',
+            underlyingSecType: 'FUT',
+            optionExchange: 'CME',
+            underlyingExchange: 'CME',
+            optionMultiplier: 2,
+            underlyingLegMultiplier: 2,
+            settlementUnitsPerContract: 1,
+            settlementKind: 'futures-deliverable',
+            pricingModel: 'black76',
+            comboPriceIncrement: 0.25,
+            supportsAmortizedMode: false,
+            supportsLegacyLiveData: true,
+            supportsUnderlyingLegs: true,
+            deliverableUnitSingular: 'futures contract',
+            deliverableUnitPlural: 'futures contracts',
+        },
         CL: {
             family: 'CL',
             displayName: 'Light Sweet Crude Oil futures option',
@@ -354,7 +392,7 @@
             return '';
         }
 
-        if (profile.family === 'ES' || profile.family === 'NQ') {
+        if (profile.family === 'ES' || profile.family === 'NQ' || profile.family === 'MES' || profile.family === 'MNQ') {
             const candidateMonths = [3, 6, 9, 12];
             const referenceUtc = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
 

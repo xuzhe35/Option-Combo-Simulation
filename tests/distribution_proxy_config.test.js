@@ -15,6 +15,8 @@ module.exports = {
 
                 const profileEs = ctx.OptionComboProductRegistry.resolveUnderlyingProfile('ES');
                 const profileNq = ctx.OptionComboProductRegistry.resolveUnderlyingProfile('NQ');
+                const profileMes = ctx.OptionComboProductRegistry.resolveUnderlyingProfile('MES');
+                const profileMnq = ctx.OptionComboProductRegistry.resolveUnderlyingProfile('MNQ');
                 const profileGc = ctx.OptionComboProductRegistry.resolveUnderlyingProfile('GC');
 
                 assert.equal(
@@ -23,6 +25,14 @@ module.exports = {
                 );
                 assert.equal(
                     ctx.OptionComboDistributionProxyConfig.resolveDistributionSymbol('NQ', profileNq),
+                    'QQQ'
+                );
+                assert.equal(
+                    ctx.OptionComboDistributionProxyConfig.resolveDistributionSymbol('MES', profileMes),
+                    'SPY'
+                );
+                assert.equal(
+                    ctx.OptionComboDistributionProxyConfig.resolveDistributionSymbol('MNQ', profileMnq),
                     'QQQ'
                 );
                 assert.equal(
