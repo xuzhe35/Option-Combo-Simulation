@@ -7,6 +7,7 @@ venv/
 *.py[cod]
 server_log.txt
 logs/
+.playwright-mcp/
 ib_server.codex*.log
 http_server.codex*.log
 ib_server.log
