@@ -13,6 +13,7 @@ import websockets
 
 from historical_replay_service import HistoricalReplayService, normalize_replay_date
 from ib_server_order_tracking import (
+    build_active_combo_orders_snapshot as build_active_combo_orders_snapshot_via_module,
     build_active_hedge_orders_snapshot as build_active_hedge_orders_snapshot_via_module,
     build_combo_order_error_handler,
     build_combo_order_exec_details_handler,
@@ -24,6 +25,7 @@ from ib_server_order_tracking import (
     build_hedge_order_error_handler,
     build_hedge_order_exec_details_handler,
     build_hedge_order_status_handler,
+    is_terminal_combo_tracking as is_terminal_combo_tracking_via_module,
     is_terminal_hedge_tracking as is_terminal_hedge_tracking_via_module,
     iter_unique_hedge_order_trackings as iter_unique_hedge_order_trackings_via_module,
     record_combo_order_error as record_combo_order_error_via_module,
@@ -33,6 +35,7 @@ from ib_server_order_tracking import (
     resolve_hedge_order_tracking as resolve_hedge_order_tracking_via_module,
     update_combo_order_tracking_snapshot as update_combo_order_tracking_snapshot_via_module,
     update_hedge_order_tracking_snapshot as update_hedge_order_tracking_snapshot_via_module,
+    upsert_combo_order_tracking as upsert_combo_order_tracking_via_module,
 )
 from ib_server_iv_term_structure import (
     build_iv_term_structure_expiry_bundle as _build_iv_term_structure_expiry_bundle,
@@ -195,27 +198,47 @@ INDEX_EXCHANGE_FALLBACKS = {
 }
 
 
+def _record_combo_order_placement(websocket, request, trade, tracking_legs):
+    """Pre-register fill tracking immediately after placeOrder.
+
+    Execution reports can arrive before the submit result is finalized
+    (the adapter sleeps to let the order settle); registering here means
+    those early fills are attributed instead of silently dropped.
+    """
+    order = getattr(trade, 'order', None)
+    order_status = getattr(trade, 'orderStatus', None)
+    upsert_combo_order_tracking_via_module(
+        _build_order_tracking_environment(),
+        websocket=websocket,
+        group_id=request.group_id,
+        group_name=request.group_name,
+        account=str(getattr(order, 'account', '') or request.account or '').strip() or None,
+        execution_mode=request.execution_mode,
+        execution_intent=request.execution_intent,
+        request_source=request.request_source,
+        order_id=getattr(order, 'orderId', None),
+        perm_id=getattr(order_status, 'permId', None) or None,
+        status=getattr(order_status, 'status', None),
+        legs=tracking_legs,
+    )
+
+
 def _record_combo_order_submission(websocket, request, result):
-    tracking = {
-        'websocket': websocket,
-        'groupId': request.group_id,
-        'groupName': request.group_name,
-        'account': str(request.account or '').strip() or None,
-        'executionMode': request.execution_mode,
-        'executionIntent': request.execution_intent,
-        'requestSource': request.request_source,
-        'orderId': result.order_id,
-        'permId': result.perm_id,
-        'status': result.status,
-        'statusMessage': result.status_message,
-        'legs': list(getattr(result, 'tracking_legs', []) or []),
-        'fillTotals': {},
-        'seenExecIds': set(),
-    }
-    if result.order_id is not None:
-        combo_order_tracking_by_order_id[result.order_id] = tracking
-    if result.perm_id is not None:
-        combo_order_tracking_by_perm_id[result.perm_id] = tracking
+    upsert_combo_order_tracking_via_module(
+        _build_order_tracking_environment(),
+        websocket=websocket,
+        group_id=request.group_id,
+        group_name=request.group_name,
+        account=str(request.account or '').strip() or None,
+        execution_mode=request.execution_mode,
+        execution_intent=request.execution_intent,
+        request_source=request.request_source,
+        order_id=result.order_id,
+        perm_id=result.perm_id,
+        status=result.status,
+        status_message=result.status_message,
+        legs=list(getattr(result, 'tracking_legs', []) or []),
+    )
 
 
 def _record_hedge_order_submission(websocket, request, result):
@@ -377,6 +400,24 @@ def _is_terminal_hedge_tracking(tracking):
     return is_terminal_hedge_tracking_via_module(_build_order_tracking_environment(), tracking)
 
 
+def _is_terminal_combo_tracking(tracking):
+    return is_terminal_combo_tracking_via_module(_build_order_tracking_environment(), tracking)
+
+
+def _build_active_combo_orders_snapshot(websocket, data=None):
+    # Re-adopt orphaned managed supervision contexts first so resumed
+    # status emits and resume/concede/cancel target the new session.
+    try:
+        execution_engine.reattach_managed_for_websocket(websocket)
+    except Exception:
+        logging.exception("Failed to re-attach managed execution contexts")
+    return build_active_combo_orders_snapshot_via_module(
+        _build_order_tracking_environment(),
+        websocket,
+        data,
+    )
+
+
 def _has_active_hedge_order_for_request(websocket, request):
     hedge_id = str(getattr(request, 'hedge_id', '') or '').strip()
     if not hedge_id:
@@ -428,6 +469,7 @@ execution_adapter = IbkrExecutionAdapter(
     managed_reprice_timeout_seconds=MANAGED_REPRICE_TIMEOUT_SECONDS,
     logger=logging.getLogger('trade_execution.ibkr'),
     emit_order_update=_emit_combo_order_update,
+    on_combo_order_placed=_record_combo_order_placement,
 )
 
 execution_engine = ExecutionEngine(
@@ -1312,12 +1354,14 @@ def _build_ws_handler_environment():
         'coerce_positive_int': _coerce_positive_int,
         'normalize_symbol': _normalize_symbol,
         'build_active_hedge_orders_snapshot': _build_active_hedge_orders_snapshot,
+        'build_active_combo_orders_snapshot': _build_active_combo_orders_snapshot,
         'combo_order_tracking_by_order_id': combo_order_tracking_by_order_id,
         'combo_order_tracking_by_perm_id': combo_order_tracking_by_perm_id,
         'hedge_order_tracking_by_order_id': hedge_order_tracking_by_order_id,
         'hedge_order_tracking_by_perm_id': hedge_order_tracking_by_perm_id,
         'iter_unique_hedge_order_trackings': _iter_unique_hedge_order_trackings,
         'is_terminal_hedge_tracking': _is_terminal_hedge_tracking,
+        'is_terminal_combo_tracking': _is_terminal_combo_tracking,
         'extract_market_price': _extract_market_price,
         'ib': ib,
     }
@@ -1328,6 +1372,7 @@ def _purge_combo_order_tracking_for_websocket(ws):
         ws,
         combo_order_tracking_by_order_id,
         combo_order_tracking_by_perm_id,
+        is_terminal_combo_tracking=_is_terminal_combo_tracking,
     )
 
 

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -22,6 +24,8 @@ DEFAULT_HEDGE_TERMINAL_STATUSES = {
     'inactive',
     'rejected',
 }
+
+DEFAULT_COMBO_TERMINAL_STATUSES = DEFAULT_HEDGE_TERMINAL_STATUSES
 
 
 class OrderTrackingEnvironment(TypedDict, total=False):
@@ -65,6 +69,115 @@ def resolve_hedge_order_tracking(
         order_id,
         perm_id,
     )
+
+
+def upsert_combo_order_tracking(
+    env: OrderTrackingEnvironment,
+    *,
+    websocket: Any,
+    group_id: Any,
+    group_name: Any,
+    account: str | None,
+    execution_mode: Any,
+    execution_intent: Any,
+    request_source: Any,
+    order_id: int | None,
+    perm_id: int | None,
+    status: Any = None,
+    status_message: Any = None,
+    legs: Any = None,
+) -> dict[str, Any]:
+    """Create or merge a combo tracking record without dropping accumulated fills.
+
+    Submission goes through two passes: a pre-registration immediately after
+    placeOrder (so execution reports arriving during the post-submit settle
+    window can be attributed) and a final pass once the submit result is known.
+    The second pass must not replace fillTotals/seenExecIds captured in between.
+    """
+    tracking = resolve_combo_order_tracking(env, order_id, perm_id)
+    if tracking is None:
+        tracking = {
+            'fillTotals': {},
+            'seenExecIds': set(),
+        }
+
+    tracking['websocket'] = websocket
+    tracking['groupId'] = group_id
+    tracking['groupName'] = group_name
+    tracking['account'] = account
+    tracking['executionMode'] = execution_mode
+    tracking['executionIntent'] = execution_intent
+    tracking['requestSource'] = request_source
+    if order_id is not None:
+        tracking['orderId'] = order_id
+    if perm_id is not None:
+        tracking['permId'] = perm_id
+    if status is not None:
+        tracking['status'] = status
+    if status_message:
+        tracking['statusMessage'] = status_message
+    if legs:
+        tracking['legs'] = list(legs)
+    else:
+        tracking.setdefault('legs', [])
+
+    if order_id is not None:
+        env['combo_order_tracking_by_order_id'][order_id] = tracking
+    if perm_id is not None:
+        env['combo_order_tracking_by_perm_id'][perm_id] = tracking
+    return tracking
+
+
+def is_terminal_combo_tracking(env: OrderTrackingEnvironment, tracking: dict[str, Any] | None) -> bool:
+    if not tracking:
+        return False
+
+    status = _normalize_order_status_text(tracking.get('status'))
+    terminal_statuses = env.get('combo_terminal_statuses') or DEFAULT_COMBO_TERMINAL_STATUSES
+    if status in terminal_statuses:
+        return True
+
+    trade = tracking.get('trade')
+    order_status = getattr(trade, 'orderStatus', None) if trade is not None else None
+    trade_status = _normalize_order_status_text(getattr(order_status, 'status', None))
+    return trade_status in terminal_statuses
+
+
+def iter_unique_combo_order_trackings(env: OrderTrackingEnvironment):
+    seen_tracking_ids = set()
+    values = list(env['combo_order_tracking_by_order_id'].values()) + list(env['combo_order_tracking_by_perm_id'].values())
+    for tracking in values:
+        tracking_identity = id(tracking)
+        if tracking_identity in seen_tracking_ids:
+            continue
+        seen_tracking_ids.add(tracking_identity)
+        yield tracking
+
+
+def build_active_combo_orders_snapshot(
+    env: OrderTrackingEnvironment,
+    websocket: Any,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Re-attach orphaned combo trackings to a reconnected session and snapshot them."""
+    request_data = data if isinstance(data, dict) else {}
+    requested_group_id = str(request_data.get('groupId') or '').strip()
+    requested_account = str(request_data.get('account') or '').strip()
+    orders = []
+    for tracking in iter_unique_combo_order_trackings(env):
+        if is_terminal_combo_tracking(env, tracking):
+            continue
+        if requested_group_id and str(tracking.get('groupId') or '').strip() != requested_group_id:
+            continue
+        if requested_account and str(tracking.get('account') or '').strip() != requested_account:
+            continue
+        tracking['websocket'] = websocket
+        orders.append(build_combo_order_status_payload(env, tracking.get('trade'), tracking)['orderStatus'])
+
+    return {
+        'action': 'active_combo_orders_snapshot',
+        'orders': orders,
+    }
 
 
 def update_combo_order_tracking_snapshot(
@@ -520,10 +633,6 @@ def build_combo_order_status_handler(env: OrderTrackingEnvironment):
         if tracking is None:
             return
 
-        websocket = tracking.get('websocket')
-        if websocket is None:
-            return
-
         update_combo_order_tracking_snapshot(
             tracking,
             order=order,
@@ -531,6 +640,11 @@ def build_combo_order_status_handler(env: OrderTrackingEnvironment):
             trade=trade,
             status_message=extract_trade_status_message(trade),
         )
+
+        websocket = tracking.get('websocket')
+        if websocket is None:
+            return
+
         payload = build_combo_order_status_payload(env, trade, tracking)
         logging.info(
             "Broadcasting combo order status update: groupId=%s orderId=%s permId=%s status=%s filled=%s remaining=%s",
@@ -667,10 +781,9 @@ def build_combo_order_exec_details_handler(env: OrderTrackingEnvironment):
         if tracking is None or tracking.get('executionMode') != 'submit':
             return
 
-        websocket = tracking.get('websocket')
-        if websocket is None:
-            return
-
+        # Record fills even while the tracking is orphaned (websocket is None
+        # after a browser disconnect) so the attributed costs survive until a
+        # reconnected session re-adopts the tracking; only the push is skipped.
         exec_id = str(getattr(execution, 'execId', '') or '').strip()
         seen_exec_ids = tracking.setdefault('seenExecIds', set())
         if exec_id and exec_id in seen_exec_ids:
@@ -727,7 +840,7 @@ def build_combo_order_exec_details_handler(env: OrderTrackingEnvironment):
             avg_fill_price,
         )
         payload = build_combo_order_fill_cost_payload(tracking, order_id, perm_id)
-        _schedule_payload_send(env, websocket, payload)
+        _schedule_payload_send(env, tracking.get('websocket'), payload)
 
     return on_combo_order_exec_details
 

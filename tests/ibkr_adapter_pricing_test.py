@@ -666,5 +666,120 @@ class IbServerExecutionDispatchTests(unittest.TestCase):
         self.assertEqual([call[0] for call in stub.calls], ['hedge', 'combo'])
 
 
+class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pre_registers_combo_tracking_before_settle_sleep(self):
+        events = []
+
+        class _SubmitIb:
+            def __init__(self):
+                self.orderStatusEvent = _DummyEvent()
+
+            def placeOrder(self, contract, order):
+                events.append('place_order')
+                order.orderId = 4500
+                return SimpleNamespace(
+                    order=order,
+                    orderStatus=SimpleNamespace(
+                        permId=4501,
+                        status='PendingSubmit',
+                        filled=0,
+                        remaining=1,
+                        avgFillPrice=0,
+                        lastFillPrice=0,
+                        whyHeld='',
+                        mktCapPrice=0,
+                    ),
+                    log=[],
+                    advancedError='',
+                )
+
+        def on_combo_order_placed(websocket, request, trade, tracking_legs):
+            events.append('pre_register')
+            self.assertEqual(getattr(trade.order, 'orderId', None), 4500)
+            self.assertEqual(len(tracking_legs), 1)
+            self.assertEqual(tracking_legs[0]['id'], 'leg_1')
+            self.assertEqual(tracking_legs[0]['conId'], 12345)
+
+        adapter = IbkrExecutionAdapter(
+            ib=_SubmitIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            on_combo_order_placed=on_combo_order_placed,
+        )
+        adapter._register_managed_context = lambda *args, **kwargs: None
+
+        preview = SimpleNamespace(
+            combo_symbol='SPY',
+            combo_exchange='SMART',
+            order_action='BUY',
+            total_quantity=1,
+            limit_price=1.25,
+            raw_net_mid=1.25,
+            execution_mode='submit',
+            account='',
+            pricing_source='middle',
+            pricing_note='',
+            legs=[],
+        )
+        order = SimpleNamespace(
+            action='BUY',
+            orderType='LMT',
+            totalQuantity=1,
+            lmtPrice=1.25,
+            tif='DAY',
+            transmit=True,
+        )
+        resolved_legs = [{
+            'request': SimpleNamespace(id='leg_1', exp_date='2026-06-19'),
+            'contract': SimpleNamespace(
+                conId=12345,
+                localSymbol='SPY  260619C00500000',
+                symbol='SPY',
+                secType='OPT',
+                right='C',
+                strike=500.0,
+            ),
+            'pos': 1,
+            'ratio': 1,
+            'quote': {'bid': 1.2, 'ask': 1.3, 'mark': 1.25},
+        }]
+
+        async def fake_build(websocket, request):
+            return {
+                'comboContract': SimpleNamespace(secType='BAG'),
+                'order': order,
+                'preview': preview,
+                'resolvedLegs': resolved_legs,
+            }
+
+        adapter._build_combo_order_from_request = fake_build
+
+        request = ComboOrderRequest(
+            group_id='group_pre_reg',
+            group_name='Pre Registration',
+            underlying_symbol='SPY',
+            underlying_contract_month='',
+            execution_mode='submit',
+        )
+
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(_seconds):
+            events.append('sleep')
+            await real_sleep(0)
+
+        asyncio.sleep = fake_sleep
+        try:
+            result = await adapter.submit_combo_order(object(), request)
+        finally:
+            asyncio.sleep = real_sleep
+
+        self.assertEqual(events, ['place_order', 'pre_register', 'sleep'])
+        self.assertEqual(result.order_id, 4500)
+        self.assertEqual(result.perm_id, 4501)
+
+
 if __name__ == '__main__':
     unittest.main()

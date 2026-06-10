@@ -5,25 +5,44 @@ import sqlite3
 from typing import Any
 
 from ib_async import Stock
-import websockets
+from websockets.exceptions import ConnectionClosed
 
 from runtime_contracts import HistoricalBarsResponsePayload, HistoricalReplayErrorPayload, ManualUnderlyingSyncPayload
 
 
-def purge_combo_order_tracking_for_websocket(ws, combo_order_tracking_by_order_id, combo_order_tracking_by_perm_id):
-    stale_order_ids = [
-        order_id for order_id, tracking in combo_order_tracking_by_order_id.items()
-        if tracking.get('websocket') is ws
-    ]
-    for order_id in stale_order_ids:
-        combo_order_tracking_by_order_id.pop(order_id, None)
+def purge_combo_order_tracking_for_websocket(
+    ws,
+    combo_order_tracking_by_order_id,
+    combo_order_tracking_by_perm_id,
+    *,
+    is_terminal_combo_tracking=None,
+):
+    """Drop terminal trackings and orphan live ones when a client disconnects.
 
-    stale_perm_ids = [
-        perm_id for perm_id, tracking in combo_order_tracking_by_perm_id.items()
-        if tracking.get('websocket') is ws
-    ]
-    for perm_id in stale_perm_ids:
-        combo_order_tracking_by_perm_id.pop(perm_id, None)
+    Live (non-terminal) trackings must survive the disconnect: the broker order
+    is still working in TWS, and a reconnecting session re-adopts them through
+    `request_active_combo_orders_snapshot`. Without a terminal predicate this
+    conservatively orphans everything rather than dropping fill attribution.
+    """
+    seen_tracking_ids = set()
+    trackings = list(combo_order_tracking_by_order_id.values()) + list(combo_order_tracking_by_perm_id.values())
+    for tracking in trackings:
+        tracking_identity = id(tracking)
+        if tracking_identity in seen_tracking_ids:
+            continue
+        seen_tracking_ids.add(tracking_identity)
+        if tracking.get('websocket') is not ws:
+            continue
+
+        if callable(is_terminal_combo_tracking) and is_terminal_combo_tracking(tracking):
+            order_id = tracking.get('orderId')
+            perm_id = tracking.get('permId')
+            if order_id is not None:
+                combo_order_tracking_by_order_id.pop(order_id, None)
+            if perm_id is not None:
+                combo_order_tracking_by_perm_id.pop(perm_id, None)
+        else:
+            tracking['websocket'] = None
 
 
 def purge_hedge_order_tracking_for_websocket(
@@ -334,6 +353,12 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
             websocket,
             json.dumps(env['build_active_hedge_orders_snapshot'](websocket, data)),
         )
+    elif action == 'request_active_combo_orders_snapshot':
+        logging.info(f"Received active combo orders snapshot request from {client_ip}")
+        await env['send_message_safe'](
+            websocket,
+            json.dumps(env['build_active_combo_orders_snapshot'](websocket, data)),
+        )
     else:
         payload = await dispatch_execution_action(
             env,
@@ -356,9 +381,27 @@ async def handle_ws_client(env, websocket):
 
     try:
         async for message in websocket:
-            data = json.loads(message)
-            await dispatch_client_message(env, websocket, data, client_ip=client_ip)
-    except websockets.exceptions.ConnectionClosed:
+            # One malformed message or handler bug must not tear down the
+            # session: a disconnect orphans live-order supervision, so the
+            # loop only exits when the connection itself closes.
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                logging.warning(f"Ignoring malformed WebSocket message from {client_ip}")
+                continue
+            if not isinstance(data, dict):
+                logging.warning(f"Ignoring non-object WebSocket message from {client_ip}")
+                continue
+
+            try:
+                await dispatch_client_message(env, websocket, data, client_ip=client_ip)
+            except ConnectionClosed:
+                raise
+            except Exception:
+                logging.exception(
+                    f"Error handling action {data.get('action')!r} from {client_ip}; connection kept alive"
+                )
+    except ConnectionClosed:
         pass
     finally:
         logging.info(f"Client disconnected: {client_ip}")
@@ -368,6 +411,7 @@ async def handle_ws_client(env, websocket):
             websocket,
             env['combo_order_tracking_by_order_id'],
             env['combo_order_tracking_by_perm_id'],
+            is_terminal_combo_tracking=env.get('is_terminal_combo_tracking'),
         )
         purge_hedge_order_tracking_for_websocket(
             websocket,
@@ -376,7 +420,13 @@ async def handle_ws_client(env, websocket):
             hedge_order_tracking_by_order_id=env['hedge_order_tracking_by_order_id'],
             hedge_order_tracking_by_perm_id=env['hedge_order_tracking_by_perm_id'],
         )
-        env['execution_engine'].cancel_managed_for_websocket(websocket)
+        execution_engine = env['execution_engine']
+        release_managed = (
+            getattr(execution_engine, 'release_managed_for_websocket', None)
+            or getattr(execution_engine, 'cancel_managed_for_websocket', None)
+        )
+        if callable(release_managed):
+            release_managed(websocket)
         env['connected_clients'].discard(websocket)
         env['client_subscriptions'].pop(websocket, None)
         env['client_subscription_settings'].pop(websocket, None)

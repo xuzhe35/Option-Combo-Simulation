@@ -93,9 +93,19 @@ class ExecutionEngine:
             return self.adapter.get_managed_order_snapshot(order_id, perm_id)
         return None
 
-    def cancel_managed_for_websocket(self, websocket):
-        if hasattr(self.adapter, "cancel_managed_for_websocket"):
+    def release_managed_for_websocket(self, websocket):
+        if hasattr(self.adapter, "release_managed_for_websocket"):
+            self.adapter.release_managed_for_websocket(websocket)
+        elif hasattr(self.adapter, "cancel_managed_for_websocket"):
             self.adapter.cancel_managed_for_websocket(websocket)
+
+    # Backwards-compatible alias for older callers.
+    cancel_managed_for_websocket = release_managed_for_websocket
+
+    def reattach_managed_for_websocket(self, websocket):
+        if hasattr(self.adapter, "reattach_managed_for_websocket"):
+            return self.adapter.reattach_managed_for_websocket(websocket)
+        return 0
 
     async def handle_hedge_action(self, websocket, raw_data, client_ip="Unknown"):
         if not isinstance(raw_data, dict):

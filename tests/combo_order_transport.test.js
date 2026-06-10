@@ -438,6 +438,53 @@ module.exports = {
             },
         },
         {
+            name: 'restores submitted runtime state from an active combo orders snapshot',
+            run() {
+                const state = {
+                    groups: [
+                        {
+                            id: 'group_reattach',
+                            tradeTrigger: {
+                                enabled: false,
+                                pendingRequest: false,
+                                status: 'idle',
+                                lastPreview: null,
+                                lastError: '',
+                            },
+                            legs: [],
+                        },
+                    ],
+                };
+                const harness = buildHarness({ state });
+
+                const handled = harness.api.handleMessage({
+                    action: 'active_combo_orders_snapshot',
+                    orders: [
+                        {
+                            groupId: 'group_reattach',
+                            executionMode: 'submit',
+                            executionIntent: 'open',
+                            requestSource: 'trial_trigger',
+                            status: 'Submitted',
+                            orderId: 4400,
+                            permId: 4401,
+                            managedMode: true,
+                            managedState: 'watching',
+                            workingLimitPrice: 1.85,
+                        },
+                    ],
+                });
+
+                assert.equal(handled, true);
+                const trigger = state.groups[0].tradeTrigger;
+                assert.equal(trigger.status, 'submitted');
+                assert.equal(trigger.lastPreview.orderId, 4400);
+                assert.equal(trigger.lastPreview.permId, 4401);
+                assert.equal(trigger.lastPreview.managedState, 'watching');
+                assert.equal(trigger.lastPreview.workingLimitPrice, 1.85);
+            },
+        },
+        {
             name: 'writes fill-cost updates into entry cost or close price by runtime kind',
             run() {
                 const state = {

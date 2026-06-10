@@ -63,6 +63,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         managed_reprice_timeout_seconds=600.0,
         logger=None,
         emit_order_update=None,
+        on_combo_order_placed=None,
     ):
         self.ib = ib
         self.client_subscriptions = client_subscriptions
@@ -71,6 +72,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.index_exchange_fallbacks = index_exchange_fallbacks
         self.logger = logger or logging.getLogger(__name__)
         self.emit_order_update = emit_order_update
+        self.on_combo_order_placed = on_combo_order_placed
         self.what_if_timeout_seconds = 4.0
         self.test_only_buy_factor = 0.2
         self.test_only_sell_factor = 5.0
@@ -1157,6 +1159,32 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             f"limit={order.lmtPrice} tif={order.tif} account={getattr(order, 'account', '') or ''}"
         )
         trade = self.ib.placeOrder(combo_contract, order)
+        tracking_legs = [
+            {
+                'id': leg['request'].id,
+                'conId': getattr(leg['contract'], 'conId', None),
+                'localSymbol': getattr(leg['contract'], 'localSymbol', ''),
+                'symbol': getattr(leg['contract'], 'symbol', ''),
+                'secType': getattr(leg['contract'], 'secType', ''),
+                'right': getattr(leg['contract'], 'right', ''),
+                'strike': getattr(leg['contract'], 'strike', None),
+                'expDate': getattr(leg['request'], 'exp_date', ''),
+                'targetPosition': leg['pos'],
+                'expectedExecutionSide': 'BOT' if leg['pos'] > 0 else 'SLD',
+                'ratio': leg['ratio'],
+            }
+            for leg in resolved_legs
+        ]
+        # Pre-register fill tracking synchronously (no await between placeOrder
+        # and here) so execution reports arriving during the settle sleep below
+        # can still be attributed to the right legs.
+        if callable(self.on_combo_order_placed):
+            try:
+                self.on_combo_order_placed(websocket, request, trade, tracking_legs)
+            except Exception:
+                self.logger.exception(
+                    f"Failed to pre-register combo order tracking for groupId={request.group_id}"
+                )
         await asyncio.sleep(1.5)
         managed_context = self._register_managed_context(
             websocket,
@@ -1180,22 +1208,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             preview.repricing_count = managed_context.get('repricingCount')
             preview.last_reprice_at = managed_context.get('lastRepriceAt')
             preview.managed_message = managed_context.get('managedMessage')
-        tracking_legs = [
-            {
-                'id': leg['request'].id,
-                'conId': getattr(leg['contract'], 'conId', None),
-                'localSymbol': getattr(leg['contract'], 'localSymbol', ''),
-                'symbol': getattr(leg['contract'], 'symbol', ''),
-                'secType': getattr(leg['contract'], 'secType', ''),
-                'right': getattr(leg['contract'], 'right', ''),
-                'strike': getattr(leg['contract'], 'strike', None),
-                'expDate': getattr(leg['request'], 'exp_date', ''),
-                'targetPosition': leg['pos'],
-                'expectedExecutionSide': 'BOT' if leg['pos'] > 0 else 'SLD',
-                'ratio': leg['ratio'],
-            }
-            for leg in resolved_legs
-        ]
         result = ComboSubmitResult(
             preview=preview,
             order_id=getattr(getattr(trade, 'order', None), 'orderId', None),
@@ -1217,26 +1229,70 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             return None
         return self._build_managed_snapshot(context)
 
-    def cancel_managed_for_websocket(self, websocket):
-        stale_contexts = []
-        for context in list(self.managed_executions_by_order_id.values()):
-            if context.get('websocket') is websocket and context not in stale_contexts:
-                stale_contexts.append(context)
+    def _iter_unique_managed_contexts(self):
+        seen_context_ids = set()
+        contexts = list(self.managed_executions_by_order_id.values()) + list(self.managed_executions_by_perm_id.values())
+        for context in contexts:
+            context_identity = id(context)
+            if context_identity in seen_context_ids:
+                continue
+            seen_context_ids.add(context_identity)
+            yield context
 
-        for context in stale_contexts:
-            context['terminated'] = True
-            task = context.get('task')
-            if task and not task.done():
-                task.cancel()
-            self._cleanup_managed_context(context)
+    def _iter_unique_hedge_contexts(self):
+        seen_context_ids = set()
+        contexts = list(self.hedge_orders_by_order_id.values()) + list(self.hedge_orders_by_perm_id.values())
+        for context in contexts:
+            context_identity = id(context)
+            if context_identity in seen_context_ids:
+                continue
+            seen_context_ids.add(context_identity)
+            yield context
 
-        stale_hedge_contexts = []
-        for context in list(self.hedge_orders_by_order_id.values()):
-            if context.get('websocket') is websocket and context not in stale_hedge_contexts:
-                stale_hedge_contexts.append(context)
+    def release_managed_for_websocket(self, websocket):
+        """Orphan (do not terminate) supervision owned by a disconnected session.
 
-        for context in stale_hedge_contexts:
-            self._cleanup_hedge_order_context(context)
+        The broker order is still live in TWS, so the reprice loop keeps
+        supervising it server-side; status emits are skipped until a
+        reconnected session adopts the context via
+        reattach_managed_for_websocket().
+        """
+        for context in self._iter_unique_managed_contexts():
+            if context.get('websocket') is websocket:
+                context['websocket'] = None
+                context['lastManagedEmitSignature'] = None
+
+        for context in self._iter_unique_hedge_contexts():
+            if context.get('websocket') is websocket:
+                context['websocket'] = None
+
+    # Backwards-compatible alias for older callers.
+    cancel_managed_for_websocket = release_managed_for_websocket
+
+    def reattach_managed_for_websocket(self, websocket):
+        """Adopt orphaned supervision contexts into a reconnected session."""
+        adopted = 0
+        for context in self._iter_unique_managed_contexts():
+            if context.get('websocket') is None:
+                context['websocket'] = websocket
+                context['lastManagedEmitSignature'] = None
+                adopted += 1
+
+        for context in self._iter_unique_hedge_contexts():
+            if context.get('websocket') is None:
+                context['websocket'] = websocket
+                adopted += 1
+
+        return adopted
+
+    def _adopt_or_verify_context_session(self, context, websocket, error_message):
+        owner = context.get('websocket')
+        if owner is None:
+            context['websocket'] = websocket
+            context['lastManagedEmitSignature'] = None
+            return
+        if owner is not websocket:
+            raise ValueError(error_message)
 
     async def resume_managed_combo_order(self, websocket, raw_data):
         group_id = raw_data.get('groupId')
@@ -1252,8 +1308,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         if context is None:
             raise ValueError('No managed combo order is available to resume.')
 
-        if context.get('websocket') is not websocket:
-            raise ValueError('Managed combo order belongs to a different session.')
+        self._adopt_or_verify_context_session(
+            context,
+            websocket,
+            'Managed combo order belongs to a different session.',
+        )
 
         status = str(context.get('status') or '').strip()
         if self._is_terminal_order_status(status):
@@ -1307,8 +1366,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         if context is None:
             raise ValueError('No managed combo order is available to reprice with concession.')
 
-        if context.get('websocket') is not websocket:
-            raise ValueError('Managed combo order belongs to a different session.')
+        self._adopt_or_verify_context_session(
+            context,
+            websocket,
+            'Managed combo order belongs to a different session.',
+        )
 
         status = str(context.get('status') or '').strip()
         if self._is_terminal_order_status(status):
@@ -1399,8 +1461,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         if context is None:
             raise ValueError('No managed combo order is available to cancel.')
 
-        if context.get('websocket') is not websocket:
-            raise ValueError('Managed combo order belongs to a different session.')
+        self._adopt_or_verify_context_session(
+            context,
+            websocket,
+            'Managed combo order belongs to a different session.',
+        )
 
         status = str(context.get('status') or '').strip()
         if self._is_terminal_order_status(status):

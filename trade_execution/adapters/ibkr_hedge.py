@@ -365,8 +365,11 @@ async def cancel_hedge_order(self, websocket, raw_data):
     if context is None:
         raise ValueError('No hedge order is available to cancel.')
 
-    if context.get('websocket') is not websocket:
-        raise ValueError('Hedge order belongs to a different session.')
+    self._adopt_or_verify_context_session(
+        context,
+        websocket,
+        'Hedge order belongs to a different session.',
+    )
 
     status = str(context.get('status') or '').strip()
     if self._is_terminal_order_status(status):

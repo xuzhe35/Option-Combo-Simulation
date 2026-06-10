@@ -821,6 +821,7 @@ function connectWebSocket() {
         updateWsStatusUI('connected');
         handleLiveSubscriptions();
         requestActiveHedgeOrdersSnapshot();
+        requestActiveComboOrdersSnapshot();
     };
 
     ws.onclose = () => {
@@ -933,6 +934,22 @@ function requestActiveHedgeOrdersSnapshot() {
     if (hedgeId) {
         payload.hedgeId = hedgeId;
     }
+    if (account) {
+        payload.account = account;
+    }
+    ws.send(JSON.stringify(payload));
+    return true;
+}
+
+function requestActiveComboOrdersSnapshot() {
+    if (!isWsConnected || !ws || _isHistoricalMode()) {
+        return false;
+    }
+
+    const payload = {
+        action: 'request_active_combo_orders_snapshot',
+    };
+    const account = _getSelectedLiveComboOrderAccount();
     if (account) {
         payload.account = account;
     }

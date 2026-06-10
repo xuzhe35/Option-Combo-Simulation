@@ -50,7 +50,7 @@ class _ExecutionEngineStub:
         self.calls.append(('combo', websocket, data, client_ip))
         return {'action': 'combo_order_preview_result', 'groupId': 'group_1'}
 
-    def cancel_managed_for_websocket(self, websocket):
+    def release_managed_for_websocket(self, websocket):
         self.cancel_calls.append(websocket)
 
 
@@ -129,6 +129,15 @@ class IbServerWsHandlerTests(unittest.TestCase):
                 'requestId': data.get('requestId'),
             }
 
+        active_combo_snapshot_calls = []
+
+        def build_active_combo_orders_snapshot(websocket, data):
+            active_combo_snapshot_calls.append((websocket, data))
+            return {
+                'action': 'active_combo_orders_snapshot',
+                'orders': [],
+            }
+
         async def qualify_one(contract, request=None):
             request_data = request if isinstance(request, dict) else {}
             sec_type = str(request_data.get('secType') or getattr(contract, 'secType', '') or 'STK').upper()
@@ -201,6 +210,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
             },
             'ensure_ib_connect_task': ensure_ib_connect_task,
             'build_active_hedge_orders_snapshot': build_active_hedge_orders_snapshot,
+            'build_active_combo_orders_snapshot': build_active_combo_orders_snapshot,
             'normalize_bool': lambda value, default=False: default if value is None else str(value).strip().lower() in ('1', 'true', 'yes', 'on'),
             'build_contract_from_request': lambda request: type('ContractRequest', (), {
                 'secType': str((request or {}).get('secType') or 'STK').upper(),
@@ -236,6 +246,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
                 'unsubscribe_calls': unsubscribe_calls,
                 'ensure_connect_calls': ensure_connect_calls,
                 'active_hedge_snapshot_calls': active_hedge_snapshot_calls,
+                'active_combo_snapshot_calls': active_combo_snapshot_calls,
                 'iv_subscription_calls': iv_subscription_calls,
                 'historical_bar_calls': historical_bar_calls,
             },
@@ -520,18 +531,97 @@ class IbServerWsHandlerTests(unittest.TestCase):
             {'action': 'subscribe_iv_term_structure', 'underlying': {'secType': 'IND', 'symbol': 'SPX'}},
         )])
 
-    def test_purge_combo_order_tracking_removes_only_matching_websocket(self):
+    def test_handle_ws_client_routes_active_combo_snapshot_action(self):
+        (
+            env,
+            sent_messages,
+            _snapshot_calls,
+            _managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_env()
+        websocket = _FakeWebSocket(messages=[json.dumps({'action': 'request_active_combo_orders_snapshot'})])
+        handler = build_ws_client_handler(env)
+
+        asyncio.run(handler(websocket))
+
+        self.assertEqual(len(env['_captures']['active_combo_snapshot_calls']), 1)
+        snapshot_messages = [
+            payload for _ws, payload in sent_messages
+            if payload.get('action') == 'active_combo_orders_snapshot'
+        ]
+        self.assertEqual(len(snapshot_messages), 1)
+
+    def test_handle_ws_client_survives_malformed_and_failing_messages(self):
+        (
+            env,
+            sent_messages,
+            _snapshot_calls,
+            _managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_env()
+
+        class _ExplodingEngine(_ExecutionEngineStub):
+            async def handle_hedge_action(self, websocket, data, client_ip='Unknown'):
+                if data.get('action') == 'boom':
+                    raise RuntimeError('handler bug')
+                return await super().handle_hedge_action(websocket, data, client_ip=client_ip)
+
+        env['execution_engine'] = _ExplodingEngine()
+        websocket = _FakeWebSocket(messages=[
+            'this is not json',
+            json.dumps(['not', 'a', 'dict']),
+            json.dumps({'action': 'boom'}),
+            json.dumps({'action': 'request_ib_connection_status'}),
+        ])
+        handler = build_ws_client_handler(env)
+
+        asyncio.run(handler(websocket))
+
+        status_messages = [
+            payload for _ws, payload in sent_messages
+            if payload.get('action') == 'ib_connection_status'
+        ]
+        self.assertEqual(len(status_messages), 1)
+        self.assertEqual(env['execution_engine'].cancel_calls, [websocket])
+
+    def test_purge_combo_order_tracking_orphans_live_and_drops_terminal_entries(self):
         ws_target = object()
         ws_other = object()
-        tracking_target = {'websocket': ws_target}
-        tracking_other = {'websocket': ws_other}
-        by_order_id = {1: tracking_target, 2: tracking_other}
-        by_perm_id = {11: tracking_target, 22: tracking_other}
+        terminal_tracking = {'websocket': ws_target, 'orderId': 1, 'permId': 11, 'status': 'Filled'}
+        live_tracking = {'websocket': ws_target, 'orderId': 2, 'permId': 22, 'status': 'Submitted'}
+        other_tracking = {'websocket': ws_other, 'orderId': 3, 'permId': 33, 'status': 'Submitted'}
+        by_order_id = {1: terminal_tracking, 2: live_tracking, 3: other_tracking}
+        by_perm_id = {11: terminal_tracking, 22: live_tracking, 33: other_tracking}
+
+        purge_combo_order_tracking_for_websocket(
+            ws_target,
+            by_order_id,
+            by_perm_id,
+            is_terminal_combo_tracking=lambda tracking: tracking.get('status') == 'Filled',
+        )
+
+        self.assertEqual(by_order_id, {2: live_tracking, 3: other_tracking})
+        self.assertEqual(by_perm_id, {22: live_tracking, 33: other_tracking})
+        self.assertIsNone(live_tracking['websocket'])
+        self.assertIs(other_tracking['websocket'], ws_other)
+
+    def test_purge_combo_order_tracking_orphans_everything_without_predicate(self):
+        ws_target = object()
+        live_tracking = {'websocket': ws_target, 'orderId': 2, 'permId': 22, 'status': 'Submitted'}
+        by_order_id = {2: live_tracking}
+        by_perm_id = {22: live_tracking}
 
         purge_combo_order_tracking_for_websocket(ws_target, by_order_id, by_perm_id)
 
-        self.assertEqual(by_order_id, {2: tracking_other})
-        self.assertEqual(by_perm_id, {22: tracking_other})
+        self.assertEqual(by_order_id, {2: live_tracking})
+        self.assertEqual(by_perm_id, {22: live_tracking})
+        self.assertIsNone(live_tracking['websocket'])
 
     def test_purge_hedge_order_tracking_clears_terminal_and_detaches_live_entries(self):
         ws_target = object()

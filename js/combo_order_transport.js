@@ -1057,6 +1057,21 @@
             return true;
         }
 
+        function _applyActiveComboOrdersSnapshot(data) {
+            const orders = Array.isArray(data && data.orders) ? data.orders : [];
+            orders.forEach((order) => {
+                if (!order || typeof order !== 'object' || !order.groupId) {
+                    return;
+                }
+                _applyComboOrderStatusUpdate({
+                    action: 'combo_order_status_update',
+                    groupId: order.groupId,
+                    orderStatus: order,
+                });
+            });
+            return true;
+        }
+
         function handleMessage(data) {
             if (!data || typeof data !== 'object' || !data.action) {
                 return false;
@@ -1064,6 +1079,9 @@
 
             if (data.action === 'combo_order_validation_result') {
                 return _applyComboOrderValidationResult(data);
+            }
+            if (data.action === 'active_combo_orders_snapshot') {
+                return _applyActiveComboOrdersSnapshot(data);
             }
             if (data.action === 'combo_order_preview_result' || data.action === 'combo_order_submit_result') {
                 return _applyComboOrderResult(data);
@@ -1103,6 +1121,7 @@
                 applyComboOrderValidationResult: _applyComboOrderValidationResult,
                 applyComboOrderResult: _applyComboOrderResult,
                 applyComboOrderStatusUpdate: _applyComboOrderStatusUpdate,
+                applyActiveComboOrdersSnapshot: _applyActiveComboOrdersSnapshot,
                 applyComboOrderResumeResult: _applyComboOrderResumeResult,
                 applyComboOrderConcedeResult: _applyComboOrderConcedeResult,
                 applyComboOrderCancelResult: _applyComboOrderCancelResult,
