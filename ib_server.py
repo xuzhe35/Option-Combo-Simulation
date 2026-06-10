@@ -429,7 +429,7 @@ def _build_active_combo_orders_snapshot(websocket, data=None):
     # reconnecting tab cannot claim another live session's orders.
     for order in snapshot.get('orders') or []:
         try:
-            execution_engine.adopt_managed_combo_order(
+            adopted = execution_engine.adopt_managed_combo_order(
                 websocket,
                 order.get('orderId'),
                 order.get('permId'),
@@ -437,6 +437,14 @@ def _build_active_combo_orders_snapshot(websocket, data=None):
         except Exception:
             logging.exception(
                 "Failed to adopt managed combo context for orderId=%s permId=%s",
+                order.get('orderId'),
+                order.get('permId'),
+            )
+            continue
+        if not adopted:
+            logging.warning(
+                "Managed combo context for orderId=%s permId=%s is owned by another "
+                "live session; resume/concede/cancel stay with that session",
                 order.get('orderId'),
                 order.get('permId'),
             )

@@ -1256,7 +1256,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         The broker order is still live in TWS, so the reprice loop keeps
         supervising it server-side; status emits are skipped until a
         reconnected session adopts the context via
-        reattach_managed_for_websocket().
+        adopt_managed_combo_order().
         """
         for context in self._iter_unique_managed_contexts():
             if context.get('websocket') is websocket:

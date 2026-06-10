@@ -166,6 +166,12 @@ def build_active_combo_orders_snapshot(
     combo_order_fill_cost_update pushes so leg costs are written back, and
     trackings that reached a terminal broker status while disconnected get a
     final combo_order_status_update push before being dropped.
+
+    Trackings still owned by another live websocket are skipped entirely
+    (disconnects orphan trackings, so a non-None owner is still connected):
+    re-binding them here would move status/fill pushes to this session while
+    managed resume/concede/cancel stayed with the owner, splitting display
+    and control across tabs.
     """
     request_data = data if isinstance(data, dict) else {}
     requested_group_id = str(request_data.get('groupId') or '').strip()
@@ -175,6 +181,15 @@ def build_active_combo_orders_snapshot(
         if requested_group_id and str(tracking.get('groupId') or '').strip() != requested_group_id:
             continue
         if requested_account and str(tracking.get('account') or '').strip() != requested_account:
+            continue
+        owner = tracking.get('websocket')
+        if owner is not None and owner is not websocket:
+            logging.info(
+                "Skipping active combo snapshot re-bind for groupId=%s orderId=%s: "
+                "tracking is owned by another live session",
+                tracking.get('groupId'),
+                tracking.get('orderId'),
+            )
             continue
         tracking['websocket'] = websocket
 

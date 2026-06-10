@@ -566,6 +566,51 @@ class IbServerOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(933, env['combo_order_tracking_by_perm_id'])
         self.assertIn(930, env['combo_order_tracking_by_order_id'])
 
+    async def test_active_combo_snapshot_does_not_steal_live_session_trackings(self):
+        env, sent_messages, _execution_engine = self._build_env()
+        owner_websocket = object()
+        other_websocket = object()
+        owned_tracking = {
+            'websocket': owner_websocket,
+            'groupId': 'group_owned',
+            'groupName': 'Owned Combo',
+            'executionMode': 'submit',
+            'executionIntent': 'open',
+            'requestSource': 'trial_trigger',
+            'orderId': 940,
+            'permId': 941,
+            'status': 'Submitted',
+            'legs': [
+                {
+                    'id': 'leg_owned',
+                    'conId': 401,
+                    'expectedExecutionSide': 'BOT',
+                },
+            ],
+            'fillTotals': {
+                'leg_owned': {'filledQuantity': 1.0, 'filledNotional': 2.0},
+            },
+            'seenExecIds': set(),
+        }
+        env['combo_order_tracking_by_order_id'][940] = owned_tracking
+        env['combo_order_tracking_by_perm_id'][941] = owned_tracking
+
+        snapshot = build_active_combo_orders_snapshot(env, other_websocket, None)
+        await asyncio.sleep(0)
+
+        # A tracking owned by another live session must stay fully with that
+        # session: no re-bind, no snapshot entry, no replayed pushes.
+        self.assertEqual(snapshot['orders'], [])
+        self.assertIs(owned_tracking['websocket'], owner_websocket)
+        self.assertEqual(sent_messages, [])
+        self.assertIn(940, env['combo_order_tracking_by_order_id'])
+
+        # The owning session itself may re-request and keeps everything.
+        snapshot = build_active_combo_orders_snapshot(env, owner_websocket, None)
+        await asyncio.sleep(0)
+        self.assertEqual(len(snapshot['orders']), 1)
+        self.assertIs(owned_tracking['websocket'], owner_websocket)
+
 
 if __name__ == '__main__':
     unittest.main()
