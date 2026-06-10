@@ -1215,6 +1215,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             status=getattr(order_status, 'status', None),
             status_message=status_message or None,
             tracking_legs=tracking_legs,
+            trade=trade,
         )
         self.logger.info(
             f"Combo order submitted for groupId={request.group_id}: "
@@ -1269,21 +1270,22 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     # Backwards-compatible alias for older callers.
     cancel_managed_for_websocket = release_managed_for_websocket
 
-    def reattach_managed_for_websocket(self, websocket):
-        """Adopt orphaned supervision contexts into a reconnected session."""
-        adopted = 0
-        for context in self._iter_unique_managed_contexts():
-            if context.get('websocket') is None:
-                context['websocket'] = websocket
-                context['lastManagedEmitSignature'] = None
-                adopted += 1
+    def adopt_managed_combo_order(self, websocket, order_id, perm_id):
+        """Adopt one orphaned managed context into a reconnected session.
 
-        for context in self._iter_unique_hedge_contexts():
-            if context.get('websocket') is None:
-                context['websocket'] = websocket
-                adopted += 1
-
-        return adopted
+        Adoption is per-order (driven by the account/group-filtered combo
+        snapshot) so one reconnecting tab cannot claim supervision contexts
+        that belong to another live session. Contexts still owned by a live
+        websocket are left untouched.
+        """
+        context = self._resolve_order_tracking(order_id, perm_id)
+        if context is None:
+            return False
+        if context.get('websocket') is None:
+            context['websocket'] = websocket
+            context['lastManagedEmitSignature'] = None
+            return True
+        return context.get('websocket') is websocket
 
     def _adopt_or_verify_context_session(self, context, websocket, error_message):
         owner = context.get('websocket')

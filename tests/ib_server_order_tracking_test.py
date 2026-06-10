@@ -412,11 +412,25 @@ class IbServerOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
 
         new_websocket = object()
         snapshot = build_active_combo_orders_snapshot(env, new_websocket, None)
+        await asyncio.sleep(0)
 
         self.assertEqual(snapshot['action'], 'active_combo_orders_snapshot')
         self.assertEqual(len(snapshot['orders']), 1)
         self.assertEqual(snapshot['orders'][0]['groupId'], 'group_orphan')
         self.assertIs(tracking['websocket'], new_websocket)
+
+        # The fills accumulated while orphaned must be replayed to the
+        # re-attached session so leg costs are written back.
+        fill_messages = [
+            payload for ws, payload in sent_messages
+            if ws is new_websocket and payload.get('action') == 'combo_order_fill_cost_update'
+        ]
+        self.assertEqual(len(fill_messages), 1)
+        replayed_legs = fill_messages[0]['orderFill']['legs']
+        self.assertEqual(len(replayed_legs), 1)
+        self.assertEqual(replayed_legs[0]['id'], 'leg_call')
+        self.assertEqual(replayed_legs[0]['avgFillPrice'], 2.5)
+        self.assertEqual(replayed_legs[0]['filledQuantity'], 1.0)
 
     def test_upsert_combo_order_tracking_preserves_fills_across_passes(self):
         env, _sent_messages, _execution_engine = self._build_env()
@@ -468,9 +482,8 @@ class IbServerOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(env['combo_order_tracking_by_order_id'][920], merged)
         self.assertIs(env['combo_order_tracking_by_perm_id'][921], merged)
 
-    def test_active_combo_snapshot_filters_terminal_orders(self):
-        env, _sent_messages, _execution_engine = self._build_env()
-        old_websocket = object()
+    async def test_active_combo_snapshot_pushes_terminal_state_and_drops_tracking(self):
+        env, sent_messages, _execution_engine = self._build_env()
         new_websocket = object()
         live_tracking = {
             'websocket': None,
@@ -484,7 +497,7 @@ class IbServerOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
             'status': 'Submitted',
         }
         terminal_tracking = {
-            'websocket': old_websocket,
+            'websocket': None,
             'groupId': 'group_done',
             'groupName': 'Done Combo',
             'executionMode': 'submit',
@@ -493,6 +506,24 @@ class IbServerOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
             'orderId': 932,
             'permId': 933,
             'status': 'Filled',
+            'legs': [
+                {
+                    'id': 'leg_done',
+                    'conId': 201,
+                    'localSymbol': 'SPY  240621C00510000',
+                    'symbol': 'SPY',
+                    'secType': 'OPT',
+                    'right': 'C',
+                    'strike': 510,
+                    'expDate': '20240621',
+                    'targetPosition': 1,
+                    'expectedExecutionSide': 'BOT',
+                },
+            ],
+            'fillTotals': {
+                'leg_done': {'filledQuantity': 1.0, 'filledNotional': 3.4},
+            },
+            'seenExecIds': {'done-fill-1'},
         }
         env['combo_order_tracking_by_order_id'][930] = live_tracking
         env['combo_order_tracking_by_perm_id'][931] = live_tracking
@@ -503,12 +534,37 @@ class IbServerOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_terminal_combo_tracking(env, terminal_tracking))
 
         snapshot = build_active_combo_orders_snapshot(env, new_websocket, None)
+        await asyncio.sleep(0)
 
         self.assertEqual(snapshot['action'], 'active_combo_orders_snapshot')
         self.assertEqual(len(snapshot['orders']), 1)
         self.assertEqual(snapshot['orders'][0]['groupId'], 'group_live')
         self.assertIs(live_tracking['websocket'], new_websocket)
-        self.assertIs(terminal_tracking['websocket'], old_websocket)
+
+        # The order that filled while disconnected delivers its final status
+        # and attributed fill costs to the reconnected session, then the
+        # tracking is dropped.
+        terminal_status_messages = [
+            payload for ws, payload in sent_messages
+            if ws is new_websocket
+            and payload.get('action') == 'combo_order_status_update'
+            and payload.get('groupId') == 'group_done'
+        ]
+        self.assertEqual(len(terminal_status_messages), 1)
+        self.assertEqual(terminal_status_messages[0]['orderStatus']['status'], 'Filled')
+
+        terminal_fill_messages = [
+            payload for ws, payload in sent_messages
+            if ws is new_websocket
+            and payload.get('action') == 'combo_order_fill_cost_update'
+            and payload.get('groupId') == 'group_done'
+        ]
+        self.assertEqual(len(terminal_fill_messages), 1)
+        self.assertEqual(terminal_fill_messages[0]['orderFill']['legs'][0]['avgFillPrice'], 3.4)
+
+        self.assertNotIn(932, env['combo_order_tracking_by_order_id'])
+        self.assertNotIn(933, env['combo_order_tracking_by_perm_id'])
+        self.assertIn(930, env['combo_order_tracking_by_order_id'])
 
 
 if __name__ == '__main__':

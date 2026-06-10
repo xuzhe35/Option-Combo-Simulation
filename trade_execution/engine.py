@@ -102,10 +102,10 @@ class ExecutionEngine:
     # Backwards-compatible alias for older callers.
     cancel_managed_for_websocket = release_managed_for_websocket
 
-    def reattach_managed_for_websocket(self, websocket):
-        if hasattr(self.adapter, "reattach_managed_for_websocket"):
-            return self.adapter.reattach_managed_for_websocket(websocket)
-        return 0
+    def adopt_managed_combo_order(self, websocket, order_id, perm_id):
+        if hasattr(self.adapter, "adopt_managed_combo_order"):
+            return self.adapter.adopt_managed_combo_order(websocket, order_id, perm_id)
+        return False
 
     async def handle_hedge_action(self, websocket, raw_data, client_ip="Unknown"):
         if not isinstance(raw_data, dict):

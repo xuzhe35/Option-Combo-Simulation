@@ -159,20 +159,47 @@ def build_active_combo_orders_snapshot(
     websocket: Any,
     data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Re-attach orphaned combo trackings to a reconnected session and snapshot them."""
+    """Re-attach orphaned combo trackings to a reconnected session and snapshot them.
+
+    Live trackings are returned in the snapshot orders list. Fill totals
+    accumulated while the tracking was orphaned are replayed as standard
+    combo_order_fill_cost_update pushes so leg costs are written back, and
+    trackings that reached a terminal broker status while disconnected get a
+    final combo_order_status_update push before being dropped.
+    """
     request_data = data if isinstance(data, dict) else {}
     requested_group_id = str(request_data.get('groupId') or '').strip()
     requested_account = str(request_data.get('account') or '').strip()
     orders = []
-    for tracking in iter_unique_combo_order_trackings(env):
-        if is_terminal_combo_tracking(env, tracking):
-            continue
+    for tracking in list(iter_unique_combo_order_trackings(env)):
         if requested_group_id and str(tracking.get('groupId') or '').strip() != requested_group_id:
             continue
         if requested_account and str(tracking.get('account') or '').strip() != requested_account:
             continue
         tracking['websocket'] = websocket
-        orders.append(build_combo_order_status_payload(env, tracking.get('trade'), tracking)['orderStatus'])
+
+        fill_payload = build_combo_order_fill_cost_payload(
+            tracking,
+            tracking.get('orderId'),
+            tracking.get('permId'),
+        )
+        if fill_payload['orderFill']['legs']:
+            _schedule_payload_send(env, websocket, fill_payload)
+
+        status_payload = build_combo_order_status_payload(env, tracking.get('trade'), tracking)
+        if is_terminal_combo_tracking(env, tracking):
+            # Deliver the terminal status the page missed while disconnected,
+            # then drop the tracking - it needs no further supervision.
+            _schedule_payload_send(env, websocket, status_payload)
+            order_id = tracking.get('orderId')
+            perm_id = tracking.get('permId')
+            if order_id is not None:
+                env['combo_order_tracking_by_order_id'].pop(order_id, None)
+            if perm_id is not None:
+                env['combo_order_tracking_by_perm_id'].pop(perm_id, None)
+            continue
+
+        orders.append(status_payload['orderStatus'])
 
     return {
         'action': 'active_combo_orders_snapshot',

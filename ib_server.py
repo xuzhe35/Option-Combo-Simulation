@@ -239,6 +239,20 @@ def _record_combo_order_submission(websocket, request, result):
         status_message=result.status_message,
         legs=list(getattr(result, 'tracking_legs', []) or []),
     )
+    # Replay fills already accumulated on the Trade as a safety net: if the
+    # pre-registration callback failed, executions that arrived during the
+    # post-submit settle window had no tracking and were dropped by the live
+    # event handler. seenExecIds dedup makes this replay idempotent.
+    trade = getattr(result, 'trade', None)
+    for fill in list(getattr(trade, 'fills', None) or []):
+        try:
+            on_combo_order_exec_details(trade, fill)
+        except Exception:
+            logging.exception(
+                "Failed to replay combo execution fill for groupId=%s orderId=%s",
+                request.group_id,
+                result.order_id,
+            )
 
 
 def _record_hedge_order_submission(websocket, request, result):
@@ -405,17 +419,28 @@ def _is_terminal_combo_tracking(tracking):
 
 
 def _build_active_combo_orders_snapshot(websocket, data=None):
-    # Re-adopt orphaned managed supervision contexts first so resumed
-    # status emits and resume/concede/cancel target the new session.
-    try:
-        execution_engine.reattach_managed_for_websocket(websocket)
-    except Exception:
-        logging.exception("Failed to re-attach managed execution contexts")
-    return build_active_combo_orders_snapshot_via_module(
+    snapshot = build_active_combo_orders_snapshot_via_module(
         _build_order_tracking_environment(),
         websocket,
         data,
     )
+    # Adopt managed supervision contexts only for the orders this session
+    # actually re-attached (the snapshot is account/group scoped), so one
+    # reconnecting tab cannot claim another live session's orders.
+    for order in snapshot.get('orders') or []:
+        try:
+            execution_engine.adopt_managed_combo_order(
+                websocket,
+                order.get('orderId'),
+                order.get('permId'),
+            )
+        except Exception:
+            logging.exception(
+                "Failed to adopt managed combo context for orderId=%s permId=%s",
+                order.get('orderId'),
+                order.get('permId'),
+            )
+    return snapshot
 
 
 def _has_active_hedge_order_for_request(websocket, request):

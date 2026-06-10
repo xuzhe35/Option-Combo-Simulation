@@ -394,6 +394,8 @@ class ComboSubmitResult:
     status: Optional[str]
     status_message: Optional[str] = None
     tracking_legs: list[dict[str, Any]] = field(default_factory=list)
+    # Live ib_async Trade handle for post-submit fill replay; never serialized.
+    trade: Any = None
 
     def to_payload(self) -> dict[str, Any]:
         payload = self.preview.to_payload()

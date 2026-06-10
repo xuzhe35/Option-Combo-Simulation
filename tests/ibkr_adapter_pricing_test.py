@@ -779,6 +779,124 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, ['place_order', 'pre_register', 'sleep'])
         self.assertEqual(result.order_id, 4500)
         self.assertEqual(result.perm_id, 4501)
+        self.assertIs(result.trade.order, order)
+
+
+class IbkrAdapterManagedAdoptionTests(unittest.TestCase):
+    def _build_adapter(self):
+        return IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+
+    def test_adopt_managed_combo_order_claims_only_orphaned_contexts(self):
+        adapter = self._build_adapter()
+        new_websocket = object()
+        orphan_context = {'websocket': None, 'orderId': 5100, 'permId': 5101}
+        adapter.managed_executions_by_order_id[5100] = orphan_context
+        adapter.managed_executions_by_perm_id[5101] = orphan_context
+
+        self.assertTrue(adapter.adopt_managed_combo_order(new_websocket, 5100, 5101))
+        self.assertIs(orphan_context['websocket'], new_websocket)
+        self.assertIsNone(orphan_context['lastManagedEmitSignature'])
+
+    def test_adopt_managed_combo_order_leaves_live_sessions_untouched(self):
+        adapter = self._build_adapter()
+        owner_websocket = object()
+        other_websocket = object()
+        owned_context = {'websocket': owner_websocket, 'orderId': 5200, 'permId': 5201}
+        adapter.managed_executions_by_order_id[5200] = owned_context
+        adapter.managed_executions_by_perm_id[5201] = owned_context
+
+        self.assertFalse(adapter.adopt_managed_combo_order(other_websocket, 5200, 5201))
+        self.assertIs(owned_context['websocket'], owner_websocket)
+        self.assertFalse(adapter.adopt_managed_combo_order(other_websocket, 9999, None))
+
+
+class IbServerSubmissionFillReplayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_record_combo_order_submission_replays_trade_fills(self):
+        websocket = object()
+        request = SimpleNamespace(
+            group_id='group_replay',
+            group_name='Replay Combo',
+            account='ACC-1',
+            execution_mode='submit',
+            execution_intent='open',
+            request_source='trial_trigger',
+        )
+        tracking_legs = [{
+            'id': 'leg_replay',
+            'conId': 301,
+            'localSymbol': 'SPY  240621C00520000',
+            'symbol': 'SPY',
+            'secType': 'OPT',
+            'right': 'C',
+            'strike': 520,
+            'expDate': '20240621',
+            'targetPosition': 1,
+            'expectedExecutionSide': 'BOT',
+            'ratio': 1,
+        }]
+        fill = SimpleNamespace(
+            execution=SimpleNamespace(
+                orderId=940,
+                permId=941,
+                execId='replay-fill-1',
+                shares=1,
+                price=4.2,
+                side='BOT',
+            ),
+            contract=SimpleNamespace(secType='OPT', conId=301),
+        )
+        trade = SimpleNamespace(
+            order=SimpleNamespace(orderId=940, account='ACC-1'),
+            orderStatus=SimpleNamespace(
+                permId=941,
+                status='Filled',
+                filled=1,
+                remaining=0,
+                avgFillPrice=4.2,
+                lastFillPrice=4.2,
+                whyHeld='',
+                mktCapPrice=0,
+            ),
+            fills=[fill],
+            log=[],
+            advancedError='',
+        )
+        result = SimpleNamespace(
+            order_id=940,
+            perm_id=941,
+            status='Filled',
+            status_message=None,
+            tracking_legs=tracking_legs,
+            trade=trade,
+        )
+
+        try:
+            # Simulate the pre-registration callback having failed: no
+            # tracking exists yet, so the live exec event for this fill was
+            # dropped. The submission record must replay it from trade.fills.
+            ib_server._record_combo_order_submission(websocket, request, result)
+            await asyncio.sleep(0)
+
+            tracking = ib_server.combo_order_tracking_by_order_id.get(940)
+            self.assertIsNotNone(tracking)
+            self.assertEqual(tracking['fillTotals']['leg_replay']['filledQuantity'], 1.0)
+            self.assertEqual(tracking['fillTotals']['leg_replay']['filledNotional'], 4.2)
+            self.assertIn('replay-fill-1', tracking['seenExecIds'])
+
+            # Replaying again must not double-count thanks to exec-id dedup.
+            ib_server._record_combo_order_submission(websocket, request, result)
+            await asyncio.sleep(0)
+            tracking = ib_server.combo_order_tracking_by_order_id.get(940)
+            self.assertEqual(tracking['fillTotals']['leg_replay']['filledQuantity'], 1.0)
+        finally:
+            ib_server.combo_order_tracking_by_order_id.pop(940, None)
+            ib_server.combo_order_tracking_by_perm_id.pop(941, None)
 
 
 if __name__ == '__main__':
