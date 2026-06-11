@@ -52,7 +52,24 @@ def build_arg_parser():
     )
     parser.add_argument("--timeout", type=float, default=8.0, help="Seconds to wait for target response")
     parser.add_argument("--verbose", action="store_true", help="Print ignored startup messages")
+    parser.add_argument(
+        "--token",
+        default="",
+        help=(
+            "Server auth token (see the server's logs/ws_auth_token). "
+            "Falls back to the OPTION_COMBO_WS_AUTH_TOKEN environment variable."
+        ),
+    )
     return parser
+
+
+def resolve_auth_token(args):
+    import os
+
+    token = str(getattr(args, "token", "") or "").strip()
+    if token:
+        return token
+    return str(os.environ.get("OPTION_COMBO_WS_AUTH_TOKEN") or "").strip()
 
 
 def validate_payload_args(args):
@@ -113,7 +130,11 @@ async def run_smoke(args):
     url = f"ws://{args.host}:{args.port}"
     deadline = time.monotonic() + max(float(args.timeout), 0.1)
 
+    auth_token = resolve_auth_token(args)
+
     async with websockets.connect(url) as websocket:
+        if auth_token:
+            await websocket.send(json.dumps({"action": "authenticate", "token": auth_token}))
         await websocket.send(json.dumps(payload))
 
         while True:

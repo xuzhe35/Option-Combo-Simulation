@@ -586,6 +586,13 @@
         });
     }
 
+    function sendWsAuthTokenIfAvailable(ws) {
+        const authApi = globalScope.OptionComboWsAuthClient;
+        if (authApi && typeof authApi.sendAuthTokenIfAvailable === 'function') {
+            authApi.sendAuthTokenIfAvailable(ws, getWsHost(), getWsPort());
+        }
+    }
+
     async function ensureSocket(card) {
         if (card.ws && card.ws.readyState === WebSocket.OPEN) {
             return card.ws;
@@ -597,7 +604,10 @@
         const ws = new WebSocket(getWsUrl());
         card.ws = ws;
         card.wsOpenPromise = new Promise((resolve, reject) => {
-            ws.addEventListener('open', () => resolve(ws), { once: true });
+            ws.addEventListener('open', () => {
+                sendWsAuthTokenIfAvailable(ws);
+                resolve(ws);
+            }, { once: true });
             ws.addEventListener('error', () => reject(new Error('Unable to connect websocket.')), { once: true });
         });
         attachSocketHandlers(card, ws);
@@ -610,6 +620,7 @@
                 return;
             }
             runtime.controlWsOpenPromise = Promise.resolve(ws);
+            sendWsAuthTokenIfAvailable(ws);
             ws.send(JSON.stringify({ action: 'request_ib_connection_status' }));
         });
 

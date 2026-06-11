@@ -591,6 +591,10 @@
         if (lab.socket && (lab.socket.readyState === WebSocket.OPEN || lab.socket.readyState === WebSocket.CONNECTING)) return;
         lab.socket = new WebSocket(`ws://127.0.0.1:${wsPort()}`);
         lab.socket.addEventListener('open', () => {
+            const authApi = globalScope.OptionComboWsAuthClient;
+            if (authApi && typeof authApi.sendAuthTokenIfAvailable === 'function') {
+                authApi.sendAuthTokenIfAvailable(lab.socket, '127.0.0.1', wsPort());
+            }
             setMessage('Chart Lab connected. Loading daily bars and live price...', 'success');
             subscribeUnderlying();
             requestBars(true);

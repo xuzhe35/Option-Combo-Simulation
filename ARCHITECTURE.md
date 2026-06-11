@@ -445,7 +445,10 @@ Supporting live-backend helper modules:
 
 - `ib_server_ws.py`
   - WebSocket session lifecycle
+  - origin checks, token-auth gating, and live-order kill-switch enforcement
   - action dispatch and connection cleanup
+- `ib_server_auth.py`
+  - token storage, origin allowlisting, and auth payload helpers
 - `ib_server_order_tracking.py`
   - combo / hedge order tracking lookup helpers
   - order-status / error / fill payload builders
@@ -463,6 +466,10 @@ Supporting live-backend helper modules:
 
 `ib_server_ws.py` owns the client session lifecycle and WebSocket action dispatch for these high-level message families:
 
+- `authenticate`
+  - per-server shared-token auth (see `ib_server_auth.py`)
+  - enforced automatically when any bind address is non-loopback
+  - browser origins are allowlisted at connect time
 - `subscribe`
   - live underlying/options/futures/stocks
   - optional option Greeks via generic tick `106`

@@ -12,6 +12,11 @@ from ib_async import *
 import websockets
 
 from historical_replay_service import HistoricalReplayService, normalize_replay_date
+from ib_server_auth import (
+    build_allowed_origin_hosts as build_ws_allowed_origin_hosts,
+    load_or_create_token as load_or_create_ws_auth_token,
+    resolve_auth_required as resolve_ws_auth_required,
+)
 from ib_server_order_tracking import (
     build_active_combo_orders_snapshot as build_active_combo_orders_snapshot_via_module,
     build_active_hedge_orders_snapshot as build_active_hedge_orders_snapshot_via_module,
@@ -83,9 +88,9 @@ from trade_execution.adapters.ibkr import IbkrExecutionAdapter
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Load Config
+# Load Config (machine-local overrides in config.local.ini win over config.ini)
 config = configparser.ConfigParser()
-config.read('config.ini')
+config.read(['config.ini', 'config.local.ini'])
 
 TWS_HOST = config.get('tws', 'host', fallback='127.0.0.1')
 TWS_PORT = config.getint('tws', 'port', fallback=7496)
@@ -93,6 +98,11 @@ TWS_CLIENT_ID = config.getint('tws', 'client_id', fallback=999)
 
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
+WS_AUTH_TOKEN_PATH = config.get('server', 'auth_token_path', fallback=os.path.join('logs', 'ws_auth_token'))
+WS_AUTH_TOKEN_OVERRIDE = config.get('server', 'auth_token', fallback='').strip()
+WS_REQUIRE_AUTH_MODE = config.get('server', 'require_auth', fallback='auto').strip().lower()
+WS_EXTRA_ORIGIN_HOSTS = config.get('server', 'allowed_origin_hosts', fallback='')
+ALLOW_LIVE_ORDERS = config.getboolean('execution', 'allow_live_orders', fallback=True)
 MANAGED_REPRICE_THRESHOLD_DEFAULT = config.getfloat('execution', 'managed_reprice_threshold_default', fallback=0.01)
 MANAGED_REPRICE_INTERVAL_SECONDS = config.getfloat('execution', 'managed_reprice_interval_seconds', fallback=2.0)
 MANAGED_REPRICE_MAX_UPDATES = config.getint('execution', 'managed_reprice_max_updates', fallback=12)
@@ -119,6 +129,41 @@ for host in WS_HOSTS:
             "Restrict access with Tailscale ACLs and the OS firewall.",
             host,
         )
+
+WS_AUTH_REQUIRED = resolve_ws_auth_required(WS_REQUIRE_AUTH_MODE, WS_HOSTS)
+WS_AUTH_TOKEN = WS_AUTH_TOKEN_OVERRIDE or load_or_create_ws_auth_token(WS_AUTH_TOKEN_PATH)
+WS_ALLOWED_ORIGIN_HOSTS = build_ws_allowed_origin_hosts(WS_HOSTS, WS_EXTRA_ORIGIN_HOSTS)
+ws_client_auth_state = {}
+
+if WS_AUTH_REQUIRED:
+    if WS_AUTH_TOKEN:
+        logging.info(
+            "WebSocket auth is REQUIRED (mode=%s). Paste the token from %s into each "
+            "browser client's WS Target panel.",
+            WS_REQUIRE_AUTH_MODE,
+            'config auth_token' if WS_AUTH_TOKEN_OVERRIDE else os.path.abspath(WS_AUTH_TOKEN_PATH),
+        )
+    else:
+        logging.critical(
+            "WebSocket auth is REQUIRED but no token is available (could not read or "
+            "create %s). All protected actions will be rejected until this is fixed.",
+            os.path.abspath(WS_AUTH_TOKEN_PATH),
+        )
+else:
+    logging.info(
+        "WebSocket auth is optional (mode=%s, loopback-only bind). "
+        "Token at %s is still accepted if presented.",
+        WS_REQUIRE_AUTH_MODE,
+        os.path.abspath(WS_AUTH_TOKEN_PATH),
+    )
+
+logging.info("Allowed WebSocket origin hosts: %s", ', '.join(sorted(WS_ALLOWED_ORIGIN_HOSTS)))
+
+if not ALLOW_LIVE_ORDERS:
+    logging.warning(
+        "[execution] allow_live_orders = false: submit/resume/concede actions are "
+        "disabled server-side. Cancels remain allowed."
+    )
 
 ib = IB()
 connected_clients = set()
@@ -1397,6 +1442,13 @@ def _build_ws_handler_environment():
         'is_terminal_combo_tracking': _is_terminal_combo_tracking,
         'extract_market_price': _extract_market_price,
         'ib': ib,
+        'auth': {
+            'required': WS_AUTH_REQUIRED,
+            'token': WS_AUTH_TOKEN,
+            'allowed_origin_hosts': WS_ALLOWED_ORIGIN_HOSTS,
+            'allow_live_orders': ALLOW_LIVE_ORDERS,
+        },
+        'client_auth_state': ws_client_auth_state,
     }
 
 

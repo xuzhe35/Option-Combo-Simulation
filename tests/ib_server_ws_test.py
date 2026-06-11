@@ -3,6 +3,7 @@ import json
 import pathlib
 import sys
 import unittest
+from types import SimpleNamespace
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -18,10 +19,16 @@ from ib_server_ws import (
 
 
 class _FakeWebSocket:
-    def __init__(self, messages=None, remote_address=('127.0.0.1', 8765)):
+    def __init__(self, messages=None, remote_address=('127.0.0.1', 8765), origin=None):
         self._messages = list(messages or [])
         self.remote_address = remote_address
         self.sent = []
+        self.close_calls = []
+        if origin is not None:
+            self.request = SimpleNamespace(headers={'Origin': origin})
+
+    async def close(self, code=None, reason=None):
+        self.close_calls.append((code, reason))
 
     def __aiter__(self):
         self._iter = iter(self._messages)
@@ -589,6 +596,164 @@ class IbServerWsHandlerTests(unittest.TestCase):
         ]
         self.assertEqual(len(status_messages), 1)
         self.assertEqual(env['execution_engine'].cancel_calls, [websocket])
+
+    def _build_auth_env(self, required=True, token='test-token', allow_live_orders=True):
+        env_tuple = self._build_env()
+        env = env_tuple[0]
+        env['auth'] = {
+            'required': required,
+            'token': token,
+            'allowed_origin_hosts': {'localhost', '127.0.0.1', '::1'},
+            'allow_live_orders': allow_live_orders,
+        }
+        env['client_auth_state'] = {}
+        return env_tuple
+
+    def test_handle_ws_client_rejects_disallowed_origin(self):
+        (
+            env,
+            sent_messages,
+            snapshot_calls,
+            _managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_auth_env()
+        websocket = _FakeWebSocket(
+            messages=[json.dumps({'action': 'request_ib_connection_status'})],
+            origin='http://evil.example',
+        )
+        handler = build_ws_client_handler(env)
+
+        asyncio.run(handler(websocket))
+
+        self.assertEqual(websocket.close_calls, [(4403, 'Origin not allowed')])
+        self.assertEqual(sent_messages, [])
+        self.assertEqual(snapshot_calls, [])
+        self.assertEqual(env['connected_clients'], set())
+
+    def test_handle_ws_client_allows_listed_browser_origin(self):
+        (
+            env,
+            sent_messages,
+            _snapshot_calls,
+            _managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_auth_env(required=False)
+        websocket = _FakeWebSocket(
+            messages=[json.dumps({'action': 'request_ib_connection_status'})],
+            origin='http://localhost:8000',
+        )
+        handler = build_ws_client_handler(env)
+
+        asyncio.run(handler(websocket))
+
+        self.assertEqual(websocket.close_calls, [])
+        status_messages = [p for _ws, p in sent_messages if p.get('action') == 'ib_connection_status']
+        self.assertEqual(len(status_messages), 1)
+
+    def test_handle_ws_client_requires_auth_for_protected_actions(self):
+        (
+            env,
+            sent_messages,
+            snapshot_calls,
+            managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_auth_env()
+        websocket = _FakeWebSocket(messages=[
+            json.dumps({'action': 'request_ib_connection_status'}),
+            json.dumps({'action': 'subscribe', 'underlying': 'SPY', 'options': []}),
+            json.dumps({'action': 'preview_combo_order', 'groupId': 'group_1'}),
+            json.dumps({'action': 'authenticate', 'token': 'test-token'}),
+            json.dumps({'action': 'preview_combo_order', 'groupId': 'group_1'}),
+        ])
+        handler = build_ws_client_handler(env)
+
+        asyncio.run(handler(websocket))
+
+        actions = [payload.get('action') for _ws, payload in sent_messages]
+        # Connect pushes auth_status; unauthenticated allowlist still works,
+        # protected actions are rejected, auth unlocks them.
+        self.assertEqual(actions[0], 'auth_status')
+        self.assertIn('ib_connection_status', actions)
+        self.assertIn('auth_error', actions)  # subscribe rejected
+        self.assertIn('combo_order_error', actions)  # pre-auth combo rejected
+        self.assertIn('auth_result', actions)
+        self.assertEqual(actions[-1], 'combo_order_preview_result')
+
+        auth_status = sent_messages[0][1]
+        self.assertTrue(auth_status['authRequired'])
+        self.assertFalse(auth_status['authenticated'])
+
+        auth_result = next(p for _ws, p in sent_messages if p.get('action') == 'auth_result')
+        self.assertTrue(auth_result['ok'])
+
+        # The account-revealing bootstrap was withheld until after auth.
+        self.assertEqual(snapshot_calls, [websocket])
+        self.assertEqual(managed_snapshot_calls, [websocket])
+
+        # Only the post-auth combo action reached the execution engine.
+        combo_calls = [call for call in env['execution_engine'].calls if call[0] == 'combo']
+        self.assertEqual(len(combo_calls), 1)
+
+    def test_handle_ws_client_closes_after_repeated_failed_auth(self):
+        (
+            env,
+            sent_messages,
+            _snapshot_calls,
+            _managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_auth_env()
+        bad_auth = json.dumps({'action': 'authenticate', 'token': 'wrong'})
+        websocket = _FakeWebSocket(messages=[bad_auth] * 5)
+        handler = build_ws_client_handler(env)
+
+        asyncio.run(handler(websocket))
+
+        results = [p for _ws, p in sent_messages if p.get('action') == 'auth_result']
+        self.assertEqual(len(results), 5)
+        self.assertTrue(all(p['ok'] is False for p in results))
+        self.assertEqual(websocket.close_calls, [(4401, 'Too many failed authentication attempts')])
+
+    def test_handle_ws_client_blocks_live_orders_when_disabled(self):
+        (
+            env,
+            sent_messages,
+            _snapshot_calls,
+            _managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_auth_env(required=False, allow_live_orders=False)
+        websocket = _FakeWebSocket(messages=[
+            json.dumps({'action': 'submit_combo_order', 'groupId': 'group_1'}),
+            json.dumps({'action': 'cancel_managed_combo_order', 'groupId': 'group_1'}),
+        ])
+        handler = build_ws_client_handler(env)
+
+        asyncio.run(handler(websocket))
+
+        errors = [p for _ws, p in sent_messages if p.get('action') == 'combo_order_error']
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]['requestAction'], 'submit_combo_order')
+        self.assertIn('disabled', errors[0]['message'])
+
+        # The cancel still reached the execution engine: the kill switch must
+        # never block getting out of an order.
+        combo_calls = [call for call in env['execution_engine'].calls if call[0] == 'combo']
+        self.assertEqual(len(combo_calls), 1)
+        self.assertEqual(combo_calls[0][2].get('action'), 'cancel_managed_combo_order')
 
     def test_purge_combo_order_tracking_orphans_live_and_drops_terminal_entries(self):
         ws_target = object()

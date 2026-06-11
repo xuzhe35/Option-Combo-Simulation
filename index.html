@@ -87,6 +87,8 @@
                         <div id="wsPortControls" style="display: none; margin-top: 0.75rem;">
                             <label for="wsHostInput" class="small text-muted" style="display: block; margin-bottom: 0.35rem;">Browser WS Host</label>
                             <input type="text" id="wsHostInput" class="number-input" value="127.0.0.1" placeholder="127.0.0.1 or server.tailnet.ts.net" style="width: 100%; margin-bottom: 0.6rem;">
+                            <label for="wsAuthTokenInput" class="small text-muted" style="display: block; margin-bottom: 0.35rem;">Server Auth Token (per target)</label>
+                            <input type="password" id="wsAuthTokenInput" class="number-input" autocomplete="off" placeholder="paste token from the server's logs/ws_auth_token" style="width: 100%; margin-bottom: 0.6rem;">
                             <label for="wsPortInput" class="small text-muted" style="display: block; margin-bottom: 0.35rem;">Browser WS Port</label>
                             <div style="display: flex; gap: 0.5rem; align-items: center;">
                                 <input type="number" id="wsPortInput" class="number-input" min="1" max="65535" step="1" value="8765">
@@ -1342,6 +1344,7 @@
     <script src="js/delta_hedge_transport.js"></script>
     <script src="js/delta_hedge_ui.js"></script>
     <script src="js/app.js?v=20260505-importfix"></script>
+    <script src="js/ws_auth_client.js?v=20260611-wsauth"></script>
     <script src="js/ws_client.js?v=20260322-riskfree"></script>
 </body>
 

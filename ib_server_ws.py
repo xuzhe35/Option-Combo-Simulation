@@ -7,7 +7,82 @@ from typing import Any
 from ib_async import Stock
 from websockets.exceptions import ConnectionClosed
 
+from ib_server_auth import (
+    AUTH_REQUIRED_MESSAGE,
+    LIVE_ORDER_ACTIONS,
+    LIVE_ORDERS_DISABLED_MESSAGE,
+    MAX_FAILED_AUTH_ATTEMPTS,
+    UNAUTHENTICATED_ACTIONS,
+    build_action_rejected_payload,
+    build_auth_result_payload,
+    build_auth_status_payload,
+    is_origin_allowed,
+    verify_token,
+)
 from runtime_contracts import HistoricalBarsResponsePayload, HistoricalReplayErrorPayload, ManualUnderlyingSyncPayload
+
+
+def extract_request_origin(websocket):
+    """Read the Origin header across websockets library generations."""
+    request = getattr(websocket, 'request', None)
+    headers = getattr(request, 'headers', None)
+    if headers is None:
+        headers = getattr(websocket, 'request_headers', None)
+    if headers is None:
+        return None
+    try:
+        return headers.get('Origin')
+    except Exception:
+        return None
+
+
+def get_client_auth_state(env, websocket):
+    auth = env.get('auth') or {}
+    states = env.setdefault('client_auth_state', {})
+    if websocket not in states:
+        states[websocket] = {
+            'authenticated': not auth.get('required', False),
+            'failed_attempts': 0,
+        }
+    return states[websocket]
+
+
+async def handle_authenticate_action(env, websocket, data, client_ip='Unknown'):
+    auth = env.get('auth') or {}
+    state = get_client_auth_state(env, websocket)
+    required = bool(auth.get('required', False))
+
+    if verify_token(auth.get('token'), data.get('token')):
+        state['authenticated'] = True
+        state['failed_attempts'] = 0
+        logging.info(f"WebSocket client {client_ip} authenticated successfully")
+        await env['send_message_safe'](
+            websocket,
+            json.dumps(build_auth_result_payload(True, required)),
+        )
+        # The pre-auth bootstrap was withheld; deliver it now so the session
+        # starts with the same snapshots an open server would have pushed.
+        if required:
+            env['send_portfolio_avg_cost_snapshot'](websocket)
+            env['send_managed_accounts_snapshot'](websocket)
+        return
+
+    state['authenticated'] = False
+    state['failed_attempts'] = int(state.get('failed_attempts') or 0) + 1
+    logging.warning(
+        f"WebSocket client {client_ip} failed authentication "
+        f"(attempt {state['failed_attempts']}/{MAX_FAILED_AUTH_ATTEMPTS})"
+    )
+    await env['send_message_safe'](
+        websocket,
+        json.dumps(build_auth_result_payload(False, required, 'Invalid auth token.')),
+    )
+    if state['failed_attempts'] >= MAX_FAILED_AUTH_ATTEMPTS:
+        logging.warning(f"Closing WebSocket client {client_ip} after repeated failed auth attempts")
+        try:
+            await websocket.close(4401, 'Too many failed authentication attempts')
+        except Exception:
+            pass
 
 
 def purge_combo_order_tracking_for_websocket(
@@ -68,6 +143,13 @@ def purge_hedge_order_tracking_for_websocket(
 
 
 async def dispatch_execution_action(env, websocket, data, client_ip='Unknown'):
+    auth = env.get('auth') or {}
+    if auth.get('allow_live_orders', True) is False and data.get('action') in LIVE_ORDER_ACTIONS:
+        logging.warning(
+            f"Rejecting {data.get('action')} from {client_ip}: live orders are disabled on this server"
+        )
+        return build_action_rejected_payload(data, LIVE_ORDERS_DISABLED_MESSAGE)
+
     execution_engine = env['execution_engine']
     if hasattr(execution_engine, 'handle_hedge_action'):
         payload = await execution_engine.handle_hedge_action(
@@ -372,12 +454,43 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
 
 async def handle_ws_client(env, websocket):
     client_ip = websocket.remote_address[0] if websocket.remote_address else 'Unknown'
+    auth = env.get('auth') or {}
+
+    # Reject disallowed browser origins before any session state exists.
+    # WebSocket is not subject to the same-origin policy, so this is what
+    # stops an arbitrary web page on a trusted device from driving orders.
+    if auth:
+        origin = extract_request_origin(websocket)
+        if not is_origin_allowed(origin, auth.get('allowed_origin_hosts')):
+            logging.warning(f"Rejecting WebSocket client {client_ip}: origin {origin!r} is not allowed")
+            try:
+                await websocket.close(4403, 'Origin not allowed')
+            except Exception:
+                pass
+            return
+
     logging.info(f"Client connected: {client_ip}")
     env['connected_clients'].add(websocket)
     env['client_subscriptions'][websocket] = {}
     env['client_subscription_settings'][websocket] = {'greeks_enabled': False}
-    env['send_portfolio_avg_cost_snapshot'](websocket)
-    env['send_managed_accounts_snapshot'](websocket)
+
+    auth_required = bool(auth.get('required', False))
+    auth_state = get_client_auth_state(env, websocket) if auth else None
+    if auth:
+        await env['send_message_safe'](
+            websocket,
+            json.dumps(build_auth_status_payload(
+                auth_required,
+                auth_state['authenticated'],
+                AUTH_REQUIRED_MESSAGE if auth_required and not auth_state['authenticated'] else '',
+            )),
+        )
+
+    # Withhold the account-revealing bootstrap until the session is
+    # authenticated; handle_authenticate_action delivers it on success.
+    if auth_state is None or auth_state['authenticated']:
+        env['send_portfolio_avg_cost_snapshot'](websocket)
+        env['send_managed_accounts_snapshot'](websocket)
 
     try:
         async for message in websocket:
@@ -394,6 +507,26 @@ async def handle_ws_client(env, websocket):
                 continue
 
             try:
+                action = data.get('action')
+                if auth and action == 'authenticate':
+                    await handle_authenticate_action(env, websocket, data, client_ip=client_ip)
+                    continue
+
+                if (
+                    auth_state is not None
+                    and auth_required
+                    and not auth_state['authenticated']
+                    and action not in UNAUTHENTICATED_ACTIONS
+                ):
+                    logging.warning(
+                        f"Rejecting {action!r} from unauthenticated client {client_ip}"
+                    )
+                    await env['send_message_safe'](
+                        websocket,
+                        json.dumps(build_action_rejected_payload(data, AUTH_REQUIRED_MESSAGE)),
+                    )
+                    continue
+
                 await dispatch_client_message(env, websocket, data, client_ip=client_ip)
             except ConnectionClosed:
                 raise
@@ -430,6 +563,7 @@ async def handle_ws_client(env, websocket):
         env['connected_clients'].discard(websocket)
         env['client_subscriptions'].pop(websocket, None)
         env['client_subscription_settings'].pop(websocket, None)
+        (env.get('client_auth_state') or {}).pop(websocket, None)
 
 
 def build_ws_client_handler(env):

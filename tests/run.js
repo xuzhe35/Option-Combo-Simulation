@@ -1,5 +1,6 @@
 const suites = [
     require('./market_holidays.test'),
+    require('./ws_auth_client.test'),
     require('./product_registry.test'),
     require('./distribution_proxy_config.test'),
     require('./iv_term_structure_core.test'),

@@ -781,6 +781,59 @@ function _getWsUrl() {
     return `ws://${_getCurrentWsHost()}:${_getCurrentWsPort()}`;
 }
 
+function _getWsAuthClientApi() {
+    return (typeof window !== 'undefined' && window.OptionComboWsAuthClient)
+        ? window.OptionComboWsAuthClient
+        : null;
+}
+
+let _wsAuthState = { required: false, authenticated: true };
+
+function _sendWsAuthTokenIfAvailable() {
+    const api = _getWsAuthClientApi();
+    if (!api || !ws) return false;
+    return api.sendAuthTokenIfAvailable(ws, _getCurrentWsHost(), _getCurrentWsPort());
+}
+
+function _syncWsAuthTokenInput() {
+    const input = document.getElementById('wsAuthTokenInput');
+    const api = _getWsAuthClientApi();
+    if (!input || !api) return;
+    input.value = api.getTokenForTarget(_getCurrentWsHost(), _getCurrentWsPort());
+}
+
+function _handleWsAuthMessage(data) {
+    if (!data || typeof data !== 'object') return false;
+
+    if (data.action === 'auth_status' || data.action === 'auth_result') {
+        _wsAuthState = {
+            required: data.authRequired === true,
+            authenticated: data.authenticated === true,
+        };
+        if (data.action === 'auth_result' && data.ok !== true) {
+            console.warn('WebSocket auth failed:', data.message || 'Invalid auth token.');
+            updateWsStatusUI('auth_failed');
+        } else if (_wsAuthState.required && !_wsAuthState.authenticated) {
+            updateWsStatusUI('auth_required');
+        } else if (isWsConnected) {
+            updateWsStatusUI('connected');
+        }
+        return true;
+    }
+
+    if (data.action === 'auth_error') {
+        console.warn(
+            `WebSocket action ${data.requestAction || ''} rejected: ${data.message || 'authentication required.'}`
+        );
+        if (_wsAuthState.required && !_wsAuthState.authenticated) {
+            updateWsStatusUI('auth_required');
+        }
+        return true;
+    }
+
+    return false;
+}
+
 function _clearWsReconnectTimer() {
     if (_wsReconnectTimer) {
         clearTimeout(_wsReconnectTimer);
@@ -798,6 +851,12 @@ function updateWsStatusUI(status, nextRetrySec) {
     if (status === 'connected') {
         el.textContent = `Connected ${endpoint}`;
         el.className = 'ws-status ws-connected';
+    } else if (status === 'auth_required') {
+        el.textContent = `Auth required ${endpoint} - paste this server's token in WS Target`;
+        el.className = 'ws-status ws-error';
+    } else if (status === 'auth_failed') {
+        el.textContent = `Auth failed ${endpoint} - check the token in WS Target`;
+        el.className = 'ws-status ws-error';
     } else if (status === 'error') {
         el.textContent = `Error ${endpoint}`;
         el.className = 'ws-status ws-error';
@@ -819,6 +878,9 @@ function connectWebSocket() {
         _wsReconnectDelay = WS_BASE_DELAY;
         console.log(`WebSocket Connected to IB Gateway Backend at ${wsUrl}`);
         updateWsStatusUI('connected');
+        // Authenticate first: the server handles messages in order, so the
+        // subscriptions below land on an already-authenticated session.
+        _sendWsAuthTokenIfAvailable();
         handleLiveSubscriptions();
         requestActiveHedgeOrdersSnapshot();
         requestActiveComboOrdersSnapshot();
@@ -855,6 +917,9 @@ function connectWebSocket() {
     ws.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
+            if (_handleWsAuthMessage(data)) {
+                return;
+            }
             if (_handleManagedAccountsMessage(data)) {
                 return;
             }
@@ -1400,6 +1465,14 @@ function applyWsEndpoint() {
     portInput.value = String(safePort);
     _setSavedWsHost(safeHost);
     _setSavedWsPort(safePort);
+
+    const tokenInput = document.getElementById('wsAuthTokenInput');
+    const authApi = _getWsAuthClientApi();
+    if (tokenInput && authApi) {
+        authApi.setTokenForTarget(safeHost, safePort, tokenInput.value);
+        tokenInput.value = authApi.getTokenForTarget(safeHost, safePort);
+    }
+
     reconnectWebSocket();
 }
 
@@ -1412,6 +1485,7 @@ function resetWsEndpoint() {
     _setSavedWsPort(DEFAULT_WS_PORT);
     _syncWsHostInput(DEFAULT_WS_HOST);
     _syncWsPortInput(DEFAULT_WS_PORT);
+    _syncWsAuthTokenInput();
     reconnectWebSocket();
 }
 
@@ -1420,6 +1494,7 @@ function initWsPortControls() {
     const savedPort = _getSavedWsPort();
     _syncWsHostInput(savedHost);
     _syncWsPortInput(savedPort);
+    _syncWsAuthTokenInput();
     updateWsStatusUI('disconnected');
 }
 

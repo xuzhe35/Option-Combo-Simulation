@@ -307,7 +307,7 @@ Do not commit personal filesystem paths into tracked config files. Use `config.l
 
 ### Live backend
 
-`ib_server.py` reads these settings from `config.ini`:
+`ib_server.py` reads these settings from `config.ini` (machine-local overrides in `config.local.ini` win):
 
 ```ini
 [tws]
@@ -318,13 +318,42 @@ client_id = 999
 [server]
 ws_host = 127.0.0.1
 ws_port = 8765
+require_auth = auto
+auth_token_path = logs/ws_auth_token
 
 [execution]
 managed_reprice_threshold_default = 0.01
 managed_reprice_interval_seconds = 2.0
 managed_reprice_max_updates = 12
 managed_reprice_timeout_seconds = 600
+allow_live_orders = true
 ```
+
+### WebSocket authentication
+
+The backend protects order routing with a per-server shared token plus a
+browser Origin allowlist:
+
+- On first run the server generates a random token at `auth_token_path`
+  (default `logs/ws_auth_token`) and reuses it across restarts.
+- `require_auth = auto` enforces the token as soon as `ws_host` includes any
+  non-loopback address (the Tailscale / LAN case). Loopback-only binds keep
+  token auth optional. `always` / `never` override.
+- While auth is required, an unauthenticated connection may only call
+  `authenticate` and `request_ib_connection_status`; everything else
+  (subscriptions, snapshots, execution) is rejected fail-closed.
+- Browser connections must come from an allowlisted Origin host (loopback,
+  the server's own `ws_host` entries, plus `allowed_origin_hosts` extras).
+  Non-browser clients send no Origin and are gated by the token instead.
+- Repeated failed `authenticate` attempts close the connection.
+- `allow_live_orders = false` is a server-side kill switch that rejects
+  submit / resume / concede actions while still allowing cancels.
+
+Browser setup is one-time per server target: open the `WS Target` panel,
+paste that server's token into `Server Auth Token`, and click Apply. Tokens
+are stored per `host:port` in localStorage, so each backend (local TWS, each
+remote VM) keeps its own token. `scripts/smoke_delta_hedge_ws.py` accepts
+`--token` or the `OPTION_COMBO_WS_AUTH_TOKEN` environment variable.
 
 Optional historical DB override:
 
