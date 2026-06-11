@@ -41,10 +41,11 @@
     <settlement-method status="cme-reference">Physical Delivery</settlement-method>
     <delivery-type status="cme-reference">futures-position</delivery-type>
     <unit>index-points</unit>
-    <min-tick status="cme-reference">0.25</min-tick>
+    <min-tick status="variable-needs-contract-verification">varies-by-contract-and-premium</min-tick>
   </settlement>
   <notes>
     <note>Micro E-mini Nasdaq-100 options are one-tenth the size of NQ options.</note>
+    <note>Do not enforce a family-wide 0.25 pricing increment; near-expiry far-OTM contracts may quote on smaller increments.</note>
     <note>Do not infer IB tradingClass from NQ until verified in TWS for a concrete contract.</note>
     <note>Keep contract month, expiry, right, strike, trading class, local symbol, and conId as runtime selectors when locking a concrete contract.</note>
   </notes>

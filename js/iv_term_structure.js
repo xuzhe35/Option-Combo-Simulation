@@ -51,10 +51,39 @@
         return globalScope.OptionComboProductRegistry;
     }
 
+    function normalizeWsPort(rawValue) {
+        const parsed = parseInt(rawValue, 10);
+        if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+            return DEFAULT_WS_PORT;
+        }
+        return parsed;
+    }
+
+    function normalizeWsHost(rawValue) {
+        const trimmed = String(rawValue || '').trim();
+        if (!trimmed) {
+            return DEFAULT_WS_HOST;
+        }
+
+        let candidate = trimmed
+            .replace(/^[a-z]+:\/\//i, '')
+            .replace(/[/?#].*$/, '');
+
+        if (candidate.startsWith('[')) {
+            const bracketedMatch = candidate.match(/^\[[^\]]+\]/);
+            if (bracketedMatch) {
+                candidate = bracketedMatch[0];
+            }
+        } else if ((candidate.match(/:/g) || []).length === 1) {
+            candidate = candidate.replace(/:\d+$/, '');
+        }
+
+        return candidate || DEFAULT_WS_HOST;
+    }
+
     function getWsHost() {
         try {
-            const stored = String(localStorage.getItem(WS_HOST_STORAGE_KEY) || '').trim();
-            return stored || DEFAULT_WS_HOST;
+            return normalizeWsHost(localStorage.getItem(WS_HOST_STORAGE_KEY));
         } catch (_) {
             return DEFAULT_WS_HOST;
         }
@@ -62,15 +91,45 @@
 
     function getWsPort() {
         try {
-            const parsed = parseInt(localStorage.getItem(WS_PORT_STORAGE_KEY), 10);
-            return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_WS_PORT;
+            return normalizeWsPort(localStorage.getItem(WS_PORT_STORAGE_KEY));
         } catch (_) {
             return DEFAULT_WS_PORT;
         }
     }
 
+    function setSavedWsHost(host) {
+        const safeHost = normalizeWsHost(host);
+        try {
+            localStorage.setItem(WS_HOST_STORAGE_KEY, safeHost);
+        } catch (_) {
+            // Keep the runtime value even when storage is unavailable.
+        }
+        return safeHost;
+    }
+
+    function setSavedWsPort(port) {
+        const safePort = normalizeWsPort(port);
+        try {
+            localStorage.setItem(WS_PORT_STORAGE_KEY, String(safePort));
+        } catch (_) {
+            // Keep the runtime value even when storage is unavailable.
+        }
+        return safePort;
+    }
+
     function getWsUrl() {
         return `ws://${getWsHost()}:${getWsPort()}`;
+    }
+
+    function syncWsEndpointInputs() {
+        const hostInput = document.getElementById('ivtsWsHostInput');
+        const portInput = document.getElementById('ivtsWsPortInput');
+        if (hostInput && document.activeElement !== hostInput) {
+            hostInput.value = getWsHost();
+        }
+        if (portInput && document.activeElement !== portInput) {
+            portInput.value = String(getWsPort());
+        }
     }
 
     function updateIbStatus(payload) {
@@ -188,6 +247,7 @@
             catalog: null,
             quotesBySubId: {},
             underlyingPrice: null,
+            forceBodyRefreshOnce: false,
             bundledHistoryDocument: null,
             historyDocument: null,
             currentFileHandle: null,
@@ -195,6 +255,7 @@
             lastSyncLabel: '',
             lastSampleLabel: '',
             closeNotice: '',
+            straddleBaselineExpiry: '',
             catalogPatchCount: 0,
             catalogPatchTimeoutId: null,
         };
@@ -214,9 +275,49 @@
         return Number.isFinite(parsed) ? parsed.toFixed(digits) : '--';
     }
 
-    function formatPercent(value) {
+    function formatCompactPercent(value) {
         const parsed = parseFloat(value);
-        return Number.isFinite(parsed) ? `${(parsed * 100).toFixed(2)}%` : '--';
+        if (!Number.isFinite(parsed)) {
+            return '--';
+        }
+        return `${(parsed * 100).toFixed(2).replace(/\.?0+$/, '')}%`;
+    }
+
+    function formatIvPair(callIv, putIv) {
+        return `${formatCompactPercent(callIv)}/${formatCompactPercent(putIv)}`;
+    }
+
+    function formatMoney(value) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? `$${parsed.toFixed(2)}` : '--';
+    }
+
+    function formatMultiple(value) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? `${parsed.toFixed(2)}X` : '--';
+    }
+
+    function normalizeExpiryKey(value) {
+        const normalized = String(value || '').trim().replace(/-/g, '');
+        return /^\d{8}$/.test(normalized) ? normalized : '';
+    }
+
+    function isBaselineSelectElement(element) {
+        return !!(
+            element
+            && typeof element.matches === 'function'
+            && element.matches('select[data-action="baseline"][data-symbol]')
+        );
+    }
+
+    function isFocusedBaselineSelectInCard(cardNode) {
+        const activeElement = document && document.activeElement;
+        return !!(
+            cardNode
+            && isBaselineSelectElement(activeElement)
+            && typeof cardNode.contains === 'function'
+            && cardNode.contains(activeElement)
+        );
     }
 
     function formatTimestamp(value) {
@@ -725,6 +826,67 @@
         }
     }
 
+    function closeSocketsForEndpointChange() {
+        clearIbStatusPollTimer();
+        if (runtime.controlWs) {
+            try {
+                runtime.controlWs.close(1000, 'endpoint changed');
+            } catch (_) {
+                // Ignore best-effort shutdown failures.
+            }
+        }
+        runtime.controlWs = null;
+        runtime.controlWsOpenPromise = null;
+        runtime.ibStatus = {
+            connected: false,
+            connecting: false,
+            message: 'Socket target updated.',
+        };
+
+        runtime.cardsBySymbol.forEach((card) => {
+            clearCatalogPatchWatchdog(card);
+            card.syncInProgress = false;
+            card.sampleInProgress = false;
+            if (card.pendingCatalog) {
+                const pending = card.pendingCatalog;
+                card.pendingCatalog = null;
+                clearTimeout(pending.timeoutId);
+                if (typeof pending.reject === 'function') {
+                    pending.reject(new Error('Socket target changed.'));
+                }
+            }
+            card.closeNotice = '';
+            if (card.ws) {
+                try {
+                    card.ws.close(1000, 'endpoint changed');
+                } catch (_) {
+                    // Ignore best-effort shutdown failures.
+                }
+            }
+            card.ws = null;
+            card.wsOpenPromise = null;
+            setCardStatus(card, 'Socket target updated. Use Sync/Update to reconnect this ETF.', '');
+        });
+    }
+
+    function applyWsEndpointFromPage() {
+        const hostInput = document.getElementById('ivtsWsHostInput');
+        const portInput = document.getElementById('ivtsWsPortInput');
+        setSavedWsHost(hostInput ? hostInput.value : getWsHost());
+        setSavedWsPort(portInput ? portInput.value : getWsPort());
+        syncWsEndpointInputs();
+        closeSocketsForEndpointChange();
+        render(true);
+    }
+
+    function resetWsEndpointFromPage() {
+        setSavedWsHost(DEFAULT_WS_HOST);
+        setSavedWsPort(DEFAULT_WS_PORT);
+        syncWsEndpointInputs();
+        closeSocketsForEndpointChange();
+        render(true);
+    }
+
     async function waitForAtmQuotes(card, timeoutMs) {
         const deadline = Date.now() + Math.max(250, timeoutMs || 0);
         const expiryRows = Array.isArray(card.catalog && card.catalog.expiryRows)
@@ -792,11 +954,32 @@
         return core().buildExpiryDetailRows(snapshot, card.quotesBySubId);
     }
 
-    function buildBucketRows(card) {
-        return core().buildBucketRows(
-            buildDetailRows(card),
-            runtime.config.bucketDefinitions
+    function resolveSelectedStraddleBaselineExpiry(card, detailRows) {
+        const selected = normalizeExpiryKey(card && card.straddleBaselineExpiry);
+        if (!selected) {
+            return '';
+        }
+        return (Array.isArray(detailRows) ? detailRows : []).some((row) => normalizeExpiryKey(row && row.expiry) === selected)
+            ? selected
+            : '';
+    }
+
+    function buildComparedRows(card) {
+        const detailRows = buildDetailRows(card);
+        const baselineExpiry = resolveSelectedStraddleBaselineExpiry(card, detailRows);
+        const comparedDetailRows = core().buildStraddleComparisonRows(detailRows, baselineExpiry);
+        const comparedBucketRows = core().buildStraddleComparisonRows(
+            core().buildBucketRows(detailRows, runtime.config.bucketDefinitions),
+            baselineExpiry
         );
+        const baselineRow = comparedDetailRows.find((row) => row && row.isStraddleBaseline) || null;
+
+        return {
+            baselineExpiry,
+            baselineRow,
+            detailRows: comparedDetailRows,
+            bucketRows: comparedBucketRows,
+        };
     }
 
     function hasUsableLiveSnapshot(card) {
@@ -918,15 +1101,15 @@
             if (shouldResyncBeforeSample) {
                 await syncCard(card, { waitForQuotes: true, quoteTimeoutMs: 2500 });
             }
-            const detailRows = buildDetailRows(card);
-            const bucketRows = buildBucketRows(card);
+            const comparedRows = buildComparedRows(card);
             const sampleRecord = core().buildSampleRecord(
                 card.symbol,
                 card.underlyingPrice,
-                bucketRows,
-                detailRows,
+                comparedRows.bucketRows,
+                comparedRows.detailRows,
                 new Date().toISOString(),
-                card.catalog && card.catalog.anchorDate
+                card.catalog && card.catalog.anchorDate,
+                comparedRows.baselineExpiry
             );
             const historyDocument = normalizeHistoryDocument(readOnlyHistoryDocument(card), card.symbol);
             historyDocument.samples = historyDocument.samples.concat(sampleRecord);
@@ -942,73 +1125,97 @@
         }
     }
 
-    function buildBucketTable(card) {
-        const bucketRows = buildBucketRows(card);
+    function buildStraddlePriceCell(row) {
+        return row && row.atmStraddleMark != null
+            ? escapeHtml(formatMoney(row.atmStraddleMark))
+            : '<span class="ivts-missing">Insufficient</span>';
+    }
+
+    function buildStraddleRatioCell(row, baselineExpiry) {
+        if (!baselineExpiry) {
+            return '<span class="ivts-missing">--</span>';
+        }
+        return row && row.straddleBaselineRatio != null
+            ? `<span class="ivts-ratio">${escapeHtml(formatMultiple(row.straddleBaselineRatio))}</span>`
+            : '<span class="ivts-missing">Insufficient</span>';
+    }
+
+    function buildIvPairCell(row) {
+        const text = row ? formatIvPair(row.callIv, row.putIv) : '--/--';
+        return row && (row.callIv != null || row.putIv != null)
+            ? escapeHtml(text)
+            : `<span class="ivts-missing">${escapeHtml(text)}</span>`;
+    }
+
+    function buildBaselineControl(card, comparedRows) {
+        const detailRows = comparedRows && Array.isArray(comparedRows.detailRows) ? comparedRows.detailRows : [];
+        const selectedExpiry = comparedRows ? comparedRows.baselineExpiry : '';
+        const baselineRow = comparedRows ? comparedRows.baselineRow : null;
+        const baselineSummary = selectedExpiry
+            ? (baselineRow && baselineRow.atmStraddleMark != null
+                ? `Base ATM straddle ${formatMoney(baselineRow.atmStraddleMark)}`
+                : 'Selected baseline has insufficient data.')
+            : 'Select a synced expiry to compare ATM straddle prices.';
         return `
-            <div class="ivts-table-shell ivts-bucket-table-shell">
-                <table class="ivts-table ivts-table-buckets">
-                    <thead>
-                        <tr>
-                            <th>Bucket</th>
-                            <th>Matched Expiry</th>
-                            <th>DTE</th>
-                            <th>ATM Strike</th>
-                            <th>Call IV</th>
-                            <th>Put IV</th>
-                            <th>ATM IV</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${bucketRows.map((row) => `
-                            <tr>
-                                <td>${escapeHtml(row.label)}</td>
-                                <td>${row.matchedExpiry ? escapeHtml(row.matchedExpiry) : '<span class="ivts-missing">--</span>'}</td>
-                                <td>${row.matchedDte != null ? escapeHtml(row.matchedDte) : '<span class="ivts-missing">--</span>'}</td>
-                                <td>${row.atmStrike != null ? escapeHtml(formatNumber(row.atmStrike, 2)) : '<span class="ivts-missing">--</span>'}</td>
-                                <td>${row.callIv != null ? escapeHtml(formatPercent(row.callIv)) : '<span class="ivts-missing">--</span>'}</td>
-                                <td>${row.putIv != null ? escapeHtml(formatPercent(row.putIv)) : '<span class="ivts-missing">--</span>'}</td>
-                                <td>${row.atmIv != null ? escapeHtml(formatPercent(row.atmIv)) : '<span class="ivts-missing">--</span>'}</td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
+            <div class="ivts-baseline-control">
+                <label for="ivtsBaseline-${escapeHtml(card.symbol)}">
+                    <span class="ivts-fact-label">Straddle Baseline</span>
+                </label>
+                <div class="ivts-baseline-row">
+                    <select id="ivtsBaseline-${escapeHtml(card.symbol)}" class="ivts-baseline-select" data-action="baseline" data-symbol="${escapeHtml(card.symbol)}">
+                        <option value="">Select expiry</option>
+                        ${detailRows.map((row) => {
+                            const expiry = normalizeExpiryKey(row && row.expiry);
+                            const priceLabel = row && row.atmStraddleMark != null
+                                ? `, ${formatMoney(row.atmStraddleMark)} straddle`
+                                : ', insufficient data';
+                            return `<option value="${escapeHtml(expiry)}" ${expiry && expiry === selectedExpiry ? 'selected' : ''}>${escapeHtml(`${expiry} (${row.dte}D${priceLabel})`)}</option>`;
+                        }).join('')}
+                    </select>
+                    <span class="ivts-baseline-summary">${escapeHtml(baselineSummary)}</span>
+                </div>
             </div>
         `;
     }
 
-    function buildDetailTable(card) {
-        const detailRows = buildDetailRows(card);
+    function getPrimaryExpiryRows(comparedRows) {
+        return comparedRows && Array.isArray(comparedRows.detailRows)
+            ? comparedRows.detailRows
+            : [];
+    }
+
+    function buildBucketSummaryTable(comparedRows) {
+        const bucketRows = comparedRows.bucketRows;
+        const baselineExpiry = comparedRows.baselineExpiry;
         return `
-            <details class="ivts-details">
-                <summary>Expiry Details (${detailRows.length})</summary>
+            <details class="ivts-details ivts-bucket-summary">
+                <summary>Bucket Summary (${bucketRows.length})</summary>
                 <div class="ivts-details-body">
-                    <div class="ivts-table-shell ivts-details-table-shell">
-                        <table class="ivts-table ivts-table-details">
+                    <div class="ivts-table-shell ivts-bucket-table-shell">
+                        <table class="ivts-table ivts-table-buckets">
                             <thead>
                                 <tr>
-                                    <th>Expiry</th>
+                                    <th>Bucket</th>
+                                    <th>Matched Expiry</th>
                                     <th>DTE</th>
                                     <th>ATM Strike</th>
-                                    <th>Call IV</th>
-                                    <th>Put IV</th>
-                                    <th>ATM IV</th>
+                                    <th>Call/Put IV</th>
+                                    <th>ATM Straddle</th>
+                                    <th>Vs Base</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                ${detailRows.map((row) => `
-                                    <tr>
-                                        <td>${escapeHtml(row.expiry)}</td>
-                                        <td>${escapeHtml(row.dte)}</td>
+                                ${bucketRows.map((row) => `
+                                    <tr class="${row.isStraddleBaseline ? 'is-straddle-baseline' : ''}">
+                                        <td>${escapeHtml(row.label)}</td>
+                                        <td>${row.matchedExpiry ? escapeHtml(row.matchedExpiry) : '<span class="ivts-missing">--</span>'}</td>
+                                        <td>${row.matchedDte != null ? escapeHtml(row.matchedDte) : '<span class="ivts-missing">--</span>'}</td>
                                         <td>${row.atmStrike != null ? escapeHtml(formatNumber(row.atmStrike, 2)) : '<span class="ivts-missing">--</span>'}</td>
-                                        <td>${row.callIv != null ? escapeHtml(formatPercent(row.callIv)) : '<span class="ivts-missing">--</span>'}</td>
-                                        <td>${row.putIv != null ? escapeHtml(formatPercent(row.putIv)) : '<span class="ivts-missing">--</span>'}</td>
-                                        <td>${row.atmIv != null ? escapeHtml(formatPercent(row.atmIv)) : '<span class="ivts-missing">--</span>'}</td>
+                                        <td>${buildIvPairCell(row)}</td>
+                                        <td>${buildStraddlePriceCell(row)}</td>
+                                        <td>${buildStraddleRatioCell(row, baselineExpiry)}</td>
                                     </tr>
-                                `).join('') || `
-                                    <tr>
-                                        <td colspan="6" class="ivts-missing">No expiry rows have been synced yet.</td>
-                                    </tr>
-                                `}
+                                `).join('')}
                             </tbody>
                         </table>
                     </div>
@@ -1017,8 +1224,47 @@
         `;
     }
 
+    function buildPrimaryExpiryTable(comparedRows) {
+        const detailRows = getPrimaryExpiryRows(comparedRows);
+        const baselineExpiry = comparedRows.baselineExpiry;
+        return `
+            <div class="ivts-table-caption">All Expiries (${detailRows.length})</div>
+            <div class="ivts-table-shell ivts-details-table-shell">
+                <table class="ivts-table ivts-table-details">
+                    <thead>
+                        <tr>
+                            <th>Expiry</th>
+                            <th>DTE</th>
+                            <th>ATM Strike</th>
+                            <th>Call/Put IV</th>
+                            <th>ATM Straddle</th>
+                            <th>Vs Base</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${detailRows.map((row) => `
+                            <tr class="${row.isStraddleBaseline ? 'is-straddle-baseline' : ''}">
+                                <td>${escapeHtml(row.expiry)}</td>
+                                <td>${escapeHtml(row.dte)}</td>
+                                <td>${row.atmStrike != null ? escapeHtml(formatNumber(row.atmStrike, 2)) : '<span class="ivts-missing">--</span>'}</td>
+                                <td>${buildIvPairCell(row)}</td>
+                                <td>${buildStraddlePriceCell(row)}</td>
+                                <td>${buildStraddleRatioCell(row, baselineExpiry)}</td>
+                            </tr>
+                        `).join('') || `
+                            <tr>
+                                <td colspan="6" class="ivts-missing">No expiry rows have been synced yet.</td>
+                            </tr>
+                        `}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
     function buildCardBodyMarkup(card) {
         const historyDocument = readOnlyHistoryDocument(card);
+        const comparedRows = buildComparedRows(card);
         return `
             <div class="ivts-status ${card.statusKind ? `is-${escapeHtml(card.statusKind)}` : ''}">
                 ${escapeHtml(card.statusMessage)}
@@ -1043,8 +1289,9 @@
                 </div>
             </div>
 
-            ${buildBucketTable(card)}
-            ${buildDetailTable(card)}
+            ${buildBaselineControl(card, comparedRows)}
+            ${buildPrimaryExpiryTable(comparedRows)}
+            ${buildBucketSummaryTable(comparedRows)}
         `;
     }
 
@@ -1101,6 +1348,12 @@
 
         const bodyNode = cardNode.querySelector('.ivts-card-body');
         if (!bodyNode) {
+            return;
+        }
+
+        const forceBodyRefresh = card.forceBodyRefreshOnce === true;
+        card.forceBodyRefreshOnce = false;
+        if (!forceBodyRefresh && isFocusedBaselineSelectInCard(cardNode)) {
             return;
         }
 
@@ -1215,14 +1468,51 @@
             }
         });
 
+        container.addEventListener('change', (event) => {
+            const field = event.target.closest('select[data-action="baseline"][data-symbol]');
+            if (!field) {
+                return;
+            }
+            const card = getCard(field.getAttribute('data-symbol'));
+            if (!card) {
+                return;
+            }
+            card.straddleBaselineExpiry = normalizeExpiryKey(field.value);
+            card.forceBodyRefreshOnce = true;
+            render(true);
+        });
+
+        container.addEventListener('focusout', (event) => {
+            const field = event.target.closest('select[data-action="baseline"][data-symbol]');
+            if (!field) {
+                return;
+            }
+            setTimeout(() => {
+                render(true);
+            }, 0);
+        });
+
         container.dataset.bound = 'true';
     }
+
+    globalScope.OptionComboIvTermStructurePage = {
+        _test: {
+            normalizeWsHost,
+            normalizeWsPort,
+            isBaselineSelectElement,
+            isFocusedBaselineSelectInCard,
+            getPrimaryExpiryRows,
+            formatIvPair,
+            buildPrimaryExpiryTable,
+        },
+    };
 
     function performRender() {
         const socketStatus = document.getElementById('ivtsSocketStatus');
         if (socketStatus) {
             socketStatus.textContent = getWsUrl();
         }
+        syncWsEndpointInputs();
 
         const configStatus = document.getElementById('ivtsConfigStatus');
         if (configStatus) {
@@ -1294,6 +1584,30 @@
                     connectIbFromPage();
                 });
             }
+            const wsApplyButton = document.getElementById('ivtsWsApplyButton');
+            if (wsApplyButton) {
+                wsApplyButton.addEventListener('click', () => {
+                    applyWsEndpointFromPage();
+                });
+            }
+            const wsResetButton = document.getElementById('ivtsWsResetButton');
+            if (wsResetButton) {
+                wsResetButton.addEventListener('click', () => {
+                    resetWsEndpointFromPage();
+                });
+            }
+            ['ivtsWsHostInput', 'ivtsWsPortInput'].forEach((id) => {
+                const input = document.getElementById(id);
+                if (!input) {
+                    return;
+                }
+                input.addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        applyWsEndpointFromPage();
+                    }
+                });
+            });
             globalScope.addEventListener('pagehide', closeAllSocketsForPageExit, { capture: true });
             globalScope.addEventListener('beforeunload', closeAllSocketsForPageExit, { capture: true });
             render(true);

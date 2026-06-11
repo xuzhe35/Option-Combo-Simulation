@@ -3,6 +3,7 @@ const suites = [
     require('./product_registry.test'),
     require('./distribution_proxy_config.test'),
     require('./iv_term_structure_core.test'),
+    require('./iv_term_structure_page.test'),
     require('./group_order_builder.test'),
     require('./trade_trigger_logic.test'),
     require('./combo_order_transport.test'),

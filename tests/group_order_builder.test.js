@@ -50,7 +50,7 @@ module.exports = {
             },
         },
         {
-            name: 'includes ES quarter-point combo price increment in payload profiles',
+            name: 'uses the default combo price increment for ES payload profiles',
             run() {
                 const ctx = loadBrowserScripts([
                     'js/product_registry.js',
@@ -81,7 +81,7 @@ module.exports = {
                 );
 
                 assert.equal(payload.profile.family, 'ES');
-                assert.equal(payload.profile.priceIncrement, 0.25);
+                assert.equal(payload.profile.priceIncrement, 0.01);
             },
         },
         {

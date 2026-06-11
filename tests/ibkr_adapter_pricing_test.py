@@ -127,7 +127,7 @@ class IbkrAdapterPricingTests(unittest.TestCase):
         self.assertEqual(pricing_source, 'test_guardrail')
         self.assertIn('avoid fills', note)
 
-    def test_resolve_combo_price_increment_uses_es_live_family_default(self):
+    def test_resolve_combo_price_increment_uses_default_when_es_has_no_family_increment(self):
         adapter = IbkrExecutionAdapter(
             ib=_DummyIb(),
             client_subscriptions={},
@@ -146,7 +146,7 @@ class IbkrAdapterPricingTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(adapter._resolve_combo_price_increment(request=request), 0.25)
+        self.assertEqual(adapter._resolve_combo_price_increment(request=request), 0.01)
 
     def test_build_contract_from_request_preserves_micro_fop_multipliers_without_trading_class(self):
         adapter = IbkrExecutionAdapter(
@@ -184,7 +184,7 @@ class IbkrAdapterPricingTests(unittest.TestCase):
             self.assertEqual(getattr(contract, 'multiplier', ''), multiplier)
             self.assertEqual(getattr(contract, 'tradingClass', ''), '')
 
-    def test_quantize_limit_price_respects_es_quarter_point_increment(self):
+    def test_quantize_limit_price_respects_explicit_quarter_point_increment(self):
         quantized = self.adapter._quantize_limit_price(3.18, 'BUY', 0.25)
         self.assertEqual(quantized, 3.0)
 

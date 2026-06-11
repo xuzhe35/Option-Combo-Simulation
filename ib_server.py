@@ -150,7 +150,6 @@ SUPPORTED_LIVE_FAMILIES = {
         'currency': 'USD',
         'multiplier': '50',
         'trading_class': 'E3A',
-        'price_increment': 0.25,
     },
     'NQ': {
         'underlying_sec_type': 'FUT',

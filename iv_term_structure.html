@@ -7,7 +7,7 @@
     <title>IV Term Structure</title>
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="stylesheet" href="iv_term_structure.css?v=20260423d">
+    <link rel="stylesheet" href="iv_term_structure.css?v=20260610d">
 </head>
 
 <body>
@@ -25,9 +25,23 @@
                     <span class="ivts-label">Config</span>
                     <span id="ivtsConfigStatus">Loading...</span>
                 </div>
-                <div class="ivts-header-chip">
+                <div class="ivts-header-chip ivts-header-chip-socket">
                     <span class="ivts-label">Socket</span>
                     <span id="ivtsSocketStatus">ws://127.0.0.1:8765</span>
+                    <div class="ivts-socket-controls">
+                        <label class="ivts-socket-field" for="ivtsWsHostInput">
+                            <span>Host</span>
+                            <input id="ivtsWsHostInput" class="ivts-socket-input" type="text" value="127.0.0.1" autocomplete="off">
+                        </label>
+                        <label class="ivts-socket-field ivts-socket-port-field" for="ivtsWsPortInput">
+                            <span>Port</span>
+                            <input id="ivtsWsPortInput" class="ivts-socket-input" type="number" min="1" max="65535" step="1" value="8765">
+                        </label>
+                        <div class="ivts-socket-actions">
+                            <button id="ivtsWsApplyButton" class="ivts-btn ivts-btn-primary ivts-socket-btn" type="button">Apply</button>
+                            <button id="ivtsWsResetButton" class="ivts-btn ivts-btn-muted ivts-socket-btn" type="button">Reset</button>
+                        </div>
+                    </div>
                 </div>
                 <div class="ivts-header-chip ivts-header-chip-action">
                     <span class="ivts-label">IB</span>
@@ -45,8 +59,8 @@
     <input type="file" id="ivtsHistoryFileInput" accept=".json" hidden>
 
     <script src="js/product_registry.js?v=20260423"></script>
-    <script src="js/iv_term_structure_core.js?v=20260423"></script>
-    <script src="js/iv_term_structure.js?v=20260424b"></script>
+    <script src="js/iv_term_structure_core.js?v=20260610a"></script>
+    <script src="js/iv_term_structure.js?v=20260610e"></script>
 </body>
 
 </html>

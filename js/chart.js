@@ -428,6 +428,19 @@ class PnLChart {
         this.ctx.textBaseline = 'top';
 
         const formatMoney = val => (val >= 0 ? '+' : '-') + '$' + Math.abs(val).toFixed(2);
+        const formatRatioValue = val => {
+            if (!Number.isFinite(val)) return null;
+            const decimals = val >= 100 ? 0 : val >= 10 ? 1 : 2;
+            return val.toFixed(decimals).replace(/\.?0+$/, '');
+        };
+        const formatProfitLossRatio = (maxProfit, maxLoss) => {
+            if (!Number.isFinite(maxProfit) || !Number.isFinite(maxLoss)) return 'n/a';
+            if (maxProfit <= 0 && maxLoss >= 0) return 'n/a';
+            if (maxProfit <= 0) return 'no profit in range';
+            if (maxLoss >= 0 || Math.abs(maxLoss) < 0.005) return 'no loss in range';
+            const ratioText = formatRatioValue(maxProfit / Math.abs(maxLoss));
+            return ratioText ? `${ratioText}:1` : 'n/a';
+        };
 
         // Use darker variations for text rendering for clarity
         this.ctx.fillStyle = '#059669'; // Emerald 600
@@ -435,6 +448,9 @@ class PnLChart {
 
         this.ctx.fillStyle = '#DC2626'; // Red 600
         this.ctx.fillText(`Max Loss (in range): ${formatMoney(trueMinPnL)}`, this.padding.left + 10, this.padding.top + 28);
+
+        this.ctx.fillStyle = this.textColor;
+        this.ctx.fillText(`Profit/Loss Ratio: ${formatProfitLossRatio(trueMaxPnL, trueMinPnL)}`, this.padding.left + 10, this.padding.top + 46);
 
         // Cache parameters for tooltips
         this.lastRenderData = {
