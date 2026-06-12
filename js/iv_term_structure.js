@@ -465,6 +465,13 @@
                 return;
             }
 
+            const authProblem = describeAuthProblem(payload);
+            if (authProblem) {
+                setCardStatus(card, authProblem, 'error');
+                render();
+                return;
+            }
+
             if (payload && payload.action === 'iv_term_structure_snapshot') {
                 if (String(payload.symbol || '').trim().toUpperCase() !== card.symbol) {
                     return;
@@ -593,6 +600,36 @@
         }
     }
 
+    function describeAuthProblem(payload) {
+        if (!payload || typeof payload !== 'object') return '';
+        if (payload.action === 'auth_error') {
+            return 'Server auth required. Paste this server\'s token in the Auth field and retry.';
+        }
+        if (payload.action === 'auth_result' && payload.ok !== true) {
+            return 'Server auth failed. Check the token in the Auth field.';
+        }
+        if (payload.action === 'auth_status' && payload.authRequired === true && payload.authenticated !== true) {
+            return 'Server auth required. Paste this server\'s token in the Auth field.';
+        }
+        return '';
+    }
+
+    function syncAuthTokenInput() {
+        const input = document.getElementById('ivtsAuthTokenInput');
+        const authApi = globalScope.OptionComboWsAuthClient;
+        if (!input || !authApi) return;
+        input.value = authApi.getTokenForTarget(getWsHost(), getWsPort());
+    }
+
+    function saveAuthTokenFromInput() {
+        const input = document.getElementById('ivtsAuthTokenInput');
+        const authApi = globalScope.OptionComboWsAuthClient;
+        if (!input || !authApi) return;
+        authApi.setTokenForTarget(getWsHost(), getWsPort(), input.value);
+        input.value = authApi.getTokenForTarget(getWsHost(), getWsPort());
+        requestIbStatus();
+    }
+
     async function ensureSocket(card) {
         if (card.ws && card.ws.readyState === WebSocket.OPEN) {
             return card.ws;
@@ -632,6 +669,11 @@
             try {
                 payload = JSON.parse(event.data);
             } catch (_) {
+                return;
+            }
+            const authProblem = describeAuthProblem(payload);
+            if (authProblem) {
+                updateIbStatus({ connected: false, connecting: false, message: authProblem });
                 return;
             }
             if (payload && payload.action === 'ib_connection_status') {
@@ -1304,6 +1346,11 @@
                 ibConnectButton.addEventListener('click', () => {
                     connectIbFromPage();
                 });
+            }
+            syncAuthTokenInput();
+            const authTokenSaveButton = document.getElementById('ivtsAuthTokenSave');
+            if (authTokenSaveButton) {
+                authTokenSaveButton.addEventListener('click', saveAuthTokenFromInput);
             }
             globalScope.addEventListener('pagehide', closeAllSocketsForPageExit, { capture: true });
             globalScope.addEventListener('beforeunload', closeAllSocketsForPageExit, { capture: true });

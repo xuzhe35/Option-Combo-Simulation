@@ -15,8 +15,13 @@ import hmac
 import logging
 import os
 import secrets
+import stat
 from urllib.parse import urlsplit
 
+
+# Outside the project tree on purpose: the repo may live in a cloud-synced
+# folder (OneDrive etc.) and a bearer token must not ride along.
+DEFAULT_TOKEN_PATH = os.path.join('~', '.option_combo', 'ws_auth_token')
 
 LOOPBACK_HOSTS = {'127.0.0.1', 'localhost', '::1', '[::1]'}
 
@@ -67,6 +72,31 @@ LIVE_ORDERS_DISABLED_MESSAGE = (
 )
 
 
+def _enforce_owner_only_permissions(path, log):
+    """Tighten an existing token file to owner read/write only (POSIX)."""
+    if os.name != 'posix':
+        return
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        return
+    if mode & 0o077:
+        try:
+            os.chmod(path, 0o600)
+            log.warning(
+                "Auth token file %s had permissive mode %s; tightened to 0600.",
+                path,
+                oct(mode),
+            )
+        except OSError:
+            log.warning(
+                "Auth token file %s has permissive mode %s and could not be "
+                "tightened; fix its permissions manually.",
+                path,
+                oct(mode),
+            )
+
+
 def load_or_create_token(path, logger=None):
     """Read the shared auth token from disk, creating it on first run.
 
@@ -75,11 +105,12 @@ def load_or_create_token(path, logger=None):
     or written, which leaves auth fail-closed when enforcement is on.
     """
     log = logger or logging.getLogger(__name__)
-    resolved_path = os.path.abspath(path)
+    resolved_path = os.path.abspath(os.path.expanduser(path))
     try:
         with open(resolved_path, 'r', encoding='utf-8') as handle:
             token = handle.read().strip()
         if token:
+            _enforce_owner_only_permissions(resolved_path, log)
             return token
         log.warning("Auth token file %s is empty; generating a new token.", resolved_path)
     except FileNotFoundError:
@@ -146,6 +177,20 @@ def build_allowed_origin_hosts(ws_hosts, extra_hosts_raw=''):
             allowed.add(normalized)
     allowed |= parse_extra_origin_hosts(extra_hosts_raw)
     return allowed
+
+
+def extract_request_origin(websocket):
+    """Read the Origin header across websockets library generations."""
+    request = getattr(websocket, 'request', None)
+    headers = getattr(request, 'headers', None)
+    if headers is None:
+        headers = getattr(websocket, 'request_headers', None)
+    if headers is None:
+        return None
+    try:
+        return headers.get('Origin')
+    except Exception:
+        return None
 
 
 def extract_origin_host(origin):

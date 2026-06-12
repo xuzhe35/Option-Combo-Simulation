@@ -30,6 +30,11 @@
                     <span id="ivtsSocketStatus">ws://127.0.0.1:8765</span>
                 </div>
                 <div class="ivts-header-chip ivts-header-chip-action">
+                    <span class="ivts-label">Auth</span>
+                    <input type="password" id="ivtsAuthTokenInput" autocomplete="off" placeholder="server token" style="width: 9rem;">
+                    <button id="ivtsAuthTokenSave" class="ivts-btn ivts-header-btn" type="button">Save</button>
+                </div>
+                <div class="ivts-header-chip ivts-header-chip-action">
                     <span class="ivts-label">IB</span>
                     <span id="ivtsIbStatus">Checking...</span>
                     <button id="ivtsIbConnectButton" class="ivts-btn ivts-btn-primary ivts-header-btn" type="button">Connect IB</button>

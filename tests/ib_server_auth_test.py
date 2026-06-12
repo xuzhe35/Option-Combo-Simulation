@@ -55,6 +55,35 @@ class TokenStorageTests(unittest.TestCase):
         token = load_or_create_token('/nonexistent-root-dir/deep/ws_auth_token')
         self.assertEqual(token, '')
 
+    @unittest.skipUnless(os.name == 'posix', 'POSIX permission semantics')
+    def test_tightens_permissive_mode_on_existing_token_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            token_path = os.path.join(tmp_dir, 'ws_auth_token')
+            with open(token_path, 'w', encoding='utf-8') as handle:
+                handle.write('existing-token\n')
+            os.chmod(token_path, 0o644)
+
+            token = load_or_create_token(token_path)
+
+            self.assertEqual(token, 'existing-token')
+            mode = stat.S_IMODE(os.stat(token_path).st_mode)
+            self.assertEqual(mode, 0o600)
+
+    def test_expands_user_home_in_path(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_home = os.environ.get('HOME')
+            os.environ['HOME'] = tmp_dir
+            try:
+                token = load_or_create_token(os.path.join('~', '.option_combo_test', 'ws_auth_token'))
+                expected = os.path.join(tmp_dir, '.option_combo_test', 'ws_auth_token')
+                self.assertTrue(token)
+                self.assertTrue(os.path.exists(expected))
+            finally:
+                if original_home is None:
+                    os.environ.pop('HOME', None)
+                else:
+                    os.environ['HOME'] = original_home
+
 
 class AuthRequirementTests(unittest.TestCase):
     def test_auto_mode_follows_bind_addresses(self):

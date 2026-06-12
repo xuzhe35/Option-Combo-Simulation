@@ -1,4 +1,5 @@
 import asyncio
+import json
 import pathlib
 import sys
 import types
@@ -664,6 +665,58 @@ class IbServerExecutionDispatchTests(unittest.TestCase):
         self.assertEqual(payload['action'], 'combo_order_preview_result')
         self.assertEqual(payload['groupId'], 'group_1')
         self.assertEqual([call[0] for call in stub.calls], ['hedge', 'combo'])
+
+
+class IbServerBroadcastAuthFilterTests(unittest.IsolatedAsyncioTestCase):
+    class _RecordingWs:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, message):
+            self.sent.append(json.loads(message))
+
+    async def test_account_broadcasts_skip_unauthenticated_clients(self):
+        authed = self._RecordingWs()
+        unauthed = self._RecordingWs()
+        stranger = self._RecordingWs()
+        original_required = ib_server.WS_AUTH_REQUIRED
+        try:
+            ib_server.WS_AUTH_REQUIRED = True
+            ib_server.connected_clients.update({authed, unauthed, stranger})
+            ib_server.ws_client_auth_state[authed] = {'authenticated': True, 'failed_attempts': 0}
+            ib_server.ws_client_auth_state[unauthed] = {'authenticated': False, 'failed_attempts': 0}
+            # `stranger` has no auth state at all; with auth required it must
+            # be treated as unauthenticated.
+
+            ib_server._broadcast_managed_accounts_snapshot()
+            ib_server._broadcast_portfolio_avg_cost_items([{'symbol': 'SPY', 'avgCostPerUnit': 1.23}])
+            await asyncio.sleep(0)
+
+            authed_actions = [payload.get('action') for payload in authed.sent]
+            self.assertIn('managed_accounts_update', authed_actions)
+            self.assertIn('portfolio_avg_cost_update', authed_actions)
+            self.assertEqual(unauthed.sent, [])
+            self.assertEqual(stranger.sent, [])
+        finally:
+            ib_server.WS_AUTH_REQUIRED = original_required
+            ib_server.connected_clients.difference_update({authed, unauthed, stranger})
+            ib_server.ws_client_auth_state.pop(authed, None)
+            ib_server.ws_client_auth_state.pop(unauthed, None)
+
+    async def test_account_broadcasts_reach_everyone_when_auth_not_required(self):
+        client = self._RecordingWs()
+        original_required = ib_server.WS_AUTH_REQUIRED
+        try:
+            ib_server.WS_AUTH_REQUIRED = False
+            ib_server.connected_clients.add(client)
+
+            ib_server._broadcast_managed_accounts_snapshot()
+            await asyncio.sleep(0)
+
+            self.assertEqual([p.get('action') for p in client.sent], ['managed_accounts_update'])
+        finally:
+            ib_server.WS_AUTH_REQUIRED = original_required
+            ib_server.connected_clients.discard(client)
 
 
 class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):

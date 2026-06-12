@@ -107,7 +107,8 @@ Current `index.html` load order:
 28. `js/delta_hedge_transport.js`
 29. `js/delta_hedge_ui.js`
 30. `js/app.js`
-31. `js/ws_client.js`
+31. `js/ws_auth_client.js`
+32. `js/ws_client.js`
 
 `chart_lab.html` keeps the same shared shell ordering where relevant, but intentionally omits the Delta Hedge modules. Its tail order is:
 
@@ -115,14 +116,16 @@ Current `index.html` load order:
 2. `js/combo_order_transport.js`
 3. `js/delta_hedge_transport.js`
 4. `js/app.js`
-5. `js/ws_client.js`
-6. `js/chart_lab.js`
+5. `js/ws_auth_client.js`
+6. `js/ws_client.js`
+7. `js/chart_lab.js`
 
 `iv_term_structure.html` uses its own small runtime:
 
 1. `js/product_registry.js`
-2. `js/iv_term_structure_core.js`
-3. `js/iv_term_structure.js`
+2. `js/ws_auth_client.js`
+3. `js/iv_term_structure_core.js`
+4. `js/iv_term_structure.js`
 
 If browser runtime behavior suddenly becomes `undefined`, load order is still the first thing to check.
 

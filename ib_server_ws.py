@@ -16,24 +16,11 @@ from ib_server_auth import (
     build_action_rejected_payload,
     build_auth_result_payload,
     build_auth_status_payload,
+    extract_request_origin,
     is_origin_allowed,
     verify_token,
 )
 from runtime_contracts import HistoricalBarsResponsePayload, HistoricalReplayErrorPayload, ManualUnderlyingSyncPayload
-
-
-def extract_request_origin(websocket):
-    """Read the Origin header across websockets library generations."""
-    request = getattr(websocket, 'request', None)
-    headers = getattr(request, 'headers', None)
-    if headers is None:
-        headers = getattr(websocket, 'request_headers', None)
-    if headers is None:
-        return None
-    try:
-        return headers.get('Origin')
-    except Exception:
-        return None
 
 
 def get_client_auth_state(env, websocket):

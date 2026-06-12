@@ -606,6 +606,12 @@
             } catch (_) {
                 return;
             }
+            if (payload && (payload.action === 'auth_error'
+                || (payload.action === 'auth_result' && payload.ok !== true)
+                || (payload.action === 'auth_status' && payload.authRequired === true && payload.authenticated !== true))) {
+                setMessage('Chart Lab: server auth required or failed. Paste this server\'s token in the WS Port panel and reconnect.', 'error');
+                return;
+            }
             if (payload && payload.action === 'historical_bars_response') {
                 if (payload.requestId && lab.latestRequestId && payload.requestId !== lab.latestRequestId) return;
                 lab.bars = Array.isArray(payload.bars) ? payload.bars.map((bar) => ({

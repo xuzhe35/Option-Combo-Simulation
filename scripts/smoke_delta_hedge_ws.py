@@ -56,7 +56,7 @@ def build_arg_parser():
         "--token",
         default="",
         help=(
-            "Server auth token (see the server's logs/ws_auth_token). "
+            "Server auth token (the token file path is in the server's startup log). "
             "Falls back to the OPTION_COMBO_WS_AUTH_TOKEN environment variable."
         ),
     )

@@ -12,12 +12,24 @@ from historical_replay_service import (
     describe_contract_request,
     normalize_replay_date,
 )
+from ib_server_auth import (
+    AUTH_REQUIRED_MESSAGE,
+    DEFAULT_TOKEN_PATH,
+    MAX_FAILED_AUTH_ATTEMPTS,
+    build_allowed_origin_hosts,
+    build_auth_result_payload,
+    build_auth_status_payload,
+    extract_request_origin,
+    is_origin_allowed,
+    load_or_create_token,
+    verify_token,
+)
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 config = configparser.ConfigParser()
-config.read('config.ini')
+config.read(['config.ini', 'config.local.ini'])
 
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_HOST = '127.0.0.1'
@@ -37,6 +49,22 @@ elif CONFIGURED_WS_HOST != WS_HOST:
         CONFIGURED_WS_HOST,
     )
 
+# The replay server binds loopback only, so require_auth=auto stays optional;
+# 'always' is honored. The Origin allowlist is always on because any web page
+# can open a socket to 127.0.0.1.
+ALLOWED_ORIGIN_HOSTS = build_allowed_origin_hosts(
+    [WS_HOST],
+    config.get('server', 'allowed_origin_hosts', fallback=''),
+)
+AUTH_REQUIRED = config.get('server', 'require_auth', fallback='auto').strip().lower() == 'always'
+AUTH_TOKEN = ''
+if AUTH_REQUIRED:
+    AUTH_TOKEN = (
+        config.get('server', 'auth_token', fallback='').strip()
+        or load_or_create_token(config.get('server', 'auth_token_path', fallback=DEFAULT_TOKEN_PATH))
+    )
+    logging.info("Historical replay server requires WebSocket auth (require_auth=always).")
+
 historical_replay_service = HistoricalReplayService(
     HISTORICAL_SQLITE_DB,
     logger=logging.getLogger('historical_replay.sqlite'),
@@ -52,12 +80,64 @@ async def send_message_safe(ws, message):
 
 async def handle_ws_client(websocket):
     client_ip = websocket.remote_address[0] if websocket.remote_address else 'Unknown'
+
+    origin = extract_request_origin(websocket)
+    if not is_origin_allowed(origin, ALLOWED_ORIGIN_HOSTS):
+        logging.warning("Rejecting historical replay client %s: origin %r is not allowed", client_ip, origin)
+        try:
+            await websocket.close(4403, 'Origin not allowed')
+        except Exception:
+            pass
+        return
+
     logging.info("Historical replay client connected: %s", client_ip)
+    authenticated = not AUTH_REQUIRED
+    failed_auth_attempts = 0
+    if AUTH_REQUIRED:
+        await send_message_safe(
+            websocket,
+            json.dumps(build_auth_status_payload(True, authenticated, AUTH_REQUIRED_MESSAGE)),
+        )
 
     try:
         async for message in websocket:
-            data = json.loads(message)
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                logging.warning("Ignoring malformed WebSocket message from %s", client_ip)
+                continue
+            if not isinstance(data, dict):
+                continue
             action = data.get('action')
+
+            if action == 'authenticate':
+                if verify_token(AUTH_TOKEN, data.get('token')):
+                    authenticated = True
+                    failed_auth_attempts = 0
+                    await send_message_safe(
+                        websocket,
+                        json.dumps(build_auth_result_payload(True, AUTH_REQUIRED)),
+                    )
+                else:
+                    failed_auth_attempts += 1
+                    await send_message_safe(
+                        websocket,
+                        json.dumps(build_auth_result_payload(False, AUTH_REQUIRED, 'Invalid auth token.')),
+                    )
+                    if failed_auth_attempts >= MAX_FAILED_AUTH_ATTEMPTS:
+                        try:
+                            await websocket.close(4401, 'Too many failed authentication attempts')
+                        except Exception:
+                            pass
+                continue
+
+            if AUTH_REQUIRED and not authenticated:
+                await send_message_safe(websocket, json.dumps({
+                    'action': 'auth_error',
+                    'requestAction': action,
+                    'message': AUTH_REQUIRED_MESSAGE,
+                }))
+                continue
 
             if action == 'request_historical_snapshot':
                 raw_underlying = data.get('underlying')

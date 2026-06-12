@@ -116,7 +116,7 @@ This is a standalone live IV term-structure monitor.
 
 Current behavior:
 
-- loads only `js/product_registry.js`, `js/iv_term_structure_core.js`, and `js/iv_term_structure.js`
+- loads only `js/product_registry.js`, `js/ws_auth_client.js`, `js/iv_term_structure_core.js`, and `js/iv_term_structure.js`
 - reads `iv_term_structure/iv_term_structure_config.json`
 - falls back to embedded defaults if the config file cannot be loaded
 - loads bundled history files from `iv_term_structure/data/*.json`
@@ -319,7 +319,7 @@ client_id = 999
 ws_host = 127.0.0.1
 ws_port = 8765
 require_auth = auto
-auth_token_path = logs/ws_auth_token
+; auth_token_path = ~/.option_combo/ws_auth_token
 
 [execution]
 managed_reprice_threshold_default = 0.01
@@ -335,7 +335,9 @@ The backend protects order routing with a per-server shared token plus a
 browser Origin allowlist:
 
 - On first run the server generates a random token at `auth_token_path`
-  (default `logs/ws_auth_token`) and reuses it across restarts.
+  (default `~/.option_combo/ws_auth_token`, outside the project tree so
+  cloud-synced folders never see it; mode 0600, tightened on read) and
+  reuses it across restarts.
 - `require_auth = auto` enforces the token as soon as `ws_host` includes any
   non-loopback address (the Tailscale / LAN case). Loopback-only binds keep
   token auth optional. `always` / `never` override.
@@ -352,8 +354,13 @@ browser Origin allowlist:
 Browser setup is one-time per server target: open the `WS Target` panel,
 paste that server's token into `Server Auth Token`, and click Apply. Tokens
 are stored per `host:port` in localStorage, so each backend (local TWS, each
-remote VM) keeps its own token. `scripts/smoke_delta_hedge_ws.py` accepts
-`--token` or the `OPTION_COMBO_WS_AUTH_TOKEN` environment variable.
+remote VM) keeps its own token. Chart Lab exposes the same token field in
+its `WS Port` panel and the IV page has an `Auth` chip in its header.
+`scripts/smoke_delta_hedge_ws.py` accepts `--token` or the
+`OPTION_COMBO_WS_AUTH_TOKEN` environment variable.
+
+`historical_server.py` enforces the same browser Origin allowlist; token
+auth applies to it only with `require_auth = always`.
 
 Optional historical DB override:
 

@@ -13,6 +13,7 @@ import websockets
 
 from historical_replay_service import HistoricalReplayService, normalize_replay_date
 from ib_server_auth import (
+    DEFAULT_TOKEN_PATH as WS_AUTH_DEFAULT_TOKEN_PATH,
     build_allowed_origin_hosts as build_ws_allowed_origin_hosts,
     load_or_create_token as load_or_create_ws_auth_token,
     resolve_auth_required as resolve_ws_auth_required,
@@ -98,7 +99,7 @@ TWS_CLIENT_ID = config.getint('tws', 'client_id', fallback=999)
 
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
-WS_AUTH_TOKEN_PATH = config.get('server', 'auth_token_path', fallback=os.path.join('logs', 'ws_auth_token'))
+WS_AUTH_TOKEN_PATH = config.get('server', 'auth_token_path', fallback=WS_AUTH_DEFAULT_TOKEN_PATH)
 WS_AUTH_TOKEN_OVERRIDE = config.get('server', 'auth_token', fallback='').strip()
 WS_REQUIRE_AUTH_MODE = config.get('server', 'require_auth', fallback='auto').strip().lower()
 WS_EXTRA_ORIGIN_HOSTS = config.get('server', 'allowed_origin_hosts', fallback='')
@@ -685,12 +686,27 @@ async def send_message_safe(ws, message):
         pass
 
 
+def _is_ws_authorized_for_account_broadcasts(ws):
+    """Account-revealing broadcasts must respect the auth gate.
+
+    Connections enter connected_clients before authenticating (market-data
+    fanout needs the registration), so the global managed-accounts and
+    portfolio broadcasts filter here instead.
+    """
+    state = ws_client_auth_state.get(ws)
+    if state is not None:
+        return state.get('authenticated', False) is True
+    return not WS_AUTH_REQUIRED
+
+
 def _broadcast_managed_accounts_snapshot():
     if not connected_clients:
         return
 
     message = json.dumps(_build_managed_accounts_payload())
     for ws in list(connected_clients):
+        if not _is_ws_authorized_for_account_broadcasts(ws):
+            continue
         asyncio.create_task(send_message_safe(ws, message))
 
 
@@ -704,6 +720,8 @@ def _broadcast_portfolio_avg_cost_items(items):
 
     message = json.dumps(_build_portfolio_avg_cost_payload(items))
     for ws in list(connected_clients):
+        if not _is_ws_authorized_for_account_broadcasts(ws):
+            continue
         asyncio.create_task(send_message_safe(ws, message))
 
 
