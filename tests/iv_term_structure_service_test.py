@@ -80,13 +80,13 @@ class IvTermStructureServiceTests(unittest.TestCase):
             'GLD',
         )
 
-    def test_build_expiry_strike_selections_uses_expiry_specific_ladders(self):
+    def test_build_expiry_strike_selections_uses_common_strike_ladder(self):
         selections = iv_term_structure_service.build_expiry_strike_selections(
             [
-                {'expiry': '20260424', 'strike': 711, 'tradingClass': 'SPY'},
                 {'expiry': '20260424', 'strike': 712, 'tradingClass': 'SPY'},
                 {'expiry': '20260424', 'strike': 713, 'tradingClass': 'SPY'},
                 {'expiry': '20260930', 'strike': 710, 'tradingClass': 'SPY'},
+                {'expiry': '20260930', 'strike': 712, 'tradingClass': 'SPY'},
                 {'expiry': '20260930', 'strike': 715, 'tradingClass': 'SPY'},
             ],
             711.63,
@@ -97,18 +97,39 @@ class IvTermStructureServiceTests(unittest.TestCase):
             selections['20260424'],
             {
                 'atm_strike': 712.0,
-                'window_strikes': [711.0, 712.0, 713.0],
+                'window_strikes': [712.0],
                 'tradingClass': 'SPY',
             },
         )
         self.assertEqual(
             selections['20260930'],
             {
-                'atm_strike': 710.0,
-                'window_strikes': [710.0, 715.0],
+                'atm_strike': 712.0,
+                'window_strikes': [712.0],
                 'tradingClass': 'SPY',
             },
         )
+
+    def test_build_expiry_strike_selections_uses_best_coverage_when_no_all_expiry_common_strike_exists(self):
+        selections = iv_term_structure_service.build_expiry_strike_selections(
+            [
+                {'expiry': '20260424', 'strike': 710, 'tradingClass': 'SPY'},
+                {'expiry': '20260424', 'strike': 712, 'tradingClass': 'SPY'},
+                {'expiry': '20260930', 'strike': 710, 'tradingClass': 'SPY'},
+                {'expiry': '20260930', 'strike': 715, 'tradingClass': 'SPY'},
+                {'expiry': '20261231', 'strike': 715, 'tradingClass': 'SPY'},
+                {'expiry': '20261231', 'strike': 720, 'tradingClass': 'SPY'},
+            ],
+            711.63,
+            radius=1,
+        )
+
+        self.assertEqual(selections['20260424']['atm_strike'], 710.0)
+        self.assertEqual(selections['20260424']['window_strikes'], [710.0])
+        self.assertEqual(selections['20260930']['atm_strike'], 710.0)
+        self.assertEqual(selections['20260930']['window_strikes'], [710.0, 715.0])
+        self.assertIsNone(selections['20261231']['atm_strike'])
+        self.assertEqual(selections['20261231']['window_strikes'], [])
 
 
 if __name__ == '__main__':

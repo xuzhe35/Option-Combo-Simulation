@@ -134,6 +134,66 @@ def pick_strike_window(
     }
 
 
+def _normalize_unique_strikes(strikes: Iterable[object]) -> list[float]:
+    normalized_strikes = []
+    seen = set()
+    for raw_strike in strikes or []:
+        try:
+            strike = float(raw_strike)
+        except (TypeError, ValueError):
+            continue
+        if not (strike == strike):
+            continue
+        if strike in seen:
+            continue
+        seen.add(strike)
+        normalized_strikes.append(strike)
+
+    normalized_strikes.sort()
+    return normalized_strikes
+
+
+def pick_shared_strike_window(
+    expiry_strikes: dict[str, Iterable[object]],
+    underlying_price: object,
+    radius: int = DEFAULT_STRIKE_RADIUS,
+) -> dict[str, object]:
+    try:
+        target_price = float(underlying_price)
+    except (TypeError, ValueError):
+        return {"atm_strike": None, "window_strikes": [], "covered_expiries": []}
+
+    if not (target_price == target_price):
+        return {"atm_strike": None, "window_strikes": [], "covered_expiries": []}
+
+    coverage_by_strike: dict[float, set[str]] = {}
+    for expiry, raw_strikes in (expiry_strikes or {}).items():
+        normalized_expiry = normalize_expiry_code(expiry)
+        if not normalized_expiry:
+            continue
+
+        for strike in _normalize_unique_strikes(raw_strikes or []):
+            coverage_by_strike.setdefault(strike, set()).add(normalized_expiry)
+
+    if not coverage_by_strike:
+        return {"atm_strike": None, "window_strikes": [], "covered_expiries": []}
+
+    max_coverage = max(len(expiries) for expiries in coverage_by_strike.values())
+    best_coverage_strikes = sorted(
+        strike for strike, expiries in coverage_by_strike.items()
+        if len(expiries) == max_coverage
+    )
+    strike_window = pick_strike_window(best_coverage_strikes, target_price, radius)
+    atm_strike = strike_window.get("atm_strike")
+    covered_expiries = sorted(coverage_by_strike.get(atm_strike, set())) if atm_strike is not None else []
+
+    return {
+        "atm_strike": atm_strike,
+        "window_strikes": strike_window.get("window_strikes") or [],
+        "covered_expiries": covered_expiries,
+    }
+
+
 def choose_trading_class(
     trading_classes: Iterable[object],
     requested_trading_class: object = "",
@@ -172,12 +232,24 @@ def build_expiry_strike_selections(
         bucket["strikes"].append(row.get("strike"))
         bucket["tradingClasses"].append(row.get("tradingClass"))
 
+    strike_sets_by_expiry = {
+        expiry: set(_normalize_unique_strikes(bucket.get("strikes") or []))
+        for expiry, bucket in grouped.items()
+    }
+    shared_strike_window = pick_shared_strike_window(strike_sets_by_expiry, underlying_price, radius)
+    shared_atm_strike = shared_strike_window.get("atm_strike")
+    shared_window_strikes = shared_strike_window.get("window_strikes") or []
+
     selections: dict[str, dict[str, object]] = {}
     for expiry, bucket in grouped.items():
-        strike_window = pick_strike_window(bucket.get("strikes") or [], underlying_price, radius)
+        expiry_strikes = strike_sets_by_expiry.get(expiry) or set()
+        has_shared_atm = shared_atm_strike is not None and shared_atm_strike in expiry_strikes
         selections[expiry] = {
-            "atm_strike": strike_window.get("atm_strike"),
-            "window_strikes": strike_window.get("window_strikes") or [],
+            "atm_strike": shared_atm_strike if has_shared_atm else None,
+            "window_strikes": [
+                strike for strike in shared_window_strikes
+                if strike in expiry_strikes
+            ] if has_shared_atm else [],
             "tradingClass": choose_trading_class(bucket.get("tradingClasses") or []),
         }
 

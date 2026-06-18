@@ -40,6 +40,11 @@ body {
     margin-bottom: 24px;
 }
 
+.ivts-header > div:first-child {
+    flex: 1 1 auto;
+    min-width: 320px;
+}
+
 .ivts-kicker {
     margin: 0 0 6px;
     text-transform: uppercase;
@@ -62,33 +67,52 @@ body {
 }
 
 .ivts-header-meta {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(150px, 220px) minmax(330px, 430px);
     gap: 12px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
+    align-items: start;
+    flex: 0 1 662px;
 }
 
 .ivts-header-chip {
-    min-width: 180px;
-    padding: 12px 14px;
+    padding: 10px 12px;
     border: 1px solid var(--ivts-border);
     border-radius: 14px;
     background: rgba(255, 250, 241, 0.92);
     box-shadow: var(--ivts-shadow);
 }
 
-.ivts-header-chip-action {
-    min-width: 220px;
+.ivts-header-chip-config {
+    min-width: 0;
+    min-height: 0;
+}
+
+.ivts-header-chip-config #ivtsConfigStatus {
+    display: block;
+    font-size: 0.92rem;
+    line-height: 1.35;
 }
 
 .ivts-header-chip-socket {
-    min-width: 300px;
+    min-width: 0;
 }
 
-.ivts-header-btn {
+.ivts-socket-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    align-items: flex-start;
+}
+
+.ivts-ib-inline {
+    min-width: 86px;
+    text-align: right;
+}
+
+.ivts-ib-inline #ivtsIbStatus {
     display: block;
-    width: 100%;
-    margin-top: 10px;
+    font-size: 0.92rem;
+    line-height: 1.35;
 }
 
 .ivts-label {
@@ -137,20 +161,28 @@ body {
 
 .ivts-socket-actions {
     grid-column: 1 / -1;
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr 1fr minmax(116px, 1fr);
     gap: 8px;
 }
 
 .ivts-socket-btn {
-    flex: 1 1 0;
+    width: 100%;
     padding: 8px 10px;
     font-size: 0.86rem;
 }
 
+.ivts-ib-btn:disabled {
+    background: #7db0aa;
+    color: #fff;
+    border-color: #7db0aa;
+    opacity: 1;
+}
+
 .ivts-card-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr));
-    gap: 20px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
     align-items: start;
 }
 
@@ -166,9 +198,47 @@ body {
     display: flex;
     justify-content: space-between;
     gap: 16px;
-    align-items: flex-start;
+    align-items: center;
     padding: 18px 18px 14px;
     border-bottom: 1px solid rgba(216, 200, 183, 0.7);
+}
+
+.ivts-card.is-collapsed .ivts-card-header {
+    border-bottom: 0;
+}
+
+.ivts-card-heading {
+    min-width: 0;
+}
+
+.ivts-card-title-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.ivts-card-toggle {
+    display: inline-grid;
+    width: 34px;
+    height: 34px;
+    place-items: center;
+    flex: 0 0 auto;
+    border: 1px solid var(--ivts-border);
+    border-radius: 50%;
+    background: #fff;
+    color: var(--ivts-accent);
+    font: inherit;
+    font-size: 1.2rem;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    transition: transform 120ms ease, background-color 120ms ease, border-color 120ms ease;
+}
+
+.ivts-card-toggle:hover {
+    transform: translateY(-1px);
+    border-color: var(--ivts-accent);
+    background: var(--ivts-accent-soft);
 }
 
 .ivts-card-header h2 {
@@ -180,6 +250,41 @@ body {
     margin-top: 6px;
     color: var(--ivts-muted);
     font-size: 0.88rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ivts-card-overview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    margin-top: 10px;
+    color: var(--ivts-muted);
+    font-size: 0.82rem;
+}
+
+.ivts-card-overview strong {
+    color: var(--ivts-ink);
+    font-weight: 650;
+}
+
+.ivts-card-header-status {
+    max-width: 760px;
+    margin-top: 8px;
+    color: var(--ivts-muted);
+    font-size: 0.84rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ivts-card-header-status.is-success {
+    color: var(--ivts-success);
+}
+
+.ivts-card-header-status.is-error {
+    color: var(--ivts-error);
 }
 
 .ivts-actions {
@@ -231,6 +336,18 @@ body {
 
 .ivts-card-body {
     padding: 16px 18px 18px;
+}
+
+.ivts-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 .ivts-status {
@@ -311,6 +428,136 @@ body {
 .ivts-baseline-summary {
     color: var(--ivts-muted);
     font-size: 0.9rem;
+}
+
+.ivts-calendar-finder {
+    margin: 0 0 14px;
+}
+
+.ivts-calendar-finder summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.ivts-calendar-summary {
+    color: var(--ivts-muted);
+    font-size: 0.86rem;
+    font-weight: 500;
+    overflow: hidden;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ivts-calendar-body {
+    padding: 0 12px 12px;
+}
+
+.ivts-calendar-controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.ivts-calendar-field {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+}
+
+.ivts-calendar-field select,
+.ivts-calendar-field input {
+    width: 100%;
+    min-width: 0;
+    padding: 8px 9px;
+    border: 1px solid var(--ivts-border);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ivts-ink);
+    font: inherit;
+    font-size: 0.86rem;
+}
+
+.ivts-calendar-field input:disabled {
+    background: rgba(246, 239, 228, 0.7);
+    color: var(--ivts-muted);
+}
+
+.ivts-calendar-range {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+}
+
+.ivts-calendar-toggle {
+    align-self: end;
+    min-height: 36px;
+    padding: 8px 10px;
+}
+
+.ivts-calendar-picks {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 8px;
+    margin: 0 0 10px;
+}
+
+.ivts-calendar-pick {
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid rgba(12, 106, 106, 0.22);
+    border-radius: 8px;
+    background: rgba(216, 238, 234, 0.42);
+}
+
+.ivts-calendar-pick.is-secondary {
+    border-color: rgba(163, 90, 42, 0.28);
+    background: rgba(247, 239, 228, 0.78);
+}
+
+.ivts-calendar-pick-head,
+.ivts-calendar-pick-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.ivts-calendar-pick-label {
+    color: var(--ivts-accent);
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.ivts-calendar-pick-note,
+.ivts-calendar-pick-meta {
+    color: var(--ivts-muted);
+    font-size: 0.78rem;
+}
+
+.ivts-calendar-pick-main {
+    margin: 4px 0;
+    overflow: hidden;
+    font-size: 0.92rem;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ivts-calendar-table-shell {
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.ivts-calendar-load {
+    min-height: 0;
+    padding: 4px 10px;
+    font-size: 0.8rem;
 }
 
 .ivts-table-shell {
@@ -430,12 +677,76 @@ body {
     width: 19%;
 }
 
+.ivts-table-calendar th:nth-child(1),
+.ivts-table-calendar td:nth-child(1) {
+    width: 10%;
+}
+
+.ivts-table-calendar th:nth-child(2),
+.ivts-table-calendar td:nth-child(2),
+.ivts-table-calendar th:nth-child(3),
+.ivts-table-calendar td:nth-child(3) {
+    width: 16%;
+}
+
+.ivts-table-calendar th:nth-child(4),
+.ivts-table-calendar td:nth-child(4),
+.ivts-table-calendar th:nth-child(6),
+.ivts-table-calendar td:nth-child(6) {
+    width: 9%;
+}
+
+.ivts-table-calendar th:nth-child(7),
+.ivts-table-calendar td:nth-child(7) {
+    width: 11%;
+}
+
+.ivts-table-calendar th:nth-child(5),
+.ivts-table-calendar td:nth-child(5) {
+    width: 16%;
+}
+
+.ivts-table-calendar th:nth-child(8),
+.ivts-table-calendar td:nth-child(8) {
+    width: 12%;
+    text-align: right;
+}
+
 .ivts-table tbody tr:last-child td {
     border-bottom: 0;
 }
 
 .ivts-table tbody tr.is-straddle-baseline {
     background: rgba(12, 106, 106, 0.08);
+}
+
+.ivts-table tbody tr.is-calendar-best {
+    background: rgba(12, 106, 106, 0.08);
+}
+
+.ivts-table tbody tr.is-calendar-secondary {
+    background: rgba(163, 90, 42, 0.08);
+}
+
+.ivts-rank-number {
+    margin-right: 5px;
+}
+
+.ivts-rank-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 18px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    background: var(--ivts-accent);
+    color: #fff;
+    font-size: 0.66rem;
+    font-weight: 800;
+    line-height: 1;
+}
+
+.ivts-rank-badge.is-secondary {
+    background: var(--ivts-warm);
 }
 
 .ivts-ratio {
@@ -475,13 +786,26 @@ body {
         flex-direction: column;
     }
 
+    .ivts-header > div:first-child {
+        min-width: 0;
+    }
+
     .ivts-header-meta {
         width: 100%;
-        justify-content: flex-start;
+        grid-template-columns: 1fr;
     }
 
     .ivts-card-grid {
         grid-template-columns: 1fr;
+    }
+
+    .ivts-card-header {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .ivts-actions {
+        justify-content: flex-start;
     }
 
     .ivts-table {

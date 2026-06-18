@@ -138,8 +138,58 @@ function throttledUpdate() {
 // Date helper functions such as diffDays, addDays, calendarToTradingDays
 // have been unified globally in bsm.js
 
+// Consumes a Calendar Finder handoff written by the IV term structure page
+// and materializes it as one combo group (sell short straddle, buy long straddle).
+function consumePendingCalendarHandoff() {
+    const handoffApi = typeof OptionComboCalendarHandoff !== 'undefined' && OptionComboCalendarHandoff
+        ? OptionComboCalendarHandoff
+        : null;
+    if (!handoffApi || typeof handoffApi.takeHandoffPayload !== 'function') {
+        return false;
+    }
+
+    const payload = handoffApi.takeHandoffPayload();
+    if (!payload) {
+        return false;
+    }
+
+    state.underlyingSymbol = payload.symbol;
+    state.underlyingContractMonth = '';
+    if (Number.isFinite(payload.underlyingPrice) && payload.underlyingPrice > 0) {
+        state.underlyingPrice = payload.underlyingPrice;
+    }
+
+    const productRegistry = _getProductRegistryApi();
+    if (productRegistry && typeof productRegistry.resolveDefaultUnderlyingContractMonth === 'function') {
+        state.underlyingContractMonth = productRegistry.resolveDefaultUnderlyingContractMonth(
+            state.underlyingSymbol,
+            state.simulatedDate || state.baseDate
+        );
+    }
+
+    OptionComboGroupEditorUI.addGroup(state, generateId, {
+        addDays,
+        renderGroups: () => {},
+    });
+    const group = state.groups[state.groups.length - 1];
+    if (group) {
+        group.name = handoffApi.buildGroupName(payload);
+        group.legs = handoffApi.buildCalendarLegs(payload, generateId);
+    }
+
+    OptionComboSessionUI.syncControlPanel(state, currencyFormatter, {
+        diffDays,
+        calendarToTradingDays,
+    });
+    if (typeof handleLiveSubscriptions === 'function') {
+        handleLiveSubscriptions();
+    }
+    return true;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     bindControlPanelEvents();
+    consumePendingCalendarHandoff();
     renderGroups();
     renderHedges();
     updateDerivedValues();

@@ -18,6 +18,7 @@ from iv_term_structure_service import (
     build_expiry_strike_selections,
     choose_trading_class,
     filter_expiry_rows,
+    pick_strike_window,
 )
 
 
@@ -405,6 +406,203 @@ async def resolve_iv_term_structure_expiry_selection_from_candidates(
     }
 
 
+async def resolve_iv_term_structure_common_selections_from_candidates(
+    env,
+    option_symbol,
+    option_sec_type,
+    option_exchange,
+    option_currency,
+    option_multiplier,
+    expiry_rows,
+    underlying_price,
+    candidate_strikes,
+    strike_radius,
+    option_trading_class='',
+    qualified_underlying=None,
+):
+    expiries = []
+    seen_expiries = set()
+    for expiry_row in expiry_rows or []:
+        expiry = str((expiry_row or {}).get('expiry') or '').strip()
+        if not expiry or expiry in seen_expiries:
+            continue
+        seen_expiries.add(expiry)
+        expiries.append(expiry)
+
+    if not expiries:
+        return {}
+
+    normalized_candidates = []
+    seen_strikes = set()
+    for raw_strike in candidate_strikes or []:
+        strike = to_strike(raw_strike)
+        serialized = serialize_finite_number(strike)
+        if serialized is None or serialized in seen_strikes:
+            continue
+        seen_strikes.add(serialized)
+        normalized_candidates.append(serialized)
+
+    if not normalized_candidates:
+        return {}
+
+    normalized_candidates.sort()
+    try:
+        target_price = float(underlying_price)
+    except (TypeError, ValueError):
+        return {}
+    if not (target_price == target_price):
+        return {}
+
+    nearest_index = min(
+        range(len(normalized_candidates)),
+        key=lambda index: (abs(normalized_candidates[index] - target_price), normalized_candidates[index]),
+    )
+    search_indices = []
+    for offset in range(len(normalized_candidates)):
+        left_index = nearest_index - offset
+        right_index = nearest_index + offset
+        if left_index >= 0 and left_index not in search_indices:
+            search_indices.append(left_index)
+        if offset and right_index < len(normalized_candidates) and right_index not in search_indices:
+            search_indices.append(right_index)
+
+    probe_cache = {}
+    probe_semaphore = asyncio.Semaphore(8)
+
+    async def probe_expiry_index(expiry, index):
+        cache_key = (expiry, index)
+        if cache_key not in probe_cache:
+            async with probe_semaphore:
+                probe_cache[cache_key] = await fetch_iv_term_structure_contract_rows_for_exact_strike(
+                    env,
+                    option_symbol,
+                    option_sec_type,
+                    option_exchange,
+                    option_currency,
+                    option_multiplier,
+                    expiry,
+                    normalized_candidates[index],
+                    option_trading_class=option_trading_class,
+                    qualified_underlying=qualified_underlying,
+                )
+        return probe_cache[cache_key]
+
+    async def rows_by_expiry_for_index(index):
+        rows_by_expiry = {}
+        results = await asyncio.gather(*(probe_expiry_index(expiry, index) for expiry in expiries))
+        for expiry, rows in zip(expiries, results):
+            if rows:
+                rows_by_expiry[expiry] = rows
+        return rows_by_expiry
+
+    safe_radius = max(0, int(strike_radius or 0))
+    max_probe_count = min(len(search_indices), max(25, (safe_radius * 2 + 1) * 10))
+    atm_index = None
+    atm_rows_by_expiry = {}
+    for index in search_indices[:max_probe_count]:
+        rows_by_expiry = await rows_by_expiry_for_index(index)
+        if not rows_by_expiry:
+            continue
+
+        current_key = (
+            -len(rows_by_expiry),
+            abs(normalized_candidates[index] - target_price),
+            normalized_candidates[index],
+        )
+        best_key = (
+            -len(atm_rows_by_expiry),
+            abs(normalized_candidates[atm_index] - target_price) if atm_index is not None else float('inf'),
+            normalized_candidates[atm_index] if atm_index is not None else float('inf'),
+        )
+        if atm_index is None or current_key < best_key:
+            atm_index = index
+            atm_rows_by_expiry = rows_by_expiry
+            if len(atm_rows_by_expiry) == len(expiries):
+                break
+
+    if atm_index is None:
+        return {}
+
+    selected_indices = [atm_index]
+    rows_by_index_and_expiry = {atm_index: atm_rows_by_expiry}
+
+    lower_index = atm_index - 1
+    while lower_index >= 0 and len([idx for idx in selected_indices if idx < atm_index]) < safe_radius:
+        rows_by_expiry = await rows_by_expiry_for_index(lower_index)
+        if rows_by_expiry:
+            selected_indices.append(lower_index)
+            rows_by_index_and_expiry[lower_index] = rows_by_expiry
+        lower_index -= 1
+
+    upper_index = atm_index + 1
+    while upper_index < len(normalized_candidates) and len([idx for idx in selected_indices if idx > atm_index]) < safe_radius:
+        rows_by_expiry = await rows_by_expiry_for_index(upper_index)
+        if rows_by_expiry:
+            selected_indices.append(upper_index)
+            rows_by_index_and_expiry[upper_index] = rows_by_expiry
+        upper_index += 1
+
+    selected_indices = sorted(set(selected_indices))
+    selections = {}
+    for expiry in expiries:
+        if expiry not in atm_rows_by_expiry:
+            selections[expiry] = {
+                'atm_strike': None,
+                'window_strikes': [],
+                'tradingClass': option_trading_class,
+            }
+            continue
+
+        selected_rows = []
+        expiry_window_strikes = []
+        for index in selected_indices:
+            rows = rows_by_index_and_expiry.get(index, {}).get(expiry) or []
+            if rows:
+                selected_rows.extend(rows)
+                expiry_window_strikes.append(normalized_candidates[index])
+        selections[expiry] = {
+            'atm_strike': normalized_candidates[atm_index],
+            'window_strikes': expiry_window_strikes,
+            'tradingClass': choose_trading_class(
+                [row.get('tradingClass') for row in selected_rows],
+                option_trading_class,
+            ),
+        }
+
+    return selections
+
+
+def build_iv_term_structure_global_candidate_selections(
+    expiry_rows,
+    underlying_price,
+    candidate_strikes,
+    strike_radius,
+    option_trading_class='',
+):
+    strike_window = pick_strike_window(candidate_strikes, underlying_price, strike_radius)
+    atm_strike = serialize_finite_number(strike_window.get('atm_strike'))
+    window_strikes = [
+        serialized
+        for serialized in (serialize_finite_number(strike) for strike in (strike_window.get('window_strikes') or []))
+        if serialized is not None
+    ]
+    if atm_strike is None or not window_strikes:
+        return {}
+
+    selections = {}
+    for expiry_row in expiry_rows or []:
+        expiry = str((expiry_row or {}).get('expiry') or '').strip()
+        if not expiry:
+            continue
+        selections[expiry] = {
+            'atm_strike': atm_strike,
+            'window_strikes': window_strikes,
+            'tradingClass': option_trading_class,
+        }
+
+    return selections
+
+
 def build_iv_term_structure_expiry_bundle(
     expiry_row,
     option_symbol,
@@ -628,6 +826,76 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
         progress_lock = asyncio.Lock()
         concurrency_limit = min(6, max(1, total_expiry_count))
         semaphore = asyncio.Semaphore(concurrency_limit)
+        contract_rows_by_expiry = {}
+
+        async def fetch_expiry_contract_rows(expiry_row):
+            expiry = str((expiry_row or {}).get('expiry') or '').strip()
+            if not expiry or websocket not in env['client_subscriptions']:
+                return expiry, []
+
+            async with semaphore:
+                rows = await fetch_iv_term_structure_contract_rows_for_expiry(
+                    env,
+                    option_symbol,
+                    option_sec_type,
+                    option_exchange,
+                    option_currency,
+                    option_multiplier,
+                    expiry,
+                    option_trading_class=option_trading_class,
+                    qualified_underlying=qualified_underlying,
+                )
+            return expiry, rows
+
+        if prioritized_expiry_rows:
+            fetch_results = await asyncio.gather(
+                *(fetch_expiry_contract_rows(expiry_row) for expiry_row in prioritized_expiry_rows)
+            )
+            contract_rows_by_expiry = {
+                expiry: rows
+                for expiry, rows in fetch_results
+                if expiry
+            }
+
+        all_contract_rows = []
+        for rows in contract_rows_by_expiry.values():
+            all_contract_rows.extend(rows or [])
+
+        expiry_selections = build_expiry_strike_selections(
+            all_contract_rows,
+            underlying_price,
+            strike_radius,
+        )
+
+        has_selected_atm = any(
+            (selection or {}).get('atm_strike') is not None
+            for selection in expiry_selections.values()
+        )
+        if not has_selected_atm:
+            fallback_selections = await resolve_iv_term_structure_common_selections_from_candidates(
+                env,
+                option_symbol,
+                option_sec_type,
+                option_exchange,
+                option_currency,
+                option_multiplier,
+                prioritized_expiry_rows,
+                underlying_price,
+                global_candidate_strikes,
+                strike_radius,
+                option_trading_class=option_trading_class,
+                qualified_underlying=qualified_underlying,
+            )
+            if fallback_selections:
+                expiry_selections = fallback_selections
+            else:
+                expiry_selections = build_iv_term_structure_global_candidate_selections(
+                    prioritized_expiry_rows,
+                    underlying_price,
+                    global_candidate_strikes,
+                    strike_radius,
+                    option_trading_class=option_trading_class,
+                )
 
         async def process_expiry(expiry_row):
             nonlocal resolved_expiry_count
@@ -642,38 +910,7 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
                 return
 
             try:
-                async with semaphore:
-                    expiry_contract_rows = await fetch_iv_term_structure_contract_rows_for_expiry(
-                        env,
-                        option_symbol,
-                        option_sec_type,
-                        option_exchange,
-                        option_currency,
-                        option_multiplier,
-                        expiry,
-                        option_trading_class=option_trading_class,
-                        qualified_underlying=qualified_underlying,
-                    )
-                expiry_selection = build_expiry_strike_selections(
-                    expiry_contract_rows,
-                    underlying_price,
-                    strike_radius,
-                ).get(expiry) or {}
-                if not expiry_selection.get('atm_strike'):
-                    expiry_selection = await resolve_iv_term_structure_expiry_selection_from_candidates(
-                        env,
-                        option_symbol,
-                        option_sec_type,
-                        option_exchange,
-                        option_currency,
-                        option_multiplier,
-                        expiry,
-                        underlying_price,
-                        global_candidate_strikes,
-                        strike_radius,
-                        option_trading_class=option_trading_class,
-                        qualified_underlying=qualified_underlying,
-                    )
+                expiry_selection = expiry_selections.get(expiry) or {}
                 bundle = build_iv_term_structure_expiry_bundle(
                     expiry_row,
                     option_symbol,

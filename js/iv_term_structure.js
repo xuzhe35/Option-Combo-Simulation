@@ -26,6 +26,35 @@
     const WS_HOST_STORAGE_KEY = 'optionComboWsHost';
     const WS_PORT_STORAGE_KEY = 'optionComboWsPort';
     const RENDER_INTERVAL_MS = 120;
+    const CALENDAR_TARGET_PRESETS = Object.freeze(['1.5', '2', '2.5', '3']);
+    const DEFAULT_CALENDAR_FINDER_CONFIG = Object.freeze({
+        targetRatio: 2,
+        targetPreset: '2',
+        tolerancePct: 25,
+        shortMinDte: 3,
+        shortMaxDte: 60,
+        sortBy: 'best_value',
+        showAll: false,
+    });
+    const CALENDAR_FINDER_TOP_LIMIT = 5;
+    const CALENDAR_FINDER_STORAGE_KEY = 'optionComboIvtsCalendarFinder';
+    const CARD_VIEW_STATE_SECTIONS = Object.freeze([
+        {
+            key: 'calendar',
+            detailsSelector: '.ivts-calendar-finder',
+            shellSelector: '.ivts-calendar-table-shell',
+        },
+        {
+            key: 'bucket',
+            detailsSelector: '.ivts-bucket-summary',
+            shellSelector: '.ivts-bucket-table-shell',
+        },
+        {
+            key: 'details',
+            detailsSelector: '',
+            shellSelector: '.ivts-details-table-shell',
+        },
+    ]);
 
     const runtime = {
         config: null,
@@ -158,7 +187,7 @@
     }
 
     function escapeHtml(value) {
-        return String(value || '')
+        return String(value == null ? '' : value)
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
@@ -184,6 +213,79 @@
             return card.bundledHistoryDocument;
         }
         return normalizeHistoryDocument(null, card.symbol);
+    }
+
+    function normalizeCalendarFinderConfig(rawConfig) {
+        const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+        const parsedTargetRatio = parseFloat(raw.targetRatio);
+        const targetRatio = Number.isFinite(parsedTargetRatio) && parsedTargetRatio > 0
+            ? Math.min(8, Math.max(1.05, parsedTargetRatio))
+            : DEFAULT_CALENDAR_FINDER_CONFIG.targetRatio;
+        const rawPreset = String(raw.targetPreset || '').trim();
+        const targetPreset = rawPreset === 'custom' || CALENDAR_TARGET_PRESETS.includes(rawPreset)
+            ? rawPreset
+            : (CALENDAR_TARGET_PRESETS.includes(String(targetRatio)) ? String(targetRatio) : 'custom');
+        const parsedTolerancePct = parseInt(raw.tolerancePct, 10);
+        const tolerancePct = [15, 25, 40].includes(parsedTolerancePct)
+            ? parsedTolerancePct
+            : DEFAULT_CALENDAR_FINDER_CONFIG.tolerancePct;
+        const parsedShortMinDte = parseInt(raw.shortMinDte, 10);
+        const parsedShortMaxDte = parseInt(raw.shortMaxDte, 10);
+        const shortMinDte = Number.isFinite(parsedShortMinDte) && parsedShortMinDte >= 0
+            ? parsedShortMinDte
+            : DEFAULT_CALENDAR_FINDER_CONFIG.shortMinDte;
+        const shortMaxDte = Number.isFinite(parsedShortMaxDte) && parsedShortMaxDte >= shortMinDte
+            ? parsedShortMaxDte
+            : Math.max(DEFAULT_CALENDAR_FINDER_CONFIG.shortMaxDte, shortMinDte);
+        const sortBy = ['best_value', 'cheapest_long', 'closest_ratio'].includes(raw.sortBy)
+            ? raw.sortBy
+            : DEFAULT_CALENDAR_FINDER_CONFIG.sortBy;
+
+        return {
+            targetRatio,
+            targetPreset,
+            tolerancePct,
+            shortMinDte,
+            shortMaxDte,
+            sortBy,
+            showAll: raw.showAll === true,
+        };
+    }
+
+    function loadSavedCalendarFinderConfig(symbol) {
+        const key = String(symbol || '').trim().toUpperCase();
+        if (!key) {
+            return null;
+        }
+        try {
+            const parsed = JSON.parse(localStorage.getItem(CALENDAR_FINDER_STORAGE_KEY) || '{}');
+            const entry = parsed && typeof parsed === 'object' ? parsed[key] : null;
+            return entry && typeof entry === 'object' ? entry : null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function saveCalendarFinderConfig(symbol, config) {
+        const key = String(symbol || '').trim().toUpperCase();
+        if (!key) {
+            return;
+        }
+        let store = {};
+        try {
+            const parsed = JSON.parse(localStorage.getItem(CALENDAR_FINDER_STORAGE_KEY) || '{}');
+            if (parsed && typeof parsed === 'object') {
+                store = parsed;
+            }
+        } catch (_) {
+            // Start a fresh store when the saved blob is unreadable.
+        }
+        store[key] = normalizeCalendarFinderConfig(config);
+        try {
+            localStorage.setItem(CALENDAR_FINDER_STORAGE_KEY, JSON.stringify(store));
+        } catch (_) {
+            // Keep the runtime value even when storage is unavailable.
+        }
     }
 
     function resolveProfile(symbol) {
@@ -234,10 +336,18 @@
         };
     }
 
-    function createCardState(entry) {
+    function resolveDefaultExpandedSymbol(symbols) {
+        const entries = Array.isArray(symbols) ? symbols : [];
+        const spyEntry = entries.find((entry) => String(entry && entry.symbol || '').trim().toUpperCase() === 'SPY');
+        const fallbackEntry = entries.find((entry) => String(entry && entry.symbol || '').trim());
+        return String((spyEntry || fallbackEntry || {}).symbol || '').trim().toUpperCase();
+    }
+
+    function createCardState(entry, options = {}) {
         return {
             symbol: entry.symbol,
             historyPath: entry.historyPath,
+            isExpanded: options.isExpanded === true,
             statusMessage: 'Ready. Use Sync/Update to subscribe this ETF only.',
             statusKind: '',
             ws: null,
@@ -256,6 +366,9 @@
             lastSampleLabel: '',
             closeNotice: '',
             straddleBaselineExpiry: '',
+            calendarFinder: normalizeCalendarFinderConfig(
+                loadSavedCalendarFinderConfig(entry.symbol) || DEFAULT_CALENDAR_FINDER_CONFIG
+            ),
             catalogPatchCount: 0,
             catalogPatchTimeoutId: null,
         };
@@ -297,6 +410,14 @@
         return Number.isFinite(parsed) ? `${parsed.toFixed(2)}X` : '--';
     }
 
+    function formatCompactMultiple(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return '--';
+        }
+        return `${parsed.toFixed(2).replace(/\.?0+$/, '')}X`;
+    }
+
     function normalizeExpiryKey(value) {
         const normalized = String(value || '').trim().replace(/-/g, '');
         return /^\d{8}$/.test(normalized) ? normalized : '';
@@ -307,6 +428,24 @@
             element
             && typeof element.matches === 'function'
             && element.matches('select[data-action="baseline"][data-symbol]')
+        );
+    }
+
+    function isCalendarFinderControlElement(element) {
+        return !!(
+            element
+            && typeof element.matches === 'function'
+            && element.matches('[data-action^="calendar-"][data-symbol]')
+        );
+    }
+
+    function isFocusedCardControlInCard(cardNode) {
+        const activeElement = document && document.activeElement;
+        return !!(
+            cardNode
+            && (isBaselineSelectElement(activeElement) || isCalendarFinderControlElement(activeElement))
+            && typeof cardNode.contains === 'function'
+            && cardNode.contains(activeElement)
         );
     }
 
@@ -439,14 +578,21 @@
                 return;
             }
 
-            const bucketShell = cardNode.querySelector('.ivts-bucket-table-shell');
-            const detailsNode = cardNode.querySelector('.ivts-details');
-            const detailsShell = cardNode.querySelector('.ivts-details-table-shell');
-            snapshot[symbol] = {
-                bucketScrollLeft: bucketShell ? bucketShell.scrollLeft : 0,
-                detailsOpen: !!(detailsNode && detailsNode.open),
-                detailsScrollLeft: detailsShell ? detailsShell.scrollLeft : 0,
-            };
+            const sections = {};
+            CARD_VIEW_STATE_SECTIONS.forEach((section) => {
+                const detailsNode = section.detailsSelector
+                    ? cardNode.querySelector(section.detailsSelector)
+                    : null;
+                const shellNode = section.shellSelector
+                    ? cardNode.querySelector(section.shellSelector)
+                    : null;
+                sections[section.key] = {
+                    open: detailsNode ? !!detailsNode.open : null,
+                    scrollLeft: shellNode ? shellNode.scrollLeft : 0,
+                    scrollTop: shellNode ? shellNode.scrollTop : 0,
+                };
+            });
+            snapshot[symbol] = { sections };
         });
 
         return snapshot;
@@ -464,20 +610,28 @@
                 return;
             }
 
-            const detailsNode = cardNode.querySelector('.ivts-details');
-            if (detailsNode) {
-                detailsNode.open = !!savedState.detailsOpen;
-            }
+            const sections = savedState.sections && typeof savedState.sections === 'object'
+                ? savedState.sections
+                : {};
+            CARD_VIEW_STATE_SECTIONS.forEach((section) => {
+                const sectionState = sections[section.key] || {};
+                const detailsNode = section.detailsSelector
+                    ? cardNode.querySelector(section.detailsSelector)
+                    : null;
+                if (detailsNode && typeof sectionState.open === 'boolean') {
+                    detailsNode.open = sectionState.open;
+                }
 
-            const bucketShell = cardNode.querySelector('.ivts-bucket-table-shell');
-            if (bucketShell && Number.isFinite(savedState.bucketScrollLeft)) {
-                bucketShell.scrollLeft = savedState.bucketScrollLeft;
-            }
-
-            const detailsShell = cardNode.querySelector('.ivts-details-table-shell');
-            if (detailsShell && Number.isFinite(savedState.detailsScrollLeft)) {
-                detailsShell.scrollLeft = savedState.detailsScrollLeft;
-            }
+                const shellNode = section.shellSelector
+                    ? cardNode.querySelector(section.shellSelector)
+                    : null;
+                if (shellNode && Number.isFinite(sectionState.scrollLeft)) {
+                    shellNode.scrollLeft = sectionState.scrollLeft;
+                }
+                if (shellNode && Number.isFinite(sectionState.scrollTop)) {
+                    shellNode.scrollTop = sectionState.scrollTop;
+                }
+            });
         });
     }
 
@@ -511,8 +665,11 @@
         runtime.config = normalizeConfig(rawConfig);
         runtime.configSourceLabel = String(sourceLabel || '').trim();
         runtime.cardsBySymbol.clear();
+        const defaultExpandedSymbol = resolveDefaultExpandedSymbol(runtime.config.symbols);
         runtime.config.symbols.forEach((entry) => {
-            runtime.cardsBySymbol.set(entry.symbol, createCardState(entry));
+            runtime.cardsBySymbol.set(entry.symbol, createCardState(entry, {
+                isExpanded: entry.symbol === defaultExpandedSymbol,
+            }));
         });
     }
 
@@ -968,8 +1125,11 @@
         const detailRows = buildDetailRows(card);
         const baselineExpiry = resolveSelectedStraddleBaselineExpiry(card, detailRows);
         const comparedDetailRows = core().buildStraddleComparisonRows(detailRows, baselineExpiry);
+        const bucketDefinitions = runtime.config && Array.isArray(runtime.config.bucketDefinitions)
+            ? runtime.config.bucketDefinitions
+            : null;
         const comparedBucketRows = core().buildStraddleComparisonRows(
-            core().buildBucketRows(detailRows, runtime.config.bucketDefinitions),
+            core().buildBucketRows(detailRows, bucketDefinitions),
             baselineExpiry
         );
         const baselineRow = comparedDetailRows.find((row) => row && row.isStraddleBaseline) || null;
@@ -1178,6 +1338,239 @@
         `;
     }
 
+    function getCalendarFinderRows(card, comparedRows) {
+        const config = normalizeCalendarFinderConfig(card && card.calendarFinder);
+        const detailRows = comparedRows && Array.isArray(comparedRows.detailRows) ? comparedRows.detailRows : [];
+        return core().buildCalendarFinderRows(detailRows, config);
+    }
+
+    function buildCalendarTargetOptions(config) {
+        return CALENDAR_TARGET_PRESETS.map((value) => (
+            `<option value="${escapeHtml(value)}" ${config.targetPreset === value ? 'selected' : ''}>${escapeHtml(value)}X</option>`
+        )).join('') + `<option value="custom" ${config.targetPreset === 'custom' ? 'selected' : ''}>Custom</option>`;
+    }
+
+    function buildCalendarToleranceOptions(config) {
+        return [15, 25, 40].map((value) => (
+            `<option value="${value}" ${config.tolerancePct === value ? 'selected' : ''}>+/-${value}%</option>`
+        )).join('');
+    }
+
+    function buildCalendarSortOptions(config) {
+        const labels = {
+            best_value: 'Best Value',
+            cheapest_long: 'Cheapest Long',
+            closest_ratio: 'Closest Ratio',
+        };
+        return ['best_value', 'cheapest_long', 'closest_ratio'].map((value) => (
+            `<option value="${escapeHtml(value)}" ${config.sortBy === value ? 'selected' : ''}>${escapeHtml(labels[value])}</option>`
+        )).join('');
+    }
+
+    function describeCalendarFinderEmptyState(config, stats) {
+        if (!stats || stats.totalExpiries === 0) {
+            return 'No expiry rows yet. Sync/Update to subscribe quotes first.';
+        }
+        if (stats.usableExpiries < 2) {
+            return `Waiting for complete straddle quotes (${stats.usableExpiries}/${stats.totalExpiries} expiries usable).`;
+        }
+        if (stats.shortCandidates === 0) {
+            return `No short-leg expiry inside ${config.shortMinDte}-${config.shortMaxDte} DTE (${stats.usableExpiries} usable expiries). Widen the Short DTE range.`;
+        }
+        return `No long leg within +/-${config.tolerancePct}% of the ${formatCompactMultiple(config.targetRatio)} DTE ratio (${stats.shortCandidates} short candidates). Raise the tolerance or change the target.`;
+    }
+
+    function getCalendarFinderSecondaryRow(rows) {
+        const picker = core() && core().pickCalendarFinderSecondaryCandidate;
+        if (typeof picker === 'function') {
+            return picker(rows);
+        }
+        return Array.isArray(rows) && rows.length > 1 ? rows[1] : null;
+    }
+
+    function isSameCalendarCandidate(left, right) {
+        return !!(
+            left
+            && right
+            && left.shortExpiry === right.shortExpiry
+            && left.longExpiry === right.longExpiry
+            && left.shortDte === right.shortDte
+            && left.longDte === right.longDte
+        );
+    }
+
+    function describeCalendarSecondaryReason(best, secondary) {
+        if (
+            best
+            && secondary
+            && Number.isFinite(secondary.shortDte)
+            && Number.isFinite(best.shortDte)
+            && secondary.shortDte > best.shortDte
+        ) {
+            return 'Later short leg';
+        }
+        return 'Second ranked';
+    }
+
+    function getCalendarCandidateRank(rows, row) {
+        if (!Array.isArray(rows) || !row) {
+            return null;
+        }
+        const index = rows.findIndex((candidate) => isSameCalendarCandidate(candidate, row));
+        return index >= 0 ? index + 1 : null;
+    }
+
+    function buildVisibleCalendarRows(rows, secondary, showAll) {
+        if (!Array.isArray(rows) || showAll) {
+            return Array.isArray(rows) ? rows : [];
+        }
+
+        const visibleRows = rows.slice(0, CALENDAR_FINDER_TOP_LIMIT);
+        if (secondary && !visibleRows.some((row) => isSameCalendarCandidate(row, secondary))) {
+            visibleRows.push(secondary);
+        }
+        return visibleRows;
+    }
+
+    function buildCalendarRecommendation(label, row, note) {
+        if (!row) {
+            return '';
+        }
+        const modifier = label === 'Next' ? ' is-secondary' : '';
+        return `
+            <div class="ivts-calendar-pick${modifier}">
+                <div class="ivts-calendar-pick-head">
+                    <span class="ivts-calendar-pick-label">${escapeHtml(label)}</span>
+                    <span class="ivts-calendar-pick-note">${escapeHtml(note || '')}</span>
+                </div>
+                <div class="ivts-calendar-pick-main">${escapeHtml(`${row.shortExpiry} / ${row.longExpiry}`)}</div>
+                <div class="ivts-calendar-pick-meta">
+                    <span>${escapeHtml(`${row.shortDte}D -> ${row.longDte}D`)}</span>
+                    <span>${escapeHtml(`${formatCompactMultiple(row.priceMultiple)} price`)}</span>
+                    <span>${escapeHtml(`${formatMultiple(row.valueScore)} value`)}</span>
+                </div>
+            </div>
+        `;
+    }
+
+    function buildCalendarFinderSection(card, comparedRows) {
+        const config = normalizeCalendarFinderConfig(card && card.calendarFinder);
+        const detailRows = comparedRows && Array.isArray(comparedRows.detailRows) ? comparedRows.detailRows : [];
+        const rows = getCalendarFinderRows({ ...card, calendarFinder: config }, comparedRows);
+        const stats = core().buildCalendarFinderStats(detailRows, config);
+        const best = rows[0] || null;
+        const secondary = getCalendarFinderSecondaryRow(rows);
+        const visibleRows = buildVisibleCalendarRows(rows, secondary, config.showAll);
+        const secondaryReason = secondary ? describeCalendarSecondaryReason(best, secondary) : '';
+        const emptyMessage = describeCalendarFinderEmptyState(config, stats);
+        const summary = best
+            ? `Best ${formatMultiple(best.valueScore)} | ${best.shortDte}D -> ${best.longDte}D${secondary ? ` | Next ${secondary.shortDte}D -> ${secondary.longDte}D` : ''}`
+            : emptyMessage;
+        const customDisabled = config.targetPreset !== 'custom' ? 'disabled' : '';
+        const showAllButtonLabel = config.showAll
+            ? 'Top 5'
+            : (rows.length > CALENDAR_FINDER_TOP_LIMIT ? `Show All (${rows.length})` : 'Show All');
+
+        return `
+            <details class="ivts-details ivts-calendar-finder">
+                <summary>
+                    <span>Calendar Finder</span>
+                    <span class="ivts-calendar-summary">${escapeHtml(summary)}</span>
+                </summary>
+                <div class="ivts-details-body ivts-calendar-body">
+                    <div class="ivts-calendar-controls">
+                        <label class="ivts-calendar-field">
+                            <span class="ivts-fact-label">Target Ratio</span>
+                            <select data-action="calendar-target-preset" data-symbol="${escapeHtml(card.symbol)}">
+                                ${buildCalendarTargetOptions(config)}
+                            </select>
+                        </label>
+                        <label class="ivts-calendar-field ivts-calendar-custom-field">
+                            <span class="ivts-fact-label">Custom</span>
+                            <input data-action="calendar-target-custom" data-symbol="${escapeHtml(card.symbol)}" type="number" min="1.05" max="8" step="0.05" value="${escapeHtml(formatNumber(config.targetRatio, 2))}" ${customDisabled}>
+                        </label>
+                        <label class="ivts-calendar-field">
+                            <span class="ivts-fact-label">Tolerance</span>
+                            <select data-action="calendar-tolerance" data-symbol="${escapeHtml(card.symbol)}">
+                                ${buildCalendarToleranceOptions(config)}
+                            </select>
+                        </label>
+                        <label class="ivts-calendar-field">
+                            <span class="ivts-fact-label">Short DTE</span>
+                            <span class="ivts-calendar-range">
+                                <input data-action="calendar-short-min" data-symbol="${escapeHtml(card.symbol)}" type="number" min="0" max="999" step="1" value="${escapeHtml(config.shortMinDte)}">
+                                <input data-action="calendar-short-max" data-symbol="${escapeHtml(card.symbol)}" type="number" min="0" max="999" step="1" value="${escapeHtml(config.shortMaxDte)}">
+                            </span>
+                        </label>
+                        <label class="ivts-calendar-field">
+                            <span class="ivts-fact-label">Sort</span>
+                            <select data-action="calendar-sort" data-symbol="${escapeHtml(card.symbol)}">
+                                ${buildCalendarSortOptions(config)}
+                            </select>
+                        </label>
+                        <button class="ivts-btn ivts-btn-muted ivts-calendar-toggle" data-action="calendar-show-all" data-symbol="${escapeHtml(card.symbol)}" type="button" ${rows.length <= CALENDAR_FINDER_TOP_LIMIT && !config.showAll ? 'disabled' : ''}>${escapeHtml(showAllButtonLabel)}</button>
+                    </div>
+                    ${best ? `
+                        <div class="ivts-calendar-picks" aria-label="Calendar recommendations">
+                            ${buildCalendarRecommendation('Best', best, 'Lowest value score')}
+                            ${buildCalendarRecommendation('Next', secondary, secondaryReason)}
+                        </div>
+                    ` : ''}
+                    <div class="ivts-table-shell ivts-calendar-table-shell">
+                        <table class="ivts-table ivts-table-calendar">
+                            <thead>
+                                <tr>
+                                    <th>Rank</th>
+                                    <th>Sell Expiry</th>
+                                    <th>Buy Expiry</th>
+                                    <th>DTE Ratio</th>
+                                    <th>Straddle</th>
+                                    <th>Price</th>
+                                    <th>Value</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${visibleRows.map((row, index) => {
+                                    const canLoad = row.shortAtmStrike != null && row.longAtmStrike != null;
+                                    const isBest = isSameCalendarCandidate(row, best);
+                                    const isSecondary = isSameCalendarCandidate(row, secondary);
+                                    const rowClasses = ['ivts-calendar-row'];
+                                    if (isBest) {
+                                        rowClasses.push('is-calendar-best');
+                                    }
+                                    if (isSecondary) {
+                                        rowClasses.push('is-calendar-secondary');
+                                    }
+                                    const rankBadge = isBest
+                                        ? '<span class="ivts-rank-badge">Best</span>'
+                                        : (isSecondary ? '<span class="ivts-rank-badge is-secondary">Next</span>' : '');
+                                    const rank = getCalendarCandidateRank(rows, row) || index + 1;
+                                    return `
+                                    <tr class="${escapeHtml(rowClasses.join(' '))}">
+                                        <td><span class="ivts-rank-number">${rank}</span>${rankBadge}</td>
+                                        <td>${escapeHtml(`${row.shortExpiry} (${row.shortDte}D)`)}</td>
+                                        <td>${escapeHtml(`${row.longExpiry} (${row.longDte}D)`)}</td>
+                                        <td>${escapeHtml(formatCompactMultiple(row.dteRatio))}</td>
+                                        <td>${escapeHtml(`${formatMoney(row.shortStraddleMark)}/${formatMoney(row.longStraddleMark)}`)}</td>
+                                        <td>${escapeHtml(formatCompactMultiple(row.priceMultiple))}</td>
+                                        <td><span class="ivts-ratio">${escapeHtml(formatMultiple(row.valueScore))}</span></td>
+                                        <td><button class="ivts-btn ivts-btn-muted ivts-calendar-load" data-action="calendar-load" data-symbol="${escapeHtml(card.symbol)}" data-short-expiry="${escapeHtml(row.shortExpiry)}" data-long-expiry="${escapeHtml(row.longExpiry)}" type="button" ${canLoad ? '' : 'disabled'} title="${canLoad ? 'Open this calendar in the simulator' : 'ATM strikes are not resolved yet'}">Load</button></td>
+                                    </tr>
+                                `;
+                                }).join('') || `
+                                    <tr>
+                                        <td colspan="8" class="ivts-missing">${escapeHtml(emptyMessage)}</td>
+                                    </tr>
+                                `}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </details>
+        `;
+    }
+
     function getPrimaryExpiryRows(comparedRows) {
         return comparedRows && Array.isArray(comparedRows.detailRows)
             ? comparedRows.detailRows
@@ -1290,22 +1683,45 @@
             </div>
 
             ${buildBaselineControl(card, comparedRows)}
+            ${buildCalendarFinderSection(card, comparedRows)}
             ${buildPrimaryExpiryTable(comparedRows)}
             ${buildBucketSummaryTable(comparedRows)}
+        `;
+    }
+
+    function buildCardHeaderSummary(card) {
+        const historyDocument = readOnlyHistoryDocument(card);
+        return `
+            <div class="ivts-card-overview" aria-label="${escapeHtml(card.symbol)} summary">
+                <span>Underlying <strong data-field="header-underlying">${card.underlyingPrice != null ? `$${formatNumber(card.underlyingPrice, 2)}` : '--'}</strong></span>
+                <span>Samples <strong data-field="header-samples">${historyDocument.samples.length}</strong></span>
+                <span>Last Sync <strong data-field="header-last-sync">${escapeHtml(formatTimestamp(card.lastSyncLabel))}</strong></span>
+            </div>
+            <div class="ivts-card-header-status ${card.statusKind ? `is-${escapeHtml(card.statusKind)}` : ''}" data-field="header-status">
+                ${escapeHtml(card.statusMessage)}
+            </div>
         `;
     }
 
     function buildCardMarkup(card) {
         const sampleDisabled = card.syncInProgress || card.sampleInProgress || (!card.currentFileHandle && (globalScope.showOpenFilePicker || !card.historyDocument));
         const unsubscribeDisabled = !card.ws || (card.ws.readyState !== WebSocket.OPEN && card.ws.readyState !== WebSocket.CONNECTING);
+        const expanded = card.isExpanded === true;
         return `
-            <article class="ivts-card" data-symbol="${escapeHtml(card.symbol)}">
+            <article class="ivts-card ${expanded ? 'is-expanded' : 'is-collapsed'}" data-symbol="${escapeHtml(card.symbol)}">
                 <div class="ivts-card-header">
-                    <div>
-                        <h2>${escapeHtml(card.symbol)}</h2>
+                    <div class="ivts-card-heading">
+                        <div class="ivts-card-title-row">
+                            <button class="ivts-card-toggle" data-action="toggle-card" data-symbol="${escapeHtml(card.symbol)}" type="button" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="ivts-card-body-${escapeHtml(card.symbol)}" title="${expanded ? 'Collapse' : 'Expand'} ${escapeHtml(card.symbol)}">
+                                <span aria-hidden="true">${expanded ? '-' : '+'}</span>
+                                <span class="ivts-sr-only">${expanded ? 'Collapse' : 'Expand'} ${escapeHtml(card.symbol)}</span>
+                            </button>
+                            <h2>${escapeHtml(card.symbol)}</h2>
+                        </div>
                         <div class="ivts-card-meta">
                             ${escapeHtml(card.historyPath)}
                         </div>
+                        ${buildCardHeaderSummary(card)}
                     </div>
                     <div class="ivts-actions">
                         <button class="ivts-btn" data-action="open" data-symbol="${escapeHtml(card.symbol)}">Open History</button>
@@ -1314,17 +1730,64 @@
                         <button class="ivts-btn ivts-btn-warm" data-action="sample" data-symbol="${escapeHtml(card.symbol)}" ${sampleDisabled ? 'disabled' : ''}>Sample</button>
                     </div>
                 </div>
-                <div class="ivts-card-body">
+                <div id="ivts-card-body-${escapeHtml(card.symbol)}" class="ivts-card-body" ${expanded ? '' : 'hidden'}>
                     ${buildCardBodyMarkup(card)}
                 </div>
             </article>
         `;
     }
 
+    function updateCardChrome(card, cardNode) {
+        const expanded = card.isExpanded === true;
+        cardNode.classList.toggle('is-expanded', expanded);
+        cardNode.classList.toggle('is-collapsed', !expanded);
+
+        const toggleButton = cardNode.querySelector('[data-action="toggle-card"]');
+        if (toggleButton) {
+            toggleButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+            toggleButton.title = `${expanded ? 'Collapse' : 'Expand'} ${card.symbol}`;
+            const visible = toggleButton.querySelector('[aria-hidden="true"]');
+            if (visible) {
+                visible.textContent = expanded ? '-' : '+';
+            }
+            const srOnly = toggleButton.querySelector('.ivts-sr-only');
+            if (srOnly) {
+                srOnly.textContent = `${expanded ? 'Collapse' : 'Expand'} ${card.symbol}`;
+            }
+        }
+
+        const historyDocument = readOnlyHistoryDocument(card);
+        const headerUnderlying = cardNode.querySelector('[data-field="header-underlying"]');
+        const headerSamples = cardNode.querySelector('[data-field="header-samples"]');
+        const headerLastSync = cardNode.querySelector('[data-field="header-last-sync"]');
+        const headerStatus = cardNode.querySelector('[data-field="header-status"]');
+        if (headerUnderlying) {
+            headerUnderlying.textContent = card.underlyingPrice != null ? `$${formatNumber(card.underlyingPrice, 2)}` : '--';
+        }
+        if (headerSamples) {
+            headerSamples.textContent = String(historyDocument.samples.length);
+        }
+        if (headerLastSync) {
+            headerLastSync.textContent = formatTimestamp(card.lastSyncLabel);
+        }
+        if (headerStatus) {
+            headerStatus.textContent = card.statusMessage;
+            headerStatus.className = `ivts-card-header-status${card.statusKind ? ` is-${card.statusKind}` : ''}`;
+            headerStatus.setAttribute('data-field', 'header-status');
+        }
+
+        const bodyNode = cardNode.querySelector('.ivts-card-body');
+        if (bodyNode) {
+            bodyNode.hidden = !expanded;
+        }
+    }
+
     function updateCardElement(card, cardNode) {
         if (!cardNode) {
             return;
         }
+
+        updateCardChrome(card, cardNode);
 
         const sampleDisabled = card.syncInProgress || card.sampleInProgress || (!card.currentFileHandle && (globalScope.showOpenFilePicker || !card.historyDocument));
         const unsubscribeDisabled = !card.ws || (card.ws.readyState !== WebSocket.OPEN && card.ws.readyState !== WebSocket.CONNECTING);
@@ -1353,13 +1816,109 @@
 
         const forceBodyRefresh = card.forceBodyRefreshOnce === true;
         card.forceBodyRefreshOnce = false;
-        if (!forceBodyRefresh && isFocusedBaselineSelectInCard(cardNode)) {
+        if (!forceBodyRefresh && isFocusedCardControlInCard(cardNode)) {
             return;
         }
 
         const viewState = captureCardViewState(cardNode.parentElement || cardNode);
         bodyNode.innerHTML = buildCardBodyMarkup(card);
         restoreCardViewState(cardNode.parentElement || cardNode, viewState);
+    }
+
+    function applyCalendarFinderFieldChange(field) {
+        const card = getCard(field.getAttribute('data-symbol'));
+        if (!card) {
+            return;
+        }
+
+        const action = String(field.getAttribute('data-action') || '').trim();
+        const nextConfig = normalizeCalendarFinderConfig(card.calendarFinder);
+        if (action === 'calendar-target-preset') {
+            const value = String(field.value || '').trim();
+            if (value === 'custom') {
+                nextConfig.targetPreset = 'custom';
+            } else if (CALENDAR_TARGET_PRESETS.includes(value)) {
+                nextConfig.targetPreset = value;
+                nextConfig.targetRatio = parseFloat(value);
+            }
+        } else if (action === 'calendar-target-custom') {
+            nextConfig.targetPreset = 'custom';
+            nextConfig.targetRatio = field.value;
+        } else if (action === 'calendar-tolerance') {
+            nextConfig.tolerancePct = field.value;
+        } else if (action === 'calendar-short-min') {
+            nextConfig.shortMinDte = field.value;
+        } else if (action === 'calendar-short-max') {
+            nextConfig.shortMaxDte = field.value;
+        } else if (action === 'calendar-sort') {
+            nextConfig.sortBy = field.value;
+        } else {
+            return;
+        }
+
+        card.calendarFinder = normalizeCalendarFinderConfig(nextConfig);
+        saveCalendarFinderConfig(card.symbol, card.calendarFinder);
+        card.forceBodyRefreshOnce = true;
+        render(true);
+    }
+
+    function toggleCalendarFinderShowAll(button) {
+        const card = getCard(button.getAttribute('data-symbol'));
+        if (!card) {
+            return;
+        }
+        const nextConfig = normalizeCalendarFinderConfig(card.calendarFinder);
+        nextConfig.showAll = !nextConfig.showAll;
+        card.calendarFinder = normalizeCalendarFinderConfig(nextConfig);
+        saveCalendarFinderConfig(card.symbol, card.calendarFinder);
+        card.forceBodyRefreshOnce = true;
+        render(true);
+    }
+
+    function toggleCardExpanded(card) {
+        if (!card) {
+            return;
+        }
+        card.isExpanded = card.isExpanded !== true;
+        render(true);
+    }
+
+    function loadCalendarCandidate(button) {
+        const card = getCard(button.getAttribute('data-symbol'));
+        if (!card) {
+            return;
+        }
+        const handoff = typeof OptionComboCalendarHandoff !== 'undefined' ? OptionComboCalendarHandoff : null;
+        if (!handoff) {
+            setCardStatus(card, 'Calendar handoff module is not loaded.', 'error');
+            render(true);
+            return;
+        }
+
+        const shortExpiry = String(button.getAttribute('data-short-expiry') || '').trim();
+        const longExpiry = String(button.getAttribute('data-long-expiry') || '').trim();
+        const rows = getCalendarFinderRows(card, buildComparedRows(card));
+        const row = rows.find((entry) => entry.shortExpiry === shortExpiry && entry.longExpiry === longExpiry) || null;
+        if (!row) {
+            setCardStatus(card, 'That calendar candidate is no longer available. Refresh and retry.', 'error');
+            render(true);
+            return;
+        }
+
+        const payload = handoff.buildHandoffPayload({
+            symbol: card.symbol,
+            underlyingPrice: card.underlyingPrice,
+            row,
+        });
+        if (!payload || !handoff.saveHandoffPayload(payload)) {
+            setCardStatus(card, 'Could not hand the calendar off to the simulator (missing strikes or storage blocked).', 'error');
+            render(true);
+            return;
+        }
+
+        setCardStatus(card, `Opening simulator with the ${shortExpiry}/${longExpiry} calendar...`, '');
+        render(true);
+        window.open('index.html', '_blank');
     }
 
     function ensureCardShells(container) {
@@ -1446,6 +2005,10 @@
             }
 
             const action = String(button.getAttribute('data-action') || '').trim();
+            if (action === 'toggle-card') {
+                toggleCardExpanded(card);
+                return;
+            }
             if (action === 'open') {
                 openHistoryFile(card);
                 return;
@@ -1465,10 +2028,24 @@
             }
             if (action === 'sample') {
                 sampleCard(card);
+                return;
+            }
+            if (action === 'calendar-show-all') {
+                toggleCalendarFinderShowAll(button);
+                return;
+            }
+            if (action === 'calendar-load') {
+                loadCalendarCandidate(button);
             }
         });
 
         container.addEventListener('change', (event) => {
+            const calendarField = event.target.closest('[data-action^="calendar-"][data-symbol]');
+            if (calendarField && calendarField.getAttribute('data-action') !== 'calendar-show-all') {
+                applyCalendarFinderFieldChange(calendarField);
+                return;
+            }
+
             const field = event.target.closest('select[data-action="baseline"][data-symbol]');
             if (!field) {
                 return;
@@ -1483,7 +2060,7 @@
         });
 
         container.addEventListener('focusout', (event) => {
-            const field = event.target.closest('select[data-action="baseline"][data-symbol]');
+            const field = event.target.closest('select[data-action="baseline"][data-symbol], [data-action^="calendar-"][data-symbol]');
             if (!field) {
                 return;
             }
@@ -1499,11 +2076,21 @@
         _test: {
             normalizeWsHost,
             normalizeWsPort,
+            resolveDefaultExpandedSymbol,
+            createCardState,
             isBaselineSelectElement,
             isFocusedBaselineSelectInCard,
             getPrimaryExpiryRows,
             formatIvPair,
             buildPrimaryExpiryTable,
+            buildCardMarkup,
+            normalizeCalendarFinderConfig,
+            buildCalendarFinderSection,
+            describeCalendarFinderEmptyState,
+            loadSavedCalendarFinderConfig,
+            saveCalendarFinderConfig,
+            captureCardViewState,
+            restoreCardViewState,
         },
     };
 
@@ -1517,7 +2104,7 @@
         const configStatus = document.getElementById('ivtsConfigStatus');
         if (configStatus) {
             configStatus.textContent = runtime.config
-                ? `${runtime.config.symbols.length} ETF symbols loaded via ${runtime.configSourceLabel || 'config'}`
+                ? `${runtime.config.symbols.length} symbols via ${runtime.configSourceLabel || 'config'}`
                 : 'Unavailable';
         }
 

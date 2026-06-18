@@ -63,5 +63,22 @@ module.exports = {
                 assert.match(chartLabHtml, /<script src="js\/page_capabilities\.js"><\/script>/i);
             },
         },
+        {
+            name: 'iv term header keeps IB status inside the socket chip',
+            run() {
+                const html = fs.readFileSync(path.join(PROJECT_ROOT, 'iv_term_structure.html'), 'utf8');
+                const socketStart = html.indexOf('ivts-header-chip ivts-header-chip-socket');
+                const socketEnd = html.indexOf('<main>');
+                const socketRegion = socketStart >= 0 && socketEnd > socketStart
+                    ? html.slice(socketStart, socketEnd)
+                    : '';
+
+                assert.ok(socketRegion, 'socket chip should exist');
+                assert.match(socketRegion, /id="ivtsIbStatus"/);
+                assert.match(socketRegion, /id="ivtsIbConnectButton"/);
+                assert.doesNotMatch(html, /ivts-header-chip-action/);
+                assert.match(html, /ivts-header-chip-config/);
+            },
+        },
     ],
 };

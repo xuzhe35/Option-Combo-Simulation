@@ -285,5 +285,88 @@ module.exports = {
                 assert.equal(harness.callLog.renderHedges.length, 1);
             },
         },
+        {
+            name: 'consumes a pending calendar handoff into a combo group on startup',
+            run() {
+                const takeCalls = [];
+                const harness = loadAppContext({
+                    overrides: {
+                        OptionComboCalendarHandoff: {
+                            takeHandoffPayload() {
+                                takeCalls.push(true);
+                                return {
+                                    version: 1,
+                                    symbol: 'ES',
+                                    underlyingPrice: 6010.25,
+                                    shortExpiry: '20260630',
+                                    longExpiry: '20260720',
+                                    shortStrike: 6010,
+                                    longStrike: 6015,
+                                };
+                            },
+                            buildGroupName(payload) {
+                                return `${payload.symbol} Calendar ${payload.shortExpiry}/${payload.longExpiry}`;
+                            },
+                            buildCalendarLegs(payload, generateId) {
+                                return [
+                                    { id: generateId(), pos: -1, type: 'call' },
+                                    { id: generateId(), pos: -1, type: 'put' },
+                                    { id: generateId(), pos: 1, type: 'call' },
+                                    { id: generateId(), pos: 1, type: 'put' },
+                                ];
+                            },
+                        },
+                        OptionComboGroupEditorUI: {
+                            addGroup(state, generateId) {
+                                state.groups.push({
+                                    id: generateId(),
+                                    name: `Combo Group ${state.groups.length + 1}`,
+                                    legs: [{ id: generateId() }],
+                                });
+                            },
+                            removeGroup() {},
+                            addLegToGroupById() {},
+                            addLegToGroup() {},
+                            removeLeg() {},
+                            renderGroups() {},
+                            toggleGroupCollapse() {},
+                        },
+                    },
+                });
+
+                harness.triggerDomReady();
+
+                assert.equal(takeCalls.length, 1);
+                const state = harness.context.__optionComboApp.getState();
+                assert.equal(state.underlyingSymbol, 'ES');
+                assert.equal(state.underlyingPrice, 6010.25);
+                assert.equal(state.underlyingContractMonth, '202606');
+                assert.equal(state.groups.length, 1);
+                assert.equal(state.groups[0].name, 'ES Calendar 20260630/20260720');
+                assert.equal(state.groups[0].legs.length, 4);
+                assert.deepEqual(Array.from(state.groups[0].legs, (leg) => leg.pos), [-1, -1, 1, 1]);
+            },
+        },
+        {
+            name: 'boots normally when no calendar handoff is pending',
+            run() {
+                const harness = loadAppContext({
+                    overrides: {
+                        OptionComboCalendarHandoff: {
+                            takeHandoffPayload() {
+                                return null;
+                            },
+                        },
+                    },
+                });
+
+                harness.triggerDomReady();
+
+                const state = harness.context.__optionComboApp.getState();
+                assert.equal(state.underlyingSymbol, 'SPY');
+                assert.equal(state.groups.length, 0);
+                assert.equal(harness.callLog.renderGroups.length, 1);
+            },
+        },
     ],
 };
