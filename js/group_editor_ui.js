@@ -962,7 +962,13 @@
             : (group.legs || []).some(leg => Math.abs(parseFloat(leg && leg.pos) || 0) > 0.0001);
         const hasLockedEntryCosts = _groupHasCostForAllPositionedLegs(group);
         const brokerStatus = String(closeExecution.lastPreview && closeExecution.lastPreview.status || '').trim();
-        const isCompleted = brokerStatus === 'Filled';
+        const lastRequestSource = String(closeExecution.lastPreview && closeExecution.lastPreview.requestSource || '').trim();
+        const lastPlanStage = String(closeExecution.lastPreview && closeExecution.lastPreview.closePlanStage || '').trim();
+        const isStagedUnderlyingClose = lastRequestSource === 'close_group_underlying'
+            || (lastPlanStage === 'underlying'
+                && closeExecution.lastPreview
+                && closeExecution.lastPreview.closePlanComplete === false);
+        const isCompleted = brokerStatus === 'Filled' && !isStagedUnderlyingClose;
 
         if (isHistoricalMode) {
             closeExecution.executionMode = 'preview';

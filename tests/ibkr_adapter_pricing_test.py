@@ -61,6 +61,7 @@ if 'ib_async' not in sys.modules:
 from trade_execution.adapters.ibkr import IbkrExecutionAdapter
 from trade_execution.models import (
     ComboLegRequest,
+    ComboOrderPreview,
     ComboOrderRequest,
     HedgeOrderPreview,
     HedgeOrderRequest,
@@ -667,6 +668,461 @@ class IbServerExecutionDispatchTests(unittest.TestCase):
 
 
 class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
+    def _build_close_leg(self, leg_id, pos, right, strike=415, exp_date='20260618'):
+        return ComboLegRequest.from_payload({
+            'id': leg_id,
+            'type': 'put' if right == 'P' else 'call',
+            'pos': pos,
+            'secType': 'OPT',
+            'symbol': 'GLD',
+            'underlyingSymbol': 'GLD',
+            'exchange': 'SMART',
+            'underlyingExchange': 'SMART',
+            'currency': 'USD',
+            'multiplier': '100',
+            'underlyingMultiplier': '100',
+            'right': right,
+            'strike': strike,
+            'expDate': exp_date,
+            'contractMonth': exp_date[:6],
+        })
+
+    def test_assignment_aware_close_plan_replaces_missing_short_put_with_underlying_close(self):
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: [
+                {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260618', 'right': 'C', 'strike': 415, 'position': -16},
+                {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260717', 'right': 'C', 'strike': 415, 'position': 22},
+                {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260717', 'right': 'P', 'strike': 415, 'position': 24},
+                {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 1600},
+            ],
+        )
+        request = ComboOrderRequest(
+            group_id='group_gld',
+            group_name='GLD Assignment Close',
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='U1',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[
+                self._build_close_leg('short_call', 16, 'C'),
+                self._build_close_leg('assigned_put', 16, 'P'),
+                self._build_close_leg('long_call', -22, 'C', exp_date='20260717'),
+                self._build_close_leg('long_put', -24, 'P', exp_date='20260717'),
+            ],
+        )
+
+        plan = adapter._build_assignment_aware_close_plan(request)
+
+        self.assertEqual([leg.id for leg in plan['optionRequest'].legs], ['short_call', 'long_call', 'long_put'])
+        self.assertEqual(plan['underlyingLegs'][0].sec_type, 'STK')
+        self.assertEqual(plan['underlyingLegs'][0].symbol, 'GLD')
+        self.assertEqual(plan['underlyingLegs'][0].pos, -1600)
+        adjustment = plan['assignmentAdjustments'][0]
+        self.assertEqual(adjustment['optionLegId'], 'assigned_put')
+        self.assertEqual(adjustment['assignedOptionPosition'], -16)
+        self.assertEqual(adjustment['remainingOptionPosition'], 0)
+        self.assertEqual(adjustment['underlyingQuantity'], 1600)
+        self.assertEqual(adjustment['underlyingClosePosition'], -1600)
+
+    def test_assignment_aware_close_plan_keeps_remaining_partially_assigned_option_leg(self):
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: [
+                {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260618', 'right': 'P', 'strike': 415, 'position': -6},
+                {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 1000},
+            ],
+        )
+        request = ComboOrderRequest(
+            group_id='group_gld_partial',
+            group_name='GLD Partial Assignment Close',
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='U1',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[self._build_close_leg('partial_put', 16, 'P')],
+        )
+
+        plan = adapter._build_assignment_aware_close_plan(request)
+
+        self.assertEqual(len(plan['optionRequest'].legs), 1)
+        self.assertEqual(plan['optionRequest'].legs[0].id, 'partial_put')
+        self.assertEqual(plan['optionRequest'].legs[0].pos, 6)
+        self.assertEqual(plan['underlyingLegs'][0].pos, -1000)
+        adjustment = plan['assignmentAdjustments'][0]
+        self.assertEqual(adjustment['assignedOptionPosition'], -10)
+        self.assertEqual(adjustment['remainingOptionPosition'], -6)
+        self.assertEqual(adjustment['underlyingQuantity'], 1000)
+
+    def test_assignment_aware_close_plan_clamps_merged_futures_underlying_demands(self):
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: [
+                {'account': 'U1', 'secType': 'FUT', 'symbol': 'ES', 'expDate': '202606', 'multiplier': '5', 'position': -2},
+            ],
+        )
+        assigned_fop = ComboLegRequest.from_payload({
+            'id': 'assigned_fop_call',
+            'type': 'call',
+            'pos': 2,
+            'secType': 'FOP',
+            'symbol': 'ES',
+            'underlyingSymbol': 'ES',
+            'exchange': 'CME',
+            'underlyingExchange': 'CME',
+            'currency': 'USD',
+            'multiplier': '50',
+            'underlyingMultiplier': '5',
+            'right': 'C',
+            'strike': 5000,
+            'expDate': '20260619',
+            'contractMonth': '202606',
+            'underlyingContractMonth': '202606',
+        })
+        explicit_future = ComboLegRequest.from_payload({
+            'id': 'explicit_future',
+            'type': 'future',
+            'pos': 2,
+            'secType': 'FUT',
+            'symbol': 'ES',
+            'exchange': 'GLOBEX',
+            'currency': 'USD',
+            'multiplier': '5.0',
+            'contractMonth': '202606',
+        })
+        request = ComboOrderRequest(
+            group_id='group_es_assignment',
+            group_name='ES Assignment Close',
+            underlying_symbol='ES',
+            underlying_contract_month='202606',
+            execution_mode='submit',
+            account='U1',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[assigned_fop, explicit_future],
+        )
+
+        plan = adapter._build_assignment_aware_close_plan(request)
+
+        self.assertEqual(sum(leg.pos for leg in plan['underlyingLegs']), 2)
+        self.assertEqual(len(plan['underlyingLegs']), 1)
+        self.assertEqual(plan['underlyingLegs'][0].sec_type, 'FUT')
+        self.assertEqual(plan['assignmentAdjustments'][0]['underlyingClosePosition'], 2)
+        self.assertTrue(any('Only 2 of 4 requested FUT ES' in message for message in plan['messages']))
+
+    def test_assignment_close_plan_preserves_deliverable_when_underlying_nets_flat(self):
+        # Short put assigned, but the deliverable underlying already nets flat in TWS (position 0),
+        # so no underlying close order is produced. The deliverable must still be reported so the
+        # client can book the option->underlying conversion instead of leaving a phantom open leg.
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: [
+                {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 0},
+                {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260717', 'right': 'C', 'strike': 415, 'position': 5},
+            ],
+        )
+        request = ComboOrderRequest(
+            group_id='group_gld_netted',
+            group_name='GLD Netted Assignment Close',
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='U1',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[self._build_close_leg('assigned_put', 16, 'P')],
+        )
+
+        plan = adapter._build_assignment_aware_close_plan(request)
+
+        self.assertEqual(plan['optionRequest'].legs, [])
+        self.assertEqual(plan['underlyingLegs'], [])
+        adjustment = plan['assignmentAdjustments'][0]
+        self.assertEqual(adjustment['assignedOptionPosition'], -16)
+        self.assertEqual(adjustment['deliverableUnderlyingPosition'], 1600)
+        self.assertEqual(adjustment['underlyingClosePosition'], 0)
+        self.assertEqual(adjustment['underlyingQuantity'], 0)
+
+    def test_test_submit_underlying_first_order_uses_guardrail_price(self):
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+        request = ComboOrderRequest(
+            group_id='group_test_underlying',
+            group_name='Test Underlying',
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='test_submit',
+            execution_intent='close',
+            request_source='close_group',
+        )
+        leg = ComboLegRequest.from_payload({
+            'id': 'stock_leg',
+            'type': 'stock',
+            'pos': -1600,
+            'secType': 'STK',
+            'symbol': 'GLD',
+            'exchange': 'SMART',
+            'currency': 'USD',
+        })
+
+        order = adapter._build_underlying_close_order(
+            request,
+            leg,
+            {'bid': 413.2, 'ask': 413.3, 'mark': 413.25},
+        )
+
+        self.assertEqual(order.action, 'SELL')
+        self.assertGreater(order.lmtPrice, 413.25)
+
+    async def test_preview_assignment_close_shows_underlying_stage_without_assigned_option(self):
+        resolved_leg_ids = []
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: [
+                {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 1600},
+            ],
+        )
+
+        async def fake_resolve(_websocket, leg_request):
+            resolved_leg_ids.append(leg_request.id)
+            self.assertEqual(leg_request.sec_type, 'STK')
+            return (
+                SimpleNamespace(conId=7101, secType='STK', symbol='GLD', localSymbol='GLD', exchange='SMART'),
+                {'bid': 413.2, 'ask': 413.3, 'mark': 413.25},
+            )
+
+        adapter._resolve_leg_contract_and_mark = fake_resolve
+        request = ComboOrderRequest(
+            group_id='group_preview_assignment',
+            group_name='GLD Preview Assignment',
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='preview',
+            account='U1',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[self._build_close_leg('assigned_put', 16, 'P')],
+        )
+
+        preview = await adapter.preview_combo_order(object(), request)
+
+        self.assertEqual(resolved_leg_ids, ['__assigned_underlying_assigned_put'])
+        self.assertEqual(preview.request_source, 'close_group_underlying')
+        self.assertEqual(preview.close_plan_stage, 'underlying')
+        self.assertEqual(preview.close_plan_complete, False)
+        self.assertEqual(preview.legs[0].sec_type, 'STK')
+        self.assertEqual(preview.assignment_adjustments[0]['optionLegId'], 'assigned_put')
+        self.assertIn('account-level TWS portfolio positions', preview.pricing_note)
+
+    async def test_validate_assignment_close_excludes_assigned_option_leg(self):
+        validated_leg_ids = []
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: [
+                {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260618', 'right': 'C', 'strike': 415, 'position': -16},
+                {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 1600},
+            ],
+        )
+
+        async def fake_validate(leg_request):
+            validated_leg_ids.append(leg_request.id)
+            return SimpleNamespace(
+                conId=7200 + len(validated_leg_ids),
+                secType=leg_request.sec_type,
+                symbol=leg_request.symbol,
+                localSymbol=leg_request.symbol,
+            )
+
+        adapter._validate_leg_contract = fake_validate
+        request = ComboOrderRequest(
+            group_id='group_validate_assignment',
+            group_name='GLD Validate Assignment',
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='U1',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[
+                self._build_close_leg('short_call', 16, 'C'),
+                self._build_close_leg('assigned_put', 16, 'P'),
+            ],
+        )
+
+        result = await adapter.validate_combo_order(object(), request)
+
+        self.assertTrue(result.valid)
+        self.assertEqual(validated_leg_ids, ['__assigned_underlying_assigned_put', 'short_call'])
+
+    async def test_submit_closes_assignment_underlying_before_remaining_options(self):
+        events = []
+        placed_orders = []
+        preregistered_sources = []
+        resolved_leg_ids = []
+
+        class _SubmitIb:
+            def __init__(self):
+                self.orderStatusEvent = _DummyEvent()
+
+            def placeOrder(self, contract, order):
+                order_index = len(placed_orders)
+                order.orderId = 5100 + order_index
+                status = 'Filled' if order_index == 0 else 'Submitted'
+                avg_fill = 413.2 if order_index == 0 else 0
+                trade = SimpleNamespace(
+                    order=order,
+                    contract=contract,
+                    orderStatus=SimpleNamespace(
+                        permId=6100 + order_index,
+                        status=status,
+                        filled=getattr(order, 'totalQuantity', 0) if status == 'Filled' else 0,
+                        remaining=0 if status == 'Filled' else getattr(order, 'totalQuantity', 0),
+                        avgFillPrice=avg_fill,
+                        lastFillPrice=avg_fill,
+                        whyHeld='',
+                        mktCapPrice=0,
+                    ),
+                    fills=[],
+                    log=[],
+                    advancedError='',
+                )
+                placed_orders.append((contract, order, trade))
+                events.append(f"place:{getattr(contract, 'secType', '')}:{getattr(order, 'action', '')}")
+                return trade
+
+        def on_combo_order_placed(_websocket, placed_request, _trade, _tracking_legs):
+            preregistered_sources.append(placed_request.request_source)
+            events.append(f"register:{placed_request.request_source}")
+            return None
+
+        adapter = IbkrExecutionAdapter(
+            ib=_SubmitIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            on_combo_order_placed=on_combo_order_placed,
+            portfolio_positions_provider=lambda: [
+                {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260618', 'right': 'C', 'strike': 415, 'position': -16},
+                {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 1600},
+            ],
+        )
+        adapter._register_managed_context = lambda *args, **kwargs: None
+
+        async def fake_resolve_contract(_websocket, leg_request):
+            resolved_leg_ids.append(leg_request.id)
+            if leg_request.sec_type == 'STK':
+                self.assertEqual(leg_request.symbol, 'GLD')
+                self.assertEqual(leg_request.pos, -1600)
+                return (
+                    SimpleNamespace(conId=7001, secType='STK', symbol='GLD', localSymbol='GLD', exchange='SMART'),
+                    {'bid': 413.2, 'ask': 413.3, 'mark': 413.25},
+                )
+            self.assertEqual(leg_request.sec_type, 'OPT')
+            self.assertEqual(leg_request.id, 'short_call')
+            self.assertEqual(leg_request.pos, 16)
+            return (
+                SimpleNamespace(
+                    conId=7002,
+                    secType='OPT',
+                    symbol='GLD',
+                    localSymbol='GLD  260618C00415000',
+                    exchange='SMART',
+                    currency='USD',
+                    right='C',
+                    strike=415.0,
+                ),
+                {'bid': 2.0, 'ask': 2.2, 'mark': 2.1},
+            )
+
+        adapter._resolve_leg_contract_and_mark = fake_resolve_contract
+
+        request = ComboOrderRequest(
+            group_id='group_assignment_submit',
+            group_name='GLD Assignment Submit',
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='U1',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[
+                self._build_close_leg('short_call', 16, 'C'),
+                self._build_close_leg('assigned_put', 16, 'P'),
+            ],
+        )
+
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(seconds):
+            events.append(f"sleep:{seconds}")
+            await real_sleep(0)
+
+        asyncio.sleep = fake_sleep
+        try:
+            result = await adapter.submit_combo_order(object(), request)
+        finally:
+            asyncio.sleep = real_sleep
+
+        self.assertEqual(
+            events,
+            [
+                'place:STK:SELL',
+                'register:close_group_underlying',
+                'sleep:3.0',
+                'place:OPT:BUY',
+                'register:close_group',
+                'sleep:1.5',
+            ],
+        )
+        self.assertEqual(preregistered_sources, ['close_group_underlying', 'close_group'])
+        self.assertEqual(resolved_leg_ids, ['__assigned_underlying_assigned_put', 'short_call'])
+        self.assertEqual(placed_orders[1][0].secType, 'OPT')
+        self.assertEqual(placed_orders[1][1].totalQuantity, 16)
+        self.assertEqual(result.order_id, 5101)
+        self.assertEqual(result.status, 'Submitted')
+        self.assertEqual(result.preview.close_plan_stage, 'options')
+        self.assertEqual(result.preview.close_plan_complete, None)
+        self.assertIn('regular order instead of BAG', result.preview.pricing_note)
+        self.assertIn('account-level TWS portfolio positions', result.preview.close_plan_message)
+        self.assertEqual(result.preview.staged_orders[0]['orderId'], 5100)
+        self.assertEqual(result.preview.staged_orders[0]['orderAction'], 'SELL')
+        self.assertEqual(result.preview.assignment_adjustments[0]['optionLegId'], 'assigned_put')
+        self.assertEqual(result.preview.assignment_adjustments[0]['underlyingAvgFillPrice'], 413.2)
+
     async def test_pre_registers_combo_tracking_before_settle_sleep(self):
         events = []
 
@@ -710,18 +1166,17 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
         )
         adapter._register_managed_context = lambda *args, **kwargs: None
 
-        preview = SimpleNamespace(
+        preview = ComboOrderPreview(
+            group_id='group_pre_reg',
+            group_name='Pre Registration',
             combo_symbol='SPY',
             combo_exchange='SMART',
             order_action='BUY',
             total_quantity=1,
             limit_price=1.25,
+            pricing_source='middle',
             raw_net_mid=1.25,
             execution_mode='submit',
-            account='',
-            pricing_source='middle',
-            pricing_note='',
-            legs=[],
         )
         order = SimpleNamespace(
             action='BUY',
@@ -780,6 +1235,118 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.order_id, 4500)
         self.assertEqual(result.perm_id, 4501)
         self.assertIs(result.trade.order, order)
+
+    async def test_submit_result_uses_error_message_captured_during_pre_registration(self):
+        captured_tracking = {
+            'status': 'Inactive',
+            'statusMessage': 'IB 201: Order rejected - reason: Available Funds are insufficient.',
+        }
+
+        class _SubmitIb:
+            def __init__(self):
+                self.orderStatusEvent = _DummyEvent()
+
+            def placeOrder(self, contract, order):
+                order.orderId = 4600
+                return SimpleNamespace(
+                    order=order,
+                    orderStatus=SimpleNamespace(
+                        permId=4601,
+                        status='PendingSubmit',
+                        filled=0,
+                        remaining=1,
+                        avgFillPrice=0,
+                        lastFillPrice=0,
+                        whyHeld='',
+                        mktCapPrice=0,
+                    ),
+                    log=[],
+                    advancedError='',
+                )
+
+        def on_combo_order_placed(_websocket, _request, _trade, _tracking_legs):
+            return captured_tracking
+
+        adapter = IbkrExecutionAdapter(
+            ib=_SubmitIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            on_combo_order_placed=on_combo_order_placed,
+        )
+        adapter._register_managed_context = lambda *args, **kwargs: None
+
+        preview = ComboOrderPreview(
+            group_id='group_rejected',
+            group_name='Rejected Combo',
+            combo_symbol='SPY',
+            combo_exchange='SMART',
+            order_action='BUY',
+            total_quantity=1,
+            limit_price=1.25,
+            pricing_source='middle',
+            raw_net_mid=1.25,
+            execution_mode='submit',
+        )
+        order = SimpleNamespace(
+            action='BUY',
+            orderType='LMT',
+            totalQuantity=1,
+            lmtPrice=1.25,
+            tif='DAY',
+            transmit=True,
+        )
+        resolved_legs = [{
+            'request': SimpleNamespace(id='leg_1', exp_date='2026-06-19'),
+            'contract': SimpleNamespace(
+                conId=12345,
+                localSymbol='SPY  260619C00500000',
+                symbol='SPY',
+                secType='OPT',
+                right='C',
+                strike=500.0,
+            ),
+            'pos': 1,
+            'ratio': 1,
+            'quote': {'bid': 1.2, 'ask': 1.3, 'mark': 1.25},
+        }]
+
+        async def fake_build(_websocket, _request):
+            return {
+                'comboContract': SimpleNamespace(secType='BAG'),
+                'order': order,
+                'preview': preview,
+                'resolvedLegs': resolved_legs,
+            }
+
+        adapter._build_combo_order_from_request = fake_build
+
+        request = ComboOrderRequest(
+            group_id='group_rejected',
+            group_name='Rejected Combo',
+            underlying_symbol='SPY',
+            underlying_contract_month='',
+            execution_mode='submit',
+        )
+
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(_seconds):
+            await real_sleep(0)
+
+        asyncio.sleep = fake_sleep
+        try:
+            result = await adapter.submit_combo_order(object(), request)
+        finally:
+            asyncio.sleep = real_sleep
+
+        self.assertEqual(result.status, 'Inactive')
+        self.assertEqual(
+            result.status_message,
+            'IB 201: Order rejected - reason: Available Funds are insufficient.',
+        )
+        self.assertEqual(result.to_payload()['statusMessage'], result.status_message)
 
 
 class IbkrAdapterManagedAdoptionTests(unittest.TestCase):

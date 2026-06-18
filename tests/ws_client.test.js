@@ -4224,6 +4224,84 @@ module.exports = {
             },
         },
         {
+            name: 'preserves readable reject reason when final submit result arrives after status update',
+            run() {
+                const state = {
+                    groups: [
+                        {
+                            id: 'group_1',
+                            tradeTrigger: {
+                                enabled: false,
+                                pendingRequest: false,
+                                status: 'error',
+                                lastPreview: {
+                                    executionMode: 'submit',
+                                    orderId: 42567,
+                                    permId: 429367627,
+                                    status: 'Inactive',
+                                    statusMessage: 'IB 201: Order rejected - reason: Available Funds are insufficient.',
+                                },
+                                lastError: 'IB 201: Order rejected - reason: Available Funds are insufficient.',
+                            },
+                        },
+                    ],
+                };
+
+                let renderCalls = 0;
+                let updateCalls = 0;
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/trade_trigger_logic.js',
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {
+                            renderCalls += 1;
+                        },
+                        updateDerivedValues() {
+                            updateCalls += 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const handled = ctx._applyComboOrderResult({
+                    action: 'combo_order_submit_result',
+                    groupId: 'group_1',
+                    order: {
+                        executionMode: 'submit',
+                        orderId: 42567,
+                        permId: 429367627,
+                        status: 'Inactive',
+                    },
+                });
+
+                assert.equal(handled, true);
+                assert.equal(state.groups[0].tradeTrigger.status, 'error');
+                assert.match(
+                    state.groups[0].tradeTrigger.lastError,
+                    /available funds are insufficient/i
+                );
+                assert.match(
+                    state.groups[0].tradeTrigger.lastPreview.statusMessage,
+                    /available funds are insufficient/i
+                );
+                assert.equal(renderCalls, 1);
+                assert.equal(updateCalls, 1);
+            },
+        },
+        {
             name: 'does not mark managed terminal confirmation updates as trigger errors',
             run() {
                 const state = {

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime
+from dataclasses import replace
 from math import gcd, isfinite
 from decimal import Decimal, ROUND_FLOOR, ROUND_CEILING
 
@@ -64,6 +65,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         logger=None,
         emit_order_update=None,
         on_combo_order_placed=None,
+        portfolio_positions_provider=None,
     ):
         self.ib = ib
         self.client_subscriptions = client_subscriptions
@@ -73,7 +75,9 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.logger = logger or logging.getLogger(__name__)
         self.emit_order_update = emit_order_update
         self.on_combo_order_placed = on_combo_order_placed
+        self.portfolio_positions_provider = portfolio_positions_provider
         self.what_if_timeout_seconds = 4.0
+        self.underlying_close_settle_seconds = 3.0
         self.test_only_buy_factor = 0.2
         self.test_only_sell_factor = 5.0
         self.test_only_small_credit_buffer = 0.5
@@ -882,6 +886,752 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             return False
         return True
 
+    def _is_assignment_aware_close_request(self, request):
+        return (
+            self._normalize_symbol(getattr(request, 'execution_mode', '')) in {'PREVIEW', 'SUBMIT', 'TEST_SUBMIT'}
+            and self._normalize_symbol(getattr(request, 'execution_intent', '')) == 'CLOSE'
+            and str(getattr(request, 'request_source', '') or '').strip() == 'close_group'
+            and callable(self.portfolio_positions_provider)
+        )
+
+    def _get_portfolio_position_items(self):
+        if not callable(self.portfolio_positions_provider):
+            return []
+        try:
+            items = self.portfolio_positions_provider()
+        except Exception:
+            self.logger.exception('Failed to read TWS portfolio positions for assignment-aware close.')
+            return []
+        return [item for item in (items or []) if isinstance(item, dict)]
+
+    def _portfolio_item_matches_account(self, item, account):
+        requested_account = str(account or '').strip()
+        if not requested_account:
+            return True
+        return str(item.get('account') or '').strip() == requested_account
+
+    def _portfolio_item_position(self, item):
+        try:
+            position = float(item.get('position') or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return position if abs(position) > 0.000001 else 0.0
+
+    def _portfolio_has_symbol_snapshot(self, request, items):
+        requested_account = str(getattr(request, 'account', '') or '').strip()
+        requested_symbols = set()
+        profile = getattr(request, 'profile', None) or {}
+        for symbol in (
+            getattr(request, 'underlying_symbol', ''),
+            profile.get('underlyingSymbol'),
+            profile.get('optionSymbol'),
+        ):
+            normalized = self._normalize_symbol(symbol)
+            if normalized:
+                requested_symbols.add(normalized)
+        for leg_request in getattr(request, 'legs', None) or []:
+            for symbol in (leg_request.symbol, leg_request.underlying_symbol):
+                normalized = self._normalize_symbol(symbol)
+                if normalized:
+                    requested_symbols.add(normalized)
+
+        if not requested_symbols:
+            return bool(items)
+
+        for item in items:
+            if not self._portfolio_item_matches_account(item, requested_account):
+                continue
+            if self._normalize_symbol(item.get('symbol')) in requested_symbols:
+                return True
+        return False
+
+    def _find_portfolio_item_for_leg(self, leg_request, request, items):
+        sec_type = self._normalize_symbol(leg_request.sec_type)
+        symbol = self._normalize_symbol(leg_request.symbol)
+        account = str(getattr(request, 'account', '') or '').strip()
+        exp_date = self._to_expiry(leg_request.exp_date)
+        right = self._normalize_symbol(leg_request.right)
+        strike = leg_request.strike
+
+        for item in items:
+            if not self._portfolio_item_matches_account(item, account):
+                continue
+            if self._normalize_symbol(item.get('secType')) != sec_type:
+                continue
+            if self._normalize_symbol(item.get('symbol')) != symbol:
+                continue
+
+            if sec_type in {'STK', 'IND'}:
+                return item
+
+            if sec_type == 'FUT':
+                contract_month = self._to_contract_month(leg_request.contract_month)
+                item_month = self._to_contract_month(item.get('expDate'))
+                if contract_month and item_month and contract_month != item_month:
+                    continue
+                return item
+
+            if sec_type in {'OPT', 'FOP'}:
+                if self._to_expiry(item.get('expDate')) != exp_date:
+                    continue
+                if self._normalize_symbol(item.get('right')) != right:
+                    continue
+                try:
+                    item_strike = float(item.get('strike'))
+                    request_strike = float(strike)
+                except (TypeError, ValueError):
+                    continue
+                if abs(item_strike - request_strike) > 0.0001:
+                    continue
+                return item
+        return None
+
+    def _clamp_close_position_to_actual(self, close_position, actual_position):
+        try:
+            close_position = int(close_position or 0)
+            actual_position = float(actual_position or 0)
+        except (TypeError, ValueError):
+            return 0
+        if close_position == 0 or abs(actual_position) < 0.000001:
+            return 0
+        if (close_position > 0 and actual_position > 0) or (close_position < 0 and actual_position < 0):
+            return 0
+        close_quantity = min(abs(close_position), int(abs(actual_position)))
+        return close_quantity if close_position > 0 else -close_quantity
+
+    def _settlement_units_for_option_leg(self, leg_request):
+        sec_type = self._normalize_symbol(leg_request.sec_type)
+        if sec_type == 'FOP':
+            return 1
+        try:
+            multiplier = int(float(leg_request.multiplier or leg_request.underlying_multiplier or 100))
+        except (TypeError, ValueError):
+            multiplier = 100
+        return max(multiplier, 1)
+
+    def _assignment_underlying_position(self, leg_request, assigned_option_position):
+        units = self._settlement_units_for_option_leg(leg_request)
+        right = self._normalize_symbol(leg_request.right)
+        if right == 'C':
+            return int(assigned_option_position * units)
+        if right == 'P':
+            return int(-assigned_option_position * units)
+        return 0
+
+    def _build_underlying_leg_from_option_assignment(self, leg_request, close_position):
+        sec_type = 'FUT' if self._normalize_symbol(leg_request.sec_type) == 'FOP' else 'STK'
+        symbol = (
+            leg_request.underlying_symbol
+            or (self._resolve_family_defaults(leg_request.symbol) or {}).get('underlying_symbol')
+            or leg_request.symbol
+        )
+        exchange = leg_request.underlying_exchange or leg_request.exchange or 'SMART'
+        multiplier = leg_request.underlying_multiplier if sec_type == 'FUT' else ''
+        contract_month = leg_request.underlying_contract_month if sec_type == 'FUT' else ''
+        return replace(
+            leg_request,
+            id=f"__assigned_underlying_{leg_request.id or 'leg'}",
+            type='stock',
+            pos=int(close_position),
+            sec_type=sec_type,
+            symbol=symbol,
+            underlying_symbol=symbol,
+            exchange=exchange,
+            underlying_exchange=exchange,
+            multiplier=str(multiplier or ''),
+            underlying_multiplier=str(multiplier or ''),
+            trading_class=None,
+            right='',
+            strike=None,
+            exp_date='',
+            contract_month=contract_month,
+            underlying_contract_month=contract_month,
+        )
+
+    def _contract_number_key(self, value):
+        if value in (None, ''):
+            return ''
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value or '').strip()
+        if number.is_integer():
+            return str(int(number))
+        return f"{number:g}"
+
+    def _portfolio_item_contract_key(self, item):
+        account = str(item.get('account') or '').strip()
+        con_id = item.get('conId')
+        if con_id not in (None, ''):
+            try:
+                normalized_con_id = int(con_id)
+            except (TypeError, ValueError):
+                normalized_con_id = str(con_id).strip()
+            return ('conId', account, normalized_con_id)
+
+        sec_type = self._normalize_symbol(item.get('secType'))
+        symbol = self._normalize_symbol(item.get('symbol'))
+        multiplier = self._contract_number_key(item.get('multiplier'))
+        if sec_type in {'OPT', 'FOP'}:
+            return (
+                'contract',
+                account,
+                sec_type,
+                symbol,
+                self._to_expiry(item.get('expDate')),
+                self._normalize_symbol(item.get('right')),
+                self._contract_number_key(item.get('strike')),
+                multiplier,
+            )
+        if sec_type == 'FUT':
+            return (
+                'contract',
+                account,
+                sec_type,
+                symbol,
+                self._to_contract_month(item.get('expDate')),
+                multiplier,
+            )
+        return ('contract', account, sec_type, symbol)
+
+    def _portfolio_item_label(self, item):
+        sec_type = self._normalize_symbol(item.get('secType'))
+        symbol = self._normalize_symbol(item.get('symbol'))
+        if sec_type in {'OPT', 'FOP'}:
+            return (
+                f"{sec_type} {symbol} {self._to_expiry(item.get('expDate'))} "
+                f"{self._normalize_symbol(item.get('right'))}{self._contract_number_key(item.get('strike'))}"
+            ).strip()
+        if sec_type == 'FUT':
+            return f"{sec_type} {symbol} {self._to_contract_month(item.get('expDate'))}".strip()
+        return f"{sec_type} {symbol}".strip()
+
+    def _reset_assignment_underlying_allocation(self, source):
+        if (source or {}).get('kind') != 'assignment':
+            return
+        adjustment = source.get('adjustment') or {}
+        adjustment['underlyingClosePosition'] = 0
+        adjustment['underlyingQuantity'] = 0
+
+    def _add_underlying_close_demand(self, aggregate, request, portfolio_items, leg_request, source, messages):
+        item = self._find_portfolio_item_for_leg(leg_request, request, portfolio_items)
+        if item is None:
+            messages.append(
+                f"Skipped underlying close demand for {leg_request.id or leg_request.symbol}: "
+                f"no matching TWS portfolio position was found."
+            )
+            self._reset_assignment_underlying_allocation(source)
+            return
+
+        key = self._portfolio_item_contract_key(item)
+        bucket = aggregate.setdefault(key, {
+            'item': item,
+            'demands': [],
+        })
+        bucket['demands'].append({
+            'leg': replace(leg_request),
+            'requestedClosePosition': int(leg_request.pos or 0),
+            'source': source,
+        })
+
+    def _append_assignment_close_plan_warnings(self, messages, assignment_adjustments, underlying_legs):
+        if any('account-level TWS portfolio positions' in str(message) for message in messages):
+            return
+        messages.insert(
+            0,
+            'Close Group uses account-level TWS portfolio positions; '
+            'it cannot distinguish other groups or manual positions that share the same contract.'
+        )
+        messages.insert(
+            1,
+            'Using the latest cached TWS portfolio snapshot. Refresh/sync TWS before closing if positions changed.'
+        )
+        if underlying_legs and not any('legged workflow' in str(message) for message in messages):
+            messages.insert(
+                2,
+                'Underlying-first Close is a legged workflow; remaining option legs are submitted only after '
+                'the underlying stage fills, which can briefly change hedge exposure.'
+            )
+
+    def _allocate_underlying_close_demands(self, aggregate, messages):
+        underlying_legs = []
+        for bucket in aggregate.values():
+            item = bucket.get('item') or {}
+            demands = list(bucket.get('demands') or [])
+            requested_total = sum(int(demand.get('requestedClosePosition') or 0) for demand in demands)
+            actual_position = self._portfolio_item_position(item)
+            closeable_total = self._clamp_close_position_to_actual(
+                requested_total,
+                actual_position,
+            )
+            item_label = self._portfolio_item_label(item)
+            if not closeable_total:
+                messages.append(
+                    f"Skipped inferred underlying close for {item_label}: "
+                    f"TWS position {actual_position:g} does not match requested close direction {requested_total:g}."
+                )
+                for demand in demands:
+                    self._reset_assignment_underlying_allocation(demand.get('source'))
+                continue
+
+            if abs(closeable_total) < abs(requested_total):
+                messages.append(
+                    f"Only {abs(closeable_total):g} of {abs(requested_total):g} requested "
+                    f"{item_label} underlying unit(s) are available in TWS; closing the available amount."
+                )
+
+            remaining = abs(int(closeable_total))
+            direction = 1 if closeable_total > 0 else -1
+            for demand in demands:
+                requested_position = int(demand.get('requestedClosePosition') or 0)
+                source = demand.get('source') or {}
+                allocated_position = 0
+                if requested_position * direction > 0 and remaining > 0:
+                    allocated_quantity = min(abs(requested_position), remaining)
+                    allocated_position = direction * allocated_quantity
+                    remaining -= allocated_quantity
+
+                if not allocated_position:
+                    self._reset_assignment_underlying_allocation(source)
+                    continue
+
+                leg = replace(demand['leg'], pos=allocated_position)
+                if source.get('kind') == 'assignment':
+                    adjustment = source.get('adjustment') or {}
+                    adjustment['underlyingLegId'] = leg.id
+                    adjustment['underlyingClosePosition'] = allocated_position
+                    adjustment['underlyingQuantity'] = -allocated_position
+                underlying_legs.append(leg)
+
+        return underlying_legs
+
+    def _build_assignment_aware_close_plan(self, request):
+        if not self._is_assignment_aware_close_request(request):
+            return {
+                'optionRequest': request,
+                'underlyingLegs': [],
+                'assignmentAdjustments': [],
+                'messages': [],
+            }
+
+        portfolio_items = self._get_portfolio_position_items()
+        if not self._portfolio_has_symbol_snapshot(request, portfolio_items):
+            raise ValueError(
+                'TWS portfolio positions are not ready for assignment-aware Close. '
+                'Refresh/sync the TWS portfolio snapshot, then try Close Group again.'
+            )
+
+        option_legs = []
+        underlying_aggregate = {}
+        assignment_adjustments = []
+        messages = []
+
+        for leg_request in request.legs:
+            requested_close_position = int(leg_request.pos or 0)
+            if requested_close_position == 0:
+                continue
+
+            sec_type = self._normalize_symbol(leg_request.sec_type)
+            item = self._find_portfolio_item_for_leg(leg_request, request, portfolio_items)
+            actual_position = self._portfolio_item_position(item) if item else 0.0
+            closeable_position = self._clamp_close_position_to_actual(
+                requested_close_position,
+                actual_position,
+            )
+
+            if sec_type in {'OPT', 'FOP'}:
+                if closeable_position:
+                    option_legs.append(replace(leg_request, pos=closeable_position))
+
+                missing_quantity = abs(requested_close_position) - abs(closeable_position)
+                if missing_quantity <= 0:
+                    continue
+
+                assigned_option_position = (-1 if requested_close_position > 0 else 1) * missing_quantity
+                underlying_position = self._assignment_underlying_position(
+                    leg_request,
+                    assigned_option_position,
+                )
+                underlying_close_position = -underlying_position
+                if underlying_close_position == 0:
+                    raise ValueError(
+                        f"Cannot infer assignment/exercise deliverable for "
+                        f"{leg_request.id or self._describe_contract_request(leg_request)}: "
+                        f"unsupported option right {leg_request.right!r}."
+                    )
+
+                underlying_leg = self._build_underlying_leg_from_option_assignment(
+                    leg_request,
+                    underlying_close_position,
+                )
+                adjustment = {
+                    'adjustmentId': f"{leg_request.id or 'leg'}:{assigned_option_position}",
+                    'optionLegId': leg_request.id,
+                    'assignedOptionPosition': assigned_option_position,
+                    'remainingOptionPosition': -closeable_position if closeable_position else 0,
+                    'underlyingLegId': underlying_leg.id,
+                    'underlyingSecType': underlying_leg.sec_type,
+                    'underlyingSymbol': underlying_leg.symbol,
+                    # Deliverable produced by the assignment/exercise (cost basis = strike). Invariant:
+                    # it is never cleared by allocation, so the client can always book the conversion
+                    # even when the close order nets to zero against an existing TWS position.
+                    'deliverableUnderlyingPosition': underlying_position,
+                    'underlyingQuantity': underlying_position,
+                    'underlyingClosePosition': underlying_close_position,
+                    'assignmentStrike': leg_request.strike,
+                    'assignmentRight': leg_request.right,
+                    'source': 'tws_assignment_close_plan',
+                }
+                assignment_adjustments.append(adjustment)
+                self._add_underlying_close_demand(
+                    underlying_aggregate,
+                    request,
+                    portfolio_items,
+                    underlying_leg,
+                    {
+                        'kind': 'assignment',
+                        'adjustment': adjustment,
+                    },
+                    messages,
+                )
+                messages.append(
+                    f"Detected assignment/exercise on {leg_request.id or self._describe_contract_request(leg_request)}: "
+                    f"{missing_quantity} contract(s) no longer exist in TWS; "
+                    f"will close {abs(underlying_close_position)} underlying unit(s) first."
+                )
+                continue
+
+            if sec_type in {'STK', 'FUT'}:
+                if not closeable_position:
+                    messages.append(
+                        f"Skipped underlying close leg {leg_request.id or leg_request.symbol}: "
+                        f"TWS position does not match requested close direction."
+                    )
+                    continue
+                self._add_underlying_close_demand(
+                    underlying_aggregate,
+                    request,
+                    portfolio_items,
+                    leg_request,
+                    {
+                        'kind': 'existing_underlying',
+                        'legId': leg_request.id,
+                    },
+                    messages,
+                )
+                continue
+
+            option_legs.append(leg_request)
+
+        underlying_legs = self._allocate_underlying_close_demands(underlying_aggregate, messages)
+        self._append_assignment_close_plan_warnings(messages, assignment_adjustments, underlying_legs)
+
+        option_request = replace(request, legs=option_legs)
+        return {
+            'optionRequest': option_request,
+            'underlyingLegs': underlying_legs,
+            'assignmentAdjustments': assignment_adjustments,
+            'messages': messages,
+        }
+
+    def _build_staged_underlying_preview(
+        self,
+        request,
+        leg_request,
+        qualified_contract,
+        quote,
+        order,
+        status_message='',
+        assignment_adjustments=None,
+        staged_orders=None,
+        close_plan_complete=False,
+    ):
+        preview_leg = ComboPreviewLeg(
+            id=leg_request.id,
+            symbol=getattr(qualified_contract, 'symbol', '') or leg_request.symbol,
+            local_symbol=getattr(qualified_contract, 'localSymbol', '') or getattr(qualified_contract, 'symbol', ''),
+            sec_type=getattr(qualified_contract, 'secType', '') or leg_request.sec_type,
+            ratio=abs(int(leg_request.pos or 0)),
+            mark=quote.get('mark'),
+            target_position=int(leg_request.pos or 0),
+            execution_action='BUY' if int(leg_request.pos or 0) > 0 else 'SELL',
+            combo_leg_action='',
+        )
+        return ComboOrderPreview(
+            group_id=request.group_id,
+            group_name=request.group_name,
+            combo_symbol=request.underlying_symbol or leg_request.symbol,
+            combo_exchange=leg_request.exchange or getattr(qualified_contract, 'exchange', '') or 'SMART',
+            order_action=order.action,
+            total_quantity=int(order.totalQuantity),
+            limit_price=getattr(order, 'lmtPrice', None),
+            pricing_source='underlying_first',
+            raw_net_mid=round(float(quote.get('mark') or 0), 4),
+            time_in_force=order.tif,
+            execution_mode=request.execution_mode or 'submit',
+            account=str(getattr(order, 'account', '') or request.account or '').strip(),
+            execution_intent=request.execution_intent or 'close',
+            request_source='close_group_underlying' if not close_plan_complete else 'close_group',
+            pricing_note=status_message,
+            close_plan_stage='underlying',
+            close_plan_complete=close_plan_complete,
+            close_plan_message=status_message,
+            assignment_adjustments=list(assignment_adjustments or []),
+            staged_orders=list(staged_orders or []),
+            legs=[preview_leg],
+        )
+
+    def _format_close_plan_message(self, close_plan, prefix=''):
+        parts = []
+        if prefix:
+            parts.append(str(prefix).strip())
+        parts.extend(str(message).strip() for message in (close_plan.get('messages') or []) if str(message).strip())
+        return ' '.join(parts)
+
+    def _apply_close_plan_metadata(self, preview, close_plan, staged_orders=None, stage=None, complete=None, prefix=''):
+        if close_plan.get('assignmentAdjustments'):
+            preview.assignment_adjustments = close_plan.get('assignmentAdjustments') or []
+        if staged_orders:
+            preview.staged_orders = list(staged_orders)
+        if stage:
+            preview.close_plan_stage = stage
+        if complete is not None:
+            preview.close_plan_complete = complete
+        close_plan_message = self._format_close_plan_message(close_plan, prefix)
+        if close_plan_message:
+            preview.close_plan_message = close_plan_message
+            if preview.pricing_note:
+                preview.pricing_note = f"{preview.pricing_note} {close_plan_message}"
+            else:
+                preview.pricing_note = close_plan_message
+
+    async def _build_underlying_first_preview(self, websocket, request, close_plan):
+        staged_orders = []
+        first_stage = None
+        for leg_request in close_plan.get('underlyingLegs') or []:
+            qualified_contract, quote = await self._resolve_leg_contract_and_mark(websocket, leg_request)
+            order = self._build_underlying_close_order(request, leg_request, quote)
+            staged_order = {
+                'stage': 'underlying',
+                'status': 'Previewed',
+                'orderAction': order.action,
+                'quantity': int(order.totalQuantity),
+                'limitPrice': getattr(order, 'lmtPrice', None),
+                'legId': leg_request.id,
+                'secType': getattr(qualified_contract, 'secType', '') or leg_request.sec_type,
+                'symbol': getattr(qualified_contract, 'symbol', '') or leg_request.symbol,
+            }
+            staged_orders.append(staged_order)
+            if first_stage is None:
+                first_stage = {
+                    'legRequest': leg_request,
+                    'qualifiedContract': qualified_contract,
+                    'quote': quote,
+                    'order': order,
+                }
+
+        if first_stage is None:
+            raise ValueError('No assignment/deliverable underlying legs were available to preview.')
+
+        preview = self._build_staged_underlying_preview(
+            request,
+            first_stage['legRequest'],
+            first_stage['qualifiedContract'],
+            first_stage['quote'],
+            first_stage['order'],
+            status_message='',
+            assignment_adjustments=close_plan.get('assignmentAdjustments'),
+            staged_orders=staged_orders,
+            close_plan_complete=False,
+        )
+        self._apply_close_plan_metadata(
+            preview,
+            close_plan,
+            staged_orders=staged_orders,
+            stage='underlying',
+            complete=False,
+            prefix=(
+                'Close preview reflects the first assignment/deliverable underlying order; '
+                'remaining option legs are handled only after that underlying stage fills.'
+            ),
+        )
+        if request.execution_mode == 'test_submit':
+            preview.pricing_source = 'test_guardrail'
+        return {
+            'contract': first_stage['qualifiedContract'],
+            'order': first_stage['order'],
+            'preview': preview,
+        }
+
+    def _build_underlying_close_order(self, request, leg_request, quote):
+        order = Order()
+        order.action = 'BUY' if int(leg_request.pos or 0) > 0 else 'SELL'
+        order.orderType = 'LMT'
+        order.totalQuantity = abs(int(leg_request.pos or 0))
+        order.tif = self._resolve_time_in_force(request)
+        order.transmit = True
+        if request.execution_mode == 'test_submit':
+            mark = quote.get('mark')
+            direct_mid = float(mark or 0) if order.action == 'BUY' else -float(mark or 0)
+            raw_limit, _pricing_source, _pricing_note = self._resolve_limit_pricing(
+                request,
+                direct_mid,
+                order.action,
+            )
+        else:
+            raw_limit = quote.get('ask') if order.action == 'BUY' else quote.get('bid')
+            if raw_limit is None:
+                raw_limit = quote.get('mark')
+        order.lmtPrice = self._quantize_underlying_limit_price(raw_limit, order.action)
+        if str(request.account or '').strip():
+            order.account = str(request.account).strip()
+        return order
+
+    def _quantize_underlying_limit_price(self, raw_price, order_action):
+        increment = Decimal(str(self.default_price_increment))
+        price_decimal = Decimal(str(max(float(raw_price), float(increment))))
+        rounding = ROUND_CEILING if order_action == 'BUY' else ROUND_FLOOR
+        step_count = (price_decimal / increment).to_integral_value(rounding=rounding)
+        quantized = max(step_count * increment, increment)
+        decimals = max(0, -increment.normalize().as_tuple().exponent)
+        return round(float(quantized), decimals)
+
+    def _extract_filled_average_price(self, trade):
+        order_status = getattr(trade, 'orderStatus', None)
+        try:
+            avg_fill_price = float(getattr(order_status, 'avgFillPrice', None) or 0)
+        except (TypeError, ValueError):
+            avg_fill_price = 0.0
+        if avg_fill_price > 0:
+            return round(avg_fill_price, 4)
+
+        fills = list(getattr(trade, 'fills', None) or [])
+        total_quantity = 0.0
+        total_notional = 0.0
+        for fill in fills:
+            execution = getattr(fill, 'execution', None)
+            if execution is None:
+                continue
+            try:
+                quantity = abs(float(getattr(execution, 'shares', 0) or 0))
+                price = abs(float(getattr(execution, 'price', 0) or 0))
+            except (TypeError, ValueError):
+                continue
+            if quantity <= 0 or price <= 0:
+                continue
+            total_quantity += quantity
+            total_notional += quantity * price
+        if total_quantity > 0:
+            return round(total_notional / total_quantity, 4)
+        return None
+
+    async def _submit_underlying_first_close_plan(self, websocket, request, close_plan):
+        staged_orders = []
+        for leg_request in close_plan.get('underlyingLegs') or []:
+            qualified_contract, quote = await self._resolve_leg_contract_and_mark(websocket, leg_request)
+            order = self._build_underlying_close_order(request, leg_request, quote)
+            self.logger.info(
+                f"Submitting close-group underlying-first order groupId={request.group_id}: "
+                f"id={leg_request.id} secType={leg_request.sec_type} symbol={leg_request.symbol} "
+                f"action={order.action} qty={order.totalQuantity} limit={order.lmtPrice} "
+                f"account={getattr(order, 'account', '') or ''}"
+            )
+            trade = self.ib.placeOrder(qualified_contract, order)
+            tracking_legs = [{
+                'id': leg_request.id,
+                'conId': getattr(qualified_contract, 'conId', None),
+                'localSymbol': getattr(qualified_contract, 'localSymbol', ''),
+                'symbol': getattr(qualified_contract, 'symbol', '') or leg_request.symbol,
+                'secType': getattr(qualified_contract, 'secType', '') or leg_request.sec_type,
+                'right': '',
+                'strike': None,
+                'expDate': '',
+                'targetPosition': int(leg_request.pos or 0),
+                'expectedExecutionSide': 'BOT' if int(leg_request.pos or 0) > 0 else 'SLD',
+                'ratio': abs(int(leg_request.pos or 0)),
+            }]
+            staged_request = replace(request, request_source='close_group_underlying', legs=[leg_request])
+            placement_tracking = None
+            if callable(self.on_combo_order_placed):
+                try:
+                    placement_tracking = self.on_combo_order_placed(
+                        websocket,
+                        staged_request,
+                        trade,
+                        tracking_legs,
+                    )
+                except Exception:
+                    self.logger.exception(
+                        f"Failed to pre-register underlying close tracking for groupId={request.group_id}"
+                    )
+
+            await asyncio.sleep(self.underlying_close_settle_seconds)
+            order_status = getattr(trade, 'orderStatus', None)
+            tracked_status = placement_tracking.get('status') if isinstance(placement_tracking, dict) else None
+            status = str(tracked_status or getattr(order_status, 'status', '') or '').strip()
+            status_message = (
+                self._extract_trade_status_message(trade)
+                or (str(placement_tracking.get('statusMessage') or '').strip() if isinstance(placement_tracking, dict) else '')
+            )
+            avg_fill_price = self._extract_filled_average_price(trade)
+            order_id = getattr(getattr(trade, 'order', None), 'orderId', None)
+            perm_id = getattr(order_status, 'permId', None)
+            staged_orders.append({
+                'stage': 'underlying',
+                'orderId': order_id,
+                'permId': perm_id,
+                'status': status,
+                'orderAction': order.action,
+                'quantity': int(order.totalQuantity),
+                'limitPrice': getattr(order, 'lmtPrice', None),
+                'legId': leg_request.id,
+                'secType': getattr(qualified_contract, 'secType', '') or leg_request.sec_type,
+                'symbol': getattr(qualified_contract, 'symbol', '') or leg_request.symbol,
+                'avgFillPrice': avg_fill_price,
+            })
+
+            for adjustment in close_plan.get('assignmentAdjustments') or []:
+                if adjustment.get('underlyingLegId') == leg_request.id and avg_fill_price is not None:
+                    adjustment['underlyingAvgFillPrice'] = avg_fill_price
+                    adjustment['underlyingOrderId'] = order_id
+                    adjustment['underlyingPermId'] = perm_id
+
+            filled = status == 'Filled'
+            if not filled:
+                message = status_message or (
+                    'Underlying close order is working; option close was not submitted yet. '
+                    'After the underlying fill is reflected, run Close Group again for the remaining option legs.'
+                )
+                preview = self._build_staged_underlying_preview(
+                    request,
+                    leg_request,
+                    qualified_contract,
+                    quote,
+                    order,
+                    status_message=message,
+                    assignment_adjustments=close_plan.get('assignmentAdjustments'),
+                    staged_orders=staged_orders,
+                    close_plan_complete=False,
+                )
+                return {
+                    'completed': False,
+                    'result': ComboSubmitResult(
+                        preview=preview,
+                        order_id=order_id,
+                        perm_id=perm_id,
+                        status=status or getattr(order_status, 'status', None),
+                        status_message=message,
+                        tracking_legs=tracking_legs,
+                        trade=trade,
+                    ),
+                    'stagedOrders': staged_orders,
+                }
+
+        return {
+            'completed': True,
+            'stagedOrders': staged_orders,
+        }
+
     def _resolve_limit_pricing(self, request, direct_net_mid, order_action):
         abs_mid = round(abs(direct_net_mid), 4)
         min_limit_price = self._resolve_combo_price_increment(request=request)
@@ -969,6 +1719,72 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         combo_exchange = resolved_legs[0]['request'].exchange or getattr(resolved_legs[0]['contract'], 'exchange', '') or 'SMART'
         combo_symbol = request.underlying_symbol or getattr(resolved_legs[0]['contract'], 'symbol', '')
         combo_currency = resolved_legs[0]['request'].currency or getattr(resolved_legs[0]['contract'], 'currency', 'USD') or 'USD'
+
+        if len(resolved_legs) == 1:
+            leg = resolved_legs[0]
+            leg['ratio'] = 1
+            leg['comboLegAction'] = ''
+            single_contract = leg['contract']
+            order = Order()
+            order.action = 'BUY' if leg['pos'] > 0 else 'SELL'
+            order.orderType = 'LMT'
+            order.totalQuantity = abs(int(leg['pos']))
+            price_increment = self._resolve_combo_price_increment(request=request)
+            limit_price, pricing_source, pricing_note = self._resolve_limit_pricing(
+                request,
+                direct_net_mid,
+                order.action,
+            )
+            order.lmtPrice = self._quantize_limit_price(limit_price, order.action, price_increment)
+            order.tif = self._resolve_time_in_force(request)
+            order.transmit = True
+            if str(request.account or '').strip():
+                order.account = str(request.account).strip()
+
+            if pricing_note:
+                pricing_note = f"{pricing_note} Single remaining leg routed as a regular order instead of BAG."
+            else:
+                pricing_note = 'Single remaining leg routed as a regular order instead of BAG.'
+
+            preview_legs = [ComboPreviewLeg(
+                id=leg['request'].id,
+                symbol=getattr(single_contract, 'symbol', ''),
+                local_symbol=getattr(single_contract, 'localSymbol', ''),
+                sec_type=getattr(single_contract, 'secType', ''),
+                ratio=1,
+                mark=leg['quote']['mark'],
+                target_position=leg['pos'],
+                execution_action=order.action,
+                combo_leg_action='',
+            )]
+            quote_bounds = self._compute_quote_bounds_from_resolved_legs(resolved_legs)
+            preview = ComboOrderPreview(
+                group_id=request.group_id,
+                group_name=request.group_name,
+                combo_symbol=getattr(single_contract, 'symbol', '') or combo_symbol,
+                combo_exchange=getattr(single_contract, 'exchange', '') or combo_exchange,
+                order_action=order.action,
+                total_quantity=order.totalQuantity,
+                limit_price=order.lmtPrice,
+                pricing_source=pricing_source,
+                raw_net_mid=round(direct_net_mid, 4),
+                time_in_force=order.tif,
+                execution_mode=request.execution_mode or 'preview',
+                account=str(getattr(order, 'account', '') or request.account or '').strip(),
+                execution_intent=request.execution_intent or 'open',
+                request_source=request.request_source or 'manual',
+                pricing_note=pricing_note,
+                managed_concession_ratio=float(request.managed_concession_ratio or 0.0),
+                best_combo_price=quote_bounds['bestPrice'] if quote_bounds else None,
+                worst_combo_price=quote_bounds['worstPrice'] if quote_bounds else None,
+                legs=preview_legs,
+            )
+            return {
+                'comboContract': single_contract,
+                'order': order,
+                'preview': preview,
+                'resolvedLegs': resolved_legs,
+            }
 
         combo_contract = Contract(
             secType='BAG',
@@ -1069,12 +1885,17 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         }
 
     async def validate_combo_order(self, websocket, request):
-        if not request.legs:
+        close_plan = self._build_assignment_aware_close_plan(request)
+        validation_legs_to_check = list((close_plan.get('underlyingLegs') or []))
+        option_request = close_plan.get('optionRequest') or request
+        validation_legs_to_check.extend(option_request.legs or [])
+
+        if not validation_legs_to_check:
             raise ValueError('No combo legs were provided.')
 
         validation_legs = []
         non_zero_legs = 0
-        for leg_request in request.legs:
+        for leg_request in validation_legs_to_check:
             if int(leg_request.pos or 0) == 0:
                 continue
             non_zero_legs += 1
@@ -1110,10 +1931,36 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     cancel_hedge_order = cancel_hedge_order
 
     async def preview_combo_order(self, websocket, request):
-        build_result = await self._build_combo_order_from_request(websocket, request)
-        combo_contract = build_result['comboContract']
-        order = build_result['order']
-        preview = build_result['preview']
+        close_plan = self._build_assignment_aware_close_plan(request)
+        if close_plan.get('underlyingLegs'):
+            stage_result = await self._build_underlying_first_preview(websocket, request, close_plan)
+            combo_contract = stage_result['contract']
+            order = stage_result['order']
+            preview = stage_result['preview']
+        else:
+            request = close_plan.get('optionRequest') or request
+            if not request.legs and (
+                close_plan.get('assignmentAdjustments')
+                or close_plan.get('underlyingLegs')
+                or close_plan.get('messages')
+            ):
+                raise ValueError(
+                    self._format_close_plan_message(
+                        close_plan,
+                        'Assignment-aware Close found no live option or underlying position to preview.'
+                    )
+                )
+            build_result = await self._build_combo_order_from_request(websocket, request)
+            combo_contract = build_result['comboContract']
+            order = build_result['order']
+            preview = build_result['preview']
+            self._apply_close_plan_metadata(
+                preview,
+                close_plan,
+                stage='options' if close_plan.get('assignmentAdjustments') else None,
+                prefix='Close preview excludes assigned/exercised contracts and shows remaining live option legs.'
+                if close_plan.get('assignmentAdjustments') else '',
+            )
         self._log_combo_preview_summary(
             f"Preview-ready groupId={request.group_id}",
             preview,
@@ -1144,10 +1991,88 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         return preview
 
     async def submit_combo_order(self, websocket, request):
+        close_plan = self._build_assignment_aware_close_plan(request)
+        staged_orders = []
+        if close_plan.get('underlyingLegs'):
+            underlying_stage = await self._submit_underlying_first_close_plan(websocket, request, close_plan)
+            staged_orders = underlying_stage.get('stagedOrders') or []
+            if not underlying_stage.get('completed'):
+                return underlying_stage['result']
+            request = close_plan['optionRequest']
+            if not request.legs:
+                message = (
+                    'Close Group completed after closing assignment/deliverable underlying first; '
+                    'no live option legs remained to submit.'
+                )
+                plan_message = self._format_close_plan_message(close_plan, message)
+                last_stage = staged_orders[-1] if staged_orders else {}
+                preview = ComboOrderPreview(
+                    group_id=request.group_id,
+                    group_name=request.group_name,
+                    combo_symbol=request.underlying_symbol,
+                    combo_exchange=(last_stage.get('exchange') or 'SMART'),
+                    order_action=last_stage.get('orderAction') or '',
+                    total_quantity=last_stage.get('quantity') or 0,
+                    limit_price=last_stage.get('limitPrice') or 0,
+                    pricing_source='underlying_first',
+                    raw_net_mid=last_stage.get('avgFillPrice') or 0,
+                    time_in_force=request.time_in_force or 'DAY',
+                    execution_mode=request.execution_mode or 'submit',
+                    account=str(request.account or '').strip(),
+                    execution_intent=request.execution_intent or 'close',
+                    request_source='close_group',
+                    pricing_note=plan_message,
+                    close_plan_stage='complete',
+                    close_plan_complete=True,
+                    close_plan_message=plan_message,
+                    assignment_adjustments=close_plan.get('assignmentAdjustments') or [],
+                    staged_orders=staged_orders,
+                    legs=[],
+                )
+                return ComboSubmitResult(
+                    preview=preview,
+                    order_id=last_stage.get('orderId'),
+                    perm_id=last_stage.get('permId'),
+                    status='Filled',
+                    status_message=plan_message,
+                    tracking_legs=[],
+                    trade=None,
+                )
+        elif close_plan is not None:
+            request = close_plan.get('optionRequest') or request
+
+        if not request.legs and (
+            close_plan.get('assignmentAdjustments')
+            or close_plan.get('underlyingLegs')
+            or close_plan.get('messages')
+        ):
+            raise ValueError(
+                self._format_close_plan_message(
+                    close_plan,
+                    'Assignment-aware Close found no live option or underlying position to submit.'
+                )
+            )
+
         build_result = await self._build_combo_order_from_request(websocket, request)
         combo_contract = build_result['comboContract']
         order = build_result['order']
         preview = build_result['preview']
+        if staged_orders:
+            self._apply_close_plan_metadata(
+                preview,
+                close_plan,
+                staged_orders=staged_orders,
+                stage='options',
+                prefix='Assignment/deliverable underlying was closed first; submitted remaining option combo.',
+            )
+        else:
+            self._apply_close_plan_metadata(
+                preview,
+                close_plan,
+                stage='options' if close_plan.get('assignmentAdjustments') else None,
+                prefix='Close submit excludes assigned/exercised contracts and submits remaining live option legs.'
+                if close_plan.get('assignmentAdjustments') else '',
+            )
         resolved_legs = build_result['resolvedLegs']
         self._log_combo_preview_summary(
             f"{'Submitting TEST-ONLY combo' if request.execution_mode == 'test_submit' else 'Submitting combo'} groupId={request.group_id}",
@@ -1178,9 +2103,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         # Pre-register fill tracking synchronously (no await between placeOrder
         # and here) so execution reports arriving during the settle sleep below
         # can still be attributed to the right legs.
+        placement_tracking = None
         if callable(self.on_combo_order_placed):
             try:
-                self.on_combo_order_placed(websocket, request, trade, tracking_legs)
+                placement_tracking = self.on_combo_order_placed(websocket, request, trade, tracking_legs)
             except Exception:
                 self.logger.exception(
                     f"Failed to pre-register combo order tracking for groupId={request.group_id}"
@@ -1195,7 +2121,15 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             resolved_legs,
         )
         order_status = getattr(trade, 'orderStatus', None)
-        status_message = self._extract_trade_status_message(trade)
+        tracked_status_message = ''
+        tracked_status = None
+        if isinstance(placement_tracking, dict):
+            tracked_status_message = str(placement_tracking.get('statusMessage') or '').strip()
+            tracked_status = placement_tracking.get('status')
+        status_message = self._extract_trade_status_message(trade) or tracked_status_message
+        final_status = getattr(order_status, 'status', None)
+        if str(tracked_status or '').strip() in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}:
+            final_status = tracked_status
         if managed_context is not None:
             preview.managed_mode = True
             preview.managed_state = managed_context.get('managedState')
@@ -1212,7 +2146,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             preview=preview,
             order_id=getattr(getattr(trade, 'order', None), 'orderId', None),
             perm_id=getattr(order_status, 'permId', None),
-            status=getattr(order_status, 'status', None),
+            status=final_status,
             status_message=status_message or None,
             tracking_legs=tracking_legs,
             trade=trade,

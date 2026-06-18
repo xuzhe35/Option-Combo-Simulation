@@ -366,6 +366,276 @@ module.exports = {
             },
         },
         {
+            name: 'applies full assignment adjustments from a staged underlying close result',
+            run() {
+                const state = {
+                    groups: [
+                        {
+                            id: 'group_full_assignment',
+                            closeExecution: {
+                                executionMode: 'submit',
+                                pendingRequest: true,
+                                status: 'pending_submit',
+                                lastPreview: {
+                                    executionMode: 'preview',
+                                    executionIntent: 'close',
+                                    requestSource: 'close_group',
+                                    limitPrice: 4.5,
+                                },
+                                lastError: '',
+                            },
+                            legs: [
+                                { id: 'assigned_put', type: 'put', pos: -16, strike: 415, expDate: '2026-06-18', cost: 3.2, closePrice: null },
+                            ],
+                        },
+                    ],
+                };
+                const harness = buildHarness({ state });
+
+                const handled = harness.api._test.applyComboOrderResult({
+                    action: 'combo_order_submit_result',
+                    groupId: 'group_full_assignment',
+                    preview: {
+                        executionMode: 'submit',
+                        executionIntent: 'close',
+                        requestSource: 'close_group_underlying',
+                        closePlanStage: 'underlying',
+                        closePlanComplete: false,
+                        status: 'Filled',
+                        orderId: 8101,
+                        permId: 9101,
+                        assignmentAdjustments: [
+                            {
+                                adjustmentId: 'assigned_put:full',
+                                optionLegId: 'assigned_put',
+                                underlyingLegId: 'assigned_put_underlying',
+                                assignedOptionPosition: -16,
+                                remainingOptionPosition: 0,
+                                underlyingQuantity: 1600,
+                                underlyingClosePosition: -1600,
+                                assignmentStrike: 415,
+                                underlyingAvgFillPrice: 413.21,
+                                underlyingOrderId: 8101,
+                                underlyingPermId: 9101,
+                            },
+                        ],
+                    },
+                });
+
+                assert.equal(handled, true);
+                assert.equal(state.groups[0].closeExecution.status, 'submitted');
+                assert.equal(state.groups[0].closeExecution.lastPreview.requestSource, 'close_group_underlying');
+                assert.equal(state.groups[0].closeExecution.lastPreview.orderId, 8101);
+                assert.equal(state.groups[0].legs[0].closePrice, 0);
+                assert.equal(state.groups[0].legs[0].closePriceSource, 'assignment_conversion');
+
+                const underlyingLeg = state.groups[0].legs.find((leg) => leg.id === 'assigned_put_underlying');
+                assert.ok(underlyingLeg);
+                assert.equal(underlyingLeg.type, 'stock');
+                assert.equal(underlyingLeg.pos, 1600);
+                assert.equal(underlyingLeg.cost, 415);
+                assert.equal(underlyingLeg.closePrice, 413.21);
+                assert.equal(underlyingLeg.closePriceSource, 'execution_report');
+                assert.equal(harness.renderCalls, 1);
+                assert.equal(harness.updateCalls, 1);
+            },
+        },
+        {
+            name: 'splits partially assigned option legs before adding the underlying leg',
+            run() {
+                const state = {
+                    groups: [
+                        {
+                            id: 'group_partial_assignment',
+                            closeExecution: {
+                                executionMode: 'submit',
+                                pendingRequest: true,
+                                status: 'pending_submit',
+                                lastPreview: null,
+                                lastError: '',
+                            },
+                            legs: [
+                                { id: 'short_put', type: 'put', pos: -16, strike: 415, expDate: '2026-06-18', cost: 3.2, closePrice: null },
+                            ],
+                        },
+                    ],
+                };
+                const harness = buildHarness({ state });
+
+                const handled = harness.api._test.applyComboOrderResult({
+                    action: 'combo_order_submit_result',
+                    groupId: 'group_partial_assignment',
+                    preview: {
+                        executionMode: 'submit',
+                        executionIntent: 'close',
+                        requestSource: 'close_group_underlying',
+                        closePlanStage: 'underlying',
+                        closePlanComplete: false,
+                        status: 'Submitted',
+                        orderId: 8102,
+                        permId: 9102,
+                        assignmentAdjustments: [
+                            {
+                                adjustmentId: 'short_put:partial',
+                                optionLegId: 'short_put',
+                                underlyingLegId: 'short_put_underlying',
+                                assignedOptionPosition: -10,
+                                remainingOptionPosition: -6,
+                                underlyingQuantity: 1000,
+                                underlyingClosePosition: -1000,
+                                assignmentStrike: 415,
+                            },
+                        ],
+                    },
+                });
+
+                assert.equal(handled, true);
+                assert.equal(state.groups[0].legs[0].id, 'short_put');
+                assert.equal(state.groups[0].legs[0].pos, -6);
+
+                const assignedLeg = state.groups[0].legs.find((leg) => (
+                    leg.assignmentAdjustmentId === 'short_put:partial'
+                    && leg.assignmentSourceLegId === 'short_put'
+                    && leg.id !== 'short_put'
+                ));
+                assert.ok(assignedLeg);
+                assert.equal(assignedLeg.pos, -10);
+                assert.equal(assignedLeg.closePrice, 0);
+                assert.equal(assignedLeg.closePriceSource, 'assignment_conversion');
+
+                const underlyingLeg = state.groups[0].legs.find((leg) => leg.id === 'short_put_underlying');
+                assert.ok(underlyingLeg);
+                assert.equal(underlyingLeg.pos, 1000);
+                assert.equal(underlyingLeg.costSource, 'assignment_conversion');
+            },
+        },
+        {
+            name: 'books the assignment conversion even when the underlying close nets flat',
+            run() {
+                const state = {
+                    groups: [
+                        {
+                            id: 'group_netted_assignment',
+                            closeExecution: {
+                                executionMode: 'submit',
+                                pendingRequest: true,
+                                status: 'pending_submit',
+                                lastPreview: null,
+                                lastError: '',
+                            },
+                            legs: [
+                                { id: 'assigned_put', type: 'put', pos: -16, strike: 415, expDate: '2026-06-18', cost: 3.2, closePrice: null },
+                            ],
+                        },
+                    ],
+                };
+                const harness = buildHarness({ state });
+
+                const handled = harness.api._test.applyComboOrderResult({
+                    action: 'combo_order_submit_result',
+                    groupId: 'group_netted_assignment',
+                    preview: {
+                        executionMode: 'submit',
+                        executionIntent: 'close',
+                        requestSource: 'close_group',
+                        status: 'Filled',
+                        orderId: 8103,
+                        permId: 9103,
+                        assignmentAdjustments: [
+                            {
+                                adjustmentId: 'assigned_put:full',
+                                optionLegId: 'assigned_put',
+                                underlyingLegId: 'assigned_put_underlying',
+                                assignedOptionPosition: -16,
+                                remainingOptionPosition: 0,
+                                // Deliverable preserved; close-order quantity nets to 0.
+                                deliverableUnderlyingPosition: 1600,
+                                underlyingQuantity: 0,
+                                underlyingClosePosition: 0,
+                                assignmentStrike: 415,
+                            },
+                        ],
+                    },
+                });
+
+                assert.equal(handled, true);
+                // The assigned option leg must be booked as closed (no longer a phantom open leg).
+                assert.equal(state.groups[0].legs[0].closePrice, 0);
+                assert.equal(state.groups[0].legs[0].closePriceSource, 'assignment_conversion');
+
+                const underlyingLeg = state.groups[0].legs.find((leg) => leg.id === 'assigned_put_underlying');
+                assert.ok(underlyingLeg);
+                assert.equal(underlyingLeg.type, 'stock');
+                assert.equal(underlyingLeg.pos, 1600);
+                assert.equal(underlyingLeg.cost, 415);
+                assert.equal(underlyingLeg.costSource, 'assignment_conversion');
+                // No close fill arrived, so the synthetic underlying leg stays open at strike cost.
+                assert.equal(underlyingLeg.closePrice, null);
+            },
+        },
+        {
+            name: 'keeps option-stage close status when late underlying updates arrive',
+            run() {
+                const state = {
+                    groups: [
+                        {
+                            id: 'group_staged_status',
+                            closeExecution: {
+                                executionMode: 'submit',
+                                pendingRequest: false,
+                                status: 'submitted',
+                                lastPreview: {
+                                    executionMode: 'submit',
+                                    executionIntent: 'close',
+                                    requestSource: 'close_group',
+                                    orderId: 2200,
+                                    permId: 2201,
+                                    status: 'Submitted',
+                                },
+                                lastError: '',
+                            },
+                            legs: [
+                                { id: 'assigned_put', type: 'put', pos: -16, strike: 415, expDate: '2026-06-18', cost: 3.2, closePrice: null },
+                            ],
+                        },
+                    ],
+                };
+                const harness = buildHarness({ state });
+
+                const handled = harness.api._test.applyComboOrderStatusUpdate({
+                    action: 'combo_order_status_update',
+                    groupId: 'group_staged_status',
+                    orderStatus: {
+                        executionMode: 'submit',
+                        executionIntent: 'close',
+                        requestSource: 'close_group_underlying',
+                        orderId: 2100,
+                        permId: 2101,
+                        status: 'Filled',
+                        assignmentAdjustments: [
+                            {
+                                adjustmentId: 'assigned_put:full',
+                                optionLegId: 'assigned_put',
+                                underlyingLegId: 'assigned_put_underlying',
+                                assignedOptionPosition: -16,
+                                remainingOptionPosition: 0,
+                                underlyingQuantity: 1600,
+                                underlyingClosePosition: -1600,
+                                assignmentStrike: 415,
+                                underlyingAvgFillPrice: 413.21,
+                            },
+                        ],
+                    },
+                });
+
+                assert.equal(handled, true);
+                assert.equal(state.groups[0].closeExecution.lastPreview.orderId, 2200);
+                assert.equal(state.groups[0].closeExecution.lastPreview.status, 'Submitted');
+                assert.equal(state.groups[0].legs[0].closePrice, 0);
+                assert.ok(state.groups[0].legs.find((leg) => leg.id === 'assigned_put_underlying'));
+            },
+        },
+        {
             name: 'merges managed status fields and advances resume/concede/cancel flows',
             run() {
                 const state = {

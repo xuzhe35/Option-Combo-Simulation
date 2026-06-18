@@ -206,7 +206,7 @@ def _record_combo_order_placement(websocket, request, trade, tracking_legs):
     """
     order = getattr(trade, 'order', None)
     order_status = getattr(trade, 'orderStatus', None)
-    upsert_combo_order_tracking_via_module(
+    return upsert_combo_order_tracking_via_module(
         _build_order_tracking_environment(),
         websocket=websocket,
         group_id=request.group_id,
@@ -502,6 +502,7 @@ execution_adapter = IbkrExecutionAdapter(
     logger=logging.getLogger('trade_execution.ibkr'),
     emit_order_update=_emit_combo_order_update,
     on_combo_order_placed=_record_combo_order_placement,
+    portfolio_positions_provider=lambda: list(portfolio_avg_cost_cache.values()),
 )
 
 execution_engine = ExecutionEngine(
@@ -526,6 +527,21 @@ def _portfolio_avg_cost_cache_key(item_payload):
         str(item_payload.get('right') or '').strip().upper(),
         str(item_payload.get('strike')),
         str(item_payload.get('localSymbol') or '').strip(),
+    )
+
+
+def _portfolio_avg_cost_cache_key_from_contract(account, contract):
+    if contract is None:
+        return None
+
+    return (
+        str(account or '').strip(),
+        str(getattr(contract, 'secType', '') or '').strip().upper(),
+        str(getattr(contract, 'symbol', '') or '').strip().upper(),
+        _normalize_contract_date(getattr(contract, 'lastTradeDateOrContractMonth', '') or ''),
+        str(getattr(contract, 'right', '') or '').strip().upper(),
+        str(getattr(contract, 'strike', None)),
+        str(getattr(contract, 'localSymbol', '') or '').strip(),
     )
 
 
@@ -579,6 +595,7 @@ def _serialize_portfolio_avg_cost_item(portfolio_item):
 
     return {
         'account': getattr(portfolio_item, 'account', '') or '',
+        'conId': getattr(contract, 'conId', None),
         'secType': sec_type,
         'symbol': getattr(contract, 'symbol', '') or '',
         'localSymbol': getattr(contract, 'localSymbol', '') or '',
@@ -671,6 +688,18 @@ def _send_portfolio_avg_cost_snapshot(websocket):
 def on_update_portfolio_item(portfolio_item):
     item = _serialize_portfolio_avg_cost_item(portfolio_item)
     if not item:
+        contract = getattr(portfolio_item, 'contract', None)
+        cache_key = _portfolio_avg_cost_cache_key_from_contract(
+            getattr(portfolio_item, 'account', '') or '',
+            contract,
+        )
+        if cache_key is not None and cache_key in portfolio_avg_cost_cache:
+            removed = portfolio_avg_cost_cache.pop(cache_key, None)
+            logging.info(
+                f"Removed portfolio avg cost cache item after zero/invalid update: "
+                f"{(removed or {}).get('secType') or getattr(contract, 'secType', '')} "
+                f"{(removed or {}).get('localSymbol') or getattr(contract, 'localSymbol', '')}"
+            )
         return
 
     portfolio_avg_cost_cache[_portfolio_avg_cost_cache_key(item)] = item

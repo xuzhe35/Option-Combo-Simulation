@@ -331,6 +331,11 @@ class ComboOrderPreview:
     worst_combo_price: Optional[float] = None
     can_concede_pricing: bool = False
     continue_action_label: Optional[str] = None
+    close_plan_stage: Optional[str] = None
+    close_plan_complete: Optional[bool] = None
+    close_plan_message: Optional[str] = None
+    assignment_adjustments: list[dict[str, Any]] = field(default_factory=list)
+    staged_orders: list[dict[str, Any]] = field(default_factory=list)
     legs: list[ComboPreviewLeg] = field(default_factory=list)
     what_if: Optional[dict[str, Any]] = None
 
@@ -381,6 +386,16 @@ class ComboOrderPreview:
             payload["canConcedePricing"] = True
         if self.continue_action_label:
             payload["continueActionLabel"] = self.continue_action_label
+        if self.close_plan_stage:
+            payload["closePlanStage"] = self.close_plan_stage
+        if self.close_plan_complete is not None:
+            payload["closePlanComplete"] = self.close_plan_complete
+        if self.close_plan_message:
+            payload["closePlanMessage"] = self.close_plan_message
+        if self.assignment_adjustments:
+            payload["assignmentAdjustments"] = self.assignment_adjustments
+        if self.staged_orders:
+            payload["stagedOrders"] = self.staged_orders
         if self.what_if is not None:
             payload["whatIf"] = self.what_if
         return payload

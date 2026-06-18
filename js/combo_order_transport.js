@@ -244,6 +244,184 @@
             return ['Cancelled', 'Inactive', 'ApiCancelled'].includes(String(status || '').trim());
         }
 
+        function _isSameBrokerOrder(left, right) {
+            const leftOrderId = left && left.orderId != null ? String(left.orderId) : '';
+            const rightOrderId = right && right.orderId != null ? String(right.orderId) : '';
+            if (leftOrderId && rightOrderId) {
+                return leftOrderId === rightOrderId;
+            }
+
+            const leftPermId = left && left.permId != null ? String(left.permId) : '';
+            const rightPermId = right && right.permId != null ? String(right.permId) : '';
+            return !!(leftPermId && rightPermId && leftPermId === rightPermId);
+        }
+
+        function _toFiniteNumberOrNull(value) {
+            const parsed = parseFloat(value);
+            return Number.isFinite(parsed) ? parsed : null;
+        }
+
+        function _hasResolvedClosePrice(leg) {
+            return !!(leg
+                && leg.closePrice !== null
+                && leg.closePrice !== ''
+                && leg.closePrice !== undefined);
+        }
+
+        function _buildSyntheticAssignmentId(prefix, sourceId) {
+            const normalizedSource = String(sourceId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24) || 'leg';
+            return `_${prefix}_${normalizedSource}_${Math.random().toString(36).slice(2, 8)}`;
+        }
+
+        function _applyAssignmentAdjustment(group, adjustment) {
+            if (!group || !adjustment || typeof adjustment !== 'object') {
+                return false;
+            }
+
+            const optionLegId = String(adjustment.optionLegId || '').trim();
+            const optionLeg = (group.legs || []).find((leg) => leg && String(leg.id || '') === optionLegId);
+            if (!optionLeg) {
+                return false;
+            }
+
+            const assignedOptionPosition = _toFiniteNumberOrNull(adjustment.assignedOptionPosition);
+            const remainingOptionPosition = _toFiniteNumberOrNull(adjustment.remainingOptionPosition);
+            // The deliverable underlying position (cost basis = strike) is what the assignment/exercise
+            // produces; it is invariant. The close-order quantity can net to 0 when the deliverable
+            // offsets an existing TWS position, so booking the conversion must not depend on it.
+            // Fall back to the legacy underlyingQuantity field for older server payloads.
+            const deliverableUnderlyingPosition = _toFiniteNumberOrNull(adjustment.deliverableUnderlyingPosition);
+            const underlyingQuantity = Number.isFinite(deliverableUnderlyingPosition)
+                ? deliverableUnderlyingPosition
+                : _toFiniteNumberOrNull(adjustment.underlyingQuantity);
+            if (!Number.isFinite(assignedOptionPosition)
+                || Math.abs(assignedOptionPosition) < 0.0001
+                || !Number.isFinite(underlyingQuantity)
+                || Math.abs(underlyingQuantity) < 0.0001) {
+                return false;
+            }
+
+            const adjustmentId = String(adjustment.adjustmentId || `${optionLegId}:${assignedOptionPosition}`).trim();
+            const underlyingLegId = String(adjustment.underlyingLegId || '').trim()
+                || _buildSyntheticAssignmentId('assigned_underlying', optionLegId);
+            const isPartialAssignment = Number.isFinite(remainingOptionPosition)
+                && Math.abs(remainingOptionPosition) > 0.0001;
+            let changed = false;
+            let assignmentSourceLeg = optionLeg;
+
+            if (isPartialAssignment) {
+                const currentPos = _toFiniteNumberOrNull(optionLeg.pos);
+                if (!Number.isFinite(currentPos) || Math.abs(currentPos - remainingOptionPosition) > 0.0001) {
+                    optionLeg.pos = remainingOptionPosition;
+                    changed = true;
+                }
+
+                let assignedOptionLeg = (group.legs || []).find((leg) => (
+                    leg
+                    && leg.assignmentAdjustmentId === adjustmentId
+                    && leg.assignmentSourceLegId === optionLegId
+                ));
+                if (!assignedOptionLeg) {
+                    assignedOptionLeg = {
+                        ...optionLeg,
+                        id: _buildSyntheticAssignmentId('assigned_option', optionLegId),
+                        pos: assignedOptionPosition,
+                        closePrice: 0,
+                        closePriceSource: 'assignment_conversion',
+                        assignmentAdjustmentId: adjustmentId,
+                        assignmentSourceLegId: optionLegId,
+                        assignmentUnderlyingLegId: underlyingLegId,
+                        assignmentUnderlyingQuantity: underlyingQuantity,
+                        executionReportOrderId: null,
+                        executionReportPermId: null,
+                        closeExecutionOrderId: null,
+                        closeExecutionPermId: null,
+                    };
+                    const optionIndex = (group.legs || []).indexOf(optionLeg);
+                    group.legs.splice(optionIndex + 1, 0, assignedOptionLeg);
+                    changed = true;
+                }
+                assignmentSourceLeg = assignedOptionLeg;
+            } else {
+                if (!_hasResolvedClosePrice(optionLeg) || optionLeg.closePriceSource !== 'assignment_conversion') {
+                    optionLeg.closePrice = 0;
+                    optionLeg.closePriceSource = 'assignment_conversion';
+                    changed = true;
+                }
+                optionLeg.assignmentAdjustmentId = adjustmentId;
+                optionLeg.assignmentUnderlyingLegId = underlyingLegId;
+                optionLeg.assignmentUnderlyingQuantity = underlyingQuantity;
+            }
+
+            let underlyingLeg = (group.legs || []).find((leg) => leg && String(leg.id || '') === underlyingLegId);
+            if (!underlyingLeg) {
+                underlyingLeg = {
+                    id: underlyingLegId,
+                    type: 'stock',
+                    pos: underlyingQuantity,
+                    strike: 0,
+                    expDate: '',
+                    iv: 0,
+                    ivSource: 'manual',
+                    ivManualOverride: false,
+                    currentPrice: 0,
+                    currentPriceSource: '',
+                    portfolioMarketPrice: null,
+                    portfolioMarketPriceSource: '',
+                    portfolioUnrealizedPnl: null,
+                    cost: Math.abs(_toFiniteNumberOrNull(adjustment.assignmentStrike) || _toFiniteNumberOrNull(optionLeg.strike) || 0),
+                    costSource: 'assignment_conversion',
+                    closePrice: null,
+                    closePriceSource: '',
+                    underlyingFutureId: optionLeg.underlyingFutureId || '',
+                    assignmentAdjustmentId: adjustmentId,
+                    assignmentSourceLegId: assignmentSourceLeg.id,
+                };
+                group.legs.push(underlyingLeg);
+                changed = true;
+            }
+
+            const avgFillPrice = _toFiniteNumberOrNull(adjustment.underlyingAvgFillPrice);
+            if (Number.isFinite(avgFillPrice) && avgFillPrice > 0) {
+                if (Math.abs((_toFiniteNumberOrNull(underlyingLeg.closePrice) || 0) - avgFillPrice) > 0.0001
+                    || underlyingLeg.closePriceSource !== 'execution_report') {
+                    underlyingLeg.closePrice = avgFillPrice;
+                    underlyingLeg.closePriceSource = 'execution_report';
+                    underlyingLeg.closeExecutionOrderId = adjustment.underlyingOrderId || null;
+                    underlyingLeg.closeExecutionPermId = adjustment.underlyingPermId || null;
+                    changed = true;
+                }
+            }
+
+            return changed;
+        }
+
+        function _applyAssignmentAdjustments(group, adjustments) {
+            if (!Array.isArray(adjustments) || adjustments.length === 0) {
+                return false;
+            }
+            return adjustments.reduce((changed, adjustment) => (
+                _applyAssignmentAdjustment(group, adjustment) || changed
+            ), false);
+        }
+
+        function _isStagedUnderlyingCloseUpdate(update, runtime) {
+            const requestSource = String(update && update.requestSource || '').trim();
+            if (requestSource !== 'close_group_underlying') {
+                return false;
+            }
+            const currentPreview = runtime && runtime.lastPreview;
+            if (!currentPreview || String(currentPreview.requestSource || '').trim() === 'close_group_underlying') {
+                return false;
+            }
+            const currentHasBrokerRef = currentPreview.orderId != null || currentPreview.permId != null;
+            const updateHasBrokerRef = update && (update.orderId != null || update.permId != null);
+            if (!currentHasBrokerRef || !updateHasBrokerRef) {
+                return false;
+            }
+            return !_isSameBrokerOrder(currentPreview, update);
+        }
+
         function _isManagedTerminalConfirmation(preview) {
             return !!(preview
                 && preview.managedMode === true
@@ -790,12 +968,33 @@
             const payload = data.preview || data.order || {};
             const { runtime, runtimeKind } = _resolveExecutionRuntime(group, payload);
             if (!runtime) return true;
+            const assignmentChanged = _applyAssignmentAdjustments(group, payload.assignmentAdjustments);
+            if (_isStagedUnderlyingCloseUpdate(payload, runtime)) {
+                runtime.pendingRequest = false;
+                if (assignmentChanged) {
+                    _renderGroups();
+                    _updateDerivedValues();
+                }
+                return true;
+            }
 
+            const previousPreview = runtime.lastPreview && typeof runtime.lastPreview === 'object'
+                ? runtime.lastPreview
+                : {};
             runtime.pendingRequest = false;
             if (runtimeKind === 'tradeTrigger') {
                 runtime.enabled = false;
             }
             runtime.lastPreview = payload || null;
+            if (data.action === 'combo_order_submit_result'
+                && runtime.lastPreview
+                && !String(runtime.lastPreview.statusMessage || '').trim()
+                && _isSameBrokerOrder(previousPreview, runtime.lastPreview)) {
+                const previousStatusMessage = String(previousPreview.statusMessage || '').trim();
+                if (previousStatusMessage) {
+                    runtime.lastPreview.statusMessage = previousStatusMessage;
+                }
+            }
             const orderStatus = String((runtime.lastPreview && runtime.lastPreview.status) || '').trim();
             const statusMessage = String((runtime.lastPreview && runtime.lastPreview.statusMessage) || '').trim();
             if (data.action === 'combo_order_submit_result'
@@ -832,6 +1031,14 @@
             const update = data.orderStatus || {};
             const { runtime, runtimeKind } = _resolveExecutionRuntime(group, update);
             if (!runtime) return true;
+            const assignmentChanged = _applyAssignmentAdjustments(group, update.assignmentAdjustments);
+            if (_isStagedUnderlyingCloseUpdate(update, runtime)) {
+                if (assignmentChanged) {
+                    _renderGroups();
+                    _updateDerivedValues();
+                }
+                return true;
+            }
 
             if (!runtime.lastPreview || typeof runtime.lastPreview !== 'object') {
                 runtime.lastPreview = {};
