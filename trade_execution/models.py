@@ -329,6 +329,7 @@ class ComboOrderPreview:
     managed_concession_ratio: Optional[float] = None
     best_combo_price: Optional[float] = None
     worst_combo_price: Optional[float] = None
+    price_increment: Optional[float] = None
     can_concede_pricing: bool = False
     continue_action_label: Optional[str] = None
     close_plan_stage: Optional[str] = None
@@ -382,6 +383,8 @@ class ComboOrderPreview:
             payload["bestComboPrice"] = self.best_combo_price
         if self.worst_combo_price is not None:
             payload["worstComboPrice"] = self.worst_combo_price
+        if self.price_increment is not None:
+            payload["priceIncrement"] = self.price_increment
         if self.can_concede_pricing:
             payload["canConcedePricing"] = True
         if self.continue_action_label:

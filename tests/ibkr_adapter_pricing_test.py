@@ -11,7 +11,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-if 'ib_async' not in sys.modules:
+try:
+    import ib_async  # noqa: F401
+except ImportError:
     ib_async = types.ModuleType('ib_async')
 
     class _SimpleIbObject:
@@ -149,6 +151,12 @@ class IbkrAdapterPricingTests(unittest.TestCase):
 
         self.assertEqual(adapter._resolve_combo_price_increment(request=request), 0.01)
 
+    def test_select_increment_from_ib_market_rule_ladder(self):
+        increments = [(0.0, 0.05), (3.0, 0.25)]
+
+        self.assertEqual(self.adapter._select_increment_from_ladder(1.23, increments), 0.05)
+        self.assertEqual(self.adapter._select_increment_from_ladder(65.63, increments), 0.25)
+
     def test_build_contract_from_request_preserves_micro_fop_multipliers_without_trading_class(self):
         adapter = IbkrExecutionAdapter(
             ib=_DummyIb(),
@@ -188,6 +196,173 @@ class IbkrAdapterPricingTests(unittest.TestCase):
     def test_quantize_limit_price_respects_explicit_quarter_point_increment(self):
         quantized = self.adapter._quantize_limit_price(3.18, 'BUY', 0.25)
         self.assertEqual(quantized, 3.0)
+
+    def test_quantize_limit_price_accepts_small_market_rule_increment(self):
+        quantized = self.adapter._quantize_limit_price(1.23, 'BUY', 0.05)
+        self.assertEqual(quantized, 1.2)
+
+    def test_single_leg_order_uses_ib_market_rule_increment(self):
+        class _MarketRuleIb(_DummyIb):
+            async def reqContractDetailsAsync(self, contract):
+                return [SimpleNamespace(
+                    minTick=0.01,
+                    validExchanges='SMART',
+                    marketRuleIds='101',
+                    contract=SimpleNamespace(exchange='SMART'),
+                )]
+
+            async def reqMarketRuleAsync(self, market_rule_id):
+                if market_rule_id != 101:
+                    raise AssertionError(f'unexpected market rule id {market_rule_id}')
+                return [
+                    SimpleNamespace(lowEdge=0, increment=0.05),
+                    SimpleNamespace(lowEdge=3, increment=0.25),
+                ]
+
+        adapter = IbkrExecutionAdapter(
+            ib=_MarketRuleIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+
+        async def fake_resolve(_websocket, leg_request):
+            return (
+                SimpleNamespace(
+                    conId=8801,
+                    secType='FOP',
+                    symbol='MES',
+                    localSymbol='MES 260630C07560000',
+                    exchange='SMART',
+                    currency='USD',
+                ),
+                {'bid': 65.5, 'ask': 65.75, 'mark': 65.63},
+            )
+
+        adapter._resolve_leg_contract_and_mark = fake_resolve
+        request = ComboOrderRequest(
+            group_id='group_single_tick',
+            group_name='Single Tick',
+            underlying_symbol='MES',
+            underlying_contract_month='202609',
+            execution_mode='preview',
+            profile={'family': 'MES', 'priceIncrement': 0.01},
+            legs=[
+                ComboLegRequest.from_payload({
+                    'id': 'mes_call',
+                    'type': 'call',
+                    'pos': 10,
+                    'secType': 'FOP',
+                    'symbol': 'MES',
+                    'exchange': 'CME',
+                    'currency': 'USD',
+                    'multiplier': '5',
+                    'right': 'C',
+                    'strike': 7560,
+                    'expDate': '20260630',
+                    'contractMonth': '202606',
+                    'underlyingContractMonth': '202609',
+                }),
+            ],
+        )
+
+        result = asyncio.run(adapter._build_combo_order_from_request(object(), request))
+
+        self.assertEqual(result['comboContract'].secType, 'FOP')
+        self.assertEqual(result['order'].lmtPrice, 65.5)
+        self.assertEqual(result['priceIncrement'], 0.25)
+        self.assertEqual(getattr(result['preview'], 'price_increment'), 0.25)
+
+    def test_bag_order_uses_smallest_leg_market_rule_increment(self):
+        class _MarketRuleIb(_DummyIb):
+            async def reqContractDetailsAsync(self, contract):
+                rule_id = '101' if contract.conId == 8801 else '202'
+                return [SimpleNamespace(
+                    minTick=0.01,
+                    validExchanges='SMART',
+                    marketRuleIds=rule_id,
+                    contract=SimpleNamespace(exchange='SMART'),
+                )]
+
+            async def reqMarketRuleAsync(self, market_rule_id):
+                if market_rule_id == 101:
+                    return [
+                        SimpleNamespace(lowEdge=0, increment=0.05),
+                        SimpleNamespace(lowEdge=3, increment=0.25),
+                    ]
+                return [SimpleNamespace(lowEdge=0, increment=0.1)]
+
+        adapter = IbkrExecutionAdapter(
+            ib=_MarketRuleIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+
+        async def fake_resolve(_websocket, leg_request):
+            con_id = 8801 if leg_request.id == 'leg_a' else 8802
+            mark = 1.26 if leg_request.id == 'leg_a' else 1.27
+            return (
+                SimpleNamespace(
+                    conId=con_id,
+                    secType='FOP',
+                    symbol='MES',
+                    localSymbol=f'MES {con_id}',
+                    exchange='SMART',
+                    currency='USD',
+                ),
+                {'bid': mark - 0.01, 'ask': mark + 0.01, 'mark': mark},
+            )
+
+        adapter._resolve_leg_contract_and_mark = fake_resolve
+        request = ComboOrderRequest(
+            group_id='group_bag_tick',
+            group_name='BAG Tick',
+            underlying_symbol='MES',
+            underlying_contract_month='202609',
+            execution_mode='preview',
+            profile={'family': 'MES', 'priceIncrement': 0.01},
+            legs=[
+                ComboLegRequest.from_payload({
+                    'id': 'leg_a',
+                    'type': 'call',
+                    'pos': 1,
+                    'secType': 'FOP',
+                    'symbol': 'MES',
+                    'exchange': 'CME',
+                    'currency': 'USD',
+                    'multiplier': '5',
+                    'right': 'C',
+                    'strike': 7560,
+                    'expDate': '20260630',
+                    'contractMonth': '202606',
+                    'underlyingContractMonth': '202609',
+                }),
+                ComboLegRequest.from_payload({
+                    'id': 'leg_b',
+                    'type': 'put',
+                    'pos': 1,
+                    'secType': 'FOP',
+                    'symbol': 'MES',
+                    'exchange': 'CME',
+                    'currency': 'USD',
+                    'multiplier': '5',
+                    'right': 'P',
+                    'strike': 7560,
+                    'expDate': '20260630',
+                    'contractMonth': '202606',
+                    'underlyingContractMonth': '202609',
+                }),
+            ],
+        )
+
+        result = asyncio.run(adapter._build_combo_order_from_request(object(), request))
+
+        self.assertEqual(result['comboContract'].secType, 'BAG')
+        self.assertEqual(result['priceIncrement'], 0.05)
+        self.assertEqual(result['order'].lmtPrice, 2.5)
 
     def test_extract_trade_status_message_prefers_latest_non_empty_trade_log_message(self):
         trade = SimpleNamespace(
@@ -1347,6 +1522,146 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             'IB 201: Order rejected - reason: Available Funds are insufficient.',
         )
         self.assertEqual(result.to_payload()['statusMessage'], result.status_message)
+
+    async def test_retries_combo_submit_with_coarser_tick_after_min_price_reject(self):
+        placed_orders = []
+        managed_order_ids = []
+
+        class _SubmitIb:
+            def __init__(self):
+                self.orderStatusEvent = _DummyEvent()
+
+            def placeOrder(self, contract, order):
+                order_index = len(placed_orders)
+                order.orderId = 4700 + order_index
+                status = 'Inactive' if order_index == 0 else 'Submitted'
+                log = []
+                if order_index == 0:
+                    log = [SimpleNamespace(
+                        errorCode=110,
+                        message='Error 110, reqId 387: The price does not conform to the minimum price variation for this contract.',
+                    )]
+                trade = SimpleNamespace(
+                    order=order,
+                    contract=contract,
+                    orderStatus=SimpleNamespace(
+                        permId=5700 + order_index,
+                        status=status,
+                        filled=0,
+                        remaining=getattr(order, 'totalQuantity', 0),
+                        avgFillPrice=0,
+                        lastFillPrice=0,
+                        whyHeld='',
+                        mktCapPrice=0,
+                    ),
+                    fills=[],
+                    log=log,
+                    advancedError='',
+                )
+                placed_orders.append((contract, order, trade))
+                return trade
+
+        adapter = IbkrExecutionAdapter(
+            ib=_SubmitIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+
+        def fake_register(_websocket, _request, _combo_contract, trade, _preview, _resolved_legs):
+            managed_order_ids.append(getattr(getattr(trade, 'order', None), 'orderId', None))
+            return None
+
+        adapter._register_managed_context = fake_register
+
+        preview = ComboOrderPreview(
+            group_id='group_tick_retry',
+            group_name='Tick Retry',
+            combo_symbol='MES',
+            combo_exchange='CME',
+            order_action='BUY',
+            total_quantity=1,
+            limit_price=2.55,
+            pricing_source='middle',
+            raw_net_mid=2.58,
+            execution_mode='submit',
+        )
+        preview.price_increment = 0.05
+        order = SimpleNamespace(
+            action='BUY',
+            orderType='LMT',
+            totalQuantity=1,
+            lmtPrice=2.55,
+            tif='DAY',
+            transmit=True,
+        )
+        resolved_legs = [{
+            'request': SimpleNamespace(id='leg_1', exp_date='2026-06-19'),
+            'contract': SimpleNamespace(
+                conId=12345,
+                localSymbol='MES  260619C07560000',
+                symbol='MES',
+                secType='FOP',
+                right='C',
+                strike=7560.0,
+            ),
+            'pos': 1,
+            'ratio': 1,
+            'quote': {'bid': 2.5, 'ask': 2.65, 'mark': 2.58},
+        }]
+
+        async def fake_build(_websocket, _request):
+            return {
+                'comboContract': SimpleNamespace(secType='BAG', exchange='CME'),
+                'order': order,
+                'preview': preview,
+                'resolvedLegs': resolved_legs,
+                'priceIncrement': 0.05,
+                'rawLimitPrice': 2.58,
+            }
+
+        adapter._build_combo_order_from_request = fake_build
+
+        request = ComboOrderRequest(
+            group_id='group_tick_retry',
+            group_name='Tick Retry',
+            underlying_symbol='MES',
+            underlying_contract_month='202609',
+            execution_mode='submit',
+        )
+
+        real_sleep = asyncio.sleep
+        sleep_calls = []
+
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+            await real_sleep(0)
+
+        asyncio.sleep = fake_sleep
+        try:
+            result = await adapter.submit_combo_order(object(), request)
+        finally:
+            asyncio.sleep = real_sleep
+
+        self.assertEqual(len(placed_orders), 2)
+        self.assertEqual(sleep_calls, [1.5, 1.5])
+        self.assertEqual(placed_orders[0][1].lmtPrice, 2.55)
+        self.assertEqual(placed_orders[1][1].lmtPrice, 2.5)
+        self.assertEqual(result.order_id, 4701)
+        self.assertEqual(result.status, 'Submitted')
+        self.assertIsNone(result.status_message)
+        self.assertEqual(managed_order_ids, [4701])
+        self.assertEqual(result.preview.limit_price, 2.5)
+        self.assertEqual(result.preview.price_increment, 0.25)
+        self.assertEqual(result.to_payload()['priceIncrement'], 0.25)
+        self.assertIn('minimum price variation', result.preview.pricing_note)
+        self.assertIn('resubmitted at 2.5', result.preview.pricing_note)
+        self.assertEqual(len(result.preview.staged_orders), 2)
+        self.assertEqual(result.preview.staged_orders[0]['status'], 'Inactive')
+        self.assertEqual(result.preview.staged_orders[0]['priceIncrement'], 0.05)
+        self.assertEqual(result.preview.staged_orders[1]['status'], 'Submitted')
+        self.assertEqual(result.preview.staged_orders[1]['priceIncrement'], 0.25)
 
 
 class IbkrAdapterManagedAdoptionTests(unittest.TestCase):

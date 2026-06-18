@@ -91,6 +91,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.managed_executions_by_perm_id = {}
         self.hedge_orders_by_order_id = {}
         self.hedge_orders_by_perm_id = {}
+        self.contract_details_cache_by_con_id = {}
+        self.market_rule_cache_by_id = {}
         self.ib.orderStatusEvent += self._on_managed_order_status
         self.ib.orderStatusEvent += self._on_hedge_order_status
 
@@ -235,6 +237,290 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     def _normalize_symbol(self, value):
         return str(value or '').strip().upper()
 
+    def _normalize_exchange(self, value):
+        return str(value or '').strip().upper()
+
+    def _safe_positive_float(self, value):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 and parsed == parsed else None
+
+    def _select_market_rule_id(self, contract_details, exchange):
+        raw_rule_ids = str(getattr(contract_details, 'marketRuleIds', '') or '').strip()
+        if not raw_rule_ids:
+            return None
+
+        rule_ids = [item.strip() for item in raw_rule_ids.split(',')]
+        if not rule_ids:
+            return None
+
+        valid_exchanges = [
+            self._normalize_exchange(item)
+            for item in str(getattr(contract_details, 'validExchanges', '') or '').split(',')
+        ]
+        requested_exchange = self._normalize_exchange(exchange)
+        for index, valid_exchange in enumerate(valid_exchanges):
+            if requested_exchange and valid_exchange == requested_exchange and index < len(rule_ids):
+                return rule_ids[index]
+
+        primary_exchange = self._normalize_exchange(getattr(contract_details, 'contract', None) and getattr(contract_details.contract, 'exchange', ''))
+        for index, valid_exchange in enumerate(valid_exchanges):
+            if primary_exchange and valid_exchange == primary_exchange and index < len(rule_ids):
+                return rule_ids[index]
+
+        return rule_ids[0]
+
+    async def _get_contract_details_for_contract(self, contract):
+        con_id = getattr(contract, 'conId', None)
+        if con_id not in (None, ''):
+            try:
+                cache_key = int(con_id)
+            except (TypeError, ValueError):
+                cache_key = str(con_id).strip()
+            if cache_key in self.contract_details_cache_by_con_id:
+                return self.contract_details_cache_by_con_id[cache_key]
+
+        if not hasattr(self.ib, 'reqContractDetailsAsync'):
+            return None
+
+        try:
+            details = await self.ib.reqContractDetailsAsync(contract)
+        except Exception as exc:
+            self.logger.warning(
+                f"Failed to request contract details for conId={con_id}: {exc}"
+            )
+            return None
+
+        contract_details = details[0] if details else None
+        if contract_details is not None and con_id not in (None, ''):
+            self.contract_details_cache_by_con_id[cache_key] = contract_details
+        return contract_details
+
+    async def _get_market_rule_increments(self, market_rule_id):
+        try:
+            rule_key = int(market_rule_id)
+        except (TypeError, ValueError):
+            return []
+        if rule_key in self.market_rule_cache_by_id:
+            return self.market_rule_cache_by_id[rule_key]
+        if not hasattr(self.ib, 'reqMarketRuleAsync'):
+            return []
+
+        try:
+            increments = await self.ib.reqMarketRuleAsync(rule_key)
+        except Exception as exc:
+            self.logger.warning(f"Failed to request IB market rule {rule_key}: {exc}")
+            return []
+
+        cleaned = []
+        for increment in increments or []:
+            low_edge = self._safe_positive_float(getattr(increment, 'lowEdge', None))
+            if low_edge is None:
+                try:
+                    low_edge = float(getattr(increment, 'lowEdge', 0) or 0)
+                except (TypeError, ValueError):
+                    low_edge = 0.0
+            price_increment = self._safe_positive_float(getattr(increment, 'increment', None))
+            if price_increment is None:
+                continue
+            cleaned.append((float(low_edge), float(price_increment)))
+        cleaned.sort(key=lambda item: item[0])
+        self.market_rule_cache_by_id[rule_key] = cleaned
+        return cleaned
+
+    def _select_increment_from_ladder(self, price, increments):
+        price_abs = abs(float(price or 0))
+        selected = None
+        for low_edge, increment in increments or []:
+            if price_abs + 1e-12 >= float(low_edge):
+                selected = float(increment)
+            else:
+                break
+        return selected
+
+    async def _resolve_contract_price_increment(self, contract, exchange, reference_price, fallback_increment=None):
+        fallback = self._safe_positive_float(fallback_increment) or float(self.default_price_increment)
+        details = await self._get_contract_details_for_contract(contract)
+        if details is None:
+            return fallback
+
+        market_rule_id = self._select_market_rule_id(details, exchange)
+        increments = await self._get_market_rule_increments(market_rule_id)
+        selected = self._select_increment_from_ladder(reference_price, increments)
+        if selected:
+            return selected
+
+        min_tick = self._safe_positive_float(getattr(details, 'minTick', None))
+        return min_tick or fallback
+
+    async def _resolve_price_increment_for_legs(self, resolved_legs, raw_limit_price, combo_exchange, fallback_increment):
+        fallback = self._safe_positive_float(fallback_increment) or float(self.default_price_increment)
+        legs = list(resolved_legs or [])
+        if not legs:
+            return fallback
+
+        if len(legs) == 1:
+            leg = legs[0]
+            exchange = (
+                getattr(leg.get('contract'), 'exchange', '')
+                or getattr(leg.get('request'), 'exchange', '')
+                or combo_exchange
+            )
+            return await self._resolve_contract_price_increment(
+                leg.get('contract'),
+                exchange,
+                raw_limit_price,
+                fallback,
+            )
+
+        increments = []
+        for leg in legs:
+            leg_reference = (leg.get('quote') or {}).get('mark') or raw_limit_price
+            exchange = (
+                getattr(leg.get('contract'), 'exchange', '')
+                or getattr(leg.get('request'), 'exchange', '')
+                or combo_exchange
+            )
+            increment = await self._resolve_contract_price_increment(
+                leg.get('contract'),
+                exchange,
+                leg_reference,
+                fallback,
+            )
+            if increment:
+                increments.append(float(increment))
+
+        if increments:
+            return min(increments)
+        return fallback
+
+    async def _resolve_order_price_increment(self, request, resolved_legs, order_action, raw_limit_price, combo_exchange):
+        return await self._resolve_price_increment_for_legs(
+            resolved_legs,
+            raw_limit_price,
+            combo_exchange,
+            self._resolve_combo_price_increment(request=request),
+        )
+
+    async def _resolve_context_price_increment(self, context, raw_limit_price):
+        combo_contract = context.get('comboContract')
+        return await self._resolve_price_increment_for_legs(
+            context.get('resolvedLegs') or [],
+            raw_limit_price,
+            getattr(combo_contract, 'exchange', '') or '',
+            self._resolve_combo_price_increment(context=context),
+        )
+
+    def _format_price_increment(self, value):
+        parsed = self._safe_positive_float(value)
+        if parsed is None:
+            return ''
+        text = format(Decimal(str(parsed)).normalize(), 'f')
+        return text.rstrip('0').rstrip('.') or '0'
+
+    def _coarser_price_increment_candidates(self, current_increment, max_candidates=4):
+        current = Decimal(str(
+            self._safe_positive_float(current_increment) or self.default_price_increment
+        ))
+        preferred_ladders = {
+            Decimal('0.0001'): (Decimal('0.0005'), Decimal('0.001'), Decimal('0.005'), Decimal('0.01')),
+            Decimal('0.0005'): (Decimal('0.001'), Decimal('0.005'), Decimal('0.01'), Decimal('0.05')),
+            Decimal('0.001'): (Decimal('0.005'), Decimal('0.01'), Decimal('0.05'), Decimal('0.25')),
+            Decimal('0.005'): (Decimal('0.01'), Decimal('0.05'), Decimal('0.25'), Decimal('0.5')),
+            Decimal('0.01'): (Decimal('0.05'), Decimal('0.25'), Decimal('0.5'), Decimal('1')),
+            Decimal('0.05'): (Decimal('0.25'), Decimal('0.5'), Decimal('1'), Decimal('2.5')),
+            Decimal('0.25'): (Decimal('0.5'), Decimal('1'), Decimal('2.5'), Decimal('5')),
+            Decimal('0.5'): (Decimal('1'), Decimal('2.5'), Decimal('5')),
+            Decimal('1'): (Decimal('2.5'), Decimal('5'), Decimal('10')),
+        }
+        common_increments = (
+            Decimal('0.0005'),
+            Decimal('0.001'),
+            Decimal('0.005'),
+            Decimal('0.01'),
+            Decimal('0.05'),
+            Decimal('0.25'),
+            Decimal('0.5'),
+            Decimal('1'),
+            Decimal('2.5'),
+            Decimal('5'),
+            Decimal('10'),
+        )
+        candidates = []
+        seen = set()
+
+        def add_candidate(candidate):
+            candidate = Decimal(str(candidate))
+            if candidate <= current:
+                return
+            key = str(candidate.normalize())
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(float(candidate))
+
+        preferred_candidates = preferred_ladders.get(current)
+        if preferred_candidates:
+            for candidate in preferred_candidates:
+                add_candidate(candidate)
+            for multiplier in (Decimal('2'), Decimal('5'), Decimal('10')):
+                add_candidate(current * multiplier)
+        else:
+            for candidate in common_increments:
+                add_candidate(candidate)
+            for multiplier in (Decimal('2'), Decimal('5'), Decimal('10')):
+                add_candidate(current * multiplier)
+        return candidates[:max(0, int(max_candidates or 0))]
+
+    def _is_min_price_variation_reject(self, status, status_message):
+        text = str(status_message or '').strip().lower()
+        if not text:
+            return False
+        return (
+            'minimum price variation' in text
+            or 'does not conform to the minimum price variation' in text
+            or 'error 110' in text
+            or 'ib 110' in text
+        )
+
+    def _clone_order_for_limit_retry(self, order, limit_price):
+        retry_order = Order()
+        skip_attrs = {'orderId', 'permId', 'clientId'}
+        try:
+            order_items = vars(order).items()
+        except TypeError:
+            order_items = []
+        for attr, value in order_items:
+            if attr in skip_attrs:
+                continue
+            if attr == 'smartComboRoutingParams' and isinstance(value, list):
+                value = list(value)
+            setattr(retry_order, attr, value)
+
+        for attr in (
+            'action',
+            'orderType',
+            'totalQuantity',
+            'tif',
+            'account',
+            'smartComboRoutingParams',
+            'outsideRth',
+            'orderRef',
+            'usePriceMgmtAlgo',
+        ):
+            if attr in skip_attrs or hasattr(retry_order, attr) or not hasattr(order, attr):
+                continue
+            value = getattr(order, attr)
+            if attr == 'smartComboRoutingParams' and isinstance(value, list):
+                value = list(value)
+            setattr(retry_order, attr, value)
+
+        retry_order.lmtPrice = limit_price
+        retry_order.transmit = True
+        return retry_order
+
     _to_contract_month = _to_contract_month
     _to_expiry = _to_expiry
     _resolve_family_defaults = _resolve_family_defaults
@@ -344,10 +630,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         return current or 1
 
     def _is_terminal_order_status(self, status):
-        return str(status or '').strip() in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
+        return str(status or '').strip() in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive', 'Rejected'}
 
     def _is_soft_terminal_order_status(self, status):
-        return str(status or '').strip() in {'Cancelled', 'ApiCancelled', 'Inactive'}
+        return str(status or '').strip() in {'Cancelled', 'ApiCancelled', 'Inactive', 'Rejected'}
 
     def _resolve_order_tracking(self, order_id, perm_id):
         return resolve_tracking(
@@ -704,10 +990,15 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 )
                 break
 
+            price_increment = await self._resolve_context_price_increment(
+                context,
+                target_limit_source,
+            )
+            context['priceIncrement'] = price_increment
             new_limit = self._quantize_limit_price(
                 target_limit_source,
                 context.get('orderAction'),
-                context.get('priceIncrement'),
+                price_increment,
             )
             if abs(new_limit - float(context.get('workingLimitPrice') or 0)) < 1e-9:
                 context['managedState'] = 'watching'
@@ -765,7 +1056,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'underlyingSymbol': request.underlying_symbol,
             'family': self._normalize_symbol((request.profile or {}).get('family') or request.underlying_symbol),
             'profile': dict(request.profile or {}),
-            'priceIncrement': self._resolve_combo_price_increment(request=request),
+            'priceIncrement': self._safe_positive_float(getattr(preview, 'price_increment', None))
+                or self._resolve_combo_price_increment(request=request),
             'executionMode': request.execution_mode,
             'account': str(getattr(order, 'account', '') or request.account or '').strip() or None,
             'executionIntent': request.execution_intent,
@@ -1410,13 +1702,28 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         first_stage = None
         for leg_request in close_plan.get('underlyingLegs') or []:
             qualified_contract, quote = await self._resolve_leg_contract_and_mark(websocket, leg_request)
-            order = self._build_underlying_close_order(request, leg_request, quote)
+            order_action = 'BUY' if int(leg_request.pos or 0) > 0 else 'SELL'
+            raw_limit = self._resolve_underlying_close_raw_limit(request, quote, order_action)
+            price_increment = await self._resolve_contract_price_increment(
+                qualified_contract,
+                getattr(qualified_contract, 'exchange', '') or leg_request.exchange,
+                raw_limit,
+                self._resolve_combo_price_increment(request=request),
+            )
+            order = self._build_underlying_close_order(
+                request,
+                leg_request,
+                quote,
+                price_increment=price_increment,
+                raw_limit=raw_limit,
+            )
             staged_order = {
                 'stage': 'underlying',
                 'status': 'Previewed',
                 'orderAction': order.action,
                 'quantity': int(order.totalQuantity),
                 'limitPrice': getattr(order, 'lmtPrice', None),
+                'priceIncrement': price_increment,
                 'legId': leg_request.id,
                 'secType': getattr(qualified_contract, 'secType', '') or leg_request.sec_type,
                 'symbol': getattr(qualified_contract, 'symbol', '') or leg_request.symbol,
@@ -1428,6 +1735,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                     'qualifiedContract': qualified_contract,
                     'quote': quote,
                     'order': order,
+                    'priceIncrement': price_increment,
                 }
 
         if first_stage is None:
@@ -1457,38 +1765,44 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         )
         if request.execution_mode == 'test_submit':
             preview.pricing_source = 'test_guardrail'
+        preview.price_increment = first_stage.get('priceIncrement')
         return {
             'contract': first_stage['qualifiedContract'],
             'order': first_stage['order'],
             'preview': preview,
         }
 
-    def _build_underlying_close_order(self, request, leg_request, quote):
+    def _build_underlying_close_order(self, request, leg_request, quote, price_increment=None, raw_limit=None):
         order = Order()
         order.action = 'BUY' if int(leg_request.pos or 0) > 0 else 'SELL'
         order.orderType = 'LMT'
         order.totalQuantity = abs(int(leg_request.pos or 0))
         order.tif = self._resolve_time_in_force(request)
         order.transmit = True
-        if request.execution_mode == 'test_submit':
-            mark = quote.get('mark')
-            direct_mid = float(mark or 0) if order.action == 'BUY' else -float(mark or 0)
-            raw_limit, _pricing_source, _pricing_note = self._resolve_limit_pricing(
-                request,
-                direct_mid,
-                order.action,
-            )
-        else:
-            raw_limit = quote.get('ask') if order.action == 'BUY' else quote.get('bid')
-            if raw_limit is None:
-                raw_limit = quote.get('mark')
-        order.lmtPrice = self._quantize_underlying_limit_price(raw_limit, order.action)
+        if raw_limit is None:
+            raw_limit = self._resolve_underlying_close_raw_limit(request, quote, order.action)
+        order.lmtPrice = self._quantize_underlying_limit_price(raw_limit, order.action, price_increment)
         if str(request.account or '').strip():
             order.account = str(request.account).strip()
         return order
 
-    def _quantize_underlying_limit_price(self, raw_price, order_action):
-        increment = Decimal(str(self.default_price_increment))
+    def _resolve_underlying_close_raw_limit(self, request, quote, order_action):
+        if request.execution_mode == 'test_submit':
+            mark = quote.get('mark')
+            direct_mid = float(mark or 0) if order_action == 'BUY' else -float(mark or 0)
+            raw_limit, _pricing_source, _pricing_note = self._resolve_limit_pricing(
+                request,
+                direct_mid,
+                order_action,
+            )
+        else:
+            raw_limit = quote.get('ask') if order_action == 'BUY' else quote.get('bid')
+            if raw_limit is None:
+                raw_limit = quote.get('mark')
+        return raw_limit
+
+    def _quantize_underlying_limit_price(self, raw_price, order_action, price_increment=None):
+        increment = Decimal(str(self._safe_positive_float(price_increment) or self.default_price_increment))
         price_decimal = Decimal(str(max(float(raw_price), float(increment))))
         rounding = ROUND_CEILING if order_action == 'BUY' else ROUND_FLOOR
         step_count = (price_decimal / increment).to_integral_value(rounding=rounding)
@@ -1529,7 +1843,21 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         staged_orders = []
         for leg_request in close_plan.get('underlyingLegs') or []:
             qualified_contract, quote = await self._resolve_leg_contract_and_mark(websocket, leg_request)
-            order = self._build_underlying_close_order(request, leg_request, quote)
+            order_action = 'BUY' if int(leg_request.pos or 0) > 0 else 'SELL'
+            raw_limit = self._resolve_underlying_close_raw_limit(request, quote, order_action)
+            price_increment = await self._resolve_contract_price_increment(
+                qualified_contract,
+                getattr(qualified_contract, 'exchange', '') or leg_request.exchange,
+                raw_limit,
+                self._resolve_combo_price_increment(request=request),
+            )
+            order = self._build_underlying_close_order(
+                request,
+                leg_request,
+                quote,
+                price_increment=price_increment,
+                raw_limit=raw_limit,
+            )
             self.logger.info(
                 f"Submitting close-group underlying-first order groupId={request.group_id}: "
                 f"id={leg_request.id} secType={leg_request.sec_type} symbol={leg_request.symbol} "
@@ -1584,6 +1912,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 'orderAction': order.action,
                 'quantity': int(order.totalQuantity),
                 'limitPrice': getattr(order, 'lmtPrice', None),
+                'priceIncrement': price_increment,
                 'legId': leg_request.id,
                 'secType': getattr(qualified_contract, 'secType', '') or leg_request.sec_type,
                 'symbol': getattr(qualified_contract, 'symbol', '') or leg_request.symbol,
@@ -1729,11 +2058,17 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             order.action = 'BUY' if leg['pos'] > 0 else 'SELL'
             order.orderType = 'LMT'
             order.totalQuantity = abs(int(leg['pos']))
-            price_increment = self._resolve_combo_price_increment(request=request)
             limit_price, pricing_source, pricing_note = self._resolve_limit_pricing(
                 request,
                 direct_net_mid,
                 order.action,
+            )
+            price_increment = await self._resolve_order_price_increment(
+                request,
+                resolved_legs,
+                order.action,
+                limit_price,
+                combo_exchange,
             )
             order.lmtPrice = self._quantize_limit_price(limit_price, order.action, price_increment)
             order.tif = self._resolve_time_in_force(request)
@@ -1779,11 +2114,14 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 worst_combo_price=quote_bounds['worstPrice'] if quote_bounds else None,
                 legs=preview_legs,
             )
+            preview.price_increment = price_increment
             return {
                 'comboContract': single_contract,
                 'order': order,
                 'preview': preview,
                 'resolvedLegs': resolved_legs,
+                'priceIncrement': price_increment,
+                'rawLimitPrice': limit_price,
             }
 
         combo_contract = Contract(
@@ -1829,11 +2167,17 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         order.action = order_action
         order.orderType = 'LMT'
         order.totalQuantity = quantity
-        price_increment = self._resolve_combo_price_increment(request=request)
         limit_price, pricing_source, pricing_note = self._resolve_limit_pricing(
             request,
             direct_net_mid,
             order_action,
+        )
+        price_increment = await self._resolve_order_price_increment(
+            request,
+            resolved_legs,
+            order_action,
+            limit_price,
+            combo_exchange,
         )
         order.lmtPrice = self._quantize_limit_price(limit_price, order_action, price_increment)
         order.tif = self._resolve_time_in_force(request)
@@ -1877,11 +2221,14 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             worst_combo_price=quote_bounds['worstPrice'] if quote_bounds else None,
             legs=preview_legs,
         )
+        preview.price_increment = price_increment
         return {
             'comboContract': combo_contract,
             'order': order,
             'preview': preview,
             'resolvedLegs': resolved_legs,
+            'priceIncrement': price_increment,
+            'rawLimitPrice': limit_price,
         }
 
     async def validate_combo_order(self, websocket, request):
@@ -1990,6 +2337,119 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self._log_what_if_summary(request.group_id, preview.what_if)
         return preview
 
+    def _append_combo_pricing_note(self, preview, message):
+        message = str(message or '').strip()
+        if not message:
+            return
+        if preview.pricing_note:
+            preview.pricing_note = f"{preview.pricing_note} {message}"
+        else:
+            preview.pricing_note = message
+
+    def _build_combo_tracking_legs(self, resolved_legs):
+        return [
+            {
+                'id': leg['request'].id,
+                'conId': getattr(leg['contract'], 'conId', None),
+                'localSymbol': getattr(leg['contract'], 'localSymbol', ''),
+                'symbol': getattr(leg['contract'], 'symbol', ''),
+                'secType': getattr(leg['contract'], 'secType', ''),
+                'right': getattr(leg['contract'], 'right', ''),
+                'strike': getattr(leg['contract'], 'strike', None),
+                'expDate': getattr(leg['request'], 'exp_date', ''),
+                'targetPosition': leg['pos'],
+                'expectedExecutionSide': 'BOT' if leg['pos'] > 0 else 'SLD',
+                'ratio': leg['ratio'],
+            }
+            for leg in resolved_legs
+        ]
+
+    def _extract_combo_submit_attempt_state(self, trade, placement_tracking):
+        order_status = getattr(trade, 'orderStatus', None)
+        tracked_status_message = ''
+        tracked_status = None
+        if isinstance(placement_tracking, dict):
+            tracked_status_message = str(placement_tracking.get('statusMessage') or '').strip()
+            tracked_status = placement_tracking.get('status')
+        status_message = self._extract_trade_status_message(trade) or tracked_status_message
+        final_status = getattr(order_status, 'status', None)
+        if self._is_terminal_order_status(tracked_status):
+            final_status = tracked_status
+        elif final_status in (None, '') and tracked_status:
+            final_status = tracked_status
+        return {
+            'status': final_status,
+            'statusMessage': status_message,
+            'orderId': getattr(getattr(trade, 'order', None), 'orderId', None),
+            'permId': getattr(order_status, 'permId', None),
+        }
+
+    def _build_combo_attempt_stage(self, attempt, price_increment, retry_reason=''):
+        order = attempt.get('order')
+        stage = {
+            'stage': 'combo',
+            'attempt': attempt.get('attemptNumber'),
+            'orderId': attempt.get('orderId'),
+            'permId': attempt.get('permId'),
+            'status': attempt.get('status'),
+            'orderAction': getattr(order, 'action', None),
+            'quantity': getattr(order, 'totalQuantity', None),
+            'limitPrice': getattr(order, 'lmtPrice', None),
+            'priceIncrement': price_increment,
+        }
+        status_message = str(attempt.get('statusMessage') or '').strip()
+        if status_message:
+            stage['statusMessage'] = status_message
+        if retry_reason:
+            stage['retryReason'] = retry_reason
+        return {key: value for key, value in stage.items() if value is not None and value != ''}
+
+    async def _place_combo_order_attempt(
+        self,
+        websocket,
+        request,
+        combo_contract,
+        order,
+        resolved_legs,
+        price_increment=None,
+        attempt_number=1,
+        retry_reason='',
+    ):
+        attempt_label = 'Retrying' if attempt_number > 1 else 'Placing'
+        increment_text = self._format_price_increment(price_increment)
+        retry_detail = f" retryReason={retry_reason}" if retry_reason else ''
+        increment_detail = f" priceIncrement={increment_text}" if increment_text else ''
+        self.logger.info(
+            f"{attempt_label} combo order for groupId={request.group_id}: "
+            f"executionMode={request.execution_mode} action={order.action} qty={order.totalQuantity} "
+            f"limit={order.lmtPrice} tif={order.tif} account={getattr(order, 'account', '') or ''}"
+            f"{increment_detail}{retry_detail}"
+        )
+        trade = self.ib.placeOrder(combo_contract, order)
+        tracking_legs = self._build_combo_tracking_legs(resolved_legs)
+        # Pre-register fill tracking synchronously (no await between placeOrder
+        # and here) so execution reports arriving during the settle sleep below
+        # can still be attributed to the right legs.
+        placement_tracking = None
+        if callable(self.on_combo_order_placed):
+            try:
+                placement_tracking = self.on_combo_order_placed(websocket, request, trade, tracking_legs)
+            except Exception:
+                self.logger.exception(
+                    f"Failed to pre-register combo order tracking for groupId={request.group_id}"
+                )
+        await asyncio.sleep(1.5)
+        attempt = self._extract_combo_submit_attempt_state(trade, placement_tracking)
+        attempt.update({
+            'trade': trade,
+            'order': order,
+            'trackingLegs': tracking_legs,
+            'placementTracking': placement_tracking,
+            'priceIncrement': price_increment,
+            'attemptNumber': attempt_number,
+        })
+        return attempt
+
     async def submit_combo_order(self, websocket, request):
         close_plan = self._build_assignment_aware_close_plan(request)
         staged_orders = []
@@ -2078,58 +2538,119 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             f"{'Submitting TEST-ONLY combo' if request.execution_mode == 'test_submit' else 'Submitting combo'} groupId={request.group_id}",
             preview,
         )
-        self.logger.info(
-            f"Placing combo order for groupId={request.group_id}: "
-            f"executionMode={request.execution_mode} action={order.action} qty={order.totalQuantity} "
-            f"limit={order.lmtPrice} tif={order.tif} account={getattr(order, 'account', '') or ''}"
+        price_increment = self._safe_positive_float(
+            build_result.get('priceIncrement') or getattr(preview, 'price_increment', None)
         )
-        trade = self.ib.placeOrder(combo_contract, order)
-        tracking_legs = [
-            {
-                'id': leg['request'].id,
-                'conId': getattr(leg['contract'], 'conId', None),
-                'localSymbol': getattr(leg['contract'], 'localSymbol', ''),
-                'symbol': getattr(leg['contract'], 'symbol', ''),
-                'secType': getattr(leg['contract'], 'secType', ''),
-                'right': getattr(leg['contract'], 'right', ''),
-                'strike': getattr(leg['contract'], 'strike', None),
-                'expDate': getattr(leg['request'], 'exp_date', ''),
-                'targetPosition': leg['pos'],
-                'expectedExecutionSide': 'BOT' if leg['pos'] > 0 else 'SLD',
-                'ratio': leg['ratio'],
-            }
-            for leg in resolved_legs
-        ]
-        # Pre-register fill tracking synchronously (no await between placeOrder
-        # and here) so execution reports arriving during the settle sleep below
-        # can still be attributed to the right legs.
-        placement_tracking = None
-        if callable(self.on_combo_order_placed):
-            try:
-                placement_tracking = self.on_combo_order_placed(websocket, request, trade, tracking_legs)
-            except Exception:
-                self.logger.exception(
-                    f"Failed to pre-register combo order tracking for groupId={request.group_id}"
-                )
-        await asyncio.sleep(1.5)
-        managed_context = self._register_managed_context(
+        raw_limit_price = build_result.get('rawLimitPrice')
+        if raw_limit_price is None:
+            raw_limit_price = getattr(order, 'lmtPrice', None)
+
+        attempt = await self._place_combo_order_attempt(
             websocket,
             request,
             combo_contract,
-            trade,
-            preview,
+            order,
             resolved_legs,
+            price_increment=price_increment,
+            attempt_number=1,
         )
-        order_status = getattr(trade, 'orderStatus', None)
-        tracked_status_message = ''
-        tracked_status = None
-        if isinstance(placement_tracking, dict):
-            tracked_status_message = str(placement_tracking.get('statusMessage') or '').strip()
-            tracked_status = placement_tracking.get('status')
-        status_message = self._extract_trade_status_message(trade) or tracked_status_message
-        final_status = getattr(order_status, 'status', None)
-        if str(tracked_status or '').strip() in {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}:
-            final_status = tracked_status
+        final_attempt = attempt
+        retry_stages = []
+
+        if self._is_min_price_variation_reject(attempt.get('status'), attempt.get('statusMessage')):
+            retry_stages.append(self._build_combo_attempt_stage(
+                attempt,
+                price_increment,
+                retry_reason='minimum_price_variation',
+            ))
+            last_limit = self._safe_positive_float(getattr(order, 'lmtPrice', None)) or 0.0
+            next_attempt_number = 2
+            for retry_increment in self._coarser_price_increment_candidates(price_increment):
+                retry_limit = self._quantize_limit_price(
+                    raw_limit_price,
+                    order.action,
+                    retry_increment,
+                )
+                if abs(float(retry_limit) - float(last_limit)) < 1e-9:
+                    continue
+                retry_order = self._clone_order_for_limit_retry(order, retry_limit)
+                retry_attempt = await self._place_combo_order_attempt(
+                    websocket,
+                    request,
+                    combo_contract,
+                    retry_order,
+                    resolved_legs,
+                    price_increment=retry_increment,
+                    attempt_number=next_attempt_number,
+                    retry_reason='minimum_price_variation',
+                )
+                retry_stages.append(self._build_combo_attempt_stage(
+                    retry_attempt,
+                    retry_increment,
+                    retry_reason='minimum_price_variation',
+                ))
+                final_attempt = retry_attempt
+                price_increment = retry_increment
+                last_limit = retry_limit
+                next_attempt_number += 1
+                if not self._is_min_price_variation_reject(
+                    retry_attempt.get('status'),
+                    retry_attempt.get('statusMessage'),
+                ):
+                    break
+
+        if retry_stages:
+            preview.staged_orders = list(preview.staged_orders or []) + retry_stages
+            final_order = final_attempt.get('order') or order
+            final_limit = getattr(final_order, 'lmtPrice', None)
+            if final_limit is not None:
+                preview.limit_price = final_limit
+            preview.price_increment = self._safe_positive_float(
+                final_attempt.get('priceIncrement') or price_increment
+            )
+            final_increment_text = self._format_price_increment(preview.price_increment)
+            final_limit_text = getattr(final_order, 'lmtPrice', None)
+            if self._is_min_price_variation_reject(
+                final_attempt.get('status'),
+                final_attempt.get('statusMessage'),
+            ):
+                self._append_combo_pricing_note(
+                    preview,
+                    'TWS rejected the combo limit for minimum price variation; '
+                    'the backend retried with coarser tick sizes but TWS still rejected the latest price.'
+                )
+            else:
+                self._append_combo_pricing_note(
+                    preview,
+                    f"TWS rejected the initial combo limit for minimum price variation; "
+                    f"the backend resubmitted at {final_limit_text} using "
+                    f"{final_increment_text or 'a coarser'} tick size."
+                )
+
+        trade = final_attempt['trade']
+        tracking_legs = final_attempt['trackingLegs']
+        managed_context = None
+        if not self._is_min_price_variation_reject(
+            final_attempt.get('status'),
+            final_attempt.get('statusMessage'),
+        ):
+            managed_context = self._register_managed_context(
+                websocket,
+                request,
+                combo_contract,
+                trade,
+                preview,
+                resolved_legs,
+            )
+        status_message = final_attempt.get('statusMessage') or ''
+        final_status = final_attempt.get('status')
+        if retry_stages and self._is_min_price_variation_reject(final_status, status_message):
+            status_message = (
+                'TWS rejected the combo limit for minimum price variation after retrying coarser tick sizes. '
+                f"Latest TWS message: {status_message}"
+                if status_message
+                else 'TWS rejected the combo limit for minimum price variation after retrying coarser tick sizes.'
+            )
         if managed_context is not None:
             preview.managed_mode = True
             preview.managed_state = managed_context.get('managedState')
@@ -2144,8 +2665,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             preview.managed_message = managed_context.get('managedMessage')
         result = ComboSubmitResult(
             preview=preview,
-            order_id=getattr(getattr(trade, 'order', None), 'orderId', None),
-            perm_id=getattr(order_status, 'permId', None),
+            order_id=final_attempt.get('orderId'),
+            perm_id=final_attempt.get('permId'),
             status=final_status,
             status_message=status_message or None,
             tracking_legs=tracking_legs,
