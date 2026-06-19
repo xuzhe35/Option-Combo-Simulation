@@ -77,7 +77,12 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.on_combo_order_placed = on_combo_order_placed
         self.portfolio_positions_provider = portfolio_positions_provider
         self.what_if_timeout_seconds = 4.0
+        self.tick_size_request_timeout_seconds = 4.0
         self.underlying_close_settle_seconds = 3.0
+        self.combo_submit_settle_seconds = 1.5
+        # Brief window to surface an immediate minimum-price-variation reject so a
+        # coarser-tick retry can fire without burning the full settle window.
+        self.combo_submit_reject_probe_seconds = 0.25
         self.test_only_buy_factor = 0.2
         self.test_only_sell_factor = 5.0
         self.test_only_small_credit_buffer = 0.5
@@ -92,6 +97,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.hedge_orders_by_order_id = {}
         self.hedge_orders_by_perm_id = {}
         self.contract_details_cache_by_con_id = {}
+        # Combo signatures (sorted (conId, ratio) tuples) -> the coarser tick that
+        # TWS accepted after a minimum-price-variation reject, so repeat submits of
+        # the same combo shape start at the working tick instead of re-eating a reject.
+        self.combo_working_increment_by_signature = {}
         self.market_rule_cache_by_id = {}
         self.ib.orderStatusEvent += self._on_managed_order_status
         self.ib.orderStatusEvent += self._on_hedge_order_status
@@ -286,7 +295,16 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             return None
 
         try:
-            details = await self.ib.reqContractDetailsAsync(contract)
+            details = await asyncio.wait_for(
+                self.ib.reqContractDetailsAsync(contract),
+                timeout=self.tick_size_request_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            self.logger.warning(
+                f"Timed out requesting contract details for conId={con_id} after "
+                f"{self.tick_size_request_timeout_seconds:.1f}s; using fallback price increment"
+            )
+            return None
         except Exception as exc:
             self.logger.warning(
                 f"Failed to request contract details for conId={con_id}: {exc}"
@@ -309,7 +327,16 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             return []
 
         try:
-            increments = await self.ib.reqMarketRuleAsync(rule_key)
+            increments = await asyncio.wait_for(
+                self.ib.reqMarketRuleAsync(rule_key),
+                timeout=self.tick_size_request_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            self.logger.warning(
+                f"Timed out requesting IB market rule {rule_key} after "
+                f"{self.tick_size_request_timeout_seconds:.1f}s; using fallback price increment"
+            )
+            return []
         except Exception as exc:
             self.logger.warning(f"Failed to request IB market rule {rule_key}: {exc}")
             return []
@@ -355,6 +382,58 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         min_tick = self._safe_positive_float(getattr(details, 'minTick', None))
         return min_tick or fallback
 
+    def _combo_increment_signature(self, resolved_legs):
+        """Stable key identifying a combo shape (the legs and their ratios).
+
+        Returns None for fewer than two legs: a lone leg is routed as a regular
+        order whose tick comes straight from its own market rule, so there is
+        nothing combo-specific to learn or reuse.
+        """
+        parts = []
+        for leg in resolved_legs or []:
+            contract = leg.get('contract') if isinstance(leg, dict) else None
+            con_id = getattr(contract, 'conId', None)
+            if con_id in (None, ''):
+                return None
+            try:
+                con_id = int(con_id)
+            except (TypeError, ValueError):
+                return None
+            try:
+                ratio = abs(int(leg.get('ratio') or 0))
+            except (TypeError, ValueError):
+                ratio = 0
+            parts.append((con_id, ratio))
+        if len(parts) < 2:
+            return None
+        parts.sort()
+        return tuple(parts)
+
+    def _apply_learned_combo_increment(self, resolved_legs, resolved_increment):
+        """Floor the freshly-resolved increment by any previously-learned working
+        tick for this combo shape, so repeat submits skip the reject/retry cycle."""
+        signature = self._combo_increment_signature(resolved_legs)
+        if signature is None:
+            return resolved_increment
+        learned = self._safe_positive_float(self.combo_working_increment_by_signature.get(signature))
+        resolved = self._safe_positive_float(resolved_increment) or 0.0
+        if learned and learned > resolved:
+            return learned
+        return resolved_increment
+
+    def _remember_working_combo_increment(self, resolved_legs, working_increment, group_id=None):
+        signature = self._combo_increment_signature(resolved_legs)
+        increment = self._safe_positive_float(working_increment)
+        if signature is None or not increment:
+            return
+        if self.combo_working_increment_by_signature.get(signature) == increment:
+            return
+        self.combo_working_increment_by_signature[signature] = increment
+        self.logger.info(
+            f"Learned working combo tick {self._format_price_increment(increment)} "
+            f"for combo signature {signature} (groupId={group_id})"
+        )
+
     async def _resolve_price_increment_for_legs(self, resolved_legs, raw_limit_price, combo_exchange, fallback_increment):
         fallback = self._safe_positive_float(fallback_increment) or float(self.default_price_increment)
         legs = list(resolved_legs or [])
@@ -392,9 +471,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             if increment:
                 increments.append(float(increment))
 
-        if increments:
-            return min(increments)
-        return fallback
+        resolved = min(increments) if increments else fallback
+        return self._apply_learned_combo_increment(legs, resolved)
 
     async def _resolve_order_price_increment(self, request, resolved_legs, order_action, raw_limit_price, combo_exchange):
         return await self._resolve_price_increment_for_legs(
@@ -767,6 +845,29 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         context['pendingTerminalStatus'] = None
         context['repricingSuspended'] = False
 
+    async def _cancel_reprice_task_and_wait(self, context):
+        """Cancel the context's auto-reprice loop and wait for it to fully unwind.
+
+        Restart/cancel paths must not leave the previous loop "alive but doomed":
+        awaiting its termination guarantees it can never interleave another
+        placeOrder with the supervision that replaces it. No-ops when the task is
+        absent, already finished, or is the caller itself (awaiting self hangs).
+        """
+        task = context.get('task')
+        current_task = asyncio.current_task()
+        if task is None or task.done() or task is current_task:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            self.logger.exception(
+                f"Managed reprice task raised while being cancelled "
+                f"(groupId={context.get('groupId')})"
+            )
+
     async def _finalize_managed_terminal(self, context, terminal_status, message=None):
         self._clear_pending_terminal_confirmation(context)
         if terminal_status == 'Filled':
@@ -779,10 +880,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         await self._emit_managed_update(context)
         if not context.get('terminated'):
             context['terminated'] = True
-        task = context.get('task')
-        current_task = asyncio.current_task()
-        if task and not task.done() and task is not current_task:
-            task.cancel()
+        await self._cancel_reprice_task_and_wait(context)
         self._cleanup_managed_context(context)
 
     async def _confirm_terminal_status_after_grace(self, context, terminal_status, token):
@@ -2404,6 +2502,22 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             stage['retryReason'] = retry_reason
         return {key: value for key, value in stage.items() if value is not None and value != ''}
 
+    async def _await_combo_submit_settle(self, trade, placement_tracking):
+        """Wait for the freshly placed order to settle, but bail out early on an
+        immediate minimum-price-variation reject so the caller can retry with a
+        coarser tick in milliseconds instead of after the full settle window."""
+        settle_seconds = float(self.combo_submit_settle_seconds)
+        probe_seconds = float(self.combo_submit_reject_probe_seconds)
+        if 0 < probe_seconds < settle_seconds:
+            await asyncio.sleep(probe_seconds)
+            attempt = self._extract_combo_submit_attempt_state(trade, placement_tracking)
+            if self._is_min_price_variation_reject(attempt.get('status'), attempt.get('statusMessage')):
+                return attempt
+            await asyncio.sleep(settle_seconds - probe_seconds)
+        else:
+            await asyncio.sleep(settle_seconds)
+        return self._extract_combo_submit_attempt_state(trade, placement_tracking)
+
     async def _place_combo_order_attempt(
         self,
         websocket,
@@ -2438,8 +2552,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 self.logger.exception(
                     f"Failed to pre-register combo order tracking for groupId={request.group_id}"
                 )
-        await asyncio.sleep(1.5)
-        attempt = self._extract_combo_submit_attempt_state(trade, placement_tracking)
+        attempt = await self._await_combo_submit_settle(trade, placement_tracking)
         attempt.update({
             'trade': trade,
             'order': order,
@@ -2626,6 +2739,13 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                     f"the backend resubmitted at {final_limit_text} using "
                     f"{final_increment_text or 'a coarser'} tick size."
                 )
+                # Remember the tick TWS just accepted so the next submit of this
+                # combo shape starts here and skips the reject/retry round-trip.
+                self._remember_working_combo_increment(
+                    resolved_legs,
+                    preview.price_increment,
+                    request.group_id,
+                )
 
         trade = final_attempt['trade']
         tracking_legs = final_attempt['trackingLegs']
@@ -2796,9 +2916,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 f'with drift threshold '
                 f'{self._format_managed_reprice_threshold(context.get("managedRepriceThreshold") or self.managed_reprice_threshold)}.'
             )
-        task = context.get('task')
-        if task and not task.done():
-            task.cancel()
+        await self._cancel_reprice_task_and_wait(context)
         context['task'] = asyncio.create_task(self._managed_reprice_loop(context))
         await self._emit_managed_update(context)
         self.logger.info(
@@ -2866,9 +2984,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             raise ValueError('No live broker order is available to modify.')
 
         previous_limit = float(context.get('workingLimitPrice') or 0)
-        task = context.get('task')
-        if task and not task.done():
-            task.cancel()
+        await self._cancel_reprice_task_and_wait(context)
 
         context['terminated'] = False
         context['maxRepriceCount'] = int(context.get('maxRepriceCount') or self.managed_reprice_max_updates) + self.managed_reprice_max_updates
@@ -2941,9 +3057,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             if reason == 'exit_condition'
             else 'Cancelling the live combo order in TWS.'
         )
-        task = context.get('task')
-        if task and not task.done():
-            task.cancel()
+        await self._cancel_reprice_task_and_wait(context)
 
         await self._emit_managed_update(context)
         self.ib.cancelOrder(order)

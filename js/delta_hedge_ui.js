@@ -281,8 +281,38 @@
         return null;
     }
 
+    function _resolveBrokerConfirmedTickSize(state, instrument, symbol) {
+        // The server resolves the real price increment from the broker's market rule
+        // and returns it on the hedge preview. Reuse it so the client auto-limit uses
+        // the same tick the order will actually be submitted at — one source of truth.
+        const runtime = state && state.deltaHedge;
+        const preview = runtime && runtime.lastPreview;
+        if (!preview || typeof preview !== 'object') {
+            return null;
+        }
+        const increment = Number(preview.priceIncrement);
+        if (!Number.isFinite(increment) || increment <= 0) {
+            return null;
+        }
+        // Only reuse it when the preview describes the same contract still in view.
+        const previewSymbol = _normalizeSymbol(preview.symbol);
+        if (previewSymbol && symbol && previewSymbol !== symbol) {
+            return null;
+        }
+        const previewSecType = _normalizeSymbol(preview.secType);
+        const instrumentSecType = _normalizeSymbol(instrument && instrument.secType);
+        if (previewSecType && instrumentSecType && previewSecType !== instrumentSecType) {
+            return null;
+        }
+        return increment;
+    }
+
     function _resolveLimitPriceTickSize(state, instrument) {
         const symbol = _normalizeSymbol(instrument && instrument.symbol) || _normalizeSymbol(state && state.underlyingSymbol);
+        const brokerIncrement = _resolveBrokerConfirmedTickSize(state, instrument, symbol);
+        if (brokerIncrement) {
+            return brokerIncrement;
+        }
         const registry = _getProductRegistry();
         if (registry && typeof registry.getComboPriceIncrement === 'function') {
             const tickSize = Number(registry.getComboPriceIncrement(symbol));

@@ -114,6 +114,25 @@ async def _build_hedge_order_from_request(self, request):
     self._validate_hedge_order_request(request)
     qualified_contract = await self._qualify_hedge_contract(request)
     order = self._build_hedge_order(request)
+
+    price_increment = None
+    if order.orderType == 'LMT':
+        # Reuse the same market-rule / min-tick resolution and quantization the combo
+        # path uses, so a hedge limit price conforms to the contract's real price
+        # increment (e.g. ES futures 0.25) instead of an assumed default. Keeping a
+        # single source of truth means future tick-handling changes live in one place.
+        price_increment = await self._resolve_contract_price_increment(
+            qualified_contract,
+            getattr(qualified_contract, 'exchange', '') or request.exchange or '',
+            getattr(order, 'lmtPrice', None),
+            self.default_price_increment,
+        )
+        order.lmtPrice = self._quantize_underlying_limit_price(
+            order.lmtPrice,
+            order.action,
+            price_increment,
+        )
+
     preview = HedgeOrderPreview(
         hedge_id=request.hedge_id,
         hedge_name=request.hedge_name,
@@ -137,6 +156,7 @@ async def _build_hedge_order_from_request(self, request):
         projected_net_delta=request.projected_net_delta,
         target_lower=request.target_lower,
         target_upper=request.target_upper,
+        price_increment=price_increment,
     )
     return {
         'contract': qualified_contract,

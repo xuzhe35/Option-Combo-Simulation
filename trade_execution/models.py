@@ -108,6 +108,7 @@ class HedgeOrderPreview:
     projected_net_delta: Optional[float] = None
     target_lower: Optional[float] = None
     target_upper: Optional[float] = None
+    price_increment: Optional[float] = None
     what_if: Optional[dict[str, Any]] = None
 
     def to_payload(self) -> dict[str, Any]:
@@ -144,6 +145,8 @@ class HedgeOrderPreview:
             payload["targetLower"] = self.target_lower
         if self.target_upper is not None:
             payload["targetUpper"] = self.target_upper
+        if self.price_increment is not None:
+            payload["priceIncrement"] = self.price_increment
         if self.what_if is not None:
             payload["whatIf"] = self.what_if
         return payload

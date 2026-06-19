@@ -364,6 +364,118 @@ class IbkrAdapterPricingTests(unittest.TestCase):
         self.assertEqual(result['priceIncrement'], 0.05)
         self.assertEqual(result['order'].lmtPrice, 2.5)
 
+    def test_resolve_price_increment_reuses_learned_combo_tick(self):
+        class _FineRuleIb(_DummyIb):
+            async def reqContractDetailsAsync(self, contract):
+                return [SimpleNamespace(
+                    minTick=0.01,
+                    validExchanges='CME',
+                    marketRuleIds='101',
+                    contract=SimpleNamespace(exchange='CME'),
+                )]
+
+            async def reqMarketRuleAsync(self, market_rule_id):
+                return [SimpleNamespace(lowEdge=0, increment=0.05)]
+
+        adapter = IbkrExecutionAdapter(
+            ib=_FineRuleIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+        resolved_legs = [
+            {
+                'request': SimpleNamespace(exchange='CME'),
+                'contract': SimpleNamespace(conId=8801, exchange='CME'),
+                'ratio': 1,
+                'quote': {'mark': 1.26},
+            },
+            {
+                'request': SimpleNamespace(exchange='CME'),
+                'contract': SimpleNamespace(conId=8802, exchange='CME'),
+                'ratio': 1,
+                'quote': {'mark': 1.27},
+            },
+        ]
+
+        # Without a learned tick, the resolver returns the fine market-rule tick.
+        fresh = asyncio.run(
+            adapter._resolve_price_increment_for_legs(resolved_legs, 2.53, 'CME', 0.01)
+        )
+        self.assertEqual(fresh, 0.05)
+
+        # After learning a coarser working tick for this combo shape, reuse it so
+        # the next submit skips the reject/retry round-trip.
+        adapter.combo_working_increment_by_signature[((8801, 1), (8802, 1))] = 0.25
+        reused = asyncio.run(
+            adapter._resolve_price_increment_for_legs(resolved_legs, 2.53, 'CME', 0.01)
+        )
+        self.assertEqual(reused, 0.25)
+
+    def test_contract_details_timeout_uses_fallback_increment(self):
+        class _SlowDetailsIb(_DummyIb):
+            async def reqContractDetailsAsync(self, _contract):
+                await asyncio.sleep(1.0)
+                return [SimpleNamespace(
+                    minTick=0.25,
+                    validExchanges='SMART',
+                    marketRuleIds='101',
+                    contract=SimpleNamespace(exchange='SMART'),
+                )]
+
+        adapter = IbkrExecutionAdapter(
+            ib=_SlowDetailsIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+        adapter.tick_size_request_timeout_seconds = 0.01
+
+        result = asyncio.run(adapter._resolve_contract_price_increment(
+            SimpleNamespace(conId=9901),
+            'SMART',
+            65.63,
+            0.05,
+        ))
+
+        self.assertEqual(result, 0.05)
+        self.assertNotIn(9901, adapter.contract_details_cache_by_con_id)
+
+    def test_market_rule_timeout_uses_fallback_increment(self):
+        class _SlowMarketRuleIb(_DummyIb):
+            async def reqContractDetailsAsync(self, _contract):
+                return [SimpleNamespace(
+                    minTick=None,
+                    validExchanges='SMART',
+                    marketRuleIds='101',
+                    contract=SimpleNamespace(exchange='SMART'),
+                )]
+
+            async def reqMarketRuleAsync(self, _market_rule_id):
+                await asyncio.sleep(1.0)
+                return [SimpleNamespace(lowEdge=0, increment=0.25)]
+
+        adapter = IbkrExecutionAdapter(
+            ib=_SlowMarketRuleIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+        adapter.tick_size_request_timeout_seconds = 0.01
+
+        result = asyncio.run(adapter._resolve_contract_price_increment(
+            SimpleNamespace(conId=9902),
+            'SMART',
+            65.63,
+            0.05,
+        ))
+
+        self.assertEqual(result, 0.05)
+        self.assertNotIn(101, adapter.market_rule_cache_by_id)
+
     def test_extract_trade_status_message_prefers_latest_non_empty_trade_log_message(self):
         trade = SimpleNamespace(
             log=[
@@ -1280,7 +1392,8 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
                 'sleep:3.0',
                 'place:OPT:BUY',
                 'register:close_group',
-                'sleep:1.5',
+                'sleep:0.25',
+                'sleep:1.25',
             ],
         )
         self.assertEqual(preregistered_sources, ['close_group_underlying', 'close_group'])
@@ -1406,7 +1519,9 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             asyncio.sleep = real_sleep
 
-        self.assertEqual(events, ['place_order', 'pre_register', 'sleep'])
+        # Pre-registration still happens before any settle sleep; the settle now
+        # runs as a short reject-probe followed by the remaining window (two sleeps).
+        self.assertEqual(events, ['place_order', 'pre_register', 'sleep', 'sleep'])
         self.assertEqual(result.order_id, 4500)
         self.assertEqual(result.perm_id, 4501)
         self.assertIs(result.trade.order, order)
@@ -1596,20 +1711,36 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             tif='DAY',
             transmit=True,
         )
-        resolved_legs = [{
-            'request': SimpleNamespace(id='leg_1', exp_date='2026-06-19'),
-            'contract': SimpleNamespace(
-                conId=12345,
-                localSymbol='MES  260619C07560000',
-                symbol='MES',
-                secType='FOP',
-                right='C',
-                strike=7560.0,
-            ),
-            'pos': 1,
-            'ratio': 1,
-            'quote': {'bid': 2.5, 'ask': 2.65, 'mark': 2.58},
-        }]
+        resolved_legs = [
+            {
+                'request': SimpleNamespace(id='leg_1', exp_date='2026-06-19'),
+                'contract': SimpleNamespace(
+                    conId=12345,
+                    localSymbol='MES  260619C07560000',
+                    symbol='MES',
+                    secType='FOP',
+                    right='C',
+                    strike=7560.0,
+                ),
+                'pos': 1,
+                'ratio': 1,
+                'quote': {'bid': 2.5, 'ask': 2.65, 'mark': 2.58},
+            },
+            {
+                'request': SimpleNamespace(id='leg_2', exp_date='2026-06-19'),
+                'contract': SimpleNamespace(
+                    conId=12346,
+                    localSymbol='MES  260619P07560000',
+                    symbol='MES',
+                    secType='FOP',
+                    right='P',
+                    strike=7560.0,
+                ),
+                'pos': -1,
+                'ratio': 1,
+                'quote': {'bid': 2.4, 'ask': 2.55, 'mark': 2.48},
+            },
+        ]
 
         async def fake_build(_websocket, _request):
             return {
@@ -1645,7 +1776,14 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             asyncio.sleep = real_sleep
 
         self.assertEqual(len(placed_orders), 2)
-        self.assertEqual(sleep_calls, [1.5, 1.5])
+        # First attempt bails out after the short reject probe (110 detected);
+        # the accepted retry waits the probe plus the remaining settle window.
+        self.assertEqual(sleep_calls, [0.25, 0.25, 1.25])
+        # The coarser tick that TWS accepted is remembered for this combo shape.
+        self.assertEqual(
+            adapter.combo_working_increment_by_signature.get(((12345, 1), (12346, 1))),
+            0.25,
+        )
         self.assertEqual(placed_orders[0][1].lmtPrice, 2.55)
         self.assertEqual(placed_orders[1][1].lmtPrice, 2.5)
         self.assertEqual(result.order_id, 4701)
@@ -1662,6 +1800,50 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.preview.staged_orders[0]['priceIncrement'], 0.05)
         self.assertEqual(result.preview.staged_orders[1]['status'], 'Submitted')
         self.assertEqual(result.preview.staged_orders[1]['priceIncrement'], 0.25)
+
+    async def test_cancel_reprice_task_and_wait_awaits_termination(self):
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+        started = asyncio.Event()
+        observed_cancel = {'value': False}
+
+        async def fake_loop():
+            started.set()
+            try:
+                await asyncio.sleep(100)
+            except asyncio.CancelledError:
+                observed_cancel['value'] = True
+                raise
+
+        task = asyncio.create_task(fake_loop())
+        await started.wait()
+        context = {'task': task, 'groupId': 'g_cancel_wait'}
+
+        await adapter._cancel_reprice_task_and_wait(context)
+
+        # The helper must await the loop to full termination, not fire-and-forget,
+        # so a restart/cancel path can never overlap a doomed loop with a new one.
+        self.assertTrue(task.done())
+        self.assertTrue(observed_cancel['value'])
+
+    async def test_cancel_reprice_task_and_wait_skips_current_task(self):
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+        # Invoked from within the loop task itself, awaiting self would hang;
+        # the helper must no-op (and never cancel the caller) instead.
+        context = {'task': asyncio.current_task(), 'groupId': 'g_self'}
+        await asyncio.wait_for(adapter._cancel_reprice_task_and_wait(context), timeout=1.0)
+        self.assertFalse(asyncio.current_task().cancelled())
 
 
 class IbkrAdapterManagedAdoptionTests(unittest.TestCase):

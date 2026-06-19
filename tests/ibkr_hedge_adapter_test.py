@@ -79,6 +79,22 @@ class _FakeIb:
         self.cancelled_orders.append(order)
 
 
+class _MarketRuleFakeIb(_FakeIb):
+    """Fake IB that exposes the contract-details / market-rule API so the hedge
+    path can resolve a real price increment (e.g. ES futures 0.25)."""
+
+    async def reqContractDetailsAsync(self, contract):
+        return [SimpleNamespace(
+            minTick=0.25,
+            validExchanges="CME",
+            marketRuleIds="67",
+            contract=SimpleNamespace(exchange="CME"),
+        )]
+
+    async def reqMarketRuleAsync(self, market_rule_id):
+        return [SimpleNamespace(lowEdge=0, increment=0.25)]
+
+
 class IbkrHedgeAdapterTests(unittest.TestCase):
     def setUp(self):
         self.ib = _FakeIb()
@@ -277,6 +293,42 @@ class IbkrHedgeAdapterTests(unittest.TestCase):
             }))
 
         self.assertEqual(self.ib.cancelled_orders, [])
+
+    def test_hedge_lmt_snaps_to_market_rule_tick(self):
+        # ES futures trade in 0.25 ticks; a hedge limit off that grid must be
+        # snapped via the same market-rule resolution the combo path uses, not
+        # left at the client-provided (possibly 0.01-rounded) value.
+        self.ib = _MarketRuleFakeIb()
+        self.adapter = IbkrExecutionAdapter(
+            ib=self.ib,
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+        request = HedgeOrderRequest.from_payload({
+            "hedgeId": "delta_es",
+            "hedgeName": "ES Delta Hedge",
+            "secType": "FUT",
+            "symbol": "ES",
+            "exchange": "CME",
+            "currency": "USD",
+            "contractMonth": "202606",
+            "multiplier": "50",
+            "orderAction": "BUY",
+            "quantity": 1,
+            "orderType": "LMT",
+            "limitPrice": 5125.13,
+            "account": "DU12345",
+        })
+
+        preview = self._run(self.adapter.preview_hedge_order(None, request))
+
+        # BUY rounds up to the next valid 0.25 tick (5125.13 -> 5125.25), and the
+        # resolved increment is surfaced on the preview payload.
+        self.assertEqual(preview.price_increment, 0.25)
+        self.assertEqual(preview.limit_price, 5125.25)
+        self.assertEqual(preview.to_payload()["priceIncrement"], 0.25)
 
     def _run(self, awaitable):
         import asyncio

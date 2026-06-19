@@ -465,6 +465,74 @@ module.exports = {
             },
         },
         {
+            name: 'auto-limit reuses the broker-confirmed tick from the last preview',
+            run() {
+                const elements = buildElements();
+                const ctx = loadContext(elements, {
+                    OptionComboWsLiveQuotes: {
+                        getStockQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return { bid: 5124.75, ask: 5125.25, mark: 5125.0 };
+                        },
+                    },
+                    OptionComboProductRegistry: {
+                        // Registry would suggest a 0.01 tick, but the broker preview
+                        // resolved 0.25 from the real market rule and must win.
+                        getComboPriceIncrement() {
+                            return 0.01;
+                        },
+                        formatPriceInputValue(_symbol, value) {
+                            return String(Number(value));
+                        },
+                    },
+                });
+                const state = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'ES',
+                    deltaHedge: {
+                        enabled: true,
+                        targetDelta: 0,
+                        tolerance: 25,
+                        hedgeInstrument: {
+                            secType: 'FUT',
+                            symbol: 'ES',
+                            exchange: 'CME',
+                            currency: 'USD',
+                            contractMonth: '202606',
+                            multiplier: 50,
+                            deltaPerUnit: 1,
+                        },
+                        orderType: 'LMT',
+                        limitPrice: null,
+                        lastPreview: {
+                            secType: 'FUT',
+                            symbol: 'ES',
+                            priceIncrement: 0.25,
+                            limitPrice: 5119.75,
+                        },
+                    },
+                };
+
+                ctx.OptionComboDeltaHedgeUI.bindDeltaHedgePanel(state, {});
+                ctx.OptionComboDeltaHedgeUI.applyRecommendationPreview(state, {
+                    portfolioDeltaAvailable: true,
+                    portfolioDeltaDisplayable: true,
+                    portfolioOptionDelta: -60,
+                    portfolioHedgeDelta: 0,
+                    portfolioNetDelta: -60,
+                    portfolioDeltaMissingGroupCount: 0,
+                });
+
+                // 5125 * (1 - 0.001) = 5119.875 -> BUY rounds down to the 0.25 grid
+                // (5119.75), not the registry's 0.01 grid (5119.87).
+                assert.equal(state.deltaHedge.limitPrice, 5119.75);
+                assert.equal(state.deltaHedge.limitPriceTickSize, 0.25);
+            },
+        },
+        {
             name: 'preserves manually edited LMT price across quote refresh',
             run() {
                 const elements = buildElements();
