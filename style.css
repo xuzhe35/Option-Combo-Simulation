@@ -443,6 +443,24 @@ input[type=range]:focus {
     white-space: nowrap;
 }
 
+.summary-item.option-redundancy-summary {
+    display: block;
+}
+
+.summary-item.option-redundancy-summary .label {
+    display: block;
+    margin-bottom: 0.35rem;
+    white-space: normal;
+}
+
+.summary-item .option-redundancy-value {
+    display: block;
+    line-height: 1.35;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
 /* Buttons */
 .btn {
     display: inline-flex;

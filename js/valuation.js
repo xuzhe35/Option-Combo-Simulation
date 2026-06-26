@@ -108,7 +108,10 @@
     }
 
     function isClosedLeg(leg) {
-        return !!(leg && leg.closePrice !== null && leg.closePrice !== '');
+        return !!(leg
+            && leg.closePrice !== null
+            && leg.closePrice !== ''
+            && leg.closePrice !== undefined);
     }
 
     function normalizeLegPosition(value) {
@@ -119,6 +122,63 @@
     function normalizeFiniteNumber(value, fallback = 0) {
         const parsed = parseFloat(value);
         return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function createEmptyOptionLegRedundancyBucket() {
+        return {
+            buyContracts: 0,
+            sellContracts: 0,
+            netContracts: 0,
+            redundantContracts: 0,
+            direction: 'flat',
+        };
+    }
+
+    function finalizeOptionLegRedundancyBucket(bucket) {
+        const netContracts = bucket.buyContracts - bucket.sellContracts;
+        return {
+            buyContracts: bucket.buyContracts,
+            sellContracts: bucket.sellContracts,
+            netContracts,
+            redundantContracts: Math.abs(netContracts),
+            direction: netContracts > 0 ? 'long' : (netContracts < 0 ? 'short' : 'flat'),
+        };
+    }
+
+    function computeOptionLegRedundancy(groups) {
+        const buckets = {
+            call: createEmptyOptionLegRedundancyBucket(),
+            put: createEmptyOptionLegRedundancyBucket(),
+        };
+
+        (Array.isArray(groups) ? groups : []).forEach((group) => {
+            (Array.isArray(group && group.legs) ? group.legs : []).forEach((leg) => {
+                if (!leg || isClosedLeg(leg)) {
+                    return;
+                }
+
+                const type = String(leg.type || '').trim().toLowerCase();
+                if (type !== 'call' && type !== 'put') {
+                    return;
+                }
+
+                const contracts = Math.abs(normalizeLegPosition(leg.pos));
+                if (contracts <= 0) {
+                    return;
+                }
+
+                if (normalizeLegPosition(leg.pos) > 0) {
+                    buckets[type].buyContracts += contracts;
+                } else {
+                    buckets[type].sellContracts += contracts;
+                }
+            });
+        });
+
+        return {
+            call: finalizeOptionLegRedundancyBucket(buckets.call),
+            put: finalizeOptionLegRedundancyBucket(buckets.put),
+        };
     }
 
     function computeHedgeDelta(hedge) {
@@ -569,6 +629,7 @@
             ? productRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol)
             : null;
         const includedGroupResults = groupResults.filter(result => result.isIncludedInGlobal);
+        const optionLegRedundancy = computeOptionLegRedundancy(globalState && globalState.groups);
 
         const globalTotalCost = includedGroupResults.reduce((sum, result) => sum + result.groupCost, 0);
         const globalSimulationAvailable = includedGroupResults.every(result => result.groupSimulationAvailable !== false);
@@ -595,6 +656,7 @@
             hedgeResultsById: new Map(hedgeResults.map(result => [result.id, result])),
             groupResults,
             groupResultsById: new Map(groupResults.map(result => [result.id, result])),
+            optionLegRedundancy,
             globalTotalCost,
             globalSimulationAvailable,
             globalSimulatedValue,
@@ -649,6 +711,7 @@
         buildCurrentPriceDisplayState,
         computeHedgeDerivedData,
         computeLegDerivedData,
+        computeOptionLegRedundancy,
         computeGroupDeltaSummary,
         computeGroupDerivedData,
         buildPortfolioDeltaSummary,

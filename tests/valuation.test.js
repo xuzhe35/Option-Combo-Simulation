@@ -29,6 +29,43 @@ module.exports = {
             },
         },
         {
+            name: 'computes all-groups option leg redundancy from open call and put positions',
+            run() {
+                const ctx = loadValuationContext();
+                const result = ctx.OptionComboValuation.computeOptionLegRedundancy([
+                    {
+                        id: 'excluded_group_still_counts',
+                        includedInGlobal: false,
+                        legs: [
+                            { id: 'put_buy_1', type: 'put', pos: 10 },
+                            { id: 'put_buy_2', type: 'put', pos: 20 },
+                            { id: 'call_buy', type: 'call', pos: 5 },
+                            { id: 'stock_leg', type: 'stock', pos: 100 },
+                        ],
+                    },
+                    {
+                        id: 'g2',
+                        legs: [
+                            { id: 'put_sell', type: 'put', pos: -24 },
+                            { id: 'call_sell', type: 'call', pos: -2 },
+                            { id: 'closed_put_sell', type: 'put', pos: -100, closePrice: 1.25 },
+                        ],
+                    },
+                ]);
+
+                assert.equal(result.put.buyContracts, 30);
+                assert.equal(result.put.sellContracts, 24);
+                assert.equal(result.put.netContracts, 6);
+                assert.equal(result.put.redundantContracts, 6);
+                assert.equal(result.put.direction, 'long');
+                assert.equal(result.call.buyContracts, 5);
+                assert.equal(result.call.sellContracts, 2);
+                assert.equal(result.call.netContracts, 3);
+                assert.equal(result.call.redundantContracts, 3);
+                assert.equal(result.call.direction, 'long');
+            },
+        },
+        {
             name: 'computes trial-group totals without exposing fake live pnl from zero-cost legs',
             run() {
                 const ctx = loadValuationContext();
