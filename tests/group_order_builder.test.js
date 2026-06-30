@@ -171,6 +171,53 @@ module.exports = {
             },
         },
         {
+            name: 'uses per-leg futures pool contract months for FOP order payloads',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_order_builder.js',
+                ]);
+
+                const payload = ctx.OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(
+                    {
+                        id: 'group_mes_calendar',
+                        name: 'MES Calendar',
+                        legs: [
+                            {
+                                id: 'leg_mes_call',
+                                type: 'call',
+                                pos: 5,
+                                strike: 7550,
+                                expDate: '2026-07-17',
+                                underlyingFutureId: 'future_sep',
+                            },
+                        ],
+                    },
+                    {
+                        underlyingSymbol: 'MES',
+                        underlyingContractMonth: '202606',
+                        baseDate: '2026-07-01',
+                        simulatedDate: '2026-07-01',
+                        futuresPool: [
+                            { id: 'future_jun', contractMonth: '202606' },
+                            { id: 'future_sep', contractMonth: '202609' },
+                        ],
+                    },
+                    {
+                        action: 'preview_combo_order',
+                        executionMode: 'preview',
+                        intent: 'open',
+                        source: 'trial_trigger',
+                    }
+                );
+
+                assert.equal(payload.legs.length, 1);
+                assert.equal(payload.legs[0].secType, 'FOP');
+                assert.equal(payload.legs[0].symbol, 'MES');
+                assert.equal(payload.legs[0].underlyingContractMonth, '202609');
+            },
+        },
+        {
             name: 'builds close-intent leg requests by reversing group positions',
             run() {
                 const ctx = loadBrowserScripts([

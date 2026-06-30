@@ -74,6 +74,23 @@
         );
     }
 
+    function _resolveFuturesPoolEntry(globalState, entryId) {
+        if (!entryId || !Array.isArray(globalState && globalState.futuresPool)) {
+            return null;
+        }
+
+        return globalState.futuresPool.find((entry) => entry && entry.id === entryId) || null;
+    }
+
+    function _resolveLegUnderlyingContractMonth(leg, globalState, fallbackContractMonth) {
+        const selectedFuture = _resolveFuturesPoolEntry(globalState, leg && leg.underlyingFutureId);
+        return String(
+            selectedFuture?.contractMonth
+            || fallbackContractMonth
+            || ''
+        ).trim();
+    }
+
     function _resolveExecutionIntent(intent) {
         const normalized = String(intent || 'open').trim().toLowerCase();
         return VALID_EXECUTION_INTENTS.includes(normalized) ? normalized : 'open';
@@ -142,6 +159,12 @@
                     return request;
                 }
 
+                const underlyingContractMonth = _resolveLegUnderlyingContractMonth(
+                    leg,
+                    globalState,
+                    defaultUnderlyingContractMonth
+                );
+
                 return {
                     id: leg.id,
                     type: leg.type,
@@ -160,7 +183,7 @@
                     strike: leg.strike,
                     expDate: String(leg.expDate || '').replace(/-/g, ''),
                     contractMonth: String(leg.expDate || '').replace(/-/g, '').slice(0, 6),
-                    underlyingContractMonth: defaultUnderlyingContractMonth,
+                    underlyingContractMonth,
                 };
             });
     }
