@@ -41,10 +41,11 @@ module.exports = {
             },
         },
         {
-            name: 'resolves CL as a live-enabled futures-option family',
+            name: 'resolves CL and SI as live-enabled futures-option families',
             run() {
                 const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
-                const profile = ctx.OptionComboProductRegistry.resolveUnderlyingProfile('CL');
+                const registry = ctx.OptionComboProductRegistry;
+                const profile = registry.resolveUnderlyingProfile('CL');
 
                 assert.equal(profile.optionSecType, 'FOP');
                 assert.equal(profile.underlyingSecType, 'FUT');
@@ -54,6 +55,14 @@ module.exports = {
                 assert.equal(profile.tradingClass, 'ML3');
                 assert.equal(profile.supportsLegacyLiveData, true);
                 assert.equal(profile.supportsUnderlyingLegs, true);
+
+                const siProfile = registry.resolveUnderlyingProfile('SI');
+                assert.equal(siProfile.optionSecType, 'FOP');
+                assert.equal(siProfile.underlyingSecType, 'FUT');
+                assert.equal(siProfile.optionExchange, 'COMEX');
+                assert.equal(siProfile.underlyingExchange, 'COMEX');
+                assert.equal(siProfile.optionMultiplier, 5000);
+                assert.equal(siProfile.tradingClass, 'S3T');
             },
         },
         {
@@ -125,6 +134,9 @@ module.exports = {
                 assert.equal(registry.resolveDefaultUnderlyingContractMonth('MNQ', '2026-09-10'), '202609');
                 assert.equal(registry.resolveDefaultUnderlyingContractMonth('CL', '2026-03-15'), '202604');
                 assert.equal(registry.resolveDefaultUnderlyingContractMonth('CL', '2026-03-23'), '202605');
+                assert.equal(registry.resolveDefaultUnderlyingContractMonth('SI', '2026-06-01'), '202607');
+                assert.equal(registry.resolveDefaultUnderlyingContractMonth('SI', '2026-06-27'), '202609');
+                assert.equal(registry.resolveDefaultUnderlyingContractMonth('SI', '2026-11-25'), '202703');
                 assert.equal(registry.resolveDefaultUnderlyingContractMonth('SPY', '2026-03-15'), '');
             },
         },

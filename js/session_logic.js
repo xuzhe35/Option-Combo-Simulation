@@ -494,6 +494,7 @@
             .map(sample => _buildArchivableForwardRateSample(sample));
         snapshot.futuresPool = (snapshot.futuresPool || [])
             .map(entry => _buildArchivableFuturesPoolEntry(entry));
+        delete snapshot.comboTemplateQuoteRequests;
         return snapshot;
     }
 

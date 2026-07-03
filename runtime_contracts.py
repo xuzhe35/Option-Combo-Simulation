@@ -75,6 +75,9 @@ class IvTermStructureSnapshotPayload(TypedDict, total=False):
     expectedOptionCount: int
     subscriptionPending: bool
     warning: str
+    message: str
+    underlyingContractMonth: str
+    requestedUnderlyingContractMonth: str
 
 
 class IvTermStructureCatalogPatchPayload(TypedDict):

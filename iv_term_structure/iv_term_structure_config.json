@@ -16,6 +16,8 @@
     { "symbol": "QQQ", "historyPath": "iv_term_structure/data/QQQ.json" },
     { "symbol": "GLD", "historyPath": "iv_term_structure/data/GLD.json" },
     { "symbol": "SLV", "historyPath": "iv_term_structure/data/SLV.json" },
-    { "symbol": "USO", "historyPath": "iv_term_structure/data/USO.json" }
+    { "symbol": "USO", "historyPath": "iv_term_structure/data/USO.json" },
+    { "symbol": "CL", "historyPath": "iv_term_structure/data/CL.json" },
+    { "symbol": "SI", "historyPath": "iv_term_structure/data/SI.json" }
   ]
 }

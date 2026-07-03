@@ -268,6 +268,54 @@
                 && leg.closePrice !== undefined);
         }
 
+        function _normalizeLegIds(legIds) {
+            if (!Array.isArray(legIds)) {
+                return [];
+            }
+            return legIds
+                .map((id) => String(id || '').trim())
+                .filter(Boolean);
+        }
+
+        function _getScopedLegs(group, legIds) {
+            const legs = Array.isArray(group && group.legs) ? group.legs : [];
+            const normalizedLegIds = _normalizeLegIds(legIds);
+            if (normalizedLegIds.length === 0) {
+                return legs;
+            }
+            const legIdSet = new Set(normalizedLegIds);
+            return legs.filter((leg) => legIdSet.has(String(leg && leg.id || '').trim()));
+        }
+
+        function _isOpenPositionLeg(leg) {
+            const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
+            return pos > 0.0001 && !_hasResolvedClosePrice(leg);
+        }
+
+        function _hasOpenPositionsInScope(group, legIds) {
+            return _getScopedLegs(group, legIds).some(_isOpenPositionLeg);
+        }
+
+        function _hasCostForAllPositionedLegsInScope(group, legIds) {
+            return _getScopedLegs(group, legIds).every((leg) => {
+                const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
+                if (pos < 0.0001 || _hasResolvedClosePrice(leg)) {
+                    return true;
+                }
+                return Math.abs(parseFloat(leg && leg.cost) || 0) > 0;
+            });
+        }
+
+        function _setCloseExecutionTarget(closeExecution, legIds) {
+            if (!closeExecution) {
+                return [];
+            }
+            const normalizedLegIds = _normalizeLegIds(legIds);
+            closeExecution.pendingCloseLegIds = normalizedLegIds;
+            closeExecution.pendingCloseScope = normalizedLegIds.length > 0 ? 'leg' : 'group';
+            return normalizedLegIds;
+        }
+
         function _buildSyntheticAssignmentId(prefix, sourceId) {
             const normalizedSource = String(sourceId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24) || 'leg';
             return `_${prefix}_${normalizedSource}_${Math.random().toString(36).slice(2, 8)}`;
@@ -459,7 +507,7 @@
             }
         }
 
-        function _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode = 'submit') {
+        function _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode = 'submit', options = {}) {
             if (!closeExecution) {
                 return null;
             }
@@ -469,7 +517,12 @@
                 return null;
             }
 
-            return groupOrderBuilder.buildGroupOrderRequestPayload(group, _getState(), {
+            const requestOptions = options && typeof options === 'object' ? options : {};
+            const hasExplicitLegIds = Object.prototype.hasOwnProperty.call(requestOptions, 'legIds');
+            const legIds = hasExplicitLegIds
+                ? _normalizeLegIds(requestOptions.legIds)
+                : _normalizeLegIds(closeExecution.pendingCloseLegIds);
+            const payload = groupOrderBuilder.buildGroupOrderRequestPayload(group, _getState(), {
                 action: executionMode === 'preview' ? 'preview_combo_order' : 'submit_combo_order',
                 executionMode,
                 intent: 'close',
@@ -477,7 +530,17 @@
                 managedRepriceThreshold: closeExecution.repriceThreshold,
                 managedConcessionRatio: closeExecution.concessionRatio,
                 timeInForce: closeExecution.timeInForce,
+                legIds,
             });
+
+            if (legIds.length > 0) {
+                payload.closeTargetLegIds = legIds;
+                payload.closeTargetScope = 'leg';
+            } else {
+                payload.closeTargetScope = 'group';
+            }
+
+            return payload;
         }
 
         function _sendValidatedComboSubmit(group, executionMode) {
@@ -553,26 +616,35 @@
             return applyResult;
         }
 
-        function _settleHistoricalReplayGroup(group) {
+        function _settleHistoricalReplayGroup(group, options = {}) {
             const closeExecution = _getCloseExecution(group);
             if (!closeExecution) {
                 return false;
             }
+            const legIds = _normalizeLegIds(options && options.legIds);
+            const scopedClose = legIds.length > 0;
 
-            if (!_groupHasOpenPositions(group)) {
-                _markCloseExecutionError(group, 'This group has no open position to close.');
+            if (!_hasOpenPositionsInScope(group, legIds)) {
+                _markCloseExecutionError(group, scopedClose
+                    ? 'This leg has no open position to close.'
+                    : 'This group has no open position to close.');
                 return false;
             }
 
-            if (!_groupHasCostForAllPositionedLegs(group)) {
-                _markCloseExecutionError(group, 'Historical settlement needs a locked entry cost for every open leg. Use Enter @ Replay Day or let base-day quotes seed the costs first.');
+            const hasLockedEntryCosts = scopedClose
+                ? _hasCostForAllPositionedLegsInScope(group, legIds)
+                : _groupHasCostForAllPositionedLegs(group);
+            if (!hasLockedEntryCosts) {
+                _markCloseExecutionError(group, scopedClose
+                    ? 'Historical single-leg close needs a locked entry cost for that leg. Use Enter @ Replay Day or let base-day quotes seed the cost first.'
+                    : 'Historical settlement needs a locked entry cost for every open leg. Use Enter @ Replay Day or let base-day quotes seed the costs first.');
                 return false;
             }
 
             const missingLegs = [];
             const settledLegs = [];
 
-            (group.legs || []).forEach((leg) => {
+            _getScopedLegs(group, legIds).forEach((leg) => {
                 const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
                 if (pos < 0.0001 || (leg.closePrice !== null && leg.closePrice !== '' && leg.closePrice !== undefined)) {
                     return;
@@ -595,9 +667,12 @@
 
             const state = _getState();
             group.settleUnderlyingPrice = Number.isFinite(state.underlyingPrice) ? state.underlyingPrice : group.settleUnderlyingPrice;
-            group.viewMode = 'settlement';
+            if (!scopedClose || !_groupHasOpenPositions(group)) {
+                group.viewMode = 'settlement';
+            }
 
             closeExecution.pendingRequest = false;
+            _setCloseExecutionTarget(closeExecution, legIds);
             closeExecution.lastError = '';
             closeExecution.status = 'submitted';
             closeExecution.lastPreview = {
@@ -605,8 +680,12 @@
                 executionMode: 'submit',
                 executionIntent: 'close',
                 requestSource: 'close_group',
+                closeTargetScope: scopedClose ? 'leg' : 'group',
+                closeTargetLegIds: scopedClose ? legIds : [],
                 status: 'Filled',
-                statusMessage: `Historical replay simulated close filled on ${_getHistoricalReplayDate() || 'the selected day'}.`,
+                statusMessage: scopedClose
+                    ? `Historical replay simulated single-leg close filled on ${_getHistoricalReplayDate() || 'the selected day'}.`
+                    : `Historical replay simulated close filled on ${_getHistoricalReplayDate() || 'the selected day'}.`,
                 orderId: closeExecution.lastPreview && closeExecution.lastPreview.orderId,
                 permId: closeExecution.lastPreview && closeExecution.lastPreview.permId,
                 closePriceSource: 'historical_replay',
@@ -757,11 +836,19 @@
             return true;
         }
 
-        function requestCloseGroupComboOrder(group) {
+        function _requestCloseComboOrder(group, options = {}) {
             if (!group) return false;
             const state = _getState();
+            const legIds = _normalizeLegIds(options && options.legIds);
+            const scopedClose = legIds.length > 0;
+            const closeExecution = _getCloseExecution(group);
+            if (!closeExecution || closeExecution.pendingRequest) {
+                return false;
+            }
+            _setCloseExecutionTarget(closeExecution, legIds);
+
             if (_isHistoricalMode()) {
-                const didSettle = _settleHistoricalReplayGroup(group);
+                const didSettle = _settleHistoricalReplayGroup(group, { legIds });
                 if (!didSettle) {
                     _renderGroups();
                 }
@@ -772,8 +859,10 @@
                 _renderGroups();
                 return false;
             }
-            if (!_groupHasOpenPositions(group)) {
-                _markCloseExecutionError(group, 'This group has no open position to close.');
+            if (!_hasOpenPositionsInScope(group, legIds)) {
+                _markCloseExecutionError(group, scopedClose
+                    ? 'This leg has no open position to close.'
+                    : 'This group has no open position to close.');
                 _renderGroups();
                 return false;
             }
@@ -783,11 +872,6 @@
                 && sessionLogic.getRenderableGroupViewMode(group) !== 'active') {
                 _markCloseExecutionError(group, 'Close Group is only available when this group is in Active mode.');
                 _renderGroups();
-                return false;
-            }
-
-            const closeExecution = _getCloseExecution(group);
-            if (!closeExecution || closeExecution.pendingRequest) {
                 return false;
             }
 
@@ -809,9 +893,18 @@
                 return false;
             }
 
-            const payload = _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode);
+            const payload = _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode, { legIds });
             if (!payload) {
-                _markCloseExecutionError(group, 'Unable to build close-group combo order payload.');
+                _markCloseExecutionError(group, scopedClose
+                    ? 'Unable to build single-leg close order payload.'
+                    : 'Unable to build close-group combo order payload.');
+                _renderGroups();
+                return false;
+            }
+            if (!Array.isArray(payload.legs) || payload.legs.length === 0) {
+                _markCloseExecutionError(group, scopedClose
+                    ? 'This leg is already closed or has no non-zero position.'
+                    : 'This group has no open position to close.');
                 _renderGroups();
                 return false;
             }
@@ -827,6 +920,26 @@
             _sendPayload(payload);
             _renderGroups();
             return true;
+        }
+
+        function requestCloseGroupComboOrder(group) {
+            return _requestCloseComboOrder(group, { legIds: [] });
+        }
+
+        function requestCloseLegComboOrder(group, leg) {
+            const legId = String(leg && leg.id || '').trim();
+            if (!group || !legId) {
+                return false;
+            }
+
+            const belongsToGroup = (group.legs || []).some((entry) => String(entry && entry.id || '').trim() === legId);
+            if (!belongsToGroup) {
+                _markCloseExecutionError(group, 'Unable to find that leg in this group.');
+                _renderGroups();
+                return false;
+            }
+
+            return _requestCloseComboOrder(group, { legIds: [legId] });
         }
 
         function requestTrialGroupComboOrder(group) {
@@ -1317,6 +1430,7 @@
         return {
             requestTrialGroupComboOrder,
             requestCloseGroupComboOrder,
+            requestCloseLegComboOrder,
             requestContinueManagedComboOrder,
             requestConcedeManagedComboOrder,
             requestCancelManagedComboOrder,
@@ -1337,6 +1451,7 @@
                 markExecutionError: _markExecutionError,
                 isSoftTerminalBrokerStatus: _isSoftTerminalBrokerStatus,
                 buildCloseGroupComboOrderPayload: _buildCloseGroupComboOrderPayload,
+                requestCloseComboOrder: _requestCloseComboOrder,
             },
         };
     }

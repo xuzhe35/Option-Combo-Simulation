@@ -1290,7 +1290,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         try:
             items = self.portfolio_positions_provider()
         except Exception:
-            self.logger.exception('Failed to read TWS portfolio positions for assignment-aware close.')
+            self.logger.exception('Failed to read TWS portfolio positions for Close position checks.')
             return []
         return [item for item in (items or []) if isinstance(item, dict)]
 
@@ -1399,45 +1399,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             multiplier = 100
         return max(multiplier, 1)
 
-    def _assignment_underlying_position(self, leg_request, assigned_option_position):
-        units = self._settlement_units_for_option_leg(leg_request)
-        right = self._normalize_symbol(leg_request.right)
-        if right == 'C':
-            return int(assigned_option_position * units)
-        if right == 'P':
-            return int(-assigned_option_position * units)
-        return 0
-
-    def _build_underlying_leg_from_option_assignment(self, leg_request, close_position):
-        sec_type = 'FUT' if self._normalize_symbol(leg_request.sec_type) == 'FOP' else 'STK'
-        symbol = (
-            leg_request.underlying_symbol
-            or (self._resolve_family_defaults(leg_request.symbol) or {}).get('underlying_symbol')
-            or leg_request.symbol
-        )
-        exchange = leg_request.underlying_exchange or leg_request.exchange or 'SMART'
-        multiplier = leg_request.underlying_multiplier if sec_type == 'FUT' else ''
-        contract_month = leg_request.underlying_contract_month if sec_type == 'FUT' else ''
-        return replace(
-            leg_request,
-            id=f"__assigned_underlying_{leg_request.id or 'leg'}",
-            type='stock',
-            pos=int(close_position),
-            sec_type=sec_type,
-            symbol=symbol,
-            underlying_symbol=symbol,
-            exchange=exchange,
-            underlying_exchange=exchange,
-            multiplier=str(multiplier or ''),
-            underlying_multiplier=str(multiplier or ''),
-            trading_class=None,
-            right='',
-            strike=None,
-            exp_date='',
-            contract_month=contract_month,
-            underlying_contract_month=contract_month,
-        )
-
     def _contract_number_key(self, value):
         if value in (None, ''):
             return ''
@@ -1496,6 +1457,41 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             return f"{sec_type} {symbol} {self._to_contract_month(item.get('expDate'))}".strip()
         return f"{sec_type} {symbol}".strip()
 
+    def _close_leg_request_label(self, leg_request):
+        sec_type = self._normalize_symbol(getattr(leg_request, 'sec_type', ''))
+        symbol = self._normalize_symbol(getattr(leg_request, 'symbol', ''))
+        if sec_type in {'OPT', 'FOP'}:
+            return (
+                f"{sec_type} {symbol} {self._to_expiry(getattr(leg_request, 'exp_date', ''))} "
+                f"{self._normalize_symbol(getattr(leg_request, 'right', ''))}"
+                f"{self._contract_number_key(getattr(leg_request, 'strike', None))}"
+            ).strip()
+        if sec_type == 'FUT':
+            month = (
+                self._to_contract_month(getattr(leg_request, 'contract_month', ''))
+                or self._to_contract_month(getattr(leg_request, 'underlying_contract_month', ''))
+            )
+            return f"{sec_type} {symbol} {month}".strip()
+        return f"{sec_type} {symbol}".strip()
+
+    def _raise_uncloseable_tws_position(self, request, leg_request, requested_close_position, actual_position, item):
+        requested_quantity = abs(int(requested_close_position or 0))
+        actual_quantity = abs(float(actual_position or 0))
+        requested_account = str(getattr(request, 'account', '') or '').strip()
+        account_text = f" in account {requested_account}" if requested_account else ''
+        item_text = (
+            f" TWS currently shows {actual_position:g} on {self._portfolio_item_label(item)}."
+            if item
+            else " No matching TWS portfolio position was found."
+        )
+        raise ValueError(
+            f"Close blocked for {self._close_leg_request_label(leg_request)}{account_text}: "
+            f"requested close quantity {requested_quantity:g}, but only {actual_quantity:g} is closeable."
+            f"{item_text} This Group may be simulated or out of sync; Close will not place a reverse order "
+            "unless the matching TWS position already exists. If this option was assigned/exercised, "
+            "convert that option leg to its deliverable underlying leg first, then close the underlying leg."
+        )
+
     def _reset_assignment_underlying_allocation(self, source):
         if (source or {}).get('kind') != 'assignment':
             return
@@ -1543,7 +1539,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 'the underlying stage fills, which can briefly change hedge exposure.'
             )
 
-    def _allocate_underlying_close_demands(self, aggregate, messages):
+    def _allocate_underlying_close_demands(self, aggregate, messages, request=None):
         underlying_legs = []
         for bucket in aggregate.values():
             item = bucket.get('item') or {}
@@ -1556,18 +1552,24 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             )
             item_label = self._portfolio_item_label(item)
             if not closeable_total:
-                messages.append(
-                    f"Skipped inferred underlying close for {item_label}: "
-                    f"TWS position {actual_position:g} does not match requested close direction {requested_total:g}."
+                requested_account = str(getattr(request, 'account', '') or '').strip()
+                account_text = f" in account {requested_account}" if requested_account else ''
+                raise ValueError(
+                    f"Close blocked for {item_label}{account_text}: requested close quantity "
+                    f"{abs(requested_total):g}, but only 0 is closeable. TWS currently shows "
+                    f"{actual_position:g} on {item_label}. This Group may be simulated or out of sync; "
+                    "Close will not place a reverse order unless the matching TWS position already exists."
                 )
-                for demand in demands:
-                    self._reset_assignment_underlying_allocation(demand.get('source'))
-                continue
 
             if abs(closeable_total) < abs(requested_total):
-                messages.append(
-                    f"Only {abs(closeable_total):g} of {abs(requested_total):g} requested "
-                    f"{item_label} underlying unit(s) are available in TWS; closing the available amount."
+                requested_account = str(getattr(request, 'account', '') or '').strip()
+                account_text = f" in account {requested_account}" if requested_account else ''
+                raise ValueError(
+                    f"Close blocked for {item_label}{account_text}: requested close quantity "
+                    f"{abs(requested_total):g}, but only {abs(closeable_total):g} is closeable. "
+                    f"TWS currently shows {actual_position:g} on {item_label}. This Group may be "
+                    "simulated or out of sync; Close will not place a reverse order unless the matching "
+                    "TWS position already exists."
                 )
 
             remaining = abs(int(closeable_total))
@@ -1607,7 +1609,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         portfolio_items = self._get_portfolio_position_items()
         if not self._portfolio_has_symbol_snapshot(request, portfolio_items):
             raise ValueError(
-                'TWS portfolio positions are not ready for assignment-aware Close. '
+                'TWS portfolio positions are not ready for Close position checks. '
                 'Refresh/sync the TWS portfolio snapshot, then try Close Group again.'
             )
 
@@ -1630,74 +1632,26 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             )
 
             if sec_type in {'OPT', 'FOP'}:
-                if closeable_position:
-                    option_legs.append(replace(leg_request, pos=closeable_position))
-
-                missing_quantity = abs(requested_close_position) - abs(closeable_position)
-                if missing_quantity <= 0:
-                    continue
-
-                assigned_option_position = (-1 if requested_close_position > 0 else 1) * missing_quantity
-                underlying_position = self._assignment_underlying_position(
-                    leg_request,
-                    assigned_option_position,
-                )
-                underlying_close_position = -underlying_position
-                if underlying_close_position == 0:
-                    raise ValueError(
-                        f"Cannot infer assignment/exercise deliverable for "
-                        f"{leg_request.id or self._describe_contract_request(leg_request)}: "
-                        f"unsupported option right {leg_request.right!r}."
+                if abs(closeable_position) < abs(requested_close_position):
+                    self._raise_uncloseable_tws_position(
+                        request,
+                        leg_request,
+                        requested_close_position,
+                        actual_position,
+                        item,
                     )
-
-                underlying_leg = self._build_underlying_leg_from_option_assignment(
-                    leg_request,
-                    underlying_close_position,
-                )
-                adjustment = {
-                    'adjustmentId': f"{leg_request.id or 'leg'}:{assigned_option_position}",
-                    'optionLegId': leg_request.id,
-                    'assignedOptionPosition': assigned_option_position,
-                    'remainingOptionPosition': -closeable_position if closeable_position else 0,
-                    'underlyingLegId': underlying_leg.id,
-                    'underlyingSecType': underlying_leg.sec_type,
-                    'underlyingSymbol': underlying_leg.symbol,
-                    # Deliverable produced by the assignment/exercise (cost basis = strike). Invariant:
-                    # it is never cleared by allocation, so the client can always book the conversion
-                    # even when the close order nets to zero against an existing TWS position.
-                    'deliverableUnderlyingPosition': underlying_position,
-                    'underlyingQuantity': underlying_position,
-                    'underlyingClosePosition': underlying_close_position,
-                    'assignmentStrike': leg_request.strike,
-                    'assignmentRight': leg_request.right,
-                    'source': 'tws_assignment_close_plan',
-                }
-                assignment_adjustments.append(adjustment)
-                self._add_underlying_close_demand(
-                    underlying_aggregate,
-                    request,
-                    portfolio_items,
-                    underlying_leg,
-                    {
-                        'kind': 'assignment',
-                        'adjustment': adjustment,
-                    },
-                    messages,
-                )
-                messages.append(
-                    f"Detected assignment/exercise on {leg_request.id or self._describe_contract_request(leg_request)}: "
-                    f"{missing_quantity} contract(s) no longer exist in TWS; "
-                    f"will close {abs(underlying_close_position)} underlying unit(s) first."
-                )
+                option_legs.append(replace(leg_request, pos=closeable_position))
                 continue
 
             if sec_type in {'STK', 'FUT'}:
-                if not closeable_position:
-                    messages.append(
-                        f"Skipped underlying close leg {leg_request.id or leg_request.symbol}: "
-                        f"TWS position does not match requested close direction."
+                if abs(closeable_position) < abs(requested_close_position):
+                    self._raise_uncloseable_tws_position(
+                        request,
+                        leg_request,
+                        requested_close_position,
+                        actual_position,
+                        item,
                     )
-                    continue
                 self._add_underlying_close_demand(
                     underlying_aggregate,
                     request,
@@ -1713,7 +1667,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
 
             option_legs.append(leg_request)
 
-        underlying_legs = self._allocate_underlying_close_demands(underlying_aggregate, messages)
+        underlying_legs = self._allocate_underlying_close_demands(underlying_aggregate, messages, request)
         self._append_assignment_close_plan_warnings(messages, assignment_adjustments, underlying_legs)
 
         option_request = replace(request, legs=option_legs)
@@ -1837,7 +1791,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 }
 
         if first_stage is None:
-            raise ValueError('No assignment/deliverable underlying legs were available to preview.')
+            raise ValueError('No explicit underlying legs were available to preview.')
 
         preview = self._build_staged_underlying_preview(
             request,
@@ -1857,7 +1811,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             stage='underlying',
             complete=False,
             prefix=(
-                'Close preview reflects the first assignment/deliverable underlying order; '
+                'Close preview reflects the first underlying-leg order; '
                 'remaining option legs are handled only after that underlying stage fills.'
             ),
         )
@@ -2392,7 +2346,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 raise ValueError(
                     self._format_close_plan_message(
                         close_plan,
-                        'Assignment-aware Close found no live option or underlying position to preview.'
+                        'Close position checks found no live option or explicit underlying position to preview.'
                     )
                 )
             build_result = await self._build_combo_order_from_request(websocket, request)
@@ -2574,7 +2528,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             request = close_plan['optionRequest']
             if not request.legs:
                 message = (
-                    'Close Group completed after closing assignment/deliverable underlying first; '
+                    'Close Group completed after closing the explicit underlying leg first; '
                     'no live option legs remained to submit.'
                 )
                 plan_message = self._format_close_plan_message(close_plan, message)
@@ -2622,7 +2576,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             raise ValueError(
                 self._format_close_plan_message(
                     close_plan,
-                    'Assignment-aware Close found no live option or underlying position to submit.'
+                    'Close position checks found no live option or explicit underlying position to submit.'
                 )
             )
 
@@ -2636,7 +2590,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 close_plan,
                 staged_orders=staged_orders,
                 stage='options',
-                prefix='Assignment/deliverable underlying was closed first; submitted remaining option combo.',
+                prefix='Underlying leg was closed first; submitted remaining option combo.',
             )
         else:
             self._apply_close_plan_metadata(

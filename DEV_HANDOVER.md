@@ -26,7 +26,7 @@ Current surfaces:
   - `entry=live`
   - `entry=historical`
 - workspace banner / title / subtitle changes driven by `workspaceVariant` and `marketDataModeLocked`
-- JSON import / export
+- JSON import / save / save-as
 - direct save-back when the browser File System Access API is available
 
 ### Control panel

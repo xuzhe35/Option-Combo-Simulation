@@ -266,6 +266,56 @@ module.exports = {
             },
         },
         {
+            name: 'requests close previews for one targeted leg only',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 671.1,
+                    simulatedDate: '2026-03-19',
+                    baseDate: '2026-03-19',
+                    allowLiveComboOrders: true,
+                    selectedLiveComboOrderAccount: 'F1234567',
+                    groups: [
+                        {
+                            id: 'group_close_leg_preview',
+                            viewMode: 'active',
+                            closeExecution: {
+                                executionMode: 'preview',
+                                repriceThreshold: 0.01,
+                                timeInForce: 'DAY',
+                                pendingRequest: false,
+                                status: 'idle',
+                                lastPreview: null,
+                                lastError: '',
+                            },
+                            legs: [
+                                { id: 'leg_call', type: 'call', pos: 1, strike: 670, expDate: '2026-04-02', cost: 11.22, closePrice: null },
+                                { id: 'leg_stock', type: 'stock', pos: 100, strike: 0, expDate: '', cost: 671.1, closePrice: null },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+                const harness = buildHarness({ state });
+
+                const result = harness.api.requestCloseLegComboOrder(state.groups[0], state.groups[0].legs[1]);
+
+                assert.equal(result, true);
+                assert.equal(harness.sent.length, 1);
+                assert.equal(harness.sent[0].action, 'preview_combo_order');
+                assert.equal(harness.sent[0].executionIntent, 'close');
+                assert.equal(harness.sent[0].requestSource, 'close_group');
+                assert.equal(harness.sent[0].closeTargetScope, 'leg');
+                assert.deepEqual(Array.from(harness.sent[0].closeTargetLegIds), ['leg_stock']);
+                assert.equal(harness.sent[0].legs.length, 1);
+                assert.equal(harness.sent[0].legs[0].id, 'leg_stock');
+                assert.equal(harness.sent[0].legs[0].secType, 'STK');
+                assert.equal(harness.sent[0].legs[0].pos, -100);
+                assert.deepEqual(Array.from(state.groups[0].closeExecution.pendingCloseLegIds), ['leg_stock']);
+                assert.equal(state.groups[0].closeExecution.status, 'pending_preview');
+            },
+        },
+        {
             name: 'advances validated close-group submit into a close submit payload',
             run() {
                 const state = {
@@ -318,6 +368,68 @@ module.exports = {
                 assert.equal(harness.sent[0].action, 'submit_combo_order');
                 assert.equal(harness.sent[0].executionIntent, 'close');
                 assert.equal(harness.sent[0].requestSource, 'close_group');
+                assert.equal(state.groups[0].closeExecution.status, 'pending_submit');
+            },
+        },
+        {
+            name: 'keeps targeted close leg scope after validation before submit',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    allowLiveComboOrders: true,
+                    selectedLiveComboOrderAccount: 'F1234567',
+                    groups: [
+                        {
+                            id: 'group_close_leg_submit',
+                            viewMode: 'active',
+                            tradeTrigger: {
+                                enabled: false,
+                                pendingRequest: false,
+                                status: 'idle',
+                                lastPreview: null,
+                                lastError: '',
+                            },
+                            closeExecution: {
+                                executionMode: 'submit',
+                                repriceThreshold: 0.01,
+                                timeInForce: 'DAY',
+                                pendingRequest: true,
+                                pendingCloseLegIds: ['leg_put'],
+                                pendingCloseScope: 'leg',
+                                status: 'pending_validation',
+                                lastPreview: null,
+                                lastError: '',
+                            },
+                            legs: [
+                                { id: 'leg_call', type: 'call', pos: 1, strike: 670, expDate: '2026-04-02', cost: 11.22, closePrice: null },
+                                { id: 'leg_put', type: 'put', pos: -1, strike: 662, expDate: '2026-04-02', cost: 7.96, closePrice: null },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+                const harness = buildHarness({ state });
+
+                const handled = harness.api._test.applyComboOrderValidationResult({
+                    action: 'combo_order_validation_result',
+                    groupId: 'group_close_leg_submit',
+                    validation: {
+                        valid: true,
+                        executionMode: 'submit',
+                        executionIntent: 'close',
+                        requestSource: 'close_group',
+                    },
+                });
+
+                assert.equal(handled, true);
+                assert.equal(harness.sent.length, 1);
+                assert.equal(harness.sent[0].action, 'submit_combo_order');
+                assert.equal(harness.sent[0].executionIntent, 'close');
+                assert.equal(harness.sent[0].closeTargetScope, 'leg');
+                assert.deepEqual(Array.from(harness.sent[0].closeTargetLegIds), ['leg_put']);
+                assert.equal(harness.sent[0].legs.length, 1);
+                assert.equal(harness.sent[0].legs[0].id, 'leg_put');
+                assert.equal(harness.sent[0].legs[0].pos, 1);
                 assert.equal(state.groups[0].closeExecution.status, 'pending_submit');
             },
         },
@@ -910,6 +1022,50 @@ module.exports = {
                 assert.equal(state.groups[0].viewMode, 'settlement');
                 assert.equal(state.groups[0].closeExecution.status, 'submitted');
                 assert.equal(state.groups[0].legs[0].closePrice, 10.85);
+                assert.equal(state.groups[0].legs[1].closePrice, 6.74);
+            },
+        },
+        {
+            name: 'keeps historical single-leg close local and leaves other legs open',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 671.1,
+                    simulatedDate: '2026-03-19',
+                    baseDate: '2026-03-19',
+                    historicalQuoteDate: '2026-03-19',
+                    groups: [
+                        {
+                            id: 'group_hist_close_leg',
+                            viewMode: 'active',
+                            closeExecution: {
+                                executionMode: 'preview',
+                                repriceThreshold: 0.01,
+                                timeInForce: 'DAY',
+                                pendingRequest: false,
+                                status: 'idle',
+                                lastPreview: null,
+                                lastError: '',
+                            },
+                            legs: [
+                                { id: 'leg_call', type: 'call', pos: 1, strike: 670, expDate: '2026-04-02', cost: 11.22, closePrice: null, currentPrice: 10.85 },
+                                { id: 'leg_put', type: 'put', pos: -1, strike: 662, expDate: '2026-04-02', cost: 7.96, closePrice: null, currentPrice: 6.74 },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+                const harness = buildHarness({ state, historicalMode: true });
+
+                const didSettle = harness.api.requestCloseLegComboOrder(state.groups[0], state.groups[0].legs[1]);
+
+                assert.equal(didSettle, true);
+                assert.equal(harness.sent.length, 0);
+                assert.equal(state.groups[0].viewMode, 'active');
+                assert.equal(state.groups[0].closeExecution.status, 'submitted');
+                assert.equal(state.groups[0].closeExecution.lastPreview.closeTargetScope, 'leg');
+                assert.deepEqual(Array.from(state.groups[0].closeExecution.lastPreview.closeTargetLegIds), ['leg_put']);
+                assert.equal(state.groups[0].legs[0].closePrice, null);
                 assert.equal(state.groups[0].legs[1].closePrice, 6.74);
             },
         },

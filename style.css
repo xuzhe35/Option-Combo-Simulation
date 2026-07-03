@@ -525,6 +525,89 @@ input[type=range]:focus {
     background: var(--danger-bg);
 }
 
+/* Combo template dialog */
+.panel-card.combo-template-panel {
+    width: min(920px, calc(100vw - 2rem));
+    max-height: calc(100vh - 2rem);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 0;
+    margin-bottom: 0;
+}
+
+.combo-template-header,
+.combo-template-footer {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1rem 1.25rem;
+    background: var(--card-bg);
+}
+
+.combo-template-header {
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.combo-template-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 1.25rem;
+}
+
+.combo-template-section {
+    margin-bottom: 1rem;
+}
+
+.combo-template-field-grid,
+.combo-template-butterfly-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.75rem;
+}
+
+.combo-template-butterfly-tools {
+    margin-top: 1rem;
+}
+
+.combo-template-butterfly-actions {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 1rem 0 0.25rem;
+    flex-wrap: wrap;
+}
+
+.combo-template-butterfly-quote-panel {
+    margin-top: 1rem;
+}
+
+.combo-template-butterfly-progress {
+    margin-bottom: 0.65rem;
+}
+
+.combo-template-butterfly-quote-scroll {
+    max-height: min(360px, 44vh);
+    overflow: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+}
+
+.combo-template-error {
+    margin-top: 0.85rem;
+}
+
+.combo-template-footer {
+    justify-content: flex-end;
+    border-top: 1px solid var(--border-color);
+    box-shadow: 0 -8px 16px rgba(15, 23, 42, 0.04);
+    flex-wrap: wrap;
+}
+
 /* Portfolio Table & Groups */
 .portfolio-header-global {
     display: flex;

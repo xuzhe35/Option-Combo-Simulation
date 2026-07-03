@@ -254,6 +254,44 @@ module.exports = {
             },
         },
         {
+            name: 'builds close-intent payloads for one targeted leg including underlyings',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_order_builder.js',
+                ]);
+
+                const payload = ctx.OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(
+                    {
+                        id: 'group_close_leg',
+                        name: 'Close One Leg Test',
+                        legs: [
+                            { id: 'leg_call', type: 'call', pos: 2, strike: 500, expDate: '2026-04-17' },
+                            { id: 'leg_stock', type: 'stock', pos: 100, strike: 0, expDate: '' },
+                        ],
+                    },
+                    {
+                        underlyingSymbol: 'SPY',
+                        underlyingContractMonth: '',
+                        baseDate: '2026-03-15',
+                        simulatedDate: '2026-03-15',
+                    },
+                    {
+                        executionMode: 'submit',
+                        intent: 'close',
+                        source: 'close_group',
+                        legIds: ['leg_stock'],
+                    }
+                );
+
+                assert.equal(payload.executionIntent, 'close');
+                assert.equal(payload.legs.length, 1);
+                assert.equal(payload.legs[0].id, 'leg_stock');
+                assert.equal(payload.legs[0].secType, 'STK');
+                assert.equal(payload.legs[0].pos, -100);
+            },
+        },
+        {
             name: 'close-intent payload excludes already-closed assignment-converted option legs',
             run() {
                 const ctx = loadBrowserScripts([

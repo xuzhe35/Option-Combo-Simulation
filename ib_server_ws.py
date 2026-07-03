@@ -131,6 +131,31 @@ async def _handle_request_historical_snapshot(env, websocket, data, client_ip):
     await env['send_message_safe'](websocket, json.dumps(payload))
 
 
+def _find_pooled_market_data_ticker(env, con_id):
+    if not con_id:
+        return None
+    for subs in env['client_subscriptions'].values():
+        for ticker in subs.values():
+            contract = getattr(ticker, 'contract', None)
+            if getattr(contract, 'conId', None) == con_id:
+                return ticker
+    return None
+
+
+def _req_mkt_data_pooled(env, qualified_contract, generic_ticks=''):
+    """Request market data once per contract.
+
+    ib_insync keeps only the newest reqId per contract, so issuing a second
+    reqMktData for a contract that is already streaming leaks the earlier
+    market data line in TWS (it can never be cancelled afterwards). Reuse the
+    existing ticker instead, whether it belongs to this pass or another client.
+    """
+    ticker = _find_pooled_market_data_ticker(env, getattr(qualified_contract, 'conId', None))
+    if ticker is not None:
+        return ticker
+    return env['ib'].reqMktData(qualified_contract, generic_ticks, False, False)
+
+
 async def _handle_subscribe(env, websocket, data, client_ip):
     raw_underlying = data.get('underlying')
     options_data = data.get('options', [])
@@ -163,7 +188,7 @@ async def _handle_subscribe(env, websocket, data, client_ip):
             f"continuing with option subscriptions only"
         )
     else:
-        ticker = env['ib'].reqMktData(qualified_underlying, '', False, False)
+        ticker = _req_mkt_data_pooled(env, qualified_underlying)
         env['client_subscriptions'][websocket]['underlying'] = ticker
 
     for opt in options_data:
@@ -180,7 +205,7 @@ async def _handle_subscribe(env, websocket, data, client_ip):
             continue
 
         generic_ticks = '106' if greeks_enabled else ''
-        opt_ticker = env['ib'].reqMktData(qualified_option, generic_ticks, False, False)
+        opt_ticker = _req_mkt_data_pooled(env, qualified_option, generic_ticks)
         env['client_subscriptions'][websocket][leg_id] = opt_ticker
 
     for future_req in futures_data:
@@ -202,7 +227,7 @@ async def _handle_subscribe(env, websocket, data, client_ip):
             )
             continue
 
-        future_ticker = env['ib'].reqMktData(qualified_future, '', False, False)
+        future_ticker = _req_mkt_data_pooled(env, qualified_future)
         env['client_subscriptions'][websocket][f'future_{future_id}'] = future_ticker
 
     for stock_sym in stocks_data:
@@ -212,7 +237,7 @@ async def _handle_subscribe(env, websocket, data, client_ip):
             logging.error(f"Failed to qualify hedge stock {stock_sym}")
             continue
 
-        stock_ticker = env['ib'].reqMktData(qualified_stock, '', False, False)
+        stock_ticker = _req_mkt_data_pooled(env, qualified_stock)
 
         def make_stock_tick_handler(symbol, ws):
             def _on_stock_tick(ticker):

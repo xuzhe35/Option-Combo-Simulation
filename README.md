@@ -67,7 +67,7 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
   - configurable DTE buckets
   - per-symbol JSON history files
 - Session persistence:
-  - JSON import / export
+- JSON import / save / save-as
   - direct save-back when the browser File System Access API is available
 
 ## Main Entry Points

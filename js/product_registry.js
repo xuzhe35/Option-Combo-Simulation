@@ -354,6 +354,16 @@
         return _toContractMonthValue(nextYear, nextMonth);
     }
 
+    function _nextListedContractMonth(year, month, candidateMonths) {
+        const sortedMonths = (candidateMonths || []).slice().sort((a, b) => a - b);
+        for (const candidateMonth of sortedMonths) {
+            if (candidateMonth >= month) {
+                return _toContractMonthValue(year, candidateMonth);
+            }
+        }
+        return _toContractMonthValue(year + 1, sortedMonths[0] || month);
+    }
+
     function _getThirdFridayUtc(year, month) {
         const firstDay = new Date(Date.UTC(year, month - 1, 1));
         const firstWeekday = firstDay.getUTCDay();
@@ -405,6 +415,15 @@
 
         if (profile.family === 'CL') {
             return _shiftContractMonth(parts.year, parts.month, parts.day > 20 ? 2 : 1);
+        }
+
+        if (profile.family === 'SI') {
+            const targetMonth = _shiftContractMonth(parts.year, parts.month, parts.day > 20 ? 2 : 1);
+            const targetParts = {
+                year: parseInt(targetMonth.slice(0, 4), 10),
+                month: parseInt(targetMonth.slice(4, 6), 10),
+            };
+            return _nextListedContractMonth(targetParts.year, targetParts.month, [3, 5, 7, 9, 12]);
         }
 
         return _shiftContractMonth(parts.year, parts.month, 1);

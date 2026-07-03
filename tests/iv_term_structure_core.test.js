@@ -216,89 +216,87 @@ module.exports = {
             },
         },
         {
-            name: 'finds calendar candidates near the target DTE ratio by best value',
+            name: 'ranks all calendar candidates by highest short-long ATM IV ratio',
             run() {
                 const ctx = loadBrowserScripts([
                     'js/iv_term_structure_core.js',
                 ]);
 
                 const rows = ctx.OptionComboIvTermStructureCore.buildCalendarFinderRows([
-                    { expiry: '20260620', dte: 10, atmStraddleMark: 10, hasCompleteStraddle: true },
-                    { expiry: '20260630', dte: 20, atmStraddleMark: 16, hasCompleteStraddle: true },
-                    { expiry: '20260710', dte: 30, atmStraddleMark: 18, hasCompleteStraddle: true },
-                    { expiry: '20260720', dte: 40, atmStraddleMark: 21, hasCompleteStraddle: true },
-                    { expiry: '20260810', dte: 61, atmStraddleMark: 34, hasCompleteStraddle: true },
+                    { expiry: '20260620', dte: 10, atmIv: 0.5, atmStraddleMark: 10, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260623', dte: 13, atmIv: 0.3, atmStraddleMark: 12, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260630', dte: 20, atmIv: 0.4, atmStraddleMark: 16, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260710', dte: 30, atmIv: 0.55, atmStraddleMark: 18, hasCompletePair: true, hasCompleteStraddle: true },
                 ], {
                     targetRatio: 2,
                     tolerancePct: 25,
                     shortMinDte: 3,
                     shortMaxDte: 60,
-                    sortBy: 'best_value',
+                    sortBy: 'best_iv_ratio',
                 });
 
-                assert.equal(rows.length, 5);
-                assert.equal(rows[0].shortExpiry, '20260630');
-                assert.equal(rows[0].longExpiry, '20260710');
-                assert.equal(rows[0].dteRatio, 1.5);
-                assert.equal(rows[0].priceMultiple, 1.125);
-                assert.equal(rows[0].timeFairMultiple, 1.224745);
-                assert.equal(rows[0].valueScore, 0.918559);
-                assert.equal(rows[1].shortExpiry, '20260630');
-                assert.equal(rows[1].longExpiry, '20260720');
-                assert.equal(rows[1].dteRatio, 2);
-                assert.equal(rows[1].valueScore, 0.928078);
+                assert.equal(rows.length, 6);
+                assert.equal(rows[0].shortExpiry, '20260620');
+                assert.equal(rows[0].longExpiry, '20260623');
+                assert.equal(rows[0].dteRatio, 1.3);
+                assert.equal(rows[0].shortAtmIv, 0.5);
+                assert.equal(rows[0].longAtmIv, 0.3);
+                assert.equal(rows[0].ivRatio, 1.666667);
+                assert.equal(rows[1].shortExpiry, '20260620');
+                assert.equal(rows[1].longExpiry, '20260630');
+                assert.equal(rows[1].ivRatio, 1.25);
             },
         },
         {
-            name: 'skips calendar candidates with insufficient straddle prices or out-of-range short DTE',
+            name: 'skips calendar candidates with insufficient IV but does not filter by short DTE range',
             run() {
                 const ctx = loadBrowserScripts([
                     'js/iv_term_structure_core.js',
                 ]);
 
                 const rows = ctx.OptionComboIvTermStructureCore.buildCalendarFinderRows([
-                    { expiry: '20260610', dte: 0, atmStraddleMark: 4, hasCompleteStraddle: true },
-                    { expiry: '20260613', dte: 3, atmStraddleMark: null, hasCompleteStraddle: false },
-                    { expiry: '20260620', dte: 10, atmStraddleMark: 10, hasCompleteStraddle: true },
-                    { expiry: '20260630', dte: 20, atmStraddleMark: null, hasCompleteStraddle: false },
-                    { expiry: '20260701', dte: 21, atmStraddleMark: 16, hasCompleteStraddle: true },
-                    { expiry: '20260710', dte: 30, atmStraddleMark: 24, hasCompleteStraddle: true },
-                    { expiry: '20260810', dte: 61, atmStraddleMark: 36, hasCompleteStraddle: true },
+                    { expiry: '20260610', dte: 0, atmIv: 0.8, atmStraddleMark: 4, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260613', dte: 3, atmIv: null, atmStraddleMark: 6, hasCompletePair: false, hasCompleteStraddle: true },
+                    { expiry: '20260620', dte: 10, atmIv: 0.5, atmStraddleMark: 10, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260701', dte: 21, atmIv: 0.4, atmStraddleMark: 16, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260810', dte: 61, atmIv: 0.3, atmStraddleMark: 36, hasCompletePair: true, hasCompleteStraddle: true },
                 ], {
                     targetRatio: 2,
                     tolerancePct: 25,
                     shortMinDte: 3,
-                    shortMaxDte: 25,
+                    shortMaxDte: 15,
                 });
 
-                assert.equal(rows.length, 1);
+                assert.equal(rows.length, 3);
                 assert.equal(rows[0].shortExpiry, '20260620');
-                assert.equal(rows[0].longExpiry, '20260701');
+                assert.equal(rows[0].longExpiry, '20260810');
+                assert.equal(rows[0].ivRatio, 1.666667);
+                assert.equal(rows[1].shortExpiry, '20260701');
+                assert.equal(rows[1].longExpiry, '20260810');
+                assert.equal(rows[2].longExpiry, '20260701');
             },
         },
         {
-            name: 'sorts calendar candidates by cheapest long multiple when requested',
+            name: 'does not filter calendar candidates by target DTE ratio',
             run() {
                 const ctx = loadBrowserScripts([
                     'js/iv_term_structure_core.js',
                 ]);
 
                 const rows = ctx.OptionComboIvTermStructureCore.buildCalendarFinderRows([
-                    { expiry: '20260620', dte: 10, atmStraddleMark: 10, hasCompleteStraddle: true },
-                    { expiry: '20260630', dte: 20, atmStraddleMark: 17, hasCompleteStraddle: true },
-                    { expiry: '20260710', dte: 30, atmStraddleMark: 18, hasCompleteStraddle: true },
+                    { expiry: '20260620', dte: 10, atmIv: 0.5, atmStraddleMark: 10, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260623', dte: 13, atmIv: 0.3, atmStraddleMark: 12, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260710', dte: 30, atmIv: 0.4, atmStraddleMark: 18, hasCompletePair: true, hasCompleteStraddle: true },
                 ], {
-                    targetRatio: 2,
-                    tolerancePct: 100,
-                    sortBy: 'cheapest_long',
+                    targetRatio: 8,
+                    tolerancePct: 1,
+                    sortBy: 'best_iv_ratio',
                 });
 
-                assert.equal(rows[0].shortExpiry, '20260630');
-                assert.equal(rows[0].longExpiry, '20260710');
-                assert.equal(rows[0].priceMultiple, 1.058824);
-                assert.equal(rows[1].shortExpiry, '20260620');
-                assert.equal(rows[1].longExpiry, '20260630');
-                assert.equal(rows[1].priceMultiple, 1.7);
+                assert.equal(rows.length, 3);
+                assert.equal(rows[0].shortExpiry, '20260620');
+                assert.equal(rows[0].longExpiry, '20260623');
+                assert.equal(rows[0].dteRatio, 1.3);
             },
         },
         {
@@ -344,8 +342,8 @@ module.exports = {
                 ]);
 
                 const rows = ctx.OptionComboIvTermStructureCore.buildCalendarFinderRows([
-                    { expiry: '20260630', dte: 20, atmStraddleMark: 10, callMark: 5.2, putMark: 4.8, hasCompleteStraddle: true },
-                    { expiry: '20260720', dte: 40, atmStraddleMark: 14, callMark: 7.5, putMark: 6.5, hasCompleteStraddle: true },
+                    { expiry: '20260630', dte: 20, atmIv: 0.5, atmStraddleMark: 10, callMark: 5.2, putMark: 4.8, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260720', dte: 40, atmIv: 0.4, atmStraddleMark: 14, callMark: 7.5, putMark: 6.5, hasCompletePair: true, hasCompleteStraddle: true },
                 ], { targetRatio: 2, tolerancePct: 25 });
 
                 assert.equal(rows.length, 1);
@@ -365,18 +363,18 @@ module.exports = {
                 const options = { targetRatio: 2, tolerancePct: 25, shortMinDte: 3, shortMaxDte: 25 };
 
                 const stats = core.buildCalendarFinderStats([
-                    { expiry: '20260610', dte: 0, atmStraddleMark: 4, hasCompleteStraddle: true },
-                    { expiry: '20260620', dte: 10, atmStraddleMark: 10, hasCompleteStraddle: true },
-                    { expiry: '20260630', dte: 20, atmStraddleMark: null, hasCompleteStraddle: false },
-                    { expiry: '20260701', dte: 21, atmStraddleMark: 16, hasCompleteStraddle: true },
-                    { expiry: '20260810', dte: 61, atmStraddleMark: 36, hasCompleteStraddle: true },
+                    { expiry: '20260610', dte: 0, atmIv: 0.8, atmStraddleMark: 4, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260620', dte: 10, atmIv: 0.5, atmStraddleMark: 10, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260630', dte: 20, atmIv: null, atmStraddleMark: 14, hasCompletePair: false, hasCompleteStraddle: true },
+                    { expiry: '20260701', dte: 21, atmIv: 0.4, atmStraddleMark: 16, hasCompletePair: true, hasCompleteStraddle: true },
+                    { expiry: '20260810', dte: 61, atmIv: 0.3, atmStraddleMark: 36, hasCompletePair: true, hasCompleteStraddle: true },
                 ], options);
 
-                // The 0-DTE row is excluded by the dte > 0 guard; the null-mark row is unusable.
+                // The 0-DTE row is excluded by the dte > 0 guard; the null-IV row is unusable.
                 assert.equal(stats.totalExpiries, 5);
                 assert.equal(stats.usableExpiries, 3);
                 assert.equal(stats.shortCandidates, 2);
-                assert.equal(stats.pairCount, 1);
+                assert.equal(stats.pairCount, 3);
 
                 const emptyStats = core.buildCalendarFinderStats([], options);
                 assert.equal(emptyStats.totalExpiries, 0);

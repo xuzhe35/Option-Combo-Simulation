@@ -8,7 +8,7 @@
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260322-workspace">
+    <link rel="stylesheet" href="style.css?v=20260704-combo-dialog-spacing">
     <link rel="stylesheet" href="chart_lab.css?v=20260323-prototype">
 </head>
 
@@ -43,7 +43,7 @@
                     </button>
                     <input type="file" id="importFile" accept=".json" style="display: none;"
                         onchange="importFromJSON(event)">
-                    <button id="saveBtn" class="btn btn-primary" style="display: none;" onclick="saveToJSON()">
+                    <button id="saveBtn" class="btn btn-primary" onclick="saveToJSON()">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
@@ -52,14 +52,14 @@
                         </svg>
                         Save
                     </button>
-                    <button id="exportBtn" class="btn btn-secondary" onclick="exportToJSON()">
+                    <button id="saveAsBtn" class="btn btn-secondary" style="display: none;" onclick="saveAsJSON()">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="17 8 12 3 7 8"></polyline>
-                            <line x1="12" y1="3" x2="12" y2="15"></line>
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                            <line x1="7" y1="8" x2="15" y2="8"></line>
                         </svg>
-                        Export JSON
+                        Save As
                     </button>
                 </div>
             </div>
@@ -352,7 +352,9 @@
                                 <div class="chart-control-item">
                                     <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Range
                                         Mode</label>
-                                    <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                    <div class="button-group" style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="3"
+                                            onclick="setGlobalChartRangeMode(this, 3)">±3%</button>
                                         <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="5"
                                             onclick="setGlobalChartRangeMode(this, 5)">±5%</button>
                                         <button class="btn btn-secondary btn-sm global-range-mode-btn active"
@@ -361,6 +363,8 @@
                                             onclick="setGlobalChartRangeMode(this, 20)">±20%</button>
                                         <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="25"
                                             onclick="setGlobalChartRangeMode(this, 25)">±25%</button>
+                                        <button class="btn btn-secondary btn-sm global-range-mode-btn" data-mode="35"
+                                            onclick="setGlobalChartRangeMode(this, 35)">±35%</button>
                                         <button class="btn btn-secondary btn-sm global-range-mode-btn"
                                             data-mode="custom"
                                             onclick="setGlobalChartRangeMode(this, 'custom')">Custom</button>
@@ -411,15 +415,19 @@
                             <div class="chart-controls" style="display: flex; gap: 2rem; margin-bottom: 1rem;">
                                 <div class="chart-control-item">
                                     <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Range Mode</label>
-                                    <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                    <div class="button-group" style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                                        <button class="btn btn-secondary btn-sm global-amort-range-mode-btn" data-mode="3"
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 3)">±3%</button>
                                         <button class="btn btn-secondary btn-sm global-amort-range-mode-btn" data-mode="5"
-                                            onclick="setGlobalAmortizedChartRangeMode(this, 5)">卤5%</button>
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 5)">±5%</button>
                                         <button class="btn btn-secondary btn-sm global-amort-range-mode-btn active" data-mode="10"
-                                            onclick="setGlobalAmortizedChartRangeMode(this, 10)">卤10%</button>
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 10)">±10%</button>
                                         <button class="btn btn-secondary btn-sm global-amort-range-mode-btn" data-mode="20"
-                                            onclick="setGlobalAmortizedChartRangeMode(this, 20)">卤20%</button>
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 20)">±20%</button>
                                         <button class="btn btn-secondary btn-sm global-amort-range-mode-btn" data-mode="25"
-                                            onclick="setGlobalAmortizedChartRangeMode(this, 25)">卤25%</button>
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 25)">±25%</button>
+                                        <button class="btn btn-secondary btn-sm global-amort-range-mode-btn" data-mode="35"
+                                            onclick="setGlobalAmortizedChartRangeMode(this, 35)">±35%</button>
                                         <button class="btn btn-secondary btn-sm global-amort-range-mode-btn" data-mode="custom"
                                             onclick="setGlobalAmortizedChartRangeMode(this, 'custom')">Custom</button>
                                     </div>
@@ -579,6 +587,9 @@
                                     <input type="text" class="group-name-input h3-style" value="New Combo">
                                     <button class="btn btn-secondary btn-sm trial-trigger-toggle-btn" type="button" style="display: none;">
                                         Trial Trigger
+                                    </button>
+                                    <button class="btn btn-primary btn-sm simulate-open-btn" type="button" style="display: none;">
+                                        Sim Open
                                     </button>
                                     <button class="btn btn-secondary btn-sm close-group-toggle-btn" type="button" style="display: none;">
                                         Close Group
@@ -797,6 +808,9 @@
                                 </table>
                                 <div class="group-empty-state" style="display: none;">
                                     <p class="text-muted small">No legs in this combo.</p>
+                                    <button class="btn btn-secondary btn-sm combo-template-open-btn" type="button">
+                                        Choose Typical Combo
+                                    </button>
                                 </div>
                             </div>
 
@@ -856,7 +870,9 @@
                                 <div class="chart-controls" style="display: flex; gap: 2rem; margin-bottom: 1rem;">
                                     <div class="chart-control-item">
                                         <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Range Mode</label>
-                                        <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                        <div class="button-group" style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                                            <button class="btn btn-secondary btn-sm amort-range-mode-btn" data-mode="3"
+                                                onclick="setAmortChartRangeMode(this, 3)">±3%</button>
                                             <button class="btn btn-secondary btn-sm amort-range-mode-btn" data-mode="5"
                                                 onclick="setAmortChartRangeMode(this, 5)">±5%</button>
                                             <button class="btn btn-secondary btn-sm amort-range-mode-btn active" data-mode="10"
@@ -865,6 +881,8 @@
                                                 onclick="setAmortChartRangeMode(this, 20)">±20%</button>
                                             <button class="btn btn-secondary btn-sm amort-range-mode-btn" data-mode="25"
                                                 onclick="setAmortChartRangeMode(this, 25)">±25%</button>
+                                            <button class="btn btn-secondary btn-sm amort-range-mode-btn" data-mode="35"
+                                                onclick="setAmortChartRangeMode(this, 35)">±35%</button>
                                             <button class="btn btn-secondary btn-sm amort-range-mode-btn" data-mode="custom"
                                                 onclick="setAmortChartRangeMode(this, 'custom')">Custom</button>
                                         </div>
@@ -894,7 +912,9 @@
                                     <div class="chart-control-item">
                                         <label class="small text-muted"
                                             style="display:block; margin-bottom: 0.25rem;">Range Mode</label>
-                                        <div class="button-group" style="display: flex; gap: 0.25rem;">
+                                        <div class="button-group" style="display: flex; flex-wrap: wrap; gap: 0.25rem;">
+                                            <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="3"
+                                                onclick="setChartRangeMode(this, 3)">±3%</button>
                                             <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="5"
                                                 onclick="setChartRangeMode(this, 5)">±5%</button>
                                             <button class="btn btn-secondary btn-sm range-mode-btn active"
@@ -903,6 +923,8 @@
                                                 onclick="setChartRangeMode(this, 20)">±20%</button>
                                             <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="25"
                                                 onclick="setChartRangeMode(this, 25)">±25%</button>
+                                            <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="35"
+                                                onclick="setChartRangeMode(this, 35)">±35%</button>
                                             <button class="btn btn-secondary btn-sm range-mode-btn" data-mode="custom"
                                                 onclick="setChartRangeMode(this, 'custom')">Custom</button>
                                         </div>

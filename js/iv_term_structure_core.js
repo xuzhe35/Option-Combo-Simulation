@@ -188,53 +188,32 @@
         const shortMaxDte = Number.isFinite(shortMaxDteRaw) && shortMaxDteRaw >= shortMinDte
             ? shortMaxDteRaw
             : Math.max(60, shortMinDte);
-        const sortBy = ['best_value', 'cheapest_long', 'closest_ratio'].includes(data.sortBy)
-            ? data.sortBy
-            : 'best_value';
-
         return {
             targetRatio,
             tolerancePct,
             shortMinDte,
             shortMaxDte,
-            sortBy,
+            sortBy: 'best_iv_ratio',
         };
     }
 
-    function _hasUsableCalendarStraddle(row) {
+    function _hasUsableCalendarIv(row) {
         return !!(
             row
             && Number.isFinite(row.dte)
             && row.dte > 0
-            && Number.isFinite(row.atmStraddleMark)
-            && row.atmStraddleMark > 0
-            && (row.hasCompleteStraddle !== false)
+            && Number.isFinite(row.atmIv)
+            && row.atmIv > 0
+            && (row.hasCompletePair !== false)
         );
     }
 
-    function _compareCalendarCandidates(left, right, sortBy) {
-        const byBestValue = (
-            left.valueScore - right.valueScore
-            || left.ratioDistance - right.ratioDistance
-            || left.priceMultiple - right.priceMultiple
-        );
-        const byCheapestLong = (
-            left.priceMultiple - right.priceMultiple
-            || left.valueScore - right.valueScore
-            || left.ratioDistance - right.ratioDistance
-        );
-        const byClosestRatio = (
-            left.ratioDistance - right.ratioDistance
-            || left.valueScore - right.valueScore
-            || left.priceMultiple - right.priceMultiple
-        );
-
-        const primary = sortBy === 'cheapest_long'
-            ? byCheapestLong
-            : (sortBy === 'closest_ratio' ? byClosestRatio : byBestValue);
-        return primary
-            || left.shortDte - right.shortDte
+    function _compareCalendarCandidates(left, right) {
+        return right.ivRatio - left.ivRatio
             || left.longDte - right.longDte
+            || left.dteRatio - right.dteRatio
+            || left.priceMultiple - right.priceMultiple
+            || left.shortDte - right.shortDte
             || String(left.shortExpiry).localeCompare(String(right.shortExpiry))
             || String(left.longExpiry).localeCompare(String(right.longExpiry));
     }
@@ -242,39 +221,36 @@
     function _collectCalendarCandidates(detailRows, finderOptions) {
         const totalExpiries = Array.isArray(detailRows) ? detailRows.length : 0;
         const sourceRows = (Array.isArray(detailRows) ? detailRows : [])
-            .filter(_hasUsableCalendarStraddle)
+            .filter(_hasUsableCalendarIv)
             .slice()
             .sort((left, right) => (
                 left.dte - right.dte
                 || String(left.expiry || '').localeCompare(String(right.expiry || ''))
             ));
-        const toleranceRatio = finderOptions.tolerancePct / 100;
-        const minRatio = finderOptions.targetRatio * Math.max(0, 1 - toleranceRatio);
-        const maxRatio = finderOptions.targetRatio * (1 + toleranceRatio);
         const candidates = [];
         let shortCandidates = 0;
 
         for (let shortIndex = 0; shortIndex < sourceRows.length; shortIndex += 1) {
             const shortRow = sourceRows[shortIndex];
-            if (shortRow.dte < finderOptions.shortMinDte || shortRow.dte > finderOptions.shortMaxDte) {
-                continue;
-            }
-            shortCandidates += 1;
+            let hasLaterExpiry = false;
 
             for (let longIndex = 0; longIndex < sourceRows.length; longIndex += 1) {
                 const longRow = sourceRows[longIndex];
                 if (longRow.dte <= shortRow.dte) {
                     continue;
                 }
+                hasLaterExpiry = true;
 
                 const dteRatio = longRow.dte / shortRow.dte;
-                if (dteRatio < minRatio || dteRatio > maxRatio) {
-                    continue;
-                }
-
-                const priceMultiple = longRow.atmStraddleMark / shortRow.atmStraddleMark;
+                const priceMultiple = Number.isFinite(shortRow.atmStraddleMark)
+                    && shortRow.atmStraddleMark > 0
+                    && Number.isFinite(longRow.atmStraddleMark)
+                    && longRow.atmStraddleMark > 0
+                    ? longRow.atmStraddleMark / shortRow.atmStraddleMark
+                    : null;
                 const timeFairMultiple = Math.sqrt(dteRatio);
-                const valueScore = priceMultiple / timeFairMultiple;
+                const valueScore = Number.isFinite(priceMultiple) ? priceMultiple / timeFairMultiple : null;
+                const ivRatio = shortRow.atmIv / longRow.atmIv;
 
                 candidates.push({
                     shortExpiry: String(shortRow.expiry || '').trim(),
@@ -289,6 +265,9 @@
                     priceMultiple: _roundNumber(priceMultiple, 6),
                     timeFairMultiple: _roundNumber(timeFairMultiple, 6),
                     valueScore: _roundNumber(valueScore, 6),
+                    shortAtmIv: _roundNumber(shortRow.atmIv, 6),
+                    longAtmIv: _roundNumber(longRow.atmIv, 6),
+                    ivRatio: _roundNumber(ivRatio, 6),
                     shortAtmStrike: Number.isFinite(shortRow.atmStrike) ? shortRow.atmStrike : null,
                     longAtmStrike: Number.isFinite(longRow.atmStrike) ? longRow.atmStrike : null,
                     shortCallMark: Number.isFinite(shortRow.callMark) ? shortRow.callMark : null,
@@ -300,6 +279,10 @@
                     longCallIv: Number.isFinite(longRow.callIv) ? longRow.callIv : null,
                     longPutIv: Number.isFinite(longRow.putIv) ? longRow.putIv : null,
                 });
+            }
+
+            if (hasLaterExpiry) {
+                shortCandidates += 1;
             }
         }
 
@@ -317,7 +300,7 @@
     function buildCalendarFinderRows(detailRows, options) {
         const finderOptions = _normalizeCalendarFinderOptions(options);
         const { candidates } = _collectCalendarCandidates(detailRows, finderOptions);
-        return candidates.sort((left, right) => _compareCalendarCandidates(left, right, finderOptions.sortBy));
+        return candidates.sort(_compareCalendarCandidates);
     }
 
     function pickCalendarFinderSecondaryCandidate(calendarRows) {

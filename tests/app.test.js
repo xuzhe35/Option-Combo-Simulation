@@ -2,6 +2,54 @@ const assert = require('node:assert/strict');
 
 const { loadAppContext } = require('./helpers/load-browser-scripts');
 
+function createSaveButtonElements() {
+    return {
+        saveBtn: { style: {}, innerHTML: 'Save' },
+        saveAsBtn: { style: {}, innerHTML: 'Save As' },
+    };
+}
+
+function createWritableFileHandle(name, writes) {
+    return {
+        name,
+        async createWritable() {
+            return {
+                async write(text) {
+                    writes.push(text);
+                },
+                async close() {},
+            };
+        },
+    };
+}
+
+function createImportedSession(overrides = {}) {
+    return {
+        underlyingSymbol: 'SPY',
+        underlyingContractMonth: '',
+        underlyingPrice: 501.25,
+        baseDate: '2026-05-01',
+        simulatedDate: '2026-05-02',
+        marketDataMode: 'live',
+        historicalQuoteDate: '',
+        interestRate: 0.03,
+        ivOffset: 0,
+        greeksEnabled: false,
+        deltaHedge: {},
+        primaryControlPanelCollapsed: false,
+        allowLiveComboOrders: false,
+        allowLiveHedgeOrders: false,
+        liveComboOrderAccounts: [],
+        liveComboOrderAccountsConnected: false,
+        selectedLiveComboOrderAccount: '',
+        forwardRateSamples: [],
+        futuresPool: [],
+        groups: [],
+        hedges: [],
+        ...overrides,
+    };
+}
+
 module.exports = {
     name: 'app.js',
     tests: [
@@ -40,6 +88,103 @@ module.exports = {
                 assert.equal(harness.callLog.syncWorkspaceChrome.length, 1);
                 assert.equal(harness.callLog.bindDeltaHedgePanel.length, 1);
                 assert.deepEqual(harness.callLog.setInterval.map(item => item.delay), [5000]);
+            },
+        },
+        {
+            name: 'initializes session file actions with Save visible and Save As hidden',
+            run() {
+                const elements = createSaveButtonElements();
+                elements.saveBtn.style.display = 'none';
+                elements.saveAsBtn.style.display = 'inline-flex';
+
+                const harness = loadAppContext({ elements });
+                harness.triggerDomReady();
+
+                assert.equal(elements.saveBtn.style.display, 'inline-flex');
+                assert.equal(elements.saveAsBtn.style.display, 'none');
+                const fileTargetState = harness.context.__optionComboApp.getSessionFileTargetState();
+                assert.equal(fileTargetState.hasFileTarget, false);
+                assert.equal(fileTargetState.hasWritableFileHandle, false);
+                assert.equal(harness.context.exportToJSON, undefined);
+            },
+        },
+        {
+            name: 'Save chooses a JSON location when no session file is bound',
+            async run() {
+                const elements = createSaveButtonElements();
+                const writes = [];
+                let pickerOptions = null;
+                const fileHandle = createWritableFileHandle('Fresh Session.json', writes);
+                const harness = loadAppContext({
+                    elements,
+                    overrides: {
+                        showSaveFilePicker(options) {
+                            pickerOptions = options;
+                            return Promise.resolve(fileHandle);
+                        },
+                        setTimeout(callback) {
+                            callback();
+                            return 1;
+                        },
+                    },
+                });
+
+                harness.triggerDomReady();
+                const saved = await harness.context.saveToJSON();
+
+                assert.equal(saved, true);
+                assert.ok(pickerOptions);
+                assert.match(pickerOptions.suggestedName, /\.json$/);
+                assert.doesNotMatch(pickerOptions.suggestedName, /copy/i);
+                assert.equal(JSON.parse(writes[0]).underlyingSymbol, 'SPY');
+                assert.equal(harness.context.__optionComboApp.getState().importedSessionTitle, 'Fresh Session.json');
+                const fileTargetState = harness.context.__optionComboApp.getSessionFileTargetState();
+                assert.equal(fileTargetState.hasFileTarget, true);
+                assert.equal(fileTargetState.hasWritableFileHandle, true);
+                assert.equal(elements.saveAsBtn.style.display, 'inline-flex');
+            },
+        },
+        {
+            name: 'Save As appears after import and suggests a copy filename',
+            async run() {
+                const elements = createSaveButtonElements();
+                const writes = [];
+                let pickerOptions = null;
+                const fileHandle = createWritableFileHandle('SPY Session copy.json', writes);
+                const harness = loadAppContext({
+                    elements,
+                    overrides: {
+                        showSaveFilePicker(options) {
+                            pickerOptions = options;
+                            return Promise.resolve(fileHandle);
+                        },
+                        setTimeout(callback) {
+                            callback();
+                            return 1;
+                        },
+                    },
+                });
+
+                harness.triggerDomReady();
+                harness.context.processImportedFile({
+                    name: 'SPY Session.json',
+                    __text: JSON.stringify(createImportedSession()),
+                });
+
+                assert.equal(elements.saveAsBtn.style.display, 'inline-flex');
+                const importedFileTargetState = harness.context.__optionComboApp.getSessionFileTargetState();
+                assert.equal(importedFileTargetState.hasFileTarget, true);
+                assert.equal(importedFileTargetState.hasWritableFileHandle, false);
+
+                const saved = await harness.context.saveAsJSON();
+
+                assert.equal(saved, true);
+                assert.equal(pickerOptions.suggestedName, 'SPY Session copy.json');
+                assert.equal(JSON.parse(writes[0]).underlyingPrice, 501.25);
+                assert.equal(harness.context.__optionComboApp.getState().importedSessionTitle, 'SPY Session copy.json');
+                const savedFileTargetState = harness.context.__optionComboApp.getSessionFileTargetState();
+                assert.equal(savedFileTargetState.hasFileTarget, true);
+                assert.equal(savedFileTargetState.hasWritableFileHandle, true);
             },
         },
         {

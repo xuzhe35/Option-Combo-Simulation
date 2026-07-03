@@ -172,6 +172,42 @@ module.exports = {
             },
         },
         {
+            name: 'renders futures month controls and binds FOP sync payloads to the selected future',
+            run() {
+                const ctx = loadPageContext(null);
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                const card = testApi.createCardState({
+                    symbol: 'CL',
+                    historyPath: 'iv_term_structure/data/CL.json',
+                    futuresContractMonth: '202608',
+                }, { isExpanded: true });
+                const html = testApi.buildCardMarkup(card);
+                const payload = testApi.buildSubscribePayload(card);
+
+                assert.match(html, /Underlying FUT Month/);
+                assert.match(html, /data-action="futures-contract-month"/);
+                assert.match(html, /value="202608"/);
+                assert.equal(payload.underlying.secType, 'FUT');
+                assert.equal(payload.underlying.symbol, 'CL');
+                assert.equal(payload.underlying.contractMonth, '202608');
+                assert.equal(payload.underlying.multiplier, '1000');
+                assert.equal(payload.optionTemplate.secType, 'FOP');
+                assert.equal(payload.optionTemplate.underlyingContractMonth, '202608');
+                assert.equal(payload.optionTemplate.underlyingMultiplier, '1000');
+
+                const siCard = testApi.createCardState({
+                    symbol: 'SI',
+                    historyPath: 'iv_term_structure/data/SI.json',
+                    futuresContractMonth: '202608',
+                }, { isExpanded: true });
+                const siPayload = testApi.buildSubscribePayload(siCard);
+                assert.equal(siPayload.underlying.symbol, 'SI');
+                assert.equal(siPayload.underlying.contractMonth, '202608');
+                assert.equal(siPayload.underlying.multiplier, '5000');
+                assert.equal(siPayload.optionTemplate.underlyingMultiplier, '5000');
+            },
+        },
+        {
             name: 'uses all expiry detail rows as the primary visible table',
             run() {
                 const ctx = loadPageContext(null);
@@ -239,25 +275,27 @@ module.exports = {
                         tolerancePct: 25,
                         shortMinDte: 3,
                         shortMaxDte: 60,
-                        sortBy: 'best_value',
+                        sortBy: 'best_iv_ratio',
                         showAll: false,
                     },
                 }, {
                     detailRows: [
-                        { expiry: '20260620', dte: 10, atmStraddleMark: 10, hasCompleteStraddle: true },
-                        { expiry: '20260630', dte: 20, atmStraddleMark: 16, hasCompleteStraddle: true },
-                        { expiry: '20260710', dte: 30, atmStraddleMark: 18, hasCompleteStraddle: true },
-                        { expiry: '20260720', dte: 40, atmStraddleMark: 21, hasCompleteStraddle: true },
-                        { expiry: '20260810', dte: 61, atmStraddleMark: 34, hasCompleteStraddle: true },
+                        { expiry: '20260620', dte: 10, atmIv: 0.5, atmStraddleMark: 10, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260623', dte: 13, atmIv: 0.3, atmStraddleMark: 12, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260630', dte: 20, atmIv: 0.4, atmStraddleMark: 16, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260710', dte: 30, atmIv: 0.55, atmStraddleMark: 18, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260720', dte: 40, atmIv: 0.6, atmStraddleMark: 21, hasCompletePair: true, hasCompleteStraddle: true },
                     ],
                 });
 
                 assert.match(html, /Calendar Finder/);
-                assert.match(html, /Best 0\.92X/);
+                assert.match(html, /Best 1\.67X IV/);
                 assert.match(html, /Sell Expiry/);
                 assert.match(html, /Buy Expiry/);
-                assert.match(html, /20260630/);
-                assert.match(html, /20260710/);
+                assert.match(html, /IV Ratio/);
+                assert.match(html, /ATM IV/);
+                assert.match(html, /20260620/);
+                assert.match(html, /20260623/);
                 assert.equal((html.match(/ivts-calendar-row/g) || []).length, 5);
             },
         },
@@ -273,15 +311,15 @@ module.exports = {
                         tolerancePct: 50,
                         shortMinDte: 3,
                         shortMaxDte: 60,
-                        sortBy: 'best_value',
+                        sortBy: 'best_iv_ratio',
                         showAll: false,
                     },
                 }, {
                     detailRows: [
-                        { expiry: '20260617', dte: 5, atmStraddleMark: 10, atmStrike: 600, hasCompleteStraddle: true },
-                        { expiry: '20260622', dte: 10, atmStraddleMark: 12, atmStrike: 601, hasCompleteStraddle: true },
-                        { expiry: '20260627', dte: 15, atmStraddleMark: 13, atmStrike: 602, hasCompleteStraddle: true },
-                        { expiry: '20260702', dte: 20, atmStraddleMark: 17, atmStrike: 603, hasCompleteStraddle: true },
+                        { expiry: '20260617', dte: 5, atmIv: 0.8, atmStraddleMark: 10, atmStrike: 600, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260622', dte: 10, atmIv: 0.5, atmStraddleMark: 12, atmStrike: 601, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260627', dte: 15, atmIv: 0.6, atmStraddleMark: 13, atmStrike: 602, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260702', dte: 20, atmIv: 0.9, atmStraddleMark: 17, atmStrike: 603, hasCompletePair: true, hasCompleteStraddle: true },
                     ],
                 });
 
@@ -306,19 +344,19 @@ module.exports = {
                         tolerancePct: 40,
                         shortMinDte: 3,
                         shortMaxDte: 60,
-                        sortBy: 'best_value',
+                        sortBy: 'best_iv_ratio',
                         showAll: false,
                     },
                 }, {
                     detailRows: [
-                        { expiry: '20260617', dte: 5, atmStraddleMark: 10, atmStrike: 600, hasCompleteStraddle: true },
-                        { expiry: '20260620', dte: 8, atmStraddleMark: 11, atmStrike: 601, hasCompleteStraddle: true },
-                        { expiry: '20260621', dte: 9, atmStraddleMark: 12, atmStrike: 602, hasCompleteStraddle: true },
-                        { expiry: '20260622', dte: 10, atmStraddleMark: 13, atmStrike: 603, hasCompleteStraddle: true },
-                        { expiry: '20260623', dte: 11, atmStraddleMark: 14, atmStrike: 604, hasCompleteStraddle: true },
-                        { expiry: '20260624', dte: 12, atmStraddleMark: 15, atmStrike: 605, hasCompleteStraddle: true },
-                        { expiry: '20260702', dte: 20, atmStraddleMark: 20, atmStrike: 606, hasCompleteStraddle: true },
-                        { expiry: '20260722', dte: 40, atmStraddleMark: 29, atmStrike: 607, hasCompleteStraddle: true },
+                        { expiry: '20260617', dte: 5, atmIv: 0.9, atmStraddleMark: 10, atmStrike: 600, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260620', dte: 8, atmIv: 0.1, atmStraddleMark: 11, atmStrike: 601, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260621', dte: 9, atmIv: 0.11, atmStraddleMark: 12, atmStrike: 602, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260622', dte: 10, atmIv: 0.12, atmStraddleMark: 13, atmStrike: 603, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260623', dte: 11, atmIv: 0.13, atmStraddleMark: 14, atmStrike: 604, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260624', dte: 12, atmIv: 0.14, atmStraddleMark: 15, atmStrike: 605, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260702', dte: 20, atmIv: 0.5, atmStraddleMark: 20, atmStrike: 606, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260722', dte: 40, atmIv: 0.25, atmStraddleMark: 29, atmStrike: 607, hasCompletePair: true, hasCompleteStraddle: true },
                     ],
                 });
 
@@ -337,7 +375,7 @@ module.exports = {
                     tolerancePct: '40',
                     shortMinDte: '5',
                     shortMaxDte: '3',
-                    sortBy: 'closest_ratio',
+                    sortBy: 'best_iv_ratio',
                     showAll: true,
                 });
 
@@ -346,7 +384,7 @@ module.exports = {
                 assert.equal(config.tolerancePct, 40);
                 assert.equal(config.shortMinDte, 5);
                 assert.equal(config.shortMaxDte, 60);
-                assert.equal(config.sortBy, 'closest_ratio');
+                assert.equal(config.sortBy, 'best_iv_ratio');
                 assert.equal(config.showAll, true);
             },
         },
@@ -382,7 +420,7 @@ module.exports = {
             },
         },
         {
-            name: 'renders zero short DTE and clamps calendar finder numeric bounds',
+            name: 'normalizes short DTE bounds without rendering a DTE filter',
             run() {
                 const ctx = loadPageContext(null);
                 const config = ctx.OptionComboIvTermStructurePage._test.normalizeCalendarFinderConfig({
@@ -400,7 +438,7 @@ module.exports = {
                         tolerancePct: 25,
                         shortMinDte: 0,
                         shortMaxDte: 60,
-                        sortBy: 'best_value',
+                        sortBy: 'best_iv_ratio',
                         showAll: false,
                     },
                 }, { detailRows: [] });
@@ -408,7 +446,8 @@ module.exports = {
                 assert.equal(config.targetRatio, 8);
                 assert.equal(config.shortMinDte, 100);
                 assert.equal(config.shortMaxDte, 100);
-                assert.match(html, /data-action="calendar-short-min"[^>]*value="0"/);
+                assert.doesNotMatch(html, /data-action="calendar-short-min"/);
+                assert.doesNotMatch(html, /Short DTE/);
             },
         },
         {
@@ -428,11 +467,11 @@ module.exports = {
                 );
                 assert.match(
                     describe(config, { totalExpiries: 6, usableExpiries: 4, shortCandidates: 0, pairCount: 0 }),
-                    /3-60 DTE/
+                    /No sell\/buy expiry pairs/
                 );
                 assert.match(
                     describe(config, { totalExpiries: 6, usableExpiries: 4, shortCandidates: 2, pairCount: 0 }),
-                    /\+\/-25% of the 2X DTE ratio/
+                    /No long-leg expiry/
                 );
             },
         },
@@ -448,16 +487,16 @@ module.exports = {
                         tolerancePct: 25,
                         shortMinDte: 3,
                         shortMaxDte: 60,
-                        sortBy: 'best_value',
+                        sortBy: 'best_iv_ratio',
                         showAll: false,
                     },
                 }, {
                     detailRows: [
-                        { expiry: '20260620', dte: 10, atmStraddleMark: 10, hasCompleteStraddle: true },
+                        { expiry: '20260620', dte: 10, atmIv: 0.5, atmStraddleMark: 10, hasCompletePair: true, hasCompleteStraddle: true },
                     ],
                 });
 
-                assert.match(html, /Waiting for complete straddle quotes \(1\/1 expiries usable\)\./);
+                assert.match(html, /Waiting for complete ATM IV quotes \(1\/1 expiries usable\)\./);
             },
         },
         {
@@ -472,13 +511,13 @@ module.exports = {
                         tolerancePct: 25,
                         shortMinDte: 3,
                         shortMaxDte: 60,
-                        sortBy: 'best_value',
+                        sortBy: 'best_iv_ratio',
                         showAll: false,
                     },
                 }, {
                     detailRows: [
-                        { expiry: '20260630', dte: 20, atmStraddleMark: 16, atmStrike: 600, hasCompleteStraddle: true },
-                        { expiry: '20260720', dte: 40, atmStraddleMark: 21, atmStrike: 602, hasCompleteStraddle: true },
+                        { expiry: '20260630', dte: 20, atmIv: 0.5, atmStraddleMark: 16, atmStrike: 600, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260720', dte: 40, atmIv: 0.4, atmStraddleMark: 21, atmStrike: 602, hasCompletePair: true, hasCompleteStraddle: true },
                     ],
                 });
 
@@ -500,13 +539,13 @@ module.exports = {
                         tolerancePct: 25,
                         shortMinDte: 3,
                         shortMaxDte: 60,
-                        sortBy: 'best_value',
+                        sortBy: 'best_iv_ratio',
                         showAll: false,
                     },
                 }, {
                     detailRows: [
-                        { expiry: '20260630', dte: 20, atmStraddleMark: 16, hasCompleteStraddle: true },
-                        { expiry: '20260720', dte: 40, atmStraddleMark: 21, hasCompleteStraddle: true },
+                        { expiry: '20260630', dte: 20, atmIv: 0.5, atmStraddleMark: 16, hasCompletePair: true, hasCompleteStraddle: true },
+                        { expiry: '20260720', dte: 40, atmIv: 0.4, atmStraddleMark: 21, hasCompletePair: true, hasCompleteStraddle: true },
                     ],
                 });
 
@@ -554,7 +593,7 @@ module.exports = {
                 assert.equal(restored.tolerancePct, 40);
                 assert.equal(restored.shortMinDte, 5);
                 assert.equal(restored.shortMaxDte, 45);
-                assert.equal(restored.sortBy, 'closest_ratio');
+                assert.equal(restored.sortBy, 'best_iv_ratio');
                 assert.equal(restored.showAll, true);
                 assert.equal(testApi.loadSavedCalendarFinderConfig('QQQ'), null);
 

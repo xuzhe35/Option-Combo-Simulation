@@ -112,7 +112,22 @@
             && leg.closePrice !== undefined);
     }
 
-    function _shouldIncludeLegForIntent(leg, intent) {
+    function _normalizeLegIdFilter(options) {
+        if (!options || !Array.isArray(options.legIds)) {
+            return null;
+        }
+
+        const legIds = options.legIds
+            .map((id) => String(id || '').trim())
+            .filter(Boolean);
+        return legIds.length > 0 ? new Set(legIds) : null;
+    }
+
+    function _shouldIncludeLegForIntent(leg, intent, legIdFilter) {
+        if (legIdFilter && !legIdFilter.has(String(leg && leg.id || '').trim())) {
+            return false;
+        }
+
         const pos = parseInt(leg && leg.pos, 10) || 0;
         if (pos === 0) {
             return false;
@@ -129,10 +144,11 @@
         const profile = _resolveUnderlyingProfile(globalState);
         const defaultUnderlyingContractMonth = _resolveDefaultUnderlyingContractMonth(globalState);
         const intent = _resolveExecutionIntent(options && options.intent);
+        const legIdFilter = _normalizeLegIdFilter(options);
         const productRegistry = _getProductRegistryApi();
 
         return (group.legs || [])
-            .filter((leg) => _shouldIncludeLegForIntent(leg, intent))
+            .filter((leg) => _shouldIncludeLegForIntent(leg, intent, legIdFilter))
             .map((leg) => {
                 const targetPos = _resolveTargetPosition(leg.pos, intent);
                 const optionContractSpec = productRegistry
@@ -219,7 +235,10 @@
                 currency: profile.currency,
                 priceIncrement: profile.comboPriceIncrement,
             },
-            legs: buildGroupOrderLegRequests(group, globalState, { intent }),
+            legs: buildGroupOrderLegRequests(group, globalState, {
+                intent,
+                legIds: requestOptions.legIds,
+            }),
         };
 
         const selectedAccount = _resolveSelectedTradeAccount(globalState);

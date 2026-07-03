@@ -21,6 +21,12 @@
             : null;
     }
 
+    function _getLiveQuotesApi() {
+        return globalScope.OptionComboWsLiveQuotes && typeof globalScope.OptionComboWsLiveQuotes === 'object'
+            ? globalScope.OptionComboWsLiveQuotes
+            : null;
+    }
+
     function isOptionLeg(leg) {
         const productRegistry = _getProductRegistryApi();
         return productRegistry && typeof productRegistry.isOptionLeg === 'function'
@@ -139,14 +145,25 @@
                 || closeExecution.lastPreview));
     }
 
-    function isCloseExecutionCompleted(closeExecution) {
+    function isStagedUnderlyingClosePreview(preview) {
+        const requestSource = String(preview && preview.requestSource || '').trim();
+        const closePlanStage = String(preview && preview.closePlanStage || '').trim();
+        return requestSource === 'close_group_underlying'
+            || (closePlanStage === 'underlying'
+                && preview
+                && preview.closePlanComplete === false);
+    }
+
+    function isCloseExecutionCompleted(closeExecution, hasOpenPosition) {
         const brokerStatus = String(closeExecution && closeExecution.lastPreview && closeExecution.lastPreview.status || '').trim();
-        return brokerStatus === 'Filled';
+        return brokerStatus === 'Filled'
+            && hasOpenPosition !== true
+            && !isStagedUnderlyingClosePreview(closeExecution && closeExecution.lastPreview);
     }
 
     function resolveCloseGroupUiState(activeViewMode, hasOpenPosition, closeExecution, isHistoricalMode = false) {
         const hasRuntime = hasCloseGroupRuntime(closeExecution);
-        const isCompleted = isCloseExecutionCompleted(closeExecution);
+        const isCompleted = isCloseExecutionCompleted(closeExecution, hasOpenPosition);
         const closeableMode = activeViewMode === 'active' || (isHistoricalMode && activeViewMode === 'trial');
         const showToggle = !isCompleted && ((closeableMode && hasOpenPosition) || hasRuntime);
         return {
@@ -168,9 +185,11 @@
 
         const trialToggleBtn = card.querySelector('.trial-trigger-toggle-btn');
         const closeToggleBtn = card.querySelector('.close-group-toggle-btn');
+        const simulateOpenBtn = card.querySelector('.simulate-open-btn');
         const showRow = !!(
             (trialToggleBtn && trialToggleBtn.style.display !== 'none')
             || (closeToggleBtn && closeToggleBtn.style.display !== 'none')
+            || (simulateOpenBtn && simulateOpenBtn.style.display !== 'none')
         );
         secondaryActionsRow.style.display = showRow ? 'flex' : 'none';
     }
@@ -388,6 +407,122 @@
         return `${parsed >= 0 ? '+' : ''}${normalized}`;
     }
 
+    function _resolvePositiveLegPrice(leg) {
+        if (!leg) {
+            return null;
+        }
+        const liveQuotes = _getLiveQuotesApi();
+        const quote = liveQuotes && typeof liveQuotes.getOptionQuote === 'function'
+            ? liveQuotes.getOptionQuote(leg.id)
+            : null;
+        const bid = parseFloat(quote && quote.bid);
+        const ask = parseFloat(quote && quote.ask);
+        if (Number.isFinite(bid) && bid > 0 && Number.isFinite(ask) && ask > 0) {
+            return (bid + ask) / 2;
+        }
+        const mark = parseFloat(quote && quote.mark);
+        if (Number.isFinite(mark) && mark > 0) {
+            return mark;
+        }
+        const currentPrice = parseFloat(leg.currentPrice);
+        if (leg.currentPriceSource !== 'missing' && Number.isFinite(currentPrice) && currentPrice > 0) {
+            return currentPrice;
+        }
+        return null;
+    }
+
+    function _calculateIronButterflyRisk(group) {
+        if (!group || !group.comboTemplate || group.comboTemplate.strategy !== 'butterfly') {
+            return null;
+        }
+        const legs = Array.isArray(group.legs) ? group.legs : [];
+        const lowerStrike = parseFloat(group.comboTemplate.lowerStrike);
+        const middleStrike = parseFloat(group.comboTemplate.middleStrike);
+        const upperStrike = parseFloat(group.comboTemplate.upperStrike);
+        const lowerPut = legs.find((leg) => String(leg.type).toLowerCase() === 'put'
+            && (parseFloat(leg.pos) || 0) > 0
+            && Math.abs((parseFloat(leg.strike) || 0) - lowerStrike) < 0.0001);
+        const middlePut = legs.find((leg) => String(leg.type).toLowerCase() === 'put'
+            && (parseFloat(leg.pos) || 0) < 0
+            && Math.abs((parseFloat(leg.strike) || 0) - middleStrike) < 0.0001);
+        const middleCall = legs.find((leg) => String(leg.type).toLowerCase() === 'call'
+            && (parseFloat(leg.pos) || 0) < 0
+            && Math.abs((parseFloat(leg.strike) || 0) - middleStrike) < 0.0001);
+        const upperCall = legs.find((leg) => String(leg.type).toLowerCase() === 'call'
+            && (parseFloat(leg.pos) || 0) > 0
+            && Math.abs((parseFloat(leg.strike) || 0) - upperStrike) < 0.0001);
+
+        const lowerPutPrice = _resolvePositiveLegPrice(lowerPut);
+        const middlePutPrice = _resolvePositiveLegPrice(middlePut);
+        const middleCallPrice = _resolvePositiveLegPrice(middleCall);
+        const upperCallPrice = _resolvePositiveLegPrice(upperCall);
+        const width = Math.max(middleStrike - lowerStrike, upperStrike - middleStrike);
+        if ([lowerPutPrice, middlePutPrice, middleCallPrice, upperCallPrice].some(value => !Number.isFinite(value))
+            || !Number.isFinite(width)
+            || width <= 0) {
+            return group.comboTemplate.risk || null;
+        }
+
+        const netCredit = middlePutPrice + middleCallPrice - lowerPutPrice - upperCallPrice;
+        const maxProfit = netCredit;
+        const maxLoss = width - netCredit;
+        if (!(maxProfit > 0) || !(maxLoss > 0)) {
+            return group.comboTemplate.risk || null;
+        }
+        return {
+            maxProfit,
+            maxLoss,
+            profitLossRatio: maxProfit / maxLoss,
+            wingWidth: width,
+            netCredit,
+        };
+    }
+
+    function _ensureComboRiskSummaryEl(card) {
+        if (!card) {
+            return null;
+        }
+        let el = card.querySelector('.combo-template-risk-summary');
+        if (el) {
+            return el;
+        }
+        el = document.createElement('div');
+        el.className = 'combo-template-risk-summary small text-muted';
+        el.style.cssText = 'display: none; margin: -0.35rem 0 0.75rem 0; padding: 0.45rem 0.6rem; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-color);';
+        const liveControl = card.querySelector('.group-live-control');
+        if (liveControl && liveControl.parentNode) {
+            liveControl.parentNode.insertBefore(el, liveControl.nextSibling);
+        } else if (typeof card.appendChild === 'function') {
+            card.appendChild(el);
+        }
+        return el;
+    }
+
+    function applyComboTemplateRiskSummary(card, group, currencyFormatter) {
+        const el = _ensureComboRiskSummaryEl(card);
+        if (!el) {
+            return;
+        }
+        if (!group || !group.comboTemplate || group.comboTemplate.strategy !== 'butterfly') {
+            el.style.display = 'none';
+            el.textContent = '';
+            return;
+        }
+        const risk = _calculateIronButterflyRisk(group);
+        if (!risk) {
+            el.style.display = 'block';
+            el.textContent = 'Butterfly Risk: waiting for option quotes to calculate MaxProfit / MaxLoss.';
+            return;
+        }
+        el.style.display = 'block';
+        el.textContent = [
+            `Butterfly Risk: MaxProfit ${currencyFormatter.format(risk.maxProfit)}`,
+            `MaxLoss ${currencyFormatter.format(risk.maxLoss)}`,
+            `Ratio ${risk.profitLossRatio.toFixed(3)}`,
+            `Wing ${risk.wingWidth}`,
+        ].join(' / ');
+    }
+
     function resolveGroupHeaderSummaryState(groupResult) {
         if (groupResult.activeViewMode === 'settlement' && Number.isFinite(groupResult.groupPnL)) {
             return {
@@ -546,6 +681,24 @@
 
     function applyGroupDerivedData(card, groupResult, currencyFormatter, chartApi) {
         applyLegDerivedData(card, groupResult, currencyFormatter);
+        applyComboTemplateRiskSummary(card, groupResult.group, currencyFormatter);
+
+        const simulateOpenBtn = card.querySelector('.simulate-open-btn');
+        if (simulateOpenBtn) {
+            const editorUi = globalScope.OptionComboGroupEditorUI;
+            const simState = editorUi && typeof editorUi.describeSimulatedOpenState === 'function'
+                ? editorUi.describeSimulatedOpenState(
+                    groupResult.group,
+                    { marketDataMode: groupResult.isHistoricalMode === true ? 'historical' : 'live' },
+                    groupResult.activeViewMode
+                )
+                : { visible: false, disabled: true, reason: 'Simulated opening is unavailable.' };
+            simulateOpenBtn.style.display = simState.visible ? 'inline-flex' : 'none';
+            simulateOpenBtn.disabled = simState.disabled === true;
+            simulateOpenBtn.title = simState.reason || 'Copy current quotes into Cost and switch this group to Active mode.';
+            simulateOpenBtn.textContent = 'Sim Open';
+        }
+        syncSecondaryActionRow(card);
 
         const triggerContainer = card.querySelector('.trial-trigger-container');
         if (triggerContainer) {

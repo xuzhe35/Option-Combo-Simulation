@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from ib_server_ws import (
     build_ws_client_handler,
+    dispatch_client_message,
     purge_combo_order_tracking_for_websocket,
     purge_hedge_order_tracking_for_websocket,
 )
@@ -505,6 +506,81 @@ class IbServerWsHandlerTests(unittest.TestCase):
         self.assertTrue(any(call[0].symbol == 'SPY' for call in req_mkt_data_calls))
         self.assertGreaterEqual(cancel_iv_calls.count(websocket), 2)
         self.assertGreaterEqual(unsubscribe_calls.count(websocket), 2)
+
+    def test_handle_subscribe_pools_market_data_lines_per_contract(self):
+        (
+            env,
+            _sent_messages,
+            _snapshot_calls,
+            _managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_env()
+
+        async def qualify_by_key(contract, request=None):
+            request_data = request if isinstance(request, dict) else {}
+            sec_type = str(request_data.get('secType') or getattr(contract, 'secType', '') or 'STK').upper()
+            symbol = str(request_data.get('symbol') or getattr(contract, 'symbol', '') or 'UNKNOWN').upper()
+            strike = str(request_data.get('strike') or '')
+            right = str(request_data.get('right') or '')
+            key = f'{sec_type}|{symbol}|{strike}|{right}'
+            con_id = abs(hash(key)) % 100000 + 1
+            return type('QualifiedContract', (), {
+                'conId': con_id,
+                'secType': sec_type,
+                'symbol': symbol,
+            })()
+
+        env['qualify_one'] = qualify_by_key
+
+        # Two clients connected at the same time (e.g. two browser tabs).
+        first_socket = _FakeWebSocket(messages=[])
+        second_socket = _FakeWebSocket(messages=[])
+        for socket in (first_socket, second_socket):
+            env['connected_clients'].add(socket)
+            env['client_subscriptions'][socket] = {}
+            env['client_subscription_settings'][socket] = {'greeks_enabled': False}
+
+        # First client: the same option contract requested under three ids
+        # (e.g. finder template quote + legs in two combo groups).
+        asyncio.run(dispatch_client_message(env, first_socket, {
+            'action': 'subscribe',
+            'underlying': {'secType': 'FUT', 'symbol': 'ES'},
+            'options': [
+                {'id': 'combo_template_ES_P_7550', 'secType': 'FOP', 'symbol': 'ES', 'strike': 7550, 'right': 'P'},
+                {'id': 'leg_a', 'secType': 'FOP', 'symbol': 'ES', 'strike': 7550, 'right': 'P'},
+                {'id': 'leg_b', 'secType': 'FOP', 'symbol': 'ES', 'strike': 7550, 'right': 'P'},
+                {'id': 'leg_c', 'secType': 'FOP', 'symbol': 'ES', 'strike': 7600, 'right': 'C'},
+            ],
+            'futures': [],
+            'stocks': [],
+        }))
+
+        option_calls = [call for call in env['ib'].req_mkt_data_calls if call[0].secType == 'FOP']
+        self.assertEqual(len(option_calls), 2)
+
+        first_subs = env['client_subscriptions'][first_socket]
+        self.assertIs(first_subs['combo_template_ES_P_7550'], first_subs['leg_a'])
+        self.assertIs(first_subs['leg_a'], first_subs['leg_b'])
+        self.assertIsNot(first_subs['leg_a'], first_subs['leg_c'])
+
+        # Second client asking for the same contract reuses the first client's
+        # ticker instead of opening another TWS market data line.
+        asyncio.run(dispatch_client_message(env, second_socket, {
+            'action': 'subscribe',
+            'underlying': {'secType': 'FUT', 'symbol': 'ES'},
+            'options': [
+                {'id': 'other_leg', 'secType': 'FOP', 'symbol': 'ES', 'strike': 7550, 'right': 'P'},
+            ],
+            'futures': [],
+            'stocks': [],
+        }))
+
+        option_calls = [call for call in env['ib'].req_mkt_data_calls if call[0].secType == 'FOP']
+        self.assertEqual(len(option_calls), 2)
+        self.assertIs(env['client_subscriptions'][second_socket]['other_leg'], first_subs['leg_a'])
 
     def test_handle_ws_client_routes_iv_term_structure_action(self):
         (

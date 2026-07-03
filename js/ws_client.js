@@ -32,6 +32,9 @@ const _liveQuoteRuntime = {
     optionQuotesById: new Map(),
     futureQuotesById: new Map(),
     stockQuotesBySymbol: new Map(),
+    // Subscription pool: canonical subscription id -> other request ids that
+    // resolve to the same option contract and share its market data line.
+    optionQuoteAliasesByCanonicalId: new Map(),
 };
 const _liveQuotePricingSnapshotFields = ['bid', 'ask', 'mark', 'iv'];
 const _liveQuoteSnapshotFields = ['bid', 'ask', 'mark', 'iv', 'delta'];
@@ -198,6 +201,77 @@ function _resetLiveQuoteRuntime() {
     _liveQuoteRuntime.optionQuotesById.clear();
     _liveQuoteRuntime.futureQuotesById.clear();
     _liveQuoteRuntime.stockQuotesBySymbol.clear();
+    _liveQuoteRuntime.optionQuoteAliasesByCanonicalId.clear();
+}
+
+function _buildOptionContractSignature(request) {
+    return [
+        request.secType || '',
+        request.symbol || '',
+        request.right || '',
+        parseFloat(request.strike),
+        request.expDate || '',
+        request.contractMonth || '',
+        request.tradingClass || '',
+        request.exchange || '',
+        request.currency || '',
+        String(request.multiplier || ''),
+    ].join('|');
+}
+
+// One market data line per unique contract: the first request for a contract
+// becomes the canonical subscription, later ids become aliases that are fed
+// from the canonical quote when data arrives.
+function _dedupeOptionRequestsForSubscription(optionRequests) {
+    const canonicalBySignature = new Map();
+    const deduped = [];
+    _liveQuoteRuntime.optionQuoteAliasesByCanonicalId.clear();
+    (Array.isArray(optionRequests) ? optionRequests : []).forEach((request) => {
+        if (!request || !request.id) {
+            return;
+        }
+        const signature = _buildOptionContractSignature(request);
+        const canonical = canonicalBySignature.get(signature);
+        if (!canonical) {
+            canonicalBySignature.set(signature, request);
+            deduped.push(request);
+            return;
+        }
+        if (request.id === canonical.id) {
+            return;
+        }
+        // FOP qualification hint lives on leg requests only; keep it on the
+        // canonical request even when a template request claimed the slot first.
+        if (!canonical.underlyingContractMonth && request.underlyingContractMonth) {
+            canonical.underlyingContractMonth = request.underlyingContractMonth;
+        }
+        let aliasIds = _liveQuoteRuntime.optionQuoteAliasesByCanonicalId.get(canonical.id);
+        if (!aliasIds) {
+            aliasIds = [];
+            _liveQuoteRuntime.optionQuoteAliasesByCanonicalId.set(canonical.id, aliasIds);
+        }
+        if (!aliasIds.includes(request.id)) {
+            aliasIds.push(request.id);
+        }
+    });
+    return deduped;
+}
+
+function _expandOptionQuoteAliases(options) {
+    if (!options || typeof options !== 'object') {
+        return;
+    }
+    _liveQuoteRuntime.optionQuoteAliasesByCanonicalId.forEach((aliasIds, canonicalId) => {
+        const quote = options[canonicalId];
+        if (quote === undefined) {
+            return;
+        }
+        aliasIds.forEach((aliasId) => {
+            if (options[aliasId] === undefined) {
+                options[aliasId] = quote;
+            }
+        });
+    });
 }
 
 function _setUnderlyingQuoteSnapshot(rawQuote) {
@@ -1356,6 +1430,14 @@ function requestCloseGroupComboOrder(group) {
     return transportApi.requestCloseGroupComboOrder(group);
 }
 
+function requestCloseLegComboOrder(group, leg) {
+    const transportApi = _getComboOrderTransportApi();
+    if (!transportApi || typeof transportApi.requestCloseLegComboOrder !== 'function') {
+        return false;
+    }
+    return transportApi.requestCloseLegComboOrder(group, leg);
+}
+
 function requestHistoricalReplayEntryGroup(group) {
     if (!_isHistoricalMode()) {
         return false;
@@ -1436,6 +1518,7 @@ window.requestContinueManagedComboOrder = requestContinueManagedComboOrder;
 window.requestConcedeManagedComboOrder = requestConcedeManagedComboOrder;
 window.requestCancelManagedComboOrder = requestCancelManagedComboOrder;
 window.requestCloseGroupComboOrder = requestCloseGroupComboOrder;
+window.requestCloseLegComboOrder = requestCloseLegComboOrder;
 window.requestHistoricalReplayEntryGroup = requestHistoricalReplayEntryGroup;
 window.requestHistoricalReplayExpirySettlementSync = requestHistoricalReplayExpirySettlementSync;
 
@@ -1610,6 +1693,33 @@ function handleLiveSubscriptions() {
         });
     }
 
+    (state.comboTemplateQuoteRequests || []).forEach((request) => {
+        if (!request || !request.id || !request.expDate || !Number.isFinite(parseFloat(request.strike))) {
+            return;
+        }
+        const optionContractSpec = registry
+            && typeof registry.resolveOptionContractSpec === 'function'
+            ? registry.resolveOptionContractSpec(state.underlyingSymbol, request.expDate)
+            : null;
+        optionRequests.push({
+            id: request.id,
+            secType: profile?.optionSecType || 'OPT',
+            symbol: optionContractSpec?.symbol || profile?.optionSymbol || state.underlyingSymbol,
+            underlyingSymbol: profile?.underlyingSymbol || state.underlyingSymbol,
+            exchange: profile?.optionExchange || 'SMART',
+            underlyingExchange: profile?.underlyingExchange || profile?.optionExchange || 'SMART',
+            currency: profile?.currency || 'USD',
+            multiplier: String(profile?.optionMultiplier || 100),
+            underlyingMultiplier: String(profile?.optionMultiplier || 100),
+            tradingClass: optionContractSpec?.tradingClass
+                || (profile?.tradingClass || undefined),
+            right: String(request.type || '').toLowerCase() === 'put' ? 'P' : 'C',
+            strike: parseFloat(request.strike),
+            expDate: _toContractDateCode(request.expDate),
+            contractMonth: _toContractMonth(request.expDate),
+        });
+    });
+
     // Collect all legs from groups that have Live Data == true
     state.groups.forEach(group => {
         if (group.liveData) {
@@ -1651,13 +1761,16 @@ function handleLiveSubscriptions() {
         }
     });
 
+    const dedupedOptionRequests = _dedupeOptionRequestsForSubscription(optionRequests);
+    payload.options = dedupedOptionRequests;
+
     payload.underlying = _buildUnderlyingRequest(profile || {
         family: 'DEFAULT_EQUITY',
         underlyingSecType: 'STK',
         underlyingSymbol: state.underlyingSymbol,
         underlyingExchange: 'SMART',
         currency: 'USD',
-    }, optionRequests, futuresRequests);
+    }, dedupedOptionRequests, futuresRequests);
 
     // Collect all hedge stocks that have Live Data == true
     state.hedges.forEach(hedge => {
@@ -1667,7 +1780,7 @@ function handleLiveSubscriptions() {
     });
 
     if (_isHistoricalMode()) {
-        ws.send(JSON.stringify(_buildHistoricalSnapshotPayload(payload.underlying, optionRequests, futuresRequests)));
+        ws.send(JSON.stringify(_buildHistoricalSnapshotPayload(payload.underlying, dedupedOptionRequests, futuresRequests)));
         return;
     }
 
@@ -1679,6 +1792,70 @@ function handleLiveSubscriptions() {
         || state.liveComboOrderAccountsConnected !== true) {
         requestManagedAccountsSnapshot();
     }
+}
+
+let _unsubscribeOptionsFeedbackTimer = null;
+
+function _setUnsubscribeOptionsFeedback(message, isError) {
+    const el = document.getElementById('unsubscribeOptionsFeedback');
+    if (!el) {
+        return;
+    }
+    if (_unsubscribeOptionsFeedbackTimer !== null && typeof clearTimeout === 'function') {
+        clearTimeout(_unsubscribeOptionsFeedbackTimer);
+        _unsubscribeOptionsFeedbackTimer = null;
+    }
+    el.textContent = message || '';
+    el.style.display = message ? 'block' : 'none';
+    el.style.color = isError ? 'var(--danger-color, #DC2626)' : 'var(--success-color, #059669)';
+    if (message && typeof setTimeout === 'function') {
+        _unsubscribeOptionsFeedbackTimer = setTimeout(() => {
+            _unsubscribeOptionsFeedbackTimer = null;
+            el.textContent = '';
+            el.style.display = 'none';
+        }, 6000);
+    }
+}
+
+function unsubscribeAllOptionQuotes() {
+    if (!isWsConnected || !ws) {
+        _setUnsubscribeOptionsFeedback('Failed: market data WebSocket is not connected.', true);
+        return false;
+    }
+
+    let disabledGroupCount = 0;
+    (state.groups || []).forEach((group) => {
+        if (group && group.liveData) {
+            group.liveData = false;
+            disabledGroupCount += 1;
+        }
+    });
+    const templateQuoteCount = Array.isArray(state.comboTemplateQuoteRequests)
+        ? state.comboTemplateQuoteRequests.length
+        : 0;
+    if (templateQuoteCount > 0) {
+        state.comboTemplateQuoteRequests = [];
+    }
+    // Re-issuing the subscribe action with no options drops every option
+    // market data line server-side while keeping underlying/futures/stocks.
+    handleLiveSubscriptions();
+    if (disabledGroupCount > 0 && typeof renderGroups === 'function') {
+        renderGroups();
+    }
+
+    if (disabledGroupCount === 0 && templateQuoteCount === 0) {
+        _setUnsubscribeOptionsFeedback('No active option subscriptions to cancel.', false);
+    } else {
+        const parts = [];
+        if (disabledGroupCount > 0) {
+            parts.push(`market data turned off for ${disabledGroupCount} group${disabledGroupCount > 1 ? 's' : ''}`);
+        }
+        if (templateQuoteCount > 0) {
+            parts.push(`${templateQuoteCount} combo finder quote${templateQuoteCount > 1 ? 's' : ''} released`);
+        }
+        _setUnsubscribeOptionsFeedback(`Option subscriptions cancelled: ${parts.join(', ')}.`, false);
+    }
+    return true;
 }
 
 function requestUnderlyingPriceSync() {
@@ -3180,6 +3357,7 @@ function _handleHistoricalReplayMessage(data) {
 let renderScheduled = false;
 
 function processLiveMarketData(data) {
+    _expandOptionQuoteAliases(data && data.options);
     let stateChanged = _applyHistoricalReplayMetadata(data);
     stateChanged = _applyHistoricalExpiryUnderlyingAnchors(data) || stateChanged;
     const quoteSourceKind = _getQuoteSourceKind(data);

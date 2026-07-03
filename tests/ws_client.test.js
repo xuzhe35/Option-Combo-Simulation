@@ -420,6 +420,309 @@ module.exports = {
             },
         },
         {
+            name: 'dedupes identical option contracts into one subscription and fans quotes out to aliases',
+            run() {
+                const state = {
+                    underlyingSymbol: 'CL',
+                    underlyingContractMonth: '',
+                    underlyingPrice: 72.5,
+                    simulatedDate: '2026-03-17',
+                    baseDate: '2026-03-17',
+                    greeksEnabled: false,
+                    futuresPool: [
+                        { id: 'future_jul', contractMonth: '202607' },
+                    ],
+                    comboTemplateQuoteRequests: [
+                        { id: 'combo_template_CL_20260420_C_75', type: 'call', strike: 75, expDate: '2026-04-20' },
+                    ],
+                    groups: [
+                        {
+                            id: 'group_a',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_a',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 75,
+                                    expDate: '2026-04-20',
+                                    underlyingFutureId: 'future_jul',
+                                },
+                            ],
+                        },
+                        {
+                            id: 'group_b',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_b',
+                                    type: 'call',
+                                    pos: -1,
+                                    strike: 75,
+                                    expDate: '2026-04-20',
+                                    underlyingFutureId: 'future_jul',
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        requestAnimationFrame(callback) {
+                            callback();
+                        },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                            querySelectorAll() { return []; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+
+                const subscribeMessage = JSON.parse(MockWebSocket.instance.sent[0]);
+                assert.equal(subscribeMessage.action, 'subscribe');
+                // Template request + two legs on the same contract collapse into one line.
+                assert.equal(subscribeMessage.options.length, 1);
+                assert.equal(subscribeMessage.options[0].id, 'combo_template_CL_20260420_C_75');
+                // The FOP qualification hint survives even though the template
+                // request (which has none) claimed the canonical slot first.
+                assert.equal(subscribeMessage.options[0].underlyingContractMonth, '202607');
+
+                ctx.processLiveMarketData({
+                    options: {
+                        combo_template_CL_20260420_C_75: { bid: 1.2, ask: 1.4 },
+                    },
+                });
+
+                const canonicalQuote = ctx.OptionComboWsLiveQuotes.getOptionQuote('combo_template_CL_20260420_C_75');
+                const legAQuote = ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_a');
+                const legBQuote = ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_b');
+                assert.equal(canonicalQuote.bid, 1.2);
+                assert.equal(legAQuote.bid, 1.2);
+                assert.equal(legAQuote.ask, 1.4);
+                assert.equal(legBQuote.bid, 1.2);
+                assert.equal(legBQuote.ask, 1.4);
+            },
+        },
+        {
+            name: 'unsubscribes all option quotes while keeping underlying and futures subscriptions',
+            run() {
+                const state = {
+                    underlyingSymbol: 'CL',
+                    underlyingContractMonth: '',
+                    underlyingPrice: 72.5,
+                    simulatedDate: '2026-03-17',
+                    baseDate: '2026-03-17',
+                    greeksEnabled: false,
+                    futuresPool: [
+                        { id: 'future_jul', contractMonth: '202607' },
+                    ],
+                    comboTemplateQuoteRequests: [
+                        { id: 'combo_template_CL_20260420_C_75', type: 'call', strike: 75, expDate: '2026-04-20' },
+                    ],
+                    groups: [
+                        {
+                            id: 'group_cl',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_cl_call',
+                                    type: 'call',
+                                    pos: 1,
+                                    strike: 75,
+                                    expDate: '2026-04-20',
+                                    underlyingFutureId: 'future_jul',
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                let renderCalls = 0;
+                const feedbackEl = {
+                    textContent: '',
+                    style: {},
+                };
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {
+                            renderCalls += 1;
+                        },
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        setTimeout() { return 0; },
+                        clearTimeout() {},
+                        document: {
+                            getElementById(id) {
+                                return id === 'unsubscribeOptionsFeedback' ? feedbackEl : null;
+                            },
+                            querySelector() { return null; },
+                            querySelectorAll() { return []; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+
+                const firstMessage = JSON.parse(MockWebSocket.instance.sent[0]);
+                assert.equal(firstMessage.action, 'subscribe');
+                assert.ok(firstMessage.options.length > 0);
+
+                const sentBefore = MockWebSocket.instance.sent.length;
+                const result = ctx.unsubscribeAllOptionQuotes();
+
+                assert.equal(result, true);
+                const subscribeMessages = MockWebSocket.instance.sent
+                    .slice(sentBefore)
+                    .map((message) => JSON.parse(message))
+                    .filter((message) => message.action === 'subscribe');
+                assert.equal(subscribeMessages.length, 1);
+                assert.equal(subscribeMessages[0].options.length, 0);
+                assert.equal(subscribeMessages[0].futures.length, 1);
+                assert.equal(subscribeMessages[0].underlying.secType, 'FUT');
+                assert.equal(state.groups[0].liveData, false);
+                assert.equal(state.comboTemplateQuoteRequests.length, 0);
+                assert.equal(renderCalls, 1);
+                assert.equal(feedbackEl.style.display, 'block');
+                assert.ok(feedbackEl.textContent.includes('market data turned off for 1 group'));
+                assert.ok(feedbackEl.textContent.includes('1 combo finder quote released'));
+            },
+        },
+        {
+            name: 'reports failure when unsubscribing option quotes while disconnected',
+            run() {
+                const state = {
+                    underlyingSymbol: 'CL',
+                    underlyingPrice: 72.5,
+                    greeksEnabled: false,
+                    futuresPool: [],
+                    comboTemplateQuoteRequests: [],
+                    groups: [
+                        { id: 'group_cl', liveData: true, legs: [] },
+                    ],
+                    hedges: [],
+                };
+                const feedbackEl = {
+                    textContent: '',
+                    style: {},
+                };
+
+                // Never fires onopen, so the client stays disconnected.
+                class MockWebSocket {
+                    send() {}
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {
+                            throw new Error('should not re-render when nothing changed');
+                        },
+                        updateDerivedValues() {},
+                        setTimeout() { return 0; },
+                        clearTimeout() {},
+                        WebSocket: MockWebSocket,
+                        document: {
+                            getElementById(id) {
+                                return id === 'unsubscribeOptionsFeedback' ? feedbackEl : null;
+                            },
+                            querySelector() { return null; },
+                            querySelectorAll() { return []; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                    }
+                );
+
+                const result = ctx.unsubscribeAllOptionQuotes();
+
+                assert.equal(result, false);
+                // State stays untouched so a later retry still knows what to release.
+                assert.equal(state.groups[0].liveData, true);
+                assert.equal(feedbackEl.style.display, 'block');
+                assert.ok(feedbackEl.textContent.includes('not connected'));
+            },
+        },
+        {
             name: 'builds MES and MNQ live subscriptions with micro FUT and FOP multipliers',
             run() {
                 [

@@ -281,11 +281,13 @@ def unsubscribe_client_safely(ws: Any, *, client_subscriptions: dict[Any, dict[s
             if con_id:
                 active_contracts[con_id] = True
 
+    cancelled_con_ids = set()
     for ticker in subs.values():
         contract = getattr(ticker, 'contract', None)
         con_id = getattr(contract, 'conId', None)
-        if contract is None or not con_id or con_id in active_contracts:
+        if contract is None or not con_id or con_id in active_contracts or con_id in cancelled_con_ids:
             continue
+        cancelled_con_ids.add(con_id)
         ib.cancelMktData(contract)
 
     client_subscriptions[ws] = {}

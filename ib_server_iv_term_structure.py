@@ -30,6 +30,30 @@ def to_expiry(value: Any) -> str:
     return str(value or '').replace('-', '')
 
 
+def to_contract_month(value: Any) -> str:
+    normalized = ''.join(ch for ch in str(value or '').strip() if ch.isdigit())
+    return normalized[:6] if len(normalized) >= 6 else ''
+
+
+def shift_contract_month(contract_month: Any, delta_months: int) -> str:
+    normalized = to_contract_month(contract_month)
+    if not normalized:
+        return ''
+
+    try:
+        year = int(normalized[:4])
+        month = int(normalized[4:6])
+    except ValueError:
+        return ''
+    if month < 1 or month > 12:
+        return ''
+
+    zero_indexed = (year * 12) + (month - 1) + int(delta_months or 0)
+    shifted_year = zero_indexed // 12
+    shifted_month = (zero_indexed % 12) + 1
+    return f'{shifted_year}{shifted_month:02d}'
+
+
 def to_strike(value: Any) -> float | None:
     try:
         return float(value)
@@ -80,6 +104,7 @@ def filter_iv_term_structure_option_chains(option_chains, option_template):
         return []
 
     template = option_template if isinstance(option_template, dict) else {}
+    template_sec_type = normalize_symbol(template.get('secType') or template.get('sec_type'))
     template_multiplier = str(template.get('multiplier') or '').strip()
     template_exchange = str(template.get('exchange') or '').strip().upper()
     template_trading_class = str(template.get('tradingClass') or template.get('trading_class') or '').strip().upper()
@@ -100,7 +125,7 @@ def filter_iv_term_structure_option_chains(option_chains, option_template):
         if exchange_matches:
             chains = exchange_matches
 
-    if template_trading_class:
+    if template_trading_class and template_sec_type != 'FOP':
         trading_class_matches = [
             chain for chain in chains
             if str(getattr(chain, 'tradingClass', '') or '').strip().upper() == template_trading_class
@@ -112,6 +137,8 @@ def filter_iv_term_structure_option_chains(option_chains, option_template):
 
 
 def merge_iv_term_structure_chain_fields(option_chains, option_template):
+    template = option_template if isinstance(option_template, dict) else {}
+    template_sec_type = normalize_symbol(template.get('secType') or template.get('sec_type'))
     chains = filter_iv_term_structure_option_chains(option_chains, option_template)
     expirations = set()
     strikes = set()
@@ -128,7 +155,9 @@ def merge_iv_term_structure_chain_fields(option_chains, option_template):
         'strikes': sorted(strikes),
         'tradingClass': choose_trading_class(
             chain_trading_classes,
-            requested_trading_class=(option_template or {}).get('tradingClass') or (option_template or {}).get('trading_class') or '',
+            requested_trading_class=''
+            if template_sec_type == 'FOP'
+            else (template.get('tradingClass') or template.get('trading_class') or ''),
         ),
     }
 
@@ -581,12 +610,7 @@ def build_iv_term_structure_global_candidate_selections(
 ):
     strike_window = pick_strike_window(candidate_strikes, underlying_price, strike_radius)
     atm_strike = serialize_finite_number(strike_window.get('atm_strike'))
-    window_strikes = [
-        serialized
-        for serialized in (serialize_finite_number(strike) for strike in (strike_window.get('window_strikes') or []))
-        if serialized is not None
-    ]
-    if atm_strike is None or not window_strikes:
+    if atm_strike is None:
         return {}
 
     selections = {}
@@ -596,11 +620,64 @@ def build_iv_term_structure_global_candidate_selections(
             continue
         selections[expiry] = {
             'atm_strike': atm_strike,
-            'window_strikes': window_strikes,
+            'window_strikes': [atm_strike],
             'tradingClass': option_trading_class,
         }
 
     return selections
+
+
+def choose_iv_term_structure_shared_atm_strike(expiry_selections, underlying_price):
+    coverage_by_strike = {}
+    for selection in (expiry_selections or {}).values():
+        serialized = serialize_finite_number((selection or {}).get('atm_strike'))
+        if serialized is None:
+            continue
+        coverage_by_strike[serialized] = coverage_by_strike.get(serialized, 0) + 1
+
+    if not coverage_by_strike:
+        return None
+
+    try:
+        target_price = float(underlying_price)
+    except (TypeError, ValueError):
+        target_price = None
+
+    return min(
+        coverage_by_strike,
+        key=lambda strike: (
+            -coverage_by_strike[strike],
+            abs(strike - target_price) if target_price is not None and target_price == target_price else 0,
+            strike,
+        ),
+    )
+
+
+def expand_iv_term_structure_shared_atm_to_all_expiries(
+    expiry_rows,
+    expiry_selections,
+    shared_atm_strike,
+    option_trading_class='',
+):
+    atm_strike = serialize_finite_number(shared_atm_strike)
+    if atm_strike is None:
+        return expiry_selections if isinstance(expiry_selections, dict) else {}
+
+    existing = expiry_selections if isinstance(expiry_selections, dict) else {}
+    expanded = {}
+    for expiry_row in expiry_rows or []:
+        expiry = str((expiry_row or {}).get('expiry') or '').strip()
+        if not expiry:
+            continue
+
+        current = existing.get(expiry) if isinstance(existing.get(expiry), dict) else {}
+        expanded[expiry] = {
+            'atm_strike': atm_strike,
+            'window_strikes': [atm_strike],
+            'tradingClass': str(current.get('tradingClass') or option_trading_class or '').strip(),
+        }
+
+    return expanded
 
 
 def build_iv_term_structure_expiry_bundle(
@@ -612,7 +689,10 @@ def build_iv_term_structure_expiry_bundle(
     option_multiplier,
     underlying_symbol,
     underlying_exchange,
-    fallback_trading_class,
+    fallback_trading_class='',
+    underlying_contract_month='',
+    underlying_currency='',
+    underlying_multiplier='',
     expiry_selection=None,
 ):
     expiry = str((expiry_row or {}).get('expiry') or '').strip()
@@ -662,6 +742,12 @@ def build_iv_term_structure_expiry_bundle(
                     'expDate': expiry,
                     'contractMonth': expiry[:6],
                 }
+                if underlying_contract_month:
+                    option_request['underlyingContractMonth'] = underlying_contract_month
+                if underlying_currency:
+                    option_request['underlyingCurrency'] = underlying_currency
+                if underlying_multiplier:
+                    option_request['underlyingMultiplier'] = str(underlying_multiplier)
                 option_descriptors[sub_id] = {
                     'expiry': expiry,
                     'dte': dte,
@@ -793,6 +879,9 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
         option_multiplier = '100'
         underlying_symbol = option_symbol
         underlying_exchange = 'SMART'
+        underlying_contract_month = ''
+        underlying_currency = 'USD'
+        underlying_multiplier = ''
         option_trading_class = ''
         qualified_underlying = None
         underlying_price = None
@@ -808,6 +897,9 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             option_multiplier = str(sync_context.get('optionMultiplier') or '100').strip() or '100'
             underlying_symbol = normalize_symbol(sync_context.get('underlyingSymbol') or option_symbol)
             underlying_exchange = str(sync_context.get('underlyingExchange') or option_exchange).strip() or option_exchange
+            underlying_contract_month = to_contract_month(sync_context.get('underlyingContractMonth'))
+            underlying_currency = str(sync_context.get('underlyingCurrency') or option_currency).strip() or option_currency
+            underlying_multiplier = str(sync_context.get('underlyingMultiplier') or option_multiplier).strip()
             option_trading_class = str(sync_context.get('optionTradingClass') or '').strip()
             qualified_underlying = sync_context.get('qualifiedUnderlying')
             underlying_price = sync_context.get('underlyingPrice')
@@ -823,31 +915,73 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
         )
         resolved_expiry_count = 0
         total_expiry_count = len(prioritized_expiry_rows)
+        contract_lookup_count = 0
         progress_lock = asyncio.Lock()
         concurrency_limit = min(6, max(1, total_expiry_count))
         semaphore = asyncio.Semaphore(concurrency_limit)
         contract_rows_by_expiry = {}
 
+        async def send_sync_progress(message, lookup_count=None):
+            patch_payload: IvTermStructureCatalogPatchPayload = {
+                'action': 'iv_term_structure_catalog_patch',
+                'symbol': option_symbol,
+                'expiryRows': [],
+                'optionDescriptors': {},
+                'resolvedExpiryCount': int(lookup_count or 0),
+                'totalExpiryCount': total_expiry_count,
+                'subscribedOptionCount': subscribed_option_count,
+                'expectedOptionCount': expected_option_count,
+                'subscriptionPending': True,
+            }
+            normalized_message = str(message or '').strip()
+            if normalized_message:
+                patch_payload['message'] = normalized_message
+            await env['send_message_safe'](websocket, json.dumps(patch_payload))
+
         async def fetch_expiry_contract_rows(expiry_row):
+            nonlocal contract_lookup_count
+
             expiry = str((expiry_row or {}).get('expiry') or '').strip()
             if not expiry or websocket not in env['client_subscriptions']:
                 return expiry, []
 
-            async with semaphore:
-                rows = await fetch_iv_term_structure_contract_rows_for_expiry(
-                    env,
-                    option_symbol,
-                    option_sec_type,
-                    option_exchange,
-                    option_currency,
-                    option_multiplier,
-                    expiry,
-                    option_trading_class=option_trading_class,
-                    qualified_underlying=qualified_underlying,
+            rows = []
+            try:
+                async with semaphore:
+                    rows = await fetch_iv_term_structure_contract_rows_for_expiry(
+                        env,
+                        option_symbol,
+                        option_sec_type,
+                        option_exchange,
+                        option_currency,
+                        option_multiplier,
+                        expiry,
+                        option_trading_class=option_trading_class,
+                        qualified_underlying=qualified_underlying,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception(
+                    "IV term structure contract-row fetch failed for %s %s",
+                    option_symbol or '<missing>',
+                    expiry or '<missing>',
                 )
+
+            async with progress_lock:
+                contract_lookup_count += 1
+                lookup_count = contract_lookup_count
+            await send_sync_progress(
+                f'Resolved option-chain details for {lookup_count} of {total_expiry_count} expiries. Selecting shared ATM strike...',
+                lookup_count=lookup_count,
+            )
             return expiry, rows
 
         if prioritized_expiry_rows:
+            await send_sync_progress(
+                f'Resolving option-chain details for {total_expiry_count} expiries before selecting a shared ATM strike...',
+                lookup_count=0,
+            )
             fetch_results = await asyncio.gather(
                 *(fetch_expiry_contract_rows(expiry_row) for expiry_row in prioritized_expiry_rows)
             )
@@ -871,31 +1005,60 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             (selection or {}).get('atm_strike') is not None
             for selection in expiry_selections.values()
         )
+        if has_selected_atm:
+            shared_atm_strike = choose_iv_term_structure_shared_atm_strike(
+                expiry_selections,
+                underlying_price,
+            )
+            expiry_selections = expand_iv_term_structure_shared_atm_to_all_expiries(
+                prioritized_expiry_rows,
+            expiry_selections,
+            shared_atm_strike,
+            option_trading_class=option_trading_class,
+        )
         if not has_selected_atm:
-            fallback_selections = await resolve_iv_term_structure_common_selections_from_candidates(
-                env,
-                option_symbol,
-                option_sec_type,
-                option_exchange,
-                option_currency,
-                option_multiplier,
+            expiry_selections = build_iv_term_structure_global_candidate_selections(
                 prioritized_expiry_rows,
                 underlying_price,
                 global_candidate_strikes,
                 strike_radius,
                 option_trading_class=option_trading_class,
-                qualified_underlying=qualified_underlying,
             )
-            if fallback_selections:
-                expiry_selections = fallback_selections
-            else:
-                expiry_selections = build_iv_term_structure_global_candidate_selections(
+            has_selected_atm = any(
+                (selection or {}).get('atm_strike') is not None
+                for selection in expiry_selections.values()
+            )
+            if not has_selected_atm:
+                await send_sync_progress(
+                    'The option-chain strike list did not produce a usable ATM window. Probing exact contracts near the underlying price...',
+                    lookup_count=contract_lookup_count,
+                )
+                fallback_selections = await resolve_iv_term_structure_common_selections_from_candidates(
+                    env,
+                    option_symbol,
+                    option_sec_type,
+                    option_exchange,
+                    option_currency,
+                    option_multiplier,
                     prioritized_expiry_rows,
                     underlying_price,
                     global_candidate_strikes,
                     strike_radius,
                     option_trading_class=option_trading_class,
+                    qualified_underlying=qualified_underlying,
                 )
+                if fallback_selections:
+                    expiry_selections = fallback_selections
+                    shared_atm_strike = choose_iv_term_structure_shared_atm_strike(
+                        expiry_selections,
+                        underlying_price,
+                    )
+                    expiry_selections = expand_iv_term_structure_shared_atm_to_all_expiries(
+                        prioritized_expiry_rows,
+                        expiry_selections,
+                        shared_atm_strike,
+                        option_trading_class=option_trading_class,
+                    )
 
         async def process_expiry(expiry_row):
             nonlocal resolved_expiry_count
@@ -921,6 +1084,9 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
                     underlying_symbol,
                     underlying_exchange,
                     option_trading_class,
+                    underlying_contract_month=underlying_contract_month,
+                    underlying_currency=underlying_currency,
+                    underlying_multiplier=underlying_multiplier,
                     expiry_selection=expiry_selection,
                 )
                 option_requests = bundle.get('optionRequests') or []
@@ -1030,13 +1196,47 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
         or (underlying_request or {}).get('symbol')
         or option_template.get('symbol')
     )
+    underlying_contract_month = to_contract_month(
+        option_template.get('underlyingContractMonth')
+        or (underlying_request or {}).get('contractMonth')
+    )
+    underlying_sec_type = normalize_symbol((underlying_request or {}).get('secType') or (underlying_request or {}).get('sec_type'))
+    underlying_currency_hint = (
+        option_template.get('underlyingCurrency')
+        or (underlying_request or {}).get('currency')
+        or option_template.get('currency')
+        or 'USD'
+    )
+    underlying_multiplier_hint = str(
+        option_template.get('underlyingMultiplier')
+        or (underlying_request or {}).get('multiplier')
+        or option_template.get('multiplier')
+        or ''
+    )
+    if underlying_sec_type == 'FUT' and not underlying_contract_month:
+        error_payload = {
+            'action': 'iv_term_structure_error',
+            'symbol': underlying_symbol,
+            'message': f'Choose an underlying futures month for {underlying_symbol or "this FOP"} before syncing.',
+        }
+        await env['send_message_safe'](websocket, json.dumps(error_payload))
+        return
+    if underlying_sec_type == 'FUT' and underlying_contract_month and isinstance(underlying_request, dict):
+        underlying_request = {
+            **underlying_request,
+            'contractMonth': underlying_contract_month,
+            'currency': underlying_currency_hint,
+            'multiplier': underlying_multiplier_hint,
+        }
+    requested_underlying_contract_month = underlying_contract_month
 
     logging.info(
-        "Received IV term structure subscription request from %s for %s maxDte=%s strikeRadius=%s",
+        "Received IV term structure subscription request from %s for %s maxDte=%s strikeRadius=%s underlyingMonth=%s",
         client_ip,
         underlying_symbol or '<missing>',
         max_dte,
         strike_radius,
+        underlying_contract_month or '<none>',
     )
 
     try:
@@ -1056,13 +1256,114 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
 
     qualified_underlying = await env['qualify_one'](underlying_contract, underlying_request)
     if qualified_underlying is None:
+        underlying_description = env["describe_contract_request"](underlying_request)
+        if underlying_sec_type == 'FUT':
+            details = [underlying_symbol or '<missing>']
+            if underlying_contract_month:
+                details.append(underlying_contract_month)
+            if underlying_multiplier_hint:
+                details.append(f"x{underlying_multiplier_hint}")
+            underlying_description = f"FUT {' '.join(details)}"
         error_payload = {
             'action': 'iv_term_structure_error',
             'symbol': underlying_symbol,
-            'message': f'Failed to qualify underlying {env["describe_contract_request"](underlying_request)}.',
+            'message': f'Failed to qualify underlying {underlying_description}.',
         }
         await env['send_message_safe'](websocket, json.dumps(error_payload))
         return
+
+    request_option_chains = getattr(env['ib'], 'reqSecDefOptParamsAsync', None)
+    if not callable(request_option_chains):
+        error_payload = {
+            'action': 'iv_term_structure_error',
+            'symbol': underlying_symbol,
+            'message': 'The current ib_async build does not expose reqSecDefOptParamsAsync.',
+        }
+        await env['send_message_safe'](websocket, json.dumps(error_payload))
+        return
+
+    async def resolve_chain_fields_for_underlying(current_underlying_request, current_qualified_underlying):
+        fut_fop_exchange = resolve_iv_term_structure_secdef_exchange(option_template, current_underlying_request)
+        current_option_chains = await request_option_chains(
+            underlying_symbol,
+            fut_fop_exchange,
+            normalize_symbol(
+                getattr(current_qualified_underlying, 'secType', '')
+                or (current_underlying_request or {}).get('secType')
+            ),
+            getattr(current_qualified_underlying, 'conId', 0),
+        )
+        current_merged_chain_fields = merge_iv_term_structure_chain_fields(
+            current_option_chains,
+            option_template,
+        )
+        current_expiry_rows = filter_expiry_rows(
+            current_merged_chain_fields['expirations'],
+            anchor_date,
+            max_dte,
+        )
+        return current_option_chains, current_merged_chain_fields, current_expiry_rows
+
+    option_chains, merged_chain_fields, expiry_rows = await resolve_chain_fields_for_underlying(
+        underlying_request,
+        qualified_underlying,
+    )
+    underlying_roll_message = ''
+    if underlying_sec_type == 'FUT' and not expiry_rows:
+        logging.info(
+            "No usable IV term structure FOP expiries for %s %s; searching later underlying futures months",
+            underlying_symbol or '<missing>',
+            underlying_contract_month or '<none>',
+        )
+        for offset in range(1, 19):
+            candidate_contract_month = shift_contract_month(underlying_contract_month, offset)
+            if not candidate_contract_month:
+                continue
+            candidate_underlying_request = {
+                **underlying_request,
+                'contractMonth': candidate_contract_month,
+                'currency': underlying_currency_hint,
+                'multiplier': underlying_multiplier_hint,
+            }
+            try:
+                candidate_underlying_contract = env['build_contract_from_request'](candidate_underlying_request)
+            except Exception:
+                logging.exception(
+                    "Skipping IV term structure fallback underlying %s %s because request build failed",
+                    underlying_symbol or '<missing>',
+                    candidate_contract_month,
+                )
+                continue
+            candidate_qualified_underlying = await env['qualify_one'](
+                candidate_underlying_contract,
+                candidate_underlying_request,
+            )
+            if candidate_qualified_underlying is None:
+                continue
+
+            candidate_option_chains, candidate_merged_chain_fields, candidate_expiry_rows = await resolve_chain_fields_for_underlying(
+                candidate_underlying_request,
+                candidate_qualified_underlying,
+            )
+            if candidate_expiry_rows:
+                logging.info(
+                    "Using fallback IV term structure underlying %s %s instead of %s; found %s expiries",
+                    underlying_symbol or '<missing>',
+                    candidate_contract_month,
+                    requested_underlying_contract_month or '<none>',
+                    len(candidate_expiry_rows),
+                )
+                underlying_request = candidate_underlying_request
+                underlying_contract_month = candidate_contract_month
+                qualified_underlying = candidate_qualified_underlying
+                option_chains = candidate_option_chains
+                merged_chain_fields = candidate_merged_chain_fields
+                expiry_rows = candidate_expiry_rows
+                underlying_roll_message = (
+                    f'{underlying_symbol} {requested_underlying_contract_month} had no active FOP expiries; '
+                    f'using {underlying_symbol} {underlying_contract_month} instead.'
+                )
+                break
 
     underlying_ticker = env['ib'].reqMktData(qualified_underlying, '', False, False)
     env['client_subscriptions'][websocket]['underlying'] = underlying_ticker
@@ -1079,29 +1380,6 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
         await env['send_message_safe'](websocket, json.dumps(error_payload))
         return
 
-    request_option_chains = getattr(env['ib'], 'reqSecDefOptParamsAsync', None)
-    if not callable(request_option_chains):
-        error_payload = {
-            'action': 'iv_term_structure_error',
-            'symbol': underlying_symbol,
-            'message': 'The current ib_async build does not expose reqSecDefOptParamsAsync.',
-        }
-        await env['send_message_safe'](websocket, json.dumps(error_payload))
-        return
-
-    fut_fop_exchange = resolve_iv_term_structure_secdef_exchange(option_template, underlying_request)
-    option_chains = await request_option_chains(
-        underlying_symbol,
-        fut_fop_exchange,
-        normalize_symbol(getattr(qualified_underlying, 'secType', '') or (underlying_request or {}).get('secType')),
-        getattr(qualified_underlying, 'conId', 0),
-    )
-    merged_chain_fields = merge_iv_term_structure_chain_fields(option_chains, option_template)
-    expiry_rows = filter_expiry_rows(
-        merged_chain_fields['expirations'],
-        anchor_date,
-        max_dte,
-    )
     expiry_payload_rows = []
     option_descriptors = {}
 
@@ -1110,8 +1388,15 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
     option_exchange = option_template.get('exchange') or 'SMART'
     option_currency = option_template.get('currency') or (underlying_request or {}).get('currency') or 'USD'
     option_multiplier = str(option_template.get('multiplier') or '100')
-    option_trading_class = merged_chain_fields.get('tradingClass') or option_template.get('tradingClass') or option_template.get('trading_class') or ''
+    option_template_trading_class = option_template.get('tradingClass') or option_template.get('trading_class') or ''
+    option_trading_class = (
+        merged_chain_fields.get('tradingClass')
+        or ('' if option_sec_type == 'FOP' else option_template_trading_class)
+        or ''
+    )
     underlying_exchange = option_template.get('underlyingExchange') or (underlying_request or {}).get('exchange') or option_exchange
+    underlying_currency = option_template.get('underlyingCurrency') or (underlying_request or {}).get('currency') or option_currency
+    underlying_multiplier = str(option_template.get('underlyingMultiplier') or (underlying_request or {}).get('multiplier') or option_multiplier)
 
     for expiry_row in expiry_rows:
         bundle = build_iv_term_structure_expiry_bundle(
@@ -1124,6 +1409,9 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
             underlying_symbol,
             underlying_exchange,
             option_trading_class,
+            underlying_contract_month=underlying_contract_month,
+            underlying_currency=underlying_currency,
+            underlying_multiplier=underlying_multiplier,
             expiry_selection={},
         )
         expiry_payload_rows.append(bundle['expiryPayloadRow'])
@@ -1141,9 +1429,16 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
         'subscribedOptionCount': 0,
         'expectedOptionCount': 0,
         'subscriptionPending': bool(expiry_payload_rows),
+        'underlyingContractMonth': underlying_contract_month,
+        'requestedUnderlyingContractMonth': requested_underlying_contract_month,
     }
+    if underlying_roll_message:
+        payload['message'] = underlying_roll_message
     if not expiry_payload_rows:
-        payload['warning'] = f'No option expiries were available within {max_dte} calendar days.'
+        suffix = ''
+        if underlying_sec_type == 'FUT' and requested_underlying_contract_month:
+            suffix = f' for {underlying_symbol} {requested_underlying_contract_month}. Try a later underlying futures month.'
+        payload['warning'] = f'No option expiries were available within {max_dte} calendar days{suffix}'
 
     await env['send_message_safe'](websocket, json.dumps(payload))
     if expiry_payload_rows:
@@ -1157,6 +1452,9 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
                 'optionMultiplier': option_multiplier,
                 'underlyingSymbol': underlying_symbol,
                 'underlyingExchange': underlying_exchange,
+                'underlyingContractMonth': underlying_contract_month,
+                'underlyingCurrency': underlying_currency,
+                'underlyingMultiplier': underlying_multiplier,
                 'optionTradingClass': option_trading_class,
                 'qualifiedUnderlying': qualified_underlying,
                 'underlyingPrice': underlying_price,

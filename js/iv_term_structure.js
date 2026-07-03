@@ -19,6 +19,8 @@
             { symbol: 'GLD', historyPath: 'iv_term_structure/data/GLD.json' },
             { symbol: 'SLV', historyPath: 'iv_term_structure/data/SLV.json' },
             { symbol: 'USO', historyPath: 'iv_term_structure/data/USO.json' },
+            { symbol: 'CL', historyPath: 'iv_term_structure/data/CL.json' },
+            { symbol: 'SI', historyPath: 'iv_term_structure/data/SI.json' },
         ],
     });
     const DEFAULT_WS_HOST = '127.0.0.1';
@@ -33,11 +35,12 @@
         tolerancePct: 25,
         shortMinDte: 3,
         shortMaxDte: 60,
-        sortBy: 'best_value',
+        sortBy: 'best_iv_ratio',
         showAll: false,
     });
     const CALENDAR_FINDER_TOP_LIMIT = 5;
     const CALENDAR_FINDER_STORAGE_KEY = 'optionComboIvtsCalendarFinder';
+    const FUTURES_CONTRACT_MONTH_STORAGE_KEY = 'optionComboIvtsFuturesContractMonth';
     const CARD_VIEW_STATE_SECTIONS = Object.freeze([
         {
             key: 'calendar',
@@ -237,17 +240,13 @@
         const shortMaxDte = Number.isFinite(parsedShortMaxDte) && parsedShortMaxDte >= shortMinDte
             ? parsedShortMaxDte
             : Math.max(DEFAULT_CALENDAR_FINDER_CONFIG.shortMaxDte, shortMinDte);
-        const sortBy = ['best_value', 'cheapest_long', 'closest_ratio'].includes(raw.sortBy)
-            ? raw.sortBy
-            : DEFAULT_CALENDAR_FINDER_CONFIG.sortBy;
-
         return {
             targetRatio,
             targetPreset,
             tolerancePct,
             shortMinDte,
             shortMaxDte,
-            sortBy,
+            sortBy: DEFAULT_CALENDAR_FINDER_CONFIG.sortBy,
             showAll: raw.showAll === true,
         };
     }
@@ -306,6 +305,72 @@
         };
     }
 
+    function normalizeFuturesContractMonth(value) {
+        const normalized = String(value || '').trim().replace(/[^0-9]/g, '');
+        return /^\d{6}$/.test(normalized) ? normalized : '';
+    }
+
+    function isFuturesOptionProfile(profile) {
+        return !!(
+            profile
+            && String(profile.optionSecType || '').trim().toUpperCase() === 'FOP'
+            && String(profile.underlyingSecType || '').trim().toUpperCase() === 'FUT'
+        );
+    }
+
+    function resolveDefaultFuturesContractMonth(symbol, referenceDate) {
+        const registry = productRegistry();
+        if (registry && typeof registry.resolveDefaultUnderlyingContractMonth === 'function') {
+            return normalizeFuturesContractMonth(
+                registry.resolveDefaultUnderlyingContractMonth(symbol, referenceDate)
+            );
+        }
+        return '';
+    }
+
+    function loadSavedFuturesContractMonth(symbol) {
+        const key = String(symbol || '').trim().toUpperCase();
+        if (!key) {
+            return '';
+        }
+        try {
+            const parsed = JSON.parse(localStorage.getItem(FUTURES_CONTRACT_MONTH_STORAGE_KEY) || '{}');
+            return normalizeFuturesContractMonth(parsed && typeof parsed === 'object' ? parsed[key] : '');
+        } catch (_) {
+            return '';
+        }
+    }
+
+    function saveFuturesContractMonth(symbol, contractMonth) {
+        const key = String(symbol || '').trim().toUpperCase();
+        if (!key) {
+            return;
+        }
+
+        let store = {};
+        try {
+            const parsed = JSON.parse(localStorage.getItem(FUTURES_CONTRACT_MONTH_STORAGE_KEY) || '{}');
+            if (parsed && typeof parsed === 'object') {
+                store = parsed;
+            }
+        } catch (_) {
+            // Start fresh when the saved blob is unreadable.
+        }
+
+        const normalized = normalizeFuturesContractMonth(contractMonth);
+        if (normalized) {
+            store[key] = normalized;
+        } else {
+            delete store[key];
+        }
+
+        try {
+            localStorage.setItem(FUTURES_CONTRACT_MONTH_STORAGE_KEY, JSON.stringify(store));
+        } catch (_) {
+            // Runtime state still carries the chosen month when storage is unavailable.
+        }
+    }
+
     function normalizeConfig(rawConfig) {
         const config = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
         const symbols = Array.isArray(config.symbols) ? config.symbols : [];
@@ -331,6 +396,11 @@
                             ? entry.historyPath
                             : `iv_term_structure/data/${symbol}.json`
                     ).trim(),
+                    futuresContractMonth: normalizeFuturesContractMonth(
+                        entry && typeof entry === 'object'
+                            ? (entry.futuresContractMonth || entry.underlyingContractMonth || entry.contractMonth)
+                            : ''
+                    ),
                 };
             }).filter((entry) => entry.symbol),
         };
@@ -344,11 +414,26 @@
     }
 
     function createCardState(entry, options = {}) {
+        const profile = resolveProfile(entry.symbol);
+        const isFop = isFuturesOptionProfile(profile);
+        const today = new Date().toISOString().slice(0, 10);
+        const futuresContractMonth = isFop
+            ? (
+                normalizeFuturesContractMonth(entry.futuresContractMonth)
+                || loadSavedFuturesContractMonth(entry.symbol)
+                || resolveDefaultFuturesContractMonth(entry.symbol, today)
+            )
+            : '';
+
         return {
             symbol: entry.symbol,
             historyPath: entry.historyPath,
+            profile,
+            futuresContractMonth,
             isExpanded: options.isExpanded === true,
-            statusMessage: 'Ready. Use Sync/Update to subscribe this ETF only.',
+            statusMessage: isFop
+                ? 'Ready. Choose the underlying futures month, then Sync/Update.'
+                : 'Ready. Use Sync/Update to subscribe this ETF only.',
             statusKind: '',
             ws: null,
             wsOpenPromise: null,
@@ -439,11 +524,23 @@
         );
     }
 
+    function isFuturesContractMonthElement(element) {
+        return !!(
+            element
+            && typeof element.matches === 'function'
+            && element.matches('input[data-action="futures-contract-month"][data-symbol]')
+        );
+    }
+
     function isFocusedCardControlInCard(cardNode) {
         const activeElement = document && document.activeElement;
         return !!(
             cardNode
-            && (isBaselineSelectElement(activeElement) || isCalendarFinderControlElement(activeElement))
+            && (
+                isBaselineSelectElement(activeElement)
+                || isCalendarFinderControlElement(activeElement)
+                || isFuturesContractMonthElement(activeElement)
+            )
             && typeof cardNode.contains === 'function'
             && cardNode.contains(activeElement)
         );
@@ -637,7 +734,10 @@
 
     function buildSubscribePayload(card) {
         const profile = resolveProfile(card.symbol);
-        return {
+        const futuresContractMonth = isFuturesOptionProfile(profile)
+            ? normalizeFuturesContractMonth(card && card.futuresContractMonth)
+            : '';
+        const payload = {
             action: 'subscribe_iv_term_structure',
             underlying: {
                 secType: profile.underlyingSecType || 'STK',
@@ -656,9 +756,19 @@
                 tradingClass: profile.tradingClass || '',
             },
             anchorDate: new Date().toISOString().slice(0, 10),
-            maxDte: runtime.config.maxDte,
-            strikeRadius: runtime.config.strikeRadius,
+            maxDte: runtime.config ? runtime.config.maxDte : EMBEDDED_DEFAULT_CONFIG.maxDte,
+            strikeRadius: runtime.config ? runtime.config.strikeRadius : EMBEDDED_DEFAULT_CONFIG.strikeRadius,
         };
+
+        if (futuresContractMonth) {
+            payload.underlying.contractMonth = futuresContractMonth;
+            payload.underlying.multiplier = String(profile.underlyingLegMultiplier || profile.optionMultiplier || '');
+            payload.optionTemplate.underlyingContractMonth = futuresContractMonth;
+            payload.optionTemplate.underlyingCurrency = profile.currency || 'USD';
+            payload.optionTemplate.underlyingMultiplier = String(profile.underlyingLegMultiplier || profile.optionMultiplier || '');
+        }
+
+        return payload;
     }
 
     function applyRuntimeConfig(rawConfig, sourceLabel) {
@@ -732,10 +842,17 @@
                 card.catalogPatchCount = 0;
                 armCatalogPatchWatchdog(card);
                 updateUnderlyingPrice(card, payload && payload.underlyingPrice);
+                const resolvedFuturesContractMonth = normalizeFuturesContractMonth(payload.underlyingContractMonth);
+                if (resolvedFuturesContractMonth && resolvedFuturesContractMonth !== card.futuresContractMonth) {
+                    card.futuresContractMonth = resolvedFuturesContractMonth;
+                    saveFuturesContractMonth(card.symbol, resolvedFuturesContractMonth);
+                    card.forceBodyRefreshOnce = true;
+                }
                 card.lastSyncLabel = new Date().toISOString();
                 setCardStatus(
                     card,
                     payload.warning
+                        || String(payload.message || '').trim()
                         || (payload.subscriptionPending
                             ? ((parseInt(payload.expectedOptionCount, 10) || 0) > 0
                                 ? `Resolved ${Array.isArray(payload.expiryRows) ? payload.expiryRows.length : 0} expiries. Starting ${parseInt(payload.expectedOptionCount, 10) || 0} option subscriptions...`
@@ -764,9 +881,10 @@
                     const totalCount = parseInt(payload.totalExpiryCount, 10) || (card.catalog && Array.isArray(card.catalog.expiryRows) ? card.catalog.expiryRows.length : 0);
                     const expectedCount = parseInt(payload.expectedOptionCount, 10) || 0;
                     const subscribedCount = parseInt(payload.subscribedOptionCount, 10) || 0;
+                    const progressMessage = String(payload.message || '').trim();
                     setCardStatus(
                         card,
-                        `Resolved ${resolvedCount} of ${totalCount} expiries. Subscribed ${subscribedCount} of ${expectedCount} option streams...`,
+                        progressMessage || `Resolved ${resolvedCount} of ${totalCount} expiries. Subscribed ${subscribedCount} of ${expectedCount} option streams...`,
                         'success'
                     );
                     render();
@@ -1073,6 +1191,11 @@
     }
 
     async function syncCard(card, options = {}) {
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
+        if (isFuturesOptionProfile(profile) && !normalizeFuturesContractMonth(card && card.futuresContractMonth)) {
+            throw new Error(`Enter the ${profile.underlyingSymbol || card.symbol} underlying futures month as YYYYMM before syncing.`);
+        }
+
         const ws = await ensureSocket(card);
         card.syncInProgress = true;
         card.closeNotice = '';
@@ -1356,28 +1479,17 @@
         )).join('');
     }
 
-    function buildCalendarSortOptions(config) {
-        const labels = {
-            best_value: 'Best Value',
-            cheapest_long: 'Cheapest Long',
-            closest_ratio: 'Closest Ratio',
-        };
-        return ['best_value', 'cheapest_long', 'closest_ratio'].map((value) => (
-            `<option value="${escapeHtml(value)}" ${config.sortBy === value ? 'selected' : ''}>${escapeHtml(labels[value])}</option>`
-        )).join('');
-    }
-
     function describeCalendarFinderEmptyState(config, stats) {
         if (!stats || stats.totalExpiries === 0) {
             return 'No expiry rows yet. Sync/Update to subscribe quotes first.';
         }
         if (stats.usableExpiries < 2) {
-            return `Waiting for complete straddle quotes (${stats.usableExpiries}/${stats.totalExpiries} expiries usable).`;
+            return `Waiting for complete ATM IV quotes (${stats.usableExpiries}/${stats.totalExpiries} expiries usable).`;
         }
         if (stats.shortCandidates === 0) {
-            return `No short-leg expiry inside ${config.shortMinDte}-${config.shortMaxDte} DTE (${stats.usableExpiries} usable expiries). Widen the Short DTE range.`;
+            return `No sell/buy expiry pairs found among ${stats.usableExpiries} usable expiries. Sync more expiries with later DTE.`;
         }
-        return `No long leg within +/-${config.tolerancePct}% of the ${formatCompactMultiple(config.targetRatio)} DTE ratio (${stats.shortCandidates} short candidates). Raise the tolerance or change the target.`;
+        return `No long-leg expiry is later than the selected short-leg candidates (${stats.shortCandidates} short candidates). Sync more expiries with later DTE.`;
     }
 
     function getCalendarFinderSecondaryRow(rows) {
@@ -1446,8 +1558,8 @@
                 <div class="ivts-calendar-pick-main">${escapeHtml(`${row.shortExpiry} / ${row.longExpiry}`)}</div>
                 <div class="ivts-calendar-pick-meta">
                     <span>${escapeHtml(`${row.shortDte}D -> ${row.longDte}D`)}</span>
-                    <span>${escapeHtml(`${formatCompactMultiple(row.priceMultiple)} price`)}</span>
-                    <span>${escapeHtml(`${formatMultiple(row.valueScore)} value`)}</span>
+                    <span>${escapeHtml(`${formatMultiple(row.ivRatio)} IV`)}</span>
+                    <span>${escapeHtml(`${formatCompactPercent(row.shortAtmIv)} / ${formatCompactPercent(row.longAtmIv)}`)}</span>
                 </div>
             </div>
         `;
@@ -1464,9 +1576,8 @@
         const secondaryReason = secondary ? describeCalendarSecondaryReason(best, secondary) : '';
         const emptyMessage = describeCalendarFinderEmptyState(config, stats);
         const summary = best
-            ? `Best ${formatMultiple(best.valueScore)} | ${best.shortDte}D -> ${best.longDte}D${secondary ? ` | Next ${secondary.shortDte}D -> ${secondary.longDte}D` : ''}`
+            ? `Best ${formatMultiple(best.ivRatio)} IV | ${best.shortDte}D -> ${best.longDte}D${secondary ? ` | Next ${secondary.shortDte}D -> ${secondary.longDte}D` : ''}`
             : emptyMessage;
-        const customDisabled = config.targetPreset !== 'custom' ? 'disabled' : '';
         const showAllButtonLabel = config.showAll
             ? 'Top 5'
             : (rows.length > CALENDAR_FINDER_TOP_LIMIT ? `Show All (${rows.length})` : 'Show All');
@@ -1479,40 +1590,11 @@
                 </summary>
                 <div class="ivts-details-body ivts-calendar-body">
                     <div class="ivts-calendar-controls">
-                        <label class="ivts-calendar-field">
-                            <span class="ivts-fact-label">Target Ratio</span>
-                            <select data-action="calendar-target-preset" data-symbol="${escapeHtml(card.symbol)}">
-                                ${buildCalendarTargetOptions(config)}
-                            </select>
-                        </label>
-                        <label class="ivts-calendar-field ivts-calendar-custom-field">
-                            <span class="ivts-fact-label">Custom</span>
-                            <input data-action="calendar-target-custom" data-symbol="${escapeHtml(card.symbol)}" type="number" min="1.05" max="8" step="0.05" value="${escapeHtml(formatNumber(config.targetRatio, 2))}" ${customDisabled}>
-                        </label>
-                        <label class="ivts-calendar-field">
-                            <span class="ivts-fact-label">Tolerance</span>
-                            <select data-action="calendar-tolerance" data-symbol="${escapeHtml(card.symbol)}">
-                                ${buildCalendarToleranceOptions(config)}
-                            </select>
-                        </label>
-                        <label class="ivts-calendar-field">
-                            <span class="ivts-fact-label">Short DTE</span>
-                            <span class="ivts-calendar-range">
-                                <input data-action="calendar-short-min" data-symbol="${escapeHtml(card.symbol)}" type="number" min="0" max="999" step="1" value="${escapeHtml(config.shortMinDte)}">
-                                <input data-action="calendar-short-max" data-symbol="${escapeHtml(card.symbol)}" type="number" min="0" max="999" step="1" value="${escapeHtml(config.shortMaxDte)}">
-                            </span>
-                        </label>
-                        <label class="ivts-calendar-field">
-                            <span class="ivts-fact-label">Sort</span>
-                            <select data-action="calendar-sort" data-symbol="${escapeHtml(card.symbol)}">
-                                ${buildCalendarSortOptions(config)}
-                            </select>
-                        </label>
                         <button class="ivts-btn ivts-btn-muted ivts-calendar-toggle" data-action="calendar-show-all" data-symbol="${escapeHtml(card.symbol)}" type="button" ${rows.length <= CALENDAR_FINDER_TOP_LIMIT && !config.showAll ? 'disabled' : ''}>${escapeHtml(showAllButtonLabel)}</button>
                     </div>
                     ${best ? `
                         <div class="ivts-calendar-picks" aria-label="Calendar recommendations">
-                            ${buildCalendarRecommendation('Best', best, 'Lowest value score')}
+                            ${buildCalendarRecommendation('Best', best, 'Highest short/long IV')}
                             ${buildCalendarRecommendation('Next', secondary, secondaryReason)}
                         </div>
                     ` : ''}
@@ -1523,10 +1605,10 @@
                                     <th>Rank</th>
                                     <th>Sell Expiry</th>
                                     <th>Buy Expiry</th>
+                                    <th>IV Ratio</th>
+                                    <th>ATM IV</th>
                                     <th>DTE Ratio</th>
                                     <th>Straddle</th>
-                                    <th>Price</th>
-                                    <th>Value</th>
                                     <th></th>
                                 </tr>
                             </thead>
@@ -1551,10 +1633,10 @@
                                         <td><span class="ivts-rank-number">${rank}</span>${rankBadge}</td>
                                         <td>${escapeHtml(`${row.shortExpiry} (${row.shortDte}D)`)}</td>
                                         <td>${escapeHtml(`${row.longExpiry} (${row.longDte}D)`)}</td>
+                                        <td><span class="ivts-ratio">${escapeHtml(formatMultiple(row.ivRatio))}</span></td>
+                                        <td>${escapeHtml(`${formatCompactPercent(row.shortAtmIv)}/${formatCompactPercent(row.longAtmIv)}`)}</td>
                                         <td>${escapeHtml(formatCompactMultiple(row.dteRatio))}</td>
                                         <td>${escapeHtml(`${formatMoney(row.shortStraddleMark)}/${formatMoney(row.longStraddleMark)}`)}</td>
-                                        <td>${escapeHtml(formatCompactMultiple(row.priceMultiple))}</td>
-                                        <td><span class="ivts-ratio">${escapeHtml(formatMultiple(row.valueScore))}</span></td>
                                         <td><button class="ivts-btn ivts-btn-muted ivts-calendar-load" data-action="calendar-load" data-symbol="${escapeHtml(card.symbol)}" data-short-expiry="${escapeHtml(row.shortExpiry)}" data-long-expiry="${escapeHtml(row.longExpiry)}" type="button" ${canLoad ? '' : 'disabled'} title="${canLoad ? 'Open this calendar in the simulator' : 'ATM strikes are not resolved yet'}">Load</button></td>
                                     </tr>
                                 `;
@@ -1663,6 +1745,8 @@
                 ${escapeHtml(card.statusMessage)}
             </div>
 
+            ${buildFuturesContractControl(card)}
+
             <div class="ivts-facts">
                 <div class="ivts-fact">
                     <span class="ivts-fact-label">Underlying</span>
@@ -1686,6 +1770,34 @@
             ${buildCalendarFinderSection(card, comparedRows)}
             ${buildPrimaryExpiryTable(comparedRows)}
             ${buildBucketSummaryTable(comparedRows)}
+        `;
+    }
+
+    function buildFuturesContractControl(card) {
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
+        if (!isFuturesOptionProfile(profile)) {
+            return '';
+        }
+
+        const contractMonth = normalizeFuturesContractMonth(card && card.futuresContractMonth);
+        const underlyingSymbol = profile.underlyingSymbol || card.symbol;
+        return `
+            <div class="ivts-futures-control">
+                <label class="ivts-futures-field">
+                    <span>Underlying FUT Month</span>
+                    <input
+                        data-action="futures-contract-month"
+                        data-symbol="${escapeHtml(card.symbol)}"
+                        type="text"
+                        inputmode="numeric"
+                        pattern="\\d{6}"
+                        maxlength="6"
+                        placeholder="YYYYMM"
+                        value="${escapeHtml(contractMonth)}"
+                    >
+                </label>
+                <span class="ivts-futures-summary">${escapeHtml(underlyingSymbol)} ${escapeHtml(contractMonth || 'YYYYMM')}</span>
+            </div>
         `;
     }
 
@@ -1850,8 +1962,6 @@
             nextConfig.shortMinDte = field.value;
         } else if (action === 'calendar-short-max') {
             nextConfig.shortMaxDte = field.value;
-        } else if (action === 'calendar-sort') {
-            nextConfig.sortBy = field.value;
         } else {
             return;
         }
@@ -1859,6 +1969,30 @@
         card.calendarFinder = normalizeCalendarFinderConfig(nextConfig);
         saveCalendarFinderConfig(card.symbol, card.calendarFinder);
         card.forceBodyRefreshOnce = true;
+        render(true);
+    }
+
+    function applyFuturesContractMonthChange(field) {
+        const card = getCard(field.getAttribute('data-symbol'));
+        if (!card) {
+            return;
+        }
+
+        const normalized = normalizeFuturesContractMonth(field.value);
+        card.futuresContractMonth = normalized;
+        saveFuturesContractMonth(card.symbol, normalized);
+        card.catalog = null;
+        card.quotesBySubId = {};
+        card.underlyingPrice = null;
+        card.lastSyncLabel = '';
+        card.forceBodyRefreshOnce = true;
+        setCardStatus(
+            card,
+            normalized
+                ? `Underlying futures month set to ${normalized}. Sync/Update to load FOP expiries.`
+                : 'Enter a 6-digit underlying futures month before syncing this FOP.',
+            normalized ? '' : 'error'
+        );
         render(true);
     }
 
@@ -2040,6 +2174,12 @@
         });
 
         container.addEventListener('change', (event) => {
+            const futuresMonthField = event.target.closest('input[data-action="futures-contract-month"][data-symbol]');
+            if (futuresMonthField) {
+                applyFuturesContractMonthChange(futuresMonthField);
+                return;
+            }
+
             const calendarField = event.target.closest('[data-action^="calendar-"][data-symbol]');
             if (calendarField && calendarField.getAttribute('data-action') !== 'calendar-show-all') {
                 applyCalendarFinderFieldChange(calendarField);
@@ -2060,7 +2200,7 @@
         });
 
         container.addEventListener('focusout', (event) => {
-            const field = event.target.closest('select[data-action="baseline"][data-symbol], [data-action^="calendar-"][data-symbol]');
+            const field = event.target.closest('select[data-action="baseline"][data-symbol], [data-action^="calendar-"][data-symbol], input[data-action="futures-contract-month"][data-symbol]');
             if (!field) {
                 return;
             }
@@ -2076,12 +2216,15 @@
         _test: {
             normalizeWsHost,
             normalizeWsPort,
+            normalizeFuturesContractMonth,
             resolveDefaultExpandedSymbol,
             createCardState,
             isBaselineSelectElement,
+            isFuturesContractMonthElement,
             isFocusedBaselineSelectInCard,
             getPrimaryExpiryRows,
             formatIvPair,
+            buildSubscribePayload,
             buildPrimaryExpiryTable,
             buildCardMarkup,
             normalizeCalendarFinderConfig,

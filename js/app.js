@@ -115,6 +115,10 @@ const state = {
 
 window.__optionComboApp = {
     getState: () => state,
+    getSessionFileTargetState: () => ({
+        hasFileTarget: sessionHasFileTarget || !!currentFileHandle,
+        hasWritableFileHandle: !!currentFileHandle,
+    }),
     renderGroups: () => renderGroups(),
     renderHedges: () => renderHedges(),
     updateLiveQuoteDerivedValues: (changeSet) => updateLiveQuoteDerivedValues(changeSet),
@@ -188,6 +192,7 @@ function consumePendingCalendarHandoff() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    _syncSessionFileActionButtons();
     bindControlPanelEvents();
     consumePendingCalendarHandoff();
     renderGroups();
@@ -430,6 +435,9 @@ function renderGroups() {
         requestConcedeManagedComboOrder,
         requestCancelManagedComboOrder,
         requestCloseGroupComboOrder,
+        requestCloseLegComboOrder: typeof requestCloseLegComboOrder === 'function'
+            ? requestCloseLegComboOrder
+            : null,
         enterHistoricalReplayGroup,
         syncHistoricalReplayExpirySettlement,
         getUnderlyingProfile,
@@ -938,23 +946,153 @@ function syncHistoricalReplayExpirySettlement(group) {
 }
 
 let currentFileHandle = null;
+let sessionHasFileTarget = false;
+
+function _getJsonFilePickerTypes() {
+    return [{
+        description: 'JSON Files',
+        accept: {
+            'application/json': ['.json'],
+        },
+    }];
+}
+
+function _sanitizeSessionFileName(value) {
+    const raw = String(value || '').trim();
+    const cleaned = raw
+        .replace(/\.json$/i, '')
+        .replace(/[\\/:*?"<>|]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return cleaned || '';
+}
+
+function _resolveSuggestedSessionFileName(options = {}) {
+    const importedName = _sanitizeSessionFileName(state.importedSessionTitle);
+    if (importedName) {
+        return `${importedName}${options.copy === true ? ' copy' : ''}.json`;
+    }
+
+    const symbol = _sanitizeSessionFileName(state.underlyingSymbol).toUpperCase();
+    const datePart = String(state.simulatedDate || state.baseDate || new Date().toISOString().slice(0, 10)).trim();
+    if (symbol) {
+        return `${symbol}_${datePart}${options.copy === true ? '_copy' : ''}.json`;
+    }
+    return `option_combo_sim_${new Date().toISOString().slice(0, 10)}${options.copy === true ? '_copy' : ''}.json`;
+}
+
+function _hasSessionFileTarget() {
+    return sessionHasFileTarget || !!currentFileHandle;
+}
+
+function _syncSessionFileActionButtons() {
+    const saveBtn = document.getElementById('saveBtn');
+    if (saveBtn) {
+        saveBtn.style.display = 'inline-flex';
+    }
+
+    const saveAsBtn = document.getElementById('saveAsBtn');
+    if (saveAsBtn) {
+        saveAsBtn.style.display = _hasSessionFileTarget() ? 'inline-flex' : 'none';
+    }
+}
+
+function _setSessionFileTarget(fileHandle, fileName = '') {
+    currentFileHandle = fileHandle || null;
+    sessionHasFileTarget = true;
+
+    const resolvedName = typeof fileName === 'string' && fileName.trim()
+        ? fileName.trim()
+        : (currentFileHandle && typeof currentFileHandle.name === 'string' ? currentFileHandle.name.trim() : '');
+    if (resolvedName) {
+        state.importedSessionTitle = resolvedName;
+    }
+
+    _syncSessionFileActionButtons();
+}
+
+function _markSaveButtonSaved(saveBtn) {
+    if (!saveBtn) {
+        return;
+    }
+    const originalHTML = saveBtn.innerHTML;
+    saveBtn.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+        Saved!`;
+    setTimeout(() => {
+        saveBtn.innerHTML = originalHTML;
+    }, 2000);
+}
+
+async function _writeSessionDataToFileHandle(fileHandle, dataStr, saveBtn) {
+    if (!fileHandle || typeof fileHandle.createWritable !== 'function') {
+        return false;
+    }
+
+    try {
+        const writable = await fileHandle.createWritable();
+        await writable.write(dataStr);
+        await writable.close();
+        _markSaveButtonSaved(saveBtn);
+        return true;
+    } catch (error) {
+        console.error("Error saving directly to file:", error);
+        return false;
+    }
+}
+
+function _showManualSaveUnsupportedAlert() {
+    const message = 'This browser cannot choose a save location for JSON files. Open the app in Chrome or Edge to use Save and Save As.';
+    console.warn(message);
+    if (typeof alert === 'function') {
+        alert(message);
+    }
+}
+
+async function _saveSessionToPickedFile(options = {}) {
+    if (!window.showSaveFilePicker) {
+        _showManualSaveUnsupportedAlert();
+        return false;
+    }
+
+    try {
+        const fileHandle = await window.showSaveFilePicker({
+            suggestedName: _resolveSuggestedSessionFileName({ copy: options.copy === true }),
+            types: _getJsonFilePickerTypes(),
+        });
+        const dataStr = JSON.stringify(OptionComboSessionLogic.buildExportState(state), null, 2);
+        const saveBtn = document.getElementById('saveBtn');
+        const saved = await _writeSessionDataToFileHandle(fileHandle, dataStr, saveBtn);
+        if (!saved) {
+            if (typeof alert === 'function') {
+                alert('Unable to write the selected JSON file. Choose another location and try again.');
+            }
+            return false;
+        }
+        _setSessionFileTarget(fileHandle);
+        return true;
+    } catch (error) {
+        if (error.name !== 'AbortError') {
+            console.error("Error opening save picker:", error);
+            if (typeof alert === 'function') {
+                alert('Unable to open the save dialog. Choose another location and try again.');
+            }
+        }
+        return false;
+    }
+}
 
 async function handleImportBtnClick() {
     if (window.showOpenFilePicker) {
         try {
             const [fileHandle] = await window.showOpenFilePicker({
-                types: [{
-                    description: 'JSON Files',
-                    accept: {
-                        'application/json': ['.json'],
-                    },
-                }],
+                types: _getJsonFilePickerTypes(),
                 multiple: false
             });
-            currentFileHandle = fileHandle;
             const file = await fileHandle.getFile();
-            document.getElementById('saveBtn').style.display = 'inline-flex';
-            processImportedFile(file);
+            processImportedFile(file, { fileHandle });
         } catch (error) {
             if (error.name !== 'AbortError') {
                 console.error("Error opening file picker:", error);
@@ -970,51 +1108,27 @@ async function saveToJSON() {
     const dataStr = JSON.stringify(OptionComboSessionLogic.buildExportState(state), null, 2);
     const saveBtn = document.getElementById('saveBtn');
 
-    if (currentFileHandle && saveBtn) {
-        try {
-            const writable = await currentFileHandle.createWritable();
-            await writable.write(dataStr);
-            await writable.close();
-
-            const originalHTML = saveBtn.innerHTML;
-            saveBtn.innerHTML = `
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="20 6 9 17 4 12"></polyline>
-                </svg>
-                Saved!`;
-            setTimeout(() => {
-                saveBtn.innerHTML = originalHTML;
-            }, 2000);
-            return;
-        } catch (error) {
-            console.error("Error saving directly to file:", error);
+    if (currentFileHandle) {
+        const saved = await _writeSessionDataToFileHandle(currentFileHandle, dataStr, saveBtn);
+        if (saved) {
+            return true;
         }
+        if (typeof alert === 'function') {
+            alert('Unable to save back to the current JSON file. Use Save As to choose a writable copy.');
+        }
+        return false;
     }
 
-    exportToJSON();
+    return _saveSessionToPickedFile({ copy: false });
 }
 
-function exportToJSON() {
-    const dataStr = JSON.stringify(OptionComboSessionLogic.buildExportState(state), null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `option_combo_sim_${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+async function saveAsJSON() {
+    return _saveSessionToPickedFile({ copy: true });
 }
 
 function importFromJSON(event) {
     const file = event.target.files[0];
     if (!file) return;
-
-    currentFileHandle = null;
-    const saveBtn = document.getElementById('saveBtn');
-    if (saveBtn) saveBtn.style.display = 'none';
 
     processImportedFile(file);
     event.target.value = '';
@@ -1074,7 +1188,7 @@ function _parseImportedJsonText(rawText) {
     return JSON.parse(text.replace(/^\uFEFF/, ''));
 }
 
-function processImportedFile(file) {
+function processImportedFile(file, options = {}) {
     const reader = new FileReader();
     reader.onload = function (e) {
         try {
@@ -1090,6 +1204,7 @@ function processImportedFile(file) {
                 );
 
                 applyImportedState(normalizedState, file && typeof file.name === 'string' ? file.name : '');
+                _setSessionFileTarget(options.fileHandle || null, file && typeof file.name === 'string' ? file.name : '');
                 OptionComboSessionUI.syncControlPanel(state, currencyFormatter, {
                     diffDays,
                     calendarToTradingDays,

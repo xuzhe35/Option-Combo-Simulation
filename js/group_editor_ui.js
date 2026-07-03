@@ -3,6 +3,11 @@
  */
 
 (function attachGroupEditorUI(globalScope) {
+    // Butterfly finder candidate-grid limits: keep the ratio grid dense while
+    // bounding how many option quotes one dialog subscribes at once.
+    const BUTTERFLY_MAX_WIDTH_STEPS = 12;
+    const BUTTERFLY_MAX_QUOTE_SUBSCRIPTIONS = 48;
+
     function _getProductRegistryApi() {
         return globalScope.OptionComboProductRegistry && typeof globalScope.OptionComboProductRegistry === 'object'
             ? globalScope.OptionComboProductRegistry
@@ -99,6 +104,1203 @@
             return state.historicalQuoteDate;
         }
         return state.baseDate;
+    }
+
+    function _normalizeDateValue(value) {
+        return String(value || '').trim();
+    }
+
+    function _getCurrentSimulatedDateInputValue() {
+        const doc = globalScope.document;
+        if (!doc || typeof doc.getElementById !== 'function') {
+            return '';
+        }
+        const input = doc.getElementById('simulatedDate');
+        return input ? _normalizeDateValue(input.value) : '';
+    }
+
+    function resolveDefaultLegExpirationDate(state, deps) {
+        const stateSimulatedDate = _normalizeDateValue(state && state.simulatedDate);
+        const inputSimulatedDate = _getCurrentSimulatedDateInputValue();
+        const baseDate = _normalizeDateValue(state && state.baseDate);
+        const anchorDate = _normalizeDateValue(getLegAnchorDate(state)) || baseDate || stateSimulatedDate;
+        const simulatedDate = inputSimulatedDate && (!baseDate || inputSimulatedDate !== baseDate)
+            ? inputSimulatedDate
+            : stateSimulatedDate;
+
+        if (simulatedDate && (!baseDate || simulatedDate !== baseDate)) {
+            return simulatedDate;
+        }
+
+        if (anchorDate && deps && typeof deps.addDays === 'function') {
+            return deps.addDays(anchorDate, 30);
+        }
+
+        return simulatedDate || anchorDate || '';
+    }
+
+    function _generateFallbackId(prefix) {
+        return `${prefix || 'id'}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    }
+
+    function _generateLegId(deps) {
+        return deps && typeof deps.generateId === 'function'
+            ? deps.generateId()
+            : _generateFallbackId('leg');
+    }
+
+    function _createOptionLeg(deps, overrides) {
+        return Object.assign({
+            id: _generateLegId(deps),
+            type: 'call',
+            pos: 1,
+            strike: 0,
+            expDate: '',
+            iv: 0.2,
+            ivSource: 'manual',
+            ivManualOverride: false,
+            currentPrice: 0.00,
+            currentPriceSource: '',
+            portfolioMarketPrice: null,
+            portfolioMarketPriceSource: '',
+            portfolioUnrealizedPnl: null,
+            cost: 0.00,
+            closePrice: null,
+            underlyingFutureId: ''
+        }, overrides || {});
+    }
+
+    function _getStrikeIncrement(state) {
+        const underlying = Math.abs(parseFloat(state && state.underlyingPrice) || 0);
+        if (underlying >= 1000) return 25;
+        if (underlying >= 100) return 5;
+        if (underlying >= 20) return 1;
+        const step = parseFloat(getPriceInputStep(state && state.underlyingSymbol));
+        return Number.isFinite(step) && step > 0 ? Math.max(step, 0.5) : 0.5;
+    }
+
+    function _roundToIncrement(value, increment) {
+        const parsed = parseFloat(value);
+        const step = parseFloat(increment);
+        if (!Number.isFinite(parsed) || !Number.isFinite(step) || step <= 0) {
+            return Number.isFinite(parsed) ? parsed : 0;
+        }
+        const rounded = Math.round(parsed / step) * step;
+        const precision = step < 1 ? 4 : 2;
+        return parseFloat(rounded.toFixed(precision));
+    }
+
+    function _formatStrikeForInput(state, value) {
+        const rounded = _roundToIncrement(value, _getStrikeIncrement(state));
+        return String(rounded);
+    }
+
+    function _getDefaultComboStrikes(state) {
+        const underlying = parseFloat(state && state.underlyingPrice);
+        const increment = _getStrikeIncrement(state);
+        const centerSource = Number.isFinite(underlying) && underlying > 0 ? underlying : 100;
+        const center = _roundToIncrement(centerSource, increment);
+        const width = Math.max(increment, _roundToIncrement(centerSource * 0.02, increment));
+        return {
+            lower: _roundToIncrement(center - width, increment),
+            middle: center,
+            upper: _roundToIncrement(center + width, increment),
+        };
+    }
+
+    function _parseComboStrike(value) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function _normalizeComboStrategy(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        return ['bull_spread', 'bear_spread', 'straddle', 'strangle', 'butterfly'].includes(normalized)
+            ? normalized
+            : 'bull_spread';
+    }
+
+    function _getButterflyWingWidthOptions(state) {
+        const underlying = Math.abs(parseFloat(state && state.underlyingPrice) || 0);
+        if (underlying >= 1000) {
+            return [25, 50, 75, 100, 150, 200, 250, 300];
+        }
+        return [5, 10, 15, 20, 25, 50, 100, 150];
+    }
+
+    function _normalizePositiveNumber(value) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    }
+
+    function _getButterflyWingWidthFromStrikes(strikes) {
+        if (!strikes || strikes.lower === null || strikes.middle === null || strikes.upper === null) {
+            return null;
+        }
+        const leftWidth = strikes.middle - strikes.lower;
+        const rightWidth = strikes.upper - strikes.middle;
+        if (!Number.isFinite(leftWidth) || !Number.isFinite(rightWidth) || leftWidth <= 0 || rightWidth <= 0) {
+            return null;
+        }
+        return Math.min(leftWidth, rightWidth);
+    }
+
+    function _formatComboNumber(value, digits = 2) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return '';
+        }
+        return parsed.toFixed(digits).replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
+    }
+
+    function _buildComboTemplateQuoteId(state, expDate, type, strike) {
+        const symbol = String(state && state.underlyingSymbol || 'SYM')
+            .replace(/[^A-Za-z0-9]/g, '')
+            .toUpperCase() || 'SYM';
+        const expiry = String(expDate || '').replace(/[^0-9]/g, '') || 'EXP';
+        const right = String(type || '').toLowerCase() === 'put' ? 'P' : 'C';
+        const strikeKey = _formatComboNumber(strike, 4).replace('.', 'p');
+        return `combo_template_${symbol}_${expiry}_${right}_${strikeKey}`;
+    }
+
+    function _buildComboTemplateQuoteRequest(state, expDate, type, strike) {
+        return {
+            id: _buildComboTemplateQuoteId(state, expDate, type, strike),
+            type: String(type || '').toLowerCase() === 'put' ? 'put' : 'call',
+            strike,
+            expDate,
+        };
+    }
+
+    function _resolveQuoteMidById(quoteId) {
+        const liveQuotes = globalScope.OptionComboWsLiveQuotes;
+        const quote = liveQuotes && typeof liveQuotes.getOptionQuote === 'function'
+            ? liveQuotes.getOptionQuote(quoteId)
+            : null;
+        const bid = _normalizePositiveNumber(quote && quote.bid);
+        const ask = _normalizePositiveNumber(quote && quote.ask);
+        if (bid !== null && ask !== null) {
+            return (bid + ask) / 2;
+        }
+        const mark = _normalizePositiveNumber(quote && quote.mark);
+        return mark !== null ? mark : null;
+    }
+
+    function _resolveQuoteDisplayById(quoteId) {
+        const liveQuotes = globalScope.OptionComboWsLiveQuotes;
+        const quote = liveQuotes && typeof liveQuotes.getOptionQuote === 'function'
+            ? liveQuotes.getOptionQuote(quoteId)
+            : null;
+        const bid = _normalizePositiveNumber(quote && quote.bid);
+        const ask = _normalizePositiveNumber(quote && quote.ask);
+        const mark = _normalizePositiveNumber(quote && quote.mark);
+        const mid = bid !== null && ask !== null ? (bid + ask) / 2 : mark;
+        return {
+            bid,
+            ask,
+            mark,
+            mid: mid !== null ? mid : null,
+            hasQuote: bid !== null || ask !== null || mark !== null,
+            complete: bid !== null && ask !== null,
+        };
+    }
+
+    function calculateButterflyRiskFromLegPrices(prices, wingWidth) {
+        const lowerPut = _normalizePositiveNumber(prices && prices.lowerPut);
+        const middlePut = _normalizePositiveNumber(prices && prices.middlePut);
+        const middleCall = _normalizePositiveNumber(prices && prices.middleCall);
+        const upperCall = _normalizePositiveNumber(prices && prices.upperCall);
+        const width = _normalizePositiveNumber(wingWidth);
+        if (lowerPut === null || middlePut === null || middleCall === null || upperCall === null || width === null) {
+            return null;
+        }
+
+        const netCredit = middlePut + middleCall - lowerPut - upperCall;
+        const maxProfit = netCredit;
+        const maxLoss = width - netCredit;
+        if (!(maxProfit > 0) || !(maxLoss > 0)) {
+            return null;
+        }
+        return {
+            maxProfit,
+            maxLoss,
+            profitLossRatio: maxProfit / maxLoss,
+            netCredit,
+            wingWidth: width,
+        };
+    }
+
+    function _buildButterflyCandidate(state, expDate, middleStrike, wingWidth) {
+        const width = _normalizePositiveNumber(wingWidth);
+        const middle = _parseComboStrike(middleStrike);
+        if (width === null || middle === null) {
+            return null;
+        }
+        const lower = _roundToIncrement(middle - width, _getStrikeIncrement(state));
+        const upper = _roundToIncrement(middle + width, _getStrikeIncrement(state));
+        if (!(lower < middle && middle < upper)) {
+            return null;
+        }
+        const quoteRequests = [
+            _buildComboTemplateQuoteRequest(state, expDate, 'put', lower),
+            _buildComboTemplateQuoteRequest(state, expDate, 'put', middle),
+            _buildComboTemplateQuoteRequest(state, expDate, 'call', middle),
+            _buildComboTemplateQuoteRequest(state, expDate, 'call', upper),
+        ];
+        return {
+            lower,
+            middle,
+            upper,
+            wingWidth: width,
+            quoteRequests,
+        };
+    }
+
+    function _evaluateButterflyCandidate(candidate) {
+        if (!candidate || !Array.isArray(candidate.quoteRequests)) {
+            return null;
+        }
+        const prices = {
+            lowerPut: _resolveQuoteMidById(candidate.quoteRequests[0] && candidate.quoteRequests[0].id),
+            middlePut: _resolveQuoteMidById(candidate.quoteRequests[1] && candidate.quoteRequests[1].id),
+            middleCall: _resolveQuoteMidById(candidate.quoteRequests[2] && candidate.quoteRequests[2].id),
+            upperCall: _resolveQuoteMidById(candidate.quoteRequests[3] && candidate.quoteRequests[3].id),
+        };
+        const risk = calculateButterflyRiskFromLegPrices(prices, candidate.wingWidth);
+        return risk ? { ...candidate, risk } : null;
+    }
+
+    function _chooseButterflyCandidate(candidates, targetRatio) {
+        const evaluated = (Array.isArray(candidates) ? candidates : [])
+            .map(_evaluateButterflyCandidate)
+            .filter(Boolean);
+        if (evaluated.length === 0) {
+            return null;
+        }
+        const target = _normalizePositiveNumber(targetRatio);
+        evaluated.sort((left, right) => {
+            if (target !== null) {
+                const leftDistance = Math.abs(left.risk.profitLossRatio - target);
+                const rightDistance = Math.abs(right.risk.profitLossRatio - target);
+                if (Math.abs(leftDistance - rightDistance) > 0.000001) {
+                    return leftDistance - rightDistance;
+                }
+            }
+            return right.risk.profitLossRatio - left.risk.profitLossRatio;
+        });
+        return evaluated[0];
+    }
+
+    function _setComboTemplateQuoteRequests(state, requests) {
+        if (!state || typeof state !== 'object') {
+            return false;
+        }
+        const unique = [];
+        const seen = new Set();
+        (Array.isArray(requests) ? requests : []).forEach((request) => {
+            if (!request || !request.id || seen.has(request.id)) {
+                return;
+            }
+            seen.add(request.id);
+            unique.push(request);
+        });
+        const current = Array.isArray(state.comboTemplateQuoteRequests) ? state.comboTemplateQuoteRequests : [];
+        const unchanged = current.length === unique.length
+            && current.every((request, index) => {
+                const next = unique[index];
+                return next
+                    && request.id === next.id
+                    && request.type === next.type
+                    && request.strike === next.strike
+                    && request.expDate === next.expDate;
+            });
+        if (unchanged) {
+            return false;
+        }
+        state.comboTemplateQuoteRequests = unique;
+        return true;
+    }
+
+    function _clearComboTemplateQuoteRequests(state, deps) {
+        if (state && Array.isArray(state.comboTemplateQuoteRequests) && state.comboTemplateQuoteRequests.length > 0) {
+            state.comboTemplateQuoteRequests = [];
+            if (deps && typeof deps.handleLiveSubscriptions === 'function') {
+                deps.handleLiveSubscriptions();
+            }
+        }
+    }
+
+    function _resolveComboLegSpecs(strategy, strikes) {
+        if (strategy === 'straddle') {
+            if (strikes.middle === null) {
+                return { success: false, reason: 'Enter a valid strike.' };
+            }
+            return {
+                success: true,
+                specs: [
+                    { type: 'call', pos: 1, strike: strikes.middle },
+                    { type: 'put', pos: 1, strike: strikes.middle },
+                ],
+            };
+        }
+
+        if (strategy === 'butterfly') {
+            if (strikes.lower === null || strikes.middle === null || strikes.upper === null) {
+                return { success: false, reason: 'Enter valid lower, middle, and upper strikes.' };
+            }
+            if (!(strikes.lower < strikes.middle && strikes.middle < strikes.upper)) {
+                return { success: false, reason: 'Butterfly strikes must be lower < middle < upper.' };
+            }
+            return {
+                success: true,
+                specs: [
+                    { type: 'put', pos: 1, strike: strikes.lower },
+                    { type: 'put', pos: -1, strike: strikes.middle },
+                    { type: 'call', pos: -1, strike: strikes.middle },
+                    { type: 'call', pos: 1, strike: strikes.upper },
+                ],
+            };
+        }
+
+        if (strikes.lower === null || strikes.upper === null) {
+            return { success: false, reason: 'Enter valid lower and upper strikes.' };
+        }
+        if (!(strikes.lower < strikes.upper)) {
+            return { success: false, reason: 'Upper strike must be greater than lower strike.' };
+        }
+
+        if (strategy === 'bear_spread') {
+            return {
+                success: true,
+                specs: [
+                    { type: 'put', pos: 1, strike: strikes.upper },
+                    { type: 'put', pos: -1, strike: strikes.lower },
+                ],
+            };
+        }
+
+        if (strategy === 'strangle') {
+            return {
+                success: true,
+                specs: [
+                    { type: 'put', pos: 1, strike: strikes.lower },
+                    { type: 'call', pos: 1, strike: strikes.upper },
+                ],
+            };
+        }
+
+        return {
+            success: true,
+            specs: [
+                { type: 'call', pos: 1, strike: strikes.lower },
+                { type: 'call', pos: -1, strike: strikes.upper },
+            ],
+        };
+    }
+
+    function applyComboTemplateToGroup(group, state, deps = {}, config = {}) {
+        if (!group || !Array.isArray(group.legs)) {
+            return { success: false, reason: 'Group is unavailable.', legCount: 0 };
+        }
+        if (group.legs.length > 0) {
+            return { success: false, reason: 'Typical combos can only be applied to an empty group.', legCount: 0 };
+        }
+
+        const strategy = _normalizeComboStrategy(config.strategy);
+        const expDate = _normalizeDateValue(config.expDate || config.expiry || resolveDefaultLegExpirationDate(state, deps));
+        if (!expDate) {
+            return { success: false, reason: 'Choose an expiration date.', legCount: 0 };
+        }
+
+        const defaultStrikes = _getDefaultComboStrikes(state);
+        const strikes = {
+            lower: _parseComboStrike(config.lowerStrike !== undefined ? config.lowerStrike : defaultStrikes.lower),
+            middle: _parseComboStrike(config.middleStrike !== undefined ? config.middleStrike : defaultStrikes.middle),
+            upper: _parseComboStrike(config.upperStrike !== undefined ? config.upperStrike : defaultStrikes.upper),
+        };
+        const resolved = _resolveComboLegSpecs(strategy, strikes);
+        if (!resolved.success) {
+            return { success: false, reason: resolved.reason, legCount: 0 };
+        }
+
+        group.legs = resolved.specs.map((spec) => _createOptionLeg(deps, {
+            type: spec.type,
+            pos: spec.pos,
+            strike: spec.strike,
+            expDate,
+        }));
+        if (strategy === 'butterfly') {
+            const wingWidth = _getButterflyWingWidthFromStrikes(strikes);
+            const candidate = _buildButterflyCandidate(state, expDate, strikes.middle, wingWidth);
+            const evaluated = _evaluateButterflyCandidate(candidate);
+            group.comboTemplate = {
+                strategy: 'butterfly',
+                kind: 'iron_butterfly',
+                lowerStrike: strikes.lower,
+                middleStrike: strikes.middle,
+                upperStrike: strikes.upper,
+                wingWidth,
+                risk: evaluated && evaluated.risk ? evaluated.risk : null,
+            };
+            // The finder picked this combo from live quote mids; keep the group on
+            // the market data feed so its P&L matches the ratio it was chosen for.
+            group.liveData = true;
+        } else {
+            delete group.comboTemplate;
+        }
+        _clearComboTemplateQuoteRequests(state, null);
+
+        if (typeof deps.handleLiveSubscriptions === 'function') {
+            deps.handleLiveSubscriptions();
+        }
+        if (typeof deps.renderGroups === 'function') {
+            deps.renderGroups();
+        }
+
+        return { success: true, reason: '', legCount: group.legs.length };
+    }
+
+    function _setComboTemplateError(dialog, message) {
+        const errorEl = dialog && dialog.querySelector('.combo-template-error');
+        if (errorEl) {
+            errorEl.textContent = message || '';
+            errorEl.style.display = message ? 'block' : 'none';
+        }
+    }
+
+    function _setComboTemplateFieldVisibility(dialog) {
+        if (!dialog) return;
+        const strategy = _normalizeComboStrategy(dialog.querySelector('.combo-template-strategy')?.value);
+        const lowerField = dialog.querySelector('[data-combo-field="lower"]');
+        const middleField = dialog.querySelector('[data-combo-field="middle"]');
+        const upperField = dialog.querySelector('[data-combo-field="upper"]');
+        const lowerLabel = dialog.querySelector('.combo-template-lower-label');
+        const middleLabel = dialog.querySelector('.combo-template-middle-label');
+        const upperLabel = dialog.querySelector('.combo-template-upper-label');
+        const butterflyTools = dialog.querySelector('.combo-template-butterfly-tools');
+
+        const showLower = strategy !== 'straddle';
+        const showMiddle = strategy === 'straddle' || strategy === 'butterfly';
+        const showUpper = strategy !== 'straddle';
+
+        if (lowerField) lowerField.style.display = showLower ? 'block' : 'none';
+        if (middleField) middleField.style.display = showMiddle ? 'block' : 'none';
+        if (upperField) upperField.style.display = showUpper ? 'block' : 'none';
+
+        if (lowerLabel) {
+            lowerLabel.textContent = strategy === 'strangle' ? 'Put Strike' : 'Lower Strike';
+        }
+        if (middleLabel) {
+            middleLabel.textContent = strategy === 'straddle' ? 'Strike' : 'Middle Strike';
+        }
+        if (upperLabel) {
+            upperLabel.textContent = strategy === 'strangle' ? 'Call Strike' : 'Upper Strike';
+        }
+        if (butterflyTools) {
+            butterflyTools.style.display = strategy === 'butterfly' ? 'block' : 'none';
+        }
+    }
+
+    function _setComboTemplateDefaultInputs(dialog, state) {
+        if (!dialog) return;
+        const defaults = _getDefaultComboStrikes(state);
+        const lowerInput = dialog.querySelector('.combo-template-lower-strike');
+        const middleInput = dialog.querySelector('.combo-template-middle-strike');
+        const upperInput = dialog.querySelector('.combo-template-upper-strike');
+        if (lowerInput) lowerInput.value = _formatStrikeForInput(state, defaults.lower);
+        if (middleInput) middleInput.value = _formatStrikeForInput(state, defaults.middle);
+        if (upperInput) upperInput.value = _formatStrikeForInput(state, defaults.upper);
+    }
+
+    function _getButterflyWidthInputValue(dialog) {
+        const manualInput = dialog && dialog.querySelector('.combo-template-wing-width-manual');
+        const select = dialog && dialog.querySelector('.combo-template-wing-width-select');
+        const selectValue = select ? String(select.value || '').trim() : '';
+        if (selectValue && selectValue !== 'custom') {
+            return _normalizePositiveNumber(selectValue);
+        }
+        return _normalizePositiveNumber(manualInput && manualInput.value);
+    }
+
+    function _setButterflyRiskStatus(dialog, risk, message) {
+        const statusEl = dialog && dialog.querySelector('.combo-template-butterfly-risk-status');
+        if (!statusEl) {
+            return;
+        }
+        if (risk) {
+            statusEl.textContent = [
+                `MaxProfit ${_formatComboNumber(risk.maxProfit, 2)}`,
+                `MaxLoss ${_formatComboNumber(risk.maxLoss, 2)}`,
+                `Ratio ${_formatComboNumber(risk.profitLossRatio, 3)}`,
+            ].join(' / ');
+            statusEl.classList.remove('text-danger');
+            statusEl.classList.add('text-muted');
+            return;
+        }
+        statusEl.textContent = message || '';
+        statusEl.classList.toggle('text-danger', !!message);
+        statusEl.classList.toggle('text-muted', !message);
+    }
+
+    function _applyButterflyWingWidthToDialog(dialog, state, wingWidth) {
+        if (!dialog) return null;
+        const width = _normalizePositiveNumber(wingWidth);
+        const middleInput = dialog.querySelector('.combo-template-middle-strike');
+        const lowerInput = dialog.querySelector('.combo-template-lower-strike');
+        const upperInput = dialog.querySelector('.combo-template-upper-strike');
+        const middle = _parseComboStrike(middleInput && middleInput.value);
+        if (width === null || middle === null || !lowerInput || !upperInput) {
+            return null;
+        }
+        const increment = _getStrikeIncrement(state);
+        const lower = _roundToIncrement(middle - width, increment);
+        const upper = _roundToIncrement(middle + width, increment);
+        lowerInput.value = _formatComboNumber(lower, 4);
+        upperInput.value = _formatComboNumber(upper, 4);
+        return { lower, middle, upper, wingWidth: width };
+    }
+
+    function _syncButterflyWidthControls(dialog, state) {
+        if (!dialog) return;
+        const select = dialog.querySelector('.combo-template-wing-width-select');
+        const manualInput = dialog.querySelector('.combo-template-wing-width-manual');
+        if (!select || !manualInput) return;
+
+        const options = _getButterflyWingWidthOptions(state);
+        select.innerHTML = options
+            .map((value) => `<option value="${value}">${_formatComboNumber(value, 2)}</option>`)
+            .join('') + '<option value="custom">Custom</option>';
+        const defaultWidth = options.includes(100)
+            ? 100
+            : options[Math.min(1, options.length - 1)];
+        select.value = String(defaultWidth);
+        manualInput.value = String(defaultWidth);
+        manualInput.disabled = true;
+        _applyButterflyWingWidthToDialog(dialog, state, defaultWidth);
+        _setButterflyRiskStatus(dialog, null, '');
+    }
+
+    function _getButterflyCandidateWidths(state, manualWidth) {
+        const increment = _getStrikeIncrement(state);
+        const options = _getButterflyWingWidthOptions(state);
+        const maxWidth = options[options.length - 1];
+        const widths = manualWidth !== null ? [manualWidth] : [];
+        // Enumerate widths at strike-increment granularity so candidate ratios are
+        // dense enough to land near the target; stride up when the grid gets large.
+        const stepCount = Math.max(1, Math.floor(maxWidth / increment));
+        const stride = Math.max(1, Math.ceil(stepCount / BUTTERFLY_MAX_WIDTH_STEPS));
+        for (let step = 1; step <= stepCount; step += stride) {
+            widths.push(step * increment);
+        }
+        options.forEach((value) => widths.push(value));
+        return Array.from(new Set(widths.map((value) => _roundToIncrement(value, increment))))
+            .filter((value) => Number.isFinite(value) && value > 0)
+            .sort((left, right) => left - right);
+    }
+
+    function _buildButterflyCandidateGrid(state, expDate, middleStrike, manualWidth) {
+        const middle = _parseComboStrike(middleStrike);
+        if (!expDate || middle === null) {
+            return [];
+        }
+        const increment = _getStrikeIncrement(state);
+        const widths = _getButterflyCandidateWidths(state, manualWidth);
+        // Shifting the body off the entered middle strike is what fills the ratio
+        // gaps between symmetric wing widths. Shrink the offset range if the quote
+        // subscription budget would be exceeded.
+        const offsetPlans = [[-2, -1, 0, 1, 2], [-1, 0, 1], [0]];
+        for (const offsets of offsetPlans) {
+            const candidates = [];
+            const seenStrikes = new Set();
+            const quoteIds = new Set();
+            offsets.forEach((offset) => {
+                const center = _roundToIncrement(middle + offset * increment, increment);
+                widths.forEach((width) => {
+                    const candidate = _buildButterflyCandidate(state, expDate, center, width);
+                    if (!candidate) {
+                        return;
+                    }
+                    const key = `${candidate.lower}:${candidate.middle}:${candidate.upper}`;
+                    if (seenStrikes.has(key)) {
+                        return;
+                    }
+                    seenStrikes.add(key);
+                    candidates.push(candidate);
+                    candidate.quoteRequests.forEach((request) => quoteIds.add(request.id));
+                });
+            });
+            if (quoteIds.size <= BUTTERFLY_MAX_QUOTE_SUBSCRIPTIONS || offsets.length === 1) {
+                return candidates;
+            }
+        }
+        return [];
+    }
+
+    function _buildButterflyCandidatesFromDialog(dialog, state) {
+        const expDate = _normalizeDateValue(dialog && dialog.querySelector('.combo-template-expiry')?.value);
+        const middle = _parseComboStrike(dialog && dialog.querySelector('.combo-template-middle-strike')?.value);
+        if (!expDate || middle === null) {
+            return [];
+        }
+        return _buildButterflyCandidateGrid(state, expDate, middle, _getButterflyWidthInputValue(dialog));
+    }
+
+    function _selectButterflyCandidateInDialog(dialog, candidate) {
+        if (!dialog || !candidate) {
+            return;
+        }
+        const lowerInput = dialog.querySelector('.combo-template-lower-strike');
+        const middleInput = dialog.querySelector('.combo-template-middle-strike');
+        const upperInput = dialog.querySelector('.combo-template-upper-strike');
+        const manualInput = dialog.querySelector('.combo-template-wing-width-manual');
+        const select = dialog.querySelector('.combo-template-wing-width-select');
+        if (lowerInput) lowerInput.value = _formatComboNumber(candidate.lower, 4);
+        if (middleInput) middleInput.value = _formatComboNumber(candidate.middle, 4);
+        if (upperInput) upperInput.value = _formatComboNumber(candidate.upper, 4);
+        if (manualInput) manualInput.value = _formatComboNumber(candidate.wingWidth, 4);
+        if (select) {
+            const option = Array.from(select.options || []).find((entry) => parseFloat(entry.value) === candidate.wingWidth);
+            select.value = option ? option.value : 'custom';
+            if (manualInput) {
+                manualInput.disabled = select.value !== 'custom';
+            }
+        }
+        _setButterflyRiskStatus(dialog, candidate.risk, '');
+    }
+
+    function _stopButterflyQuoteMonitor(dialog) {
+        if (!dialog || !dialog._butterflyQuoteTimer) {
+            return;
+        }
+        const clearTimer = globalScope.clearTimeout || (typeof clearTimeout === 'function' ? clearTimeout : null);
+        if (typeof clearTimer === 'function') {
+            clearTimer(dialog._butterflyQuoteTimer);
+        }
+        dialog._butterflyQuoteTimer = null;
+    }
+
+    function _flashButterflyQuoteRow(row) {
+        if (!row || !row.style) {
+            return;
+        }
+        const timer = globalScope.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+        row.style.backgroundColor = 'rgba(74, 222, 128, 0.35)';
+        if (typeof timer === 'function') {
+            timer(() => {
+                row.style.transition = 'background-color 0.8s ease';
+                row.style.backgroundColor = 'transparent';
+                timer(() => {
+                    row.style.transition = '';
+                }, 800);
+            }, 50);
+        }
+    }
+
+    function _formatQuoteValue(value) {
+        return Number.isFinite(value) ? _formatComboNumber(value, 2) : '...';
+    }
+
+    // One row per unique strike (the subscription-pool view): a strike that
+    // serves several candidates — wing of one, body of another — still shares
+    // a single quote per right, so per-candidate rows would just repeat it.
+    function _collectButterflyQuoteRows(candidates) {
+        const rowsByStrike = new Map();
+        (Array.isArray(candidates) ? candidates : []).forEach((candidate) => {
+            (candidate && Array.isArray(candidate.quoteRequests) ? candidate.quoteRequests : []).forEach((request) => {
+                const strike = parseFloat(request && request.strike);
+                if (!Number.isFinite(strike)) {
+                    return;
+                }
+                const key = strike.toFixed(4);
+                let row = rowsByStrike.get(key);
+                if (!row) {
+                    row = { strike, putRequest: null, callRequest: null };
+                    rowsByStrike.set(key, row);
+                }
+                if (String(request.type || '').toLowerCase() === 'put') {
+                    if (!row.putRequest) {
+                        row.putRequest = request;
+                    }
+                } else if (!row.callRequest) {
+                    row.callRequest = request;
+                }
+            });
+        });
+        return Array.from(rowsByStrike.values()).sort((left, right) => left.strike - right.strike);
+    }
+
+    function _renderButterflyQuoteRows(dialog, candidates) {
+        const tbody = dialog && dialog.querySelector('.combo-template-butterfly-quote-body');
+        if (!tbody) {
+            return;
+        }
+        const rowsHtml = [];
+        _collectButterflyQuoteRows(candidates).forEach((row) => {
+            const rowKey = _formatComboNumber(row.strike, 4);
+            rowsHtml.push(`
+                <tr data-quote-row="${rowKey}" data-strike="${_formatComboNumber(row.strike, 4)}" data-put-quote-id="${row.putRequest ? row.putRequest.id : ''}" data-call-quote-id="${row.callRequest ? row.callRequest.id : ''}" data-quote-signature="">
+                    <td class="combo-template-put-bid">${row.putRequest ? '...' : ''}</td>
+                    <td class="combo-template-put-ask">${row.putRequest ? '...' : ''}</td>
+                    <td class="combo-template-put-mid font-weight-semibold">${row.putRequest ? '...' : ''}</td>
+                    <td style="font-weight: 700; text-align: center; background: rgba(var(--primary-rgb), 0.08);">${_formatComboNumber(row.strike, 4)}</td>
+                    <td class="combo-template-call-mid font-weight-semibold">${row.callRequest ? '...' : ''}</td>
+                    <td class="combo-template-call-bid">${row.callRequest ? '...' : ''}</td>
+                    <td class="combo-template-call-ask">${row.callRequest ? '...' : ''}</td>
+                </tr>
+            `);
+        });
+        tbody.innerHTML = rowsHtml.join('');
+    }
+
+    function _getButterflyQuoteProgress(candidates) {
+        const quoteIds = new Set();
+        let receivedQuoteCount = 0;
+        (Array.isArray(candidates) ? candidates : []).forEach((candidate) => {
+            (candidate.quoteRequests || []).forEach((request) => {
+                if (!request || !request.id || quoteIds.has(request.id)) {
+                    return;
+                }
+                quoteIds.add(request.id);
+                if (_resolveQuoteDisplayById(request.id).hasQuote) {
+                    receivedQuoteCount += 1;
+                }
+            });
+        });
+        const completeCandidates = (Array.isArray(candidates) ? candidates : [])
+            .filter((candidate) => !!_evaluateButterflyCandidate(candidate));
+        return {
+            quoteCount: quoteIds.size,
+            receivedQuoteCount,
+            candidateCount: Array.isArray(candidates) ? candidates.length : 0,
+            completeCandidateCount: completeCandidates.length,
+            completeCandidates,
+        };
+    }
+
+    function _updateButterflyQuoteTable(dialog) {
+        if (!dialog || !dialog._comboContext || dialog.style.display === 'none') {
+            return;
+        }
+        const candidates = Array.isArray(dialog._butterflyCandidates) ? dialog._butterflyCandidates : [];
+        const quotePanel = dialog.querySelector('.combo-template-butterfly-quote-panel');
+        const progressEl = dialog.querySelector('.combo-template-butterfly-progress');
+        const findComboBtn = dialog.querySelector('.combo-template-find-combo-btn');
+        if (!quotePanel || candidates.length === 0) {
+            if (findComboBtn) {
+                findComboBtn.disabled = true;
+            }
+            return;
+        }
+
+        quotePanel.style.display = 'block';
+        dialog.querySelectorAll('.combo-template-butterfly-quote-body tr').forEach((row) => {
+            const putDisplay = row.dataset.putQuoteId
+                ? _resolveQuoteDisplayById(row.dataset.putQuoteId)
+                : null;
+            const callDisplay = row.dataset.callQuoteId
+                ? _resolveQuoteDisplayById(row.dataset.callQuoteId)
+                : null;
+            const signature = [
+                row.dataset.putQuoteId || '',
+                putDisplay ? putDisplay.bid : '',
+                putDisplay ? putDisplay.ask : '',
+                putDisplay ? putDisplay.mid : '',
+                row.dataset.callQuoteId || '',
+                callDisplay ? callDisplay.bid : '',
+                callDisplay ? callDisplay.ask : '',
+                callDisplay ? callDisplay.mid : '',
+            ].join(':');
+            if (row.dataset.quoteSignature && row.dataset.quoteSignature !== signature) {
+                _flashButterflyQuoteRow(row);
+            }
+            row.dataset.quoteSignature = signature;
+
+            const putBidEl = row.querySelector('.combo-template-put-bid');
+            const putAskEl = row.querySelector('.combo-template-put-ask');
+            const putMidEl = row.querySelector('.combo-template-put-mid');
+            const callBidEl = row.querySelector('.combo-template-call-bid');
+            const callAskEl = row.querySelector('.combo-template-call-ask');
+            const callMidEl = row.querySelector('.combo-template-call-mid');
+
+            if (putBidEl) putBidEl.textContent = putDisplay ? _formatQuoteValue(putDisplay.bid) : '';
+            if (putAskEl) putAskEl.textContent = putDisplay ? _formatQuoteValue(putDisplay.ask) : '';
+            if (putMidEl) putMidEl.textContent = putDisplay ? _formatQuoteValue(putDisplay.mid) : '';
+            if (callBidEl) callBidEl.textContent = callDisplay ? _formatQuoteValue(callDisplay.bid) : '';
+            if (callAskEl) callAskEl.textContent = callDisplay ? _formatQuoteValue(callDisplay.ask) : '';
+            if (callMidEl) callMidEl.textContent = callDisplay ? _formatQuoteValue(callDisplay.mid) : '';
+        });
+
+        const progress = _getButterflyQuoteProgress(candidates);
+        if (progressEl) {
+            progressEl.textContent = progress.completeCandidateCount > 0
+                ? `${progress.completeCandidateCount}/${progress.candidateCount} wings ready, ${progress.receivedQuoteCount}/${progress.quoteCount} option quotes received.`
+                : `Subscribed ${progress.quoteCount} option quotes, ${progress.receivedQuoteCount}/${progress.quoteCount} received. Waiting for a complete wing.`;
+        }
+        if (findComboBtn) {
+            findComboBtn.disabled = progress.completeCandidateCount === 0;
+            findComboBtn.title = progress.completeCandidateCount === 0
+                ? 'Wait until at least one wing has all four option quotes.'
+                : 'Pick the wing with the closest MaxProfit / MaxLoss ratio.';
+        }
+    }
+
+    function _scheduleButterflyQuoteTableRefresh(dialog) {
+        _stopButterflyQuoteMonitor(dialog);
+        const timer = globalScope.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+        if (typeof timer !== 'function') {
+            return;
+        }
+        dialog._butterflyQuoteTimer = timer(() => {
+            _updateButterflyQuoteTable(dialog);
+            if (dialog && dialog._comboContext && dialog.style.display !== 'none') {
+                _scheduleButterflyQuoteTableRefresh(dialog);
+            }
+        }, 1000);
+    }
+
+    function _resetButterflyQuoteTable(dialog, message) {
+        if (!dialog) {
+            return;
+        }
+        _stopButterflyQuoteMonitor(dialog);
+        const context = dialog._comboContext || {};
+        _clearComboTemplateQuoteRequests(context.state, context.deps);
+        dialog._butterflyCandidates = [];
+        const quotePanel = dialog.querySelector('.combo-template-butterfly-quote-panel');
+        const tbody = dialog.querySelector('.combo-template-butterfly-quote-body');
+        const progressEl = dialog.querySelector('.combo-template-butterfly-progress');
+        const findComboBtn = dialog.querySelector('.combo-template-find-combo-btn');
+        if (tbody) tbody.innerHTML = '';
+        if (quotePanel) quotePanel.style.display = 'none';
+        if (progressEl) progressEl.textContent = message || '';
+        if (findComboBtn) findComboBtn.disabled = true;
+    }
+
+    function _subscribeButterflyCandidateQuotes(dialog) {
+        const context = dialog && dialog._comboContext;
+        if (!context || !context.state) {
+            return false;
+        }
+        const candidates = _buildButterflyCandidatesFromDialog(dialog, context.state);
+        if (candidates.length === 0) {
+            _setButterflyRiskStatus(dialog, null, 'Enter a valid expiration and middle strike first.');
+            return false;
+        }
+        const quoteRequests = [];
+        candidates.forEach((candidate) => {
+            quoteRequests.push(...candidate.quoteRequests);
+        });
+        dialog._butterflyCandidates = candidates;
+        _renderButterflyQuoteRows(dialog, candidates);
+        const requestListChanged = _setComboTemplateQuoteRequests(context.state, quoteRequests);
+        if (requestListChanged && context.deps && typeof context.deps.handleLiveSubscriptions === 'function') {
+            context.deps.handleLiveSubscriptions();
+        }
+        const uniqueQuoteCount = Array.isArray(context.state.comboTemplateQuoteRequests)
+            ? context.state.comboTemplateQuoteRequests.length
+            : 0;
+        _setButterflyRiskStatus(
+            dialog,
+            null,
+            requestListChanged
+                ? `Subscribed ${uniqueQuoteCount} option quotes.`
+                : `Already subscribed ${uniqueQuoteCount} option quotes.`
+        );
+        _updateButterflyQuoteTable(dialog);
+        _scheduleButterflyQuoteTableRefresh(dialog);
+        return true;
+    }
+
+    function _findButterflyComboFromQuotes(dialog) {
+        const candidates = Array.isArray(dialog && dialog._butterflyCandidates)
+            ? dialog._butterflyCandidates
+            : [];
+        if (candidates.length === 0) {
+            _setButterflyRiskStatus(dialog, null, 'Click Subscribe first to load candidate quotes.');
+            return false;
+        }
+        const targetInput = dialog.querySelector('.combo-template-target-ratio');
+        const targetRatio = targetInput ? targetInput.value : '';
+        const selected = _chooseButterflyCandidate(candidates, targetRatio);
+        if (selected) {
+            _selectButterflyCandidateInDialog(dialog, selected);
+            return true;
+        }
+
+        _setButterflyRiskStatus(dialog, null, 'No complete wing quotes yet. Keep this dialog open while quotes arrive.');
+        _updateButterflyQuoteTable(dialog);
+        return false;
+    }
+
+    function _closeComboTemplateDialog(dialog) {
+        if (!dialog) return;
+        _stopButterflyQuoteMonitor(dialog);
+        const context = dialog._comboContext || {};
+        _clearComboTemplateQuoteRequests(context.state, context.deps);
+        dialog._butterflyCandidates = [];
+        dialog.style.display = 'none';
+        dialog._comboContext = null;
+        _setComboTemplateError(dialog, '');
+    }
+
+    function _ensureComboTemplateDialog() {
+        const doc = globalScope.document;
+        if (!doc || typeof doc.createElement !== 'function') {
+            return null;
+        }
+
+        let dialog = doc.getElementById('comboTemplateDialog');
+        if (dialog) {
+            return dialog;
+        }
+
+        dialog = doc.createElement('div');
+        dialog.id = 'comboTemplateDialog';
+        dialog.setAttribute('role', 'dialog');
+        dialog.setAttribute('aria-modal', 'true');
+        dialog.setAttribute('aria-labelledby', 'comboTemplateDialogTitle');
+        dialog.style.cssText = [
+            'position: fixed',
+            'inset: 0',
+            'z-index: 2000',
+            'display: none',
+            'align-items: center',
+            'justify-content: center',
+            'background: rgba(15, 23, 42, 0.48)',
+            'padding: 1rem',
+        ].join('; ');
+        dialog.innerHTML = `
+            <div class="combo-template-panel panel-card">
+                <div class="combo-template-header">
+                    <h3 id="comboTemplateDialogTitle" class="h5">Choose Typical Combo</h3>
+                    <button type="button" class="btn btn-secondary btn-sm combo-template-cancel-btn">Cancel</button>
+                </div>
+                <div class="combo-template-body">
+                    <div class="combo-template-section">
+                        <label class="form-label small text-muted">Strategy</label>
+                        <select class="number-input combo-template-strategy">
+                            <option value="bull_spread">Bull Spread</option>
+                            <option value="bear_spread">Bear Spread</option>
+                            <option value="straddle">Straddle</option>
+                            <option value="strangle">Strangle</option>
+                            <option value="butterfly">Butterfly</option>
+                        </select>
+                    </div>
+                    <div class="combo-template-section">
+                        <label class="form-label small text-muted">Expiration</label>
+                        <input type="date" class="number-input combo-template-expiry">
+                    </div>
+                    <div class="combo-template-field-grid">
+                        <label data-combo-field="lower">
+                            <span class="form-label small text-muted combo-template-lower-label">Lower Strike</span>
+                            <input type="number" class="number-input combo-template-lower-strike">
+                        </label>
+                        <label data-combo-field="middle">
+                            <span class="form-label small text-muted combo-template-middle-label">Middle Strike</span>
+                            <input type="number" class="number-input combo-template-middle-strike">
+                        </label>
+                        <label data-combo-field="upper">
+                            <span class="form-label small text-muted combo-template-upper-label">Upper Strike</span>
+                            <input type="number" class="number-input combo-template-upper-strike">
+                        </label>
+                    </div>
+                    <div class="combo-template-butterfly-tools" style="display: none;">
+                        <div class="combo-template-butterfly-grid">
+                            <label>
+                                <span class="form-label small text-muted">Wing Width</span>
+                                <select class="number-input combo-template-wing-width-select"></select>
+                            </label>
+                            <label>
+                                <span class="form-label small text-muted">Manual Width</span>
+                                <input type="number" class="number-input combo-template-wing-width-manual" min="0" step="1">
+                            </label>
+                            <label>
+                                <span class="form-label small text-muted">Target P/L Ratio</span>
+                                <input type="number" class="number-input combo-template-target-ratio" min="0" step="0.01" placeholder="Auto best">
+                            </label>
+                        </div>
+                        <div class="combo-template-butterfly-risk-status small text-muted" style="min-height: 1.25rem; margin-top: 0.75rem;"></div>
+                        <div class="combo-template-butterfly-actions">
+                            <button type="button" class="btn btn-secondary btn-sm combo-template-subscribe-butterfly-btn">
+                                Subscribe
+                            </button>
+                            <button type="button" class="btn btn-primary btn-sm combo-template-find-combo-btn" disabled>
+                                Find Combo
+                            </button>
+                        </div>
+                        <div class="combo-template-butterfly-quote-panel" style="display: none;">
+                            <div class="combo-template-butterfly-progress small text-muted"></div>
+                            <div class="combo-template-butterfly-quote-scroll">
+                                <table class="portfolio-table" style="margin: 0; font-size: 0.85rem; min-width: 560px;">
+                                    <thead>
+                                        <tr>
+                                            <th colspan="3" style="text-align: center;">PUT</th>
+                                            <th rowspan="2" style="text-align: center; vertical-align: middle;">Strike</th>
+                                            <th colspan="3" style="text-align: center;">CALL</th>
+                                        </tr>
+                                        <tr>
+                                            <th>Bid</th>
+                                            <th>Ask</th>
+                                            <th>Mid</th>
+                                            <th>Mid</th>
+                                            <th>Bid</th>
+                                            <th>Ask</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody class="combo-template-butterfly-quote-body"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="combo-template-error text-danger small" style="display: none;"></div>
+                </div>
+                <div class="combo-template-footer">
+                    <button type="button" class="btn btn-secondary combo-template-cancel-btn">Cancel</button>
+                    <button type="button" class="btn btn-primary combo-template-submit-btn">Create Combo</button>
+                </div>
+            </div>
+        `;
+
+        const closeButtons = dialog.querySelectorAll('.combo-template-cancel-btn');
+        closeButtons.forEach((button) => {
+            button.addEventListener('click', () => _closeComboTemplateDialog(dialog));
+        });
+
+        dialog.addEventListener('click', (event) => {
+            if (event.target === dialog) {
+                _closeComboTemplateDialog(dialog);
+            }
+        });
+
+        const strategyInput = dialog.querySelector('.combo-template-strategy');
+        if (strategyInput) {
+            strategyInput.addEventListener('change', () => {
+                if (dialog._comboContext) {
+                    _setComboTemplateDefaultInputs(dialog, dialog._comboContext.state);
+                    if (_normalizeComboStrategy(strategyInput.value) === 'butterfly') {
+                        _syncButterflyWidthControls(dialog, dialog._comboContext.state);
+                    }
+                }
+                _setComboTemplateFieldVisibility(dialog);
+                _resetButterflyQuoteTable(dialog);
+                _setComboTemplateError(dialog, '');
+            });
+        }
+
+        const wingWidthSelect = dialog.querySelector('.combo-template-wing-width-select');
+        const wingWidthManual = dialog.querySelector('.combo-template-wing-width-manual');
+        const subscribeButterflyBtn = dialog.querySelector('.combo-template-subscribe-butterfly-btn');
+        const findComboBtn = dialog.querySelector('.combo-template-find-combo-btn');
+        if (wingWidthSelect) {
+            wingWidthSelect.addEventListener('change', () => {
+                const context = dialog._comboContext || {};
+                if (wingWidthManual) {
+                    wingWidthManual.disabled = wingWidthSelect.value !== 'custom';
+                    if (wingWidthSelect.value !== 'custom') {
+                        wingWidthManual.value = wingWidthSelect.value;
+                    }
+                }
+                const width = _getButterflyWidthInputValue(dialog);
+                _applyButterflyWingWidthToDialog(dialog, context.state, width);
+                _resetButterflyQuoteTable(dialog);
+            });
+        }
+        if (wingWidthManual) {
+            wingWidthManual.addEventListener('input', () => {
+                if (wingWidthSelect && wingWidthSelect.value !== 'custom') {
+                    return;
+                }
+                const context = dialog._comboContext || {};
+                _applyButterflyWingWidthToDialog(dialog, context.state, _getButterflyWidthInputValue(dialog));
+                _setButterflyRiskStatus(dialog, null, '');
+                _resetButterflyQuoteTable(dialog);
+            });
+        }
+        ['.combo-template-middle-strike', '.combo-template-expiry'].forEach((selector) => {
+            const input = dialog.querySelector(selector);
+            if (input) {
+                input.addEventListener('change', () => {
+                    const context = dialog._comboContext || {};
+                    if (_normalizeComboStrategy(strategyInput && strategyInput.value) === 'butterfly') {
+                        _applyButterflyWingWidthToDialog(dialog, context.state, _getButterflyWidthInputValue(dialog));
+                        _setButterflyRiskStatus(dialog, null, '');
+                        _resetButterflyQuoteTable(dialog);
+                    }
+                });
+            }
+        });
+        if (subscribeButterflyBtn) {
+            subscribeButterflyBtn.addEventListener('click', () => {
+                _subscribeButterflyCandidateQuotes(dialog);
+            });
+        }
+        if (findComboBtn) {
+            findComboBtn.addEventListener('click', () => {
+                _findButterflyComboFromQuotes(dialog);
+            });
+        }
+
+        const submitBtn = dialog.querySelector('.combo-template-submit-btn');
+        if (submitBtn) {
+            submitBtn.addEventListener('click', () => {
+                const context = dialog._comboContext || {};
+                const result = applyComboTemplateToGroup(context.group, context.state, context.deps, {
+                    strategy: strategyInput ? strategyInput.value : 'bull_spread',
+                    expDate: dialog.querySelector('.combo-template-expiry')?.value,
+                    lowerStrike: dialog.querySelector('.combo-template-lower-strike')?.value,
+                    middleStrike: dialog.querySelector('.combo-template-middle-strike')?.value,
+                    upperStrike: dialog.querySelector('.combo-template-upper-strike')?.value,
+                });
+                if (!result.success) {
+                    _setComboTemplateError(dialog, result.reason || 'Unable to create this combo.');
+                    return;
+                }
+                _closeComboTemplateDialog(dialog);
+            });
+        }
+
+        if (doc.body && typeof doc.body.appendChild === 'function') {
+            doc.body.appendChild(dialog);
+        }
+        return dialog;
+    }
+
+    function openComboTemplateDialog(group, state, deps) {
+        if (!group || !Array.isArray(group.legs) || group.legs.length > 0) {
+            return false;
+        }
+
+        const dialog = _ensureComboTemplateDialog();
+        if (!dialog) {
+            return false;
+        }
+
+        dialog._comboContext = { group, state, deps };
+        _resetButterflyQuoteTable(dialog);
+        const strategyInput = dialog.querySelector('.combo-template-strategy');
+        const expiryInput = dialog.querySelector('.combo-template-expiry');
+        const step = String(_getStrikeIncrement(state));
+
+        dialog.querySelectorAll('input[type="number"]').forEach((input) => {
+            input.step = step;
+        });
+
+        if (strategyInput) {
+            strategyInput.value = 'bull_spread';
+        }
+        if (expiryInput) {
+            expiryInput.value = resolveDefaultLegExpirationDate(state, deps);
+        }
+
+        _setComboTemplateDefaultInputs(dialog, state);
+        _setComboTemplateFieldVisibility(dialog);
+        _setComboTemplateError(dialog, '');
+        dialog.style.display = 'flex';
+
+        if (strategyInput && typeof strategyInput.focus === 'function') {
+            strategyInput.focus();
+        }
+        return true;
     }
 
     function applyMarketDataToggleUi(state, group, liveToggle) {
@@ -203,6 +1405,253 @@
             }
             return Math.abs(parseFloat(leg && leg.cost) || 0) > 0;
         });
+    }
+
+    function _hasResolvedClosePrice(leg) {
+        return !!(leg
+            && leg.closePrice !== null
+            && leg.closePrice !== ''
+            && leg.closePrice !== undefined);
+    }
+
+    function _legHasOpenPosition(leg) {
+        const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
+        return pos > 0.0001 && !_hasResolvedClosePrice(leg);
+    }
+
+    function _legHasLockedEntryCost(leg) {
+        return Math.abs(parseFloat(leg && leg.cost) || 0) > 0;
+    }
+
+    function _toPositiveFiniteNumber(value) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    }
+
+    function _resolveSnapshotMidpoint(snapshot) {
+        const bid = _toPositiveFiniteNumber(snapshot && snapshot.bid);
+        const ask = _toPositiveFiniteNumber(snapshot && snapshot.ask);
+        if (bid === null || ask === null) {
+            return null;
+        }
+        return (bid + ask) / 2;
+    }
+
+    function _resolveLiveQuoteSnapshotForLeg(leg) {
+        const liveQuotes = globalScope.OptionComboWsLiveQuotes;
+        if (!liveQuotes || !leg) {
+            return null;
+        }
+
+        if (isUnderlyingLeg(leg)) {
+            if (leg.underlyingFutureId && typeof liveQuotes.getFutureQuote === 'function') {
+                return liveQuotes.getFutureQuote(leg.underlyingFutureId);
+            }
+            if (typeof liveQuotes.getUnderlyingQuote === 'function') {
+                return liveQuotes.getUnderlyingQuote();
+            }
+            return null;
+        }
+
+        if (typeof liveQuotes.getOptionQuote === 'function') {
+            return liveQuotes.getOptionQuote(leg.id);
+        }
+        return null;
+    }
+
+    function _resolveSimulatedOpenPrice(group, leg) {
+        const currentPrice = _toPositiveFiniteNumber(leg && leg.currentPrice);
+        const currentPriceSource = String(leg && leg.currentPriceSource || '').trim();
+        if (currentPriceSource === 'manual' && currentPrice !== null) {
+            return {
+                price: currentPrice,
+                source: 'manual',
+            };
+        }
+
+        const livePriceMode = _ensureLivePriceMode(group);
+        const midpointPrice = _resolveSnapshotMidpoint(_resolveLiveQuoteSnapshotForLeg(leg));
+        const portfolioMarketPrice = _toPositiveFiniteNumber(leg && leg.portfolioMarketPrice);
+
+        if (livePriceMode === 'mark' && portfolioMarketPrice !== null) {
+            return {
+                price: portfolioMarketPrice,
+                source: 'tws_portfolio',
+            };
+        }
+
+        if (midpointPrice !== null) {
+            return {
+                price: midpointPrice,
+                source: 'live_midpoint',
+            };
+        }
+
+        if (portfolioMarketPrice !== null) {
+            return {
+                price: portfolioMarketPrice,
+                source: 'tws_portfolio',
+            };
+        }
+
+        if (currentPriceSource !== 'missing' && currentPrice !== null) {
+            return {
+                price: currentPrice,
+                source: currentPriceSource || 'current_price',
+            };
+        }
+
+        return null;
+    }
+
+    function _hasBlockingOpenOrderRuntime(group) {
+        const trigger = group && group.tradeTrigger;
+        if (!trigger) {
+            return false;
+        }
+
+        const status = String(trigger.status || '').trim();
+        return trigger.pendingRequest === true
+            || status.indexOf('pending_') === 0
+            || status === 'submitted'
+            || status === 'test_submitted';
+    }
+
+    function _collectSimulatedOpenPrices(group) {
+        const entries = [];
+        let missingCount = 0;
+
+        (group && Array.isArray(group.legs) ? group.legs : []).forEach((leg) => {
+            if (!_legHasOpenPosition(leg)) {
+                return;
+            }
+
+            const resolvedPrice = _resolveSimulatedOpenPrice(group, leg);
+            if (!resolvedPrice) {
+                missingCount += 1;
+                return;
+            }
+
+            entries.push({
+                leg,
+                price: resolvedPrice.price,
+                source: resolvedPrice.source,
+            });
+        });
+
+        return {
+            entries,
+            missingCount,
+            openLegCount: entries.length + missingCount,
+        };
+    }
+
+    function describeSimulatedOpenState(group, state, activeViewMode) {
+        const renderMode = activeViewMode || (group && group.viewMode) || 'active';
+        const isHistoricalMode = !!(state && state.marketDataMode === 'historical');
+        const collected = _collectSimulatedOpenPrices(group);
+        const visible = !isHistoricalMode && renderMode === 'trial' && collected.openLegCount > 0;
+        let reason = '';
+
+        if (isHistoricalMode) {
+            reason = 'Use Enter @ Replay Day to lock historical replay entry costs.';
+        } else if (!visible) {
+            reason = renderMode === 'trial'
+                ? 'Add a non-zero open leg to enable simulated opening.'
+                : 'Simulated opening is only available in Trial mode.';
+        } else if (_hasBlockingOpenOrderRuntime(group)) {
+            reason = 'A trial-trigger order request is already active for this group.';
+        } else if (collected.missingCount > 0) {
+            reason = 'Every open leg needs a current quote before simulated opening.';
+        }
+
+        return {
+            visible,
+            disabled: !!reason,
+            reason,
+            entries: collected.entries,
+            openLegCount: collected.openLegCount,
+            missingCount: collected.missingCount,
+            marketDataMode: isHistoricalMode ? 'historical' : 'live',
+        };
+    }
+
+    function simulateOpenGroup(group, state, deps = {}) {
+        const simState = describeSimulatedOpenState(group, state, (group && group.viewMode) || 'active');
+        if (!simState.visible || simState.disabled) {
+            return {
+                success: false,
+                reason: simState.reason || 'This group cannot be simulated-opened right now.',
+                updatedLegCount: 0,
+            };
+        }
+
+        simState.entries.forEach((entry) => {
+            entry.leg.cost = entry.price;
+            entry.leg.costSource = 'simulated_open';
+            entry.leg.simulatedOpenPriceSource = entry.source;
+            entry.leg.executionReportedCost = false;
+            delete entry.leg.executionReportOrderId;
+            delete entry.leg.executionReportPermId;
+        });
+
+        group.viewMode = 'active';
+        group.syncAvgCostFromPortfolio = false;
+
+        const trigger = _ensureTradeTrigger(group);
+        if (trigger) {
+            trigger.enabled = false;
+            trigger.pendingRequest = false;
+            trigger.status = 'idle';
+            trigger.lastTriggeredAt = null;
+            trigger.lastTriggerPrice = null;
+            trigger.lastPreview = null;
+            trigger.lastError = '';
+        }
+
+        if (typeof deps.renderGroups === 'function') {
+            deps.renderGroups();
+        } else if (typeof deps.updateDerivedValues === 'function') {
+            deps.updateDerivedValues();
+        }
+
+        return {
+            success: true,
+            reason: '',
+            updatedLegCount: simState.entries.length,
+        };
+    }
+
+    function _resolveCloseLegDisabledReason(group, leg, state, deps) {
+        if (!_legHasOpenPosition(leg)) {
+            return _hasResolvedClosePrice(leg)
+                ? 'This leg is already closed.'
+                : 'This leg has no open position to close.';
+        }
+
+        const closeExecution = _ensureCloseExecution(group);
+        if (closeExecution && closeExecution.pendingRequest === true) {
+            return 'A close order request is already in progress for this group.';
+        }
+
+        const isHistoricalMode = !!(state && state.marketDataMode === 'historical');
+        const renderMode = deps && typeof deps.getRenderableGroupViewMode === 'function'
+            ? deps.getRenderableGroupViewMode(group)
+            : (group && group.viewMode) || 'active';
+
+        if (!isHistoricalMode && renderMode !== 'active') {
+            return 'Single-leg close is only available when this group is in Active mode.';
+        }
+
+        if (isHistoricalMode && !_legHasLockedEntryCost(leg)) {
+            return 'Lock this leg entry cost first with Enter @ Replay Day before closing it.';
+        }
+
+        if (!deps || typeof deps.requestCloseLegComboOrder !== 'function') {
+            return 'Single-leg close transport is unavailable.';
+        }
+
+        return '';
     }
 
     function _getSettlementUnitsPerContract(state, deps) {
@@ -393,7 +1842,9 @@
         };
 
         state.groups.push(newGroup);
-        addLegToGroupById(state, newGroup.id, generateId, deps);
+        if (deps && typeof deps.renderGroups === 'function') {
+            deps.renderGroups();
+        }
     }
 
     function removeGroup(state, groupId, deps) {
@@ -446,7 +1897,7 @@
             type: 'call',
             pos: 1,
             strike: state.underlyingPrice,
-            expDate: deps.addDays(getLegAnchorDate(state), 30),
+            expDate: resolveDefaultLegExpirationDate(state, deps),
             iv: 0.2,
             ivSource: 'manual',
             ivManualOverride: false,
@@ -544,6 +1995,16 @@
                 if (!trigger) return;
                 trigger.isExpanded = !trigger.isExpanded;
                 deps.renderGroups();
+            });
+        }
+
+        const simulateOpenBtn = card.querySelector('.simulate-open-btn');
+        if (simulateOpenBtn) {
+            simulateOpenBtn.addEventListener('click', () => {
+                const result = simulateOpenGroup(group, state, deps);
+                if (!result.success && result.reason && typeof globalScope.alert === 'function') {
+                    globalScope.alert(result.reason);
+                }
             });
         }
 
@@ -734,6 +2195,12 @@
         if (group.legs.length === 0) {
             table.style.display = 'none';
             emptyState.style.display = 'block';
+            const templateBtn = emptyState.querySelector('.combo-template-open-btn');
+            if (templateBtn) {
+                templateBtn.addEventListener('click', () => {
+                    openComboTemplateDialog(group, state, deps);
+                });
+            }
             return;
         }
 
@@ -968,7 +2435,7 @@
             || (lastPlanStage === 'underlying'
                 && closeExecution.lastPreview
                 && closeExecution.lastPreview.closePlanComplete === false);
-        const isCompleted = brokerStatus === 'Filled' && !isStagedUnderlyingClose;
+        const isCompleted = brokerStatus === 'Filled' && !isStagedUnderlyingClose && !hasOpenPosition;
 
         if (isHistoricalMode) {
             closeExecution.executionMode = 'preview';
@@ -1124,7 +2591,7 @@
                 leg.ivManualOverride = false;
             } else if (!nowStock && wasStock) {
                 leg.strike = state.underlyingPrice;
-                leg.expDate = deps.addDays(getLegAnchorDate(state), 30);
+                leg.expDate = resolveDefaultLegExpirationDate(state, deps);
                 leg.iv = 0.2;
                 leg.ivSource = 'manual';
                 leg.ivManualOverride = false;
@@ -1275,6 +2742,7 @@
 
         const closePriceInput = tr.querySelector('.close-price-input');
         const closeLabel = tr.querySelector('.close-label');
+        const closeLegBtn = tr.querySelector('.close-leg-btn');
         const assignmentBtn = tr.querySelector('.assignment-convert-btn');
         if (closePriceInput && closeLabel) {
             closePriceInput.style.display = 'block';
@@ -1288,6 +2756,25 @@
                 leg.closePrice = isNaN(val) ? null : val;
                 deps.updateDerivedValues();
             });
+        }
+
+        if (closeLegBtn) {
+            const pos = Math.abs(parseFloat(leg && leg.pos) || 0);
+            const disabledReason = _resolveCloseLegDisabledReason(group, leg, state, deps);
+            const isHistoricalMode = !!(state && state.marketDataMode === 'historical');
+            closeLegBtn.style.visibility = pos > 0.0001 ? 'visible' : 'hidden';
+            closeLegBtn.disabled = !!disabledReason;
+            closeLegBtn.textContent = _hasResolvedClosePrice(leg)
+                ? 'Closed'
+                : (isHistoricalMode ? 'Settle' : 'Close');
+            closeLegBtn.title = disabledReason || (isHistoricalMode
+                ? 'Close this single leg at the current historical replay price.'
+                : 'Preview or submit a close order for this single leg using the Group Close settings.');
+            if (!disabledReason) {
+                closeLegBtn.addEventListener('click', () => {
+                    deps.requestCloseLegComboOrder(group, leg);
+                });
+            }
         }
 
         if (assignmentBtn) {
@@ -1431,10 +2918,21 @@
         renderGroups,
         applyModeLockState,
         applyOptionAssignmentConversion,
+        resolveDefaultLegExpirationDate,
+        applyComboTemplateToGroup,
+        openComboTemplateDialog,
+        describeSimulatedOpenState,
+        simulateOpenGroup,
         bindTrialTriggerControls,
         bindCloseGroupControls,
         _test: {
             describeLegIvInput: _describeLegIvInput,
+            resolveSimulatedOpenPrice: _resolveSimulatedOpenPrice,
+            getDefaultComboStrikes: _getDefaultComboStrikes,
+            calculateButterflyRiskFromLegPrices,
+            collectButterflyQuoteRows: _collectButterflyQuoteRows,
+            buildButterflyCandidateGrid: _buildButterflyCandidateGrid,
+            chooseButterflyCandidate: _chooseButterflyCandidate,
         },
     };
     globalScope.toggleGroupCollapse = toggleGroupCollapse;

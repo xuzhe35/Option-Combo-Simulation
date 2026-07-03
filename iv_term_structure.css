@@ -377,6 +377,47 @@ body {
     margin-bottom: 14px;
 }
 
+.ivts-futures-control {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+    padding: 12px;
+    border: 1px solid rgba(216, 200, 183, 0.85);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.72);
+}
+
+.ivts-futures-field {
+    display: grid;
+    gap: 6px;
+    min-width: 180px;
+    color: var(--ivts-muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.ivts-futures-field input {
+    width: 130px;
+    padding: 9px 10px;
+    border: 1px solid var(--ivts-border);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ivts-ink);
+    font: inherit;
+    font-size: 0.95rem;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+.ivts-futures-summary {
+    color: var(--ivts-muted);
+    font-size: 0.9rem;
+    line-height: 2.4;
+}
+
 .ivts-fact {
     padding: 12px;
     border: 1px solid rgba(216, 200, 183, 0.8);

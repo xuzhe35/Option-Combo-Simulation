@@ -865,6 +865,15 @@ class IbServerMicroFamilyDefaultsTests(unittest.TestCase):
         self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MNQ']['multiplier'], '2')
         self.assertNotIn('trading_class', ib_server.SUPPORTED_LIVE_FAMILIES['MNQ'])
 
+    def test_supported_live_families_include_silver_futures_options(self):
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['SI']['underlying_sec_type'], 'FUT')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['SI']['option_sec_type'], 'FOP')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['SI']['underlying_symbol'], 'SI')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['SI']['option_symbol'], 'SI')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['SI']['exchange'], 'COMEX')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['SI']['multiplier'], '5000')
+        self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['SI']['trading_class'], 'S3T')
+
     def test_build_underlying_request_uses_micro_family_multipliers(self):
         mes_request = ib_server._build_underlying_request('MES', [{'contractMonth': '202606'}])
         self.assertEqual(mes_request['secType'], 'FUT')
@@ -879,6 +888,13 @@ class IbServerMicroFamilyDefaultsTests(unittest.TestCase):
         self.assertEqual(mnq_request['exchange'], 'CME')
         self.assertEqual(mnq_request['multiplier'], '2')
         self.assertEqual(mnq_request['contractMonth'], '202609')
+
+        si_request = ib_server._build_underlying_request('SI', [{'expDate': '20260526'}])
+        self.assertEqual(si_request['secType'], 'FUT')
+        self.assertEqual(si_request['symbol'], 'SI')
+        self.assertEqual(si_request['exchange'], 'COMEX')
+        self.assertEqual(si_request['multiplier'], '5000')
+        self.assertEqual(si_request['contractMonth'], '202605')
 
 
 class IbServerExecutionDispatchTests(unittest.TestCase):
@@ -974,7 +990,20 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             'contractMonth': exp_date[:6],
         })
 
-    def test_assignment_aware_close_plan_replaces_missing_short_put_with_underlying_close(self):
+    def _build_stock_close_leg(self, leg_id, pos, symbol='GLD'):
+        return ComboLegRequest.from_payload({
+            'id': leg_id,
+            'type': 'stock',
+            'pos': pos,
+            'secType': 'STK',
+            'symbol': symbol,
+            'underlyingSymbol': symbol,
+            'exchange': 'SMART',
+            'underlyingExchange': 'SMART',
+            'currency': 'USD',
+        })
+
+    def test_close_plan_uses_matching_tws_option_positions(self):
         adapter = IbkrExecutionAdapter(
             ib=_DummyIb(),
             client_subscriptions={},
@@ -985,12 +1014,11 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
                 {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260618', 'right': 'C', 'strike': 415, 'position': -16},
                 {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260717', 'right': 'C', 'strike': 415, 'position': 22},
                 {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260717', 'right': 'P', 'strike': 415, 'position': 24},
-                {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 1600},
             ],
         )
         request = ComboOrderRequest(
             group_id='group_gld',
-            group_name='GLD Assignment Close',
+            group_name='GLD Checked Close',
             underlying_symbol='GLD',
             underlying_contract_month='',
             execution_mode='submit',
@@ -999,7 +1027,6 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             request_source='close_group',
             legs=[
                 self._build_close_leg('short_call', 16, 'C'),
-                self._build_close_leg('assigned_put', 16, 'P'),
                 self._build_close_leg('long_call', -22, 'C', exp_date='20260717'),
                 self._build_close_leg('long_put', -24, 'P', exp_date='20260717'),
             ],
@@ -1008,17 +1035,11 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
         plan = adapter._build_assignment_aware_close_plan(request)
 
         self.assertEqual([leg.id for leg in plan['optionRequest'].legs], ['short_call', 'long_call', 'long_put'])
-        self.assertEqual(plan['underlyingLegs'][0].sec_type, 'STK')
-        self.assertEqual(plan['underlyingLegs'][0].symbol, 'GLD')
-        self.assertEqual(plan['underlyingLegs'][0].pos, -1600)
-        adjustment = plan['assignmentAdjustments'][0]
-        self.assertEqual(adjustment['optionLegId'], 'assigned_put')
-        self.assertEqual(adjustment['assignedOptionPosition'], -16)
-        self.assertEqual(adjustment['remainingOptionPosition'], 0)
-        self.assertEqual(adjustment['underlyingQuantity'], 1600)
-        self.assertEqual(adjustment['underlyingClosePosition'], -1600)
+        self.assertEqual([leg.pos for leg in plan['optionRequest'].legs], [16, -22, -24])
+        self.assertEqual(plan['underlyingLegs'], [])
+        self.assertEqual(plan['assignmentAdjustments'], [])
 
-    def test_assignment_aware_close_plan_keeps_remaining_partially_assigned_option_leg(self):
+    def test_close_plan_rejects_missing_option_instead_of_inferred_assignment(self):
         adapter = IbkrExecutionAdapter(
             ib=_DummyIb(),
             client_subscriptions={},
@@ -1026,13 +1047,12 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             supported_live_families={},
             index_exchange_fallbacks={},
             portfolio_positions_provider=lambda: [
-                {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260618', 'right': 'P', 'strike': 415, 'position': -6},
                 {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 1000},
             ],
         )
         request = ComboOrderRequest(
-            group_id='group_gld_partial',
-            group_name='GLD Partial Assignment Close',
+            group_id='group_gld_missing',
+            group_name='GLD Missing Option Close',
             underlying_symbol='GLD',
             underlying_contract_month='',
             execution_mode='submit',
@@ -1042,18 +1062,10 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             legs=[self._build_close_leg('partial_put', 16, 'P')],
         )
 
-        plan = adapter._build_assignment_aware_close_plan(request)
+        with self.assertRaisesRegex(ValueError, 'Close blocked.*may be simulated.*convert that option leg'):
+            adapter._build_assignment_aware_close_plan(request)
 
-        self.assertEqual(len(plan['optionRequest'].legs), 1)
-        self.assertEqual(plan['optionRequest'].legs[0].id, 'partial_put')
-        self.assertEqual(plan['optionRequest'].legs[0].pos, 6)
-        self.assertEqual(plan['underlyingLegs'][0].pos, -1000)
-        adjustment = plan['assignmentAdjustments'][0]
-        self.assertEqual(adjustment['assignedOptionPosition'], -10)
-        self.assertEqual(adjustment['remainingOptionPosition'], -6)
-        self.assertEqual(adjustment['underlyingQuantity'], 1000)
-
-    def test_assignment_aware_close_plan_clamps_merged_futures_underlying_demands(self):
+    def test_close_plan_rejects_partial_option_position(self):
         adapter = IbkrExecutionAdapter(
             ib=_DummyIb(),
             client_subscriptions={},
@@ -1061,94 +1073,53 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             supported_live_families={},
             index_exchange_fallbacks={},
             portfolio_positions_provider=lambda: [
-                {'account': 'U1', 'secType': 'FUT', 'symbol': 'ES', 'expDate': '202606', 'multiplier': '5', 'position': -2},
-            ],
-        )
-        assigned_fop = ComboLegRequest.from_payload({
-            'id': 'assigned_fop_call',
-            'type': 'call',
-            'pos': 2,
-            'secType': 'FOP',
-            'symbol': 'ES',
-            'underlyingSymbol': 'ES',
-            'exchange': 'CME',
-            'underlyingExchange': 'CME',
-            'currency': 'USD',
-            'multiplier': '50',
-            'underlyingMultiplier': '5',
-            'right': 'C',
-            'strike': 5000,
-            'expDate': '20260619',
-            'contractMonth': '202606',
-            'underlyingContractMonth': '202606',
-        })
-        explicit_future = ComboLegRequest.from_payload({
-            'id': 'explicit_future',
-            'type': 'future',
-            'pos': 2,
-            'secType': 'FUT',
-            'symbol': 'ES',
-            'exchange': 'GLOBEX',
-            'currency': 'USD',
-            'multiplier': '5.0',
-            'contractMonth': '202606',
-        })
-        request = ComboOrderRequest(
-            group_id='group_es_assignment',
-            group_name='ES Assignment Close',
-            underlying_symbol='ES',
-            underlying_contract_month='202606',
-            execution_mode='submit',
-            account='U1',
-            execution_intent='close',
-            request_source='close_group',
-            legs=[assigned_fop, explicit_future],
-        )
-
-        plan = adapter._build_assignment_aware_close_plan(request)
-
-        self.assertEqual(sum(leg.pos for leg in plan['underlyingLegs']), 2)
-        self.assertEqual(len(plan['underlyingLegs']), 1)
-        self.assertEqual(plan['underlyingLegs'][0].sec_type, 'FUT')
-        self.assertEqual(plan['assignmentAdjustments'][0]['underlyingClosePosition'], 2)
-        self.assertTrue(any('Only 2 of 4 requested FUT ES' in message for message in plan['messages']))
-
-    def test_assignment_close_plan_preserves_deliverable_when_underlying_nets_flat(self):
-        # Short put assigned, but the deliverable underlying already nets flat in TWS (position 0),
-        # so no underlying close order is produced. The deliverable must still be reported so the
-        # client can book the option->underlying conversion instead of leaving a phantom open leg.
-        adapter = IbkrExecutionAdapter(
-            ib=_DummyIb(),
-            client_subscriptions={},
-            qualified_underlyings={},
-            supported_live_families={},
-            index_exchange_fallbacks={},
-            portfolio_positions_provider=lambda: [
-                {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 0},
-                {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260717', 'right': 'C', 'strike': 415, 'position': 5},
+                {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260618', 'right': 'P', 'strike': 415, 'position': -6},
             ],
         )
         request = ComboOrderRequest(
-            group_id='group_gld_netted',
-            group_name='GLD Netted Assignment Close',
+            group_id='group_gld_partial',
+            group_name='GLD Partial Option Close',
             underlying_symbol='GLD',
             underlying_contract_month='',
             execution_mode='submit',
             account='U1',
             execution_intent='close',
             request_source='close_group',
-            legs=[self._build_close_leg('assigned_put', 16, 'P')],
+            legs=[self._build_close_leg('partial_put', 16, 'P')],
+        )
+
+        with self.assertRaisesRegex(ValueError, 'requested close quantity 16.*only 6'):
+            adapter._build_assignment_aware_close_plan(request)
+
+    def test_close_plan_closes_explicit_underlying_leg_when_tws_position_exists(self):
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: [
+                {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 1600},
+            ],
+        )
+        request = ComboOrderRequest(
+            group_id='group_gld_underlying',
+            group_name='GLD Underlying Close',
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='U1',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[self._build_stock_close_leg('stock_leg', -1600)],
         )
 
         plan = adapter._build_assignment_aware_close_plan(request)
 
         self.assertEqual(plan['optionRequest'].legs, [])
-        self.assertEqual(plan['underlyingLegs'], [])
-        adjustment = plan['assignmentAdjustments'][0]
-        self.assertEqual(adjustment['assignedOptionPosition'], -16)
-        self.assertEqual(adjustment['deliverableUnderlyingPosition'], 1600)
-        self.assertEqual(adjustment['underlyingClosePosition'], 0)
-        self.assertEqual(adjustment['underlyingQuantity'], 0)
+        self.assertEqual(plan['underlyingLegs'][0].id, 'stock_leg')
+        self.assertEqual(plan['underlyingLegs'][0].pos, -1600)
+        self.assertEqual(plan['assignmentAdjustments'], [])
 
     def test_test_submit_underlying_first_order_uses_guardrail_price(self):
         adapter = IbkrExecutionAdapter(
@@ -1186,7 +1157,7 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order.action, 'SELL')
         self.assertGreater(order.lmtPrice, 413.25)
 
-    async def test_preview_assignment_close_shows_underlying_stage_without_assigned_option(self):
+    async def test_preview_explicit_underlying_close_shows_underlying_stage(self):
         resolved_leg_ids = []
         adapter = IbkrExecutionAdapter(
             ib=_DummyIb(),
@@ -1209,28 +1180,54 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
 
         adapter._resolve_leg_contract_and_mark = fake_resolve
         request = ComboOrderRequest(
-            group_id='group_preview_assignment',
-            group_name='GLD Preview Assignment',
+            group_id='group_preview_underlying',
+            group_name='GLD Preview Underlying',
             underlying_symbol='GLD',
             underlying_contract_month='',
             execution_mode='preview',
             account='U1',
             execution_intent='close',
             request_source='close_group',
-            legs=[self._build_close_leg('assigned_put', 16, 'P')],
+            legs=[self._build_stock_close_leg('stock_leg', -1600)],
         )
 
         preview = await adapter.preview_combo_order(object(), request)
 
-        self.assertEqual(resolved_leg_ids, ['__assigned_underlying_assigned_put'])
+        self.assertEqual(resolved_leg_ids, ['stock_leg'])
         self.assertEqual(preview.request_source, 'close_group_underlying')
         self.assertEqual(preview.close_plan_stage, 'underlying')
         self.assertEqual(preview.close_plan_complete, False)
         self.assertEqual(preview.legs[0].sec_type, 'STK')
-        self.assertEqual(preview.assignment_adjustments[0]['optionLegId'], 'assigned_put')
+        self.assertEqual(preview.assignment_adjustments, [])
         self.assertIn('account-level TWS portfolio positions', preview.pricing_note)
 
-    async def test_validate_assignment_close_excludes_assigned_option_leg(self):
+    async def test_validate_close_rejects_missing_tws_option_position(self):
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: [
+                {'account': 'U1', 'secType': 'STK', 'symbol': 'GLD', 'position': 1600},
+            ],
+        )
+        request = ComboOrderRequest(
+            group_id='group_validate_missing',
+            group_name='GLD Validate Missing',
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='U1',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[self._build_close_leg('assigned_put', 16, 'P')],
+        )
+
+        with self.assertRaisesRegex(ValueError, 'Close blocked.*No matching TWS portfolio position'):
+            await adapter.validate_combo_order(object(), request)
+
+    async def test_validate_checked_close_includes_live_option_and_underlying_legs(self):
         validated_leg_ids = []
         adapter = IbkrExecutionAdapter(
             ib=_DummyIb(),
@@ -1265,16 +1262,16 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             request_source='close_group',
             legs=[
                 self._build_close_leg('short_call', 16, 'C'),
-                self._build_close_leg('assigned_put', 16, 'P'),
+                self._build_stock_close_leg('stock_leg', -1600),
             ],
         )
 
         result = await adapter.validate_combo_order(object(), request)
 
         self.assertTrue(result.valid)
-        self.assertEqual(validated_leg_ids, ['__assigned_underlying_assigned_put', 'short_call'])
+        self.assertEqual(validated_leg_ids, ['stock_leg', 'short_call'])
 
-    async def test_submit_closes_assignment_underlying_before_remaining_options(self):
+    async def test_submit_closes_explicit_underlying_before_remaining_options(self):
         events = []
         placed_orders = []
         preregistered_sources = []
@@ -1368,7 +1365,7 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             request_source='close_group',
             legs=[
                 self._build_close_leg('short_call', 16, 'C'),
-                self._build_close_leg('assigned_put', 16, 'P'),
+                self._build_stock_close_leg('stock_leg', -1600),
             ],
         )
 
@@ -1397,7 +1394,7 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(preregistered_sources, ['close_group_underlying', 'close_group'])
-        self.assertEqual(resolved_leg_ids, ['__assigned_underlying_assigned_put', 'short_call'])
+        self.assertEqual(resolved_leg_ids, ['stock_leg', 'short_call'])
         self.assertEqual(placed_orders[1][0].secType, 'OPT')
         self.assertEqual(placed_orders[1][1].totalQuantity, 16)
         self.assertEqual(result.order_id, 5101)
@@ -1408,8 +1405,7 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('account-level TWS portfolio positions', result.preview.close_plan_message)
         self.assertEqual(result.preview.staged_orders[0]['orderId'], 5100)
         self.assertEqual(result.preview.staged_orders[0]['orderAction'], 'SELL')
-        self.assertEqual(result.preview.assignment_adjustments[0]['optionLegId'], 'assigned_put')
-        self.assertEqual(result.preview.assignment_adjustments[0]['underlyingAvgFillPrice'], 413.2)
+        self.assertEqual(result.preview.assignment_adjustments, [])
 
     async def test_pre_registers_combo_tracking_before_settle_sleep(self):
         events = []

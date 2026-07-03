@@ -195,7 +195,7 @@ Responsibilities:
 
 - group and portfolio derived values
 - global aggregation
-- session import/export normalization
+- session import/save snapshot normalization
 - trigger configuration and runtime state rules
 - delta hedge runtime state rules and recommendation logic
 - open-combo and close-combo payload assembly
@@ -277,7 +277,7 @@ Responsibilities:
 - hosts the websocket connection lifecycle
 - delegates combo-order request/response state to `js/combo_order_transport.js`
 - delegates delta-hedge broker request/response state to `js/delta_hedge_transport.js`
-- imports and exports JSON sessions
+- imports JSON sessions and saves JSON snapshots
 - exposes `window.__optionComboApp`
 
 `js/app.js` and `js/ws_client.js` are orchestration bridges, not the main place for combo-order or delta-hedge transport state machines.

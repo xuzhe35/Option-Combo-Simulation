@@ -189,6 +189,16 @@ SUPPORTED_LIVE_FAMILIES = {
         'multiplier': '1000',
         'trading_class': 'ML3',
     },
+    'SI': {
+        'underlying_sec_type': 'FUT',
+        'option_sec_type': 'FOP',
+        'underlying_symbol': 'SI',
+        'option_symbol': 'SI',
+        'exchange': 'COMEX',
+        'currency': 'USD',
+        'multiplier': '5000',
+        'trading_class': 'S3T',
+    },
 }
 
 INDEX_EXCHANGE_FALLBACKS = {
