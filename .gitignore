@@ -15,3 +15,4 @@ http_server.log
 config.local.ini
 *.pid
 *PLANE*
+.DS_Store

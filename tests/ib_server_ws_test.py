@@ -89,10 +89,14 @@ class _FakeHistoricalReplayService:
 class _FakeIB:
     def __init__(self):
         self.req_mkt_data_calls = []
+        self.cancel_mkt_data_calls = []
 
     def reqMktData(self, contract, generic_ticks, snapshot, regulatory_snapshot):
         self.req_mkt_data_calls.append((contract, generic_ticks, snapshot, regulatory_snapshot))
         return _FakeTicker(contract)
+
+    def cancelMktData(self, contract):
+        self.cancel_mkt_data_calls.append(contract)
 
 
 class IbServerWsHandlerTests(unittest.TestCase):
@@ -581,6 +585,59 @@ class IbServerWsHandlerTests(unittest.TestCase):
         option_calls = [call for call in env['ib'].req_mkt_data_calls if call[0].secType == 'FOP']
         self.assertEqual(len(option_calls), 2)
         self.assertIs(env['client_subscriptions'][second_socket]['other_leg'], first_subs['leg_a'])
+
+    def test_handle_subscribe_upgrades_pooled_line_when_greeks_requested(self):
+        (
+            env,
+            _sent_messages,
+            _snapshot_calls,
+            _managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_env()
+
+        sockets = [_FakeWebSocket(messages=[]) for _ in range(3)]
+        for socket in sockets:
+            env['connected_clients'].add(socket)
+            env['client_subscriptions'][socket] = {}
+            env['client_subscription_settings'][socket] = {'greeks_enabled': False}
+
+        def subscribe(socket, greeks_enabled):
+            asyncio.run(dispatch_client_message(env, socket, {
+                'action': 'subscribe',
+                'underlying': {'secType': 'FUT', 'symbol': 'ES'},
+                'options': [
+                    {'id': 'leg_x', 'secType': 'FOP', 'symbol': 'ES', 'strike': 7550, 'right': 'P'},
+                ],
+                'futures': [],
+                'stocks': [],
+                'greeksEnabled': greeks_enabled,
+            }))
+
+        def option_calls():
+            return [call for call in env['ib'].req_mkt_data_calls if call[0].secType == 'FOP']
+
+        # First client opens the shared line without greeks.
+        subscribe(sockets[0], False)
+        self.assertEqual(len(option_calls()), 1)
+        self.assertEqual(option_calls()[0][1], '')
+
+        # A greeks-enabled client must not silently reuse the greeks-less
+        # line: the line is reopened once with the merged tick list.
+        subscribe(sockets[1], True)
+        self.assertEqual(len(env['ib'].cancel_mkt_data_calls), 1)
+        self.assertEqual(len(option_calls()), 2)
+        self.assertEqual(option_calls()[1][1], '106')
+        second_ticker = env['client_subscriptions'][sockets[1]]['leg_x']
+        self.assertEqual(getattr(second_ticker.contract, 'conId', None),
+                         getattr(env['ib'].cancel_mkt_data_calls[0], 'conId', None))
+
+        # Another greeks-enabled client reuses the upgraded line without churn.
+        subscribe(sockets[2], True)
+        self.assertEqual(len(env['ib'].cancel_mkt_data_calls), 1)
+        self.assertEqual(len(option_calls()), 2)
 
     def test_handle_ws_client_routes_iv_term_structure_action(self):
         (

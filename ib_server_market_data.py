@@ -266,7 +266,13 @@ def build_pending_tickers_handler(env):
     return on_pending_tickers
 
 
-def unsubscribe_client_safely(ws: Any, *, client_subscriptions: dict[Any, dict[str, Any]], ib: Any) -> None:
+def unsubscribe_client_safely(
+    ws: Any,
+    *,
+    client_subscriptions: dict[Any, dict[str, Any]],
+    ib: Any,
+    generic_ticks_by_con_id: dict[Any, set[str]] | None = None,
+) -> None:
     subs = client_subscriptions.get(ws, {})
     if not subs:
         return
@@ -289,8 +295,90 @@ def unsubscribe_client_safely(ws: Any, *, client_subscriptions: dict[Any, dict[s
             continue
         cancelled_con_ids.add(con_id)
         ib.cancelMktData(contract)
+        if generic_ticks_by_con_id is not None:
+            generic_ticks_by_con_id.pop(con_id, None)
 
     client_subscriptions[ws] = {}
+
+
+def normalize_generic_tick_set(generic_ticks: Any) -> set[str]:
+    return {part.strip() for part in str(generic_ticks or '').split(',') if part.strip()}
+
+
+def find_pooled_market_data_ticker(con_id: Any, *, client_subscriptions: dict[Any, dict[str, Any]]) -> Any:
+    if not con_id:
+        return None
+    for subs in client_subscriptions.values():
+        for ticker in subs.values():
+            contract = getattr(ticker, 'contract', None)
+            if getattr(contract, 'conId', None) == con_id:
+                return ticker
+    return None
+
+
+def req_mkt_data_pooled(
+    qualified_contract: Any,
+    generic_ticks: str = '',
+    *,
+    ib: Any,
+    client_subscriptions: dict[Any, dict[str, Any]],
+    generic_ticks_by_con_id: dict[Any, set[str]] | None = None,
+) -> Any:
+    """Request market data once per contract.
+
+    ib_insync keeps only the newest reqId per contract, so issuing a second
+    reqMktData for a contract that is already streaming leaks the earlier
+    market data line in TWS (it can never be cancelled afterwards). Reuse the
+    existing ticker instead, whether it belongs to this pass or another client.
+
+    When the new request needs generic ticks the live line was not opened with
+    (e.g. greeks tick 106), cancel the line first and reopen it with the merged
+    tick list so every subscriber shares one complete stream. ib_insync keeps a
+    single Ticker object per contract, so existing subscribers keep receiving
+    updates through the reopened line.
+    """
+    con_id = getattr(qualified_contract, 'conId', None)
+    requested_ticks = normalize_generic_tick_set(generic_ticks)
+    registry = generic_ticks_by_con_id if generic_ticks_by_con_id is not None else {}
+
+    ticker = find_pooled_market_data_ticker(con_id, client_subscriptions=client_subscriptions)
+    if ticker is None:
+        if con_id:
+            registry[con_id] = requested_ticks
+        return ib.reqMktData(qualified_contract, generic_ticks, False, False)
+
+    existing_ticks = registry.get(con_id) or set()
+    if requested_ticks - existing_ticks:
+        merged_ticks = existing_ticks | requested_ticks
+        contract = getattr(ticker, 'contract', None) or qualified_contract
+        ib.cancelMktData(contract)
+        registry[con_id] = merged_ticks
+        return ib.reqMktData(contract, ','.join(sorted(merged_ticks)), False, False)
+
+    return ticker
+
+
+def cancel_mkt_data_if_unused(
+    ticker: Any,
+    *,
+    client_subscriptions: dict[Any, dict[str, Any]],
+    ib: Any,
+    generic_ticks_by_con_id: dict[Any, set[str]] | None = None,
+) -> None:
+    """Cancel a market data line only when no tracked subscription still uses it."""
+    contract = getattr(ticker, 'contract', None)
+    if contract is None:
+        return
+    con_id = getattr(contract, 'conId', None)
+    if con_id:
+        for subs in client_subscriptions.values():
+            for other_ticker in subs.values():
+                other_contract = getattr(other_ticker, 'contract', None)
+                if getattr(other_contract, 'conId', None) == con_id:
+                    return
+    ib.cancelMktData(contract)
+    if generic_ticks_by_con_id is not None and con_id:
+        generic_ticks_by_con_id.pop(con_id, None)
 
 
 def coerce_positive_int(value: Any, default_value: int) -> int:

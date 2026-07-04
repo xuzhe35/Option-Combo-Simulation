@@ -7,6 +7,7 @@ from typing import Any
 from ib_async import Stock
 from websockets.exceptions import ConnectionClosed
 
+from ib_server_market_data import req_mkt_data_pooled
 from runtime_contracts import HistoricalBarsResponsePayload, HistoricalReplayErrorPayload, ManualUnderlyingSyncPayload
 
 
@@ -131,29 +132,14 @@ async def _handle_request_historical_snapshot(env, websocket, data, client_ip):
     await env['send_message_safe'](websocket, json.dumps(payload))
 
 
-def _find_pooled_market_data_ticker(env, con_id):
-    if not con_id:
-        return None
-    for subs in env['client_subscriptions'].values():
-        for ticker in subs.values():
-            contract = getattr(ticker, 'contract', None)
-            if getattr(contract, 'conId', None) == con_id:
-                return ticker
-    return None
-
-
 def _req_mkt_data_pooled(env, qualified_contract, generic_ticks=''):
-    """Request market data once per contract.
-
-    ib_insync keeps only the newest reqId per contract, so issuing a second
-    reqMktData for a contract that is already streaming leaks the earlier
-    market data line in TWS (it can never be cancelled afterwards). Reuse the
-    existing ticker instead, whether it belongs to this pass or another client.
-    """
-    ticker = _find_pooled_market_data_ticker(env, getattr(qualified_contract, 'conId', None))
-    if ticker is not None:
-        return ticker
-    return env['ib'].reqMktData(qualified_contract, generic_ticks, False, False)
+    return req_mkt_data_pooled(
+        qualified_contract,
+        generic_ticks,
+        ib=env['ib'],
+        client_subscriptions=env['client_subscriptions'],
+        generic_ticks_by_con_id=env.setdefault('market_data_generic_ticks_by_con_id', {}),
+    )
 
 
 async def _handle_subscribe(env, websocket, data, client_ip):

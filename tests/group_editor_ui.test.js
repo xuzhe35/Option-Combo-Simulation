@@ -766,6 +766,54 @@ module.exports = {
             },
         },
         {
+            name: 'refuses assignment conversion for a leg closed through another path',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_editor_ui.js',
+                ]);
+
+                const group = {
+                    id: 'g_assign_closed',
+                    viewMode: 'active',
+                    legs: [
+                        {
+                            id: 'put_closed',
+                            type: 'put',
+                            pos: -4,
+                            strike: 685,
+                            expDate: '2026-03-27',
+                            iv: 0.2,
+                            cost: 12.59,
+                            currentPrice: 25.12,
+                            closePrice: 3.5,
+                            closePriceSource: 'manual',
+                            underlyingFutureId: '',
+                        },
+                    ],
+                };
+
+                const converted = ctx.OptionComboGroupEditorUI.applyOptionAssignmentConversion(
+                    group,
+                    group.legs[0],
+                    { underlyingSymbol: 'SPY' },
+                    {
+                        getRenderableGroupViewMode() { return 'active'; },
+                        supportsUnderlyingLegs() { return true; },
+                        getUnderlyingProfile() { return ctx.OptionComboProductRegistry.resolveUnderlyingProfile('SPY'); },
+                        generateId() { return 'should_not_generate'; },
+                        handleLiveSubscriptions() { throw new Error('must not resubscribe'); },
+                        renderGroups() { throw new Error('must not rerender'); },
+                    }
+                );
+
+                assert.equal(converted, false);
+                assert.equal(group.legs[0].closePrice, 3.5);
+                assert.equal(group.legs[0].closePriceSource, 'manual');
+                assert.equal(group.legs.length, 1);
+            },
+        },
+        {
             name: 'retitles trigger execution modes for historical replay',
             run() {
                 const ctx = loadBrowserScripts([

@@ -6,6 +6,7 @@ from typing import Any
 
 from ib_async import Contract
 
+from ib_server_market_data import cancel_mkt_data_if_unused, req_mkt_data_pooled
 from runtime_contracts import (
     IvTermStructureCatalogPatchPayload,
     IvTermStructureErrorPayload,
@@ -816,9 +817,20 @@ async def subscribe_iv_term_structure_option_request(env, websocket, option_requ
     if qualified_option is None:
         return False
 
-    option_ticker = env['ib'].reqMktData(qualified_option, '106', False, False)
+    option_ticker = req_mkt_data_pooled(
+        qualified_option,
+        '106',
+        ib=env['ib'],
+        client_subscriptions=env['client_subscriptions'],
+        generic_ticks_by_con_id=env.setdefault('market_data_generic_ticks_by_con_id', {}),
+    )
     if websocket not in env['client_subscriptions']:
-        env['ib'].cancelMktData(option_ticker.contract)
+        cancel_mkt_data_if_unused(
+            option_ticker,
+            client_subscriptions=env['client_subscriptions'],
+            ib=env['ib'],
+            generic_ticks_by_con_id=env.setdefault('market_data_generic_ticks_by_con_id', {}),
+        )
         return False
 
     env['client_subscriptions'][websocket][sub_id] = option_ticker
@@ -1012,10 +1024,10 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             )
             expiry_selections = expand_iv_term_structure_shared_atm_to_all_expiries(
                 prioritized_expiry_rows,
-            expiry_selections,
-            shared_atm_strike,
-            option_trading_class=option_trading_class,
-        )
+                expiry_selections,
+                shared_atm_strike,
+                option_trading_class=option_trading_class,
+            )
         if not has_selected_atm:
             expiry_selections = build_iv_term_structure_global_candidate_selections(
                 prioritized_expiry_rows,
@@ -1365,7 +1377,13 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
                 )
                 break
 
-    underlying_ticker = env['ib'].reqMktData(qualified_underlying, '', False, False)
+    underlying_ticker = req_mkt_data_pooled(
+        qualified_underlying,
+        '',
+        ib=env['ib'],
+        client_subscriptions=env['client_subscriptions'],
+        generic_ticks_by_con_id=env.setdefault('market_data_generic_ticks_by_con_id', {}),
+    )
     env['client_subscriptions'][websocket]['underlying'] = underlying_ticker
     await asyncio.sleep(0.75)
     underlying_quote = env['extract_quote_snapshot'](underlying_ticker, getattr(qualified_underlying, 'secType', ''))

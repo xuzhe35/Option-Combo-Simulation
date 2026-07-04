@@ -124,6 +124,8 @@ ib = IB()
 connected_clients = set()
 # Map websocket -> { leg_id: Ticker }
 client_subscriptions = {}
+# Map conId -> set of generic tick tokens the shared market data line was opened with
+market_data_generic_ticks_by_con_id = {}
 # Map websocket -> per-client live-data preferences
 client_subscription_settings = {}
 ib_connect_task = None
@@ -1192,6 +1194,7 @@ def _build_iv_term_structure_environment():
     return {
         'ib': ib,
         'client_subscriptions': client_subscriptions,
+        'market_data_generic_ticks_by_con_id': market_data_generic_ticks_by_con_id,
         'client_subscription_settings': client_subscription_settings,
         'iv_term_structure_sync_tasks': iv_term_structure_sync_tasks,
         'send_message_safe': send_message_safe,
@@ -1377,6 +1380,7 @@ def unsubscribe_client_safely(ws):
         ws,
         client_subscriptions=client_subscriptions,
         ib=ib,
+        generic_ticks_by_con_id=market_data_generic_ticks_by_con_id,
     )
 
 
@@ -1402,6 +1406,7 @@ def _build_ws_handler_environment():
     return {
         'connected_clients': connected_clients,
         'client_subscriptions': client_subscriptions,
+        'market_data_generic_ticks_by_con_id': market_data_generic_ticks_by_con_id,
         'client_subscription_settings': client_subscription_settings,
         'historical_replay_service': historical_replay_service,
         'execution_engine': execution_engine,

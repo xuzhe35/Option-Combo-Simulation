@@ -1389,16 +1389,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         close_quantity = min(abs(close_position), int(abs(actual_position)))
         return close_quantity if close_position > 0 else -close_quantity
 
-    def _settlement_units_for_option_leg(self, leg_request):
-        sec_type = self._normalize_symbol(leg_request.sec_type)
-        if sec_type == 'FOP':
-            return 1
-        try:
-            multiplier = int(float(leg_request.multiplier or leg_request.underlying_multiplier or 100))
-        except (TypeError, ValueError):
-            multiplier = 100
-        return max(multiplier, 1)
-
     def _contract_number_key(self, value):
         if value in (None, ''):
             return ''
@@ -1492,13 +1482,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             "convert that option leg to its deliverable underlying leg first, then close the underlying leg."
         )
 
-    def _reset_assignment_underlying_allocation(self, source):
-        if (source or {}).get('kind') != 'assignment':
-            return
-        adjustment = source.get('adjustment') or {}
-        adjustment['underlyingClosePosition'] = 0
-        adjustment['underlyingQuantity'] = 0
-
     def _add_underlying_close_demand(self, aggregate, request, portfolio_items, leg_request, source, messages):
         item = self._find_portfolio_item_for_leg(leg_request, request, portfolio_items)
         if item is None:
@@ -1506,7 +1489,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 f"Skipped underlying close demand for {leg_request.id or leg_request.symbol}: "
                 f"no matching TWS portfolio position was found."
             )
-            self._reset_assignment_underlying_allocation(source)
             return
 
         key = self._portfolio_item_contract_key(item)
@@ -1520,7 +1502,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'source': source,
         })
 
-    def _append_assignment_close_plan_warnings(self, messages, assignment_adjustments, underlying_legs):
+    def _append_close_plan_warnings(self, messages, underlying_legs):
         if any('account-level TWS portfolio positions' in str(message) for message in messages):
             return
         messages.insert(
@@ -1576,7 +1558,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             direction = 1 if closeable_total > 0 else -1
             for demand in demands:
                 requested_position = int(demand.get('requestedClosePosition') or 0)
-                source = demand.get('source') or {}
                 allocated_position = 0
                 if requested_position * direction > 0 and remaining > 0:
                     allocated_quantity = min(abs(requested_position), remaining)
@@ -1584,16 +1565,9 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                     remaining -= allocated_quantity
 
                 if not allocated_position:
-                    self._reset_assignment_underlying_allocation(source)
                     continue
 
-                leg = replace(demand['leg'], pos=allocated_position)
-                if source.get('kind') == 'assignment':
-                    adjustment = source.get('adjustment') or {}
-                    adjustment['underlyingLegId'] = leg.id
-                    adjustment['underlyingClosePosition'] = allocated_position
-                    adjustment['underlyingQuantity'] = -allocated_position
-                underlying_legs.append(leg)
+                underlying_legs.append(replace(demand['leg'], pos=allocated_position))
 
         return underlying_legs
 
@@ -1615,7 +1589,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
 
         option_legs = []
         underlying_aggregate = {}
-        assignment_adjustments = []
         messages = []
 
         for leg_request in request.legs:
@@ -1668,13 +1641,13 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             option_legs.append(leg_request)
 
         underlying_legs = self._allocate_underlying_close_demands(underlying_aggregate, messages, request)
-        self._append_assignment_close_plan_warnings(messages, assignment_adjustments, underlying_legs)
+        self._append_close_plan_warnings(messages, underlying_legs)
 
         option_request = replace(request, legs=option_legs)
         return {
             'optionRequest': option_request,
             'underlyingLegs': underlying_legs,
-            'assignmentAdjustments': assignment_adjustments,
+            'assignmentAdjustments': [],
             'messages': messages,
         }
 
@@ -1686,7 +1659,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         quote,
         order,
         status_message='',
-        assignment_adjustments=None,
         staged_orders=None,
         close_plan_complete=False,
     ):
@@ -1720,7 +1692,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             close_plan_stage='underlying',
             close_plan_complete=close_plan_complete,
             close_plan_message=status_message,
-            assignment_adjustments=list(assignment_adjustments or []),
             staged_orders=list(staged_orders or []),
             legs=[preview_leg],
         )
@@ -1733,8 +1704,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         return ' '.join(parts)
 
     def _apply_close_plan_metadata(self, preview, close_plan, staged_orders=None, stage=None, complete=None, prefix=''):
-        if close_plan.get('assignmentAdjustments'):
-            preview.assignment_adjustments = close_plan.get('assignmentAdjustments') or []
         if staged_orders:
             preview.staged_orders = list(staged_orders)
         if stage:
@@ -1800,7 +1769,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             first_stage['quote'],
             first_stage['order'],
             status_message='',
-            assignment_adjustments=close_plan.get('assignmentAdjustments'),
             staged_orders=staged_orders,
             close_plan_complete=False,
         )
@@ -1971,12 +1939,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 'avgFillPrice': avg_fill_price,
             })
 
-            for adjustment in close_plan.get('assignmentAdjustments') or []:
-                if adjustment.get('underlyingLegId') == leg_request.id and avg_fill_price is not None:
-                    adjustment['underlyingAvgFillPrice'] = avg_fill_price
-                    adjustment['underlyingOrderId'] = order_id
-                    adjustment['underlyingPermId'] = perm_id
-
             filled = status == 'Filled'
             if not filled:
                 message = status_message or (
@@ -1990,7 +1952,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                     quote,
                     order,
                     status_message=message,
-                    assignment_adjustments=close_plan.get('assignmentAdjustments'),
                     staged_orders=staged_orders,
                     close_plan_complete=False,
                 )
@@ -2339,8 +2300,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         else:
             request = close_plan.get('optionRequest') or request
             if not request.legs and (
-                close_plan.get('assignmentAdjustments')
-                or close_plan.get('underlyingLegs')
+                close_plan.get('underlyingLegs')
                 or close_plan.get('messages')
             ):
                 raise ValueError(
@@ -2353,13 +2313,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             combo_contract = build_result['comboContract']
             order = build_result['order']
             preview = build_result['preview']
-            self._apply_close_plan_metadata(
-                preview,
-                close_plan,
-                stage='options' if close_plan.get('assignmentAdjustments') else None,
-                prefix='Close preview excludes assigned/exercised contracts and shows remaining live option legs.'
-                if close_plan.get('assignmentAdjustments') else '',
-            )
+            self._apply_close_plan_metadata(preview, close_plan)
         self._log_combo_preview_summary(
             f"Preview-ready groupId={request.group_id}",
             preview,
@@ -2552,7 +2506,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                     close_plan_stage='complete',
                     close_plan_complete=True,
                     close_plan_message=plan_message,
-                    assignment_adjustments=close_plan.get('assignmentAdjustments') or [],
                     staged_orders=staged_orders,
                     legs=[],
                 )
@@ -2569,8 +2522,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             request = close_plan.get('optionRequest') or request
 
         if not request.legs and (
-            close_plan.get('assignmentAdjustments')
-            or close_plan.get('underlyingLegs')
+            close_plan.get('underlyingLegs')
             or close_plan.get('messages')
         ):
             raise ValueError(
@@ -2593,13 +2545,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 prefix='Underlying leg was closed first; submitted remaining option combo.',
             )
         else:
-            self._apply_close_plan_metadata(
-                preview,
-                close_plan,
-                stage='options' if close_plan.get('assignmentAdjustments') else None,
-                prefix='Close submit excludes assigned/exercised contracts and submits remaining live option legs.'
-                if close_plan.get('assignmentAdjustments') else '',
-            )
+            self._apply_close_plan_metadata(preview, close_plan)
         resolved_legs = build_result['resolvedLegs']
         self._log_combo_preview_summary(
             f"{'Submitting TEST-ONLY combo' if request.execution_mode == 'test_submit' else 'Submitting combo'} groupId={request.group_id}",

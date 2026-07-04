@@ -1719,6 +1719,14 @@
             return false;
         }
 
+        // A leg closed by any other path (manual close price, close order fill,
+        // historical settlement) must not be convertible: converting would
+        // overwrite its recorded close price with 0, and Undo could only
+        // restore null — silently losing the user's data.
+        if (_hasResolvedClosePrice(leg) && leg.closePriceSource !== 'assignment_conversion') {
+            return false;
+        }
+
         const renderMode = deps && typeof deps.getRenderableGroupViewMode === 'function'
             ? deps.getRenderableGroupViewMode(group)
             : (group.viewMode || 'active');
