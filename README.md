@@ -48,6 +48,11 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
   - per-group and global amortized analysis
   - probability analysis
   - group-level live P&L and delta summaries when available
+- Delta Hedge:
+  - portfolio Delta aggregation for included groups and existing hedge rows
+  - STK / FUT hedge recommendations with target Delta and tolerance controls
+  - broker preview / what-if, manual submit, cancel, and clear flows
+  - optional auto-preview / auto-submit supervisor behind live hedge-order gates and risk limits
 - Historical replay:
   - historical entry date plus replay date timeline
   - separate simulation date in historical mode
@@ -67,7 +72,7 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
   - configurable DTE buckets
   - per-symbol JSON history files
 - Session persistence:
-- JSON import / save / save-as
+  - JSON import / save / save-as
   - direct save-back when the browser File System Access API is available
 
 ## Main Entry Points
@@ -143,6 +148,7 @@ Current responsibilities include:
 - managed account snapshots for live order routing
 - portfolio average-cost snapshots
 - combo validation / preview / test-submit / submit
+- delta hedge validation / preview / submit / cancel
 - managed repricing supervision
 - close-group execution
 - execution-status and execution-fill fan-out back to the browser
@@ -152,6 +158,8 @@ Current responsibilities include:
 - IB connection-status and manual connect messages
 
 `ib_server.py` starts the IB connection in the background so the process can still serve replay and fallback paths even if TWS / Gateway is not available.
+
+Live market-data streams are pooled by qualified contract id. A second subscription for an already-streaming contract reuses the existing ticker; if a later subscriber needs extra generic ticks such as option Greeks tick `106`, the stream is reopened once with the merged tick list. Manual `sync_underlying` requests use the same pool and cancel one-shot lines when no active subscription shares the contract.
 
 ### `historical_server.py`
 
@@ -392,8 +400,9 @@ Current live backend wiring includes:
   - `MES`
   - `MNQ`
   - `CL`
+  - `SI`
 
-The frontend registry knows about `GC`, `SI`, and `HG`, but if you are touching live contract-qualification logic, note that those families still need TWS verification before adding backend defaults.
+The frontend registry knows about `GC` and `HG`, but if you are touching live contract-qualification logic, note that those families still need TWS verification before adding backend defaults.
 
 ## Historical Replay
 
@@ -462,6 +471,8 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
 | `js/pricing_context.js` | quote-date / simulation-date / anchor resolution |
 | `js/pricing_core.js` | pricing source of truth |
 | `js/valuation.js` | group and portfolio derived data |
+| `js/delta_hedge_logic.js` | Delta Hedge recommendation, resting-order, and automation rules |
+| `js/delta_hedge_ui.js` | Delta Hedge panel rendering and controls |
 | `js/group_order_builder.js` | open/close combo request payload builders |
 | `js/trade_trigger_logic.js` | trigger state and order-trigger rules |
 | `js/page_capabilities.js` | page kind and optional-feature capability gating |
@@ -483,6 +494,9 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
 | `historical_data.py` | SQLite historical data access |
 | `iv_term_structure_service.py` | Python IV term-structure selection helpers |
 | `trade_execution/` | execution engine and IBKR adapter |
+| `trade_execution/adapters/ibkr_hedge.py` | single-instrument STK/FUT hedge execution helpers |
+| `trade_execution/order_tracking.py` | shared combo/hedge order tracking helpers |
+| `runtime_contracts.py` | typed shared backend payload contracts |
 | `scripts/cleanup_runtime_logs.py` | local log/pid cleanup helper |
 
 ## Tests
@@ -501,12 +515,15 @@ It currently runs the suites wired into `tests/run.js`, including:
 - product registry
 - distribution proxy config
 - IV term-structure core
+- IV term-structure page helpers
 - group order builder
 - trade trigger logic
 - BSM / amortized / valuation
 - session logic / session UI / control panel UI
 - group UI / group editor UI / hedge editor UI
 - combo order transport
+- delta hedge logic / transport / UI
+- app orchestration
 - WebSocket client
 
 Python tests also exist for selected backend helpers:
@@ -516,7 +533,10 @@ Python tests also exist for selected backend helpers:
 - `tests/order_tracking_test.py`
 - `tests/ibkr_hedge_adapter_test.py`
 - `tests/ibkr_adapter_pricing_test.py`
+- `tests/trade_execution_engine_test.py`
+- `tests/iv_term_structure_backend_test.py`
 - `tests/iv_term_structure_service_test.py`
+- `tests/smoke_delta_hedge_ws_test.py`
 
 Additional test files may exist in `tests/`, but not every file is included by the default Node runner.
 

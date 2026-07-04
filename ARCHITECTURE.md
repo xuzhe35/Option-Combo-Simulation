@@ -38,7 +38,7 @@ The main app shell owns:
 - trial trigger controls
 - close-group execution controls
 - live account selection and WebSocket endpoint controls
-- delta hedge configuration panel
+- Delta Hedge recommendation, broker preview, manual submit, cancel, clear, and guarded automation controls
 
 Locked routes:
 
@@ -109,7 +109,7 @@ Current `index.html` load order:
 30. `js/app.js`
 31. `js/ws_client.js`
 
-`chart_lab.html` keeps the same shared shell ordering where relevant, but intentionally omits the Delta Hedge modules. Its tail order is:
+`chart_lab.html` keeps the same shared shell ordering where relevant, but intentionally omits the Delta Hedge panel logic/UI. Its tail order is:
 
 1. `js/page_capabilities.js`
 2. `js/combo_order_transport.js`
@@ -197,7 +197,7 @@ Responsibilities:
 - global aggregation
 - session import/save snapshot normalization
 - trigger configuration and runtime state rules
-- delta hedge runtime state rules and recommendation logic
+- delta hedge recommendation, resting-order applicability, and automation rules
 - open-combo and close-combo payload assembly
 
 ### 4.5 UI binding and DOM writes
@@ -218,7 +218,7 @@ Responsibilities:
 - mode toggles
 - live status rendering
 - execution status rendering
-- delta hedge panel rendering
+- Delta Hedge panel rendering, manual order controls, and auto-status display
 - derived-value writes back into the DOM
 
 ### 4.6 Charts and analysis
@@ -294,7 +294,7 @@ Responsibilities:
 Responsibilities:
 
 - background IB connection lifecycle
-- live underlying, option, futures, and stock-hedge subscriptions
+- pooled live underlying, option, futures, and stock-hedge subscriptions
 - product-aware IBKR contract qualification
 - portfolio average-cost snapshots
 - managed account snapshots
@@ -303,6 +303,7 @@ Responsibilities:
 - historical replay snapshots through `HistoricalReplayService`
 - IV term-structure catalog selection and option subscriptions
 - combo validation, preview, test submit, and live submit
+- STK / FUT Delta Hedge validation, preview, submit, cancel, and active-order snapshot flows
 - managed repricing and order supervision
 - close-group execution through the same managed order path
 - execution-report attribution back into group legs
@@ -427,9 +428,9 @@ Current architecture includes:
 
 Live backend nuance:
 
-- `ib_server.py` has explicit `SUPPORTED_LIVE_FAMILIES` defaults for `ES`, `NQ`, `MES`, `MNQ`, and `CL`.
+- `ib_server.py` has explicit `SUPPORTED_LIVE_FAMILIES` defaults for `ES`, `NQ`, `MES`, `MNQ`, `CL`, and `SI`.
 - `SPX` and `NDX` use index exchange fallbacks.
-- The browser registry knows about `GC`, `SI`, and `HG`; live contract qualification may still require extra verification for those families.
+- The browser registry knows about `GC` and `HG`; live contract qualification may still require extra verification for those families.
 - `MES` and `MNQ` backend defaults intentionally omit unverified trading classes and rely on underConId-assisted qualification paths.
 
 ## 7. Backend WebSocket Responsibilities
@@ -455,6 +456,7 @@ Supporting live-backend helper modules:
   - quote extraction
   - pending-ticker fanout
   - historical-bars request serialization
+  - pooled market-data subscription / generic tick upgrade helpers
   - market-data subscription cleanup helpers
 - `ib_server_iv_term_structure.py`
   - IV term-structure subscription workflow
@@ -467,7 +469,8 @@ Supporting live-backend helper modules:
   - live underlying/options/futures/stocks
   - optional option Greeks via generic tick `106`
 - `sync_underlying`
-  - snapshot-like manual underlying refresh
+  - manual underlying refresh through the pooled market-data helper
+  - one-shot lines are canceled when no active subscription shares the contract
 - `request_historical_snapshot`
   - shared historical replay through SQLite
 - `request_historical_bars`
@@ -482,7 +485,8 @@ Supporting live-backend helper modules:
   - preview
   - test submit
   - live submit
-  - resume / concede / cancel managed orders
+  - resume / concede / cancel managed combo orders
+  - cancel hedge orders
 
 The split is intentional:
 

@@ -17,20 +17,23 @@ The real-order pipeline is now in a usable but still local-operator-oriented sta
 
 Current actual shape:
 
-- there is one real backend execution path
-- the frontend can trigger it from two business flows
-- `preview`, `test_submit`, and `submit` are now distinct runtime behaviors
+- there is one execution engine with combo and hedge branches
+- the frontend can trigger combo execution from trial-trigger and close-group flows
+- the frontend can also trigger Delta Hedge STK / FUT execution
+- combo `preview`, `test_submit`, and `submit` are distinct runtime behaviors
+- Delta Hedge has broker preview / what-if, submit, and cancel behaviors
 - managed repricing exists only for real `submit`
-- exact leg-cost attribution from IB execution reports is implemented
+- exact combo leg-cost attribution from IB execution reports is implemented
+- hedge order status / fill tracking is implemented
 - historical replay uses the same UI runtime shapes, but does not send orders to TWS
 
 In short:
 
-- live real-order flow is implemented
+- live combo and hedge order flows are implemented
 - supervision and attribution are implemented
 - recovery and long-term cleanup are still incomplete
 
-## 2. The Only Real Execution Stack
+## 2. Real Execution Stack
 
 The real TWS-touching stack is:
 
@@ -40,13 +43,15 @@ The real TWS-touching stack is:
 4. `trade_execution/models.py`
 5. `trade_execution/engine.py`
 6. `trade_execution/adapters/ibkr.py`
-7. `ib_server.py`
+7. `trade_execution/adapters/ibkr_hedge.py`
+8. `ib_server_order_tracking.py`
+9. `ib_server.py`
 
 The actual backend order adapter is:
 
 - `trade_execution/adapters/ibkr.py`
 
-That is the only place that ultimately constructs the BAG order and calls IB order APIs.
+Combo BAG construction lives in `trade_execution/adapters/ibkr.py`. Single-instrument Delta Hedge order construction is mixed into that adapter from `trade_execution/adapters/ibkr_hedge.py`.
 
 ## 3. What Can Really Touch TWS
 
@@ -82,19 +87,37 @@ These actions also affect real broker state:
 
 They do not create a new business feature flow, but they absolutely do touch the existing live order in TWS.
 
+### D. Delta Hedge flow
+
+Current live path:
+
+1. `js/valuation.js` builds portfolio Delta summary for included groups and existing hedges
+2. `js/delta_hedge_logic.js` evaluates the recommendation and automation gates
+3. `js/delta_hedge_ui.js` exposes recommendation preview, broker preview, submit, cancel, and clear controls
+4. `js/delta_hedge_transport.js` sends hedge payloads
+5. backend routes `validate_hedge_order`, `preview_hedge_order`, `submit_hedge_order`, and `cancel_hedge_order` through `trade_execution/engine.py`
+6. `trade_execution/adapters/ibkr_hedge.py` qualifies the STK / FUT contract, builds the order, runs what-if preview when available, places live hedge orders, and cancels live hedge orders
+
+Manual submit and auto-submit both use the same hedge submit action. Auto-submit is browser-supervised and gated more tightly than manual submit.
+
 ## 4. Execution Modes and Real-Order Meaning
 
-| Mode | Reaches TWS | Managed repricing | Intended meaning |
+| Mode | Places / changes live broker order | Managed repricing | Intended meaning |
 | --- | --- | --- | --- |
-| `preview` | No | No | Build preview only |
-| `test_submit` | Yes | No | Send a real BAG order with a guardrail price for inspection in TWS |
-| `submit` | Yes | Yes | Send a real BAG order and enter managed repricing supervision |
+| combo `preview` | No | No | Build combo preview only |
+| combo `test_submit` | Yes | No | Send a real BAG order with a guardrail price for inspection in TWS |
+| combo `submit` | Yes | Yes | Send a real BAG order and enter managed repricing supervision |
+| Delta Hedge broker preview | No live order | No | Validate hedge contract and run broker preview / what-if when available |
+| Delta Hedge manual submit | Yes | No | Place a real STK / FUT hedge order |
+| Delta Hedge auto-submit | Yes | No | Browser-supervised submit after a fresh matching broker preview and risk gates |
+| Delta Hedge cancel | Yes | No | Cancel an active hedge order by order id / perm id |
 | historical replay `preview` / `submit` / `test_submit` | No | No | Simulated only |
 
 Important current truth:
 
 - `test_submit` is still a real broker-facing action.
 - It is safer than `submit`, but it is not broker-isolated.
+- Delta Hedge `submit` and auto-submit are real broker-facing actions.
 - Historical replay never sends live orders to TWS, even when it uses the same runtime message shapes.
 
 ## 5. Live Safety Gates
@@ -106,6 +129,16 @@ The real-order path is intentionally behind multiple gates.
 `js/ws_client.js` blocks live submit/test-submit when:
 
 - `allowLiveComboOrders !== true`
+
+Delta Hedge submit has its own explicit switch:
+
+- `allowLiveHedgeOrders === true`
+- selected live TWS account
+- actionable recommendation
+- successful broker preview
+- no active resting hedge order
+
+Auto-submit additionally requires LMT order type, positive limit price, fresh matching broker preview, max quantity / notional / daily count checks, cooldown checks, and `deltaHedge.autoSubmitEnabled === true`.
 
 ### Runtime-mode split
 
@@ -123,6 +156,8 @@ The backend validates:
 - leg qualification
 - combo construction viability
 
+Before a Delta Hedge submit goes out, the frontend requires broker preview. The backend validates the hedge request, qualifies the STK / FUT contract, and rejects duplicate active hedge orders for the same websocket session and hedge id.
+
 ## 6. Actual Backend Responsibilities
 
 ### `trade_execution/models.py`
@@ -130,6 +165,7 @@ The backend validates:
 Defines the normalized DTOs for:
 
 - combo order request
+- hedge order request
 - preview payload
 - submit result
 - managed state metadata
@@ -144,6 +180,10 @@ Routes only these execution actions:
 - `resume_managed_combo_order`
 - `concede_managed_combo_order`
 - `cancel_managed_combo_order`
+- `validate_hedge_order`
+- `preview_hedge_order`
+- `submit_hedge_order`
+- `cancel_hedge_order`
 
 ### `trade_execution/adapters/ibkr.py`
 
@@ -153,12 +193,16 @@ Current real responsibilities:
 
 - qualify option / FOP / underlying contracts
 - build combo BAG contracts
+- qualify STK / FUT hedge contracts through `ibkr_hedge.py`
+- build single-instrument hedge orders through `ibkr_hedge.py`
 - compute combo pricing inputs from live legs
 - build preview payloads
 - run `what-if` preview when available
 - place real BAG LMT orders
+- place real STK / FUT hedge orders
 - manage repricing supervision for real `submit`
 - resume, concede, and cancel supervised orders
+- cancel live hedge orders
 
 ### `ib_server.py`
 
@@ -169,10 +213,15 @@ Current real responsibilities:
 - receive frontend WebSocket messages
 - pass execution actions into `ExecutionEngine`
 - track submitted live combo orders
+- track submitted live hedge orders
+- provide active hedge-order snapshots after reconnect
 - listen to IB status and execution events
 - push:
   - `combo_order_status_update`
   - `combo_order_fill_cost_update`
+  - `hedge_order_status_update`
+  - `hedge_order_fill_update`
+  - `hedge_order_error`
 
 ## 7. Managed Repricing: Current Real Behavior
 
@@ -234,6 +283,8 @@ This exact fill-attribution path is for real `submit`.
 
 `test_submit` still reaches TWS, but the main exact-fill write-back path is intentionally centered on the real live-submit flow.
 
+Delta Hedge fills emit `hedge_order_fill_update`; the frontend folds those broker-reported fills into hedge state instead of combo leg cost fields.
+
 ## 9. Live vs Historical Order Semantics
 
 This distinction matters a lot now and should not be blurred.
@@ -278,9 +329,14 @@ That is workable, but it means:
 
 If the page is reloaded:
 
-- old live managed-order supervision context is not fully reconstructed into the new page session
+- old live managed combo-order supervision context is not fully reconstructed into the new page session
+- active hedge-order snapshots can reattach hedge order state, but the Delta decision loop itself remains browser-supervised
 
-### D. Operator model is still local-first
+### D. Delta Hedge automation is browser-supervised
+
+The backend rejects duplicate active hedge orders for a websocket session and hedge id, but the full Delta decision authority is still in the browser.
+
+### E. Operator model is still local-first
 
 The app assumes:
 
@@ -316,7 +372,13 @@ Goal:
 
 - make preview, submit, reprice, concede, cancel, and fill attribution easier to inspect from logs or exported diagnostics
 
-### 5. Extract broker-neutral repricing policy
+### 5. Move Delta Hedge decision authority backend-side
+
+Goal:
+
+- make auto hedge decisions survive browser refreshes and produce durable backend audit records
+
+### 6. Extract broker-neutral repricing policy
 
 Goal:
 
@@ -329,13 +391,18 @@ If you want the smallest accurate reading path for real-order behavior, read in 
 1. `js/trade_trigger_logic.js`
 2. `js/group_order_builder.js`
 3. `js/ws_client.js`
-4. `trade_execution/models.py`
-5. `trade_execution/engine.py`
-6. `trade_execution/adapters/ibkr.py`
-7. `ib_server.py`
+4. `js/delta_hedge_logic.js`
+5. `js/delta_hedge_transport.js`
+6. `trade_execution/models.py`
+7. `trade_execution/engine.py`
+8. `trade_execution/adapters/ibkr.py`
+9. `trade_execution/adapters/ibkr_hedge.py`
+10. `ib_server_order_tracking.py`
+11. `ib_server.py`
 
 If you only want to inspect “what can actually change a real TWS order”, the shortest set is:
 
 - `js/ws_client.js`
 - `trade_execution/adapters/ibkr.py`
+- `trade_execution/adapters/ibkr_hedge.py`
 - `ib_server.py`

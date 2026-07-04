@@ -1,6 +1,6 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-05-04
+**Updated:** 2026-07-05
 
 ## 1. Current Product State
 
@@ -37,7 +37,8 @@ Current surfaces:
 - futures-pool panel for FOP products
 - live-order enable switch
 - live TWS account selector once accounts are discovered
-- configurable browser WS endpoint in `index.html`\n- delta hedge configuration and manual execution panel
+- configurable browser WS endpoint in `index.html`
+- delta hedge recommendation, broker preview, manual execution, cancel / clear, and guarded automation panel
 
 ### Group surface
 
@@ -64,6 +65,8 @@ Current surfaces:
   - `test_submit`
   - `submit`
 - close-group execution using the same combo-order pipeline
+- Delta Hedge STK / FUT validation, broker preview, submit, cancel, and active-order recovery snapshot
+- optional Delta Hedge auto-preview / auto-submit supervisor behind explicit live hedge-order gate, account selection, LMT-only policy, max quantity / notional / daily count limits, and cooldown checks
 - managed repricing controls:
   - continue
   - concede
@@ -171,8 +174,9 @@ Runtime product source of truth for:
 Important current nuance:
 
 - browser product coverage includes `MES`, `MNQ`, `GC`, `SI`, and `HG`
-- `ib_server.py`'s `SUPPORTED_LIVE_FAMILIES` currently hard-codes live-family defaults for `ES`, `NQ`, `MES`, `MNQ`, and `CL`
+- `ib_server.py`'s `SUPPORTED_LIVE_FAMILIES` currently hard-codes live-family defaults for `ES`, `NQ`, `MES`, `MNQ`, `CL`, and `SI`
 - `MES` / `MNQ` live defaults intentionally omit unverified `trading_class` values until concrete TWS contract descriptions are confirmed
+- `GC` and `HG` remain browser-pricing families until backend contract defaults are verified
 
 ### `js/pricing_context.js`
 
@@ -232,11 +236,31 @@ This is the main renderer for:
 
 ### `js/delta_hedge_logic.js`
 
-This is the main logic handler for delta hedging configuration, recommendation calculations, broker submission logic, and the background auto-hedge timer loop.
+This is the pure Delta Hedge decision layer.
+
+It handles:
+
+- configuration normalization
+- STK / FUT hedge recommendation sizing
+- target Delta / tolerance / proactive-buffer behavior
+- LMT auto-price helpers
+- resting-order applicability and stale-review decisions
+- auto-preview / auto-submit decision gating
+
+It does not touch DOM or WebSocket transport.
 
 ### `js/delta_hedge_ui.js`
 
-This module handles the Delta Hedge panel UI, binding configuration fields, and updating the recommendation/preview status in the DOM.
+This module handles the Delta Hedge panel UI, binding configuration fields, and updating recommendation, broker-preview, submit, cancel, clear, stale-review, and automation status in the DOM.
+
+### `js/delta_hedge_transport.js`
+
+This module owns Delta Hedge WebSocket payload construction and frontend request state transitions for:
+
+- `validate_hedge_order`
+- `preview_hedge_order`
+- `submit_hedge_order`
+- `cancel_hedge_order`
 
 ### `js/ws_client.js`
 
@@ -245,6 +269,7 @@ This remains the main frontend transport layer.
 Current responsibilities include:
 
 - live subscribe payload assembly
+- pooled manual underlying sync through `sync_underlying`
 - historical snapshot requests
 - portfolio average-cost syncing
 - managed-account syncing
@@ -267,10 +292,11 @@ This module now owns the combo-order request/response state machine for:
 Current server responsibilities:
 
 - IB connection lifecycle
-- live quote subscriptions
+- pooled live quote subscriptions, including generic-tick upgrades for Greeks
 - managed-account snapshot fan-out
 - portfolio average-cost snapshot fan-out
 - combo preview / validation / submit dispatch through `trade_execution/`
+- Delta Hedge validation / preview / submit / cancel dispatch through `trade_execution/`
 - historical replay snapshots through `HistoricalReplayService`
 - historical daily bars for Chart Lab
 - SQLite fallback bars when IB historical bars are unavailable
@@ -278,6 +304,7 @@ Current server responsibilities:
 Important operational detail:
 
 - the IB connection is started in the background so replay and fallback paths can still work if TWS is down
+- direct business flows should not call `ib.reqMktData` outside `ib_server_market_data.py`; use the pooled helper so duplicate contract streams do not leak TWS market-data lines
 
 ### `ib_server_order_tracking.py`
 
@@ -302,7 +329,9 @@ Not implemented there today:
 
 - live execution
 - managed accounts
+- Delta Hedge broker preview / submit / cancel
 - Chart Lab bar endpoint
+- IV term-structure sync
 
 ## 6. Current Known Boundaries
 
@@ -351,7 +380,8 @@ That runner currently includes the main suites wired in `tests/run.js`, such as:
 - control panel UI
 - group UI / editor UI
 - hedge editor UI
-- delta hedge logic and UI
+- delta hedge logic / transport / UI
+- app orchestration
 - WebSocket client
 
 Important nuance:
@@ -362,6 +392,7 @@ Important nuance:
 - combo-order transport coverage now lives in `tests/combo_order_transport.test.js`
 - live tracking-consumer coverage now lives in `tests/ib_server_order_tracking_test.py`
 - shared combo/hedge tracking helper coverage now lives in `tests/order_tracking_test.py`
+- hedge execution engine / adapter coverage lives in `tests/trade_execution_engine_test.py` and `tests/ibkr_hedge_adapter_test.py`
 
 ## 9. Suggested Read Orders
 
