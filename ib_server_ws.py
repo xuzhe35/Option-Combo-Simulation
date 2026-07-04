@@ -7,7 +7,7 @@ from typing import Any
 from ib_async import Stock
 from websockets.exceptions import ConnectionClosed
 
-from ib_server_market_data import req_mkt_data_pooled
+from ib_server_market_data import cancel_mkt_data_if_unused, req_mkt_data_pooled
 from runtime_contracts import HistoricalBarsResponsePayload, HistoricalReplayErrorPayload, ManualUnderlyingSyncPayload
 
 
@@ -252,17 +252,25 @@ async def _handle_sync_underlying(env, websocket, data, client_ip):
         logging.error(f"Failed to manual sync underlying {env['describe_contract_request'](underlying_request)}")
         return
 
-    ticker = env['ib'].reqMktData(qualified_underlying, '', False, False)
-    await asyncio.sleep(0.5)
-    quote = env['extract_quote_snapshot'](ticker, getattr(qualified_underlying, 'secType', ''))
+    ticker = _req_mkt_data_pooled(env, qualified_underlying)
+    try:
+        await asyncio.sleep(0.5)
+        quote = env['extract_quote_snapshot'](ticker, getattr(qualified_underlying, 'secType', ''))
 
-    if quote is not None:
-        payload: ManualUnderlyingSyncPayload = {
-            'underlyingPrice': quote['mark'],
-            'underlyingQuote': quote,
-            'options': {},
-        }
-        await env['send_message_safe'](websocket, json.dumps(payload))
+        if quote is not None:
+            payload: ManualUnderlyingSyncPayload = {
+                'underlyingPrice': quote['mark'],
+                'underlyingQuote': quote,
+                'options': {},
+            }
+            await env['send_message_safe'](websocket, json.dumps(payload))
+    finally:
+        cancel_mkt_data_if_unused(
+            ticker,
+            client_subscriptions=env['client_subscriptions'],
+            ib=env['ib'],
+            generic_ticks_by_con_id=env.setdefault('market_data_generic_ticks_by_con_id', {}),
+        )
 
 
 async def _handle_request_historical_bars(env, websocket, data, client_ip):

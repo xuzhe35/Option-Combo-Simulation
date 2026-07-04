@@ -3,6 +3,7 @@ import json
 import pathlib
 import sys
 import unittest
+from unittest.mock import AsyncMock, patch
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -638,6 +639,78 @@ class IbServerWsHandlerTests(unittest.TestCase):
         subscribe(sockets[2], True)
         self.assertEqual(len(env['ib'].cancel_mkt_data_calls), 1)
         self.assertEqual(len(option_calls()), 2)
+
+    def test_sync_underlying_reuses_existing_pooled_line(self):
+        (
+            env,
+            sent_messages,
+            _snapshot_calls,
+            _managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_env()
+
+        first_socket = _FakeWebSocket(messages=[])
+        second_socket = _FakeWebSocket(messages=[])
+        for socket in (first_socket, second_socket):
+            env['client_subscriptions'][socket] = {}
+            env['client_subscription_settings'][socket] = {'greeks_enabled': False}
+
+        asyncio.run(dispatch_client_message(env, first_socket, {
+            'action': 'subscribe',
+            'underlying': {'secType': 'FUT', 'symbol': 'ES'},
+            'options': [],
+            'futures': [],
+            'stocks': [],
+        }))
+
+        self.assertEqual(len(env['ib'].req_mkt_data_calls), 1)
+        first_ticker = env['client_subscriptions'][first_socket]['underlying']
+
+        with patch('ib_server_ws.asyncio.sleep', new=AsyncMock()):
+            asyncio.run(dispatch_client_message(env, second_socket, {
+                'action': 'sync_underlying',
+                'underlying': {'secType': 'FUT', 'symbol': 'ES'},
+            }))
+
+        self.assertEqual(len(env['ib'].req_mkt_data_calls), 1)
+        self.assertEqual(len(env['ib'].cancel_mkt_data_calls), 0)
+        self.assertIs(env['client_subscriptions'][first_socket]['underlying'], first_ticker)
+        self.assertEqual(sent_messages[-1][1]['underlyingPrice'], 500.5)
+
+    def test_sync_underlying_cancels_unshared_one_shot_line(self):
+        (
+            env,
+            sent_messages,
+            _snapshot_calls,
+            _managed_snapshot_calls,
+            _cancel_iv_calls,
+            _unsubscribe_calls,
+            _ensure_connect_calls,
+            _active_hedge_snapshot_calls,
+        ) = self._build_env()
+
+        websocket = _FakeWebSocket(messages=[])
+        env['client_subscriptions'][websocket] = {}
+        env['client_subscription_settings'][websocket] = {'greeks_enabled': False}
+
+        with patch('ib_server_ws.asyncio.sleep', new=AsyncMock()):
+            asyncio.run(dispatch_client_message(env, websocket, {
+                'action': 'sync_underlying',
+                'underlying': {'secType': 'STK', 'symbol': 'SPY'},
+            }))
+
+        self.assertEqual(len(env['ib'].req_mkt_data_calls), 1)
+        self.assertEqual(env['ib'].req_mkt_data_calls[0][1], '')
+        self.assertEqual(len(env['ib'].cancel_mkt_data_calls), 1)
+        self.assertEqual(
+            getattr(env['ib'].cancel_mkt_data_calls[0], 'conId', None),
+            getattr(env['ib'].req_mkt_data_calls[0][0], 'conId', None),
+        )
+        self.assertEqual(env.get('market_data_generic_ticks_by_con_id', {}), {})
+        self.assertEqual(sent_messages[-1][1]['underlyingPrice'], 500.5)
 
     def test_handle_ws_client_routes_iv_term_structure_action(self):
         (
