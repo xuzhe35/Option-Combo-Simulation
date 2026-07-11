@@ -491,8 +491,10 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
 | `js/pricing_context.js` | quote-date / simulation-date / anchor resolution |
 | `js/pricing_core.js` | pricing source of truth |
 | `js/valuation.js` | group and portfolio derived data |
+| `js/order_safety.js` | canonical order intents, preview binding, and position-impact analysis |
+| `js/order_confirmation_ui.js` | shared fail-closed live-order confirmation Dialog |
 | `js/delta_hedge_logic.js` | Delta Hedge recommendation, resting-order, and automation rules |
-| `js/delta_hedge_ui.js` | Delta Hedge panel rendering and controls |
+| `js/delta_hedge_ui.js` | Delta Hedge configuration dialog, global status banner, and execution controls |
 | `js/group_order_builder.js` | open/close combo request payload builders |
 | `js/trade_trigger_logic.js` | trigger state and order-trigger rules |
 | `js/page_capabilities.js` | page kind and optional-feature capability gating |
@@ -516,6 +518,7 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
 | `trade_execution/` | execution engine and IBKR adapter |
 | `trade_execution/adapters/ibkr_hedge.py` | single-instrument STK/FUT hedge execution helpers |
 | `trade_execution/order_tracking.py` | shared combo/hedge order tracking helpers |
+| `trade_execution/safety.py` | one-time payload- and position-bound execution authorization |
 | `runtime_contracts.py` | typed shared backend payload contracts |
 | `scripts/cleanup_runtime_logs.py` | local log/pid cleanup helper |
 

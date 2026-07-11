@@ -301,6 +301,7 @@ def _record_hedge_order_submission(websocket, request, result):
         'timeInForce': getattr(preview, 'time_in_force', None) or request.time_in_force,
         'contractMonth': getattr(preview, 'contract_month', None) or request.contract_month,
         'multiplier': getattr(preview, 'multiplier', None) or request.multiplier,
+        'deltaPerUnit': request.delta_per_unit,
         'currentNetDelta': getattr(preview, 'current_net_delta', None)
             if getattr(preview, 'current_net_delta', None) is not None else request.current_net_delta,
         'projectedNetDelta': getattr(preview, 'projected_net_delta', None)
@@ -482,9 +483,10 @@ def _has_active_hedge_order_for_request(websocket, request):
         if tracking_identity in seen_tracking_ids:
             continue
         seen_tracking_ids.add(tracking_identity)
-        if tracking.get('websocket') is not websocket:
-            continue
         if str(tracking.get('hedgeId') or '').strip() != hedge_id:
+            continue
+        request_account = str(getattr(request, 'account', '') or '').strip()
+        if request_account and str(tracking.get('account') or '').strip() != request_account:
             continue
         if _is_terminal_hedge_tracking(tracking):
             continue

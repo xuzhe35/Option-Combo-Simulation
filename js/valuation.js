@@ -450,7 +450,8 @@
 
     function computeHedgeDerivedData(hedge) {
         const hasLivePnl = hedge.currentPriceSource !== 'missing' && hedge.currentPrice > 0;
-        const pnl = hasLivePnl ? (hedge.currentPrice - hedge.cost) * hedge.pos : 0;
+        const multiplier = normalizeFiniteNumber(hedge && hedge.multiplier, 1);
+        const pnl = hasLivePnl ? (hedge.currentPrice - hedge.cost) * hedge.pos * multiplier : 0;
         const hedgeDelta = computeHedgeDelta(hedge);
 
         return {

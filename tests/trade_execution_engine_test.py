@@ -203,6 +203,7 @@ class ExecutionEngineHedgeRoutingTests(unittest.TestCase):
         submit_payload = asyncio.run(engine.handle_hedge_action(None, {
             **base_payload,
             "action": "submit_hedge_order",
+            "executionPlanToken": preview_payload["preview"]["executionPlanToken"],
         }))
 
         self.assertEqual(preview_payload["action"], "hedge_order_preview_result")
@@ -210,6 +211,47 @@ class ExecutionEngineHedgeRoutingTests(unittest.TestCase):
         self.assertEqual(submit_payload["action"], "hedge_order_submit_result")
         self.assertEqual(submit_payload["order"]["orderId"], 1234)
         self.assertEqual([call[0] for call in adapter.calls], ["preview", "submit"])
+
+    def test_hedge_authorization_binds_broker_quantized_preview_price(self):
+        class _QuantizingHedgeAdapter(_HedgeAdapterStub):
+            async def preview_hedge_order(self, websocket, request):
+                preview = await super().preview_hedge_order(websocket, request)
+                preview.limit_price = 5125.25
+                preview.price_increment = 0.25
+                return preview
+
+        adapter = _QuantizingHedgeAdapter()
+        engine = ExecutionEngine(adapter)
+        websocket = object()
+        request = {
+            "hedgeId": "delta_es",
+            "hedgeName": "ES Delta Hedge",
+            "secType": "FUT",
+            "symbol": "ES",
+            "exchange": "CME",
+            "currency": "USD",
+            "contractMonth": "202609",
+            "orderAction": "BUY",
+            "quantity": 1,
+            "orderType": "LMT",
+            "limitPrice": 5125.13,
+            "executionMode": "submit",
+            "account": "DU12345",
+        }
+
+        preview = asyncio.run(engine.handle_hedge_action(
+            websocket, {**request, "action": "preview_hedge_order"}
+        ))
+        submit = asyncio.run(engine.handle_hedge_action(websocket, {
+            **request,
+            "action": "submit_hedge_order",
+            "limitPrice": preview["preview"]["limitPrice"],
+            "executionPlanToken": preview["preview"]["executionPlanToken"],
+        }))
+
+        self.assertEqual(preview["preview"]["limitPrice"], 5125.25)
+        self.assertEqual(submit["action"], "hedge_order_submit_result")
+        self.assertEqual(adapter.calls[-1][2].limit_price, 5125.25)
 
     def test_hedge_submit_calls_hedge_tracking_callback(self):
         adapter = _HedgeAdapterStub()
@@ -222,8 +264,7 @@ class ExecutionEngineHedgeRoutingTests(unittest.TestCase):
         )
         websocket = object()
 
-        payload = asyncio.run(engine.handle_hedge_action(websocket, {
-            "action": "submit_hedge_order",
+        request = {
             "hedgeId": "delta_spy",
             "hedgeName": "SPY Delta Hedge",
             "secType": "STK",
@@ -237,6 +278,12 @@ class ExecutionEngineHedgeRoutingTests(unittest.TestCase):
             "executionMode": "submit",
             "account": "DU12345",
             "requestSource": "delta_hedge_manual",
+        }
+        preview = asyncio.run(engine.handle_hedge_action(websocket, {**request, "action": "preview_hedge_order"}))
+        payload = asyncio.run(engine.handle_hedge_action(websocket, {
+            **request,
+            "action": "submit_hedge_order",
+            "executionPlanToken": preview["preview"]["executionPlanToken"],
         }))
 
         self.assertEqual(payload["action"], "hedge_order_submit_result")
@@ -259,8 +306,7 @@ class ExecutionEngineHedgeRoutingTests(unittest.TestCase):
             ),
         )
 
-        payload = asyncio.run(engine.handle_hedge_action(websocket, {
-            "action": "submit_hedge_order",
+        request = {
             "hedgeId": "delta_spy",
             "hedgeName": "SPY Delta Hedge",
             "secType": "STK",
@@ -274,6 +320,12 @@ class ExecutionEngineHedgeRoutingTests(unittest.TestCase):
             "executionMode": "submit",
             "account": "DU12345",
             "requestSource": "delta_hedge_auto_submit",
+        }
+        preview = asyncio.run(engine.handle_hedge_action(websocket, {**request, "action": "preview_hedge_order"}))
+        payload = asyncio.run(engine.handle_hedge_action(websocket, {
+            **request,
+            "action": "submit_hedge_order",
+            "executionPlanToken": preview["preview"]["executionPlanToken"],
         }))
 
         self.assertEqual(payload["action"], "hedge_order_error")
@@ -281,7 +333,7 @@ class ExecutionEngineHedgeRoutingTests(unittest.TestCase):
         self.assertEqual(payload["requestAction"], "submit_hedge_order")
         self.assertEqual(payload["requestSource"], "delta_hedge_auto_submit")
         self.assertIn("Active hedge order", payload["message"])
-        self.assertEqual(adapter.calls, [])
+        self.assertEqual([call[0] for call in adapter.calls], ["preview"])
 
     def test_routes_hedge_cancel_without_parsing_order_request(self):
         adapter = _HedgeAdapterStub()

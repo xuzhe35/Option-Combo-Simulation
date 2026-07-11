@@ -20,6 +20,7 @@ function buildHarness(options = {}) {
     let flashCalls = 0;
     let confirmationContext = null;
     let comboSubmissionConfirmationContext = null;
+    let sharedOrderConfirmationContext = null;
 
     const ctx = loadBrowserScripts(
         [
@@ -42,6 +43,14 @@ function buildHarness(options = {}) {
         ctx.OptionComboGroupEditorUI = {
             openComboSubmissionConfirmationDialog(context) {
                 comboSubmissionConfirmationContext = context;
+                return true;
+            },
+        };
+    }
+    if (options.showSharedOrderConfirmationDialog === true) {
+        ctx.OptionComboOrderConfirmationUI = {
+            open(context) {
+                sharedOrderConfirmationContext = context;
                 return true;
             },
         };
@@ -150,6 +159,9 @@ function buildHarness(options = {}) {
         get comboSubmissionConfirmationContext() {
             return comboSubmissionConfirmationContext;
         },
+        get sharedOrderConfirmationContext() {
+            return sharedOrderConfirmationContext;
+        },
     };
 }
 
@@ -186,7 +198,7 @@ module.exports = {
                     ],
                     hedges: [],
                 };
-                const harness = buildHarness({ state });
+                const harness = buildHarness({ state, showComboSubmissionConfirmationDialog: true });
 
                 harness.api.requestTrialGroupComboOrder(state.groups[0]);
 
@@ -211,6 +223,9 @@ module.exports = {
                             tradeTrigger: {
                                 enabled: true,
                                 executionMode: 'submit',
+                                repriceThreshold: 0.02,
+                                concessionRatio: 0.2,
+                                timeInForce: 'GTC',
                                 pendingRequest: true,
                                 status: 'pending_validation',
                                 lastPreview: null,
@@ -224,7 +239,10 @@ module.exports = {
                     ],
                     hedges: [],
                 };
-                const harness = buildHarness({ state });
+                const harness = buildHarness({ state, showComboSubmissionConfirmationDialog: true });
+                harness.api.requestTrialGroupComboOrder(state.groups[0]);
+                assert.equal(harness.sent[0].action, 'validate_combo_order');
+                harness.sent.length = 0;
 
                 const handled = harness.api._test.applyComboOrderValidationResult({
                     action: 'combo_order_validation_result',
@@ -232,15 +250,56 @@ module.exports = {
                     validation: {
                         valid: true,
                         executionMode: 'submit',
+                        executionPlanToken: 'plan-open-submit',
                     },
                 });
 
                 assert.equal(handled, true);
+                assert.equal(harness.sent.length, 0);
+                state.groups[0].tradeTrigger.repriceThreshold = 0.05;
+                state.groups[0].tradeTrigger.concessionRatio = 0;
+                state.groups[0].tradeTrigger.timeInForce = 'DAY';
+                harness.comboSubmissionConfirmationContext.onConfirm();
                 assert.equal(harness.sent.length, 1);
                 assert.equal(harness.sent[0].action, 'submit_combo_order');
+                assert.equal(harness.sent[0].executionPlanToken, 'plan-open-submit');
                 assert.equal(harness.sent[0].executionIntent, 'open');
+                assert.equal(harness.sent[0].managedRepriceThreshold, 0.02);
+                assert.equal(harness.sent[0].managedConcessionRatio, 0.2);
+                assert.equal(harness.sent[0].timeInForce, 'GTC');
                 assert.equal(state.groups[0].tradeTrigger.status, 'pending_submit');
                 assert.equal(state.groups[0].tradeTrigger.pendingRequest, true);
+            },
+        },
+        {
+            name: 'describes combo confirmation as managed dynamic pricing',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY', allowLiveComboOrders: true,
+                    selectedLiveComboOrderAccount: 'DU1', portfolioPositionsConnected: true,
+                    portfolioPositions: [], hedges: [],
+                    groups: [{
+                        id: 'managed_combo', viewMode: 'trial',
+                        tradeTrigger: {
+                            enabled: true, executionMode: 'submit', repriceThreshold: 0.02,
+                            concessionRatio: 0.2, timeInForce: 'GTC', pendingRequest: false,
+                        },
+                        legs: [{ id: 'leg_1', type: 'call', pos: 1, strike: 670, expDate: '2026-04-02' }],
+                    }],
+                };
+                const harness = buildHarness({ state, showSharedOrderConfirmationDialog: true });
+                harness.api.requestTrialGroupComboOrder(state.groups[0]);
+                harness.api._test.applyComboOrderValidationResult({
+                    action: 'combo_order_validation_result', groupId: 'managed_combo',
+                    validation: { valid: true, executionMode: 'submit', executionPlanToken: 'managed-plan' },
+                });
+
+                const intent = harness.sharedOrderConfirmationContext.intent;
+                assert.equal(intent.orderType, 'MANAGED');
+                assert.match(intent.orderDescription, /server dynamic pricing/i);
+                assert.equal(intent.timeInForce, 'GTC');
+                assert.equal(intent.managedRepriceThreshold, 0.02);
+                assert.equal(intent.managedConcessionRatio, 0.2);
             },
         },
         {
@@ -274,7 +333,7 @@ module.exports = {
                 harness.api._test.applyComboOrderValidationResult({
                     action: 'combo_order_validation_result',
                     groupId: 'new_group',
-                    validation: { valid: true, executionMode: 'submit', legs: [] },
+                    validation: { valid: true, executionMode: 'submit', legs: [], executionPlanToken: 'plan-position-warning' },
                 });
 
                 assert.equal(harness.sent.length, 1);

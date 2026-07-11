@@ -766,7 +766,7 @@ function runDeltaHedgeAutoSupervisor(derivedData = _latestPortfolioDerivedData) 
     const hasActiveRestingOrder = typeof deltaHedgeLogic.hasActiveRestingHedgeOrder === 'function'
         && deltaHedgeLogic.hasActiveRestingHedgeOrder(runtime);
     const now = new Date();
-    const decision = deltaHedgeLogic.evaluateDeltaHedgeAutomation({
+    let decision = deltaHedgeLogic.evaluateDeltaHedgeAutomation({
         deltaHedge: runtime,
         recommendation,
         liveMode: state.marketDataMode !== 'historical',
@@ -779,6 +779,19 @@ function runDeltaHedgeAutoSupervisor(derivedData = _latestPortfolioDerivedData) 
         lastPreviewAt: runtime.lastPreviewAt,
         now,
     });
+    if (decision && decision.action === 'submit') {
+        const safety = typeof OptionComboOrderSafety !== 'undefined' ? OptionComboOrderSafety : null;
+        if (!safety || typeof safety.buildHedgeIntent !== 'function' || typeof safety.analyzePositionImpact !== 'function') {
+            decision = { ...decision, action: 'blocked', reason: 'order_safety_unavailable' };
+        } else {
+            const impact = safety.analyzePositionImpact(safety.buildHedgeIntent(state, recommendation), state);
+            if (impact.available !== true) {
+                decision = { ...decision, action: 'blocked', reason: 'position_snapshot_unavailable' };
+            } else if ((impact.warnings || []).length > 0) {
+                decision = { ...decision, action: 'blocked', reason: 'position_conflict_requires_confirmation' };
+            }
+        }
+    }
 
     runtime.autoLastDecision = decision;
     runtime.autoStatus = decision.reason || decision.action || '';

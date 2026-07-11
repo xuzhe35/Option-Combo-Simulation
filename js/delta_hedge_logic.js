@@ -25,6 +25,11 @@
         return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
     }
 
+    function parseNonNegativeNumber(value, fallback) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+    }
+
     function parsePositiveInteger(value, fallback) {
         const parsed = Number(value);
         return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
@@ -119,7 +124,7 @@
             ...raw,
             enabled: raw.enabled === true,
             targetDelta: parseFiniteNumber(raw.targetDelta || raw.target_delta, defaults.targetDelta),
-            tolerance: parsePositiveNumber(raw.tolerance, defaults.tolerance),
+            tolerance: parseNonNegativeNumber(raw.tolerance, defaults.tolerance),
             proactiveBuffer: Math.max(0, parseFiniteNumber(
                 raw.proactiveBuffer || raw.proactive_buffer,
                 defaults.proactiveBuffer

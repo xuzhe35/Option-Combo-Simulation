@@ -38,7 +38,8 @@ Current surfaces:
 - live-order enable switch
 - live TWS account selector once accounts are discovered
 - configurable browser WS endpoint in `index.html`
-- delta hedge recommendation, broker preview, manual execution, cancel / clear, and guarded automation panel
+- Delta Hedge dialog beside Enable Greeks, persistent global operating status, broker preview, manual execution, cancel / clear, and guarded automation
+- shared fail-closed Order Intent, position-impact, confirmation, and one-time backend authorization for Open Combo and Delta Hedge
 
 ### Group surface
 
@@ -253,7 +254,7 @@ It does not touch DOM or WebSocket transport.
 
 ### `js/delta_hedge_ui.js`
 
-This module handles the Delta Hedge panel UI, binding configuration fields, and updating recommendation, broker-preview, submit, cancel, clear, stale-review, and automation status in the DOM.
+This module handles the Delta Hedge configuration dialog and persistent global status banner, including configuration bindings plus recommendation, broker-preview, submit, cancel, clear, stale-review, and automation status updates in the DOM.
 
 ### `js/delta_hedge_transport.js`
 

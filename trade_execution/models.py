@@ -48,6 +48,7 @@ class HedgeOrderRequest:
     projected_net_delta: Optional[float] = None
     target_lower: Optional[float] = None
     target_upper: Optional[float] = None
+    execution_plan_token: str = ""
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "HedgeOrderRequest":
@@ -81,6 +82,7 @@ class HedgeOrderRequest:
             projected_net_delta=_parse_optional_float(payload.get("projectedNetDelta") or payload.get("projected_net_delta")),
             target_lower=_parse_optional_float(payload.get("targetLower") or payload.get("target_lower")),
             target_upper=_parse_optional_float(payload.get("targetUpper") or payload.get("target_upper")),
+            execution_plan_token=str(payload.get("executionPlanToken") or payload.get("execution_plan_token") or "").strip(),
         )
 
 

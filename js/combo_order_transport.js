@@ -784,7 +784,7 @@
             return payload;
         }
 
-        function _sendValidatedComboSubmit(group, executionMode) {
+        function _sendValidatedComboSubmit(group, executionMode, frozenPayload = null) {
             if (!group) {
                 return false;
             }
@@ -806,10 +806,12 @@
             }
 
             const tradeTriggerLogic = _getTradeTriggerLogicApi();
-            const payload = tradeTriggerLogic
-                && typeof tradeTriggerLogic.buildComboOrderRequestPayload === 'function'
-                ? tradeTriggerLogic.buildComboOrderRequestPayload(group, _getState(), executionMode)
-                : null;
+            const payload = frozenPayload && typeof frozenPayload === 'object'
+                ? _clonePayload(frozenPayload)
+                : (tradeTriggerLogic
+                    && typeof tradeTriggerLogic.buildComboOrderRequestPayload === 'function'
+                    ? tradeTriggerLogic.buildComboOrderRequestPayload(group, _getState(), executionMode)
+                    : null);
 
             if (!payload) {
                 _markTradeTriggerError(group, 'Unable to build combo submit payload.');
@@ -817,8 +819,17 @@
                 return false;
             }
 
+            payload.action = 'submit_combo_order';
+            payload.executionMode = executionMode;
+
             const trigger = _getTradeTrigger(group);
             if (!trigger) {
+                return false;
+            }
+            payload.executionPlanToken = String(trigger.executionPlanToken || '').trim();
+            if (!payload.executionPlanToken) {
+                _markTradeTriggerError(group, 'Execution authorization is missing or expired. Validate again.');
+                _renderGroups();
                 return false;
             }
 
@@ -826,6 +837,7 @@
             trigger.lastError = '';
             trigger.status = executionMode === 'test_submit' ? 'pending_test_submit' : 'pending_submit';
             _sendPayload(payload);
+            trigger.executionPlanToken = '';
             _renderGroups();
             return true;
         }
@@ -1440,18 +1452,23 @@
             }
 
             const ui = globalScope.OptionComboGroupEditorUI;
+            const sharedConfirmation = globalScope.OptionComboOrderConfirmationUI;
             const showDialog = ui && typeof ui.openComboSubmissionConfirmationDialog === 'function'
                 ? ui.openComboSubmissionConfirmationDialog
                 : null;
-            if (!showDialog) {
-                return _sendValidatedComboSubmit(group, nextMode);
-            }
             const pendingPayload = runtime.pendingValidationPayload;
             if (!pendingPayload) {
                 _markTradeTriggerError(group, 'Validated order payload is unavailable. Preview again.', runtimeKind);
                 _renderGroups();
                 return true;
             }
+            pendingPayload.executionPlanToken = String(validation.executionPlanToken || '').trim();
+            if (!pendingPayload.executionPlanToken) {
+                _markTradeTriggerError(group, 'Validated execution authorization is missing. Validate again.', runtimeKind);
+                _renderGroups();
+                return true;
+            }
+            runtime.executionPlanToken = pendingPayload.executionPlanToken;
             const checker = globalScope.OptionComboLegPositionCheck;
             const positionWarnings = checker && typeof checker.findOrderReductions === 'function'
                 ? checker.findOrderReductions(
@@ -1465,7 +1482,7 @@
                 : [];
             runtime.pendingRequest = true;
             runtime.status = 'awaiting_confirmation';
-            const opened = showDialog({
+            const confirmationContext = {
                 group,
                 validation,
                 payload: pendingPayload,
@@ -1475,7 +1492,7 @@
                 onConfirm: () => {
                     runtime.pendingRequest = false;
                     runtime.pendingValidationPayload = null;
-                    return _sendValidatedComboSubmit(group, nextMode);
+                    return _sendValidatedComboSubmit(group, nextMode, pendingPayload);
                 },
                 onCancel: () => {
                     runtime.pendingRequest = false;
@@ -1484,7 +1501,38 @@
                     runtime.lastError = '';
                     _renderGroups();
                 },
-            });
+            };
+            let opened = false;
+            if (sharedConfirmation && typeof sharedConfirmation.open === 'function') {
+                opened = sharedConfirmation.open({
+                    title: 'Confirm Combo Order',
+                    expiresAt: Number(validation.executionPlanExpiresAtEpochMs) > 0
+                        ? new Date(Number(validation.executionPlanExpiresAtEpochMs)).toLocaleTimeString()
+                        : '',
+                    intent: {
+                        kind: 'combo',
+                        source: pendingPayload.requestSource || 'combo_order',
+                        ownerType: 'group',
+                        ownerId: group.id,
+                        account: pendingPayload.account,
+                        orderType: 'MANAGED',
+                        orderDescription: 'Managed · server dynamic pricing',
+                        timeInForce: pendingPayload.timeInForce || 'DAY',
+                        managedRepriceThreshold: pendingPayload.managedRepriceThreshold,
+                        managedConcessionRatio: pendingPayload.managedConcessionRatio,
+                        legs: pendingPayload.legs || [],
+                    },
+                    positionImpact: {
+                        available: state.portfolioPositionsConnected === true,
+                        warnings: positionWarnings,
+                        blockingReason: 'The latest TWS position snapshot is unavailable.',
+                    },
+                    onConfirm: confirmationContext.onConfirm,
+                    onCancel: confirmationContext.onCancel,
+                });
+            } else if (showDialog) {
+                opened = showDialog(confirmationContext);
+            }
             if (opened === false) {
                 runtime.pendingRequest = false;
                 runtime.pendingValidationPayload = null;

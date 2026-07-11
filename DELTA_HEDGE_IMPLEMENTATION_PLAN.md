@@ -22,6 +22,9 @@ Current capabilities:
 - manual `Cancel` and terminal/stale `Clear`
 - optional auto-preview / auto-submit supervisor
 - active hedge-order snapshot after reconnect
+- shared allocation-aware position-impact confirmation before manual submit
+- one-time backend execution authorization bound to session, payload, TTL, and TWS position snapshot
+- FUT fill attribution, multiplier-aware Delta/P&L, and futures quote subscriptions
 
 Out of scope today:
 
@@ -242,7 +245,7 @@ Manual `sync_underlying` also uses the pooled helper. If it opens a one-shot lin
 ## Current Boundaries
 
 - Auto-submit is still frontend-supervised. Browser continuity matters.
-- Backend duplicate checks prevent active hedge-order duplication for the same websocket and hedge id, but the backend does not yet own the full Delta decision loop.
+- Backend duplicate checks are account + hedge-id scoped across live browser sessions; the backend still does not own the full Delta decision loop.
 - There is no hedge-specific repricing loop.
 - The app assumes a local operator and local backend.
 - `test_submit` wording applies to combo orders; Delta Hedge has preview and submit, not combo-style `test_submit`.
