@@ -495,16 +495,56 @@ module.exports = {
                         managedState: 'stopped_max_reprices',
                         canContinueRepricing: true,
                         canConcedePricing: true,
+                        managedManualConcessionStep: 0.25,
                     },
                 });
 
                 assert.equal(actionState.actions[0].label, 'Continue Auto-Repricing');
-                assert.equal(actionState.actions[1].kind, 'concede_select');
+                assert.equal(actionState.actions[1].kind, 'concede_step');
+                assert.equal(actionState.actions[1].label, 'Chase 1 Step');
+                assert.equal(actionState.actions[1].stepValue, 0.25);
+                const manualChaseHtml = ctx.OptionComboGroupUI.renderTriggerAction(actionState.actions[1]);
+                assert.match(manualChaseHtml, /trial-trigger-concede-step-input/);
+                assert.match(manualChaseHtml, /value="0\.25"/);
+                assert.match(manualChaseHtml, /Chase 1 Step/);
+                assert.equal(actionState.actions[2].kind, 'concede_select');
                 assert.equal(
-                    actionState.actions[1].options.map(option => option.label).join('|'),
+                    actionState.actions[2].options.map(option => option.label).join('|'),
                     'Concede 10%|Concede 20%|Concede 30%|Concede 50%|Concede 75%|Concede 90%'
                 );
-                assert.equal(actionState.actions[2].label, 'Cancel Order');
+                assert.equal(actionState.actions[3].label, 'Cancel Order');
+            },
+        },
+        {
+            name: 'keeps concession action signature stable across managed reprice snapshots',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_ui.js',
+                ]);
+
+                const watching = ctx.OptionComboGroupUI.resolveTriggerActionState({
+                    lastPreview: {
+                        orderId: 1637,
+                        status: 'Submitted',
+                        managedState: 'watching',
+                        canContinueRepricing: false,
+                        canConcedePricing: true,
+                    },
+                });
+                const repricing = ctx.OptionComboGroupUI.resolveTriggerActionState({
+                    lastPreview: {
+                        orderId: 1637,
+                        status: 'Submitted',
+                        managedState: 'repricing',
+                        workingLimitPrice: 2.24,
+                        latestComboMid: 2.31,
+                        canContinueRepricing: false,
+                        canConcedePricing: true,
+                    },
+                });
+
+                assert.equal(watching.signature, repricing.signature);
             },
         },
         {
@@ -556,6 +596,16 @@ module.exports = {
                         },
                     }),
                     'Confirming close-order broker state...'
+                );
+
+                assert.equal(
+                    ctx.OptionComboGroupUI.formatCloseExecutionStatus({
+                        status: 'plan_cancelled',
+                        lastPreview: {
+                            closePlanConfirmationStatus: 'cancelled',
+                        },
+                    }),
+                    'Close Plan cancelled — no order sent'
                 );
             },
         },

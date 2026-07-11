@@ -50,6 +50,7 @@
     function _createDefaultCloseExecution() {
         return {
             executionMode: 'preview',
+            strategy: 'auto',
             repriceThreshold: 0.01,
             timeInForce: 'DAY',
             isExpanded: false,
@@ -116,6 +117,11 @@
         next.executionMode = ['preview', 'test_submit', 'submit'].includes(normalizedExecutionMode)
             ? normalizedExecutionMode
             : 'preview';
+
+        const normalizedStrategy = String(next.strategy || '').trim().toLowerCase();
+        next.strategy = ['auto', 'combo'].includes(normalizedStrategy)
+            ? normalizedStrategy
+            : 'auto';
 
         const parsedThreshold = parseFloat(next.repriceThreshold);
         const validThresholds = _getValidRepriceThresholds();
@@ -409,6 +415,7 @@
         const normalized = _normalizeCloseExecution(closeExecution);
         return {
             executionMode: normalized.executionMode,
+            strategy: normalized.strategy,
             repriceThreshold: normalized.repriceThreshold,
             timeInForce: normalized.timeInForce,
             isExpanded: normalized.isExpanded,
@@ -450,6 +457,33 @@
 
     function normalizeGreeksEnabled(value) {
         return value === true;
+    }
+
+    function normalizeSimTimeBasis(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        return ['calendar', 'trading', 'weighted'].includes(normalized) ? normalized : 'calendar';
+    }
+
+    function normalizeSimWeekendWeight(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return 0.3;
+        }
+        return Math.min(1, Math.max(0, parsed));
+    }
+
+    // The single weekend-variance weight (λ) the pricing clock runs on:
+    // calendar = 1 (TWS/legacy behavior), trading = 0, weighted = the
+    // user-configured value.
+    function resolveSimWeekendWeight(simTimeBasis, simWeekendWeight) {
+        const basis = normalizeSimTimeBasis(simTimeBasis);
+        if (basis === 'calendar') {
+            return 1;
+        }
+        if (basis === 'trading') {
+            return 0;
+        }
+        return normalizeSimWeekendWeight(simWeekendWeight);
     }
 
     function groupHasDeterministicCost(group) {
@@ -517,6 +551,8 @@
             historicalAvailableEndDate: '',
             interestRate: importedState.interestRate !== undefined ? importedState.interestRate : 0.03,
             ivOffset: importedState.ivOffset || 0,
+            simTimeBasis: normalizeSimTimeBasis(importedState.simTimeBasis),
+            simWeekendWeight: normalizeSimWeekendWeight(importedState.simWeekendWeight),
             greeksEnabled: normalizeGreeksEnabled(importedState.greeksEnabled),
             deltaHedge: _normalizeDeltaHedgeConfig(importedState.deltaHedge),
             primaryControlPanelCollapsed: importedState.primaryControlPanelCollapsed === true,
@@ -683,6 +719,9 @@
         normalizeGroupLivePriceMode,
         normalizeHistoricalAutoCloseAtExpiry,
         normalizeGreeksEnabled,
+        normalizeSimTimeBasis,
+        normalizeSimWeekendWeight,
+        resolveSimWeekendWeight,
         groupHasDeterministicCost,
         resolveGroupViewModeChange,
         getRenderableGroupViewMode,

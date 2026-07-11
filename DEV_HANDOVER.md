@@ -15,7 +15,7 @@ Current surfaces:
 - `ib_server_order_tracking.py` for combo/hedge tracking payloads and IB event consumers
 - `ib_server_market_data.py` for live quote fanout and historical-bars helpers
 - `ib_server_iv_term_structure.py` for IV term-structure live sync helpers
-- `historical_server.py` for SQLite replay snapshots only
+- `historical_server.py` for historical replay snapshots only (chains/bars via the shared options-chain-service, rates via `sqlite_spy/rates.db`)
 
 ## 2. What Is Actually Implemented
 
@@ -55,10 +55,12 @@ Current surfaces:
   - `amortized`
   - `settlement`
 - per-group portfolio average-cost sync toggle
+- per-group and global TWS Leg Exists Check with signed quantity comparison
 - assignment / exercise conversion into deliverable underlying legs
 
 ### Execution workflows
 
+- live open/close confirmation warns when account-level TWS netting may reduce an existing position used by another Group
 - trigger conditions in trial mode
 - trigger execution modes:
   - `preview`
@@ -76,7 +78,7 @@ Current surfaces:
 
 ### Historical replay
 
-- SQLite replay snapshots
+- replay snapshots via the shared options-chain-service (`Options DB/chain_service`, http://127.0.0.1:8750) plus local `sqlite_spy/rates.db` for rates
 - historical date-range metadata
 - replay-date stepping
 - historical risk-free rate hydration
@@ -299,7 +301,7 @@ Current server responsibilities:
 - Delta Hedge validation / preview / submit / cancel dispatch through `trade_execution/`
 - historical replay snapshots through `HistoricalReplayService`
 - historical daily bars for Chart Lab
-- SQLite fallback bars when IB historical bars are unavailable
+- chain-service fallback bars when IB historical bars are unavailable
 
 Important operational detail:
 

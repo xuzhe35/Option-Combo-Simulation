@@ -4446,7 +4446,7 @@ module.exports = {
                 assert.equal(state.groups[0].tradeTrigger.lastPreview.account, 'F1234567');
                 assert.equal(state.groups[0].tradeTrigger.lastPreview.permId, 12345);
                 assert.equal(state.groups[0].tradeTrigger.status, 'test_submitted');
-                assert.equal(renderCalls, 1);
+                assert.equal(renderCalls, 0);
                 assert.equal(updateCalls, 1);
             },
         },
@@ -4522,7 +4522,7 @@ module.exports = {
                     /available funds are insufficient/i
                 );
                 assert.equal(state.groups[0].tradeTrigger.lastPreview.permId, 429367627);
-                assert.equal(renderCalls, 1);
+                assert.equal(renderCalls, 0);
                 assert.equal(updateCalls, 1);
             },
         },
@@ -4674,7 +4674,7 @@ module.exports = {
                 assert.equal(state.groups[0].tradeTrigger.status, 'submitted');
                 assert.equal(state.groups[0].tradeTrigger.lastError, '');
                 assert.equal(state.groups[0].tradeTrigger.lastPreview.managedState, 'confirming_terminal');
-                assert.equal(renderCalls, 1);
+                assert.equal(renderCalls, 0);
                 assert.equal(updateCalls, 1);
             },
         },
@@ -4826,7 +4826,7 @@ module.exports = {
                 assert.equal(state.groups[0].tradeTrigger.lastPreview.latestComboMid, 2.31);
                 assert.equal(state.groups[0].tradeTrigger.lastPreview.repricingCount, 1);
                 assert.equal(state.groups[0].tradeTrigger.status, 'submitted');
-                assert.equal(renderCalls, 1);
+                assert.equal(renderCalls, 0);
                 assert.equal(updateCalls, 1);
             },
         },

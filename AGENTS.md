@@ -13,7 +13,7 @@ Frontend surfaces:
 Backend entry points:
 
 - `ib_server.py` for live IBKR data, live execution, Chart Lab bars, IV term-structure sync, and shared historical replay fallback paths
-- `historical_server.py` for lightweight SQLite historical replay only
+- `historical_server.py` for lightweight historical replay only (chains/bars via the shared options-chain-service at http://127.0.0.1:8750; rates via sqlite_spy/rates.db)
 
 Do not assume a bare `python` command will work in every shell, especially on Windows or inside sandboxed agent sessions.
 
@@ -60,6 +60,7 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 ### macOS / POSIX
 
 - main startup: `start_option_combo_mac.command`
+- historical replay workspace: `start_historical_replay_mac.command` (auto-starts the shared options-chain-service when it is down)
 - shell startup: `start_option_combo.sh`
 - IB bridge dependency install: `install_ib_bridge_deps_mac.command`
 - runtime log cleanup: `cleanup_logs_mac.command`
@@ -85,7 +86,7 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 
 - Live / shared backend entry point: `ib_server.py`
   - starts IB connection in the background
-  - can still serve historical replay and SQLite daily-bar fallback when TWS/Gateway is unavailable
+  - can still serve historical replay and chain-service daily-bar fallback when TWS/Gateway is unavailable
   - handles live subscriptions, futures/stock hedge subscriptions, portfolio avg-cost updates, managed accounts, combo execution, Chart Lab daily bars, and IV term-structure sync
 
 - Historical replay-only backend entry point: `historical_server.py`
@@ -94,7 +95,7 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
   - returns empty `portfolio_avg_cost_update`
   - does not provide live subscriptions, execution, Chart Lab bars, or IV term-structure sync
 
-- SQLite access is mainly through `historical_data.py` and `historical_replay_service.py`.
+- Historical data access is mainly through `historical_data.py` and `historical_replay_service.py` (options-chain-service HTTP + local rates.db).
 
 ## Agent Workflow Guidance
 

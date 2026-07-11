@@ -91,6 +91,18 @@ class _HedgeAdapterStub:
         }
 
 
+class _ClosePlanAdapterStub:
+    def __init__(self):
+        self.calls = []
+
+    async def cancel_close_plan_confirmation(self, websocket, raw_data):
+        self.calls.append((websocket, raw_data))
+        return {
+            "revoked": True,
+            "status": "cancelled",
+        }
+
+
 class HedgeOrderModelTests(unittest.TestCase):
     def test_parses_hedge_order_request_without_combo_fields(self):
         request = HedgeOrderRequest.from_payload({
@@ -285,6 +297,28 @@ class ExecutionEngineHedgeRoutingTests(unittest.TestCase):
         self.assertEqual(payload["hedgeId"], "delta_spy")
         self.assertEqual(payload["orderStatus"]["status"], "PendingCancel")
         self.assertEqual(adapter.calls[0][0], "cancel")
+
+
+class ExecutionEngineClosePlanRoutingTests(unittest.TestCase):
+    def test_routes_close_plan_cancel_without_parsing_combo_request(self):
+        adapter = _ClosePlanAdapterStub()
+        engine = ExecutionEngine(adapter)
+        websocket = object()
+
+        payload = asyncio.run(engine.handle_combo_action(websocket, {
+            "action": "cancel_close_plan",
+            "groupId": "group_close",
+            "account": "DU12345",
+            "confirmationTargetMode": "submit",
+            "closePlanToken": "one-time-token",
+        }))
+
+        self.assertEqual(payload["action"], "combo_order_close_plan_cancel_result")
+        self.assertEqual(payload["groupId"], "group_close")
+        self.assertTrue(payload["closePlan"]["revoked"])
+        self.assertEqual(payload["closePlan"]["status"], "cancelled")
+        self.assertIs(adapter.calls[0][0], websocket)
+        self.assertEqual(adapter.calls[0][1]["closePlanToken"], "one-time-token")
 
 
 if __name__ == "__main__":

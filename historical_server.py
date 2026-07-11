@@ -22,8 +22,11 @@ config.read('config.ini')
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_HOST = '127.0.0.1'
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
-HISTORICAL_SQLITE_DB = os.path.abspath(
-    config.get('historical', 'sqlite_db_path', fallback=os.path.join('sqlite_spy', 'spy_options.db'))
+CHAIN_SERVICE_URL = config.get(
+    'historical', 'chain_service_url', fallback='http://127.0.0.1:8750'
+).strip()
+RATES_SQLITE_DB = os.path.abspath(
+    config.get('historical', 'rates_sqlite_db_path', fallback=os.path.join('sqlite_spy', 'rates.db'))
 )
 
 if CONFIGURED_WS_HOST not in ('127.0.0.1', 'localhost'):
@@ -38,9 +41,26 @@ elif CONFIGURED_WS_HOST != WS_HOST:
     )
 
 historical_replay_service = HistoricalReplayService(
-    HISTORICAL_SQLITE_DB,
-    logger=logging.getLogger('historical_replay.sqlite'),
+    CHAIN_SERVICE_URL,
+    RATES_SQLITE_DB,
+    logger=logging.getLogger('historical_replay.chain_service'),
 )
+
+try:
+    health = historical_replay_service.store.check_service()
+    logging.info(
+        "Options chain service OK at %s (symbols: %s)",
+        CHAIN_SERVICE_URL,
+        ', '.join(health.get('symbols', [])),
+    )
+except Exception as exc:
+    logging.warning(
+        "Options chain service is NOT reachable at %s — historical replay "
+        "requests will fail until it is started "
+        "(Options DB/chain_service: python3 chain_server.py). Error: %s",
+        CHAIN_SERVICE_URL,
+        exc,
+    )
 
 
 async def send_message_safe(ws, message):

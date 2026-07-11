@@ -334,6 +334,21 @@ body {
     border-color: #efcfb2;
 }
 
+.ivts-btn-danger {
+    background: #fff0ed;
+    color: var(--ivts-error);
+    border-color: #dfa99f;
+}
+
+.ivts-btn-danger:hover:not(:disabled) {
+    background: #fbe1dc;
+    border-color: var(--ivts-error);
+}
+
+.ivts-api-reset-btn {
+    grid-column: 1 / -1;
+}
+
 .ivts-card-body {
     padding: 16px 18px 18px;
 }
@@ -375,6 +390,44 @@ body {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
     margin-bottom: 14px;
+}
+
+.ivts-subscription-control {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+
+.ivts-subscription-field {
+    display: grid;
+    gap: 6px;
+    min-width: 230px;
+    color: var(--ivts-muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.ivts-subscription-field select {
+    width: 230px;
+    max-width: 100%;
+    padding: 9px 10px;
+    border: 1px solid var(--ivts-border);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ivts-ink);
+    font: inherit;
+    font-size: 0.95rem;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+.ivts-subscription-summary {
+    color: var(--ivts-muted);
+    font-size: 0.9rem;
+    line-height: 2.4;
 }
 
 .ivts-futures-control {

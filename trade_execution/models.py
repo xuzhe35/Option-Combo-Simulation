@@ -215,6 +215,9 @@ class ComboLegRequest:
     exp_date: str
     contract_month: str
     underlying_contract_month: str
+    observed_bid: Optional[float] = None
+    observed_ask: Optional[float] = None
+    observed_mark: Optional[float] = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "ComboLegRequest":
@@ -236,6 +239,9 @@ class ComboLegRequest:
             exp_date=str(payload.get("expDate") or payload.get("expiry") or ""),
             contract_month=str(payload.get("contractMonth") or ""),
             underlying_contract_month=str(payload.get("underlyingContractMonth") or ""),
+            observed_bid=_parse_optional_float(payload.get("observedBid") or payload.get("observed_bid")),
+            observed_ask=_parse_optional_float(payload.get("observedAsk") or payload.get("observed_ask")),
+            observed_mark=_parse_optional_float(payload.get("observedMark") or payload.get("observed_mark")),
         )
 
 
@@ -252,6 +258,11 @@ class ComboOrderRequest:
     managed_reprice_threshold: Optional[float] = None
     managed_concession_ratio: Optional[float] = None
     time_in_force: str = "DAY"
+    close_strategy: str = "auto"
+    observed_underlying_price: Optional[float] = None
+    equivalent_close_max_otm_ask: float = 0.02
+    close_confirmation_target_mode: str = ""
+    close_plan_token: str = ""
     profile: dict[str, Any] = field(default_factory=dict)
     legs: list[ComboLegRequest] = field(default_factory=list)
 
@@ -273,6 +284,20 @@ class ComboOrderRequest:
                 payload.get("managedConcessionRatio") or payload.get("managed_concession_ratio")
             ),
             time_in_force=str(payload.get("timeInForce") or payload.get("time_in_force") or "DAY").upper(),
+            close_strategy=str(payload.get("closeStrategy") or payload.get("close_strategy") or "auto").strip().lower(),
+            observed_underlying_price=_parse_optional_float(
+                payload.get("observedUnderlyingPrice") or payload.get("observed_underlying_price")
+            ),
+            equivalent_close_max_otm_ask=(
+                _parse_optional_float(
+                    payload.get("equivalentCloseMaxOtmAsk") or payload.get("equivalent_close_max_otm_ask")
+                )
+                or 0.02
+            ),
+            close_confirmation_target_mode=str(
+                payload.get("confirmationTargetMode") or payload.get("close_confirmation_target_mode") or ""
+            ).strip().lower(),
+            close_plan_token=str(payload.get("closePlanToken") or payload.get("close_plan_token") or "").strip(),
             profile=dict(payload.get("profile") or {}),
             legs=[ComboLegRequest.from_payload(item) for item in (payload.get("legs") or [])],
         )
@@ -340,6 +365,12 @@ class ComboOrderPreview:
     close_plan_message: Optional[str] = None
     assignment_adjustments: list[dict[str, Any]] = field(default_factory=list)
     staged_orders: list[dict[str, Any]] = field(default_factory=list)
+    close_plan_token: Optional[str] = None
+    close_plan_generated_at: Optional[str] = None
+    close_plan_expires_at: Optional[str] = None
+    close_plan_legs: list[dict[str, Any]] = field(default_factory=list)
+    close_plan_orders: list[dict[str, Any]] = field(default_factory=list)
+    close_plan_adjustments: list[dict[str, Any]] = field(default_factory=list)
     legs: list[ComboPreviewLeg] = field(default_factory=list)
     what_if: Optional[dict[str, Any]] = None
 
@@ -402,6 +433,18 @@ class ComboOrderPreview:
             payload["assignmentAdjustments"] = self.assignment_adjustments
         if self.staged_orders:
             payload["stagedOrders"] = self.staged_orders
+        if self.close_plan_token:
+            payload["closePlanToken"] = self.close_plan_token
+        if self.close_plan_generated_at:
+            payload["closePlanGeneratedAt"] = self.close_plan_generated_at
+        if self.close_plan_expires_at:
+            payload["closePlanExpiresAt"] = self.close_plan_expires_at
+        if self.close_plan_legs:
+            payload["closePlanLegs"] = self.close_plan_legs
+        if self.close_plan_orders:
+            payload["closePlanOrders"] = self.close_plan_orders
+        if self.close_plan_adjustments:
+            payload["closePlanAdjustments"] = self.close_plan_adjustments
         if self.what_if is not None:
             payload["whatIf"] = self.what_if
         return payload

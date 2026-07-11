@@ -28,6 +28,10 @@ except ModuleNotFoundError:
 from ib_server_iv_term_structure import (
     handle_iv_term_structure_subscription,
     merge_iv_term_structure_chain_fields,
+    normalize_max_option_streams,
+    resolve_iv_term_structure_common_selections_from_candidates,
+    run_iv_term_structure_option_sync,
+    subscribe_iv_term_structure_option_request,
 )
 
 
@@ -41,9 +45,11 @@ class _FakeOptionChain:
 
 
 class _FakeIB:
-    def __init__(self, chains_by_con_id=None):
+    def __init__(self, chains_by_con_id=None, contract_details_by_key=None):
         self.secdef_calls = []
         self.chains_by_con_id = dict(chains_by_con_id or {})
+        self.contract_detail_calls = []
+        self.contract_details_by_key = dict(contract_details_by_key or {})
 
     def isConnected(self):
         return True
@@ -55,8 +61,276 @@ class _FakeIB:
         self.secdef_calls.append((symbol, exchange, sec_type, con_id))
         return self.chains_by_con_id.get(con_id, [])
 
+    async def reqContractDetailsAsync(self, contract):
+        key = (
+            getattr(contract, 'lastTradeDateOrContractMonth', ''),
+            float(getattr(contract, 'strike', 0)),
+        )
+        self.contract_detail_calls.append(key)
+        return self.contract_details_by_key.get(key, [])
+
 
 class IvTermStructureBackendTests(unittest.TestCase):
+    def test_option_stream_limit_keeps_complete_call_put_pairs(self):
+        self.assertEqual(normalize_max_option_streams(None), 10)
+        self.assertEqual(normalize_max_option_streams(11), 10)
+        self.assertEqual(normalize_max_option_streams(20), 20)
+        self.assertEqual(normalize_max_option_streams(0), 0)
+        self.assertEqual(normalize_max_option_streams('all'), 0)
+
+    def test_shared_atm_probe_uses_exact_nearest_strike_contracts(self):
+        def detail(expiry, right, con_id):
+            contract = type('QualifiedContract', (), {
+                'conId': con_id,
+                'lastTradeDateOrContractMonth': expiry,
+                'strike': 750.0,
+                'right': right,
+                'multiplier': '100',
+                'tradingClass': 'SPY',
+            })()
+            return type('ContractDetails', (), {'contract': contract})()
+
+        fake_ib = _FakeIB(contract_details_by_key={
+            ('20260717', 750.0): [
+                detail('20260717', 'C', 101),
+                detail('20260717', 'P', 102),
+            ],
+            ('20260724', 750.0): [
+                detail('20260724', 'C', 103),
+                detail('20260724', 'P', 104),
+            ],
+        })
+
+        selections = asyncio.run(
+            resolve_iv_term_structure_common_selections_from_candidates(
+                {'ib': fake_ib},
+                'SPY',
+                'OPT',
+                'SMART',
+                'USD',
+                '100',
+                [
+                    {'expiry': '20260717', 'dte': 7},
+                    {'expiry': '20260724', 'dte': 14},
+                ],
+                750.25,
+                [745.0, 750.0, 755.0],
+                0,
+            )
+        )
+
+        self.assertEqual(fake_ib.contract_detail_calls, [
+            ('20260717', 750.0),
+            ('20260724', 750.0),
+        ])
+        self.assertEqual(selections['20260717']['atm_strike'], 750.0)
+        self.assertEqual(len(selections['20260717']['contractRows']), 2)
+        self.assertEqual(len(selections['20260724']['contractRows']), 2)
+
+    def test_option_qualification_timeout_returns_without_blocking_the_sync(self):
+        websocket = object()
+        fake_ib = _FakeIB()
+
+        async def qualify_one(_contract, _request=None):
+            await asyncio.sleep(1)
+            return None
+
+        env = {
+            'ib': fake_ib,
+            'client_subscriptions': {websocket: {}},
+            'build_contract_from_request': lambda request: type('Contract', (), request)(),
+            'qualify_one': qualify_one,
+            'iv_term_structure_option_qualify_timeout_seconds': 0.01,
+        }
+        option_request = {
+            'id': '__ivts__|SPY|20260717|750|C',
+            'secType': 'OPT',
+            'symbol': 'SPY',
+            'exchange': 'SMART',
+            'currency': 'USD',
+            'multiplier': '100',
+            'right': 'C',
+            'strike': 750,
+            'expDate': '20260717',
+        }
+        result_details = {}
+
+        subscribed = asyncio.run(
+            subscribe_iv_term_structure_option_request(
+                env,
+                websocket,
+                option_request,
+                result_details=result_details,
+            )
+        )
+
+        self.assertFalse(subscribed)
+        self.assertEqual(env['client_subscriptions'][websocket], {})
+        self.assertEqual(result_details['kind'], 'qualification_timeout')
+        self.assertIn('SPY 20260717 750C', result_details['message'])
+        self.assertIn('timed out', result_details['message'])
+
+    def test_reuses_contract_details_contract_without_requalifying_it(self):
+        websocket = object()
+        fake_ib = _FakeIB()
+        qualified_contract = type('QualifiedContract', (), {'conId': 12345})()
+
+        async def qualify_one(_contract, _request=None):
+            raise AssertionError('qualification should be skipped for a resolved contract')
+
+        env = {
+            'ib': fake_ib,
+            'client_subscriptions': {websocket: {}},
+            'build_contract_from_request': lambda request: type('Contract', (), request)(),
+            'qualify_one': qualify_one,
+        }
+        option_request = {
+            'id': '__ivts__|ES|20260717|6300|C',
+            'secType': 'FOP',
+            'symbol': 'ES',
+            'right': 'C',
+            'strike': 6300,
+            'expDate': '20260717',
+        }
+
+        subscribed = asyncio.run(
+            subscribe_iv_term_structure_option_request(
+                env,
+                websocket,
+                option_request,
+                qualified_option=qualified_contract,
+            )
+        )
+
+        self.assertTrue(subscribed)
+        self.assertIs(
+            env['client_subscriptions'][websocket][option_request['id']].contract,
+            qualified_contract,
+        )
+
+    def test_background_sync_defaults_to_ten_streams_from_nearest_five_expiries(self):
+        websocket = object()
+        fake_ib = _FakeIB()
+        sent_messages = []
+        con_id = 20000
+        probed_expiries = []
+
+        async def send_message_safe(_websocket, message):
+            sent_messages.append(json.loads(message))
+
+        async def resolve_common_selections(
+            _env,
+            _option_symbol,
+            _option_sec_type,
+            _option_exchange,
+            _option_currency,
+            _option_multiplier,
+            expiry_rows,
+            _underlying_price,
+            _candidate_strikes,
+            _strike_radius,
+            **_kwargs,
+        ):
+            nonlocal con_id
+            selections = {}
+            for expiry_row in expiry_rows:
+                expiry = expiry_row['expiry']
+                probed_expiries.append(expiry)
+                rows = []
+                for right in ('C', 'P'):
+                    con_id += 1
+                    contract = type('QualifiedContract', (), {
+                        'conId': con_id,
+                        'secType': 'OPT',
+                        'symbol': 'SPY',
+                        'lastTradeDateOrContractMonth': expiry,
+                        'strike': 750.0,
+                        'right': right,
+                    })()
+                    rows.append({
+                        'expiry': expiry,
+                        'strike': 750.0,
+                        'right': right,
+                        'tradingClass': 'SPY',
+                        'contract': contract,
+                    })
+                selections[expiry] = {
+                    'atm_strike': 750.0,
+                    'window_strikes': [750.0],
+                    'tradingClass': 'SPY',
+                    'contractRows': rows,
+                }
+            return selections
+
+        async def qualify_one(_contract, _request=None):
+            raise AssertionError('resolved option contracts should not be requalified')
+
+        env = {
+            'ib': fake_ib,
+            'client_subscriptions': {websocket: {}},
+            'iv_term_structure_sync_tasks': {},
+            'send_message_safe': send_message_safe,
+            'build_contract_from_request': lambda request: type('Contract', (), request)(),
+            'qualify_one': qualify_one,
+            'coerce_positive_int': lambda value, default: int(value or default),
+            'iv_term_structure_default_strike_radius': 1,
+            'iv_term_structure_bucket_definitions': [],
+        }
+        sync_context = {
+            'expiryRows': [
+                {'expiry': '20260717', 'dte': 7},
+                {'expiry': '20260724', 'dte': 14},
+                {'expiry': '20260731', 'dte': 21},
+                {'expiry': '20260807', 'dte': 28},
+                {'expiry': '20260814', 'dte': 35},
+                {'expiry': '20260821', 'dte': 42},
+            ],
+            'optionSymbol': 'SPY',
+            'optionSecType': 'OPT',
+            'optionExchange': 'SMART',
+            'optionCurrency': 'USD',
+            'optionMultiplier': '100',
+            'underlyingSymbol': 'SPY',
+            'underlyingExchange': 'SMART',
+            'underlyingPrice': 750.25,
+            'strikeRadius': 1,
+            'globalCandidateStrikes': [750.0],
+        }
+
+        with patch(
+            'ib_server_iv_term_structure.resolve_iv_term_structure_common_selections_from_candidates',
+            new=resolve_common_selections,
+        ):
+            asyncio.run(
+                run_iv_term_structure_option_sync(env, websocket, 'SPY', sync_context)
+            )
+
+        complete = sent_messages[-1]
+        self.assertEqual(complete['action'], 'iv_term_structure_sync_complete')
+        self.assertEqual(complete['expectedOptionCount'], 10)
+        self.assertEqual(complete['attemptedOptionCount'], 10)
+        self.assertEqual(complete['subscribedOptionCount'], 10)
+        self.assertEqual(complete['failedOptionCount'], 0)
+        self.assertEqual(complete['timedOutOptionCount'], 0)
+        self.assertEqual(complete['subscriptionErrorMessage'], '')
+        self.assertEqual(len(env['client_subscriptions'][websocket]), 10)
+        self.assertEqual(probed_expiries, [
+            '20260717',
+            '20260724',
+            '20260731',
+            '20260807',
+            '20260814',
+        ])
+        patched_rows = [
+            row
+            for payload in sent_messages
+            if payload.get('action') == 'iv_term_structure_catalog_patch'
+            for row in payload.get('expiryRows') or []
+        ]
+        self.assertEqual(len(patched_rows), 6)
+        self.assertEqual(sum(row['subscriptionSelected'] is True for row in patched_rows), 5)
+        self.assertEqual(sum(row['subscriptionSelected'] is False for row in patched_rows), 1)
+
     def test_fop_underlying_request_uses_template_multiplier_to_avoid_si_ambiguity(self):
         websocket = object()
         fake_ib = _FakeIB({

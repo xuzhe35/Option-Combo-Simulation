@@ -137,9 +137,107 @@ def _describe_contract_request(self, leg_request):
     return f"{self._normalize_symbol(leg_request.sec_type) or 'UNKNOWN'} {self._normalize_symbol(leg_request.symbol) or '<missing>'}".strip()
 
 
+async def _fallback_qualify_derivative_contract(self, contract, leg_request, qualified_underlying=None):
+    """Resolve an OPT/FOP contract when IB returns multiple matches.
+
+    ``qualifyContractsAsync`` returns no contract for an ambiguous derivative
+    request.  This notably happens for SPY strikes where both the regular SPY
+    class and a 2SPY class share the same expiry, strike, and right.  Querying
+    contract details lets us apply the remaining discriminator locally.
+    """
+    sec_type = self._normalize_symbol(leg_request.sec_type)
+    if sec_type not in ('OPT', 'FOP') or not hasattr(self.ib, 'reqContractDetailsAsync'):
+        return None
+
+    requested_expiry = self._to_expiry(leg_request.exp_date or leg_request.contract_month)
+    requested_right = self._normalize_symbol(leg_request.right)
+    requested_symbol = self._normalize_symbol(leg_request.symbol)
+    requested_trading_class = self._normalize_symbol(leg_request.trading_class)
+    requested_multiplier = str(leg_request.multiplier or '')
+    requested_exchange = str(leg_request.exchange or '').strip().upper()
+    requested_under_con_id = getattr(qualified_underlying, 'conId', None)
+
+    probe = Contract(
+        secType=sec_type,
+        symbol=requested_symbol,
+        lastTradeDateOrContractMonth=requested_expiry,
+        strike=float(leg_request.strike),
+        right=requested_right,
+        exchange=leg_request.exchange or getattr(contract, 'exchange', '') or '',
+        currency=leg_request.currency or getattr(contract, 'currency', '') or 'USD',
+        multiplier=requested_multiplier or str(getattr(contract, 'multiplier', '') or ''),
+    )
+    if requested_under_con_id:
+        probe.underConId = requested_under_con_id
+
+    try:
+        contract_details = await self.ib.reqContractDetailsAsync(probe)
+    except Exception as exc:
+        self.logger.warning(
+            f"Contract-details fallback failed for {self._describe_contract_request(leg_request)}: {exc}"
+        )
+        return None
+
+    candidates = []
+    for index, detail in enumerate(contract_details or []):
+        candidate = getattr(detail, 'contract', None)
+        if candidate is None:
+            continue
+        if self._normalize_symbol(getattr(candidate, 'secType', '')) not in ('', sec_type):
+            continue
+
+        candidate_expiry = str(getattr(candidate, 'lastTradeDateOrContractMonth', '') or '').replace('-', '')[:8]
+        if requested_expiry and candidate_expiry != requested_expiry:
+            continue
+        if requested_right and self._normalize_symbol(getattr(candidate, 'right', '')) != requested_right:
+            continue
+        try:
+            if abs(float(getattr(candidate, 'strike', 0)) - float(leg_request.strike)) > 0.000001:
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        candidate_under_con_id = getattr(candidate, 'underConId', None)
+        if requested_under_con_id and candidate_under_con_id and candidate_under_con_id != requested_under_con_id:
+            continue
+        if requested_multiplier and str(getattr(candidate, 'multiplier', '') or '') != requested_multiplier:
+            continue
+
+        candidate_trading_class = self._normalize_symbol(getattr(candidate, 'tradingClass', ''))
+        candidate_exchange = str(getattr(candidate, 'exchange', '') or '').strip().upper()
+        score = 0
+        if requested_trading_class and candidate_trading_class == requested_trading_class:
+            score += 1000
+        # Equity/ETF option requests normally use their root symbol as the
+        # canonical trading class (SPY rather than 2SPY, for example).
+        if not requested_trading_class and candidate_trading_class == requested_symbol:
+            score += 100
+        if requested_under_con_id and candidate_under_con_id == requested_under_con_id:
+            score += 10
+        if requested_exchange and candidate_exchange == requested_exchange:
+            score += 5
+        if candidate_trading_class:
+            score += 1
+        candidates.append((score, index, candidate))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    selected = candidates[0][2]
+    self.logger.info(
+        f"Qualified {self._describe_contract_request(leg_request)} using contract-details fallback "
+        f"symbol={getattr(selected, 'symbol', '')} "
+        f"tradingClass={getattr(selected, 'tradingClass', '') or '<blank>'} "
+        f"expiry={str(getattr(selected, 'lastTradeDateOrContractMonth', '') or '')[:8]}"
+    )
+    return selected
+
+
 async def _qualify_one(self, contract, leg_request):
     sec_type = self._normalize_symbol(leg_request.sec_type)
     underlying_contract_month = ''
+    qualified_underlying = None
 
     if sec_type == 'FOP':
         underlying_contract_month = self._to_contract_month(leg_request.underlying_contract_month)
@@ -203,6 +301,15 @@ async def _qualify_one(self, contract, leg_request):
                 f"Qualified {self._describe_contract_request(leg_request)} using underConId fallback "
                 f"without tradingClass {original_trading_class}"
             )
+
+    if not results or results[0] is None:
+        fallback_contract = await self._fallback_qualify_derivative_contract(
+            contract,
+            leg_request,
+            qualified_underlying=qualified_underlying,
+        )
+        if fallback_contract is not None:
+            return fallback_contract
 
     if not results or results[0] is None:
         return None

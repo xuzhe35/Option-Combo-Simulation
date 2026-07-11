@@ -220,6 +220,22 @@ function loadAppContext(options = {}) {
             normalizeImportedState(_state, importedState) {
                 return importedState;
             },
+            normalizeSimTimeBasis(value) {
+                const normalized = String(value || '').trim().toLowerCase();
+                return ['calendar', 'trading', 'weighted'].includes(normalized) ? normalized : 'calendar';
+            },
+            normalizeSimWeekendWeight(value) {
+                const parsed = parseFloat(value);
+                return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0.3;
+            },
+            resolveSimWeekendWeight(basis, weight) {
+                if (basis === 'trading') return 0;
+                if (basis === 'weighted') {
+                    const parsed = parseFloat(weight);
+                    return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0.3;
+                }
+                return 1;
+            },
             buildExportState(state) {
                 return JSON.parse(JSON.stringify(state));
             },

@@ -8,7 +8,7 @@ Runtime surfaces:
 
 1. `index.html`
    - main multi-group portfolio workspace
-   - supports live IBKR mode and SQLite historical replay mode
+   - supports live IBKR mode and historical replay mode (options-chain-service backed)
 
 2. `chart_lab.html`
    - shared portfolio workspace plus a separate Chart Lab tab
@@ -20,7 +20,7 @@ Runtime surfaces:
 
 4. Python backends
    - `ib_server.py` for live IBKR market data, live execution, Chart Lab bars, IV term-structure sync, and historical fallback paths
-   - `historical_server.py` for SQLite historical replay snapshots only
+   - `historical_server.py` for historical replay snapshots only (options-chain-service backed)
 
 ## 2. Frontend Entry Surfaces
 
@@ -54,7 +54,7 @@ It currently:
 - reads state through `window.__optionComboApp`
 - opens its own WebSocket connection
 - requests `request_historical_bars` from `ib_server.py`
-- falls back to SQLite daily bars through `ib_server.py` when IB bars are unavailable
+- falls back to chain-service daily bars through `ib_server.py` when IB bars are unavailable
 - projects either one group or the included global portfolio onto a daily candle canvas
 
 The overlay is a visualization aid, not a complete time-path model.
@@ -85,29 +85,30 @@ Current `index.html` load order:
 6. `js/pricing_context.js`
 7. `js/trade_trigger_logic.js`
 8. `js/group_order_builder.js`
-9. `js/delta_hedge_logic.js`
-10. `js/distribution_proxy_config.js`
-11. `js/pricing_core.js`
-12. `js/bsm.js`
-13. `js/chart.js`
-14. `js/prob_charts.js`
-15. `js/chart_controls.js`
-16. `js/amortized.js`
-17. `js/valuation.js`
-18. `js/session_logic.js`
-19. `js/session_ui.js`
-20. `js/control_panel_ui.js`
-21. `js/hedge_editor_ui.js`
-22. `js/group_editor_ui.js`
-23. `js/hedge_ui.js`
-24. `js/group_ui.js`
-25. `js/global_ui.js`
-26. `js/page_capabilities.js`
-27. `js/combo_order_transport.js`
-28. `js/delta_hedge_transport.js`
-29. `js/delta_hedge_ui.js`
-30. `js/app.js`
-31. `js/ws_client.js`
+9. `js/leg_position_check.js`
+10. `js/delta_hedge_logic.js`
+11. `js/distribution_proxy_config.js`
+12. `js/pricing_core.js`
+13. `js/bsm.js`
+14. `js/chart.js`
+15. `js/prob_charts.js`
+16. `js/chart_controls.js`
+17. `js/amortized.js`
+18. `js/valuation.js`
+19. `js/session_logic.js`
+20. `js/session_ui.js`
+21. `js/control_panel_ui.js`
+22. `js/hedge_editor_ui.js`
+23. `js/group_editor_ui.js`
+24. `js/hedge_ui.js`
+25. `js/group_ui.js`
+26. `js/global_ui.js`
+27. `js/page_capabilities.js`
+28. `js/combo_order_transport.js`
+29. `js/delta_hedge_transport.js`
+30. `js/delta_hedge_ui.js`
+31. `js/app.js`
+32. `js/ws_client.js`
 
 `chart_lab.html` keeps the same shared shell ordering where relevant, but intentionally omits the Delta Hedge panel logic/UI. Its tail order is:
 
@@ -190,6 +191,7 @@ Notes:
 - `js/trade_trigger_logic.js`
 - `js/delta_hedge_logic.js`
 - `js/group_order_builder.js`
+- `js/leg_position_check.js`
 
 Responsibilities:
 
@@ -297,12 +299,14 @@ Responsibilities:
 - pooled live underlying, option, futures, and stock-hedge subscriptions
 - product-aware IBKR contract qualification
 - portfolio average-cost snapshots
+- full account-level portfolio position snapshots used by Group/Global Leg Exists Check
 - managed account snapshots
 - historical daily bars for Chart Lab
-- SQLite daily-bar fallback for Chart Lab
+- chain-service daily-bar fallback for Chart Lab
 - historical replay snapshots through `HistoricalReplayService`
 - IV term-structure catalog selection and option subscriptions
 - combo validation, preview, test submit, and live submit
+- pre-submit warnings when an order would reduce an existing net TWS position
 - STK / FUT Delta Hedge validation, preview, submit, cancel, and active-order snapshot flows
 - managed repricing and order supervision
 - close-group execution through the same managed order path
@@ -316,7 +320,7 @@ Responsibilities:
 
 Responsibilities:
 
-- SQLite historical quote reads
+- historical quote reads: option chains + underlying bars over HTTP from the shared options-chain-service; risk-free/yield-curve from local sqlite_spy/rates.db
 - replay-day underlying snapshot and option snapshot payloads
 - replay-date normalization
 - risk-free and yield-curve hydration
@@ -332,6 +336,7 @@ Responsibilities:
 - `install_ib_bridge_deps.bat`
 - `cleanup_logs.bat`
 - `start_option_combo_mac.command`
+- `start_historical_replay_mac.command`
 - `start_option_combo.sh`
 - `install_ib_bridge_deps_mac.command`
 - `cleanup_logs_mac.command`
@@ -472,9 +477,9 @@ Supporting live-backend helper modules:
   - manual underlying refresh through the pooled market-data helper
   - one-shot lines are canceled when no active subscription shares the contract
 - `request_historical_snapshot`
-  - shared historical replay through SQLite
+  - shared historical replay through the options-chain-service
 - `request_historical_bars`
-  - Chart Lab bars via IB, with SQLite fallback for daily bars
+  - Chart Lab bars via IB, with chain-service fallback for daily bars
 - `request_portfolio_avg_cost_snapshot`
 - `request_managed_accounts_snapshot`
 - `request_ib_connection_status`
@@ -514,8 +519,9 @@ Main flow:
 2. `js/ws_client.js` requests historical snapshots
 3. `historical_server.py` or `ib_server.py` routes to `HistoricalReplayService`
 4. `historical_replay_service.py` pulls data through `historical_data.py`
-5. frontend writes replayed quotes into the same state fields used by live mode
-6. existing valuation and charts update through the same render pipeline
+5. `historical_data.py` fetches option chains and underlying bars over HTTP from the shared options-chain-service (`Options DB/chain_service`, default `http://127.0.0.1:8750`) and reads risk-free / yield-curve data from the local `sqlite_spy/rates.db`
+6. frontend writes replayed quotes into the same state fields used by live mode
+7. existing valuation and charts update through the same render pipeline
 
 Historical replay also supports:
 

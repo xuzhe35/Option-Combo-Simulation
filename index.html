@@ -8,7 +8,7 @@
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260704-combo-dialog-spacing">
+    <link rel="stylesheet" href="style.css?v=20260711-no-confirm-checkbox">
 </head>
 
 <body data-option-combo-page="portfolio">
@@ -279,6 +279,19 @@
                             <input type="number" id="ivOffset" class="number-input" value="0.00" step="0.01">
                             <input type="range" id="ivOffsetSlider" min="-100" max="100" value="0" step="1">
                         </div>
+
+                        <div class="control-group">
+                            <label for="simTimeBasis" title="How simulated time decays across weekends and holidays. Calendar = TWS convention (weekends decay in full). Trading days = weekends carry no variance. Weighted = each weekend day counts as λ of a trading day. Switching never changes today's prices, only the decay path.">
+                                Time Basis (Weekend θ)
+                                <span class="value-display" id="simTimeBasisDisplay">λ=1.00</span>
+                            </label>
+                            <select id="simTimeBasis" class="number-input">
+                                <option value="calendar">Calendar (TWS default)</option>
+                                <option value="trading">Trading days (λ=0)</option>
+                                <option value="weighted">Weighted weekends (λ)</option>
+                            </select>
+                            <input type="number" id="simWeekendWeight" class="number-input" value="0.30" step="0.05" min="0" max="1" style="display: none;" title="Weekend/holiday variance weight λ: 0 = trading-day clock, 1 = calendar clock.">
+                        </div>
                         </div>
                     </div>
 
@@ -504,6 +517,10 @@
                             </button>
                             <h2 style="margin: 0;">Combo Groups</h2>
                         </div>
+                        <div style="display: flex; gap: 0.6rem; align-items: center;">
+                        <button class="btn btn-secondary" type="button" onclick="requestLegExistsCheck()" title="Compare all workspace group legs with net TWS positions in the selected account">
+                            Check All Legs in TWS
+                        </button>
                         <button class="btn btn-primary" onclick="addGroup()">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -512,6 +529,7 @@
                             </svg>
                             Add New Group
                         </button>
+                        </div>
                     </div>
 
                     <!-- Global Portfolio Chart -->
@@ -791,6 +809,9 @@
                                     </div>
                                 </div>
                                 <div class="group-actions">
+                                    <button class="btn btn-secondary btn-sm leg-exists-check-btn" type="button" title="Check this group's leg contracts and quantities against TWS">
+                                        Leg Exists Check
+                                    </button>
                                     <button class="btn btn-secondary btn-sm" onclick="addLegToGroup(this)">
                                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
                                             stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -897,7 +918,7 @@
                                     <span class="trial-trigger-status small text-muted">Idle</span>
                                 </div>
                                 <div class="trial-trigger-body">
-                                <div style="display: grid; grid-template-columns: 176px 96px 150px 120px 92px max-content; gap: 0.5rem; align-items: center; justify-content: start;">
+                                <div class="trial-trigger-order-controls" style="display: grid; grid-template-columns: 176px 96px 150px 120px 120px 92px max-content; gap: 0.5rem; align-items: center; justify-content: start;">
                                     <select class="leg-input trial-trigger-condition" style="width: 176px;">
                                         <option value="gte">Price ≥ Trigger</option>
                                         <option value="lte">Price ≤ Trigger</option>
@@ -958,7 +979,11 @@
                                     <span class="close-group-status small text-muted">Idle</span>
                                 </div>
                                 <div class="close-group-body">
-                                    <div style="display: grid; grid-template-columns: 160px 120px 92px max-content; gap: 0.5rem; align-items: center; justify-content: start;">
+                                    <div class="close-group-order-controls">
+                                        <select class="leg-input close-group-strategy" style="width: 148px;" title="Auto detects one-sided illiquid option quotes; Combo Only never substitutes expiry-equivalent hedges.">
+                                            <option value="auto">Auto Liquidity</option>
+                                            <option value="combo">Combo Only</option>
+                                        </select>
                                         <select class="leg-input close-group-execution-mode" style="width: 160px;" title="Preview first, or send a closing combo to TWS.">
                                             <option value="preview">Preview Only</option>
                                             <option value="test_submit">Send to TWS (Test Only)</option>
@@ -988,9 +1013,10 @@
                                             <option value="GTC">GTC</option>
                                         </select>
                                         <button class="btn btn-secondary btn-sm close-group-submit-btn" type="button" style="min-width: 96px; padding-inline: 0.85rem;">Close Group</button>
+                                        <button class="btn btn-secondary btn-sm close-group-equivalent-btn" type="button" style="min-width: 132px; padding-inline: 0.85rem;" title="Force an expiry-equivalent preview/close for standard physically settled stock options.">Expiry Equivalent</button>
                                     </div>
                                     <div class="close-group-help text-muted small" style="margin-top: 0.55rem;">
-                                        Sends the reverse combo for all non-zero legs and reuses the managed middle-price negotiation flow.
+                                        Auto uses the reverse combo normally, but can ignore clearly worthless OTM legs and hedge deep ITM one-sided legs with net Underlying. Expiry Equivalent forces that analysis.
                                     </div>
                                     <div class="close-group-actions" style="display: none; margin-top: 0.6rem;"></div>
                                     <div class="close-group-preview small" style="display: none; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed rgba(59, 130, 246, 0.3);"></div>
@@ -1347,36 +1373,37 @@
     <!-- Scripts -->
     <script src="js/t_params_db.js"></script>
     <script src="js/market_holidays.js"></script>
-    <script src="js/date_utils.js?v=20260322-expiryfreeze"></script>
+    <script src="js/date_utils.js?v=20260711-time-basis"></script>
     <script src="js/product_registry.js"></script>
     <script src="js/index_forward_rate.js"></script>
     <script src="js/pricing_context.js?v=20260322-histsimdate"></script>
     <script src="js/trade_trigger_logic.js"></script>
-    <script src="js/group_order_builder.js"></script>
+    <script src="js/group_order_builder.js?v=20260710-expiry-equivalent"></script>
+    <script src="js/leg_position_check.js?v=20260711-leg-exists"></script>
     <script src="js/delta_hedge_logic.js"></script>
     <script src="js/distribution_proxy_config.js"></script>
-    <script src="js/pricing_core.js?v=20260322-expiryfreeze"></script>
+    <script src="js/pricing_core.js?v=20260711-time-basis"></script>
     <script src="js/bsm.js"></script>
     <script src="js/chart.js?v=20260602-profit-loss-ratio"></script>
     <script src="js/prob_charts.js?v=20260414-probivfix"></script>
     <script src="js/chart_controls.js?v=20260414-probivfix"></script>
     <script src="js/amortized.js?v=20260322-histsimdate"></script>
     <script src="js/valuation.js?v=20260322-histsimdate"></script>
-    <script src="js/session_logic.js?v=20260322-phase4"></script>
+    <script src="js/session_logic.js?v=20260711-time-basis"></script>
     <script src="js/session_ui.js?v=20260322-histsimdate"></script>
-    <script src="js/control_panel_ui.js?v=20260322-riskfree"></script>
+    <script src="js/control_panel_ui.js?v=20260711-time-basis"></script>
     <script src="js/hedge_editor_ui.js"></script>
-    <script src="js/group_editor_ui.js?v=20260505-importfix"></script>
+    <script src="js/group_editor_ui.js?v=20260711-no-confirm-checkbox"></script>
     <script src="js/hedge_ui.js"></script>
-    <script src="js/group_ui.js?v=20260326-mobilemeta"></script>
+    <script src="js/group_ui.js?v=20260710-close-plan-revocation"></script>
     <script src="js/global_ui.js"></script>
     <script src="js/page_capabilities.js"></script>
-    <script src="js/combo_order_transport.js"></script>
+    <script src="js/combo_order_transport.js?v=20260711-leg-exists"></script>
     <script src="js/delta_hedge_transport.js"></script>
     <script src="js/delta_hedge_ui.js"></script>
     <script src="js/calendar_handoff.js?v=20260612c"></script>
-    <script src="js/app.js?v=20260612-calendarhandoff"></script>
-    <script src="js/ws_client.js?v=20260322-riskfree"></script>
+    <script src="js/app.js?v=20260711-time-basis"></script>
+    <script src="js/ws_client.js?v=20260711-leg-exists"></script>
 </body>
 
 </html>

@@ -1161,6 +1161,31 @@
         }
     }
 
+    function _syncSimTimeBasisUi(state, options = {}) {
+        const basisSelect = _getElement('simTimeBasis');
+        const weightInput = _getElement('simWeekendWeight');
+        const display = _getElement('simTimeBasisDisplay');
+        if (!basisSelect) {
+            return;
+        }
+
+        const sessionLogic = globalScope.OptionComboSessionLogic;
+        const basis = sessionLogic.normalizeSimTimeBasis(state && state.simTimeBasis);
+        const weight = sessionLogic.normalizeSimWeekendWeight(state && state.simWeekendWeight);
+        const effectiveWeight = sessionLogic.resolveSimWeekendWeight(basis, weight);
+
+        basisSelect.value = basis;
+        if (weightInput) {
+            weightInput.style.display = basis === 'weighted' ? '' : 'none';
+            if (options.keepWeightInputValue !== true) {
+                weightInput.value = weight.toFixed(2);
+            }
+        }
+        if (display) {
+            display.textContent = `λ=${effectiveWeight.toFixed(2)}`;
+        }
+    }
+
     function _syncHistoricalTimelineUi(state) {
         const replayDateInput = _getElement('historicalReplayDate');
         const replaySlider = _getElement('historicalReplaySlider');
@@ -1269,6 +1294,7 @@
         _syncPrimaryControlPanelCollapseUi(_boundState);
         _syncMarketDataModeUI(_boundState);
         _syncGreeksUi(_boundState);
+        _syncSimTimeBasisUi(_boundState);
         _syncHistoricalTimelineUi(_boundState);
         _syncSimulationDateUi(_boundState);
         _syncUnderlyingContractMonthUI(_boundState, false);
@@ -1675,6 +1701,25 @@
             ivDisplay.textContent = `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`;
             throttledUpdate();
         });
+
+        const timeBasisSelect = _getElement('simTimeBasis');
+        const weekendWeightInput = _getElement('simWeekendWeight');
+        if (timeBasisSelect) {
+            const sessionLogic = globalScope.OptionComboSessionLogic;
+            _syncSimTimeBasisUi(state);
+            timeBasisSelect.addEventListener('change', (e) => {
+                state.simTimeBasis = sessionLogic.normalizeSimTimeBasis(e.target.value);
+                _syncSimTimeBasisUi(state);
+                updateDerivedValues();
+            });
+            if (weekendWeightInput) {
+                weekendWeightInput.addEventListener('input', (e) => {
+                    state.simWeekendWeight = sessionLogic.normalizeSimWeekendWeight(e.target.value);
+                    _syncSimTimeBasisUi(state, { keepWeightInputValue: true });
+                    updateDerivedValues();
+                });
+            }
+        }
 
         if (toggleGreeksBtn) {
             _syncGreeksUi(state);

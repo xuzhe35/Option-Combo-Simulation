@@ -401,5 +401,109 @@ module.exports = {
                 almostEqual(simPrice, expectedSim, 1e-9);
             },
         },
+        {
+            name: 'counts weighted days with weekends and holidays at the configured weight',
+            run() {
+                const ctx = loadPricingContext();
+
+                // 2026-07-08 Wed -> 2026-07-13 Mon: 3 trading days + Sat/Sun.
+                assert.equal(ctx.countWeightedDays('2026-07-08', '2026-07-13', 0), 3);
+                assert.equal(ctx.countWeightedDays('2026-07-08', '2026-07-13', 1), 5);
+                assert.equal(ctx.countWeightedDays('2026-07-08', '2026-07-13', 0.5), 4);
+                // Thanksgiving 2026-11-26 counts as a non-trading day.
+                assert.equal(ctx.countWeightedDays('2026-11-25', '2026-11-27', 0), 1);
+                assert.equal(ctx.countWeightedDays('2026-11-25', '2026-11-27', 0.5), 1.5);
+                // Out-of-range weights clamp instead of exploding.
+                assert.equal(ctx.countWeightedDays('2026-07-08', '2026-07-13', 7), 5);
+                assert.equal(ctx.countWeightedDays('2026-07-08', '2026-07-13', -1), 3);
+            },
+        },
+        {
+            name: 'weighted clock at weight 1 reproduces the calendar clock exactly',
+            run() {
+                const ctx = loadPricingContext();
+                const leg = { type: 'call', pos: 1, strike: 100, expDate: '2026-07-17', iv: 0.25, cost: 1.5 };
+
+                const calendarProcessed = ctx.processLegData(leg, '2026-07-08', 0, '2026-07-08', 100, 0.03, 'active');
+                ctx.configureSimTimeBasis({ weekendWeight: 1 });
+                const weightedProcessed = ctx.processLegData(leg, '2026-07-08', 0, '2026-07-08', 100, 0.03, 'active');
+
+                assert.equal(weightedProcessed.T, calendarProcessed.T);
+                assert.equal(weightedProcessed.simIV, calendarProcessed.simIV);
+                // Invalid config falls back to the calendar clock.
+                assert.equal(ctx.configureSimTimeBasis({ weekendWeight: 'bogus' }), 1);
+                assert.equal(ctx.configureSimTimeBasis(null), 1);
+            },
+        },
+        {
+            name: 'switching the time basis never changes the price as of the base date',
+            run() {
+                const ctx = loadPricingContext();
+                // r = 0 isolates the variance clock: sigma^2 * T is preserved
+                // by the IV conversion, so the BSM price must match exactly.
+                const leg = { type: 'put', pos: 1, strike: 100, expDate: '2026-07-17', iv: 0.3, cost: 2 };
+
+                const calendarProcessed = ctx.processLegData(leg, '2026-07-08', 0, '2026-07-08', 100, 0, 'active');
+                const calendarPrice = ctx.computeLegPrice(calendarProcessed, 100, 0);
+
+                ctx.configureSimTimeBasis({ weekendWeight: 0 });
+                const tradingProcessed = ctx.processLegData(leg, '2026-07-08', 0, '2026-07-08', 100, 0, 'active');
+                const tradingPrice = ctx.computeLegPrice(tradingProcessed, 100, 0);
+
+                almostEqual(tradingPrice, calendarPrice, 1e-9);
+                // The converted IV carries the same total variance: cal 9d/365 vs 7 trading d/252.
+                almostEqual(
+                    tradingProcessed.simIV,
+                    0.3 * Math.sqrt((9 / 365) / (7 / 252)),
+                    1e-12
+                );
+            },
+        },
+        {
+            name: 'trading-day clock stops theta over the weekend and keeps the conversion anchored',
+            run() {
+                const ctx = loadPricingContext();
+                const leg = { type: 'call', pos: 1, strike: 100, expDate: '2026-07-17', iv: 0.25, cost: 1.5 };
+
+                ctx.configureSimTimeBasis({ weekendWeight: 0 });
+                const saturday = ctx.processLegData(leg, '2026-07-11', 0, '2026-07-08', 100, 0, 'active');
+                const monday = ctx.processLegData(leg, '2026-07-13', 0, '2026-07-08', 100, 0, 'active');
+
+                // Sat -> Mon spans only non-trading days: T and IV are frozen,
+                // so the simulated price is identical (no phantom weekend theta).
+                assert.equal(saturday.T, monday.T);
+                assert.equal(saturday.simIV, monday.simIV);
+                almostEqual(
+                    ctx.computeLegPrice(saturday, 100, 0),
+                    ctx.computeLegPrice(monday, 100, 0),
+                    1e-12
+                );
+
+                // The conversion factor is anchored at the base date, not the
+                // simulated date: simIV must not drift as the sim advances.
+                const friday = ctx.processLegData(leg, '2026-07-10', 0, '2026-07-08', 100, 0, 'active');
+                assert.equal(friday.simIV, saturday.simIV);
+
+                // On the calendar clock the same weekend does decay.
+                ctx.configureSimTimeBasis({ weekendWeight: 1 });
+                const calSaturday = ctx.processLegData(leg, '2026-07-11', 0, '2026-07-08', 100, 0, 'active');
+                const calMonday = ctx.processLegData(leg, '2026-07-13', 0, '2026-07-08', 100, 0, 'active');
+                assert.ok(calMonday.T < calSaturday.T);
+            },
+        },
+        {
+            name: 'floors the weighted clock so a leg is not marked to intrinsic before its last session',
+            run() {
+                const ctx = loadPricingContext();
+                const leg = { type: 'call', pos: 1, strike: 100, expDate: '2026-07-13', iv: 0.25, cost: 1.5 };
+
+                ctx.configureSimTimeBasis({ weekendWeight: 0 });
+                // Saturday before a Monday expiry: zero weighted days remain,
+                // but Monday's session has not happened yet.
+                const saturday = ctx.processLegData(leg, '2026-07-11', 0, '2026-07-08', 100, 0, 'active');
+                assert.equal(saturday.isExpired, false);
+                almostEqual(saturday.T, 0.5 / 252, 1e-12);
+            },
+        },
     ],
 };

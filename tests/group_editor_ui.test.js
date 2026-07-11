@@ -905,7 +905,7 @@ module.exports = {
             },
         },
         {
-            name: 'continues managed repricing on pointerdown to survive live rerenders',
+            name: 'handles managed repricing controls on pointerdown to survive live rerenders',
             run() {
                 const ctx = loadBrowserScripts([
                     'js/group_order_builder.js',
@@ -975,11 +975,15 @@ module.exports = {
                     },
                 };
                 let continueCalls = 0;
+                const manualConcedeCalls = [];
 
                 ctx.OptionComboGroupEditorUI.bindTrialTriggerControls(card, group, { allowLiveComboOrders: true }, {
                     renderGroups() {},
                     requestContinueManagedComboOrder() {
                         continueCalls += 1;
+                    },
+                    requestManualConcedeManagedComboOrder(_group, concessionStep, runtimeKind) {
+                        manualConcedeCalls.push([concessionStep, runtimeKind]);
                     },
                 });
 
@@ -993,6 +997,27 @@ module.exports = {
                 });
 
                 assert.equal(continueCalls, 1);
+
+                const manualContainer = {
+                    querySelector(selector) {
+                        return selector === '.trial-trigger-concede-step-input'
+                            ? { value: '0.25' }
+                            : null;
+                    },
+                };
+                const manualButton = {
+                    closest(selector) {
+                        if (selector === '.trial-trigger-concede-step-btn') return this;
+                        if (selector === '.trial-trigger-manual-concede-group') return manualContainer;
+                        return null;
+                    },
+                };
+                listeners.pointerdown({
+                    target: manualButton,
+                    preventDefault() {},
+                });
+
+                assert.deepEqual(manualConcedeCalls, [['0.25', undefined]]);
             },
         },
         {

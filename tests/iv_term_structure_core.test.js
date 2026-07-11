@@ -25,6 +25,7 @@ module.exports = {
                             expiry: '20260515',
                             dte: 22,
                             atmStrike: 505,
+                            subscriptionSelected: false,
                             atmCallSubId: 'spy_call_3w',
                             atmPutSubId: 'spy_put_3w',
                         },
@@ -48,8 +49,10 @@ module.exports = {
                 assert.equal(rows[0].putMark, 4.8);
                 assert.equal(rows[0].atmStraddleMark, 9.9);
                 assert.equal(rows[0].hasCompleteStraddle, true);
+                assert.equal(rows[0].subscriptionSelected, true);
                 assert.equal(rows[1].atmIv, 0.26);
                 assert.equal(rows[1].atmStraddleMark, 14.1);
+                assert.equal(rows[1].subscriptionSelected, false);
             },
         },
         {
@@ -381,6 +384,100 @@ module.exports = {
                 assert.equal(emptyStats.usableExpiries, 0);
                 assert.equal(emptyStats.shortCandidates, 0);
                 assert.equal(emptyStats.pairCount, 0);
+            },
+        },
+        {
+            name: 'counts trading days on a weekday clock with an optional holiday hook',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                // 2026-07-08 is a Wednesday; 07-10 Friday; 07-13 Monday.
+                assert.equal(core.countTradingDays('2026-07-08', '20260710'), 2);
+                assert.equal(core.countTradingDays('2026-07-08', '20260713'), 3);
+                assert.equal(core.countTradingDays('2026-07-08', '2026-07-08'), 0);
+                assert.equal(core.countTradingDays('', '20260713'), null);
+                assert.equal(core.countTradingDays('2026-07-14', '20260713'), null);
+
+                ctx.isMarketHoliday = (dateKey) => dateKey === '2026-07-09';
+                assert.equal(core.countTradingDays('2026-07-08', '20260710'), 1);
+            },
+        },
+        {
+            name: 'trading-day IV equalizes fairly priced expiries on both sides of a weekend',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                // Fair pricing at constant per-trading-day variance: the Monday
+                // expiry carries 3 trading days over 5 calendar days, so its
+                // calendar-annualized IV is dragged down by sqrt(219/365).
+                const nearCalendarIv = 0.29;
+                const farCalendarIv = 0.29 * Math.sqrt(219 / 365);
+
+                const rows = core.buildExpiryDetailRows(
+                    [
+                        { expiry: '20260710', dte: 2, atmStrike: 500, atmCallSubId: 'c_near', atmPutSubId: 'p_near' },
+                        { expiry: '20260713', dte: 5, atmStrike: 500, atmCallSubId: 'c_far', atmPutSubId: 'p_far' },
+                    ],
+                    {
+                        c_near: { iv: nearCalendarIv, mark: 3.0 },
+                        p_near: { iv: nearCalendarIv, mark: 3.1 },
+                        c_far: { iv: farCalendarIv, mark: 3.6 },
+                        p_far: { iv: farCalendarIv, mark: 3.7 },
+                    },
+                    '2026-07-08'
+                );
+
+                assert.equal(rows.length, 2);
+                assert.equal(rows[0].tradDte, 2);
+                assert.equal(rows[1].tradDte, 3);
+                assert.equal(
+                    rows[0].callIvTd,
+                    core.computeTradingDayAnnualizedIv(nearCalendarIv, 2, 2)
+                );
+                assert.equal(
+                    rows[1].callIvTd,
+                    core.computeTradingDayAnnualizedIv(farCalendarIv, 5, 3)
+                );
+                // Calendar IVs show a phantom ~29% inversion...
+                assert.ok(rows[0].callIv / rows[1].callIv > 1.28);
+                // ...which the trading-day clock removes almost exactly.
+                assert.ok(Math.abs(rows[0].callIvTd - rows[1].callIvTd) < 0.0001);
+                assert.ok(Math.abs(rows[0].atmIvTd - rows[1].atmIvTd) < 0.0001);
+            },
+        },
+        {
+            name: 'leaves trading-day IV empty without an anchor date and propagates it into buckets',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                const withoutAnchor = core.buildExpiryDetailRows(
+                    [{ expiry: '20260713', dte: 5, atmStrike: 500, atmCallSubId: 'c', atmPutSubId: 'p' }],
+                    { c: { iv: 0.2, mark: 1 }, p: { iv: 0.22, mark: 1 } }
+                );
+                assert.equal(withoutAnchor[0].tradDte, null);
+                assert.equal(withoutAnchor[0].callIvTd, null);
+                assert.equal(withoutAnchor[0].putIvTd, null);
+                assert.equal(withoutAnchor[0].atmIvTd, null);
+
+                const detailRows = core.buildExpiryDetailRows(
+                    [{ expiry: '20260713', dte: 5, atmStrike: 500, atmCallSubId: 'c', atmPutSubId: 'p' }],
+                    { c: { iv: 0.2, mark: 1 }, p: { iv: 0.22, mark: 1 } },
+                    '2026-07-08'
+                );
+                const bucketRows = core.buildBucketRows(detailRows, [{ label: '1W', targetDays: 7 }]);
+                assert.equal(bucketRows[0].tradDte, 3);
+                assert.equal(bucketRows[0].callIvTd, detailRows[0].callIvTd);
+                assert.equal(bucketRows[0].putIvTd, detailRows[0].putIvTd);
+                assert.equal(bucketRows[0].atmIvTd, detailRows[0].atmIvTd);
             },
         },
     ],

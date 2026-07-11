@@ -1984,6 +1984,15 @@
     }
 
     function bindGroupHeader(card, group, state, deps) {
+        const legExistsCheckBtn = card.querySelector('.leg-exists-check-btn');
+        if (legExistsCheckBtn) {
+            legExistsCheckBtn.disabled = !deps.requestLegExistsCheck;
+            legExistsCheckBtn.addEventListener('click', () => {
+                if (typeof deps.requestLegExistsCheck === 'function') {
+                    deps.requestLegExistsCheck(group.id);
+                }
+            });
+        }
         if (deps.supportsAmortizedMode
             && !deps.supportsAmortizedMode(state.underlyingSymbol)
             && group.viewMode === 'amortized') {
@@ -2389,9 +2398,10 @@
 
         const handleContinueRepricing = (e) => {
             const continueBtn = e.target.closest('.trial-trigger-continue-repricing-btn');
+            const manualConcedeBtn = e.target.closest('.trial-trigger-concede-step-btn');
             const concedeBtn = e.target.closest('.trial-trigger-concede-btn');
             const cancelBtn = e.target.closest('.trial-trigger-cancel-order-btn');
-            if (!continueBtn && !concedeBtn && !cancelBtn) {
+            if (!continueBtn && !manualConcedeBtn && !concedeBtn && !cancelBtn) {
                 return;
             }
             if (typeof e.preventDefault === 'function') {
@@ -2399,6 +2409,12 @@
             }
             if (continueBtn && typeof deps.requestContinueManagedComboOrder === 'function') {
                 deps.requestContinueManagedComboOrder(group);
+            } else if (manualConcedeBtn && typeof deps.requestManualConcedeManagedComboOrder === 'function') {
+                const manualContainer = manualConcedeBtn.closest('.trial-trigger-manual-concede-group');
+                const stepInput = manualContainer
+                    ? manualContainer.querySelector('.trial-trigger-concede-step-input')
+                    : null;
+                deps.requestManualConcedeManagedComboOrder(group, stepInput ? stepInput.value : '');
             } else if (concedeBtn && typeof deps.requestConcedeManagedComboOrder === 'function') {
                 const concedeContainer = concedeBtn.closest('.trial-trigger-concede-group');
                 const concedeSelect = concedeContainer
@@ -2415,18 +2431,363 @@
         container.addEventListener('click', handleContinueRepricing);
     }
 
+    function _escapeCloseConfirmationHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function _formatCloseConfirmationNumber(value, fallback = '—') {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return fallback;
+        }
+        return parsed.toFixed(4).replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
+    }
+
+    function openLegPositionCheckDialog(context) {
+        const doc = globalScope.document;
+        const result = context && context.result;
+        if (!doc || !doc.body || !result) return false;
+        let dialog = doc.getElementById('legPositionCheckDialog');
+        if (!dialog) {
+            dialog = doc.createElement('div');
+            dialog.id = 'legPositionCheckDialog';
+            dialog.className = 'close-confirmation-dialog';
+            dialog.setAttribute('role', 'dialog');
+            dialog.setAttribute('aria-modal', 'true');
+            dialog.innerHTML = `
+                <div class="close-confirmation-panel" style="width:min(900px,96vw)">
+                    <div class="close-confirmation-header">
+                        <div>
+                            <div class="close-confirmation-title">Leg Exists Check</div>
+                            <div class="leg-check-subtitle text-muted small"></div>
+                        </div>
+                        <button type="button" class="btn btn-secondary btn-sm leg-check-close-btn">Close</button>
+                    </div>
+                    <div class="close-confirmation-summary leg-check-summary"></div>
+                    <div class="close-confirmation-table-shell">
+                        <table class="close-confirmation-table">
+                            <thead><tr><th>Contract</th><th>Workspace Qty</th><th>TWS Qty</th><th>Status</th><th>Groups</th></tr></thead>
+                            <tbody class="leg-check-body"></tbody>
+                        </table>
+                    </div>
+                </div>`;
+            const close = () => { dialog.style.display = 'none'; };
+            dialog.querySelector('.leg-check-close-btn').addEventListener('click', close);
+            dialog.addEventListener('click', (event) => { if (event.target === dialog) close(); });
+            doc.body.appendChild(dialog);
+        }
+        const rows = Array.isArray(result.rows) ? result.rows : [];
+        const statusLabels = {
+            matched: 'Matched',
+            missing: 'Missing in TWS',
+            opposite: 'Opposite direction',
+            quantity_mismatch: 'Quantity mismatch',
+        };
+        dialog.querySelector('.leg-check-subtitle').textContent = `${context.title || 'All Groups'} · Account ${result.account || 'not selected'} · ${new Date(result.checkedAt).toLocaleTimeString()}`;
+        dialog.querySelector('.leg-check-summary').innerHTML = result.ibConnected === false
+            ? '<span class="leg-check-status-missing">TWS positions are not ready; quantities could not be verified.</span>'
+            : (rows.length === 0
+                ? '<span class="text-muted">No open, non-zero legs were found in this scope.</span>'
+                : `<span><strong>${result.ok ? '✓ All matched' : '⚠ Issues found'}</strong></span><span>Matched: ${result.matched}</span><span>Issues: ${result.issues}</span>`);
+        dialog.querySelector('.leg-check-body').innerHTML = rows.length
+            ? rows.map((row) => `<tr>
+                <td>${_escapeCloseConfirmationHtml(row.label)}</td>
+                <td>${_formatCloseConfirmationNumber(row.expected)}</td>
+                <td>${_formatCloseConfirmationNumber(row.actual, '0')}</td>
+                <td class="leg-check-status-${_escapeCloseConfirmationHtml(row.status)}">${_escapeCloseConfirmationHtml(statusLabels[row.status] || row.status)}</td>
+                <td>${_escapeCloseConfirmationHtml((row.groupNames || []).join(', '))}</td>
+            </tr>`).join('')
+            : '<tr><td colspan="5" class="text-muted">No non-zero legs were found in this scope.</td></tr>';
+        dialog.style.display = 'flex';
+        return true;
+    }
+
+    function _closeTreatmentLabel(treatment) {
+        switch (String(treatment || '').trim()) {
+            case 'combo_close': return 'Option Combo Close';
+            case 'underlying_close': return 'Close Existing Underlying';
+            case 'itm_hedged': return 'Expiry Hedge';
+            case 'otm_ignored': return 'Ignore to Expiry';
+            default: return String(treatment || 'Review');
+        }
+    }
+
+    function _renderPositionReductionWarning(context) {
+        const warnings = Array.isArray(context && context.positionWarnings) ? context.positionWarnings : [];
+        if (context && context.positionSnapshotAvailable !== true) {
+            return '<div class="position-reduction-warning"><strong>Position check unavailable.</strong> The latest TWS portfolio snapshot is not available, so this order cannot be checked for netting against existing positions.</div>';
+        }
+        if (warnings.length === 0) {
+            const safeMessage = context && context.crossGroupWarningsOnly
+                ? '✓ No other workspace Group is allocated to the contracts being closed.'
+                : '✓ This order does not reduce any position in the latest TWS snapshot.';
+            return `<div class="close-confirmation-summary"><span class="leg-check-status-matched">${safeMessage}</span></div>`;
+        }
+        const rows = warnings.map((warning) => {
+            const groups = (warning.otherGroupNames || []).length
+                ? ` Other workspace groups using this contract: ${(warning.otherGroupNames || []).join(', ')}.`
+                : '';
+            return `<li><strong>${_escapeCloseConfirmationHtml(warning.label)}</strong>: TWS ${_formatCloseConfirmationNumber(warning.current)}, order ${_formatCloseConfirmationNumber(warning.orderDelta)}, projected ${_formatCloseConfirmationNumber(warning.projected)}.${_escapeCloseConfirmationHtml(groups)}</li>`;
+        }).join('');
+        return `<div class="position-reduction-warning"><strong>WARNING: this order may close or reduce existing TWS positions.</strong><ul style="margin:0.5rem 0 0 1.2rem">${rows}</ul><div style="margin-top:0.5rem">TWS nets identical contracts at account level; it does not preserve this app's Group ownership.</div></div>`;
+    }
+
+    function openComboSubmissionConfirmationDialog(context) {
+        const doc = globalScope.document;
+        if (!doc || !doc.body || !context || !context.payload) return false;
+        let dialog = doc.getElementById('comboSubmissionConfirmationDialog');
+        if (!dialog) {
+            dialog = doc.createElement('div');
+            dialog.id = 'comboSubmissionConfirmationDialog';
+            dialog.className = 'close-confirmation-dialog';
+            dialog.setAttribute('role', 'dialog');
+            dialog.setAttribute('aria-modal', 'true');
+            dialog.innerHTML = `
+                <div class="close-confirmation-panel" style="width:min(980px,96vw)">
+                    <div class="close-confirmation-header">
+                        <div><div class="close-confirmation-title">Confirm Combo Order</div><div class="combo-submit-subtitle text-muted small"></div></div>
+                        <button type="button" class="btn btn-secondary btn-sm combo-submit-cancel-btn">Cancel</button>
+                    </div>
+                    <div class="close-confirmation-live-warning combo-submit-live-warning"></div>
+                    <div class="combo-submit-position-warning"></div>
+                    <h4>Order legs</h4>
+                    <div class="close-confirmation-table-shell"><table class="close-confirmation-table">
+                        <thead><tr><th>Contract</th><th>Action</th><th>Quantity</th></tr></thead><tbody class="combo-submit-leg-body"></tbody>
+                    </table></div>
+                    <div class="close-confirmation-footer"><span class="text-muted small">Identical contracts are netted by TWS at account level.</span><div class="close-confirmation-footer-actions">
+                        <button type="button" class="btn btn-secondary combo-submit-cancel-btn">Cancel</button>
+                        <button type="button" class="btn btn-primary combo-submit-confirm-btn">Confirm &amp; Submit to TWS</button>
+                    </div></div>
+                </div>`;
+            const close = (cancel) => {
+                const active = dialog._comboSubmitContext;
+                dialog.style.display = 'none';
+                dialog._comboSubmitContext = null;
+                if (cancel && active && typeof active.onCancel === 'function') active.onCancel();
+            };
+            dialog.querySelectorAll('.combo-submit-cancel-btn').forEach((button) => button.addEventListener('click', () => close(true)));
+            dialog.addEventListener('click', (event) => { if (event.target === dialog) close(true); });
+            const submit = dialog.querySelector('.combo-submit-confirm-btn');
+            submit.addEventListener('click', () => {
+                const active = dialog._comboSubmitContext;
+                if (!active || typeof active.onConfirm !== 'function') return;
+                submit.disabled = true;
+                const confirmed = active.onConfirm();
+                if (confirmed !== false) close(false);
+                else submit.disabled = false;
+            });
+            doc.body.appendChild(dialog);
+        }
+        const payload = context.payload;
+        const validationLegs = new Map((context.validation && context.validation.legs || []).map((leg) => [String(leg.id || ''), leg]));
+        const account = String(payload.account || '').trim() || 'Not selected';
+        dialog._comboSubmitContext = context;
+        dialog.querySelector('.combo-submit-subtitle').textContent = `${context.group && context.group.name || payload.groupName || 'Group'} · Account ${account}`;
+        dialog.querySelector('.combo-submit-live-warning').innerHTML = context.targetMode === 'test_submit'
+            ? '<strong>TEST-ONLY TWS submission.</strong> This still sends orders to TWS.'
+            : '<strong>LIVE TWS submission.</strong> Confirming sends this combo order.';
+        dialog.querySelector('.combo-submit-position-warning').innerHTML = _renderPositionReductionWarning(context);
+        dialog.querySelector('.combo-submit-leg-body').innerHTML = (payload.legs || []).map((leg) => {
+            const resolved = validationLegs.get(String(leg.id || '')) || {};
+            const name = resolved.localSymbol || leg.localSymbol || `${leg.symbol || ''} ${leg.expDate || leg.contractMonth || ''} ${leg.right || ''}${leg.strike || ''}`;
+            const quantity = parseFloat(leg.pos) || 0;
+            return `<tr><td>${_escapeCloseConfirmationHtml(name)}</td><td><strong>${quantity > 0 ? 'BUY' : 'SELL'}</strong></td><td>${_formatCloseConfirmationNumber(Math.abs(quantity))}</td></tr>`;
+        }).join('');
+        dialog.querySelector('.combo-submit-confirm-btn').disabled = false;
+        dialog.querySelector('.combo-submit-confirm-btn').textContent = context.targetMode === 'test_submit' ? 'Confirm & Send Test Order' : 'Confirm & Submit to TWS';
+        dialog.style.display = 'flex';
+        return true;
+    }
+
+    function _ensureCloseConfirmationDialog() {
+        const doc = globalScope.document;
+        if (!doc || !doc.body || typeof doc.createElement !== 'function') {
+            return null;
+        }
+        let dialog = doc.getElementById('closeConfirmationDialog');
+        if (dialog) {
+            return dialog;
+        }
+
+        dialog = doc.createElement('div');
+        dialog.id = 'closeConfirmationDialog';
+        dialog.className = 'close-confirmation-dialog';
+        dialog.setAttribute('role', 'dialog');
+        dialog.setAttribute('aria-modal', 'true');
+        dialog.setAttribute('aria-labelledby', 'closeConfirmationDialogTitle');
+        dialog.innerHTML = `
+            <div class="close-confirmation-panel">
+                <div class="close-confirmation-header">
+                    <div>
+                        <div id="closeConfirmationDialogTitle" class="close-confirmation-title">Confirm Close Plan</div>
+                        <div class="close-confirmation-subtitle text-muted small"></div>
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-sm close-confirmation-cancel-btn">Cancel</button>
+                </div>
+                <div class="close-confirmation-live-warning"></div>
+                <div class="close-confirmation-position-check"></div>
+                <div class="close-confirmation-summary"></div>
+                <h4>Leg treatment</h4>
+                <div class="close-confirmation-table-shell">
+                    <table class="close-confirmation-table">
+                        <thead><tr><th>Leg</th><th>Position</th><th>Quote</th><th>Treatment</th><th>Underlying allocation</th></tr></thead>
+                        <tbody class="close-confirmation-leg-body"></tbody>
+                    </table>
+                </div>
+                <h4>Orders authorized by this confirmation</h4>
+                <div class="close-confirmation-table-shell">
+                    <table class="close-confirmation-table">
+                        <thead><tr><th>Stage</th><th>Instrument</th><th>Action</th><th>Quantity</th><th>Initial limit</th><th>TIF</th></tr></thead>
+                        <tbody class="close-confirmation-order-body"></tbody>
+                    </table>
+                </div>
+                <div class="close-confirmation-warning-text"></div>
+                <div class="close-confirmation-footer">
+                    <span class="close-confirmation-expiry text-muted small"></span>
+                    <div class="close-confirmation-footer-actions">
+                        <button type="button" class="btn btn-secondary close-confirmation-cancel-btn">Cancel</button>
+                        <button type="button" class="btn btn-primary close-confirmation-submit-btn">Confirm &amp; Submit to TWS</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const closeDialog = (invokeCancel) => {
+            const context = dialog._closeConfirmationContext;
+            dialog.style.display = 'none';
+            dialog._closeConfirmationContext = null;
+            if (invokeCancel && context && typeof context.onCancel === 'function') {
+                context.onCancel();
+            }
+        };
+        dialog.querySelectorAll('.close-confirmation-cancel-btn').forEach((button) => {
+            button.addEventListener('click', () => closeDialog(true));
+        });
+        dialog.addEventListener('click', (event) => {
+            if (event.target === dialog) {
+                closeDialog(true);
+            }
+        });
+        const submitButton = dialog.querySelector('.close-confirmation-submit-btn');
+        submitButton.addEventListener('click', () => {
+            const context = dialog._closeConfirmationContext;
+            if (!context || typeof context.onConfirm !== 'function') {
+                return;
+            }
+            submitButton.disabled = true;
+            const confirmed = context.onConfirm();
+            if (confirmed !== false) {
+                closeDialog(false);
+            } else {
+                submitButton.disabled = false;
+            }
+        });
+        doc.body.appendChild(dialog);
+        return dialog;
+    }
+
+    function openCloseConfirmationDialog(context) {
+        const dialog = _ensureCloseConfirmationDialog();
+        if (!dialog || !context || !context.preview) {
+            return false;
+        }
+        const preview = context.preview;
+        const group = context.group || {};
+        const targetMode = String(context.targetMode || '').trim();
+        const isTestMode = targetMode === 'test_submit';
+        const legs = Array.isArray(preview.closePlanLegs) ? preview.closePlanLegs : [];
+        const orders = Array.isArray(preview.closePlanOrders) ? preview.closePlanOrders : [];
+        const account = String(preview.account || '').trim() || 'Not selected';
+        const strategy = String(group.closeExecution && group.closeExecution.pendingCloseStrategy || group.closeExecution && group.closeExecution.strategy || 'auto');
+
+        dialog._closeConfirmationContext = context;
+        dialog.querySelector('.close-confirmation-subtitle').textContent = `${group.name || preview.groupName || 'Group'} · Account ${account}`;
+        dialog.querySelector('.close-confirmation-live-warning').innerHTML = isTestMode
+            ? '<strong>TEST-ONLY TWS submission.</strong> Guardrail limits are intentionally away from market, but this still sends orders to TWS.'
+            : '<strong>LIVE TWS submission.</strong> Confirming authorizes the ordered workflow shown below.';
+        dialog.querySelector('.close-confirmation-position-check').innerHTML = _renderPositionReductionWarning(context);
+        dialog.querySelector('.close-confirmation-summary').innerHTML = `
+            <span><strong>Strategy:</strong> ${_escapeCloseConfirmationHtml(strategy)}</span>
+            <span><strong>Account:</strong> ${_escapeCloseConfirmationHtml(account)}</span>
+            <span><strong>Orders:</strong> ${orders.length}</span>
+            <span><strong>Legs:</strong> ${legs.length}</span>
+            <span><strong>Initial concession:</strong> ${_formatCloseConfirmationNumber((group.closeExecution && group.closeExecution.concessionRatio || 0) * 100)}%</span>
+            <span><strong>Drift:</strong> ${_formatCloseConfirmationNumber(group.closeExecution && group.closeExecution.repriceThreshold)}</span>
+        `;
+
+        const legBody = dialog.querySelector('.close-confirmation-leg-body');
+        legBody.innerHTML = legs.length > 0
+            ? legs.map((leg) => {
+                const optionName = leg.right
+                    ? `${leg.symbol || ''} ${leg.expiry || ''} ${leg.right}${_formatCloseConfirmationNumber(leg.strike, '')}`
+                    : `${leg.symbol || ''} ${leg.secType || ''}`;
+                const quote = `Bid ${_formatCloseConfirmationNumber(leg.observedBid)} / Ask ${_formatCloseConfirmationNumber(leg.observedAsk)}`;
+                const required = parseFloat(leg.requiredUnderlyingQuantity);
+                const netted = parseFloat(leg.internallyNettedUnderlyingQuantity);
+                const executed = parseFloat(leg.executedUnderlyingQuantity);
+                const allocation = Number.isFinite(required)
+                    ? `Need ${_formatCloseConfirmationNumber(required)}; net ${_formatCloseConfirmationNumber(netted, '0')}; trade ${_formatCloseConfirmationNumber(executed, '0')}`
+                    : '—';
+                return `<tr>
+                    <td>${_escapeCloseConfirmationHtml(optionName)}</td>
+                    <td>${_formatCloseConfirmationNumber(leg.originalPosition)} → ${_formatCloseConfirmationNumber(leg.closePosition)}</td>
+                    <td>${_escapeCloseConfirmationHtml(quote)}</td>
+                    <td>${_escapeCloseConfirmationHtml(_closeTreatmentLabel(leg.treatment))}</td>
+                    <td>${_escapeCloseConfirmationHtml(allocation)}</td>
+                </tr>`;
+            }).join('')
+            : '<tr><td colspan="5" class="text-muted">No leg treatment rows were returned.</td></tr>';
+
+        const orderBody = dialog.querySelector('.close-confirmation-order-body');
+        orderBody.innerHTML = orders.length > 0
+            ? orders.map((order, index) => `<tr>
+                <td>${index + 1}. ${_escapeCloseConfirmationHtml(order.stage || '')}</td>
+                <td>${_escapeCloseConfirmationHtml(`${order.symbol || ''} ${order.secType || order.orderKind || ''}`)}</td>
+                <td><strong>${_escapeCloseConfirmationHtml(order.orderAction || '')}</strong></td>
+                <td>${_formatCloseConfirmationNumber(order.quantity)}</td>
+                <td>${_formatCloseConfirmationNumber(order.limitPrice)}</td>
+                <td>${_escapeCloseConfirmationHtml(order.timeInForce || preview.timeInForce || '')}</td>
+            </tr>`).join('')
+            : '<tr><td colspan="6">No TWS order is required; all selected obligations are ignored-to-expiry or internally netted.</td></tr>';
+
+        const hasUnderlyingFirst = orders.some((order) => order.stage === 'underlying');
+        const workflowNote = hasUnderlyingFirst
+            ? 'Underlying stages are submitted first. Remaining option orders are submitted only after those fills; this is one confirmation but not an atomic multi-leg transaction. '
+            : '';
+        dialog.querySelector('.close-confirmation-warning-text').textContent = `${workflowNote}${preview.closePlanMessage || preview.pricingNote || ''} Initial limits are frozen from this plan; managed repricing may subsequently follow the displayed concession and drift policy.`;
+        const expiresAt = String(preview.closePlanExpiresAt || '').trim();
+        dialog.querySelector('.close-confirmation-expiry').textContent = expiresAt
+            ? `This one-time plan expires at ${new Date(expiresAt).toLocaleTimeString()}.`
+            : 'This one-time plan has a short confirmation lifetime.';
+
+        dialog.querySelector('.close-confirmation-submit-btn').disabled = false;
+        dialog.querySelector('.close-confirmation-submit-btn').textContent = isTestMode
+            ? 'Confirm & Send Test Orders'
+            : 'Confirm & Submit to TWS';
+        dialog.style.display = 'flex';
+        return true;
+    }
+
     function bindCloseGroupControls(card, group, state, deps) {
         const closeExecution = _ensureCloseExecution(group);
         const container = card.querySelector('.close-group-container');
         if (!container || !closeExecution) return;
 
+        const strategyInput = container.querySelector('.close-group-strategy');
         const executionModeInput = container.querySelector('.close-group-execution-mode');
         const thresholdInput = container.querySelector('.close-group-reprice-threshold');
         const concessionInput = container.querySelector('.close-group-concession');
         const timeInForceInput = container.querySelector('.close-group-tif');
         const submitBtn = container.querySelector('.close-group-submit-btn');
+        const equivalentBtn = container.querySelector('.close-group-equivalent-btn');
         const helpText = container.querySelector('.close-group-help');
-        if (!executionModeInput || !thresholdInput || !concessionInput || !timeInForceInput || !submitBtn) {
+        if (!strategyInput || !executionModeInput || !thresholdInput || !concessionInput
+            || !timeInForceInput || !submitBtn || !equivalentBtn) {
             return;
         }
 
@@ -2448,11 +2809,13 @@
         if (isHistoricalMode) {
             closeExecution.executionMode = 'preview';
         }
+        strategyInput.value = String(closeExecution.strategy || 'auto').toLowerCase();
         executionModeInput.value = String(closeExecution.executionMode || 'preview');
         thresholdInput.value = formatRepriceThresholdValue(closeExecution.repriceThreshold || 0.01);
         concessionInput.value = Number(closeExecution.concessionRatio || 0.0).toFixed(2);
         timeInForceInput.value = String(closeExecution.timeInForce || 'DAY').toUpperCase();
 
+        strategyInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         executionModeInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         thresholdInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         concessionInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
@@ -2460,15 +2823,20 @@
         if (helpText) {
             helpText.textContent = isHistoricalMode
                 ? 'Snapshots every open leg at the current replay day, writes those prices into Close, and switches the group into Settlement mode.'
-                : 'Sends the reverse combo for all non-zero legs and reuses the managed middle-price negotiation flow.';
+                : (closeExecution.strategy === 'combo'
+                    ? 'Combo Only always sends the reverse option combo and never substitutes an expiry hedge.'
+                    : 'Auto normally sends the reverse combo, but can ignore clearly worthless OTM legs and hedge deep ITM one-sided legs with net Underlying. Expiry Equivalent forces that analysis.');
         }
 
         if (isCompleted) {
             submitBtn.style.display = 'none';
+            equivalentBtn.style.display = 'none';
             submitBtn.disabled = true;
+            equivalentBtn.disabled = true;
             submitBtn.title = 'This group is already fully closed.';
         } else {
             submitBtn.style.display = '';
+            equivalentBtn.style.display = isHistoricalMode ? 'none' : '';
         }
 
         if (isCompleted) {
@@ -2494,11 +2862,37 @@
                     : 'Submit a managed combo order that reverses all non-zero legs in this group.');
         }
 
+        if (!isCompleted && !isHistoricalMode) {
+            if (renderMode !== 'active') {
+                equivalentBtn.disabled = true;
+                equivalentBtn.title = 'Expiry Equivalent is only available when this group is in Active mode.';
+            } else if (!hasOpenPosition) {
+                equivalentBtn.disabled = true;
+                equivalentBtn.title = 'This group has no open position to close.';
+            } else if (closeExecution.pendingRequest === true) {
+                equivalentBtn.disabled = true;
+                equivalentBtn.title = 'A close-group order request is already in progress.';
+            } else {
+                equivalentBtn.disabled = false;
+                equivalentBtn.title = 'Force expiry-equivalent analysis for standard physically settled stock options; preview first when selected.';
+            }
+        }
+
         submitBtn.textContent = isHistoricalMode
             ? 'Settle @ Replay Day'
             : (closeExecution.executionMode === 'preview'
                 ? 'Preview Close'
                 : (closeExecution.executionMode === 'test_submit' ? 'Send Test Close' : 'Close Group'));
+        equivalentBtn.textContent = closeExecution.executionMode === 'preview'
+            ? 'Preview Equivalent'
+            : (closeExecution.executionMode === 'test_submit' ? 'Test Equivalent' : 'Expiry Equivalent');
+
+        strategyInput.addEventListener('change', (e) => {
+            const nextStrategy = String(e.target.value || '').trim().toLowerCase();
+            closeExecution.strategy = ['auto', 'combo'].includes(nextStrategy) ? nextStrategy : 'auto';
+            e.target.value = closeExecution.strategy;
+            deps.renderGroups();
+        });
 
         executionModeInput.addEventListener('change', (e) => {
             const nextMode = String(e.target.value || '').trim();
@@ -2540,11 +2934,18 @@
             }
         });
 
+        equivalentBtn.addEventListener('click', () => {
+            if (typeof deps.requestEquivalentCloseGroupComboOrder === 'function') {
+                deps.requestEquivalentCloseGroupComboOrder(group);
+            }
+        });
+
         const handleCloseGroupAction = (e) => {
             const continueBtn = e.target.closest('.trial-trigger-continue-repricing-btn');
+            const manualConcedeBtn = e.target.closest('.trial-trigger-concede-step-btn');
             const concedeBtn = e.target.closest('.trial-trigger-concede-btn');
             const cancelBtn = e.target.closest('.trial-trigger-cancel-order-btn');
-            if (!continueBtn && !concedeBtn && !cancelBtn) {
+            if (!continueBtn && !manualConcedeBtn && !concedeBtn && !cancelBtn) {
                 return;
             }
 
@@ -2554,6 +2955,12 @@
 
             if (continueBtn && typeof deps.requestContinueManagedComboOrder === 'function') {
                 deps.requestContinueManagedComboOrder(group, 'closeExecution');
+            } else if (manualConcedeBtn && typeof deps.requestManualConcedeManagedComboOrder === 'function') {
+                const manualContainer = manualConcedeBtn.closest('.trial-trigger-manual-concede-group');
+                const stepInput = manualContainer
+                    ? manualContainer.querySelector('.trial-trigger-concede-step-input')
+                    : null;
+                deps.requestManualConcedeManagedComboOrder(group, stepInput ? stepInput.value : '', 'closeExecution');
             } else if (concedeBtn && typeof deps.requestConcedeManagedComboOrder === 'function') {
                 const concedeContainer = concedeBtn.closest('.trial-trigger-concede-group');
                 const concedeSelect = concedeContainer
@@ -2933,6 +3340,9 @@
         simulateOpenGroup,
         bindTrialTriggerControls,
         bindCloseGroupControls,
+        openCloseConfirmationDialog,
+        openComboSubmissionConfirmationDialog,
+        openLegPositionCheckDialog,
         _test: {
             describeLegIvInput: _describeLegIvInput,
             resolveSimulatedOpenPrice: _resolveSimulatedOpenPrice,

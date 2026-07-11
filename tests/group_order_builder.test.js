@@ -378,5 +378,53 @@ module.exports = {
                 assert.equal(payload.legs[1].symbol, 'SPY');
             },
         },
+        {
+            name: 'includes close strategy and one-sided live quotes for liquidity-aware close planning',
+            run() {
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/product_registry.js',
+                        'js/group_order_builder.js',
+                    ],
+                    {
+                        OptionComboWsLiveQuotes: {
+                            getOptionQuote(legId) {
+                                return legId === 'otm_call' ? { ask: 0.01, mark: 0.01 } : null;
+                            },
+                            getUnderlyingQuote() {
+                                return { bid: 729.98, ask: 730.02, mark: 730 };
+                            },
+                        },
+                    }
+                );
+
+                const payload = ctx.OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(
+                    {
+                        id: 'group_equivalent',
+                        name: 'Equivalent Close',
+                        legs: [
+                            { id: 'otm_call', type: 'call', pos: 1, strike: 800, expDate: '2026-07-17' },
+                        ],
+                    },
+                    {
+                        underlyingSymbol: 'SPY',
+                        underlyingPrice: 729,
+                        simulatedDate: '2026-07-10',
+                    },
+                    {
+                        executionMode: 'preview',
+                        intent: 'close',
+                        source: 'close_group',
+                        closeStrategy: 'equivalent_expiry',
+                    }
+                );
+
+                assert.equal(payload.closeStrategy, 'equivalent_expiry');
+                assert.equal(payload.observedUnderlyingPrice, 730);
+                assert.equal(payload.profile.underlyingSecType, 'STK');
+                assert.equal(payload.legs[0].observedAsk, 0.01);
+                assert.equal(payload.legs[0].observedBid, undefined);
+            },
+        },
     ],
 };

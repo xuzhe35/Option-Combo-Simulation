@@ -51,6 +51,30 @@
         return days;
     }
 
+    // Weighted day count for the simulation clock: trading days count as 1,
+    // weekends/holidays count as weekendWeight (0 = pure trading clock,
+    // 1 = pure calendar clock). Same [start, end) convention as
+    // calendarToTradingDays so the two agree at the extremes.
+    function countWeightedDays(startDateStr, endDateStr, weekendWeight) {
+        const start = new Date(normalizeDateInput(startDateStr) + 'T00:00:00Z');
+        const end = new Date(normalizeDateInput(endDateStr) + 'T00:00:00Z');
+        if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) {
+            return 0;
+        }
+        const parsedWeight = parseFloat(weekendWeight);
+        const nonTradingWeight = Number.isFinite(parsedWeight)
+            ? Math.min(1, Math.max(0, parsedWeight))
+            : 1;
+
+        let weighted = 0;
+        const current = new Date(start);
+        while (current < end) {
+            weighted += isTradingDay(current.toISOString().slice(0, 10)) ? 1 : nonTradingWeight;
+            current.setUTCDate(current.getUTCDate() + 1);
+        }
+        return weighted;
+    }
+
     function listTradingDays(startDateStr, endDateStr) {
         const start = new Date(normalizeDateInput(startDateStr) + 'T00:00:00Z');
         const end = new Date(normalizeDateInput(endDateStr) + 'T00:00:00Z');
@@ -76,6 +100,7 @@
         diffDays,
         addDays,
         calendarToTradingDays,
+        countWeightedDays,
         listTradingDays,
     };
 
