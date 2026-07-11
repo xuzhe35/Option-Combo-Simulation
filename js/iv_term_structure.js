@@ -45,6 +45,8 @@
     const OPTION_STREAM_LIMIT_STORAGE_KEY = 'optionComboIvtsOptionStreamLimit';
     const DEFAULT_MAX_OPTION_STREAMS = 10;
     const OPTION_STREAM_LIMIT_CHOICES = Object.freeze([10, 20, 40, 0]);
+    const TD_IV_LAMBDA_STORAGE_KEY = 'optionComboIvtsTdIvLambda';
+    const DEFAULT_TD_IV_LAMBDA = 0;
     const CARD_VIEW_STATE_SECTIONS = Object.freeze([
         {
             key: 'calendar',
@@ -416,6 +418,52 @@
         }
     }
 
+    function normalizeTdIvLambda(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return DEFAULT_TD_IV_LAMBDA;
+        }
+        return Math.min(1, Math.max(0, Math.round(parsed * 100) / 100));
+    }
+
+    function loadSavedTdIvLambda(symbol) {
+        const key = String(symbol || '').trim().toUpperCase();
+        if (!key) {
+            return null;
+        }
+        try {
+            const parsed = JSON.parse(localStorage.getItem(TD_IV_LAMBDA_STORAGE_KEY) || '{}');
+            if (!parsed || typeof parsed !== 'object' || !Object.prototype.hasOwnProperty.call(parsed, key)) {
+                return null;
+            }
+            return normalizeTdIvLambda(parsed[key]);
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function saveTdIvLambda(symbol, value) {
+        const key = String(symbol || '').trim().toUpperCase();
+        if (!key) {
+            return;
+        }
+        let store = {};
+        try {
+            const parsed = JSON.parse(localStorage.getItem(TD_IV_LAMBDA_STORAGE_KEY) || '{}');
+            if (parsed && typeof parsed === 'object') {
+                store = parsed;
+            }
+        } catch (_) {
+            // Start fresh when the saved blob is unreadable.
+        }
+        store[key] = normalizeTdIvLambda(value);
+        try {
+            localStorage.setItem(TD_IV_LAMBDA_STORAGE_KEY, JSON.stringify(store));
+        } catch (_) {
+            // Runtime state still carries the selected lambda when storage is unavailable.
+        }
+    }
+
     function isFuturesOptionProfile(profile) {
         return !!(
             profile
@@ -534,6 +582,7 @@
             )
             : '';
         const savedOptionStreamLimit = loadSavedOptionStreamLimit(entry.symbol);
+        const savedTdIvLambda = loadSavedTdIvLambda(entry.symbol);
 
         return {
             symbol: entry.symbol,
@@ -543,6 +592,9 @@
             maxOptionStreams: savedOptionStreamLimit == null
                 ? normalizeOptionStreamLimit(entry.maxOptionStreams)
                 : savedOptionStreamLimit,
+            tdIvWeekendWeight: savedTdIvLambda == null
+                ? DEFAULT_TD_IV_LAMBDA
+                : savedTdIvLambda,
             isExpanded: options.isExpanded === true,
             statusMessage: isFop
                 ? 'Ready. Choose the underlying futures month, then Sync/Update.'
@@ -653,6 +705,14 @@
         );
     }
 
+    function isTdIvLambdaElement(element) {
+        return !!(
+            element
+            && typeof element.matches === 'function'
+            && element.matches('input[data-action="td-iv-lambda"][data-symbol]')
+        );
+    }
+
     function isFocusedCardControlInCard(cardNode) {
         const activeElement = document && document.activeElement;
         return !!(
@@ -662,6 +722,7 @@
                 || isCalendarFinderControlElement(activeElement)
                 || isFuturesContractMonthElement(activeElement)
                 || isOptionStreamLimitElement(activeElement)
+                || isTdIvLambdaElement(activeElement)
             )
             && typeof cardNode.contains === 'function'
             && cardNode.contains(activeElement)
@@ -1471,7 +1532,8 @@
         return core().buildExpiryDetailRows(
             snapshot,
             card.quotesBySubId,
-            card.catalog && card.catalog.anchorDate
+            card.catalog && card.catalog.anchorDate,
+            normalizeTdIvLambda(card && card.tdIvWeekendWeight)
         );
     }
 
@@ -1689,8 +1751,10 @@
             return `<span class="ivts-missing">${escapeHtml(text)}</span>`;
         }
         const tradDte = Number.isFinite(row.tradDte) ? row.tradDte : null;
-        const title = 'Trading-day annualized IV: same total variance as the TWS quote, '
-            + 'but divided by trading time (tradDTE/252) instead of calendar time, '
+        const lambda = Number.isFinite(row.tdIvWeekendWeight) ? row.tdIvWeekendWeight : 0;
+        const title = 'Weighted-clock annualized IV: same total variance as the TWS quote, '
+            + `with weekends/holidays counted at λ=${lambda.toFixed(2)} of a trading day `
+            + '(0 = pure trading-day clock, 1 = calendar clock), '
             + 'so expiries on both sides of a weekend are comparable.'
             + (tradDte != null ? ` Trading DTE: ${tradDte}.` : '');
         return `<span title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
@@ -2063,6 +2127,12 @@
                         ? 'Subscribe every available expiry.'
                         : `Subscribe the nearest ${selectedExpiryCount} expiries first.`}
                 </span>
+                <label class="ivts-subscription-field" title="Weekend/holiday variance weight for the TD IV column: 0 = pure trading-day clock, 1 = calendar clock (matches the TWS IV). Adjust until cross-weekend expiries line up to read off the market's implied weekend weight.">
+                    <span>TD IV λ</span>
+                    <input type="number" data-action="td-iv-lambda" data-symbol="${escapeHtml(card.symbol)}"
+                        value="${normalizeTdIvLambda(card && card.tdIvWeekendWeight).toFixed(2)}"
+                        min="0" max="1" step="0.05" inputmode="decimal" style="width: 72px;">
+                </label>
             </div>
         `;
     }
@@ -2313,6 +2383,21 @@
         render(true);
     }
 
+    function applyTdIvLambdaChange(field) {
+        const card = getCard(field.getAttribute('data-symbol'));
+        if (!card) {
+            return;
+        }
+
+        // Display-only lens: re-annualizes the already-subscribed quotes, so
+        // no catalog reset or resubscription is needed.
+        const lambda = normalizeTdIvLambda(field.value);
+        card.tdIvWeekendWeight = lambda;
+        saveTdIvLambda(card.symbol, lambda);
+        card.forceBodyRefreshOnce = true;
+        render(true);
+    }
+
     function toggleCalendarFinderShowAll(button) {
         const card = getCard(button.getAttribute('data-symbol'));
         if (!card) {
@@ -2497,6 +2582,12 @@
                 return;
             }
 
+            const tdIvLambdaField = event.target.closest('input[data-action="td-iv-lambda"][data-symbol]');
+            if (tdIvLambdaField) {
+                applyTdIvLambdaChange(tdIvLambdaField);
+                return;
+            }
+
             const futuresMonthField = event.target.closest('input[data-action="futures-contract-month"][data-symbol]');
             if (futuresMonthField) {
                 applyFuturesContractMonthChange(futuresMonthField);
@@ -2523,7 +2614,7 @@
         });
 
         container.addEventListener('focusout', (event) => {
-            const field = event.target.closest('select[data-action="baseline"][data-symbol], [data-action^="calendar-"][data-symbol], input[data-action="futures-contract-month"][data-symbol], select[data-action="option-stream-limit"][data-symbol]');
+            const field = event.target.closest('select[data-action="baseline"][data-symbol], [data-action^="calendar-"][data-symbol], input[data-action="futures-contract-month"][data-symbol], select[data-action="option-stream-limit"][data-symbol], input[data-action="td-iv-lambda"][data-symbol]');
             if (!field) {
                 return;
             }
@@ -2563,6 +2654,9 @@
             saveCalendarFinderConfig,
             loadSavedOptionStreamLimit,
             saveOptionStreamLimit,
+            normalizeTdIvLambda,
+            loadSavedTdIvLambda,
+            saveTdIvLambda,
             captureCardViewState,
             restoreCardViewState,
         },

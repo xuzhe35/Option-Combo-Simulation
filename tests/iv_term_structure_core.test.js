@@ -452,6 +452,57 @@ module.exports = {
             },
         },
         {
+            name: 'weighted lambda interpolates the TD IV between trading-day and calendar clocks',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                // λ=1 must reproduce the TWS calendar quote exactly.
+                assert.equal(core.computeTradingDayAnnualizedIv(0.25, 5, 3, 1), 0.25);
+                // λ=0 matches the original trading-day formula (default).
+                assert.equal(
+                    core.computeTradingDayAnnualizedIv(0.25, 5, 3, 0),
+                    core.computeTradingDayAnnualizedIv(0.25, 5, 3)
+                );
+                // λ=0.3: effDte = 3 + 0.3*2 = 3.6, effYear = 252 + 0.3*113 = 285.9.
+                const expected = 0.25 * Math.sqrt((5 / 365) / (3.6 / 285.9));
+                assert.ok(Math.abs(core.computeTradingDayAnnualizedIv(0.25, 5, 3, 0.3) - expected) < 1e-6);
+                // Out-of-range and junk weights clamp to [0, 1] / default 0.
+                assert.equal(
+                    core.computeTradingDayAnnualizedIv(0.25, 5, 3, 9),
+                    core.computeTradingDayAnnualizedIv(0.25, 5, 3, 1)
+                );
+                assert.equal(
+                    core.computeTradingDayAnnualizedIv(0.25, 5, 3, 'junk'),
+                    core.computeTradingDayAnnualizedIv(0.25, 5, 3, 0)
+                );
+
+                // The lambda flows through detail rows and is stamped on them.
+                const rows = core.buildExpiryDetailRows(
+                    [{ expiry: '20260713', dte: 5, atmStrike: 500, atmCallSubId: 'c', atmPutSubId: 'p' }],
+                    { c: { iv: 0.25, mark: 1 }, p: { iv: 0.25, mark: 1 } },
+                    '2026-07-08',
+                    0.3
+                );
+                assert.equal(rows[0].tdIvWeekendWeight, 0.3);
+                assert.ok(Math.abs(rows[0].callIvTd - expected) < 1e-6);
+                const bucketRows = core.buildBucketRows(rows, [{ label: '1W', targetDays: 7 }]);
+                assert.equal(bucketRows[0].tdIvWeekendWeight, 0.3);
+
+                // At λ=1 the TD IV column equals the TWS column for every row.
+                const calendarRows = core.buildExpiryDetailRows(
+                    [{ expiry: '20260713', dte: 5, atmStrike: 500, atmCallSubId: 'c', atmPutSubId: 'p' }],
+                    { c: { iv: 0.25, mark: 1 }, p: { iv: 0.21, mark: 1 } },
+                    '2026-07-08',
+                    1
+                );
+                assert.equal(calendarRows[0].callIvTd, 0.25);
+                assert.equal(calendarRows[0].putIvTd, 0.21);
+            },
+        },
+        {
             name: 'leaves trading-day IV empty without an anchor date and propagates it into buckets',
             run() {
                 const ctx = loadBrowserScripts([

@@ -377,6 +377,10 @@ module.exports = {
                     /Trading DTE: 3/
                 );
                 assert.match(
+                    buildIvPairTdCell({ callIvTd: 0.2410, putIvTd: 0.2395, tradDte: 3, tdIvWeekendWeight: 0.3 }),
+                    /λ=0\.30/
+                );
+                assert.match(
                     buildIvPairTdCell({ callIvTd: null, putIvTd: null }),
                     /ivts-missing/
                 );
@@ -384,6 +388,32 @@ module.exports = {
                     buildIvPairTdCell({ subscriptionSelected: false, callIvTd: 0.2, putIvTd: 0.2 }),
                     /Not subscribed/
                 );
+            },
+        },
+        {
+            name: 'normalizes and persists the per-symbol TD IV lambda',
+            run() {
+                const stored = {};
+                const ctx = loadPageContext(null);
+                ctx.localStorage = {
+                    getItem(key) {
+                        return Object.prototype.hasOwnProperty.call(stored, key) ? stored[key] : null;
+                    },
+                    setItem(key, value) {
+                        stored[key] = String(value);
+                    },
+                };
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+
+                assert.equal(testApi.normalizeTdIvLambda(undefined), 0);
+                assert.equal(testApi.normalizeTdIvLambda('junk'), 0);
+                assert.equal(testApi.normalizeTdIvLambda(-1), 0);
+                assert.equal(testApi.normalizeTdIvLambda(2), 1);
+                assert.equal(testApi.normalizeTdIvLambda('0.35'), 0.35);
+
+                testApi.saveTdIvLambda('es', 0.45);
+                assert.equal(testApi.loadSavedTdIvLambda('ES'), 0.45);
+                assert.equal(testApi.loadSavedTdIvLambda('SPY'), null);
             },
         },
         {

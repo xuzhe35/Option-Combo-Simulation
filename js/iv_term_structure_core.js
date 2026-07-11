@@ -79,17 +79,31 @@
         return days;
     }
 
-    // Re-annualize a calendar-day IV onto a trading-day clock so expiries on
+    function _normalizeWeekendWeight(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return 0;
+        }
+        return Math.min(1, Math.max(0, parsed));
+    }
+
+    // Re-annualize a calendar-day IV onto a weighted-day clock so expiries on
     // both sides of a weekend become comparable: the option's total variance
-    // iv^2 * (calDte/365) is preserved and divided by tradDte/252 instead,
-    // which removes the dead weekend days from the denominator.
-    function computeTradingDayAnnualizedIv(iv, calDte, tradDte) {
+    // iv^2 * (calDte/365) is preserved and divided by effDte/effYear instead,
+    // where non-trading days count as weekendWeight (λ) of a trading day.
+    // λ = 0 is the pure trading-day clock; λ = 1 reproduces the calendar
+    // clock (and the TWS quote) exactly.
+    function computeTradingDayAnnualizedIv(iv, calDte, tradDte, weekendWeight = 0) {
         if (!Number.isFinite(iv) || iv <= 0
             || !Number.isFinite(calDte) || calDte <= 0
-            || !Number.isFinite(tradDte) || tradDte <= 0) {
+            || !Number.isFinite(tradDte) || tradDte <= 0
+            || tradDte > calDte) {
             return null;
         }
-        return _roundNumber(iv * Math.sqrt((calDte * 252) / (tradDte * 365)), 6);
+        const lambda = _normalizeWeekendWeight(weekendWeight);
+        const effDte = tradDte + lambda * (calDte - tradDte);
+        const effYear = 252 + lambda * (365 - 252);
+        return _roundNumber(iv * Math.sqrt((calDte / 365) / (effDte / effYear)), 6);
     }
 
     function _normalizeExpiryKey(value) {
@@ -109,10 +123,11 @@
         return (Array.isArray(rows) ? rows : []).find((row) => _getRowExpiry(row) === expiry) || null;
     }
 
-    function buildExpiryDetailRows(expiryRows, quotesBySubId, anchorDate) {
+    function buildExpiryDetailRows(expiryRows, quotesBySubId, anchorDate, weekendWeight = 0) {
         const quotes = quotesBySubId && typeof quotesBySubId === 'object'
             ? quotesBySubId
             : {};
+        const lambda = _normalizeWeekendWeight(weekendWeight);
 
         return (Array.isArray(expiryRows) ? expiryRows : [])
             .map((entry) => {
@@ -126,8 +141,8 @@
                 const atmStraddleMark = _computeStraddleMark(callMark, putMark);
                 const dte = Math.max(0, parseInt(entry && entry.dte, 10) || 0);
                 const tradDte = countTradingDays(anchorDate, entry && entry.expiry);
-                const callIvTd = computeTradingDayAnnualizedIv(callIv, dte, tradDte);
-                const putIvTd = computeTradingDayAnnualizedIv(putIv, dte, tradDte);
+                const callIvTd = computeTradingDayAnnualizedIv(callIv, dte, tradDte, lambda);
+                const putIvTd = computeTradingDayAnnualizedIv(putIv, dte, tradDte, lambda);
 
                 return {
                     expiry: String(entry && entry.expiry || '').trim(),
@@ -140,6 +155,7 @@
                     callIvTd,
                     putIvTd,
                     atmIvTd: _computeAverageIv(callIvTd, putIvTd),
+                    tdIvWeekendWeight: lambda,
                     callMark,
                     putMark,
                     atmStraddleMark,
@@ -200,6 +216,7 @@
                 callIvTd: match && Number.isFinite(match.callIvTd) ? match.callIvTd : null,
                 putIvTd: match && Number.isFinite(match.putIvTd) ? match.putIvTd : null,
                 atmIvTd: match && Number.isFinite(match.atmIvTd) ? match.atmIvTd : null,
+                tdIvWeekendWeight: match && Number.isFinite(match.tdIvWeekendWeight) ? match.tdIvWeekendWeight : 0,
                 callMark: match && Number.isFinite(match.callMark) ? match.callMark : null,
                 putMark: match && Number.isFinite(match.putMark) ? match.putMark : null,
                 atmStraddleMark: match && Number.isFinite(match.atmStraddleMark) ? match.atmStraddleMark : null,
