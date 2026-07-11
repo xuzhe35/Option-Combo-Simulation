@@ -29,6 +29,18 @@ module.exports = {
             },
         },
         {
+            name: 'applies futures multiplier to hedge pnl and delta',
+            run() {
+                const ctx = loadValuationContext();
+                const result = ctx.OptionComboValuation.computeHedgeDerivedData({
+                    id: 'es_hedge', secType: 'FUT', pos: 2, cost: 5000,
+                    currentPrice: 5001.25, multiplier: 50, deltaPerUnit: 1,
+                });
+                assert.equal(result.pnl, 125);
+                assert.equal(result.hedgeDelta, 100);
+            },
+        },
+        {
             name: 'computes all-groups option leg redundancy from open call and put positions',
             run() {
                 const ctx = loadValuationContext();

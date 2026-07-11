@@ -86,29 +86,31 @@ Current `index.html` load order:
 7. `js/trade_trigger_logic.js`
 8. `js/group_order_builder.js`
 9. `js/leg_position_check.js`
-10. `js/delta_hedge_logic.js`
-11. `js/distribution_proxy_config.js`
-12. `js/pricing_core.js`
-13. `js/bsm.js`
-14. `js/chart.js`
-15. `js/prob_charts.js`
-16. `js/chart_controls.js`
-17. `js/amortized.js`
-18. `js/valuation.js`
-19. `js/session_logic.js`
-20. `js/session_ui.js`
-21. `js/control_panel_ui.js`
-22. `js/hedge_editor_ui.js`
-23. `js/group_editor_ui.js`
-24. `js/hedge_ui.js`
-25. `js/group_ui.js`
-26. `js/global_ui.js`
-27. `js/page_capabilities.js`
-28. `js/combo_order_transport.js`
-29. `js/delta_hedge_transport.js`
-30. `js/delta_hedge_ui.js`
-31. `js/app.js`
-32. `js/ws_client.js`
+10. `js/order_safety.js`
+11. `js/order_confirmation_ui.js`
+12. `js/delta_hedge_logic.js`
+13. `js/distribution_proxy_config.js`
+14. `js/pricing_core.js`
+15. `js/bsm.js`
+16. `js/chart.js`
+17. `js/prob_charts.js`
+18. `js/chart_controls.js`
+19. `js/amortized.js`
+20. `js/valuation.js`
+21. `js/session_logic.js`
+22. `js/session_ui.js`
+23. `js/control_panel_ui.js`
+24. `js/hedge_editor_ui.js`
+25. `js/group_editor_ui.js`
+26. `js/hedge_ui.js`
+27. `js/group_ui.js`
+28. `js/global_ui.js`
+29. `js/page_capabilities.js`
+30. `js/combo_order_transport.js`
+31. `js/delta_hedge_transport.js`
+32. `js/delta_hedge_ui.js`
+33. `js/app.js`
+34. `js/ws_client.js`
 
 `chart_lab.html` keeps the same shared shell ordering where relevant, but intentionally omits the Delta Hedge panel logic/UI. Its tail order is:
 
@@ -192,6 +194,7 @@ Notes:
 - `js/delta_hedge_logic.js`
 - `js/group_order_builder.js`
 - `js/leg_position_check.js`
+- `js/order_safety.js`
 
 Responsibilities:
 
@@ -201,6 +204,11 @@ Responsibilities:
 - trigger configuration and runtime state rules
 - delta hedge recommendation, resting-order applicability, and automation rules
 - open-combo and close-combo payload assembly
+- canonical broker order intents, allocation-aware position-impact checks, and strict preview binding
+
+Open Combo and Delta Hedge are fail-closed behind a shared confirmation surface
+and a backend one-time execution authorization. Close Plan retains its richer
+staged-plan confirmation and existing one-time token.
 
 ### 4.5 UI binding and DOM writes
 
@@ -212,6 +220,7 @@ Responsibilities:
 - `js/hedge_ui.js`
 - `js/global_ui.js`
 - `js/delta_hedge_ui.js`
+- `js/order_confirmation_ui.js`
 
 Responsibilities:
 
@@ -220,7 +229,7 @@ Responsibilities:
 - mode toggles
 - live status rendering
 - execution status rendering
-- Delta Hedge panel rendering, manual order controls, and auto-status display
+- Delta Hedge configuration dialog, persistent global status banner, manual order controls, and automation status display
 - derived-value writes back into the DOM
 
 ### 4.6 Charts and analysis

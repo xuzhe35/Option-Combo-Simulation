@@ -21,7 +21,20 @@ function createElement(initial = {}) {
 }
 
 function buildElements() {
+    const dialogCloseButton = createElement();
+    const dialog = createElement({
+        style: { display: 'none' },
+        querySelectorAll(selector) {
+            return selector === '.deltaHedgeDialogCloseBtn' ? [dialogCloseButton] : [];
+        },
+        setAttribute(name, value) {
+            this[name] = value;
+        },
+    });
     return {
+        deltaHedgeDialog: dialog,
+        openDeltaHedgeDialogBtn: createElement(),
+        openDeltaHedgeDialogGlobalBtn: createElement(),
         deltaHedgeEnabled: createElement({ checked: false }),
         deltaHedgeTargetDelta: createElement({ value: '' }),
         deltaHedgeTolerance: createElement({ value: '' }),
@@ -58,6 +71,12 @@ function buildElements() {
         deltaHedgeProjectedDelta: createElement({ textContent: '' }),
         deltaHedgeBrokerPreviewStatus: createElement({ textContent: '' }),
         deltaHedgeBrokerPreviewDetails: createElement({ textContent: '' }),
+        deltaHedgeGlobalStatus: createElement({ hidden: true, style: {}, dataset: {} }),
+        deltaHedgeGlobalStatusBadge: createElement({ textContent: '' }),
+        deltaHedgeGlobalStatusTitle: createElement({ textContent: '' }),
+        deltaHedgeGlobalStatusSummary: createElement({ textContent: '' }),
+        deltaHedgeGlobalStatusDetail: createElement({ textContent: '' }),
+        deltaHedgeDialogCloseButton: dialogCloseButton,
     };
 }
 
@@ -66,6 +85,15 @@ function loadContext(elements, overrides = {}) {
         'js/delta_hedge_logic.js',
         'js/delta_hedge_ui.js',
     ], {
+        OptionComboOrderSafety: {
+            buildHedgeIntent(state, recommendation) {
+                return { account: state.selectedLiveComboOrderAccount, orderType: state.deltaHedge.orderType, limitPrice: state.deltaHedge.limitPrice, legs: [{ secType: 'STK', symbol: 'SPY', pos: recommendation.side === 'SELL' ? -recommendation.quantity : recommendation.quantity }] };
+            },
+            analyzePositionImpact() { return { available: true, warnings: [] }; },
+        },
+        OptionComboOrderConfirmationUI: {
+            open(context) { return context.onConfirm(); },
+        },
         document: {
             getElementById(id) {
                 return elements[id] || null;
@@ -78,6 +106,49 @@ function loadContext(elements, overrides = {}) {
 module.exports = {
     name: 'delta_hedge_ui.js',
     tests: [
+        {
+            name: 'opens configuration dialog and keeps enabled hedge status visible globally',
+            run() {
+                const elements = buildElements();
+                const ctx = loadContext(elements);
+                const state = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    deltaHedge: {
+                        enabled: true,
+                        targetDelta: 0,
+                        tolerance: 25,
+                        hedgeInstrument: {
+                            secType: 'STK',
+                            symbol: 'SPY',
+                            exchange: 'SMART',
+                            currency: 'USD',
+                            multiplier: 1,
+                            deltaPerUnit: 1,
+                        },
+                    },
+                };
+
+                ctx.OptionComboDeltaHedgeUI.bindDeltaHedgePanel(state, {});
+                ctx.OptionComboDeltaHedgeUI.applyRecommendationPreview(state, {
+                    portfolioDeltaAvailable: true,
+                    portfolioDeltaDisplayable: true,
+                    portfolioOptionDelta: 10,
+                    portfolioHedgeDelta: 0,
+                    portfolioNetDelta: 10,
+                    portfolioDeltaMissingGroupCount: 0,
+                });
+
+                assert.equal(elements.deltaHedgeGlobalStatus.hidden, false);
+                assert.match(elements.deltaHedgeGlobalStatusTitle.textContent, /inside the target band/i);
+                assert.match(elements.deltaHedgeGlobalStatusSummary.textContent, /Net Δ \+10\.00/);
+
+                elements.openDeltaHedgeDialogBtn.listeners.click();
+                assert.equal(elements.deltaHedgeDialog.style.display, 'flex');
+                elements.deltaHedgeDialogCloseButton.listeners.click();
+                assert.equal(elements.deltaHedgeDialog.style.display, 'none');
+            },
+        },
         {
             name: 'renders calculation-only recommendation preview without broker transport',
             run() {

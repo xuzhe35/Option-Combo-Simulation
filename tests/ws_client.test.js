@@ -1257,7 +1257,8 @@ module.exports = {
                             orderAction: 'SELL',
                             quantity: 55,
                             orderType: 'LMT',
-                            limitPrice: 481.25,
+                            limitPrice: 481.3,
+                            priceIncrement: 0.05,
                             projectedNetDelta: 0,
                             conId: 756733,
                         },
@@ -1267,6 +1268,9 @@ module.exports = {
                 assert.equal(state.deltaHedge.status, 'previewed');
                 assert.equal(state.deltaHedge.pendingRequest, false);
                 assert.equal(state.deltaHedge.lastPreview.symbol, 'SPY');
+                assert.equal(state.deltaHedge.limitPrice, 481.3);
+                assert.equal(state.deltaHedge.limitPriceTickSize, 0.05);
+                assert.match(state.deltaHedge.lastPreview.priceAdjustmentMessage, /adjusted limit 481\.25 to 481\.3.*tick 0\.05/i);
                 assert.equal(typeof state.deltaHedge.lastPreviewAt, 'string');
                 assert.match(state.deltaHedge.lastPreviewAt, /^\d{4}-\d{2}-\d{2}T/);
                 assert.equal(autoSupervisorCalls, 1);
@@ -1455,6 +1459,8 @@ module.exports = {
                 const state = {
                     marketDataMode: 'live',
                     allowLiveHedgeOrders: true,
+                    portfolioPositionsConnected: true,
+                    portfolioPositions: [],
                     selectedLiveComboOrderAccount: 'DU12345',
                     liveComboOrderAccounts: ['DU12345'],
                     liveComboOrderAccountsConnected: true,
@@ -1466,12 +1472,16 @@ module.exports = {
                         lastPreview: {
                             hedgeId: 'delta_hedge_stk_spy_spot',
                             executionMode: 'preview',
+                            secType: 'STK',
+                            symbol: 'SPY',
+                            account: 'DU12345',
                             orderAction: 'SELL',
                             quantity: 55,
                             orderType: 'LMT',
                             limitPrice: 481.25,
                             conId: 756733,
                             projectedNetDelta: 0,
+                            executionPlanToken: 'plan-ws-hedge-submit',
                         },
                         hedgeInstrument: {
                             secType: 'STK',
@@ -1502,6 +1512,8 @@ module.exports = {
                 const ctx = loadBrowserScripts(
                     [
                         'js/delta_hedge_logic.js',
+                        'js/leg_position_check.js',
+                        'js/order_safety.js',
                         'js/ws_client.js',
                     ],
                     {

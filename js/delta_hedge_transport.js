@@ -197,6 +197,9 @@
             if (limitPrice !== null) {
                 payload.limitPrice = limitPrice;
             }
+            if (isSubmit) {
+                payload.executionPlanToken = String(runtime.lastPreview && runtime.lastPreview.executionPlanToken || '').trim();
+            }
             return payload;
         }
 
@@ -268,6 +271,25 @@
             }
             if (runtime.status !== 'previewed' || !runtime.lastPreview) {
                 return _markDeltaHedgeError('Broker preview is required before submitting a hedge order.');
+            }
+            const safety = globalScope.OptionComboOrderSafety;
+            if (!safety || typeof safety.buildHedgeIntent !== 'function'
+                || typeof safety.previewMatchesIntent !== 'function') {
+                return _markDeltaHedgeError('Shared order safety layer is unavailable.');
+            }
+            const intent = safety.buildHedgeIntent(state, recommendation || runtime.lastRecommendation);
+            if (!safety.previewMatchesIntent(runtime.lastPreview, intent)) {
+                return _markDeltaHedgeError('The hedge configuration changed after Broker Preview. Preview again.');
+            }
+            if (typeof safety.analyzePositionImpact !== 'function') {
+                return _markDeltaHedgeError('Shared position impact analysis is unavailable.');
+            }
+            const impact = safety.analyzePositionImpact(intent, state);
+            if (impact.available !== true) {
+                return _markDeltaHedgeError(impact.blockingReason || 'A fresh TWS position snapshot is required.');
+            }
+            if ((impact.warnings || []).length > 0 && options.safetyConfirmed !== true) {
+                return _markDeltaHedgeError('This hedge reduces an existing allocated position and requires explicit confirmation.');
             }
 
             let payload;

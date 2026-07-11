@@ -1,6 +1,9 @@
+import hashlib
+import json
 import logging
 
 from trade_execution.models import ComboOrderRequest, HedgeOrderRequest
+from trade_execution.safety import ExecutionPlanAuthorizer
 
 
 class ExecutionEngine:
@@ -17,6 +20,19 @@ class ExecutionEngine:
         self.on_submit_result = on_submit_result
         self.on_hedge_submit_result = on_hedge_submit_result
         self.has_active_hedge_order = has_active_hedge_order
+        self.execution_plans = ExecutionPlanAuthorizer(ttl_seconds=60)
+
+    def _position_snapshot_marker(self):
+        provider = getattr(self.adapter, "portfolio_positions_provider", None)
+        if not callable(provider):
+            return None
+        try:
+            items = provider() or []
+            encoded = json.dumps(items, sort_keys=True, separators=(",", ":"), default=str)
+            return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        except Exception:
+            self.logger.exception("Failed to fingerprint portfolio positions for execution authorization")
+            return None
 
     def _build_error_payload(self, group_id, message, request_action=None, execution_intent=None, request_source=None):
         payload = {
@@ -101,6 +117,7 @@ class ExecutionEngine:
         return None
 
     def release_managed_for_websocket(self, websocket):
+        self.execution_plans.revoke_for_websocket(websocket)
         if hasattr(self.adapter, "release_managed_for_websocket"):
             self.adapter.release_managed_for_websocket(websocket)
         elif hasattr(self.adapter, "cancel_managed_for_websocket"):
@@ -173,17 +190,33 @@ class ExecutionEngine:
 
             if action == "preview_hedge_order":
                 preview = await self.adapter.preview_hedge_order(websocket, request)
+                # The adapter may quantize a client limit to the qualified
+                # contract's real market-rule increment. Bind authorization to
+                # that broker-ready price so the client can adopt it and submit
+                # exactly what the preview displayed.
+                authorized_payload = dict(raw_data)
+                if preview.limit_price is not None:
+                    authorized_payload["limitPrice"] = preview.limit_price
+                authorization = self.execution_plans.register(
+                    websocket,
+                    "hedge",
+                    authorized_payload,
+                    self._position_snapshot_marker(),
+                )
                 payload = {
                     "action": "hedge_order_preview_result",
                     "hedgeId": request.hedge_id,
                     "preview": preview.to_payload(),
                 }
+                payload["preview"].update(authorization)
                 self.logger.info(
                     f"Hedge preview response sent to {client_ip}: "
                     f"hedgeId={request.hedge_id} action={payload.get('action')}"
                 )
                 return payload
 
+            if action == "submit_hedge_order":
+                self.execution_plans.validate_and_consume(websocket, "hedge", raw_data, self._position_snapshot_marker())
             if action == "submit_hedge_order" and callable(self.has_active_hedge_order):
                 duplicate = self.has_active_hedge_order(websocket, request)
                 if duplicate:
@@ -304,11 +337,13 @@ class ExecutionEngine:
         try:
             if action == "validate_combo_order":
                 validation = await self.adapter.validate_combo_order(websocket, request)
+                authorization = self.execution_plans.register(websocket, "combo", raw_data, self._position_snapshot_marker())
                 payload = {
                     "action": "combo_order_validation_result",
                     "groupId": request.group_id,
                     "validation": validation.to_payload(),
                 }
+                payload["validation"].update(authorization)
                 self.logger.info(
                     f"Validation response sent to {client_ip}: "
                     f"groupId={request.group_id} action={payload.get('action')}"
@@ -328,6 +363,8 @@ class ExecutionEngine:
                 )
                 return payload
 
+            if action == "submit_combo_order" and str(request.execution_intent or "open").lower() != "close":
+                self.execution_plans.validate_and_consume(websocket, "combo", raw_data, self._position_snapshot_marker())
             result = await self.adapter.submit_combo_order(websocket, request)
             payload = {
                 "action": "combo_order_submit_result",

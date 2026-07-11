@@ -1,8 +1,6 @@
 /**
- * Delta hedge recommendation panel.
- *
- * Stage 1 is intentionally calculation-only: no websocket payloads, broker
- * validation, preview, submit, or resting order side effects live in this file.
+ * Delta Hedge configuration, global status, confirmation, and execution UI.
+ * Domain decisions and broker transport remain in their dedicated modules.
  */
 
 (function attachDeltaHedgeUi(globalScope) {
@@ -42,6 +40,9 @@
         exceeds_max_notional: 'Max notional exceeded',
         max_daily_orders_reached: 'Daily limit reached',
         cooldown_active: 'Cooldown active',
+        order_safety_unavailable: 'Order safety unavailable',
+        position_snapshot_unavailable: 'Position snapshot unavailable',
+        position_conflict_requires_confirmation: 'Position conflict requires manual confirmation',
     };
 
     const CONTROL_IDS = [
@@ -94,6 +95,81 @@
         el.hidden = hidden === true;
         if (el.style) {
             el.style.display = hidden === true ? 'none' : '';
+        }
+    }
+
+    function _openDeltaHedgeDialog(trigger) {
+        const dialog = _getElement('deltaHedgeDialog');
+        if (!dialog || !dialog.style) {
+            return;
+        }
+        dialog.__deltaHedgeReturnFocus = trigger || null;
+        dialog.style.display = 'flex';
+        if (typeof dialog.setAttribute === 'function') {
+            dialog.setAttribute('aria-hidden', 'false');
+        }
+        const firstControl = _getElement('deltaHedgeEnabled');
+        if (firstControl && typeof firstControl.focus === 'function') {
+            firstControl.focus();
+        }
+    }
+
+    function _closeDeltaHedgeDialog() {
+        const dialog = _getElement('deltaHedgeDialog');
+        if (!dialog || !dialog.style) {
+            return;
+        }
+        dialog.style.display = 'none';
+        if (typeof dialog.setAttribute === 'function') {
+            dialog.setAttribute('aria-hidden', 'true');
+        }
+        const returnFocus = dialog.__deltaHedgeReturnFocus;
+        dialog.__deltaHedgeReturnFocus = null;
+        if (returnFocus && typeof returnFocus.focus === 'function') {
+            returnFocus.focus();
+        }
+    }
+
+    function _bindDialogControls() {
+        const dialog = _getElement('deltaHedgeDialog');
+        if (dialog && globalScope.document && globalScope.document.body
+            && dialog.parentNode !== globalScope.document.body
+            && typeof globalScope.document.body.appendChild === 'function') {
+            globalScope.document.body.appendChild(dialog);
+        }
+        const openButtons = [
+            _getElement('openDeltaHedgeDialogBtn'),
+            _getElement('openDeltaHedgeDialogGlobalBtn'),
+        ].filter(Boolean);
+        const bindingTarget = dialog || openButtons[0];
+        if (!bindingTarget || bindingTarget.__deltaHedgeDialogBound) {
+            return;
+        }
+        bindingTarget.__deltaHedgeDialogBound = true;
+
+        openButtons.forEach((button) => {
+            if (typeof button.addEventListener === 'function') {
+                button.addEventListener('click', () => _openDeltaHedgeDialog(button));
+            }
+        });
+        if (dialog && typeof dialog.querySelectorAll === 'function') {
+            dialog.querySelectorAll('.deltaHedgeDialogCloseBtn').forEach((button) => {
+                button.addEventListener('click', _closeDeltaHedgeDialog);
+            });
+        }
+        if (dialog && typeof dialog.addEventListener === 'function') {
+            dialog.addEventListener('click', (event) => {
+                if (event && event.target === dialog) {
+                    _closeDeltaHedgeDialog();
+                }
+            });
+        }
+        if (globalScope.document && typeof globalScope.document.addEventListener === 'function') {
+            globalScope.document.addEventListener('keydown', (event) => {
+                if (event && event.key === 'Escape' && dialog && dialog.style && dialog.style.display !== 'none') {
+                    _closeDeltaHedgeDialog();
+                }
+            });
         }
     }
 
@@ -600,7 +676,10 @@
         const warningText = whatIf && whatIf.warningText
             ? `, ${whatIf.warningText}`
             : '';
-        return `${orderType} ${action} ${quantity} ${symbol}${limitText}${conIdText}${projectedText}${commissionText}${warningText}`.trim();
+        const adjustmentText = preview.priceAdjustmentMessage
+            ? `, ${preview.priceAdjustmentMessage}`
+            : '';
+        return `${orderType} ${action} ${quantity} ${symbol}${limitText}${conIdText}${projectedText}${commissionText}${warningText}${adjustmentText}`.trim();
     }
 
     function _evaluateRecommendation(state, derivedData) {
@@ -680,6 +759,95 @@
         return label;
     }
 
+    function _globalBrokerStatus(runtime) {
+        const status = String(runtime && runtime.status || '').trim().toLowerCase();
+        const orderState = String(runtime && runtime.orderState || '').trim().toLowerCase();
+        if (runtime && runtime.lastError) return String(runtime.lastError);
+        if (orderState === 'stale_needs_review' || status === 'partial_fill_needs_review') return 'Hedge order needs review';
+        if (status === 'pending_validation') return 'Validating hedge contract';
+        if (status === 'pending_preview') return 'Requesting broker preview';
+        if (status === 'previewed') return 'Broker preview ready';
+        if (status === 'placing') return 'Submitting hedge order';
+        if (status === 'cancel_pending') return 'Cancel request pending';
+        if (status === 'submitted' || orderState === 'resting_locked') return 'Hedge order resting';
+        if (['filled', 'canceled', 'cancelled', 'rejected', 'inactive'].includes(status)) {
+            return `Last order ${status.replace('cancelled', 'canceled')}`;
+        }
+        return '';
+    }
+
+    function applyGlobalStatus(state) {
+        const container = _getElement('deltaHedgeGlobalStatus');
+        if (!container) {
+            return;
+        }
+        const runtime = state && state.deltaHedge && typeof state.deltaHedge === 'object'
+            ? state.deltaHedge
+            : {};
+        const config = _normalizeConfig(runtime);
+        const recommendation = runtime.lastRecommendation || null;
+        const error = String(runtime.lastError || '').trim();
+        const activeOrder = _hasActiveRestingOrder(runtime);
+        const configured = config.enabled === true;
+        const shouldShow = configured || activeOrder || Boolean(error) || runtime.pendingRequest === true;
+        container.hidden = !shouldShow;
+        if (container.style) {
+            container.style.display = shouldShow ? '' : 'none';
+        }
+        if (!shouldShow) {
+            return;
+        }
+
+        const brokerStatus = _globalBrokerStatus(runtime);
+        const autoStatus = config.autoSubmitEnabled === true
+            ? (_formatAutomationDecision(runtime.autoLastDecision) || 'Auto submit waiting')
+            : 'Auto submit off';
+        const target = formatDelta(config.targetDelta);
+        const tolerance = formatDelta(config.tolerance);
+        const netDelta = recommendation ? formatDelta(recommendation.currentNetDelta) : '--';
+        const actionLabel = _recommendationLabel(recommendation);
+        const orderState = String(runtime.orderState || '').trim().toLowerCase();
+
+        let tone = 'healthy';
+        let badge = 'Monitoring';
+        let title = 'Delta Hedge monitoring';
+        if (error || orderState === 'stale_needs_review') {
+            tone = 'danger';
+            badge = 'Review';
+            title = error ? 'Delta Hedge error' : 'Hedge order needs review';
+        } else if (activeOrder || ['pending_validation', 'pending_preview', 'placing', 'cancel_pending', 'submitted'].includes(String(runtime.status || '').toLowerCase())) {
+            tone = 'working';
+            badge = 'Working';
+            title = brokerStatus || 'Delta Hedge order active';
+        } else if (recommendation && recommendation.actionable) {
+            tone = 'attention';
+            badge = 'Action';
+            title = actionLabel;
+        } else if (recommendation && recommendation.reason && recommendation.reason !== 'inside_tolerance') {
+            tone = 'attention';
+            badge = 'Waiting';
+            title = actionLabel;
+        } else if (recommendation && recommendation.reason === 'inside_tolerance') {
+            title = 'Net Delta is inside the target band';
+        }
+
+        if (container.dataset) {
+            container.dataset.tone = tone;
+        } else if (typeof container.setAttribute === 'function') {
+            container.setAttribute('data-tone', tone);
+        }
+        _setText('deltaHedgeGlobalStatusBadge', badge);
+        _setText('deltaHedgeGlobalStatusTitle', title);
+        _setText(
+            'deltaHedgeGlobalStatusSummary',
+            `Net Δ ${netDelta} · Target ${target} ± ${tolerance} · ${actionLabel}`
+        );
+        _setText(
+            'deltaHedgeGlobalStatusDetail',
+            [brokerStatus, autoStatus].filter(Boolean).join(' · ')
+        );
+    }
+
     function applyAutomationState(state) {
         const runtime = state && state.deltaHedge && typeof state.deltaHedge === 'object'
             ? state.deltaHedge
@@ -687,10 +855,12 @@
         const config = _normalizeConfig(runtime);
         if (config.autoSubmitEnabled !== true) {
             _setText('deltaHedgeAutoStatus', '');
+            applyGlobalStatus(state);
             return;
         }
         const decisionText = _formatAutomationDecision(runtime.autoLastDecision);
         _setText('deltaHedgeAutoStatus', decisionText || 'Auto submit waiting');
+        applyGlobalStatus(state);
     }
 
     function _syncControls(state) {
@@ -752,6 +922,7 @@
         _syncAccountDisplay(state);
         _syncSubmitControls(state);
         applyAutomationState(state);
+        applyGlobalStatus(state);
     }
 
     function applyRecommendationPreview(state, derivedData) {
@@ -882,6 +1053,7 @@
 
         _ensureConfig(state);
         _syncControls(state);
+        _bindDialogControls();
 
         const previewBtn = _getElement('deltaHedgeRecommendationPreviewBtn');
         const firstControl = CONTROL_IDS.map(_getElement).find(Boolean);
@@ -1103,10 +1275,28 @@
                     ? deps.updateDerivedValues()
                     : null;
                 const recommendation = applyRecommendationPreview(state, derivedData || {});
-                if (recommendation && recommendation.actionable
-                    && deps && typeof deps.requestSubmit === 'function') {
-                    deps.requestSubmit(recommendation);
+                const safety = globalScope.OptionComboOrderSafety;
+                const confirmation = globalScope.OptionComboOrderConfirmationUI;
+                if (!recommendation || recommendation.actionable !== true
+                    || !safety || typeof safety.buildHedgeIntent !== 'function'
+                    || typeof safety.analyzePositionImpact !== 'function'
+                    || !confirmation || typeof confirmation.open !== 'function') {
+                    state.deltaHedge.status = 'error';
+                    state.deltaHedge.lastError = 'Shared order safety confirmation is unavailable. No hedge order was sent.';
+                    applyBrokerPreviewState(state);
+                    return;
                 }
+                const intent = safety.buildHedgeIntent(state, recommendation);
+                const positionImpact = safety.analyzePositionImpact(intent, state);
+                confirmation.open({
+                    title: 'Confirm Delta Hedge Order',
+                    intent,
+                    positionImpact,
+                    expiresAt: state.deltaHedge.lastPreview && state.deltaHedge.lastPreview.executionPlanExpiresAt,
+                    onConfirm: () => deps && typeof deps.requestSubmit === 'function'
+                        ? deps.requestSubmit(recommendation, { safetyConfirmed: true })
+                        : false,
+                });
                 applyBrokerPreviewState(state);
             });
         }
@@ -1148,6 +1338,7 @@
         applyRecommendationPreview,
         applyBrokerPreviewState,
         applyAutomationState,
+        applyGlobalStatus,
         refreshDeltaHedgePanel,
         formatDelta,
     };

@@ -1750,6 +1750,19 @@ function handleLiveSubscriptions() {
 
     const optionRequests = [];
     const futuresRequests = _buildFuturesPoolRequests(profile || {});
+    (state.hedges || []).forEach((hedge) => {
+        if (!hedge || hedge.liveData !== true || String(hedge.secType || '').toUpperCase() !== 'FUT'
+            || !hedge.symbol || !/^\d{6}$/.test(String(hedge.contractMonth || '').slice(0, 6))) return;
+        futuresRequests.push({
+            id: hedge.id,
+            secType: 'FUT',
+            symbol: String(hedge.symbol).toUpperCase(),
+            exchange: hedge.exchange || '',
+            currency: hedge.currency || 'USD',
+            multiplier: String(hedge.multiplier || ''),
+            contractMonth: String(hedge.contractMonth).slice(0, 6),
+        });
+    });
     const payload = {
         action: 'subscribe',
         greeksEnabled: _areGreeksEnabled(),
@@ -1874,9 +1887,9 @@ function handleLiveSubscriptions() {
         currency: 'USD',
     }, dedupedOptionRequests, futuresRequests);
 
-    // Collect all hedge stocks that have Live Data == true
+    // Stock hedge rows use the stock path; FUT hedge rows are in futuresRequests.
     state.hedges.forEach(hedge => {
-        if (hedge.liveData && hedge.symbol) {
+        if (hedge.liveData && hedge.symbol && String(hedge.secType || 'STK').toUpperCase() !== 'FUT') {
             payload.stocks.push(hedge.symbol);
         }
     });
@@ -2528,14 +2541,48 @@ function _applyHedgeOrderValidationResult(data) {
 function _applyHedgeOrderPreviewResult(data) {
     const runtime = _getDeltaHedgeRuntime();
     const preview = data.preview || data.order || {};
+    if (Number(preview.executionPlanExpiresAtEpochMs) > 0 && !preview.executionPlanExpiresAt) {
+        preview.executionPlanExpiresAt = new Date(Number(preview.executionPlanExpiresAtEpochMs)).toLocaleTimeString();
+    }
+    const qualifiedMultiplier = Number(preview.multiplier);
+    const configuredMultiplier = Number(runtime.hedgeInstrument && runtime.hedgeInstrument.multiplier);
+    const multiplierChanged = String(preview.secType || '').toUpperCase() === 'FUT'
+        && Number.isFinite(qualifiedMultiplier) && qualifiedMultiplier > 0
+        && qualifiedMultiplier !== configuredMultiplier;
+    if (multiplierChanged && runtime.hedgeInstrument) {
+        runtime.hedgeInstrument.multiplier = qualifiedMultiplier;
+    }
+    const brokerLimitPrice = Number(preview.limitPrice);
+    const configuredLimitPrice = Number(runtime.limitPrice);
+    const brokerPriceIncrement = Number(preview.priceIncrement);
+    const limitPriceChanged = String(preview.orderType || '').toUpperCase() === 'LMT'
+        && Number.isFinite(brokerLimitPrice) && brokerLimitPrice > 0
+        && (!Number.isFinite(configuredLimitPrice) || brokerLimitPrice !== configuredLimitPrice);
+    if (limitPriceChanged) {
+        runtime.limitPrice = brokerLimitPrice;
+        if (Number.isFinite(brokerPriceIncrement) && brokerPriceIncrement > 0) {
+            runtime.limitPriceTickSize = brokerPriceIncrement;
+        }
+        if (runtime.limitPriceManualOverride !== true) {
+            runtime.limitPriceSource = 'broker_quantized';
+            runtime.limitPriceReferencePrice = Number.isFinite(configuredLimitPrice)
+                ? configuredLimitPrice
+                : runtime.limitPriceReferencePrice;
+        }
+        preview.priceAdjustmentMessage = Number.isFinite(configuredLimitPrice)
+            ? `Broker adjusted limit ${configuredLimitPrice} to ${brokerLimitPrice}${Number.isFinite(brokerPriceIncrement) && brokerPriceIncrement > 0 ? ` (tick ${brokerPriceIncrement})` : ''}.`
+            : `Broker set limit ${brokerLimitPrice}${Number.isFinite(brokerPriceIncrement) && brokerPriceIncrement > 0 ? ` (tick ${brokerPriceIncrement})` : ''}.`;
+    }
     runtime.pendingRequest = false;
-    runtime.status = 'previewed';
-    runtime.lastError = '';
+    runtime.status = multiplierChanged ? 'error' : 'previewed';
+    runtime.lastError = multiplierChanged
+        ? `TWS qualified multiplier ${qualifiedMultiplier}; recommendation changed. Run Broker Preview again.`
+        : '';
     runtime.lastPreview = preview;
     runtime.lastPreviewAt = new Date().toISOString();
     runtime.pendingPreviewPayload = null;
     _refreshDeltaHedgeBrokerPreviewUi();
-    if (typeof window !== 'undefined' && typeof window.runDeltaHedgeAutoSupervisor === 'function') {
+    if (!multiplierChanged && typeof window !== 'undefined' && typeof window.runDeltaHedgeAutoSupervisor === 'function') {
         window.runDeltaHedgeAutoSupervisor();
     }
     return true;
@@ -2623,6 +2670,9 @@ function _buildDeltaHedgeRestingOrder(order, fallbackPayload) {
         symbol: String(rawOrder.symbol || fallback.symbol || '').trim().toUpperCase(),
         localSymbol: rawOrder.localSymbol || fallback.localSymbol || '',
         secType: String(rawOrder.secType || fallback.secType || '').trim().toUpperCase(),
+        contractMonth: String(rawOrder.contractMonth || fallback.contractMonth || '').trim().slice(0, 6),
+        multiplier: _toFiniteNumberOrNull(rawOrder.multiplier ?? fallback.multiplier),
+        deltaPerUnit: _toFiniteNumberOrNull(rawOrder.deltaPerUnit ?? fallback.deltaPerUnit),
         side: String(rawOrder.orderAction || fallback.orderAction || '').trim().toUpperCase(),
         quantity,
         filledQuantity,
@@ -2724,6 +2774,12 @@ function _applyHedgeFillToRows(fill) {
         hedge = {
             id: hedgeId,
             symbol: String(fill && fill.symbol || '').trim().toUpperCase(),
+            localSymbol: String(fill && fill.localSymbol || '').trim(),
+            secType: String(fill && fill.secType || 'STK').trim().toUpperCase(),
+            contractMonth: String(fill && fill.contractMonth || '').trim().slice(0, 6),
+            exchange: String(fill && fill.exchange || '').trim().toUpperCase(),
+            currency: String(fill && fill.currency || 'USD').trim().toUpperCase(),
+            conId: fill && fill.conId != null ? fill.conId : null,
             pos: 0,
             cost: Number.isFinite(fillPrice) ? fillPrice : 0,
             currentPrice: Number.isFinite(fillPrice) ? fillPrice : 0,
@@ -2745,6 +2801,10 @@ function _applyHedgeFillToRows(fill) {
     if (fill && fill.symbol) {
         hedge.symbol = String(fill.symbol).trim().toUpperCase();
     }
+    if (fill && fill.secType) hedge.secType = String(fill.secType).trim().toUpperCase();
+    if (fill && fill.contractMonth) hedge.contractMonth = String(fill.contractMonth).trim().slice(0, 6);
+    if (Number.isFinite(Number(fill && fill.multiplier)) && Number(fill.multiplier) > 0) hedge.multiplier = Number(fill.multiplier);
+    if (Number.isFinite(Number(fill && fill.deltaPerUnit)) && Number(fill.deltaPerUnit) > 0) hedge.deltaPerUnit = Number(fill.deltaPerUnit);
     hedge.liveData = true;
     return true;
 }
@@ -3544,6 +3604,19 @@ function processLiveMarketData(data) {
             entry.ask = nextAsk;
             entry.mark = nextMark;
             entry.lastQuotedAt = new Date().toISOString();
+        });
+
+        (state.hedges || []).forEach((hedge) => {
+            if (!hedge || String(hedge.secType || '').toUpperCase() !== 'FUT') return;
+            const quote = data.futures[hedge.id];
+            const liveMark = Number(quote && quote.mark);
+            if (!(liveMark > 0)) return;
+            if (Math.abs(liveMark - Number(hedge.currentPrice || 0)) <= 0.001
+                && hedge.currentPriceSource === quoteSourceKind) return;
+            hedge.currentPrice = liveMark;
+            hedge.currentPriceSource = quoteSourceKind;
+            stateChanged = true;
+            if (liveMode && hedge.id) incrementalHedgeIds.add(hedge.id);
         });
 
         state.groups.forEach(group => {

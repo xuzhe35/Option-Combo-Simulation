@@ -621,6 +621,118 @@ input[type=range]:focus {
     font-weight: 700;
 }
 
+.greeks-action-row {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.4rem;
+}
+
+.delta-hedge-global-status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin: -0.5rem 0 1.5rem;
+    padding: 0.9rem 1rem;
+    border: 2px solid #a7f3d0;
+    border-radius: var(--radius-lg);
+    background: linear-gradient(135deg, #ecfdf5, #f0fdf4);
+    box-shadow: var(--shadow-md);
+}
+
+.delta-hedge-global-status[hidden] {
+    display: none;
+}
+
+.delta-hedge-global-status-main {
+    display: flex;
+    align-items: flex-start;
+    min-width: 0;
+    gap: 0.85rem;
+}
+
+.delta-hedge-global-status-badge {
+    flex: 0 0 auto;
+    padding: 0.32rem 0.58rem;
+    border-radius: 999px;
+    color: #fff;
+    background: #059669;
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.035em;
+    text-transform: uppercase;
+}
+
+.delta-hedge-global-status-copy {
+    min-width: 0;
+}
+
+.delta-hedge-global-status-title {
+    color: #065f46;
+    font-size: 0.95rem;
+    font-weight: 750;
+}
+
+.delta-hedge-global-status-summary {
+    margin-top: 0.15rem;
+    color: #064e3b;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.delta-hedge-global-status-detail {
+    margin-top: 0.15rem;
+    color: #047857;
+    font-size: 0.78rem;
+}
+
+.delta-hedge-global-status[data-tone="attention"] {
+    border-color: #f59e0b;
+    background: linear-gradient(135deg, #fffbeb, #fef3c7);
+}
+
+.delta-hedge-global-status[data-tone="attention"] .delta-hedge-global-status-badge {
+    background: #d97706;
+}
+
+.delta-hedge-global-status[data-tone="attention"] .delta-hedge-global-status-title,
+.delta-hedge-global-status[data-tone="attention"] .delta-hedge-global-status-summary,
+.delta-hedge-global-status[data-tone="attention"] .delta-hedge-global-status-detail {
+    color: #92400e;
+}
+
+.delta-hedge-global-status[data-tone="danger"] {
+    border-color: #ef4444;
+    background: linear-gradient(135deg, #fef2f2, #fee2e2);
+}
+
+.delta-hedge-global-status[data-tone="danger"] .delta-hedge-global-status-badge {
+    background: #dc2626;
+}
+
+.delta-hedge-global-status[data-tone="danger"] .delta-hedge-global-status-title,
+.delta-hedge-global-status[data-tone="danger"] .delta-hedge-global-status-summary,
+.delta-hedge-global-status[data-tone="danger"] .delta-hedge-global-status-detail {
+    color: #991b1b;
+}
+
+.delta-hedge-global-status[data-tone="working"] {
+    border-color: #818cf8;
+    background: linear-gradient(135deg, #eef2ff, #e0e7ff);
+}
+
+.delta-hedge-global-status[data-tone="working"] .delta-hedge-global-status-badge {
+    background: #4f46e5;
+}
+
+.delta-hedge-global-status[data-tone="working"] .delta-hedge-global-status-title,
+.delta-hedge-global-status[data-tone="working"] .delta-hedge-global-status-summary,
+.delta-hedge-global-status[data-tone="working"] .delta-hedge-global-status-detail {
+    color: #3730a3;
+}
+
 .group-card {
     border-top: 4px solid var(--primary-color);
 }
@@ -1236,6 +1348,22 @@ input[type=range]:focus {
     margin-top: 0.9rem;
 }
 
+.delta-hedge-dialog-panel {
+    width: min(760px, 96vw);
+}
+
+.delta-hedge-dialog-header {
+    margin-bottom: 1rem;
+    padding-bottom: 0.85rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.delta-hedge-dialog-footer {
+    margin-top: 1rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--border-color);
+}
+
 @media (max-width: 760px) {
     .close-confirmation-dialog {
         padding: 0.5rem;
@@ -1250,6 +1378,15 @@ input[type=range]:focus {
     .close-confirmation-footer {
         align-items: flex-start;
         flex-direction: column;
+    }
+
+    .delta-hedge-global-status {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .delta-hedge-global-status > .btn {
+        width: 100%;
     }
 }
 

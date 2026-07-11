@@ -8,7 +8,7 @@
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260711-no-confirm-checkbox">
+    <link rel="stylesheet" href="style.css?v=20260711-delta-hedge-dialog">
 </head>
 
 <body data-option-combo-page="portfolio">
@@ -360,11 +360,25 @@
                                     Off by default to keep the live UI responsive. Enable only when you want Group Delta.
                                 </div>
                             </div>
-                            <button id="toggleGreeksBtn" type="button" class="btn btn-secondary btn-sm">Enable Greeks</button>
+                            <div class="greeks-action-row">
+                                <button id="toggleGreeksBtn" type="button" class="btn btn-secondary btn-sm">Enable Greeks</button>
+                                <button id="openDeltaHedgeDialogBtn" type="button" class="btn btn-secondary btn-sm"
+                                    aria-haspopup="dialog" aria-controls="deltaHedgeDialog">Configure Delta Hedge</button>
+                            </div>
                         </div>
                     </div>
 
-                    <div class="panel-card" id="deltaHedgePanel" style="padding: 0.875rem 1rem;">
+                    <div class="close-confirmation-dialog delta-hedge-dialog" id="deltaHedgeDialog" role="dialog"
+                        aria-modal="true" aria-hidden="true" aria-labelledby="deltaHedgeDialogTitle">
+                    <section class="close-confirmation-panel delta-hedge-dialog-panel" id="deltaHedgePanel">
+                        <div class="close-confirmation-header delta-hedge-dialog-header">
+                            <div>
+                                <div class="close-confirmation-title" id="deltaHedgeDialogTitle">Configure Delta Hedge</div>
+                                <div class="text-muted small">Set the target band, hedge instrument, execution limits, and automation policy.</div>
+                            </div>
+                            <button type="button" class="btn btn-secondary btn-sm deltaHedgeDialogCloseBtn"
+                                aria-label="Close Delta Hedge configuration">Close</button>
+                        </div>
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem;">
                             <div>
                                 <div style="font-size: 0.9rem; font-weight: 600;">Delta Hedge</div>
@@ -499,6 +513,13 @@
                         </div>
                         <div id="deltaHedgeBrokerPreviewStatus" class="text-muted small" style="margin-top: 0.5rem;"></div>
                         <div id="deltaHedgeBrokerPreviewDetails" class="text-muted small" style="margin-top: 0.35rem;"></div>
+                        <div class="close-confirmation-footer delta-hedge-dialog-footer">
+                            <span class="text-muted small">Changes apply immediately and are included in the saved workspace.</span>
+                            <div class="close-confirmation-footer-actions">
+                                <button type="button" class="btn btn-primary deltaHedgeDialogCloseBtn">Done</button>
+                            </div>
+                        </div>
+                    </section>
                     </div>
                 </aside>
 
@@ -531,6 +552,20 @@
                         </button>
                         </div>
                     </div>
+
+                    <section id="deltaHedgeGlobalStatus" class="delta-hedge-global-status" hidden
+                        aria-live="polite" aria-atomic="true">
+                        <div class="delta-hedge-global-status-main">
+                            <span id="deltaHedgeGlobalStatusBadge" class="delta-hedge-global-status-badge">Delta Hedge</span>
+                            <div class="delta-hedge-global-status-copy">
+                                <div id="deltaHedgeGlobalStatusTitle" class="delta-hedge-global-status-title">Monitoring</div>
+                                <div id="deltaHedgeGlobalStatusSummary" class="delta-hedge-global-status-summary"></div>
+                                <div id="deltaHedgeGlobalStatusDetail" class="delta-hedge-global-status-detail"></div>
+                            </div>
+                        </div>
+                        <button id="openDeltaHedgeDialogGlobalBtn" type="button" class="btn btn-secondary btn-sm"
+                            aria-haspopup="dialog" aria-controls="deltaHedgeDialog">Configure</button>
+                    </section>
 
                     <!-- Global Portfolio Chart -->
                     <div class="panel-card global-chart-card mb-4" id="globalChartCard" style="display: none;">
@@ -1380,6 +1415,8 @@
     <script src="js/trade_trigger_logic.js"></script>
     <script src="js/group_order_builder.js?v=20260710-expiry-equivalent"></script>
     <script src="js/leg_position_check.js?v=20260711-leg-exists"></script>
+    <script src="js/order_safety.js?v=20260711-safe-execution"></script>
+    <script src="js/order_confirmation_ui.js?v=20260711-safe-execution"></script>
     <script src="js/delta_hedge_logic.js"></script>
     <script src="js/distribution_proxy_config.js"></script>
     <script src="js/pricing_core.js?v=20260711-time-basis"></script>
@@ -1400,7 +1437,7 @@
     <script src="js/page_capabilities.js"></script>
     <script src="js/combo_order_transport.js?v=20260711-leg-exists"></script>
     <script src="js/delta_hedge_transport.js"></script>
-    <script src="js/delta_hedge_ui.js"></script>
+    <script src="js/delta_hedge_ui.js?v=20260711-dialog-status"></script>
     <script src="js/calendar_handoff.js?v=20260612c"></script>
     <script src="js/app.js?v=20260711-time-basis"></script>
     <script src="js/ws_client.js?v=20260711-leg-exists"></script>

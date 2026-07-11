@@ -6,6 +6,8 @@ function buildController(state, overrides = {}) {
     const ctx = loadBrowserScripts(
         [
             'js/delta_hedge_logic.js',
+            'js/leg_position_check.js',
+            'js/order_safety.js',
             'js/delta_hedge_transport.js',
         ],
         {
@@ -163,6 +165,8 @@ module.exports = {
             run() {
                 const state = {
                     allowLiveHedgeOrders: true,
+                    portfolioPositionsConnected: true,
+                    portfolioPositions: [],
                     selectedLiveComboOrderAccount: 'DU12345',
                     deltaHedge: {
                         enabled: true,
@@ -171,8 +175,9 @@ module.exports = {
                         limitPrice: 481.25,
                         lastPreview: {
                             hedgeId: 'delta_hedge_stk_spy_spot',
-                            orderId: 7001,
-                            permId: 9001,
+                            secType: 'STK', symbol: 'SPY', orderAction: 'SELL', quantity: 55,
+                            orderType: 'LMT', limitPrice: 481.25, account: 'DU12345',
+                            executionPlanToken: 'plan-hedge-submit',
                         },
                         hedgeInstrument: {
                             secType: 'STK',
@@ -199,6 +204,7 @@ module.exports = {
                 assert.equal(submitted, true);
                 assert.equal(sentPayloads.length, 1);
                 assert.equal(sentPayloads[0].action, 'submit_hedge_order');
+                assert.equal(sentPayloads[0].executionPlanToken, 'plan-hedge-submit');
                 assert.equal(state.deltaHedge.status, 'placing');
                 assert.equal(state.deltaHedge.orderState, 'placing');
                 assert.equal(state.deltaHedge.lastOrderEventAt, '2026-05-03T10:15:30.000Z');
