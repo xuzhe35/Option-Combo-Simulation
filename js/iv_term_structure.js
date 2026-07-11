@@ -45,6 +45,8 @@
     const OPTION_STREAM_LIMIT_STORAGE_KEY = 'optionComboIvtsOptionStreamLimit';
     const DEFAULT_MAX_OPTION_STREAMS = 10;
     const OPTION_STREAM_LIMIT_CHOICES = Object.freeze([10, 20, 40, 0]);
+    const TD_IV_LAMBDA_STORAGE_KEY = 'optionComboIvtsTdIvLambdaGlobal';
+    const DEFAULT_TD_IV_LAMBDA = 0.3;
     const CARD_VIEW_STATE_SECTIONS = Object.freeze([
         {
             key: 'calendar',
@@ -73,6 +75,7 @@
         controlWsOpenPromise: null,
         ibStatusPollTimerId: null,
         apiResetInProgress: false,
+        tdIvWeekendWeight: DEFAULT_TD_IV_LAMBDA,
         ibStatus: {
             connected: false,
             connecting: false,
@@ -413,6 +416,35 @@
             localStorage.setItem(OPTION_STREAM_LIMIT_STORAGE_KEY, JSON.stringify(store));
         } catch (_) {
             // Runtime state still carries the selected limit when storage is unavailable.
+        }
+    }
+
+    function normalizeTdIvLambda(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return DEFAULT_TD_IV_LAMBDA;
+        }
+        return Math.min(1, Math.max(0, Math.round(parsed * 100) / 100));
+    }
+
+    function loadSavedTdIvLambda() {
+        try {
+            const raw = localStorage.getItem(TD_IV_LAMBDA_STORAGE_KEY);
+            if (raw == null || raw === '') {
+                return null;
+            }
+            const parsed = parseFloat(raw);
+            return Number.isFinite(parsed) ? normalizeTdIvLambda(parsed) : null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function saveTdIvLambda(value) {
+        try {
+            localStorage.setItem(TD_IV_LAMBDA_STORAGE_KEY, String(normalizeTdIvLambda(value)));
+        } catch (_) {
+            // Runtime state still carries the selected lambda when storage is unavailable.
         }
     }
 
@@ -1471,7 +1503,8 @@
         return core().buildExpiryDetailRows(
             snapshot,
             card.quotesBySubId,
-            card.catalog && card.catalog.anchorDate
+            card.catalog && card.catalog.anchorDate,
+            normalizeTdIvLambda(runtime.tdIvWeekendWeight)
         );
     }
 
@@ -1689,8 +1722,10 @@
             return `<span class="ivts-missing">${escapeHtml(text)}</span>`;
         }
         const tradDte = Number.isFinite(row.tradDte) ? row.tradDte : null;
-        const title = 'Trading-day annualized IV: same total variance as the TWS quote, '
-            + 'but divided by trading time (tradDTE/252) instead of calendar time, '
+        const lambda = Number.isFinite(row.tdIvWeekendWeight) ? row.tdIvWeekendWeight : 0;
+        const title = 'Weighted-clock annualized IV: same total variance as the TWS quote, '
+            + `with weekends/holidays counted at λ=${lambda.toFixed(2)} of a trading day `
+            + '(0 = pure trading-day clock, 1 = calendar clock), '
             + 'so expiries on both sides of a weekend are comparable.'
             + (tradDte != null ? ` Trading DTE: ${tradDte}.` : '');
         return `<span title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
@@ -2313,6 +2348,23 @@
         render(true);
     }
 
+    function applyTdIvLambdaChange(rawValue) {
+        // Display-only lens shared by every card: re-annualizes the
+        // already-subscribed quotes, so no catalog reset or resubscription
+        // is needed.
+        const lambda = normalizeTdIvLambda(rawValue);
+        runtime.tdIvWeekendWeight = lambda;
+        saveTdIvLambda(lambda);
+        const input = document.getElementById('ivtsTdIvLambdaInput');
+        if (input) {
+            input.value = lambda.toFixed(2);
+        }
+        runtime.cardsBySymbol.forEach((card) => {
+            card.forceBodyRefreshOnce = true;
+        });
+        render(true);
+    }
+
     function toggleCalendarFinderShowAll(button) {
         const card = getCard(button.getAttribute('data-symbol'));
         if (!card) {
@@ -2563,6 +2615,9 @@
             saveCalendarFinderConfig,
             loadSavedOptionStreamLimit,
             saveOptionStreamLimit,
+            normalizeTdIvLambda,
+            loadSavedTdIvLambda,
+            saveTdIvLambda,
             captureCardViewState,
             restoreCardViewState,
         },
@@ -2682,6 +2737,17 @@
                     }
                 });
             });
+            const tdIvLambdaInput = document.getElementById('ivtsTdIvLambdaInput');
+            if (tdIvLambdaInput) {
+                const savedTdIvLambda = loadSavedTdIvLambda();
+                runtime.tdIvWeekendWeight = savedTdIvLambda == null
+                    ? DEFAULT_TD_IV_LAMBDA
+                    : savedTdIvLambda;
+                tdIvLambdaInput.value = runtime.tdIvWeekendWeight.toFixed(2);
+                tdIvLambdaInput.addEventListener('change', (event) => {
+                    applyTdIvLambdaChange(event.target.value);
+                });
+            }
             globalScope.addEventListener('pagehide', closeAllSocketsForPageExit, { capture: true });
             globalScope.addEventListener('beforeunload', closeAllSocketsForPageExit, { capture: true });
             render(true);

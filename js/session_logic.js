@@ -51,6 +51,7 @@
         return {
             executionMode: 'preview',
             strategy: 'auto',
+            quantity: null,
             repriceThreshold: 0.01,
             timeInForce: 'DAY',
             isExpanded: false,
@@ -122,6 +123,11 @@
         next.strategy = ['auto', 'combo'].includes(normalizedStrategy)
             ? normalizedStrategy
             : 'auto';
+
+        const parsedQuantity = parseInt(next.quantity, 10);
+        next.quantity = Number.isInteger(parsedQuantity) && parsedQuantity > 0
+            ? parsedQuantity
+            : null;
 
         const parsedThreshold = parseFloat(next.repriceThreshold);
         const validThresholds = _getValidRepriceThresholds();
@@ -416,6 +422,7 @@
         return {
             executionMode: normalized.executionMode,
             strategy: normalized.strategy,
+            quantity: normalized.quantity,
             repriceThreshold: normalized.repriceThreshold,
             timeInForce: normalized.timeInForce,
             isExpanded: normalized.isExpanded,

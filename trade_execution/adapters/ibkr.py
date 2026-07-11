@@ -2242,6 +2242,12 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 treatment = 'underlying_close'
             else:
                 treatment = 'combo_close'
+            original_position = (
+                int(leg_request.source_position)
+                if leg_request.source_position is not None
+                else -int(leg_request.pos or 0)
+            )
+            close_position = int(leg_request.pos or 0)
             rows.append({
                 'legId': leg_id,
                 'secType': sec_type,
@@ -2249,8 +2255,9 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 'right': self._normalize_symbol(leg_request.right),
                 'strike': leg_request.strike,
                 'expiry': self._to_expiry(leg_request.exp_date),
-                'originalPosition': -int(leg_request.pos or 0),
-                'closePosition': int(leg_request.pos or 0),
+                'originalPosition': original_position,
+                'closePosition': close_position,
+                'remainingPosition': original_position + close_position,
                 'treatment': treatment,
                 'observedBid': leg_request.observed_bid,
                 'observedAsk': leg_request.observed_ask,
@@ -2656,6 +2663,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 'strike': None,
                 'expDate': '',
                 'targetPosition': int(leg_request.pos or 0),
+                'sourcePosition': getattr(leg_request, 'source_position', None),
+                'sourceCost': getattr(leg_request, 'source_cost', None),
+                'sourceRealizedPnl': getattr(leg_request, 'source_realized_pnl', 0.0),
+                'multiplier': getattr(leg_request, 'multiplier', ''),
                 'expectedExecutionSide': 'BOT' if int(leg_request.pos or 0) > 0 else 'SLD',
                 'ratio': abs(int(leg_request.pos or 0)),
             }]
@@ -3193,6 +3204,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 'strike': getattr(leg['contract'], 'strike', None),
                 'expDate': getattr(leg['request'], 'exp_date', ''),
                 'targetPosition': leg['pos'],
+                'sourcePosition': getattr(leg['request'], 'source_position', None),
+                'sourceCost': getattr(leg['request'], 'source_cost', None),
+                'sourceRealizedPnl': getattr(leg['request'], 'source_realized_pnl', 0.0),
+                'multiplier': getattr(leg['request'], 'multiplier', ''),
                 'expectedExecutionSide': 'BOT' if leg['pos'] > 0 else 'SLD',
                 'ratio': leg['ratio'],
             }

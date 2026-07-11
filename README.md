@@ -35,6 +35,7 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
   - preview / test-submit / submit combo requests
   - managed reprice / continue / concede / cancel controls
   - close-group execution using the same combo-order path
+  - partial close by complete strategy units while preserving leg ratios and realized P&L
 - Cost-tracking helpers:
   - per-group portfolio average-cost sync
   - per-group and global TWS leg/quantity checks against the selected account

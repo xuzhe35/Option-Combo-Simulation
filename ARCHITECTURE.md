@@ -204,6 +204,7 @@ Responsibilities:
 - trigger configuration and runtime state rules
 - delta hedge recommendation, resting-order applicability, and automation rules
 - open-combo and close-combo payload assembly
+- complete-strategy-unit sizing for proportional partial closes
 - canonical broker order intents, allocation-aware position-impact checks, and strict preview binding
 
 Open Combo and Delta Hedge are fail-closed behind a shared confirmation surface

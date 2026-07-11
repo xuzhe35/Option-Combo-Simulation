@@ -32,6 +32,12 @@
             : null;
     }
 
+    function _getGroupOrderBuilderApi() {
+        return globalScope.OptionComboGroupOrderBuilder && typeof globalScope.OptionComboGroupOrderBuilder === 'object'
+            ? globalScope.OptionComboGroupOrderBuilder
+            : null;
+    }
+
     function parseIvPercentInput(rawValue) {
         const normalized = String(rawValue || '')
             .replace(/[^0-9.+-]/g, '');
@@ -2704,6 +2710,11 @@
         const orders = Array.isArray(preview.closePlanOrders) ? preview.closePlanOrders : [];
         const account = String(preview.account || '').trim() || 'Not selected';
         const strategy = String(group.closeExecution && group.closeExecution.pendingCloseStrategy || group.closeExecution && group.closeExecution.strategy || 'auto');
+        const closeQuantity = parseInt(context.closeQuantity, 10);
+        const closeMaxQuantity = parseInt(context.closeMaxQuantity, 10);
+        const remainingQuantity = Number.isInteger(closeQuantity) && Number.isInteger(closeMaxQuantity)
+            ? Math.max(closeMaxQuantity - closeQuantity, 0)
+            : null;
 
         dialog._closeConfirmationContext = context;
         dialog.querySelector('.close-confirmation-subtitle').textContent = `${group.name || preview.groupName || 'Group'} · Account ${account}`;
@@ -2716,6 +2727,8 @@
             <span><strong>Account:</strong> ${_escapeCloseConfirmationHtml(account)}</span>
             <span><strong>Orders:</strong> ${orders.length}</span>
             <span><strong>Legs:</strong> ${legs.length}</span>
+            ${Number.isInteger(closeQuantity) ? `<span><strong>Close Qty:</strong> ${closeQuantity} of ${closeMaxQuantity}</span>` : ''}
+            ${Number.isInteger(remainingQuantity) ? `<span><strong>Remaining:</strong> ${remainingQuantity} strategy unit${remainingQuantity === 1 ? '' : 's'}</span>` : ''}
             <span><strong>Initial concession:</strong> ${_formatCloseConfirmationNumber((group.closeExecution && group.closeExecution.concessionRatio || 0) * 100)}%</span>
             <span><strong>Drift:</strong> ${_formatCloseConfirmationNumber(group.closeExecution && group.closeExecution.repriceThreshold)}</span>
         `;
@@ -2735,7 +2748,7 @@
                     : '—';
                 return `<tr>
                     <td>${_escapeCloseConfirmationHtml(optionName)}</td>
-                    <td>${_formatCloseConfirmationNumber(leg.originalPosition)} → ${_formatCloseConfirmationNumber(leg.closePosition)}</td>
+                    <td>${_formatCloseConfirmationNumber(leg.originalPosition)} → ${_formatCloseConfirmationNumber(leg.remainingPosition, _formatCloseConfirmationNumber(leg.closePosition))}</td>
                     <td>${_escapeCloseConfirmationHtml(quote)}</td>
                     <td>${_escapeCloseConfirmationHtml(_closeTreatmentLabel(leg.treatment))}</td>
                     <td>${_escapeCloseConfirmationHtml(allocation)}</td>
@@ -2778,6 +2791,7 @@
         const container = card.querySelector('.close-group-container');
         if (!container || !closeExecution) return;
 
+        const quantityInput = container.querySelector('.close-group-quantity');
         const strategyInput = container.querySelector('.close-group-strategy');
         const executionModeInput = container.querySelector('.close-group-execution-mode');
         const thresholdInput = container.querySelector('.close-group-reprice-threshold');
@@ -2786,7 +2800,7 @@
         const submitBtn = container.querySelector('.close-group-submit-btn');
         const equivalentBtn = container.querySelector('.close-group-equivalent-btn');
         const helpText = container.querySelector('.close-group-help');
-        if (!strategyInput || !executionModeInput || !thresholdInput || !concessionInput
+        if (!quantityInput || !strategyInput || !executionModeInput || !thresholdInput || !concessionInput
             || !timeInForceInput || !submitBtn || !equivalentBtn) {
             return;
         }
@@ -2797,6 +2811,15 @@
             ? deps.groupHasOpenPosition(group)
             : (group.legs || []).some(leg => Math.abs(parseFloat(leg && leg.pos) || 0) > 0.0001);
         const hasLockedEntryCosts = _groupHasCostForAllPositionedLegs(group);
+        const groupOrderBuilder = _getGroupOrderBuilderApi();
+        const maxCloseQuantity = groupOrderBuilder
+            && typeof groupOrderBuilder.resolveGroupCloseQuantity === 'function'
+            ? groupOrderBuilder.resolveGroupCloseQuantity(group)
+            : 0;
+        const configuredQuantity = parseInt(closeExecution.quantity, 10);
+        closeExecution.quantity = Number.isInteger(configuredQuantity) && configuredQuantity >= 1
+            ? Math.min(configuredQuantity, maxCloseQuantity || configuredQuantity)
+            : maxCloseQuantity;
         const brokerStatus = String(closeExecution.lastPreview && closeExecution.lastPreview.status || '').trim();
         const lastRequestSource = String(closeExecution.lastPreview && closeExecution.lastPreview.requestSource || '').trim();
         const lastPlanStage = String(closeExecution.lastPreview && closeExecution.lastPreview.closePlanStage || '').trim();
@@ -2808,22 +2831,33 @@
 
         if (isHistoricalMode) {
             closeExecution.executionMode = 'preview';
+            closeExecution.quantity = maxCloseQuantity;
         }
+        quantityInput.min = '1';
+        quantityInput.max = String(maxCloseQuantity || 1);
+        quantityInput.value = String(closeExecution.quantity || maxCloseQuantity || 1);
+        quantityInput.title = maxCloseQuantity > 0
+            ? `Close 1 to ${maxCloseQuantity} complete strategy unit${maxCloseQuantity === 1 ? '' : 's'}.`
+            : 'No complete strategy unit is available to close.';
         strategyInput.value = String(closeExecution.strategy || 'auto').toLowerCase();
         executionModeInput.value = String(closeExecution.executionMode || 'preview');
         thresholdInput.value = formatRepriceThresholdValue(closeExecution.repriceThreshold || 0.01);
         concessionInput.value = Number(closeExecution.concessionRatio || 0.0).toFixed(2);
         timeInForceInput.value = String(closeExecution.timeInForce || 'DAY').toUpperCase();
 
+        quantityInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted || maxCloseQuantity < 1;
         strategyInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         executionModeInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         thresholdInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         concessionInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         timeInForceInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         if (helpText) {
+            const quantityText = maxCloseQuantity > 1
+                ? `Close Qty ${closeExecution.quantity} of ${maxCloseQuantity}; the remaining leg positions stay open. `
+                : '';
             helpText.textContent = isHistoricalMode
                 ? 'Snapshots every open leg at the current replay day, writes those prices into Close, and switches the group into Settlement mode.'
-                : (closeExecution.strategy === 'combo'
+                : quantityText + (closeExecution.quantity < maxCloseQuantity || closeExecution.strategy === 'combo'
                     ? 'Combo Only always sends the reverse option combo and never substitutes an expiry hedge.'
                     : 'Auto normally sends the reverse combo, but can ignore clearly worthless OTM legs and hedge deep ITM one-sided legs with net Underlying. Expiry Equivalent forces that analysis.');
         }
@@ -2872,6 +2906,9 @@
             } else if (closeExecution.pendingRequest === true) {
                 equivalentBtn.disabled = true;
                 equivalentBtn.title = 'A close-group order request is already in progress.';
+            } else if (closeExecution.quantity < maxCloseQuantity) {
+                equivalentBtn.disabled = true;
+                equivalentBtn.title = 'Expiry Equivalent requires closing the full group quantity.';
             } else {
                 equivalentBtn.disabled = false;
                 equivalentBtn.title = 'Force expiry-equivalent analysis for standard physically settled stock options; preview first when selected.';
@@ -2886,6 +2923,18 @@
         equivalentBtn.textContent = closeExecution.executionMode === 'preview'
             ? 'Preview Equivalent'
             : (closeExecution.executionMode === 'test_submit' ? 'Test Equivalent' : 'Expiry Equivalent');
+
+        quantityInput.addEventListener('change', (e) => {
+            const parsed = parseInt(e.target.value, 10);
+            closeExecution.quantity = Number.isInteger(parsed)
+                ? Math.min(Math.max(parsed, 1), maxCloseQuantity || 1)
+                : (maxCloseQuantity || 1);
+            if (closeExecution.quantity < maxCloseQuantity) {
+                closeExecution.strategy = 'combo';
+            }
+            e.target.value = String(closeExecution.quantity);
+            deps.renderGroups();
+        });
 
         strategyInput.addEventListener('change', (e) => {
             const nextStrategy = String(e.target.value || '').trim().toLowerCase();

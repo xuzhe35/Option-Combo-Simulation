@@ -155,6 +155,27 @@
         return intent === 'close' ? numericPos * -1 : numericPos;
     }
 
+    function _greatestCommonDivisor(left, right) {
+        let a = Math.abs(parseInt(left, 10) || 0);
+        let b = Math.abs(parseInt(right, 10) || 0);
+        while (b > 0) {
+            const remainder = a % b;
+            a = b;
+            b = remainder;
+        }
+        return a;
+    }
+
+    function resolveGroupCloseQuantity(group, options = {}) {
+        const legIdFilter = _normalizeLegIdFilter(options);
+        const positions = (group && group.legs || [])
+            .filter((leg) => _shouldIncludeLegForIntent(leg, 'close', legIdFilter))
+            .map((leg) => Math.abs(parseInt(leg.pos, 10) || 0))
+            .filter((value) => value > 0);
+        if (positions.length === 0) return 0;
+        return positions.reduce((current, value) => _greatestCommonDivisor(current, value), 0);
+    }
+
     function _hasResolvedClosePrice(leg) {
         return !!(leg
             && leg.closePrice !== null
@@ -197,10 +218,22 @@
         const legIdFilter = _normalizeLegIdFilter(options);
         const productRegistry = _getProductRegistryApi();
 
-        return (group.legs || [])
-            .filter((leg) => _shouldIncludeLegForIntent(leg, intent, legIdFilter))
+        const eligibleLegs = (group.legs || [])
+            .filter((leg) => _shouldIncludeLegForIntent(leg, intent, legIdFilter));
+        const maxCloseQuantity = intent === 'close'
+            ? resolveGroupCloseQuantity({ ...group, legs: eligibleLegs })
+            : 0;
+        const requestedCloseQuantity = parseInt(options && options.closeQuantity, 10);
+        const closeQuantity = intent === 'close' && Number.isInteger(requestedCloseQuantity)
+            ? Math.min(Math.max(requestedCloseQuantity, 1), maxCloseQuantity)
+            : maxCloseQuantity;
+
+        return eligibleLegs
             .map((leg) => {
-                const targetPos = _resolveTargetPosition(leg.pos, intent);
+                const sourcePosition = parseInt(leg.pos, 10) || 0;
+                const targetPos = intent === 'close' && maxCloseQuantity > 0
+                    ? -(sourcePosition / maxCloseQuantity) * closeQuantity
+                    : _resolveTargetPosition(sourcePosition, intent);
                 const optionContractSpec = productRegistry
                     && typeof productRegistry.resolveOptionContractSpec === 'function'
                     ? productRegistry.resolveOptionContractSpec(globalState.underlyingSymbol, leg.expDate)
@@ -216,6 +249,12 @@
                         exchange: profile.underlyingExchange || 'SMART',
                         currency: profile.currency || 'USD',
                     };
+
+                    if (intent === 'close') {
+                        request.sourcePosition = sourcePosition;
+                        request.sourceCost = parseFloat(leg.cost) || 0;
+                        request.sourceRealizedPnl = parseFloat(leg.partialCloseRealizedPnl) || 0;
+                    }
 
                     if (request.secType === 'FUT') {
                         request.contractMonth = defaultUnderlyingContractMonth;
@@ -251,6 +290,11 @@
                     contractMonth: String(leg.expDate || '').replace(/-/g, '').slice(0, 6),
                     underlyingContractMonth,
                 };
+                if (intent === 'close') {
+                    request.sourcePosition = sourcePosition;
+                    request.sourceCost = parseFloat(leg.cost) || 0;
+                    request.sourceRealizedPnl = parseFloat(leg.partialCloseRealizedPnl) || 0;
+                }
                 return _appendObservedQuote(request, _resolveObservedQuoteForLeg(leg));
             });
     }
@@ -293,8 +337,14 @@
             legs: buildGroupOrderLegRequests(group, globalState, {
                 intent,
                 legIds: requestOptions.legIds,
+                closeQuantity: requestOptions.closeQuantity,
             }),
         };
+
+        if (intent === 'close') {
+            payload.closeQuantity = parseInt(requestOptions.closeQuantity, 10) || null;
+            payload.closeMaxQuantity = resolveGroupCloseQuantity(group, { legIds: requestOptions.legIds });
+        }
 
         const observedUnderlyingPrice = _resolveObservedUnderlyingPrice(globalState);
         if (observedUnderlyingPrice !== null) {
@@ -313,5 +363,6 @@
         VALID_EXECUTION_INTENTS,
         buildGroupOrderLegRequests,
         buildGroupOrderRequestPayload,
+        resolveGroupCloseQuantity,
     };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

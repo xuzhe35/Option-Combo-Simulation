@@ -80,6 +80,10 @@
         });
 
         let currentCash = -initialCashOutflow;
+        currentCash += group.legs.reduce((sum, leg) => {
+            const realized = parseFloat(leg && leg.partialCloseRealizedPnl);
+            return sum + (Number.isFinite(realized) ? realized : 0);
+        }, 0);
 
         group.legs.forEach(leg => {
             if (isUnderlyingLeg(leg)) return;

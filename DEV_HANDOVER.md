@@ -68,6 +68,7 @@ Current surfaces:
   - `test_submit`
   - `submit`
 - close-group execution using the same combo-order pipeline
+- `Close Qty` supports proportional partial closes (for example, closing 1 of a 5-lot straddle leaves 4/4) and carries realized P&L forward on the remaining legs
 - Delta Hedge STK / FUT validation, broker preview, submit, cancel, and active-order recovery snapshot
 - optional Delta Hedge auto-preview / auto-submit supervisor behind explicit live hedge-order gate, account selection, LMT-only policy, max quantity / notional / daily count limits, and cooldown checks
 - managed repricing controls:

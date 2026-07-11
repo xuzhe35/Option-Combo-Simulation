@@ -142,6 +142,8 @@
                 targetMode: runtime.pendingConfirmationMode,
                 positionWarnings,
                 crossGroupWarningsOnly: true,
+                closeQuantity: parseInt(pendingPayload && pendingPayload.closeQuantity, 10) || null,
+                closeMaxQuantity: parseInt(pendingPayload && pendingPayload.closeMaxQuantity, 10) || null,
                 positionSnapshotAvailable: state.portfolioPositionsConnected === true,
                 onConfirm: () => confirmClosePlan(group),
                 onCancel: () => cancelClosePlan(group),
@@ -772,6 +774,7 @@
                     || 'auto'
                 ).trim().toLowerCase(),
                 legIds,
+                closeQuantity: requestOptions.closeQuantity,
             });
 
             if (legIds.length > 0) {
@@ -1140,10 +1143,6 @@
                 return false;
             }
             _setCloseExecutionTarget(closeExecution, legIds);
-            closeExecution.pendingCloseStrategy = String(
-                options.closeStrategy || closeExecution.strategy || 'auto'
-            ).trim().toLowerCase();
-
             if (_isHistoricalMode()) {
                 const didSettle = _settleHistoricalReplayGroup(group, { legIds });
                 if (!didSettle) {
@@ -1151,6 +1150,41 @@
                 }
                 return didSettle;
             }
+            const groupOrderBuilder = _getGroupOrderBuilderApi();
+            const maxCloseQuantity = !scopedClose && groupOrderBuilder
+                && typeof groupOrderBuilder.resolveGroupCloseQuantity === 'function'
+                ? groupOrderBuilder.resolveGroupCloseQuantity(group)
+                : null;
+            const requestedCloseQuantity = parseInt(
+                options.closeQuantity != null ? options.closeQuantity : closeExecution.quantity,
+                10
+            );
+            const closeQuantity = !scopedClose
+                ? (Number.isInteger(requestedCloseQuantity) ? requestedCloseQuantity : maxCloseQuantity)
+                : null;
+            if (!scopedClose && (!Number.isInteger(closeQuantity) || closeQuantity < 1
+                || !Number.isInteger(maxCloseQuantity) || closeQuantity > maxCloseQuantity)) {
+                _markCloseExecutionError(group, `Close Qty must be between 1 and ${maxCloseQuantity || 0}.`);
+                _renderGroups();
+                return false;
+            }
+            if (!scopedClose && closeQuantity < maxCloseQuantity
+                && String(options.closeStrategy || '').trim().toLowerCase() === 'equivalent_expiry') {
+                _markCloseExecutionError(group, 'Expiry Equivalent is only available when closing the full group quantity.');
+                _renderGroups();
+                return false;
+            }
+            closeExecution.quantity = closeQuantity;
+            closeExecution.pendingCloseQuantity = closeQuantity;
+            closeExecution.pendingCloseMaxQuantity = maxCloseQuantity;
+            const requestedStrategy = String(
+                options.closeStrategy || closeExecution.strategy || 'auto'
+            ).trim().toLowerCase();
+            closeExecution.pendingCloseStrategy = !scopedClose
+                && closeQuantity < maxCloseQuantity
+                ? 'combo'
+                : requestedStrategy;
+
             if (!_isWsConnected()) {
                 _markCloseExecutionError(group, 'WebSocket is not connected.');
                 _renderGroups();
@@ -1198,6 +1232,7 @@
                 {
                 legIds,
                 closeStrategy: closeExecution.pendingCloseStrategy,
+                closeQuantity,
                 }
             );
             if (!payload) {
@@ -1239,6 +1274,7 @@
             return _requestCloseComboOrder(group, {
                 legIds: [],
                 closeStrategy: closeExecution && closeExecution.strategy || 'auto',
+                closeQuantity: closeExecution && closeExecution.quantity,
             });
         }
 
@@ -1807,13 +1843,42 @@
                 }
 
                 if (runtimeKind === 'closeExecution') {
-                    if (Math.abs((parseFloat(leg.closePrice) || 0) - nextCost) <= 0.0001
-                        && leg.closePriceSource === 'execution_report') {
-                        return;
+                    const sourcePosition = parseFloat(fillLeg.sourcePosition);
+                    const targetPosition = parseFloat(fillLeg.targetPosition);
+                    const cumulativeFilled = Math.abs(parseFloat(fillLeg.filledQuantity) || 0);
+                    const canApplyPartialPosition = Number.isFinite(sourcePosition)
+                        && sourcePosition !== 0
+                        && Number.isFinite(targetPosition)
+                        && targetPosition !== 0;
+                    if (canApplyPartialPosition) {
+                        const appliedFilled = Math.min(cumulativeFilled, Math.abs(targetPosition));
+                        const remainingAbs = Math.max(Math.abs(sourcePosition) - appliedFilled, 0);
+                        const sourceRealizedPnl = parseFloat(fillLeg.sourceRealizedPnl) || 0;
+                        const sourceCost = Math.abs(parseFloat(fillLeg.sourceCost));
+                        const multiplier = Math.abs(parseFloat(fillLeg.multiplier)) || 1;
+                        if (remainingAbs > 0.0001) {
+                            leg.pos = Math.sign(sourcePosition) * remainingAbs;
+                            leg.closePrice = null;
+                            leg.closePriceSource = '';
+                            leg.partialCloseRealizedPnl = Number.isFinite(sourceCost)
+                                ? sourceRealizedPnl
+                                    + (nextCost - sourceCost) * Math.sign(sourcePosition) * appliedFilled * multiplier
+                                : sourceRealizedPnl;
+                            leg.partialCloseLastPrice = nextCost;
+                            leg.partialCloseLastQuantity = appliedFilled;
+                        } else {
+                            // Preserve the final batch position so the existing closed-leg
+                            // valuation path books it at closePrice; earlier batches remain
+                            // in partialCloseRealizedPnl.
+                            leg.pos = sourcePosition;
+                            leg.partialCloseRealizedPnl = sourceRealizedPnl;
+                            leg.closePrice = nextCost;
+                            leg.closePriceSource = 'execution_report';
+                        }
+                    } else {
+                        leg.closePrice = nextCost;
+                        leg.closePriceSource = 'execution_report';
                     }
-
-                    leg.closePrice = nextCost;
-                    leg.closePriceSource = 'execution_report';
                     leg.closeExecutionOrderId = orderFill.orderId || null;
                     leg.closeExecutionPermId = orderFill.permId || null;
                 } else {
