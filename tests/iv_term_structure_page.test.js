@@ -391,7 +391,7 @@ module.exports = {
             },
         },
         {
-            name: 'normalizes and persists the per-symbol TD IV lambda',
+            name: 'normalizes and persists the global TD IV lambda with a 0.3 default',
             run() {
                 const stored = {};
                 const ctx = loadPageContext(null);
@@ -405,15 +405,19 @@ module.exports = {
                 };
                 const testApi = ctx.OptionComboIvTermStructurePage._test;
 
-                assert.equal(testApi.normalizeTdIvLambda(undefined), 0);
-                assert.equal(testApi.normalizeTdIvLambda('junk'), 0);
+                assert.equal(testApi.normalizeTdIvLambda(undefined), 0.3);
+                assert.equal(testApi.normalizeTdIvLambda('junk'), 0.3);
                 assert.equal(testApi.normalizeTdIvLambda(-1), 0);
                 assert.equal(testApi.normalizeTdIvLambda(2), 1);
                 assert.equal(testApi.normalizeTdIvLambda('0.35'), 0.35);
 
-                testApi.saveTdIvLambda('es', 0.45);
-                assert.equal(testApi.loadSavedTdIvLambda('ES'), 0.45);
-                assert.equal(testApi.loadSavedTdIvLambda('SPY'), null);
+                // Nothing stored yet: caller falls back to the 0.3 default.
+                assert.equal(testApi.loadSavedTdIvLambda(), null);
+                testApi.saveTdIvLambda(0.45);
+                assert.equal(testApi.loadSavedTdIvLambda(), 0.45);
+                // Junk in storage is ignored rather than trusted.
+                stored.optionComboIvtsTdIvLambdaGlobal = 'garbage';
+                assert.equal(testApi.loadSavedTdIvLambda(), null);
             },
         },
         {
