@@ -45,6 +45,13 @@ class ExecutionEngine:
             "orderStatus": snapshot,
         }
 
+    def _build_close_plan_cancel_payload(self, group_id, result):
+        return {
+            "action": "combo_order_close_plan_cancel_result",
+            "groupId": group_id,
+            "closePlan": result,
+        }
+
     def _build_concede_payload(self, group_id, snapshot):
         return {
             "action": "combo_order_concede_result",
@@ -223,10 +230,23 @@ class ExecutionEngine:
             return self._build_error_payload(None, "Invalid combo order payload.", None)
 
         action = raw_data.get("action")
-        if action not in ("validate_combo_order", "preview_combo_order", "submit_combo_order", "resume_managed_combo_order", "concede_managed_combo_order", "cancel_managed_combo_order"):
+        if action not in (
+            "validate_combo_order",
+            "preview_combo_order",
+            "submit_combo_order",
+            "resume_managed_combo_order",
+            "concede_managed_combo_order",
+            "cancel_managed_combo_order",
+            "cancel_close_plan",
+        ):
             return None
 
-        if action not in ("resume_managed_combo_order", "concede_managed_combo_order", "cancel_managed_combo_order"):
+        if action not in (
+            "resume_managed_combo_order",
+            "concede_managed_combo_order",
+            "cancel_managed_combo_order",
+            "cancel_close_plan",
+        ):
             self._log_request_received(client_ip, raw_data)
 
         try:
@@ -257,9 +277,22 @@ class ExecutionEngine:
                 )
                 return payload
 
+            if action == "cancel_close_plan":
+                result = await self.adapter.cancel_close_plan_confirmation(websocket, raw_data)
+                payload = self._build_close_plan_cancel_payload(raw_data.get("groupId"), result)
+                self.logger.info(
+                    f"Close Plan cancellation response sent to {client_ip}: "
+                    f"groupId={raw_data.get('groupId')} action={payload.get('action')} "
+                    f"status={result.get('status')}"
+                )
+                return payload
+
             request = ComboOrderRequest.from_payload(raw_data)
         except Exception as exc:
-            self.logger.exception("Failed to parse combo order request")
+            if action == "cancel_close_plan":
+                self.logger.exception("Close Plan cancellation failed")
+            else:
+                self.logger.exception("Failed to parse combo order request")
             return self._build_error_payload(
                 raw_data.get("groupId"),
                 str(exc),

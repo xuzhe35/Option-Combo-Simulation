@@ -56,6 +56,7 @@ from ib_server_iv_term_structure import (
 )
 from ib_server_market_data import (
     build_pending_tickers_handler,
+    cancel_all_api_market_data_subscriptions,
     coerce_positive_int,
     extract_market_price,
     extract_option_delta,
@@ -97,8 +98,11 @@ MANAGED_REPRICE_THRESHOLD_DEFAULT = config.getfloat('execution', 'managed_repric
 MANAGED_REPRICE_INTERVAL_SECONDS = config.getfloat('execution', 'managed_reprice_interval_seconds', fallback=2.0)
 MANAGED_REPRICE_MAX_UPDATES = config.getint('execution', 'managed_reprice_max_updates', fallback=12)
 MANAGED_REPRICE_TIMEOUT_SECONDS = config.getfloat('execution', 'managed_reprice_timeout_seconds', fallback=600.0)
-HISTORICAL_SQLITE_DB = os.path.abspath(
-    config.get('historical', 'sqlite_db_path', fallback=os.path.join('sqlite_spy', 'spy_options.db'))
+CHAIN_SERVICE_URL = config.get(
+    'historical', 'chain_service_url', fallback='http://127.0.0.1:8750'
+).strip()
+RATES_SQLITE_DB = os.path.abspath(
+    config.get('historical', 'rates_sqlite_db_path', fallback=os.path.join('sqlite_spy', 'rates.db'))
 )
 
 def _parse_ws_hosts(raw_value):
@@ -130,16 +134,21 @@ market_data_generic_ticks_by_con_id = {}
 client_subscription_settings = {}
 ib_connect_task = None
 iv_term_structure_sync_tasks = {}
+api_market_data_reset_lock = asyncio.Lock()
+api_market_data_generation = 0
 qualified_underlyings = {}
 portfolio_avg_cost_cache = {}
+portfolio_position_cache = {}
+portfolio_position_broadcast_task = None
 combo_order_tracking_by_order_id = {}
 combo_order_tracking_by_perm_id = {}
 hedge_order_tracking_by_order_id = {}
 hedge_order_tracking_by_perm_id = {}
 option_iv_debug_last_logged = {}
 historical_replay_service = HistoricalReplayService(
-    HISTORICAL_SQLITE_DB,
-    logger=logging.getLogger('historical_replay.sqlite'),
+    CHAIN_SERVICE_URL,
+    RATES_SQLITE_DB,
+    logger=logging.getLogger('historical_replay.chain_service'),
 )
 
 SUPPORTED_LIVE_FAMILIES = {
@@ -514,7 +523,7 @@ execution_adapter = IbkrExecutionAdapter(
     logger=logging.getLogger('trade_execution.ibkr'),
     emit_order_update=_emit_combo_order_update,
     on_combo_order_placed=_record_combo_order_placement,
-    portfolio_positions_provider=lambda: list(portfolio_avg_cost_cache.values()),
+    portfolio_positions_provider=lambda: list(portfolio_position_cache.values()),
 )
 
 execution_engine = ExecutionEngine(
@@ -624,10 +633,52 @@ def _serialize_portfolio_avg_cost_item(portfolio_item):
     }
 
 
+def _serialize_portfolio_position_item(portfolio_item):
+    contract = getattr(portfolio_item, 'contract', None)
+    if contract is None:
+        return None
+    try:
+        position_value = float(getattr(portfolio_item, 'position', 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if position_value != position_value or position_value == 0:
+        return None
+
+    return {
+        'account': getattr(portfolio_item, 'account', '') or '',
+        'conId': getattr(contract, 'conId', None),
+        'secType': str(getattr(contract, 'secType', '') or '').upper(),
+        'symbol': getattr(contract, 'symbol', '') or '',
+        'localSymbol': getattr(contract, 'localSymbol', '') or '',
+        'expDate': _normalize_contract_date(getattr(contract, 'lastTradeDateOrContractMonth', '') or ''),
+        'right': getattr(contract, 'right', '') or '',
+        'strike': getattr(contract, 'strike', None),
+        'multiplier': str(getattr(contract, 'multiplier', '') or ''),
+        'tradingClass': getattr(contract, 'tradingClass', '') or '',
+        'position': position_value,
+    }
+
+
 def _build_portfolio_avg_cost_payload(items):
     return {
         'action': 'portfolio_avg_cost_update',
         'items': items,
+    }
+
+
+def _build_portfolio_positions_payload():
+    is_ready = getattr(ib, 'isReady', None)
+    try:
+        positions_ready = bool(ib.isConnected()) and (
+            bool(is_ready()) if callable(is_ready) else True
+        )
+    except Exception:
+        positions_ready = False
+    return {
+        'action': 'portfolio_positions_snapshot',
+        'items': list(portfolio_position_cache.values()),
+        'ibConnected': ib.isConnected(),
+        'positionsReady': positions_ready,
     }
 
 
@@ -697,7 +748,46 @@ def _send_portfolio_avg_cost_snapshot(websocket):
     asyncio.create_task(send_message_safe(websocket, message))
 
 
+def _broadcast_portfolio_positions_snapshot():
+    if not connected_clients:
+        return
+    message = json.dumps(_build_portfolio_positions_payload())
+    for ws in list(connected_clients):
+        asyncio.create_task(send_message_safe(ws, message))
+
+
+async def _broadcast_portfolio_positions_after_coalesce():
+    global portfolio_position_broadcast_task
+    try:
+        await asyncio.sleep(0.05)
+        _broadcast_portfolio_positions_snapshot()
+    finally:
+        portfolio_position_broadcast_task = None
+
+
+def _schedule_portfolio_positions_broadcast():
+    global portfolio_position_broadcast_task
+    if portfolio_position_broadcast_task is not None and not portfolio_position_broadcast_task.done():
+        return
+    portfolio_position_broadcast_task = asyncio.create_task(_broadcast_portfolio_positions_after_coalesce())
+
+
+def _send_portfolio_positions_snapshot(websocket):
+    asyncio.create_task(send_message_safe(websocket, json.dumps(_build_portfolio_positions_payload())))
+
+
 def on_update_portfolio_item(portfolio_item):
+    position_item = _serialize_portfolio_position_item(portfolio_item)
+    position_key = _portfolio_avg_cost_cache_key_from_contract(
+        getattr(portfolio_item, 'account', '') or '',
+        getattr(portfolio_item, 'contract', None),
+    )
+    if position_item is not None:
+        portfolio_position_cache[_portfolio_avg_cost_cache_key(position_item)] = position_item
+    elif position_key is not None:
+        portfolio_position_cache.pop(position_key, None)
+    _schedule_portfolio_positions_broadcast()
+
     item = _serialize_portfolio_avg_cost_item(portfolio_item)
     if not item:
         contract = getattr(portfolio_item, 'contract', None)
@@ -807,6 +897,78 @@ async def _ensure_ib_connect_task():
         logging.info("Started manual/background IB connection task.")
         return 'Connecting to IB TWS/Gateway...'
     return 'IB connection attempt is already running.'
+
+
+async def _reset_all_api_market_data_subscriptions(requested_by='Unknown'):
+    """Clear all streams for this IB API client, including untracked leaked lines."""
+    global api_market_data_generation, ib_connect_task
+
+    async with api_market_data_reset_lock:
+        api_market_data_generation += 1
+        tracked_client_count = sum(1 for subscriptions in client_subscriptions.values() if subscriptions)
+        active_iv_tasks = [task for task in iv_term_structure_sync_tasks.values() if not task.done()]
+        stopped_iv_sync_count = len(active_iv_tasks)
+        if active_iv_tasks:
+            for task in active_iv_tasks:
+                task.cancel()
+            await asyncio.gather(*active_iv_tasks, return_exceptions=True)
+        iv_term_structure_sync_tasks.clear()
+
+        cancellation = cancel_all_api_market_data_subscriptions(
+            ib=ib,
+            client_subscriptions=client_subscriptions,
+            generic_ticks_by_con_id=market_data_generic_ticks_by_con_id,
+        )
+
+        connection_was_connected = bool(ib.isConnected())
+        connection_reset = False
+        if ib_connect_task is not None and not ib_connect_task.done():
+            ib_connect_task.cancel()
+            await asyncio.gather(ib_connect_task, return_exceptions=True)
+        ib_connect_task = None
+
+        if connection_was_connected:
+            ib.disconnect()
+            connection_reset = True
+
+        reconnect_message = await _ensure_ib_connect_task()
+        reconnecting = bool(ib_connect_task and not ib_connect_task.done())
+        payload = {
+            'action': 'api_market_data_subscriptions_reset',
+            'success': True,
+            'requestedBy': str(requested_by or 'Unknown'),
+            'trackedClientCount': tracked_client_count,
+            'stoppedIvSyncCount': stopped_iv_sync_count,
+            'knownTickerCount': cancellation['knownTickerCount'],
+            'cancelledTickerCount': cancellation['cancelledTickerCount'],
+            'cancelErrorCount': cancellation['cancelErrorCount'],
+            'connectionWasConnected': connection_was_connected,
+            'connectionReset': connection_reset,
+            'reconnecting': reconnecting,
+            'message': (
+                f"Cleared all market-data subscriptions for this API client "
+                f"({cancellation['knownTickerCount']} known tickers, {tracked_client_count} active web sessions). "
+                "The API connection was reset to release untracked request IDs and is reconnecting. "
+                "All pages must subscribe again. No orders were cancelled. "
+                "Any running managed-order supervision lost its live quotes during the reset and requires manual review."
+            ),
+        }
+        logging.warning(
+            "Global API market-data reset requested by %s: %s %s",
+            requested_by,
+            payload['message'],
+            reconnect_message,
+        )
+        return payload
+
+
+def _get_api_market_data_generation():
+    return api_market_data_generation
+
+
+def _api_market_data_reset_in_progress():
+    return api_market_data_reset_lock.locked()
+
 
 def _extract_market_price(ticker):
     """Extract the best available price from a market-data ticker.
@@ -1197,6 +1359,8 @@ def _build_iv_term_structure_environment():
         'market_data_generic_ticks_by_con_id': market_data_generic_ticks_by_con_id,
         'client_subscription_settings': client_subscription_settings,
         'iv_term_structure_sync_tasks': iv_term_structure_sync_tasks,
+        'get_api_market_data_generation': _get_api_market_data_generation,
+        'api_market_data_reset_in_progress': _api_market_data_reset_in_progress,
         'send_message_safe': send_message_safe,
         'build_underlying_request': _build_underlying_request,
         'build_contract_from_request': _build_contract_from_request,
@@ -1411,6 +1575,7 @@ def _build_ws_handler_environment():
         'historical_replay_service': historical_replay_service,
         'execution_engine': execution_engine,
         'send_portfolio_avg_cost_snapshot': _send_portfolio_avg_cost_snapshot,
+        'send_portfolio_positions_snapshot': _send_portfolio_positions_snapshot,
         'send_managed_accounts_snapshot': _send_managed_accounts_snapshot,
         'build_underlying_request': _build_underlying_request,
         'normalize_replay_date': normalize_replay_date,
@@ -1425,6 +1590,9 @@ def _build_ws_handler_environment():
         'handle_iv_term_structure_subscription': _handle_iv_term_structure_subscription,
         'build_ib_connection_status_payload': _build_ib_connection_status_payload,
         'ensure_ib_connect_task': _ensure_ib_connect_task,
+        'reset_all_api_market_data_subscriptions': _reset_all_api_market_data_subscriptions,
+        'get_api_market_data_generation': _get_api_market_data_generation,
+        'api_market_data_reset_in_progress': _api_market_data_reset_in_progress,
         'extract_quote_snapshot': _extract_quote_snapshot,
         'request_ib_historical_bars': _request_ib_historical_bars,
         'coerce_positive_int': _coerce_positive_int,

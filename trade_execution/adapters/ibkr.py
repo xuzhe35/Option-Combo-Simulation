@@ -1,7 +1,10 @@
 import asyncio
+import hashlib
+import json
 import logging
+import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from math import gcd, isfinite
 from decimal import Decimal, ROUND_FLOOR, ROUND_CEILING
@@ -12,6 +15,7 @@ from trade_execution.adapters.base import BrokerExecutionAdapter
 from trade_execution.adapters.ibkr_contracts import (
     _build_contract_from_request,
     _describe_contract_request,
+    _fallback_qualify_derivative_contract,
     _qualify_one,
     _qualify_underlying_future,
     _request_temporary_ticker,
@@ -87,6 +91,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.test_only_sell_factor = 5.0
         self.test_only_small_credit_buffer = 0.5
         self.default_price_increment = 0.01
+        self.close_plan_confirmation_ttl_seconds = 60.0
+        self.close_plan_confirmations = {}
         self.managed_reprice_threshold = float(managed_reprice_threshold)
         self.managed_reprice_interval_seconds = float(managed_reprice_interval_seconds)
         self.managed_reprice_max_updates = int(managed_reprice_max_updates)
@@ -614,6 +620,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     _register_hedge_order_context = _register_hedge_order_context
     _on_hedge_order_status = _on_hedge_order_status
     _describe_contract_request = _describe_contract_request
+    _fallback_qualify_derivative_contract = _fallback_qualify_derivative_contract
     _qualify_one = _qualify_one
     _request_temporary_ticker = _request_temporary_ticker
     _resolve_existing_order_ticker = _resolve_existing_order_ticker
@@ -758,6 +765,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'worstComboPrice': context.get('worstComboPrice'),
             'managedRepriceThreshold': context.get('managedRepriceThreshold'),
             'managedConcessionRatio': context.get('managedConcessionRatio'),
+            'managedManualConcessionCount': context.get('managedManualConcessionCount'),
+            'managedManualConcessionStep': context.get('managedManualConcessionStep'),
+            'managedManualConcessionOffset': context.get('managedManualConcessionOffset'),
+            'priceIncrement': context.get('priceIncrement'),
             'repricingCount': context.get('repricingCount'),
             'maxRepriceCount': context.get('maxRepriceCount'),
             'lastRepriceAt': context.get('lastRepriceAt'),
@@ -795,6 +806,14 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 return allowed
         raise ValueError('Concession ratio must be one of 0.10, 0.20, 0.30, 0.50, 0.75, or 0.90.')
 
+    def _resolve_manual_concession_step(self, raw_value):
+        step = self._safe_positive_float(raw_value)
+        if step is None:
+            raise ValueError('Manual chase step must be a positive number.')
+        if step > 1000000:
+            raise ValueError('Manual chase step is unreasonably large.')
+        return step
+
     async def _emit_managed_update(self, context):
         callback = self.emit_order_update
         websocket = context.get('websocket')
@@ -822,6 +841,16 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     def _build_default_watching_message(self, context):
         threshold = float(context.get('managedRepriceThreshold') or self.managed_reprice_threshold)
         partial_fill_prefix = self._build_partial_fill_message_prefix(context)
+        manual_count = int(context.get('managedManualConcessionCount') or 0)
+        manual_step = self._safe_positive_float(context.get('managedManualConcessionStep'))
+        manual_offset = abs(float(context.get('managedManualConcessionOffset') or 0.0))
+        manual_adjustment = (
+            f' A retained manual chase offset of {self._format_price_increment(manual_offset)} is active '
+            f'after {manual_count} adjustment{"" if manual_count == 1 else "s"}; '
+            f'the last entered step was {self._format_price_increment(manual_step)}.'
+            if manual_count > 0 and manual_step is not None
+            else ''
+        )
         if float(context.get('managedConcessionRatio') or 0.0) > 0:
             return (
                 partial_fill_prefix +
@@ -829,11 +858,13 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 f'concession from middle toward the quoted worst price. '
                 f'The backend will refresh the working limit when the target combo price moves by at least '
                 f'{self._format_managed_reprice_threshold(threshold)}.'
+                f'{manual_adjustment}'
             )
         return (
             partial_fill_prefix +
             f'Auto-repricing is active. The backend will refresh the working limit when '
             f'the target combo price moves by at least {self._format_managed_reprice_threshold(threshold)}.'
+            f'{manual_adjustment}'
         )
 
     def _clear_pending_terminal_confirmation(self, context):
@@ -955,12 +986,57 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'worstPrice': round(abs(worst_direct), 4),
         }
 
-    def _resolve_target_limit_from_quote_stats(self, context, latest_abs_mid, best_price, worst_price):
+    def _resolve_base_target_limit_from_quote_stats(self, context, latest_abs_mid, worst_price):
         concession_ratio = float(context.get('managedConcessionRatio') or 0.0)
         worst_price = float(worst_price)
         if concession_ratio <= 0:
             return round(latest_abs_mid, 4)
         return round(latest_abs_mid + concession_ratio * (worst_price - latest_abs_mid), 4)
+
+    def _resolve_target_limit_from_quote_stats(self, context, latest_abs_mid, best_price, worst_price):
+        base_target = self._resolve_base_target_limit_from_quote_stats(
+            context,
+            latest_abs_mid,
+            worst_price,
+        )
+        try:
+            manual_offset = float(context.get('managedManualConcessionOffset') or 0.0)
+        except (TypeError, ValueError):
+            manual_offset = 0.0
+
+        if abs(manual_offset) < 1e-12:
+            return base_target
+
+        worst_price = float(worst_price)
+        lower_bound = min(base_target, worst_price)
+        upper_bound = max(base_target, worst_price)
+        return round(min(max(base_target + manual_offset, lower_bound), upper_bound), 4)
+
+    def _resolve_next_manual_concession_limit(
+        self,
+        previous_limit,
+        worst_price,
+        order_action,
+        concession_step,
+    ):
+        previous = Decimal(str(float(previous_limit)))
+        worst = Decimal(str(float(worst_price)))
+        step = Decimal(str(self._resolve_manual_concession_step(concession_step)))
+        action = str(order_action or '').strip().upper()
+        if action not in {'BUY', 'SELL'}:
+            raise ValueError('Cannot apply a manual chase step without a BUY or SELL working order.')
+
+        if action == 'BUY':
+            candidate = previous + step
+            if candidate > worst:
+                return float(previous)
+        else:
+            candidate = previous - step
+            if candidate < worst:
+                return float(previous)
+
+        decimals = max(0, -candidate.normalize().as_tuple().exponent)
+        return round(float(candidate), min(decimals, 8))
 
     async def _compute_live_combo_quote_stats(self, context):
         direct_net_mid = 0.0
@@ -1179,6 +1255,9 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'worstComboPrice': preview.worst_combo_price,
             'managedRepriceThreshold': managed_threshold,
             'managedConcessionRatio': float(request.managed_concession_ratio or 0.0),
+            'managedManualConcessionCount': 0,
+            'managedManualConcessionStep': None,
+            'managedManualConcessionOffset': 0.0,
             'repricingCount': 0,
             'maxRepriceCount': self.managed_reprice_max_updates,
             'lastRepriceAt': None,
@@ -1186,6 +1265,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'managedMessage': self._build_default_watching_message({
                 'managedRepriceThreshold': managed_threshold,
                 'managedConcessionRatio': float(request.managed_concession_ratio or 0.0),
+                'managedManualConcessionCount': 0,
             }),
             'timeoutAt': time.monotonic() + self.managed_reprice_timeout_seconds,
             'terminated': False,
@@ -1571,6 +1651,268 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
 
         return underlying_legs
 
+    def _resolve_close_strategy(self, request):
+        strategy = str(getattr(request, 'close_strategy', '') or 'auto').strip().lower()
+        return strategy if strategy in {'auto', 'combo', 'equivalent_expiry'} else 'auto'
+
+    def _equivalent_close_positive_quote(self, value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if isfinite(number) and number > 0 else None
+
+    def _validate_standard_equity_option_for_equivalent_close(self, request, leg_request):
+        profile = getattr(request, 'profile', None) or {}
+        underlying_sec_type = self._normalize_symbol(profile.get('underlyingSecType') or 'STK')
+        sec_type = self._normalize_symbol(leg_request.sec_type)
+        symbol = self._normalize_symbol(leg_request.symbol)
+        underlying_symbol = self._normalize_symbol(
+            leg_request.underlying_symbol
+            or profile.get('underlyingSymbol')
+            or request.underlying_symbol
+        )
+        trading_class = self._normalize_symbol(leg_request.trading_class)
+        try:
+            multiplier = float(leg_request.multiplier or 0)
+        except (TypeError, ValueError):
+            multiplier = 0
+
+        reasons = []
+        if sec_type != 'OPT' or underlying_sec_type != 'STK':
+            reasons.append('only physically settled stock/ETF OPT legs are supported')
+        if not symbol or symbol != underlying_symbol:
+            reasons.append('the option symbol must match its stock/ETF underlying')
+        if abs(multiplier - 100.0) > 0.0001:
+            reasons.append('the contract multiplier must be the standard 100 shares')
+        if trading_class and trading_class != symbol:
+            reasons.append('adjusted/non-standard trading classes are not supported')
+        if self._normalize_symbol(leg_request.right) not in {'C', 'P'}:
+            reasons.append('the option right must be Call or Put')
+        if leg_request.strike is None or float(leg_request.strike or 0) <= 0:
+            reasons.append('a positive strike is required')
+        if not self._to_expiry(leg_request.exp_date):
+            reasons.append('an expiry date is required')
+
+        if reasons:
+            raise ValueError(
+                f"Expiry Equivalent blocked for {self._close_leg_request_label(leg_request)}: "
+                f"{'; '.join(reasons)}. Cash-settled, futures-option, and adjusted deliverables "
+                "must be closed through their native contract instead."
+            )
+
+    def _resolve_equivalent_close_classification(self, request, leg_request, strategy):
+        if strategy == 'combo':
+            return None
+
+        underlying_price = self._equivalent_close_positive_quote(
+            getattr(request, 'observed_underlying_price', None)
+        )
+        if underlying_price is None:
+            if strategy == 'equivalent_expiry':
+                raise ValueError(
+                    'Expiry Equivalent needs a current positive Underlying price to classify ITM and OTM legs.'
+                )
+            return None
+
+        try:
+            strike = float(leg_request.strike)
+        except (TypeError, ValueError):
+            strike = 0.0
+        right = self._normalize_symbol(leg_request.right)
+        if right == 'C':
+            signed_moneyness = underlying_price - strike
+        elif right == 'P':
+            signed_moneyness = strike - underlying_price
+        else:
+            return None
+
+        pin_buffer = 0.01
+        if strategy == 'equivalent_expiry':
+            if abs(signed_moneyness) <= pin_buffer:
+                raise ValueError(
+                    f"Expiry Equivalent blocked for {self._close_leg_request_label(leg_request)}: "
+                    f"Underlying {underlying_price:g} is too close to strike {strike:g}; expiry exercise is ambiguous."
+                )
+            return 'itm_hedged' if signed_moneyness > 0 else 'otm_ignored'
+
+        bid = self._equivalent_close_positive_quote(leg_request.observed_bid)
+        ask = self._equivalent_close_positive_quote(leg_request.observed_ask)
+        has_one_sided_evidence = (bid is None) != (ask is None)
+        if not has_one_sided_evidence:
+            return None
+
+        max_otm_ask = max(float(getattr(request, 'equivalent_close_max_otm_ask', 0.02) or 0.02), 0.0)
+        if signed_moneyness < -pin_buffer and bid is None and ask is not None and ask <= max_otm_ask + 1e-9:
+            return 'otm_ignored'
+
+        auto_min_itm = max(1.0, underlying_price * 0.0025)
+        if signed_moneyness >= auto_min_itm:
+            return 'itm_hedged'
+        return None
+
+    def _build_equivalent_underlying_leg(self, request, source_leg, expiry, net_position):
+        underlying_symbol = self._normalize_symbol(
+            source_leg.underlying_symbol
+            or (getattr(request, 'profile', None) or {}).get('underlyingSymbol')
+            or request.underlying_symbol
+        )
+        safe_group_id = ''.join(
+            character for character in str(request.group_id or 'group')
+            if character.isalnum() or character in {'_', '-'}
+        )[:32] or 'group'
+        return replace(
+            source_leg,
+            id=f"_equivalent_net_{safe_group_id}_{expiry}",
+            type='stock',
+            pos=int(net_position),
+            sec_type='STK',
+            symbol=underlying_symbol,
+            underlying_symbol=underlying_symbol,
+            exchange=source_leg.underlying_exchange or 'SMART',
+            multiplier='',
+            underlying_multiplier='',
+            trading_class=None,
+            right='',
+            strike=None,
+            exp_date='',
+            contract_month='',
+            underlying_contract_month='',
+            observed_bid=None,
+            observed_ask=None,
+            observed_mark=getattr(request, 'observed_underlying_price', None),
+        )
+
+    def _allocate_equivalent_underlying_net(self, adjustments):
+        positive_total = sum(
+            max(int(adjustment.get('requiredUnderlyingQuantity') or 0), 0)
+            for adjustment in adjustments
+        )
+        negative_total = sum(
+            max(-int(adjustment.get('requiredUnderlyingQuantity') or 0), 0)
+            for adjustment in adjustments
+        )
+        offset_per_side = min(positive_total, negative_total)
+        positive_offset_remaining = offset_per_side
+        negative_offset_remaining = offset_per_side
+
+        for adjustment in adjustments:
+            required = int(adjustment.get('requiredUnderlyingQuantity') or 0)
+            if required > 0:
+                netted_abs = min(required, positive_offset_remaining)
+                positive_offset_remaining -= netted_abs
+                adjustment['internallyNettedUnderlyingQuantity'] = netted_abs
+                adjustment['executedUnderlyingQuantity'] = required - netted_abs
+            elif required < 0:
+                required_abs = abs(required)
+                netted_abs = min(required_abs, negative_offset_remaining)
+                negative_offset_remaining -= netted_abs
+                adjustment['internallyNettedUnderlyingQuantity'] = -netted_abs
+                adjustment['executedUnderlyingQuantity'] = -(required_abs - netted_abs)
+            else:
+                adjustment['internallyNettedUnderlyingQuantity'] = 0
+                adjustment['executedUnderlyingQuantity'] = 0
+
+        return positive_total - negative_total
+
+    def _build_equivalent_close_components(self, request, candidates):
+        if not candidates:
+            return [], [], []
+
+        expiries = {
+            self._to_expiry(item['leg'].exp_date)
+            for item in candidates
+            if item['classification'] == 'itm_hedged'
+        }
+        if len(expiries) > 1:
+            raise ValueError(
+                'Expiry Equivalent blocked: ITM hedge legs span multiple expiries. '
+                'Underlying obligations with different settlement dates must not be netted together.'
+            )
+
+        adjustments = []
+        hedge_adjustments = []
+        for item in candidates:
+            leg_request = item['leg']
+            classification = item['classification']
+            original_option_position = -int(leg_request.pos or 0)
+            right = self._normalize_symbol(leg_request.right)
+            multiplier = int(round(float(leg_request.multiplier or 100)))
+            expiry = self._to_expiry(leg_request.exp_date)
+            required_underlying = 0
+            if classification == 'itm_hedged':
+                expected_delivery = original_option_position * multiplier
+                if right == 'P':
+                    expected_delivery *= -1
+                required_underlying = -expected_delivery
+
+            adjustment_id = f"equivalent-expiry:{request.group_id or 'group'}:{leg_request.id or expiry}"
+            adjustment = {
+                'kind': 'equivalent_expiry',
+                'adjustmentId': adjustment_id,
+                'optionLegId': leg_request.id,
+                'underlyingLegId': f"_expiry_hedge_{leg_request.id or len(adjustments) + 1}",
+                'classification': classification,
+                'expiry': expiry,
+                'right': right,
+                'assignmentStrike': float(leg_request.strike),
+                'originalOptionPosition': original_option_position,
+                'requiredUnderlyingQuantity': required_underlying,
+                'executedUnderlyingQuantity': 0,
+                'internallyNettedUnderlyingQuantity': 0,
+                'underlyingSymbol': self._normalize_symbol(
+                    leg_request.underlying_symbol or request.underlying_symbol
+                ),
+                'observedUnderlyingPrice': getattr(request, 'observed_underlying_price', None),
+                'observedBid': leg_request.observed_bid,
+                'observedAsk': leg_request.observed_ask,
+            }
+            adjustments.append(adjustment)
+            if classification == 'itm_hedged':
+                hedge_adjustments.append(adjustment)
+
+        underlying_legs = []
+        if hedge_adjustments:
+            net_position = self._allocate_equivalent_underlying_net(hedge_adjustments)
+            if net_position:
+                expiry = next(iter(expiries))
+                source_leg = next(
+                    item['leg'] for item in candidates
+                    if item['classification'] == 'itm_hedged'
+                )
+                net_leg = self._build_equivalent_underlying_leg(
+                    request,
+                    source_leg,
+                    expiry,
+                    net_position,
+                )
+                underlying_legs.append(net_leg)
+                for adjustment in hedge_adjustments:
+                    adjustment['netOrderLegId'] = net_leg.id
+
+        messages = [
+            'Expiry Equivalent leaves the option contracts at the broker until expiry; '
+            'the Group is only economically hedged and will be marked pending expiry settlement.'
+        ]
+        ignored_count = sum(1 for item in candidates if item['classification'] == 'otm_ignored')
+        if ignored_count:
+            messages.append(
+                f"Ignored {ignored_count} clearly OTM illiquid option leg(s) with no Underlying order."
+            )
+        if hedge_adjustments:
+            net_position = sum(int(item.get('executedUnderlyingQuantity') or 0) for item in hedge_adjustments)
+            gross_position = sum(abs(int(item.get('requiredUnderlyingQuantity') or 0)) for item in hedge_adjustments)
+            messages.append(
+                f"Net expiry hedge: {'BUY' if net_position > 0 else 'SELL' if net_position < 0 else 'NO TRADE'} "
+                f"{abs(net_position):g} {hedge_adjustments[0].get('underlyingSymbol') or 'Underlying'} "
+                f"after internally offsetting gross leg requirements of {gross_position:g}."
+            )
+        messages.append(
+            'Exercise-by-exception and assignment are not guaranteed; verify TWS expiry instructions, '
+            'account buying power, dividends, and any early-assignment exposure.'
+        )
+        return underlying_legs, adjustments, messages
+
     def _build_assignment_aware_close_plan(self, request):
         if not self._is_assignment_aware_close_request(request):
             return {
@@ -1590,6 +1932,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         option_legs = []
         underlying_aggregate = {}
         messages = []
+        equivalent_candidates = []
+        close_strategy = self._resolve_close_strategy(request)
 
         for leg_request in request.legs:
             requested_close_position = int(leg_request.pos or 0)
@@ -1613,7 +1957,20 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                         actual_position,
                         item,
                     )
-                option_legs.append(replace(leg_request, pos=closeable_position))
+                checked_leg = replace(leg_request, pos=closeable_position)
+                classification = self._resolve_equivalent_close_classification(
+                    request,
+                    checked_leg,
+                    close_strategy,
+                )
+                if classification:
+                    self._validate_standard_equity_option_for_equivalent_close(request, checked_leg)
+                    equivalent_candidates.append({
+                        'leg': checked_leg,
+                        'classification': classification,
+                    })
+                else:
+                    option_legs.append(checked_leg)
                 continue
 
             if sec_type in {'STK', 'FUT'}:
@@ -1641,14 +1998,301 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             option_legs.append(leg_request)
 
         underlying_legs = self._allocate_underlying_close_demands(underlying_aggregate, messages, request)
+        equivalent_underlying_legs, equivalent_adjustments, equivalent_messages = (
+            self._build_equivalent_close_components(request, equivalent_candidates)
+        )
+        underlying_legs.extend(equivalent_underlying_legs)
+        messages.extend(equivalent_messages)
         self._append_close_plan_warnings(messages, underlying_legs)
 
         option_request = replace(request, legs=option_legs)
         return {
             'optionRequest': option_request,
             'underlyingLegs': underlying_legs,
-            'assignmentAdjustments': [],
+            'assignmentAdjustments': equivalent_adjustments,
             'messages': messages,
+            'equivalentClose': bool(equivalent_adjustments),
+        }
+
+    def _is_close_group_live_submission(self, request):
+        return (
+            self._normalize_symbol(getattr(request, 'execution_mode', '')) in {'SUBMIT', 'TEST_SUBMIT'}
+            and self._normalize_symbol(getattr(request, 'execution_intent', '')) == 'CLOSE'
+            and str(getattr(request, 'request_source', '') or '').strip() == 'close_group'
+        )
+
+    def _close_plan_leg_digest_payload(self, leg_request):
+        return {
+            'id': str(leg_request.id or ''),
+            'type': str(leg_request.type or ''),
+            'pos': int(leg_request.pos or 0),
+            'secType': self._normalize_symbol(leg_request.sec_type),
+            'symbol': self._normalize_symbol(leg_request.symbol),
+            'underlyingSymbol': self._normalize_symbol(leg_request.underlying_symbol),
+            'multiplier': str(leg_request.multiplier or ''),
+            'tradingClass': str(leg_request.trading_class or ''),
+            'right': self._normalize_symbol(leg_request.right),
+            'strike': leg_request.strike,
+            'expDate': self._to_expiry(leg_request.exp_date),
+            'contractMonth': self._to_contract_month(leg_request.contract_month),
+            'observedBid': leg_request.observed_bid,
+            'observedAsk': leg_request.observed_ask,
+            'observedMark': leg_request.observed_mark,
+        }
+
+    def _build_close_plan_digest(self, request, close_plan):
+        option_request = close_plan.get('optionRequest') or request
+        digest_payload = {
+            'groupId': str(request.group_id or ''),
+            'account': str(request.account or '').strip(),
+            'underlyingSymbol': self._normalize_symbol(request.underlying_symbol),
+            'closeStrategy': self._resolve_close_strategy(request),
+            'confirmationTargetMode': str(
+                getattr(request, 'close_confirmation_target_mode', '') or ''
+            ).strip().lower(),
+            'timeInForce': str(request.time_in_force or 'DAY').strip().upper(),
+            'managedRepriceThreshold': getattr(request, 'managed_reprice_threshold', None),
+            'managedConcessionRatio': getattr(request, 'managed_concession_ratio', None),
+            'observedUnderlyingPrice': getattr(request, 'observed_underlying_price', None),
+            'requestedLegs': [
+                self._close_plan_leg_digest_payload(leg)
+                for leg in (request.legs or [])
+            ],
+            'optionLegs': [
+                self._close_plan_leg_digest_payload(leg)
+                for leg in (option_request.legs or [])
+            ],
+            'underlyingLegs': [
+                self._close_plan_leg_digest_payload(leg)
+                for leg in (close_plan.get('underlyingLegs') or [])
+            ],
+            'adjustments': [
+                {
+                    key: adjustment.get(key)
+                    for key in (
+                        'kind',
+                        'optionLegId',
+                        'classification',
+                        'expiry',
+                        'right',
+                        'assignmentStrike',
+                        'originalOptionPosition',
+                        'requiredUnderlyingQuantity',
+                        'executedUnderlyingQuantity',
+                        'internallyNettedUnderlyingQuantity',
+                        'underlyingSymbol',
+                        'netOrderLegId',
+                    )
+                }
+                for adjustment in (close_plan.get('assignmentAdjustments') or [])
+            ],
+        }
+        serialized = json.dumps(
+            digest_payload,
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=True,
+        )
+        return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+
+    def _cleanup_expired_close_plan_confirmations(self):
+        now = time.monotonic()
+        expired_tokens = [
+            token
+            for token, record in self.close_plan_confirmations.items()
+            if float(record.get('expiresMonotonic') or 0) <= now
+        ]
+        for token in expired_tokens:
+            self.close_plan_confirmations.pop(token, None)
+
+    def _close_plan_confirmation_scope(self, group_id, account, target_mode):
+        return (
+            str(group_id or '').strip(),
+            str(account or '').strip(),
+            str(target_mode or '').strip().lower(),
+        )
+
+    def _register_close_plan_confirmation(self, request, close_plan, planned_orders):
+        self._cleanup_expired_close_plan_confirmations()
+        target_mode = str(
+            getattr(request, 'close_confirmation_target_mode', '') or ''
+        ).strip().lower()
+        if target_mode not in {'submit', 'test_submit'}:
+            return None
+
+        scope = self._close_plan_confirmation_scope(
+            request.group_id,
+            request.account,
+            target_mode,
+        )
+        superseded_tokens = [
+            token
+            for token, record in self.close_plan_confirmations.items()
+            if record.get('scope') == scope
+        ]
+        for token in superseded_tokens:
+            self.close_plan_confirmations.pop(token, None)
+
+        generated_at = datetime.now(timezone.utc)
+        expires_at = generated_at + timedelta(seconds=self.close_plan_confirmation_ttl_seconds)
+        token = secrets.token_urlsafe(24)
+        self.close_plan_confirmations[token] = {
+            'digest': self._build_close_plan_digest(request, close_plan),
+            'targetMode': target_mode,
+            'groupId': str(request.group_id or ''),
+            'account': str(request.account or '').strip(),
+            'scope': scope,
+            'expiresMonotonic': time.monotonic() + self.close_plan_confirmation_ttl_seconds,
+            'generatedAt': generated_at.isoformat().replace('+00:00', 'Z'),
+            'expiresAt': expires_at.isoformat().replace('+00:00', 'Z'),
+            'plannedOrders': [dict(order) for order in (planned_orders or [])],
+            'validated': False,
+        }
+        return token, self.close_plan_confirmations[token]
+
+    def _validate_close_plan_confirmation(self, request, close_plan, stage):
+        if not self._is_close_group_live_submission(request):
+            return None
+
+        self._cleanup_expired_close_plan_confirmations()
+        token = str(getattr(request, 'close_plan_token', '') or '').strip()
+        if not token:
+            raise ValueError(
+                'Close Group submission blocked: preview the complete Close Plan and confirm it before sending to TWS.'
+            )
+        record = self.close_plan_confirmations.get(token)
+        if not record:
+            raise ValueError(
+                'Close Group confirmation expired or is no longer valid. Generate a fresh preview and confirm again.'
+            )
+
+        target_mode = str(getattr(request, 'execution_mode', '') or '').strip().lower()
+        current_digest = self._build_close_plan_digest(request, close_plan)
+        if target_mode != record.get('targetMode') or current_digest != record.get('digest'):
+            self.close_plan_confirmations.pop(token, None)
+            raise ValueError(
+                'Close Group plan changed after preview. No TWS order was sent; generate a fresh preview and confirm again.'
+            )
+
+        if stage == 'validate':
+            record['validated'] = True
+            return record
+        if stage == 'submit':
+            if record.get('validated') is not True:
+                raise ValueError(
+                    'Close Group submission blocked: the confirmed plan must pass validation immediately before submit.'
+                )
+            self.close_plan_confirmations.pop(token, None)
+            return record
+        raise ValueError(f'Unsupported close-plan confirmation stage: {stage}')
+
+    async def cancel_close_plan_confirmation(self, websocket, raw_data):
+        del websocket
+        self._cleanup_expired_close_plan_confirmations()
+        token = str((raw_data or {}).get('closePlanToken') or '').strip()
+        if not token:
+            return {
+                'revoked': False,
+                'status': 'missing_token',
+            }
+
+        record = self.close_plan_confirmations.get(token)
+        if not record:
+            return {
+                'revoked': False,
+                'status': 'already_inactive',
+            }
+
+        target_mode = str(
+            (raw_data or {}).get('confirmationTargetMode')
+            or (raw_data or {}).get('executionMode')
+            or ''
+        ).strip().lower()
+        requested_scope = self._close_plan_confirmation_scope(
+            (raw_data or {}).get('groupId'),
+            (raw_data or {}).get('account'),
+            target_mode,
+        )
+        if requested_scope != record.get('scope'):
+            return {
+                'revoked': False,
+                'status': 'scope_mismatch',
+            }
+
+        self.close_plan_confirmations.pop(token, None)
+        return {
+            'revoked': True,
+            'status': 'cancelled',
+            'cancelledAt': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        }
+
+    def _build_close_plan_leg_rows(self, request, close_plan):
+        adjustments_by_leg_id = {
+            str(adjustment.get('optionLegId') or ''): adjustment
+            for adjustment in (close_plan.get('assignmentAdjustments') or [])
+        }
+        rows = []
+        for leg_request in request.legs or []:
+            leg_id = str(leg_request.id or '')
+            adjustment = adjustments_by_leg_id.get(leg_id)
+            sec_type = self._normalize_symbol(leg_request.sec_type)
+            if adjustment:
+                treatment = str(adjustment.get('classification') or '')
+            elif sec_type in {'STK', 'FUT'}:
+                treatment = 'underlying_close'
+            else:
+                treatment = 'combo_close'
+            rows.append({
+                'legId': leg_id,
+                'secType': sec_type,
+                'symbol': self._normalize_symbol(leg_request.symbol),
+                'right': self._normalize_symbol(leg_request.right),
+                'strike': leg_request.strike,
+                'expiry': self._to_expiry(leg_request.exp_date),
+                'originalPosition': -int(leg_request.pos or 0),
+                'closePosition': int(leg_request.pos or 0),
+                'treatment': treatment,
+                'observedBid': leg_request.observed_bid,
+                'observedAsk': leg_request.observed_ask,
+                'requiredUnderlyingQuantity': (
+                    adjustment.get('requiredUnderlyingQuantity') if adjustment else None
+                ),
+                'internallyNettedUnderlyingQuantity': (
+                    adjustment.get('internallyNettedUnderlyingQuantity') if adjustment else None
+                ),
+                'executedUnderlyingQuantity': (
+                    adjustment.get('executedUnderlyingQuantity') if adjustment else None
+                ),
+            })
+        return rows
+
+    def _attach_close_plan_preview_metadata(self, preview, request, close_plan, planned_orders):
+        preview.close_plan_legs = self._build_close_plan_leg_rows(request, close_plan)
+        preview.close_plan_orders = [dict(order) for order in (planned_orders or [])]
+        preview.close_plan_adjustments = [
+            dict(adjustment) for adjustment in (close_plan.get('assignmentAdjustments') or [])
+        ]
+        registered = self._register_close_plan_confirmation(request, close_plan, preview.close_plan_orders)
+        if registered:
+            token, record = registered
+            preview.close_plan_token = token
+            preview.close_plan_generated_at = record.get('generatedAt')
+            preview.close_plan_expires_at = record.get('expiresAt')
+
+    def _build_combo_planned_order(self, preview, stage='options'):
+        return {
+            'stage': stage,
+            'orderKind': 'combo',
+            'orderAction': preview.order_action,
+            'quantity': preview.total_quantity,
+            'limitPrice': preview.limit_price,
+            'priceIncrement': preview.price_increment,
+            'symbol': preview.combo_symbol,
+            'secType': 'BAG' if len(preview.legs or []) > 1 else (
+                preview.legs[0].sec_type if preview.legs else ''
+            ),
+            'timeInForce': preview.time_in_force,
+            'legIds': [leg.id for leg in (preview.legs or [])],
         }
 
     def _build_staged_underlying_preview(
@@ -1718,6 +2362,77 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             else:
                 preview.pricing_note = close_plan_message
 
+    def _hydrate_equivalent_close_adjustments(self, close_plan, staged_orders=None):
+        staged_by_leg_id = {
+            str(stage.get('legId') or ''): stage
+            for stage in (staged_orders or [])
+            if isinstance(stage, dict) and stage.get('legId')
+        }
+        hydrated = []
+        for raw_adjustment in close_plan.get('assignmentAdjustments') or []:
+            adjustment = dict(raw_adjustment)
+            if adjustment.get('classification') != 'itm_hedged':
+                hydrated.append(adjustment)
+                continue
+
+            executed_quantity = int(adjustment.get('executedUnderlyingQuantity') or 0)
+            netted_quantity = int(adjustment.get('internallyNettedUnderlyingQuantity') or 0)
+            reference_price = self._equivalent_close_positive_quote(
+                adjustment.get('observedUnderlyingPrice')
+            )
+            stage = staged_by_leg_id.get(str(adjustment.get('netOrderLegId') or ''))
+            fill_price = None
+            if executed_quantity:
+                if stage:
+                    fill_price = self._equivalent_close_positive_quote(stage.get('avgFillPrice'))
+                    adjustment['underlyingOrderId'] = stage.get('orderId')
+                    adjustment['underlyingPermId'] = stage.get('permId')
+                if fill_price is not None:
+                    adjustment['underlyingAvgFillPrice'] = fill_price
+
+            total_quantity = abs(executed_quantity) + abs(netted_quantity)
+            if total_quantity:
+                execution_basis = fill_price if fill_price is not None else reference_price
+                net_basis = reference_price if reference_price is not None else execution_basis
+                if execution_basis is not None and net_basis is not None:
+                    adjustment['hedgeBasisPrice'] = round(
+                        (
+                            abs(executed_quantity) * execution_basis
+                            + abs(netted_quantity) * net_basis
+                        ) / total_quantity,
+                        4,
+                    )
+            hydrated.append(adjustment)
+        return hydrated
+
+    def _build_equivalent_no_order_preview(self, request, close_plan, complete=False):
+        message = self._format_close_plan_message(
+            close_plan,
+            'No broker order is required after same-expiry netting.' if complete else
+            'Expiry Equivalent preview requires no broker order after same-expiry netting.'
+        )
+        return ComboOrderPreview(
+            group_id=request.group_id,
+            group_name=request.group_name,
+            combo_symbol=request.underlying_symbol,
+            combo_exchange='SMART',
+            order_action='NONE',
+            total_quantity=0,
+            limit_price=0,
+            pricing_source='equivalent_expiry',
+            raw_net_mid=0,
+            time_in_force=request.time_in_force or 'DAY',
+            execution_mode=request.execution_mode or 'preview',
+            account=str(request.account or '').strip(),
+            execution_intent=request.execution_intent or 'close',
+            request_source='close_group',
+            pricing_note=message,
+            close_plan_stage='equivalent_expiry',
+            close_plan_complete=complete,
+            close_plan_message=message,
+            legs=[],
+        )
+
     async def _build_underlying_first_preview(self, websocket, request, close_plan):
         staged_orders = []
         first_stage = None
@@ -1740,6 +2455,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             )
             staged_order = {
                 'stage': 'underlying',
+                'orderKind': 'underlying',
                 'status': 'Previewed',
                 'orderAction': order.action,
                 'quantity': int(order.totalQuantity),
@@ -1748,6 +2464,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 'legId': leg_request.id,
                 'secType': getattr(qualified_contract, 'secType', '') or leg_request.sec_type,
                 'symbol': getattr(qualified_contract, 'symbol', '') or leg_request.symbol,
+                'timeInForce': order.tif,
             }
             staged_orders.append(staged_order)
             if first_stage is None:
@@ -1804,7 +2521,51 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         order.lmtPrice = self._quantize_underlying_limit_price(raw_limit, order.action, price_increment)
         if str(request.account or '').strip():
             order.account = str(request.account).strip()
+        self._apply_confirmed_close_plan_order(
+            request,
+            order,
+            order_kind='underlying',
+            leg_id=leg_request.id,
+        )
         return order
+
+    def _find_confirmed_close_plan_order(self, request, order_kind, leg_id=None):
+        planned_orders = getattr(request, '_confirmed_close_plan_orders', None)
+        if not isinstance(planned_orders, list):
+            return None
+        normalized_kind = str(order_kind or '').strip().lower()
+        normalized_leg_id = str(leg_id or '').strip()
+        for planned in planned_orders:
+            if not isinstance(planned, dict):
+                continue
+            if str(planned.get('orderKind') or '').strip().lower() != normalized_kind:
+                continue
+            if normalized_kind == 'underlying' and str(planned.get('legId') or '').strip() != normalized_leg_id:
+                continue
+            return planned
+        return None
+
+    def _apply_confirmed_close_plan_order(self, request, order, order_kind, leg_id=None):
+        if not isinstance(getattr(request, '_confirmed_close_plan_orders', None), list):
+            return None
+        planned = self._find_confirmed_close_plan_order(request, order_kind, leg_id)
+        if planned is None:
+            raise ValueError(
+                'Confirmed Close Plan no longer matches the orders to be submitted. No TWS order was sent.'
+            )
+        planned_action = self._normalize_symbol(planned.get('orderAction'))
+        planned_quantity = int(planned.get('quantity') or 0)
+        actual_action = self._normalize_symbol(getattr(order, 'action', ''))
+        actual_quantity = int(getattr(order, 'totalQuantity', 0) or 0)
+        if planned_action != actual_action or planned_quantity != actual_quantity:
+            raise ValueError(
+                'Confirmed Close Plan action or quantity changed after preview. No TWS order was sent.'
+            )
+        confirmed_limit = self._safe_positive_float(planned.get('limitPrice'))
+        if confirmed_limit is None:
+            raise ValueError('Confirmed Close Plan is missing a valid initial limit price.')
+        order.lmtPrice = confirmed_limit
+        return planned
 
     def _resolve_underlying_close_raw_limit(self, request, quote, order_action):
         if request.execution_mode == 'test_submit':
@@ -2088,6 +2849,18 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             order.transmit = True
             if str(request.account or '').strip():
                 order.account = str(request.account).strip()
+            confirmed_order = self._apply_confirmed_close_plan_order(
+                request,
+                order,
+                order_kind='combo',
+            )
+            if confirmed_order:
+                limit_price = order.lmtPrice
+                pricing_note = (
+                    f"{pricing_note} Initial limit is frozen from the confirmed Close Plan."
+                    if pricing_note else
+                    'Initial limit is frozen from the confirmed Close Plan.'
+                )
 
             if pricing_note:
                 pricing_note = f"{pricing_note} Single remaining leg routed as a regular order instead of BAG."
@@ -2197,6 +2970,18 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         order.transmit = True
         if str(request.account or '').strip():
             order.account = str(request.account).strip()
+        confirmed_order = self._apply_confirmed_close_plan_order(
+            request,
+            order,
+            order_kind='combo',
+        )
+        if confirmed_order:
+            limit_price = order.lmtPrice
+            pricing_note = (
+                f"{pricing_note} Initial limit is frozen from the confirmed Close Plan."
+                if pricing_note else
+                'Initial limit is frozen from the confirmed Close Plan.'
+            )
 
         if self._should_use_non_guaranteed_routing(combo_exchange, combo_legs, order):
             try:
@@ -2250,7 +3035,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         option_request = close_plan.get('optionRequest') or request
         validation_legs_to_check.extend(option_request.legs or [])
 
-        if not validation_legs_to_check:
+        equivalent_adjustments = close_plan.get('assignmentAdjustments') or []
+        if not validation_legs_to_check and not equivalent_adjustments:
             raise ValueError('No combo legs were provided.')
 
         validation_legs = []
@@ -2268,8 +3054,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 con_id=getattr(qualified_contract, 'conId', None),
             ))
 
-        if non_zero_legs == 0:
+        if non_zero_legs == 0 and not equivalent_adjustments:
             raise ValueError('All combo legs have zero position.')
+
+        self._validate_close_plan_confirmation(request, close_plan, 'validate')
 
         self.logger.info(
             f"Validation passed for groupId={request.group_id}: "
@@ -2291,14 +3079,47 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     cancel_hedge_order = cancel_hedge_order
 
     async def preview_combo_order(self, websocket, request):
+        original_request = request
         close_plan = self._build_assignment_aware_close_plan(request)
+        option_request = close_plan.get('optionRequest') or request
+        target_mode = str(
+            getattr(request, 'close_confirmation_target_mode', '') or ''
+        ).strip().lower()
+        pricing_mode = target_mode if target_mode in {'submit', 'test_submit'} else request.execution_mode
+        pricing_request = replace(request, execution_mode=pricing_mode)
+        pricing_option_request = replace(option_request, execution_mode=pricing_mode)
+        pricing_close_plan = {
+            **close_plan,
+            'optionRequest': pricing_option_request,
+        }
+        if (close_plan.get('assignmentAdjustments')
+                and not close_plan.get('underlyingLegs')
+                and not option_request.legs):
+            preview = self._build_equivalent_no_order_preview(request, close_plan, complete=False)
+            self._attach_close_plan_preview_metadata(preview, original_request, close_plan, [])
+            self._log_combo_preview_summary(f"Preview-ready groupId={request.group_id}", preview)
+            return preview
+        planned_orders = []
         if close_plan.get('underlyingLegs'):
-            stage_result = await self._build_underlying_first_preview(websocket, request, close_plan)
+            stage_result = await self._build_underlying_first_preview(
+                websocket,
+                pricing_request,
+                pricing_close_plan,
+            )
             combo_contract = stage_result['contract']
             order = stage_result['order']
             preview = stage_result['preview']
+            preview.execution_mode = 'preview'
+            planned_orders = [dict(item) for item in (preview.staged_orders or [])]
+            if option_request.legs:
+                option_build_result = await self._build_combo_order_from_request(
+                    websocket,
+                    pricing_option_request,
+                )
+                option_preview = option_build_result['preview']
+                planned_orders.append(self._build_combo_planned_order(option_preview, stage='options'))
         else:
-            request = close_plan.get('optionRequest') or request
+            request = pricing_option_request
             if not request.legs and (
                 close_plan.get('underlyingLegs')
                 or close_plan.get('messages')
@@ -2313,7 +3134,9 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             combo_contract = build_result['comboContract']
             order = build_result['order']
             preview = build_result['preview']
+            preview.execution_mode = 'preview'
             self._apply_close_plan_metadata(preview, close_plan)
+            planned_orders = [self._build_combo_planned_order(preview, stage='options')]
         self._log_combo_preview_summary(
             f"Preview-ready groupId={request.group_id}",
             preview,
@@ -2340,6 +3163,12 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                     f"returning preview without what-if details"
                 )
         preview.what_if = self._serialize_what_if(what_if)
+        self._attach_close_plan_preview_metadata(
+            preview,
+            original_request,
+            close_plan,
+            planned_orders,
+        )
         self._log_what_if_summary(request.group_id, preview.what_if)
         return preview
 
@@ -2473,6 +3302,14 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
 
     async def submit_combo_order(self, websocket, request):
         close_plan = self._build_assignment_aware_close_plan(request)
+        confirmation_record = self._validate_close_plan_confirmation(request, close_plan, 'submit')
+        if confirmation_record:
+            request._confirmed_close_plan_orders = [
+                dict(order) for order in (confirmation_record.get('plannedOrders') or [])
+            ]
+            option_request = close_plan.get('optionRequest')
+            if option_request is not None:
+                option_request._confirmed_close_plan_orders = request._confirmed_close_plan_orders
         staged_orders = []
         if close_plan.get('underlyingLegs'):
             underlying_stage = await self._submit_underlying_first_close_plan(websocket, request, close_plan)
@@ -2482,6 +3319,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             request = close_plan['optionRequest']
             if not request.legs:
                 message = (
+                    'Expiry Equivalent hedge completed; no live option combo remained to submit.'
+                    if close_plan.get('equivalentClose') else
                     'Close Group completed after closing the explicit underlying leg first; '
                     'no live option legs remained to submit.'
                 )
@@ -2509,6 +3348,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                     staged_orders=staged_orders,
                     legs=[],
                 )
+                if request.execution_mode == 'submit' and close_plan.get('assignmentAdjustments'):
+                    preview.assignment_adjustments = self._hydrate_equivalent_close_adjustments(
+                        close_plan,
+                        staged_orders,
+                    )
                 return ComboSubmitResult(
                     preview=preview,
                     order_id=last_stage.get('orderId'),
@@ -2520,6 +3364,29 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 )
         elif close_plan is not None:
             request = close_plan.get('optionRequest') or request
+
+        if close_plan.get('assignmentAdjustments') and not request.legs:
+            is_live_submit = request.execution_mode == 'submit'
+            preview = self._build_equivalent_no_order_preview(
+                request,
+                close_plan,
+                complete=is_live_submit,
+            )
+            if is_live_submit:
+                preview.assignment_adjustments = self._hydrate_equivalent_close_adjustments(
+                    close_plan,
+                    staged_orders,
+                )
+            status = 'Filled' if is_live_submit else 'TestOnly'
+            return ComboSubmitResult(
+                preview=preview,
+                order_id=None,
+                perm_id=None,
+                status=status,
+                status_message=preview.close_plan_message,
+                tracking_legs=[],
+                trade=None,
+            )
 
         if not request.legs and (
             close_plan.get('underlyingLegs')
@@ -2680,9 +3547,17 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             preview.worst_combo_price = managed_context.get('worstComboPrice')
             preview.managed_reprice_threshold = managed_context.get('managedRepriceThreshold')
             preview.managed_concession_ratio = managed_context.get('managedConcessionRatio')
+            preview.can_concede_pricing = managed_context.get('managedState') in {
+                'stopped_max_reprices', 'watching', 'repricing',
+            }
             preview.repricing_count = managed_context.get('repricingCount')
             preview.last_reprice_at = managed_context.get('lastRepriceAt')
             preview.managed_message = managed_context.get('managedMessage')
+        if request.execution_mode == 'submit' and close_plan.get('assignmentAdjustments'):
+            preview.assignment_adjustments = self._hydrate_equivalent_close_adjustments(
+                close_plan,
+                staged_orders,
+            )
         result = ComboSubmitResult(
             preview=preview,
             order_id=final_attempt.get('orderId'),
@@ -2851,7 +3726,14 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         if self._is_terminal_order_status(status):
             raise ValueError(f'Cannot concede pricing after terminal broker status {status}.')
 
-        concession_ratio = self._resolve_managed_concession_ratio(raw_data.get('concessionRatio'))
+        is_manual_concession = str(raw_data.get('concessionMode') or '').strip().lower() == 'step'
+        concession_ratio = None
+        manual_step = None
+        if is_manual_concession:
+            manual_step = self._resolve_manual_concession_step(raw_data.get('concessionStep'))
+        else:
+            concession_ratio = self._resolve_managed_concession_ratio(raw_data.get('concessionRatio'))
+
         quote_stats = await self._compute_live_combo_quote_stats(context)
         if quote_stats is None:
             raise ValueError('Live bid/ask quotes are not available on all combo legs yet.')
@@ -2865,25 +3747,51 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         context['latestComboMid'] = latest_abs_mid
         context['bestComboPrice'] = quote_stats['bestPrice']
         context['worstComboPrice'] = quote_stats['worstPrice']
-        context['managedConcessionRatio'] = concession_ratio
-
-        target_limit_source = self._resolve_target_limit_from_quote_stats(
-            context,
-            latest_abs_mid,
-            quote_stats['bestPrice'],
-            quote_stats['worstPrice'],
-        )
-        new_limit = self._quantize_limit_price(
-            target_limit_source,
-            context.get('orderAction'),
-            context.get('priceIncrement'),
-        )
 
         order = getattr(context.get('trade'), 'order', None)
         if order is None:
             raise ValueError('No live broker order is available to modify.')
 
         previous_limit = float(context.get('workingLimitPrice') or 0)
+
+        if is_manual_concession:
+            context['managedManualConcessionStep'] = manual_step
+            target_limit_source = self._resolve_base_target_limit_from_quote_stats(
+                context,
+                latest_abs_mid,
+                quote_stats['worstPrice'],
+            )
+            # Apply the entered step directly from the current working limit.
+            # Do not replace it with a market-rule tick: ES and other contracts
+            # may have price-dependent increments, and the trader explicitly
+            # owns this step selection.
+            new_limit = self._resolve_next_manual_concession_limit(
+                previous_limit,
+                quote_stats['worstPrice'],
+                context.get('orderAction'),
+                manual_step,
+            )
+        else:
+            context['managedConcessionRatio'] = concession_ratio
+            # Percentage concessions are a fresh target selection. Clear any
+            # prior manual chase offset so the chosen percentage is exact. The
+            # last entered step remains available in the textbox for reuse.
+            context['managedManualConcessionCount'] = 0
+            context['managedManualConcessionOffset'] = 0.0
+            target_limit_source = self._resolve_target_limit_from_quote_stats(
+                context,
+                latest_abs_mid,
+                quote_stats['bestPrice'],
+                quote_stats['worstPrice'],
+            )
+            price_increment = await self._resolve_context_price_increment(context, target_limit_source)
+            context['priceIncrement'] = price_increment
+            new_limit = self._quantize_limit_price(
+                target_limit_source,
+                context.get('orderAction'),
+                price_increment,
+            )
+
         await self._cancel_reprice_task_and_wait(context)
 
         context['terminated'] = False
@@ -2891,13 +3799,25 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         context['timeoutAt'] = max(time.monotonic(), context.get('timeoutAt', 0)) + self.managed_reprice_timeout_seconds
 
         if abs(new_limit - previous_limit) >= 1e-9:
+            if is_manual_concession:
+                context['managedManualConcessionOffset'] = round(new_limit - target_limit_source, 8)
+                context['managedManualConcessionCount'] = (
+                    int(context.get('managedManualConcessionCount') or 0) + 1
+                )
             order.lmtPrice = new_limit
             order.transmit = True
             context['managedState'] = 'repricing'
-            context['managedMessage'] = (
-                f'Conceding {int(concession_ratio * 100)}% toward the quoted worst price. '
-                f'Updating working limit from {previous_limit} to {new_limit}.'
-            )
+            if is_manual_concession:
+                context['managedMessage'] = (
+                    f'Applying the manually entered chase step {self._format_price_increment(manual_step)} '
+                    f'toward the quoted worst price. '
+                    f'Updating working limit from {previous_limit} to {new_limit}.'
+                )
+            else:
+                context['managedMessage'] = (
+                    f'Conceding {int(concession_ratio * 100)}% toward the quoted worst price. '
+                    f'Updating working limit from {previous_limit} to {new_limit}.'
+                )
             await self._emit_managed_update(context)
             trade = self.ib.placeOrder(context['comboContract'], order)
             context['trade'] = trade
@@ -2906,16 +3826,33 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             context['lastRepriceAt'] = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
 
         context['managedState'] = 'watching'
-        context['managedMessage'] = (
-            f'Conceded {int(concession_ratio * 100)}% from middle toward the quoted worst price '
-            f'and resumed supervision. New retry cap: {context["maxRepriceCount"]}.'
-        )
+        if is_manual_concession:
+            if abs(new_limit - previous_limit) >= 1e-9:
+                context['managedMessage'] = (
+                    f'Applied manual chase step {self._format_price_increment(manual_step)} '
+                    f'toward the quoted worst price and resumed supervision. '
+                    f'Manual adjustments applied: {context.get("managedManualConcessionCount") or 0}. '
+                    f'New retry cap: {context["maxRepriceCount"]}.'
+                )
+            else:
+                context['managedMessage'] = (
+                    f'The remaining distance to the quoted worst price is smaller than the entered '
+                    f'{self._format_price_increment(manual_step)} chase step. Enter a smaller step to continue. '
+                    f'Resumed supervision. New retry cap: {context["maxRepriceCount"]}.'
+                )
+        else:
+            context['managedMessage'] = (
+                f'Conceded {int(concession_ratio * 100)}% from middle toward the quoted worst price '
+                f'and resumed supervision. New retry cap: {context["maxRepriceCount"]}.'
+            )
         context['task'] = asyncio.create_task(self._managed_reprice_loop(context))
         await self._emit_managed_update(context)
         self.logger.info(
             f"Applied managed concession repricing for groupId={group_id} "
             f"orderId={context.get('orderId')} permId={context.get('permId')} account={context.get('account') or ''} "
-            f"concessionRatio={concession_ratio:.2f} workingLimit={context.get('workingLimitPrice')}"
+            f"concessionMode={'step' if is_manual_concession else 'ratio'} "
+            f"concessionValue={manual_step if is_manual_concession else f'{concession_ratio:.2f}'} "
+            f"workingLimit={context.get('workingLimitPrice')}"
         )
         return self._build_managed_snapshot(context)
 

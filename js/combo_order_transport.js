@@ -48,6 +48,116 @@
             deps.sendPayload(payload);
         }
 
+        function _clonePayload(payload) {
+            return payload && typeof payload === 'object'
+                ? JSON.parse(JSON.stringify(payload))
+                : null;
+        }
+
+        function _requestClosePlanRevocation(group, runtime, reason) {
+            const preview = runtime && runtime.lastPreview && typeof runtime.lastPreview === 'object'
+                ? runtime.lastPreview
+                : null;
+            const token = String(preview && preview.closePlanToken || '').trim();
+            const targetMode = String(runtime && runtime.pendingConfirmationMode || '').trim();
+            const basePayload = runtime && runtime.pendingClosePlanPayload;
+            if (!group || !token || !['submit', 'test_submit'].includes(targetMode) || !_isWsConnected()) {
+                return false;
+            }
+
+            try {
+                _sendPayload({
+                    action: 'cancel_close_plan',
+                    groupId: String(group.id || ''),
+                    account: String(
+                        basePayload && basePayload.account
+                        || preview && preview.account
+                        || _getState().selectedLiveComboOrderAccount
+                        || ''
+                    ).trim(),
+                    executionMode: targetMode,
+                    confirmationTargetMode: targetMode,
+                    executionIntent: 'close',
+                    requestSource: 'close_group',
+                    closePlanToken: token,
+                    cancelReason: String(reason || 'user_cancelled'),
+                });
+                return true;
+            } catch (_error) {
+                return false;
+            }
+        }
+
+        function _clearClosePlanConfirmation(runtime, status) {
+            if (!runtime) {
+                return;
+            }
+            if (runtime.lastPreview && typeof runtime.lastPreview === 'object') {
+                delete runtime.lastPreview.closePlanToken;
+                runtime.lastPreview.closePlanConfirmationStatus = String(status || 'cancelled');
+                runtime.lastPreview.closePlanConfirmationClosedAt = new Date().toISOString();
+            }
+            runtime.pendingRequest = false;
+            runtime.pendingConfirmationMode = '';
+            runtime.pendingClosePlanPayload = null;
+            runtime.confirmedClosePlanPayload = null;
+        }
+
+        function _showCloseConfirmationDialog(group, runtime, preview) {
+            const ui = globalScope.OptionComboGroupEditorUI;
+            const showDialog = typeof deps.showCloseConfirmationDialog === 'function'
+                ? deps.showCloseConfirmationDialog
+                : (ui && typeof ui.openCloseConfirmationDialog === 'function'
+                    ? ui.openCloseConfirmationDialog
+                    : null);
+            if (!showDialog) {
+                _requestClosePlanRevocation(group, runtime, 'confirmation_ui_unavailable');
+                _clearClosePlanConfirmation(runtime, 'cancelled');
+                _markCloseExecutionError(
+                    group,
+                    'Close Plan was previewed, but the confirmation dialog is unavailable. No TWS order was sent.'
+                );
+                _renderGroups();
+                return false;
+            }
+            const checker = globalScope.OptionComboLegPositionCheck;
+            const state = _getState();
+            const pendingPayload = runtime && runtime.pendingClosePlanPayload;
+            const detectedPositionWarnings = checker && typeof checker.findOrderReductions === 'function'
+                ? checker.findOrderReductions(
+                    pendingPayload && pendingPayload.legs,
+                    state,
+                    state.portfolioPositions || [],
+                    state.selectedLiveComboOrderAccount,
+                    state.groups || [],
+                    group.id
+                )
+                : [];
+            const positionWarnings = detectedPositionWarnings.filter((warning) => (
+                Array.isArray(warning.otherGroupNames) && warning.otherGroupNames.length > 0
+            ));
+            const opened = showDialog({
+                group,
+                preview,
+                targetMode: runtime.pendingConfirmationMode,
+                positionWarnings,
+                crossGroupWarningsOnly: true,
+                positionSnapshotAvailable: state.portfolioPositionsConnected === true,
+                onConfirm: () => confirmClosePlan(group),
+                onCancel: () => cancelClosePlan(group),
+            }) !== false;
+            if (!opened) {
+                _requestClosePlanRevocation(group, runtime, 'confirmation_ui_rejected');
+                _clearClosePlanConfirmation(runtime, 'cancelled');
+                _markCloseExecutionError(
+                    group,
+                    'Close Plan confirmation dialog could not be opened. No TWS order was sent.'
+                );
+                _renderGroups();
+            }
+            return opened;
+        }
+
         function _renderGroups() {
             if (typeof deps.renderGroups === 'function') {
                 deps.renderGroups();
@@ -321,9 +431,121 @@
             return `_${prefix}_${normalizedSource}_${Math.random().toString(36).slice(2, 8)}`;
         }
 
+        function _applyEquivalentExpiryAdjustment(group, adjustment) {
+            const optionLegId = String(adjustment && adjustment.optionLegId || '').trim();
+            const optionLeg = (group && group.legs || []).find((leg) => (
+                leg && String(leg.id || '') === optionLegId
+            ));
+            if (!optionLeg) {
+                return false;
+            }
+
+            const classification = String(adjustment.classification || '').trim().toLowerCase();
+            if (!['otm_ignored', 'itm_hedged'].includes(classification)) {
+                return false;
+            }
+
+            const adjustmentId = String(
+                adjustment.adjustmentId || `equivalent-expiry:${optionLegId}`
+            ).trim();
+            const requiredUnderlyingQuantity = _toFiniteNumberOrNull(adjustment.requiredUnderlyingQuantity);
+            let changed = false;
+
+            const closePriceSource = classification === 'otm_ignored'
+                ? 'equivalent_expiry_otm_ignored'
+                : 'equivalent_expiry_hedged';
+            if (!_hasResolvedClosePrice(optionLeg)
+                || Number(optionLeg.closePrice) !== 0
+                || optionLeg.closePriceSource !== closePriceSource) {
+                optionLeg.closePrice = 0;
+                optionLeg.closePriceSource = closePriceSource;
+                changed = true;
+            }
+
+            const metadata = {
+                equivalentCloseAdjustmentId: adjustmentId,
+                equivalentCloseClassification: classification,
+                equivalentCloseExpiry: adjustment.expiry || optionLeg.expDate || '',
+                equivalentCloseUnderlyingSymbol: adjustment.underlyingSymbol || '',
+                equivalentCloseRequiredUnderlyingQuantity: requiredUnderlyingQuantity,
+                equivalentCloseExecutedUnderlyingQuantity: _toFiniteNumberOrNull(adjustment.executedUnderlyingQuantity) || 0,
+                equivalentCloseNettedUnderlyingQuantity: _toFiniteNumberOrNull(adjustment.internallyNettedUnderlyingQuantity) || 0,
+                equivalentCloseFillPrice: _toFiniteNumberOrNull(adjustment.underlyingAvgFillPrice),
+                equivalentCloseReferencePrice: _toFiniteNumberOrNull(adjustment.observedUnderlyingPrice),
+                equivalentCloseOrderId: adjustment.underlyingOrderId || null,
+                equivalentClosePermId: adjustment.underlyingPermId || null,
+                pendingExpirySettlement: true,
+            };
+            Object.entries(metadata).forEach(([key, value]) => {
+                if (optionLeg[key] !== value) {
+                    optionLeg[key] = value;
+                    changed = true;
+                }
+            });
+
+            if (classification === 'itm_hedged'
+                && Number.isFinite(requiredUnderlyingQuantity)
+                && Math.abs(requiredUnderlyingQuantity) > 0.0001) {
+                const underlyingLegId = String(adjustment.underlyingLegId || '').trim()
+                    || _buildSyntheticAssignmentId('expiry_hedge', optionLegId);
+                let underlyingLeg = (group.legs || []).find((leg) => (
+                    leg && String(leg.id || '') === underlyingLegId
+                ));
+                const strike = Math.abs(_toFiniteNumberOrNull(adjustment.assignmentStrike)
+                    || _toFiniteNumberOrNull(optionLeg.strike)
+                    || 0);
+                const hedgeBasisPrice = Math.abs(
+                    _toFiniteNumberOrNull(adjustment.hedgeBasisPrice)
+                    || _toFiniteNumberOrNull(adjustment.underlyingAvgFillPrice)
+                    || _toFiniteNumberOrNull(adjustment.observedUnderlyingPrice)
+                    || 0
+                );
+                if (!underlyingLeg) {
+                    underlyingLeg = {
+                        id: underlyingLegId,
+                        type: 'stock',
+                        pos: requiredUnderlyingQuantity,
+                        strike: 0,
+                        expDate: '',
+                        iv: 0,
+                        ivSource: 'manual',
+                        ivManualOverride: false,
+                        currentPrice: strike,
+                        currentPriceSource: 'equivalent_expiry_offset',
+                        portfolioMarketPrice: null,
+                        portfolioMarketPriceSource: '',
+                        portfolioUnrealizedPnl: null,
+                        cost: hedgeBasisPrice,
+                        costSource: Math.abs(metadata.equivalentCloseExecutedUnderlyingQuantity) > 0.0001
+                            ? 'equivalent_expiry_execution'
+                            : 'equivalent_expiry_internal_net',
+                        closePrice: strike,
+                        closePriceSource: 'equivalent_expiry_offset',
+                        underlyingFutureId: optionLeg.underlyingFutureId || '',
+                        equivalentCloseAdjustmentId: adjustmentId,
+                        equivalentCloseSourceLegId: optionLegId,
+                        equivalentCloseExpiry: adjustment.expiry || optionLeg.expDate || '',
+                        pendingExpirySettlement: true,
+                    };
+                    group.legs.push(underlyingLeg);
+                    changed = true;
+                }
+            }
+
+            group.equivalentCloseState = {
+                status: 'pending_expiry_settlement',
+                updatedAt: new Date().toISOString(),
+            };
+            return changed;
+        }
+
         function _applyAssignmentAdjustment(group, adjustment) {
             if (!group || !adjustment || typeof adjustment !== 'object') {
                 return false;
+            }
+
+            if (String(adjustment.kind || '').trim().toLowerCase() === 'equivalent_expiry') {
+                return _applyEquivalentExpiryAdjustment(group, adjustment);
             }
 
             const optionLegId = String(adjustment.optionLegId || '').trim();
@@ -448,9 +670,11 @@
             if (!Array.isArray(adjustments) || adjustments.length === 0) {
                 return false;
             }
-            return adjustments.reduce((changed, adjustment) => (
-                _applyAssignmentAdjustment(group, adjustment) || changed
+            let changed = adjustments.reduce((didChange, adjustment) => (
+                _applyAssignmentAdjustment(group, adjustment) || didChange
             ), false);
+            changed = _maybePromoteEquivalentGroupToSettlement(group) || changed;
+            return changed;
         }
 
         function _isStagedUnderlyingCloseUpdate(update, runtime) {
@@ -487,6 +711,17 @@
                 const hasClosePrice = leg && leg.closePrice !== null && leg.closePrice !== '';
                 return pos > 0.0001 && !hasClosePrice;
             });
+        }
+
+        function _maybePromoteEquivalentGroupToSettlement(group) {
+            if (!group || !group.equivalentCloseState || _groupHasOpenPositions(group)) {
+                return false;
+            }
+            if (group.viewMode === 'settlement') {
+                return false;
+            }
+            group.viewMode = 'settlement';
+            return true;
         }
 
         function _maybePromoteFilledTrialGroupToActive(group, runtime) {
@@ -530,6 +765,12 @@
                 managedRepriceThreshold: closeExecution.repriceThreshold,
                 managedConcessionRatio: closeExecution.concessionRatio,
                 timeInForce: closeExecution.timeInForce,
+                closeStrategy: String(
+                    requestOptions.closeStrategy
+                    || closeExecution.pendingCloseStrategy
+                    || closeExecution.strategy
+                    || 'auto'
+                ).trim().toLowerCase(),
                 legIds,
             });
 
@@ -772,6 +1013,47 @@
             return true;
         }
 
+        function requestManualConcedeManagedComboOrder(group, concessionStep, runtimeKind = 'tradeTrigger') {
+            if (!group || !_isWsConnected()) {
+                return false;
+            }
+
+            const executionRuntime = _getExecutionRuntimeByKind(group, runtimeKind);
+            const preview = executionRuntime && executionRuntime.lastPreview;
+            if (!executionRuntime || !preview || !preview.orderId) {
+                _markExecutionError(group, 'No live combo order is available for manual chase repricing.', runtimeKind);
+                _renderGroups();
+                return false;
+            }
+
+            if (executionRuntime.pendingRequest) {
+                return false;
+            }
+
+            const parsedStep = Number(concessionStep);
+            if (!Number.isFinite(parsedStep) || parsedStep <= 0 || parsedStep > 1000000) {
+                _markExecutionError(group, 'Enter a positive manual chase price step.', runtimeKind);
+                _renderGroups();
+                return false;
+            }
+
+            executionRuntime.pendingRequest = true;
+            executionRuntime.lastError = '';
+            executionRuntime.status = 'pending_concede';
+            _sendPayload({
+                action: 'concede_managed_combo_order',
+                groupId: group.id,
+                orderId: preview.orderId,
+                permId: preview.permId || null,
+                concessionMode: 'step',
+                concessionStep: parsedStep,
+                executionIntent: runtimeKind === 'closeExecution' ? 'close' : 'open',
+                requestSource: runtimeKind === 'closeExecution' ? 'close_group' : 'trial_trigger',
+            });
+            _renderGroups();
+            return true;
+        }
+
         function requestCancelManagedComboOrder(group, reason = 'manual_cancel', runtimeKind = 'tradeTrigger') {
             if (!group) {
                 return false;
@@ -846,6 +1128,9 @@
                 return false;
             }
             _setCloseExecutionTarget(closeExecution, legIds);
+            closeExecution.pendingCloseStrategy = String(
+                options.closeStrategy || closeExecution.strategy || 'auto'
+            ).trim().toLowerCase();
 
             if (_isHistoricalMode()) {
                 const didSettle = _settleHistoricalReplayGroup(group, { legIds });
@@ -878,6 +1163,7 @@
             const executionMode = closeExecution.executionMode === 'submit' || closeExecution.executionMode === 'test_submit'
                 ? closeExecution.executionMode
                 : 'preview';
+            const requiresConfirmation = executionMode === 'submit' || executionMode === 'test_submit';
 
             if ((executionMode === 'submit' || executionMode === 'test_submit') && state.allowLiveComboOrders !== true) {
                 _markCloseExecutionError(group, 'Global live combo order switch is OFF.');
@@ -893,7 +1179,15 @@
                 return false;
             }
 
-            const payload = _buildCloseGroupComboOrderPayload(group, closeExecution, executionMode, { legIds });
+            const payload = _buildCloseGroupComboOrderPayload(
+                group,
+                closeExecution,
+                requiresConfirmation ? 'preview' : executionMode,
+                {
+                legIds,
+                closeStrategy: closeExecution.pendingCloseStrategy,
+                }
+            );
             if (!payload) {
                 _markCloseExecutionError(group, scopedClose
                     ? 'Unable to build single-leg close order payload.'
@@ -911,11 +1205,17 @@
 
             closeExecution.pendingRequest = true;
             closeExecution.lastError = '';
-            if (executionMode === 'preview') {
-                closeExecution.status = 'pending_preview';
+            closeExecution.status = 'pending_preview';
+            if (requiresConfirmation) {
+                payload.action = 'preview_combo_order';
+                payload.confirmationTargetMode = executionMode;
+                closeExecution.pendingConfirmationMode = executionMode;
+                closeExecution.pendingClosePlanPayload = _clonePayload(payload);
+                closeExecution.confirmedClosePlanPayload = null;
             } else {
-                payload.action = 'validate_combo_order';
-                closeExecution.status = 'pending_validation';
+                closeExecution.pendingConfirmationMode = '';
+                closeExecution.pendingClosePlanPayload = null;
+                closeExecution.confirmedClosePlanPayload = null;
             }
             _sendPayload(payload);
             _renderGroups();
@@ -923,7 +1223,18 @@
         }
 
         function requestCloseGroupComboOrder(group) {
-            return _requestCloseComboOrder(group, { legIds: [] });
+            const closeExecution = _getCloseExecution(group);
+            return _requestCloseComboOrder(group, {
+                legIds: [],
+                closeStrategy: closeExecution && closeExecution.strategy || 'auto',
+            });
+        }
+
+        function requestEquivalentCloseGroupComboOrder(group) {
+            return _requestCloseComboOrder(group, {
+                legIds: [],
+                closeStrategy: 'equivalent_expiry',
+            });
         }
 
         function requestCloseLegComboOrder(group, leg) {
@@ -940,6 +1251,57 @@
             }
 
             return _requestCloseComboOrder(group, { legIds: [legId] });
+        }
+
+        function confirmClosePlan(group) {
+            const closeExecution = _getCloseExecution(group);
+            const preview = closeExecution && closeExecution.lastPreview;
+            const targetMode = String(closeExecution && closeExecution.pendingConfirmationMode || '').trim();
+            const basePayload = closeExecution && closeExecution.pendingClosePlanPayload;
+            if (!closeExecution || !preview || !basePayload
+                || !['submit', 'test_submit'].includes(targetMode)) {
+                return false;
+            }
+            const token = String(preview.closePlanToken || '').trim();
+            if (!token) {
+                _clearClosePlanConfirmation(closeExecution, 'invalid');
+                _markCloseExecutionError(group, 'Close Plan confirmation token is missing. Preview again.');
+                _renderGroups();
+                return false;
+            }
+            const expiresAt = Date.parse(String(preview.closePlanExpiresAt || ''));
+            if (Number.isFinite(expiresAt) && Date.now() >= expiresAt) {
+                _clearClosePlanConfirmation(closeExecution, 'expired');
+                _markCloseExecutionError(group, 'Close Plan expired. No TWS order was sent; preview again.');
+                _renderGroups();
+                return false;
+            }
+
+            const payload = _clonePayload(basePayload);
+            payload.action = 'validate_combo_order';
+            payload.executionMode = targetMode;
+            payload.confirmationTargetMode = targetMode;
+            payload.closePlanToken = token;
+            closeExecution.confirmedClosePlanPayload = _clonePayload(payload);
+            closeExecution.pendingRequest = true;
+            closeExecution.lastError = '';
+            closeExecution.status = 'pending_validation';
+            _sendPayload(payload);
+            _renderGroups();
+            return true;
+        }
+
+        function cancelClosePlan(group) {
+            const closeExecution = _getCloseExecution(group);
+            if (!closeExecution) {
+                return false;
+            }
+            _requestClosePlanRevocation(group, closeExecution, 'user_cancelled');
+            _clearClosePlanConfirmation(closeExecution, 'cancelled');
+            closeExecution.status = closeExecution.lastPreview ? 'plan_cancelled' : 'idle';
+            closeExecution.lastError = '';
+            _renderGroups();
+            return true;
         }
 
         function requestTrialGroupComboOrder(group) {
@@ -1000,6 +1362,7 @@
             if (executionMode === 'submit' || executionMode === 'test_submit') {
                 payload.action = 'validate_combo_order';
                 trigger.status = 'pending_validation';
+                trigger.pendingValidationPayload = _clonePayload(payload);
             } else {
                 trigger.status = 'pending_preview';
             }
@@ -1056,13 +1419,18 @@
 
             runtime.pendingRequest = false;
             if (runtimeKind === 'closeExecution') {
-                const payload = _buildCloseGroupComboOrderPayload(group, runtime, nextMode);
+                const payload = _clonePayload(runtime.confirmedClosePlanPayload);
                 if (!payload) {
-                    _markCloseExecutionError(group, 'Unable to build close-group combo submit payload.');
+                    _markCloseExecutionError(
+                        group,
+                        'Confirmed Close Plan payload is unavailable. No TWS order was sent; preview again.'
+                    );
                     _renderGroups();
                     return true;
                 }
 
+                payload.action = 'submit_combo_order';
+                payload.executionMode = nextMode;
                 runtime.pendingRequest = true;
                 runtime.lastError = '';
                 runtime.status = 'pending_submit';
@@ -1071,7 +1439,59 @@
                 return true;
             }
 
-            return _sendValidatedComboSubmit(group, nextMode);
+            const ui = globalScope.OptionComboGroupEditorUI;
+            const showDialog = ui && typeof ui.openComboSubmissionConfirmationDialog === 'function'
+                ? ui.openComboSubmissionConfirmationDialog
+                : null;
+            if (!showDialog) {
+                return _sendValidatedComboSubmit(group, nextMode);
+            }
+            const pendingPayload = runtime.pendingValidationPayload;
+            if (!pendingPayload) {
+                _markTradeTriggerError(group, 'Validated order payload is unavailable. Preview again.', runtimeKind);
+                _renderGroups();
+                return true;
+            }
+            const checker = globalScope.OptionComboLegPositionCheck;
+            const positionWarnings = checker && typeof checker.findOrderReductions === 'function'
+                ? checker.findOrderReductions(
+                    pendingPayload.legs,
+                    state,
+                    state.portfolioPositions || [],
+                    state.selectedLiveComboOrderAccount,
+                    state.groups || [],
+                    group.id
+                )
+                : [];
+            runtime.pendingRequest = true;
+            runtime.status = 'awaiting_confirmation';
+            const opened = showDialog({
+                group,
+                validation,
+                payload: pendingPayload,
+                targetMode: nextMode,
+                positionWarnings,
+                positionSnapshotAvailable: state.portfolioPositionsConnected === true,
+                onConfirm: () => {
+                    runtime.pendingRequest = false;
+                    runtime.pendingValidationPayload = null;
+                    return _sendValidatedComboSubmit(group, nextMode);
+                },
+                onCancel: () => {
+                    runtime.pendingRequest = false;
+                    runtime.pendingValidationPayload = null;
+                    runtime.status = 'cancelled';
+                    runtime.lastError = '';
+                    _renderGroups();
+                },
+            });
+            if (opened === false) {
+                runtime.pendingRequest = false;
+                runtime.pendingValidationPayload = null;
+                _markTradeTriggerError(group, 'Order was validated, but the confirmation dialog could not be opened. No TWS order was sent.');
+            }
+            _renderGroups();
+            return true;
         }
 
         function _applyComboOrderResult(data) {
@@ -1124,12 +1544,32 @@
                 runtime.status = 'previewed';
             }
 
+            if (data.action === 'combo_order_preview_result'
+                && runtimeKind === 'closeExecution'
+                && ['submit', 'test_submit'].includes(String(runtime.pendingConfirmationMode || '').trim())) {
+                if (!String(runtime.lastPreview && runtime.lastPreview.closePlanToken || '').trim()) {
+                    _markCloseExecutionError(
+                        group,
+                        'Backend did not return a confirmable Close Plan. No TWS order was sent.'
+                    );
+                } else {
+                    runtime.pendingRequest = true;
+                    runtime.status = 'awaiting_confirmation';
+                    _showCloseConfirmationDialog(group, runtime, runtime.lastPreview);
+                }
+            }
+
             if (data.action === 'combo_order_submit_result'
                 && String(runtime.lastPreview && runtime.lastPreview.status || '').trim() === 'Filled'
                 && String(runtime.lastPreview && runtime.lastPreview.executionMode || '').trim() === 'submit') {
                 if (runtimeKind !== 'closeExecution') {
                     _maybePromoteFilledTrialGroupToActive(group, runtime);
                 }
+            }
+            if (data.action === 'combo_order_submit_result' && runtimeKind === 'closeExecution') {
+                runtime.pendingConfirmationMode = '';
+                runtime.pendingClosePlanPayload = null;
+                runtime.confirmedClosePlanPayload = null;
             }
 
             _renderGroups();
@@ -1141,6 +1581,7 @@
             const group = _findGroupById(data.groupId);
             if (!group) return true;
 
+            const previousViewMode = group.viewMode;
             const update = data.orderStatus || {};
             const { runtime, runtimeKind } = _resolveExecutionRuntime(group, update);
             if (!runtime) return true;
@@ -1167,6 +1608,10 @@
                     worstComboPrice,
                     managedRepriceThreshold,
                     managedConcessionRatio,
+                    managedManualConcessionCount,
+                    managedManualConcessionStep,
+                    managedManualConcessionOffset,
+                    priceIncrement,
                     repricingCount,
                     maxRepriceCount,
                     lastRepriceAt,
@@ -1208,7 +1653,14 @@
                 }
             }
 
-            _renderGroups();
+            // Managed supervision sends routine state snapshots every reprice
+            // interval. Rebuilding all group cards here destroys an open
+            // concession select or a manually entered chase step. A full render
+            // remains necessary only when the update changed card structure or
+            // the group's render mode.
+            if (assignmentChanged || group.viewMode !== previousViewMode) {
+                _renderGroups();
+            }
             _updateDerivedValues();
             return true;
         }
@@ -1361,6 +1813,8 @@
 
             if (runtimeKind !== 'closeExecution') {
                 _maybePromoteFilledTrialGroupToActive(group, runtime);
+            } else {
+                _maybePromoteEquivalentGroupToSettlement(group);
             }
 
             _renderGroups();
@@ -1371,7 +1825,11 @@
             const group = _findGroupById(data.groupId);
             if (!group) return true;
 
-            const { runtimeKind } = _resolveExecutionRuntime(group, data);
+            const { runtime, runtimeKind } = _resolveExecutionRuntime(group, data);
+            if (runtimeKind === 'closeExecution' && runtime) {
+                _requestClosePlanRevocation(group, runtime, 'request_failed');
+                _clearClosePlanConfirmation(runtime, 'invalid');
+            }
             _markExecutionError(group, data.message || 'Combo order request failed.', runtimeKind);
             _renderGroups();
             return true;
@@ -1418,6 +1876,9 @@
             if (data.action === 'combo_order_cancel_result') {
                 return _applyComboOrderCancelResult(data);
             }
+            if (data.action === 'combo_order_close_plan_cancel_result') {
+                return true;
+            }
             if (data.action === 'combo_order_fill_cost_update') {
                 return _applyComboOrderFillCostUpdate(data);
             }
@@ -1430,9 +1891,13 @@
         return {
             requestTrialGroupComboOrder,
             requestCloseGroupComboOrder,
+            requestEquivalentCloseGroupComboOrder,
             requestCloseLegComboOrder,
+            confirmClosePlan,
+            cancelClosePlan,
             requestContinueManagedComboOrder,
             requestConcedeManagedComboOrder,
+            requestManualConcedeManagedComboOrder,
             requestCancelManagedComboOrder,
             handleMessage,
             _test: {
@@ -1452,6 +1917,8 @@
                 isSoftTerminalBrokerStatus: _isSoftTerminalBrokerStatus,
                 buildCloseGroupComboOrderPayload: _buildCloseGroupComboOrderPayload,
                 requestCloseComboOrder: _requestCloseComboOrder,
+                confirmClosePlan,
+                cancelClosePlan,
             },
         };
     }

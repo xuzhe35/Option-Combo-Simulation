@@ -21,6 +21,7 @@
             { symbol: 'USO', historyPath: 'iv_term_structure/data/USO.json' },
             { symbol: 'CL', historyPath: 'iv_term_structure/data/CL.json' },
             { symbol: 'SI', historyPath: 'iv_term_structure/data/SI.json' },
+            { symbol: 'ES', historyPath: 'iv_term_structure/data/ES.json' },
         ],
     });
     const DEFAULT_WS_HOST = '127.0.0.1';
@@ -41,6 +42,9 @@
     const CALENDAR_FINDER_TOP_LIMIT = 5;
     const CALENDAR_FINDER_STORAGE_KEY = 'optionComboIvtsCalendarFinder';
     const FUTURES_CONTRACT_MONTH_STORAGE_KEY = 'optionComboIvtsFuturesContractMonth';
+    const OPTION_STREAM_LIMIT_STORAGE_KEY = 'optionComboIvtsOptionStreamLimit';
+    const DEFAULT_MAX_OPTION_STREAMS = 10;
+    const OPTION_STREAM_LIMIT_CHOICES = Object.freeze([10, 20, 40, 0]);
     const CARD_VIEW_STATE_SECTIONS = Object.freeze([
         {
             key: 'calendar',
@@ -68,6 +72,7 @@
         controlWs: null,
         controlWsOpenPromise: null,
         ibStatusPollTimerId: null,
+        apiResetInProgress: false,
         ibStatus: {
             connected: false,
             connecting: false,
@@ -187,6 +192,58 @@
             return status.message || 'Connecting...';
         }
         return status.message || 'Not connected';
+    }
+
+    function buildIbStatusAfterApiMarketDataReset(previousStatus, payload, message) {
+        const data = payload && typeof payload === 'object' ? payload : {};
+        if (data.success === true) {
+            return {
+                connected: false,
+                connecting: data.reconnecting === true,
+                message,
+            };
+        }
+        return {
+            ...(previousStatus || {}),
+            connecting: false,
+            message,
+        };
+    }
+
+    function handleApiMarketDataReset(payload) {
+        const data = payload && typeof payload === 'object' ? payload : {};
+        const succeeded = data.success === true;
+        const message = String(data.message || (
+            succeeded
+                ? 'All API market-data subscriptions were cleared. Subscribe each page again.'
+                : 'Unable to clear API market-data subscriptions.'
+        )).trim();
+
+        runtime.apiResetInProgress = false;
+        runtime.ibStatus = buildIbStatusAfterApiMarketDataReset(runtime.ibStatus, data, message);
+
+        if (succeeded) {
+            runtime.cardsBySymbol.forEach((card) => {
+                clearCatalogPatchWatchdog(card);
+                if (card.pendingCatalog) {
+                    const pending = card.pendingCatalog;
+                    card.pendingCatalog = null;
+                    clearTimeout(pending.timeoutId);
+                    pending.reject(new Error(message));
+                }
+                card.syncInProgress = false;
+                card.sampleInProgress = false;
+                card.catalog = null;
+                card.quotesBySubId = {};
+                card.underlyingPrice = null;
+                card.lastSyncLabel = '';
+                card.catalogPatchCount = 0;
+                setCardStatus(card, message, 'error');
+            });
+        }
+
+        scheduleIbStatusPollIfNeeded();
+        render(true);
     }
 
     function escapeHtml(value) {
@@ -310,6 +367,55 @@
         return /^\d{6}$/.test(normalized) ? normalized : '';
     }
 
+    function normalizeOptionStreamLimit(value) {
+        const normalized = String(value == null ? '' : value).trim().toLowerCase();
+        if (normalized === 'all' || normalized === '0') {
+            return 0;
+        }
+        const parsed = parseInt(normalized, 10);
+        return OPTION_STREAM_LIMIT_CHOICES.includes(parsed) && parsed > 0
+            ? parsed
+            : DEFAULT_MAX_OPTION_STREAMS;
+    }
+
+    function loadSavedOptionStreamLimit(symbol) {
+        const key = String(symbol || '').trim().toUpperCase();
+        if (!key) {
+            return null;
+        }
+        try {
+            const parsed = JSON.parse(localStorage.getItem(OPTION_STREAM_LIMIT_STORAGE_KEY) || '{}');
+            if (!parsed || typeof parsed !== 'object' || !Object.prototype.hasOwnProperty.call(parsed, key)) {
+                return null;
+            }
+            return normalizeOptionStreamLimit(parsed[key]);
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function saveOptionStreamLimit(symbol, value) {
+        const key = String(symbol || '').trim().toUpperCase();
+        if (!key) {
+            return;
+        }
+        let store = {};
+        try {
+            const parsed = JSON.parse(localStorage.getItem(OPTION_STREAM_LIMIT_STORAGE_KEY) || '{}');
+            if (parsed && typeof parsed === 'object') {
+                store = parsed;
+            }
+        } catch (_) {
+            // Start fresh when the saved blob is unreadable.
+        }
+        store[key] = normalizeOptionStreamLimit(value);
+        try {
+            localStorage.setItem(OPTION_STREAM_LIMIT_STORAGE_KEY, JSON.stringify(store));
+        } catch (_) {
+            // Runtime state still carries the selected limit when storage is unavailable.
+        }
+    }
+
     function isFuturesOptionProfile(profile) {
         return !!(
             profile
@@ -401,6 +507,9 @@
                             ? (entry.futuresContractMonth || entry.underlyingContractMonth || entry.contractMonth)
                             : ''
                     ),
+                    maxOptionStreams: normalizeOptionStreamLimit(
+                        entry && typeof entry === 'object' ? entry.maxOptionStreams : null
+                    ),
                 };
             }).filter((entry) => entry.symbol),
         };
@@ -424,12 +533,16 @@
                 || resolveDefaultFuturesContractMonth(entry.symbol, today)
             )
             : '';
+        const savedOptionStreamLimit = loadSavedOptionStreamLimit(entry.symbol);
 
         return {
             symbol: entry.symbol,
             historyPath: entry.historyPath,
             profile,
             futuresContractMonth,
+            maxOptionStreams: savedOptionStreamLimit == null
+                ? normalizeOptionStreamLimit(entry.maxOptionStreams)
+                : savedOptionStreamLimit,
             isExpanded: options.isExpanded === true,
             statusMessage: isFop
                 ? 'Ready. Choose the underlying futures month, then Sync/Update.'
@@ -532,6 +645,14 @@
         );
     }
 
+    function isOptionStreamLimitElement(element) {
+        return !!(
+            element
+            && typeof element.matches === 'function'
+            && element.matches('select[data-action="option-stream-limit"][data-symbol]')
+        );
+    }
+
     function isFocusedCardControlInCard(cardNode) {
         const activeElement = document && document.activeElement;
         return !!(
@@ -540,6 +661,7 @@
                 isBaselineSelectElement(activeElement)
                 || isCalendarFinderControlElement(activeElement)
                 || isFuturesContractMonthElement(activeElement)
+                || isOptionStreamLimitElement(activeElement)
             )
             && typeof cardNode.contains === 'function'
             && cardNode.contains(activeElement)
@@ -628,12 +750,79 @@
             card.catalog.subscribedOptionCount = parseInt(payload.subscribedOptionCount, 10);
             changed = true;
         }
+        if (Number.isFinite(parseInt(payload.attemptedOptionCount, 10))) {
+            card.catalog.attemptedOptionCount = parseInt(payload.attemptedOptionCount, 10);
+            changed = true;
+        }
+        if (Number.isFinite(parseInt(payload.failedOptionCount, 10))) {
+            card.catalog.failedOptionCount = parseInt(payload.failedOptionCount, 10);
+            changed = true;
+        }
+        if (Number.isFinite(parseInt(payload.timedOutOptionCount, 10))) {
+            card.catalog.timedOutOptionCount = parseInt(payload.timedOutOptionCount, 10);
+            changed = true;
+        }
+        if (typeof payload.subscriptionErrorMessage === 'string') {
+            card.catalog.subscriptionErrorMessage = payload.subscriptionErrorMessage;
+            changed = true;
+        }
+        if (typeof payload.sharedAtmProbeTimedOut === 'boolean') {
+            card.catalog.sharedAtmProbeTimedOut = payload.sharedAtmProbeTimedOut;
+            changed = true;
+        }
         if (typeof payload.subscriptionPending === 'boolean') {
             card.catalog.subscriptionPending = payload.subscriptionPending;
             changed = true;
         }
 
         return changed;
+    }
+
+    function buildSubscriptionStatus(payload, options = {}) {
+        const data = payload && typeof payload === 'object' ? payload : {};
+        const complete = options.complete === true;
+        const resolvedCount = parseInt(data.resolvedExpiryCount, 10) || 0;
+        const totalCount = parseInt(data.totalExpiryCount, 10) || 0;
+        const expectedCount = parseInt(data.expectedOptionCount, 10) || 0;
+        const attemptedCount = parseInt(data.attemptedOptionCount, 10) || 0;
+        const subscribedCount = parseInt(data.subscribedOptionCount, 10) || 0;
+        const parsedFailedCount = parseInt(data.failedOptionCount, 10);
+        const failedCount = Number.isFinite(parsedFailedCount)
+            ? parsedFailedCount
+            : (complete ? Math.max(0, expectedCount - subscribedCount) : 0);
+        const timedOutCount = parseInt(data.timedOutOptionCount, 10) || 0;
+        const errorMessage = String(data.subscriptionErrorMessage || '').trim();
+        const progressMessage = String(data.message || '').trim();
+
+        if (errorMessage) {
+            const summary = complete
+                ? ` Sync finished: subscribed ${subscribedCount} of ${expectedCount}; ${failedCount} failed, ${timedOutCount} timed out.`
+                : ` Subscription is still running: checked ${attemptedCount} of ${expectedCount}; subscribed ${subscribedCount}, failed ${failedCount}, timed out ${timedOutCount}.`;
+            return { message: `${errorMessage}${summary}`, kind: 'error' };
+        }
+
+        if (complete) {
+            if (failedCount > 0) {
+                return {
+                    message: `Subscribed ${subscribedCount} of ${expectedCount} option streams; ${failedCount} contracts failed. Check the server log for IB details.`,
+                    kind: 'error',
+                };
+            }
+            return {
+                message: `Subscribed ${subscribedCount} of ${expectedCount} option streams. Waiting for live IV updates...`,
+                kind: 'success',
+            };
+        }
+
+        if (progressMessage) {
+            return { message: progressMessage, kind: 'success' };
+        }
+        return {
+            message: attemptedCount > 0
+                ? `Resolved ${resolvedCount} of ${totalCount} expiries. Checked ${attemptedCount} of ${expectedCount} option contracts; subscribed ${subscribedCount}, failed ${failedCount}...`
+                : `Resolved ${resolvedCount} of ${totalCount} expiries. Subscribed ${subscribedCount} of ${expectedCount} option streams...`,
+            kind: 'success',
+        };
     }
 
     function clearCatalogPatchWatchdog(card) {
@@ -758,6 +947,7 @@
             anchorDate: new Date().toISOString().slice(0, 10),
             maxDte: runtime.config ? runtime.config.maxDte : EMBEDDED_DEFAULT_CONFIG.maxDte,
             strikeRadius: runtime.config ? runtime.config.strikeRadius : EMBEDDED_DEFAULT_CONFIG.strikeRadius,
+            maxOptionStreams: normalizeOptionStreamLimit(card && card.maxOptionStreams),
         };
 
         if (futuresContractMonth) {
@@ -870,6 +1060,11 @@
                 return;
             }
 
+            if (payload && payload.action === 'api_market_data_subscriptions_reset') {
+                handleApiMarketDataReset(payload);
+                return;
+            }
+
             if (payload && payload.action === 'iv_term_structure_catalog_patch') {
                 if (String(payload.symbol || '').trim().toUpperCase() !== card.symbol) {
                     return;
@@ -877,15 +1072,17 @@
                 if (mergeCatalogPatch(card, payload)) {
                     card.catalogPatchCount += 1;
                     clearCatalogPatchWatchdog(card);
-                    const resolvedCount = parseInt(payload.resolvedExpiryCount, 10) || 0;
                     const totalCount = parseInt(payload.totalExpiryCount, 10) || (card.catalog && Array.isArray(card.catalog.expiryRows) ? card.catalog.expiryRows.length : 0);
                     const expectedCount = parseInt(payload.expectedOptionCount, 10) || 0;
-                    const subscribedCount = parseInt(payload.subscribedOptionCount, 10) || 0;
-                    const progressMessage = String(payload.message || '').trim();
+                    const status = buildSubscriptionStatus({
+                        ...payload,
+                        totalExpiryCount: parseInt(payload.totalExpiryCount, 10) || totalCount,
+                        expectedOptionCount: expectedCount,
+                    });
                     setCardStatus(
                         card,
-                        progressMessage || `Resolved ${resolvedCount} of ${totalCount} expiries. Subscribed ${subscribedCount} of ${expectedCount} option streams...`,
-                        'success'
+                        status.message,
+                        status.kind
                     );
                     render();
                 }
@@ -896,10 +1093,11 @@
                 if (String(payload.symbol || '').trim().toUpperCase() !== card.symbol) {
                     return;
                 }
+                const status = buildSubscriptionStatus(payload, { complete: true });
                 setCardStatus(
                     card,
-                    `Subscribed ${parseInt(payload.subscribedOptionCount, 10) || 0} of ${parseInt(payload.expectedOptionCount, 10) || 0} option streams. Waiting for live IV updates...`,
-                    'success'
+                    status.message,
+                    status.kind
                 );
                 render();
                 return;
@@ -1001,6 +1199,8 @@
             }
             if (payload && payload.action === 'ib_connection_status') {
                 updateIbStatus(payload);
+            } else if (payload && payload.action === 'api_market_data_subscriptions_reset') {
+                handleApiMarketDataReset(payload);
             }
         });
 
@@ -1101,6 +1301,40 @@
         }
     }
 
+    async function resetAllApiMarketDataSubscriptionsFromPage() {
+        const confirmed = globalScope.confirm(
+            'Clear every market-data subscription on this backend\'s current TWS API connection?\n\n'
+            + 'This affects every open page and session using the backend. The API client will reconnect with zero streams, and every page must subscribe again. Open orders will not be cancelled.\n\n'
+            + 'Running managed-order supervision will lose its live quotes during the reset and may require manual intervention.'
+        );
+        if (!confirmed) {
+            return;
+        }
+
+        runtime.apiResetInProgress = true;
+        runtime.ibStatus = {
+            connected: false,
+            connecting: true,
+            message: 'Clearing all API market-data subscriptions...',
+        };
+        render(true);
+        try {
+            const ws = await ensureControlSocket();
+            ws.send(JSON.stringify({
+                action: 'reset_api_market_data_subscriptions',
+                confirmed: true,
+            }));
+        } catch (error) {
+            runtime.apiResetInProgress = false;
+            runtime.ibStatus = {
+                connected: false,
+                connecting: false,
+                message: error.message || 'Unable to request the API subscription reset.',
+            };
+            render(true);
+        }
+    }
+
     function closeSocketsForEndpointChange() {
         clearIbStatusPollTimer();
         if (runtime.controlWs) {
@@ -1175,6 +1409,9 @@
         await new Promise((resolve) => {
             function check() {
                 const ready = expiryRows.every((entry) => {
+                    if (entry && entry.subscriptionSelected === false) {
+                        return true;
+                    }
                     const hasCall = !entry.atmCallSubId || !!card.quotesBySubId[entry.atmCallSubId];
                     const hasPut = !entry.atmPutSubId || !!card.quotesBySubId[entry.atmPutSubId];
                     return hasCall && hasPut;
@@ -1231,7 +1468,11 @@
         const snapshot = card.catalog && Array.isArray(card.catalog.expiryRows)
             ? card.catalog.expiryRows
             : [];
-        return core().buildExpiryDetailRows(snapshot, card.quotesBySubId);
+        return core().buildExpiryDetailRows(
+            snapshot,
+            card.quotesBySubId,
+            card.catalog && card.catalog.anchorDate
+        );
     }
 
     function resolveSelectedStraddleBaselineExpiry(card, detailRows) {
@@ -1409,12 +1650,18 @@
     }
 
     function buildStraddlePriceCell(row) {
+        if (row && row.subscriptionSelected === false) {
+            return '<span class="ivts-missing">Not subscribed</span>';
+        }
         return row && row.atmStraddleMark != null
             ? escapeHtml(formatMoney(row.atmStraddleMark))
             : '<span class="ivts-missing">Insufficient</span>';
     }
 
     function buildStraddleRatioCell(row, baselineExpiry) {
+        if (row && row.subscriptionSelected === false) {
+            return '<span class="ivts-missing">--</span>';
+        }
         if (!baselineExpiry) {
             return '<span class="ivts-missing">--</span>';
         }
@@ -1424,10 +1671,29 @@
     }
 
     function buildIvPairCell(row) {
+        if (row && row.subscriptionSelected === false) {
+            return '<span class="ivts-missing">Not subscribed</span>';
+        }
         const text = row ? formatIvPair(row.callIv, row.putIv) : '--/--';
         return row && (row.callIv != null || row.putIv != null)
             ? escapeHtml(text)
             : `<span class="ivts-missing">${escapeHtml(text)}</span>`;
+    }
+
+    function buildIvPairTdCell(row) {
+        if (row && row.subscriptionSelected === false) {
+            return '<span class="ivts-missing">Not subscribed</span>';
+        }
+        const text = row ? formatIvPair(row.callIvTd, row.putIvTd) : '--/--';
+        if (!row || (row.callIvTd == null && row.putIvTd == null)) {
+            return `<span class="ivts-missing">${escapeHtml(text)}</span>`;
+        }
+        const tradDte = Number.isFinite(row.tradDte) ? row.tradDte : null;
+        const title = 'Trading-day annualized IV: same total variance as the TWS quote, '
+            + 'but divided by trading time (tradDTE/252) instead of calendar time, '
+            + 'so expiries on both sides of a weekend are comparable.'
+            + (tradDte != null ? ` Trading DTE: ${tradDte}.` : '');
+        return `<span title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
     }
 
     function buildBaselineControl(card, comparedRows) {
@@ -1675,6 +1941,7 @@
                                     <th>DTE</th>
                                     <th>ATM Strike</th>
                                     <th>Call/Put IV</th>
+                                    <th title="Trading-day annualized IV (weekends removed from the clock); comparable across a weekend.">TD IV</th>
                                     <th>ATM Straddle</th>
                                     <th>Vs Base</th>
                                 </tr>
@@ -1687,6 +1954,7 @@
                                         <td>${row.matchedDte != null ? escapeHtml(row.matchedDte) : '<span class="ivts-missing">--</span>'}</td>
                                         <td>${row.atmStrike != null ? escapeHtml(formatNumber(row.atmStrike, 2)) : '<span class="ivts-missing">--</span>'}</td>
                                         <td>${buildIvPairCell(row)}</td>
+                                        <td>${buildIvPairTdCell(row)}</td>
                                         <td>${buildStraddlePriceCell(row)}</td>
                                         <td>${buildStraddleRatioCell(row, baselineExpiry)}</td>
                                     </tr>
@@ -1712,6 +1980,7 @@
                             <th>DTE</th>
                             <th>ATM Strike</th>
                             <th>Call/Put IV</th>
+                            <th title="Trading-day annualized IV (weekends removed from the clock); comparable across a weekend.">TD IV</th>
                             <th>ATM Straddle</th>
                             <th>Vs Base</th>
                         </tr>
@@ -1723,12 +1992,13 @@
                                 <td>${escapeHtml(row.dte)}</td>
                                 <td>${row.atmStrike != null ? escapeHtml(formatNumber(row.atmStrike, 2)) : '<span class="ivts-missing">--</span>'}</td>
                                 <td>${buildIvPairCell(row)}</td>
+                                <td>${buildIvPairTdCell(row)}</td>
                                 <td>${buildStraddlePriceCell(row)}</td>
                                 <td>${buildStraddleRatioCell(row, baselineExpiry)}</td>
                             </tr>
                         `).join('') || `
                             <tr>
-                                <td colspan="6" class="ivts-missing">No expiry rows have been synced yet.</td>
+                                <td colspan="7" class="ivts-missing">No expiry rows have been synced yet.</td>
                             </tr>
                         `}
                     </tbody>
@@ -1745,6 +2015,7 @@
                 ${escapeHtml(card.statusMessage)}
             </div>
 
+            ${buildOptionStreamLimitControl(card)}
             ${buildFuturesContractControl(card)}
 
             <div class="ivts-facts">
@@ -1770,6 +2041,29 @@
             ${buildCalendarFinderSection(card, comparedRows)}
             ${buildPrimaryExpiryTable(comparedRows)}
             ${buildBucketSummaryTable(comparedRows)}
+        `;
+    }
+
+    function buildOptionStreamLimitControl(card) {
+        const selectedLimit = normalizeOptionStreamLimit(card && card.maxOptionStreams);
+        const selectedExpiryCount = selectedLimit > 0 ? Math.floor(selectedLimit / 2) : null;
+        return `
+            <div class="ivts-subscription-control">
+                <label class="ivts-subscription-field">
+                    <span>Live Option Streams</span>
+                    <select data-action="option-stream-limit" data-symbol="${escapeHtml(card.symbol)}">
+                        <option value="10" ${selectedLimit === 10 ? 'selected' : ''}>10 streams (5 expiries)</option>
+                        <option value="20" ${selectedLimit === 20 ? 'selected' : ''}>20 streams (10 expiries)</option>
+                        <option value="40" ${selectedLimit === 40 ? 'selected' : ''}>40 streams (20 expiries)</option>
+                        <option value="0" ${selectedLimit === 0 ? 'selected' : ''}>All streams</option>
+                    </select>
+                </label>
+                <span class="ivts-subscription-summary">
+                    ${selectedExpiryCount == null
+                        ? 'Subscribe every available expiry.'
+                        : `Subscribe the nearest ${selectedExpiryCount} expiries first.`}
+                </span>
+            </div>
         `;
     }
 
@@ -1996,6 +2290,29 @@
         render(true);
     }
 
+    function applyOptionStreamLimitChange(field) {
+        const card = getCard(field.getAttribute('data-symbol'));
+        if (!card) {
+            return;
+        }
+
+        const maxOptionStreams = normalizeOptionStreamLimit(field.value);
+        card.maxOptionStreams = maxOptionStreams;
+        saveOptionStreamLimit(card.symbol, maxOptionStreams);
+        card.catalog = null;
+        card.quotesBySubId = {};
+        card.lastSyncLabel = '';
+        card.forceBodyRefreshOnce = true;
+        setCardStatus(
+            card,
+            maxOptionStreams > 0
+                ? `Option stream limit set to ${maxOptionStreams}. Sync/Update to subscribe the nearest ${Math.floor(maxOptionStreams / 2)} expiries.`
+                : 'Option stream limit set to All. Sync/Update to subscribe every available expiry.',
+            ''
+        );
+        render(true);
+    }
+
     function toggleCalendarFinderShowAll(button) {
         const card = getCard(button.getAttribute('data-symbol'));
         if (!card) {
@@ -2174,6 +2491,12 @@
         });
 
         container.addEventListener('change', (event) => {
+            const optionStreamLimitField = event.target.closest('select[data-action="option-stream-limit"][data-symbol]');
+            if (optionStreamLimitField) {
+                applyOptionStreamLimitChange(optionStreamLimitField);
+                return;
+            }
+
             const futuresMonthField = event.target.closest('input[data-action="futures-contract-month"][data-symbol]');
             if (futuresMonthField) {
                 applyFuturesContractMonthChange(futuresMonthField);
@@ -2200,7 +2523,7 @@
         });
 
         container.addEventListener('focusout', (event) => {
-            const field = event.target.closest('select[data-action="baseline"][data-symbol], [data-action^="calendar-"][data-symbol], input[data-action="futures-contract-month"][data-symbol]');
+            const field = event.target.closest('select[data-action="baseline"][data-symbol], [data-action^="calendar-"][data-symbol], input[data-action="futures-contract-month"][data-symbol], select[data-action="option-stream-limit"][data-symbol]');
             if (!field) {
                 return;
             }
@@ -2217,14 +2540,20 @@
             normalizeWsHost,
             normalizeWsPort,
             normalizeFuturesContractMonth,
+            normalizeOptionStreamLimit,
             resolveDefaultExpandedSymbol,
             createCardState,
             isBaselineSelectElement,
             isFuturesContractMonthElement,
+            isOptionStreamLimitElement,
             isFocusedBaselineSelectInCard,
             getPrimaryExpiryRows,
             formatIvPair,
+            buildIvPairTdCell,
             buildSubscribePayload,
+            buildSubscriptionStatus,
+            buildIbStatusAfterApiMarketDataReset,
+            buildOptionStreamLimitControl,
             buildPrimaryExpiryTable,
             buildCardMarkup,
             normalizeCalendarFinderConfig,
@@ -2232,6 +2561,8 @@
             describeCalendarFinderEmptyState,
             loadSavedCalendarFinderConfig,
             saveCalendarFinderConfig,
+            loadSavedOptionStreamLimit,
+            saveOptionStreamLimit,
             captureCardViewState,
             restoreCardViewState,
         },
@@ -2261,6 +2592,13 @@
             ibConnectButton.textContent = runtime.ibStatus && runtime.ibStatus.connected
                 ? 'IB Connected'
                 : (runtime.ibStatus && runtime.ibStatus.connecting ? 'Connecting...' : 'Connect IB');
+        }
+        const apiResetButton = document.getElementById('ivtsApiResetButton');
+        if (apiResetButton) {
+            apiResetButton.disabled = runtime.apiResetInProgress;
+            apiResetButton.textContent = runtime.apiResetInProgress
+                ? 'Clearing All API Streams...'
+                : 'Clear All API Streams';
         }
 
         const container = document.getElementById('ivtsCards');
@@ -2312,6 +2650,12 @@
             if (ibConnectButton) {
                 ibConnectButton.addEventListener('click', () => {
                     connectIbFromPage();
+                });
+            }
+            const apiResetButton = document.getElementById('ivtsApiResetButton');
+            if (apiResetButton) {
+                apiResetButton.addEventListener('click', () => {
+                    resetAllApiMarketDataSubscriptionsFromPage();
                 });
             }
             const wsApplyButton = document.getElementById('ivtsWsApplyButton');

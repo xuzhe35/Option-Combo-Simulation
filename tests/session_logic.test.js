@@ -17,6 +17,30 @@ module.exports = {
             },
         },
         {
+            name: 'normalizes the simulation time basis and weekend weight',
+            run() {
+                const ctx = loadSessionLogicContext();
+                const logic = ctx.OptionComboSessionLogic;
+
+                assert.equal(logic.normalizeSimTimeBasis(), 'calendar');
+                assert.equal(logic.normalizeSimTimeBasis('bogus'), 'calendar');
+                assert.equal(logic.normalizeSimTimeBasis('Trading'), 'trading');
+                assert.equal(logic.normalizeSimTimeBasis('weighted'), 'weighted');
+
+                assert.equal(logic.normalizeSimWeekendWeight(undefined), 0.3);
+                assert.equal(logic.normalizeSimWeekendWeight('nonsense'), 0.3);
+                assert.equal(logic.normalizeSimWeekendWeight(-2), 0);
+                assert.equal(logic.normalizeSimWeekendWeight(5), 1);
+                assert.equal(logic.normalizeSimWeekendWeight('0.45'), 0.45);
+
+                assert.equal(logic.resolveSimWeekendWeight('calendar', 0.45), 1);
+                assert.equal(logic.resolveSimWeekendWeight('trading', 0.45), 0);
+                assert.equal(logic.resolveSimWeekendWeight('weighted', 0.45), 0.45);
+                assert.equal(logic.resolveSimWeekendWeight('weighted', 'bad'), 0.3);
+                assert.equal(logic.resolveSimWeekendWeight('unknown', 0.45), 1);
+            },
+        },
+        {
             name: 'forces zero-cost groups into trial for render unless settlement',
             run() {
                 const ctx = loadSessionLogicContext();

@@ -1111,6 +1111,148 @@ input[type=range]:focus {
     transition: transform 0.3s ease;
 }
 
+/* The order controls are a shared grid in the main workspace and Chart Lab. */
+.trial-trigger-order-controls {
+    column-gap: 0.85rem !important;
+    row-gap: 0.5rem !important;
+}
+
+.trial-trigger-order-controls .trial-trigger-tif {
+    margin-inline-start: 0.25rem;
+}
+
+.close-group-order-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    column-gap: 0.85rem;
+    row-gap: 0.5rem;
+}
+
+.close-group-order-controls .close-group-tif {
+    margin-inline-start: 0.25rem;
+}
+
+.close-confirmation-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 10020;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 1.25rem;
+    background: rgba(15, 23, 42, 0.62);
+    backdrop-filter: blur(3px);
+}
+
+.close-confirmation-panel {
+    width: min(1120px, 96vw);
+    max-height: 92vh;
+    overflow: auto;
+    padding: 1.1rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    background: #fff;
+    box-shadow: 0 24px 70px rgba(15, 23, 42, 0.3);
+}
+
+.close-confirmation-header,
+.close-confirmation-footer,
+.close-confirmation-footer-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.close-confirmation-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+}
+
+.close-confirmation-live-warning,
+.close-confirmation-warning-text {
+    margin-top: 0.85rem;
+    padding: 0.75rem;
+    border-radius: 0.5rem;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    color: #7c2d12;
+}
+
+.position-reduction-warning {
+    margin-top: 0.85rem;
+    padding: 0.8rem;
+    border-radius: 0.5rem;
+    color: #991b1b;
+    background: #fef2f2;
+    border: 2px solid #ef4444;
+}
+
+.leg-check-status-matched { color: #166534; font-weight: 700; }
+.leg-check-status-missing,
+.leg-check-status-opposite,
+.leg-check-status-quantity_mismatch { color: #b91c1c; font-weight: 700; }
+
+.close-confirmation-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.2rem;
+    margin-top: 0.85rem;
+    padding: 0.65rem 0;
+}
+
+.close-confirmation-panel h4 {
+    margin: 0.85rem 0 0.45rem;
+    font-size: 0.9rem;
+}
+
+.close-confirmation-table-shell {
+    overflow-x: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+}
+
+.close-confirmation-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+}
+
+.close-confirmation-table th,
+.close-confirmation-table td {
+    padding: 0.55rem 0.65rem;
+    border-bottom: 1px solid var(--border-color);
+    text-align: left;
+    white-space: nowrap;
+}
+
+.close-confirmation-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.close-confirmation-footer {
+    margin-top: 0.9rem;
+}
+
+@media (max-width: 760px) {
+    .close-confirmation-dialog {
+        padding: 0.5rem;
+    }
+
+    .close-confirmation-panel {
+        width: 100%;
+        max-height: 96vh;
+        padding: 0.8rem;
+    }
+
+    .close-confirmation-footer {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}
+
 .collapsed .chevron-icon {
     transform: rotate(-90deg);
 }

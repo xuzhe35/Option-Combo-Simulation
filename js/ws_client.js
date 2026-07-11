@@ -932,6 +932,9 @@ function connectWebSocket() {
             if (_handleManagedAccountsMessage(data)) {
                 return;
             }
+            if (_handlePortfolioPositionsMessage(data)) {
+                return;
+            }
             if (_handlePortfolioAvgCostMessage(data)) {
                 return;
             }
@@ -944,11 +947,32 @@ function connectWebSocket() {
             if (_handleHistoricalReplayMessage(data)) {
                 return;
             }
+            if (_handleApiMarketDataSubscriptionsResetMessage(data)) {
+                return;
+            }
             processLiveMarketData(data);
         } catch (e) {
             console.error("Error parsing WS message:", e);
         }
     };
+}
+
+function _handleApiMarketDataSubscriptionsResetMessage(data) {
+    if (!data || typeof data !== 'object' || data.action !== 'api_market_data_subscriptions_reset') {
+        return false;
+    }
+
+    const message = String(data.message || 'All API market-data subscriptions were cleared. Subscribe again to resume live data.');
+    const statusElement = document.getElementById('wsStatus');
+    if (statusElement) {
+        statusElement.textContent = 'API streams cleared globally';
+        statusElement.className = 'ws-status ws-error';
+        statusElement.title = message;
+    }
+    if (data.success === true && typeof window.alert === 'function') {
+        window.alert(message);
+    }
+    return true;
 }
 
 function reconnectWebSocket() {
@@ -979,6 +1003,65 @@ function requestPortfolioAvgCostSnapshot() {
 
     ws.send(JSON.stringify({
         action: 'request_portfolio_avg_cost_snapshot',
+    }));
+    return true;
+}
+
+function _runPendingLegExistsCheck() {
+    const scope = String(state.pendingLegExistsCheckGroupId || '');
+    if (!scope) return false;
+    state.pendingLegExistsCheckGroupId = '';
+    const checker = typeof OptionComboLegPositionCheck !== 'undefined'
+        ? OptionComboLegPositionCheck
+        : null;
+    if (!checker || typeof checker.compare !== 'function') return false;
+
+    const groups = scope === '__all__'
+        ? (state.groups || [])
+        : (state.groups || []).filter((group) => String(group.id || '') === scope);
+    const account = _getSelectedLiveComboOrderAccount();
+    const result = checker.compare(groups, state, state.portfolioPositions || [], account);
+    result.ibConnected = state.portfolioPositionsConnected === true;
+    const ui = typeof OptionComboGroupEditorUI !== 'undefined' ? OptionComboGroupEditorUI : null;
+    if (ui && typeof ui.openLegPositionCheckDialog === 'function') {
+        ui.openLegPositionCheckDialog({
+            result,
+            title: scope === '__all__' ? 'All Groups (net by contract)' : (groups[0] && groups[0].name || 'Group'),
+        });
+    }
+    return true;
+}
+
+function _handlePortfolioPositionsMessage(data) {
+    if (!data || typeof data !== 'object' || data.action !== 'portfolio_positions_snapshot') {
+        return false;
+    }
+    state.portfolioPositions = Array.isArray(data.items) ? data.items : [];
+    state.portfolioPositionsConnected = data.ibConnected === true && data.positionsReady !== false;
+    _runPendingLegExistsCheck();
+    return true;
+}
+
+function requestLegExistsCheck(groupId) {
+    if (_isHistoricalMode()) {
+        if (typeof window.alert === 'function') window.alert('Leg Exists Check is available only in the live TWS workspace.');
+        return false;
+    }
+    const account = _getSelectedLiveComboOrderAccount();
+    if (!account) {
+        if (typeof window.alert === 'function') window.alert(_getLiveComboOrderAccountRequirementMessage());
+        requestManagedAccountsSnapshot();
+        return false;
+    }
+    state.pendingLegExistsCheckGroupId = groupId ? String(groupId) : '__all__';
+    if (!isWsConnected || !ws) {
+        state.pendingLegExistsCheckGroupId = '';
+        if (typeof window.alert === 'function') window.alert('WebSocket is not connected; TWS positions cannot be checked.');
+        return false;
+    }
+    ws.send(JSON.stringify({
+        action: 'request_portfolio_positions_snapshot',
+        account,
     }));
     return true;
 }
@@ -1045,6 +1128,14 @@ function requestConcedeManagedComboOrder(group, concessionRatio, runtimeKind = '
         return false;
     }
     return transportApi.requestConcedeManagedComboOrder(group, concessionRatio, runtimeKind);
+}
+
+function requestManualConcedeManagedComboOrder(group, concessionStep, runtimeKind = 'tradeTrigger') {
+    const transportApi = _getComboOrderTransportApi();
+    if (!transportApi || typeof transportApi.requestManualConcedeManagedComboOrder !== 'function') {
+        return false;
+    }
+    return transportApi.requestManualConcedeManagedComboOrder(group, concessionStep, runtimeKind);
 }
 
 function requestCancelManagedComboOrder(group, reason = 'manual_cancel', runtimeKind = 'tradeTrigger') {
@@ -1430,6 +1521,14 @@ function requestCloseGroupComboOrder(group) {
     return transportApi.requestCloseGroupComboOrder(group);
 }
 
+function requestEquivalentCloseGroupComboOrder(group) {
+    const transportApi = _getComboOrderTransportApi();
+    if (!transportApi || typeof transportApi.requestEquivalentCloseGroupComboOrder !== 'function') {
+        return false;
+    }
+    return transportApi.requestEquivalentCloseGroupComboOrder(group);
+}
+
 function requestCloseLegComboOrder(group, leg) {
     const transportApi = _getComboOrderTransportApi();
     if (!transportApi || typeof transportApi.requestCloseLegComboOrder !== 'function') {
@@ -1516,9 +1615,12 @@ window.requestDeltaHedgeSubmit = requestDeltaHedgeSubmit;
 window.requestDeltaHedgeCancel = requestDeltaHedgeCancel;
 window.requestContinueManagedComboOrder = requestContinueManagedComboOrder;
 window.requestConcedeManagedComboOrder = requestConcedeManagedComboOrder;
+window.requestManualConcedeManagedComboOrder = requestManualConcedeManagedComboOrder;
 window.requestCancelManagedComboOrder = requestCancelManagedComboOrder;
 window.requestCloseGroupComboOrder = requestCloseGroupComboOrder;
+window.requestEquivalentCloseGroupComboOrder = requestEquivalentCloseGroupComboOrder;
 window.requestCloseLegComboOrder = requestCloseLegComboOrder;
+window.requestLegExistsCheck = requestLegExistsCheck;
 window.requestHistoricalReplayEntryGroup = requestHistoricalReplayEntryGroup;
 window.requestHistoricalReplayExpirySettlementSync = requestHistoricalReplayExpirySettlementSync;
 

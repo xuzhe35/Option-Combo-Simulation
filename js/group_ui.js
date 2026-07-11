@@ -3,6 +3,15 @@
  */
 
 (function attachGroupUi(globalScope) {
+    function _escapeHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     function _getProductRegistryApi() {
         return globalScope.OptionComboProductRegistry && typeof globalScope.OptionComboProductRegistry === 'object'
             ? globalScope.OptionComboProductRegistry
@@ -94,6 +103,10 @@
                 return 'Generating close preview...';
             case 'pending_validation':
                 return 'Preparing close order, validating combo legs...';
+            case 'awaiting_confirmation':
+                return 'Close Plan ready — awaiting Confirm';
+            case 'plan_cancelled':
+                return 'Close Plan cancelled — no order sent';
             case 'pending_submit':
                 return 'Sending close order to TWS...';
             case 'pending_resume':
@@ -263,8 +276,16 @@
         const brokerStatusText = preview.status
             ? `<div class="text-muted" style="margin-top: 8px;">Broker status: ${preview.status}${brokerStatusDetails.length > 0 ? ` (${brokerStatusDetails.join(', ')})` : ''}</div>`
             : '';
+        const manualChaseSummary = Number.isFinite(preview.managedManualConcessionCount)
+            && preview.managedManualConcessionCount > 0
+            ? ', Manual chase ' + preview.managedManualConcessionCount
+                + ' adjustment' + (preview.managedManualConcessionCount === 1 ? '' : 's')
+                + (Number.isFinite(preview.managedManualConcessionStep)
+                    ? ' (last step ' + currencyFormatter.format(preview.managedManualConcessionStep) + ')'
+                    : '')
+            : '';
         const managedStateText = preview.managedMode
-            ? `<div class="text-muted" style="margin-top: 8px;">Managed execution: ${preview.managedState || 'watching'}${Number.isFinite(preview.workingLimitPrice) ? `, Working LMT ${currencyFormatter.format(preview.workingLimitPrice)}` : ''}${Number.isFinite(preview.latestComboMid) ? `, Latest combo mid ${currencyFormatter.format(preview.latestComboMid)}` : ''}${Number.isFinite(preview.managedRepriceThreshold) ? `, Drift threshold ${formatRepriceThresholdValue(preview.managedRepriceThreshold)}` : ''}${Number.isFinite(preview.managedConcessionRatio) && preview.managedConcessionRatio > 0 ? `, Concession ${Math.round(preview.managedConcessionRatio * 100)}%` : ''}</div>`
+            ? `<div class="text-muted" style="margin-top: 8px;">Managed execution: ${preview.managedState || 'watching'}${Number.isFinite(preview.workingLimitPrice) ? `, Working LMT ${currencyFormatter.format(preview.workingLimitPrice)}` : ''}${Number.isFinite(preview.latestComboMid) ? `, Latest combo mid ${currencyFormatter.format(preview.latestComboMid)}` : ''}${Number.isFinite(preview.managedRepriceThreshold) ? `, Drift threshold ${formatRepriceThresholdValue(preview.managedRepriceThreshold)}` : ''}${Number.isFinite(preview.managedConcessionRatio) && preview.managedConcessionRatio > 0 ? `, Concession ${Math.round(preview.managedConcessionRatio * 100)}%` : ''}${manualChaseSummary}</div>`
             : '';
         const quoteRangeText = preview.managedMode
             && Number.isFinite(preview.bestComboPrice)
@@ -339,6 +360,15 @@
         }
         if (preview.canConcedePricing) {
             actions.push({
+                kind: 'concede_step',
+                label: 'Chase 1 Step',
+                stepValue: Number.isFinite(preview.managedManualConcessionStep)
+                    ? preview.managedManualConcessionStep
+                    : '',
+                title: 'Move the current working limit by the manually entered price step toward the current quoted worst price.',
+                className: 'trial-trigger-manual-concede-group',
+            });
+            actions.push({
                 kind: 'concede_select',
                 className: 'trial-trigger-concede-group',
                 options: [0.10, 0.20, 0.30, 0.50, 0.75, 0.90].map((ratio) => ({
@@ -355,11 +385,26 @@
 
         return {
             actions,
-            signature: `${preview.orderId}:${preview.managedState || ''}:${preview.status || ''}:${preview.canContinueRepricing ? 'continue' : 'nocontinue'}:${preview.canConcedePricing ? 'concede' : 'noconcede'}`,
+            // Managed status snapshots arrive frequently while the backend is
+            // monitoring or repricing. Those transient states do not change
+            // which controls are usable, so they must not recreate the action
+            // area (and interrupt a manual chase-step edit).
+            signature: `${preview.orderId}:${preview.canContinueRepricing ? `continue:${label}` : 'nocontinue'}:${preview.canConcedePricing ? 'concede' : 'noconcede'}`,
         };
     }
 
     function renderTriggerAction(action) {
+        if (action.kind === 'concede_step') {
+            return '<div class="' + action.className + '" style="display: inline-flex; align-items: center; gap: 0.45rem; margin-right: 0.5rem;">'
+                + '<input type="number" min="0" step="any" inputmode="decimal" '
+                + 'class="leg-input leg-input-sm trial-trigger-concede-step-input" '
+                + 'value="' + action.stepValue + '" placeholder="Step e.g. 0.25" '
+                + 'aria-label="Manual chase price step" style="width: 118px;">'
+                + '<button type="button" class="btn btn-secondary btn-sm trial-trigger-concede-step-btn" '
+                + 'title="' + (action.title || '') + '">' + action.label + '</button>'
+                + '</div>';
+        }
+
         if (action.kind === 'concede_select') {
             const optionsHtml = (Array.isArray(action.options) ? action.options : [])
                 .map((option, index) => `<option value="${option.value}"${index === 0 ? ' selected' : ''}>${option.label}</option>`)
@@ -588,12 +633,37 @@
         let simPriceHtml = currencyFormatter.format(simPricePerShare);
 
         if (leg.closePrice !== null && leg.closePrice !== '') {
-            const closeBadgeText = leg.closePriceSource === 'historical_expiry_auto'
-                ? 'Held to Expiry'
-                : (leg.closePriceSource === 'assignment_conversion'
-                    ? ((parseFloat(leg.pos) || 0) < 0 ? 'Assigned' : 'Exercised')
-                    : 'Closed');
-            simPriceHtml += ` <span class="badge" style="background: var(--primary-color); font-size: 0.65rem; vertical-align: middle;">${closeBadgeText}</span>`;
+            const closeSource = String(leg.closePriceSource || '').trim();
+            if (closeSource === 'equivalent_expiry_otm_ignored') {
+                simPriceHtml += ' <span class="badge bg-secondary" style="font-size: 0.65rem; vertical-align: middle;" title="No Underlying order was sent for this clearly OTM illiquid leg; it remains at the broker until expiry.">Expiry EQ · OTM ignored</span>';
+            } else if (closeSource === 'equivalent_expiry_hedged') {
+                const required = parseFloat(leg.equivalentCloseRequiredUnderlyingQuantity) || 0;
+                const executed = parseFloat(leg.equivalentCloseExecutedUnderlyingQuantity) || 0;
+                const netted = parseFloat(leg.equivalentCloseNettedUnderlyingQuantity) || 0;
+                const fillPrice = parseFloat(leg.equivalentCloseFillPrice);
+                const symbol = String(leg.equivalentCloseUnderlyingSymbol || 'Underlying').trim().toUpperCase();
+                const action = required >= 0 ? 'BUY' : 'SELL';
+                const formatQuantity = (value) => Number.isInteger(Math.abs(value))
+                    ? String(Math.abs(value))
+                    : Math.abs(value).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+                const executedText = Math.abs(executed) > 0.0001
+                    ? `traded ${executed >= 0 ? 'BUY' : 'SELL'} ${formatQuantity(executed)}`
+                    : 'traded 0';
+                const fillText = Number.isFinite(fillPrice) && fillPrice > 0
+                    ? ` @ ${fillPrice.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`
+                    : '';
+                const netText = Math.abs(netted) > 0.0001 ? `; internally netted ${formatQuantity(netted)}` : '';
+                const visibleNetText = Math.abs(netted) > 0.0001 ? ` · net ${formatQuantity(netted)}` : '';
+                const title = `${action} ${formatQuantity(required)} ${symbol} required; ${executedText}${fillText}${netText}. The option remains at the broker pending expiry exercise/assignment.`;
+                simPriceHtml += ` <span class="badge" style="background: var(--warning-color); font-size: 0.65rem; vertical-align: middle;" title="${_escapeHtml(title)}">Expiry EQ · ${action} ${formatQuantity(required)} ${_escapeHtml(symbol)} · ${_escapeHtml(executedText)}${_escapeHtml(fillText)}${_escapeHtml(visibleNetText)}</span>`;
+            } else {
+                const closeBadgeText = closeSource === 'historical_expiry_auto'
+                    ? 'Held to Expiry'
+                    : (closeSource === 'assignment_conversion'
+                        ? ((parseFloat(leg.pos) || 0) < 0 ? 'Assigned' : 'Exercised')
+                        : (closeSource === 'equivalent_expiry_offset' ? 'Expiry Offset' : 'Closed'));
+                simPriceHtml += ` <span class="badge" style="background: var(--primary-color); font-size: 0.65rem; vertical-align: middle;">${closeBadgeText}</span>`;
+            }
         } else if (usesScenarioUnderlying) {
             if (processedLeg.isExpired) {
                 if (simPricePerShare > 0) {

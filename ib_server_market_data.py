@@ -301,6 +301,65 @@ def unsubscribe_client_safely(
     client_subscriptions[ws] = {}
 
 
+def cancel_all_api_market_data_subscriptions(
+    *,
+    ib: Any,
+    client_subscriptions: dict[Any, dict[str, Any]],
+    generic_ticks_by_con_id: dict[Any, set[str]] | None = None,
+) -> dict[str, int]:
+    """Cancel every market-data ticker known to this IB API client.
+
+    The subsequent API connection reset is still required to release duplicate
+    request IDs that may already have fallen out of ib_async's ticker registry.
+    """
+    known_tickers = []
+    try:
+        known_tickers.extend(ib.tickers())
+    except Exception:
+        logging.exception("Unable to enumerate ib_async market-data tickers during global reset")
+
+    for subscriptions in list(client_subscriptions.values()):
+        known_tickers.extend(list((subscriptions or {}).values()))
+
+    unique_contracts = []
+    seen_contract_keys = set()
+    for ticker in known_tickers:
+        contract = getattr(ticker, 'contract', None)
+        if contract is None:
+            continue
+        con_id = getattr(contract, 'conId', None)
+        contract_key = ('conId', con_id) if con_id else ('object', id(contract))
+        if contract_key in seen_contract_keys:
+            continue
+        seen_contract_keys.add(contract_key)
+        unique_contracts.append(contract)
+
+    cancelled_count = 0
+    cancel_error_count = 0
+    for contract in unique_contracts:
+        try:
+            result = ib.cancelMktData(contract)
+            if result is not False:
+                cancelled_count += 1
+        except Exception:
+            cancel_error_count += 1
+            logging.exception(
+                "Failed to cancel market data during global API reset: %r",
+                contract,
+            )
+
+    for websocket in list(client_subscriptions):
+        client_subscriptions[websocket] = {}
+    if generic_ticks_by_con_id is not None:
+        generic_ticks_by_con_id.clear()
+
+    return {
+        'knownTickerCount': len(unique_contracts),
+        'cancelledTickerCount': cancelled_count,
+        'cancelErrorCount': cancel_error_count,
+    }
+
+
 def normalize_generic_tick_set(generic_ticks: Any) -> set[str]:
     return {part.strip() for part in str(generic_ticks or '').split(',') if part.strip()}
 

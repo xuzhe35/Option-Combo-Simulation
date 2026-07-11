@@ -100,6 +100,56 @@
         return String(globalState && globalState.selectedLiveComboOrderAccount || '').trim();
     }
 
+    function _toPositiveFiniteNumber(value) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    }
+
+    function _resolveObservedQuoteForLeg(leg) {
+        const liveQuotes = globalScope.OptionComboWsLiveQuotes;
+        if (!liveQuotes || !leg) {
+            return null;
+        }
+        if (_isUnderlyingLeg(leg)) {
+            if (leg.underlyingFutureId && typeof liveQuotes.getFutureQuote === 'function') {
+                return liveQuotes.getFutureQuote(leg.underlyingFutureId);
+            }
+            return typeof liveQuotes.getUnderlyingQuote === 'function'
+                ? liveQuotes.getUnderlyingQuote()
+                : null;
+        }
+        return typeof liveQuotes.getOptionQuote === 'function'
+            ? liveQuotes.getOptionQuote(leg.id)
+            : null;
+    }
+
+    function _appendObservedQuote(request, quote) {
+        if (!request || !quote) {
+            return request;
+        }
+        const bid = _toPositiveFiniteNumber(quote.bid);
+        const ask = _toPositiveFiniteNumber(quote.ask);
+        const mark = _toPositiveFiniteNumber(quote.mark);
+        if (bid !== null) request.observedBid = bid;
+        if (ask !== null) request.observedAsk = ask;
+        if (mark !== null) request.observedMark = mark;
+        return request;
+    }
+
+    function _resolveObservedUnderlyingPrice(globalState) {
+        const liveQuotes = globalScope.OptionComboWsLiveQuotes;
+        const quote = liveQuotes && typeof liveQuotes.getUnderlyingQuote === 'function'
+            ? liveQuotes.getUnderlyingQuote()
+            : null;
+        const bid = _toPositiveFiniteNumber(quote && quote.bid);
+        const ask = _toPositiveFiniteNumber(quote && quote.ask);
+        const mark = _toPositiveFiniteNumber(quote && quote.mark);
+        if (bid !== null && ask !== null) {
+            return (bid + ask) / 2;
+        }
+        return mark !== null ? mark : _toPositiveFiniteNumber(globalState && globalState.underlyingPrice);
+    }
+
     function _resolveTargetPosition(pos, intent) {
         const numericPos = parseInt(pos, 10) || 0;
         return intent === 'close' ? numericPos * -1 : numericPos;
@@ -172,7 +222,7 @@
                         request.multiplier = String(profile.underlyingLegMultiplier || profile.optionMultiplier || '');
                     }
 
-                    return request;
+                    return _appendObservedQuote(request, _resolveObservedQuoteForLeg(leg));
                 }
 
                 const underlyingContractMonth = _resolveLegUnderlyingContractMonth(
@@ -181,7 +231,7 @@
                     defaultUnderlyingContractMonth
                 );
 
-                return {
+                const request = {
                     id: leg.id,
                     type: leg.type,
                     pos: targetPos,
@@ -201,6 +251,7 @@
                     contractMonth: String(leg.expDate || '').replace(/-/g, '').slice(0, 6),
                     underlyingContractMonth,
                 };
+                return _appendObservedQuote(request, _resolveObservedQuoteForLeg(leg));
             });
     }
 
@@ -226,8 +277,12 @@
             managedRepriceThreshold: requestOptions.managedRepriceThreshold,
             managedConcessionRatio: requestOptions.managedConcessionRatio,
             timeInForce: requestOptions.timeInForce || 'DAY',
+            closeStrategy: String(requestOptions.closeStrategy || 'auto').trim().toLowerCase(),
+            equivalentCloseMaxOtmAsk: 0.02,
             profile: {
                 family: profile.family,
+                optionSecType: profile.optionSecType,
+                underlyingSecType: profile.underlyingSecType,
                 optionSymbol: profile.optionSymbol,
                 underlyingSymbol: profile.underlyingSymbol,
                 optionExchange: profile.optionExchange,
@@ -240,6 +295,11 @@
                 legIds: requestOptions.legIds,
             }),
         };
+
+        const observedUnderlyingPrice = _resolveObservedUnderlyingPrice(globalState);
+        if (observedUnderlyingPrice !== null) {
+            payload.observedUnderlyingPrice = observedUnderlyingPrice;
+        }
 
         const selectedAccount = _resolveSelectedTradeAccount(globalState);
         if (selectedAccount) {

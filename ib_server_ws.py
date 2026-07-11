@@ -8,7 +8,12 @@ from ib_async import Stock
 from websockets.exceptions import ConnectionClosed
 
 from ib_server_market_data import cancel_mkt_data_if_unused, req_mkt_data_pooled
-from runtime_contracts import HistoricalBarsResponsePayload, HistoricalReplayErrorPayload, ManualUnderlyingSyncPayload
+from runtime_contracts import (
+    ApiMarketDataResetPayload,
+    HistoricalBarsResponsePayload,
+    HistoricalReplayErrorPayload,
+    ManualUnderlyingSyncPayload,
+)
 
 
 def purge_combo_order_tracking_for_websocket(
@@ -142,7 +147,23 @@ def _req_mkt_data_pooled(env, qualified_contract, generic_ticks=''):
     )
 
 
+def _capture_api_market_data_generation(env):
+    getter = env.get('get_api_market_data_generation')
+    return getter() if callable(getter) else None
+
+
+def _api_market_data_generation_is_current(env, captured_generation):
+    getter = env.get('get_api_market_data_generation')
+    reset_in_progress = env.get('api_market_data_reset_in_progress')
+    if callable(reset_in_progress) and reset_in_progress():
+        return False
+    return captured_generation is None or not callable(getter) or getter() == captured_generation
+
+
 async def _handle_subscribe(env, websocket, data, client_ip):
+    subscription_generation = _capture_api_market_data_generation(env)
+    if not _api_market_data_generation_is_current(env, subscription_generation):
+        return
     raw_underlying = data.get('underlying')
     options_data = data.get('options', [])
     futures_data = data.get('futures', [])
@@ -168,6 +189,8 @@ async def _handle_subscribe(env, websocket, data, client_ip):
     env['unsubscribe_client_safely'](websocket)
 
     qualified_underlying = await env['qualify_one'](underlying_contract, underlying_request)
+    if not _api_market_data_generation_is_current(env, subscription_generation):
+        return
     if qualified_underlying is None:
         logging.warning(
             f"Failed to qualify underlying {env['describe_contract_request'](underlying_request)}; "
@@ -186,6 +209,8 @@ async def _handle_subscribe(env, websocket, data, client_ip):
             continue
 
         qualified_option = await env['qualify_one'](opt_contract, opt)
+        if not _api_market_data_generation_is_current(env, subscription_generation):
+            return
         if qualified_option is None:
             logging.error(f"Failed to qualify option leg {leg_id}: {env['describe_contract_request'](opt)}")
             continue
@@ -206,6 +231,8 @@ async def _handle_subscribe(env, websocket, data, client_ip):
             continue
 
         qualified_future = await env['qualify_one'](future_contract, future_req)
+        if not _api_market_data_generation_is_current(env, subscription_generation):
+            return
         if qualified_future is None:
             logging.error(
                 f"Failed to qualify future subscription {future_id}: "
@@ -219,6 +246,8 @@ async def _handle_subscribe(env, websocket, data, client_ip):
     for stock_sym in stocks_data:
         stock_contract = Stock(stock_sym, 'SMART', 'USD')
         qualified_stock = await env['qualify_one'](stock_contract)
+        if not _api_market_data_generation_is_current(env, subscription_generation):
+            return
         if qualified_stock is None:
             logging.error(f"Failed to qualify hedge stock {stock_sym}")
             continue
@@ -239,6 +268,9 @@ async def _handle_subscribe(env, websocket, data, client_ip):
 
 
 async def _handle_sync_underlying(env, websocket, data, client_ip):
+    subscription_generation = _capture_api_market_data_generation(env)
+    if not _api_market_data_generation_is_current(env, subscription_generation):
+        return
     raw_underlying = data.get('underlying')
     underlying_request = env['build_underlying_request'](raw_underlying, [])
     try:
@@ -248,6 +280,8 @@ async def _handle_sync_underlying(env, websocket, data, client_ip):
         return
 
     qualified_underlying = await env['qualify_one'](contract, underlying_request)
+    if not _api_market_data_generation_is_current(env, subscription_generation):
+        return
     if qualified_underlying is None:
         logging.error(f"Failed to manual sync underlying {env['describe_contract_request'](underlying_request)}")
         return
@@ -255,6 +289,8 @@ async def _handle_sync_underlying(env, websocket, data, client_ip):
     ticker = _req_mkt_data_pooled(env, qualified_underlying)
     try:
         await asyncio.sleep(0.5)
+        if not _api_market_data_generation_is_current(env, subscription_generation):
+            return
         quote = env['extract_quote_snapshot'](ticker, getattr(qualified_underlying, 'secType', ''))
 
         if quote is not None:
@@ -356,6 +392,32 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
             websocket,
             json.dumps(env['build_ib_connection_status_payload'](message)),
         )
+    elif action == 'reset_api_market_data_subscriptions':
+        if data.get('confirmed') is not True:
+            payload: ApiMarketDataResetPayload = {
+                'action': 'api_market_data_subscriptions_reset',
+                'success': False,
+                'message': 'Explicit confirmation is required before clearing all API market-data subscriptions.',
+            }
+            await env['send_message_safe'](websocket, json.dumps(payload))
+            return
+
+        try:
+            payload = await env['reset_all_api_market_data_subscriptions'](client_ip)
+        except Exception as exc:
+            logging.exception("Global API market-data subscription reset failed")
+            payload = {
+                'action': 'api_market_data_subscriptions_reset',
+                'success': False,
+                'message': f'Failed to clear all API market-data subscriptions: {exc}',
+            }
+
+        recipients = set(env['connected_clients'])
+        recipients.add(websocket)
+        await asyncio.gather(*(
+            env['send_message_safe'](recipient, json.dumps(payload))
+            for recipient in recipients
+        ))
     elif action == 'sync_underlying':
         await _handle_sync_underlying(env, websocket, data, client_ip)
     elif action == 'request_historical_bars':
@@ -363,6 +425,9 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
     elif action == 'request_portfolio_avg_cost_snapshot':
         logging.info(f"Received portfolio avg cost snapshot request from {client_ip}")
         env['send_portfolio_avg_cost_snapshot'](websocket)
+    elif action == 'request_portfolio_positions_snapshot':
+        logging.info(f"Received portfolio positions snapshot request from {client_ip}")
+        env['send_portfolio_positions_snapshot'](websocket)
     elif action == 'request_managed_accounts_snapshot':
         logging.info(f"Received managed accounts snapshot request from {client_ip}")
         env['send_managed_accounts_snapshot'](websocket)
@@ -396,6 +461,7 @@ async def handle_ws_client(env, websocket):
     env['client_subscriptions'][websocket] = {}
     env['client_subscription_settings'][websocket] = {'greeks_enabled': False}
     env['send_portfolio_avg_cost_snapshot'](websocket)
+    env['send_portfolio_positions_snapshot'](websocket)
     env['send_managed_accounts_snapshot'](websocket)
 
     try:

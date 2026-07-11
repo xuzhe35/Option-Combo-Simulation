@@ -13,7 +13,7 @@ The repo currently has three frontend surfaces:
 It also has two optional Python WebSocket backends:
 
 - `ib_server.py` for live IBKR market data, combo execution, Chart Lab bars, IV term-structure sync, and shared historical fallback paths
-- `historical_server.py` for SQLite historical replay snapshots only
+- `historical_server.py` for historical replay snapshots only (chains via the shared options-chain-service)
 
 There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in ordered global-script form.
 
@@ -37,6 +37,7 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
   - close-group execution using the same combo-order path
 - Cost-tracking helpers:
   - per-group portfolio average-cost sync
+  - per-group and global TWS leg/quantity checks against the selected account
   - assignment / exercise conversion into deliverable underlying legs
   - execution-report fill attribution back into entry cost or close price
 - Product-aware pricing controls:
@@ -64,7 +65,7 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
   - daily candle chart
   - latest price overlay
   - one-group or included-global projection
-  - IB daily bars with SQLite fallback through `ib_server.py`
+  - IB daily bars with chain-service fallback through `ib_server.py`
 - IV Term Structure:
   - standalone ETF monitor
   - per-symbol sync/update from IB
@@ -84,7 +85,7 @@ This is the main portfolio workspace.
 It supports:
 
 - live IBKR mode
-- SQLite historical replay mode
+- Historical replay mode (options-chain-service backed)
 - forward-carry samples for index products
 - futures-pool management for FOP products
 - live combo-order account selection
@@ -110,10 +111,10 @@ Current behavior:
 Important current limitation:
 
 - Chart Lab requests `request_historical_bars`, which is implemented in `ib_server.py`
-- the SQLite daily-bar fallback is also served through `ib_server.py`
+- the chain-service daily-bar fallback is also served through `ib_server.py`
 - `historical_server.py` does not implement the bar endpoint
 
-If you want Chart Lab bars, run `ib_server.py`, even if you only need the SQLite fallback path.
+If you want Chart Lab bars, run `ib_server.py`, even if you only need the chain-service fallback path.
 
 ### `iv_term_structure.html`
 
@@ -148,12 +149,13 @@ Current responsibilities include:
 - managed account snapshots for live order routing
 - portfolio average-cost snapshots
 - combo validation / preview / test-submit / submit
+- account-level portfolio position snapshots for leg existence checks and pre-submit netting warnings
 - delta hedge validation / preview / submit / cancel
 - managed repricing supervision
 - close-group execution
 - execution-status and execution-fill fan-out back to the browser
 - historical replay snapshots through `HistoricalReplayService`
-- historical daily bars for Chart Lab, with SQLite fallback when IB bars are unavailable
+- historical daily bars for Chart Lab, with chain-service fallback when IB bars are unavailable
 - IV term-structure option-chain discovery and live option subscriptions
 - IB connection-status and manual connect messages
 
@@ -163,12 +165,21 @@ Live market-data streams are pooled by qualified contract id. A second subscript
 
 ### `historical_server.py`
 
-This is the lightweight SQLite replay server.
+This is the lightweight historical replay server. Since 2026-07 it no longer
+reads a bundled SQLite copy: option chains and underlying daily bars come from
+the shared **options-chain-service** (`Options DB/chain_service/chain_server.py`,
+default `http://127.0.0.1:8750`, backed by the Databento cleaned DB with
+SPY/QQQ/GLD/SLV/TLT/USO through 2026-06). Risk-free rates and the treasury
+yield curve still come from the small local `sqlite_spy/rates.db` (extracted
+from the legacy DB by `scripts/extract_rates_db.py`).
 
 Current responsibilities:
 
 - `request_historical_snapshot`
 - empty `portfolio_avg_cost_update` responses for historical mode
+
+The chain service must be running for replay to work; the start scripts probe
+`/health` and launch it automatically when it is down.
 
 Important boundaries:
 
@@ -207,6 +218,7 @@ Important PowerShell entry points:
 ### macOS / POSIX
 
 - `start_option_combo_mac.command`
+- `start_historical_replay_mac.command`
 - `start_option_combo.sh`
 - `install_ib_bridge_deps_mac.command`
 - `cleanup_logs_mac.command`
@@ -276,7 +288,7 @@ This is the recommended backend when you need any of the following:
 - combo execution
 - managed repricing
 - Chart Lab daily bars
-- SQLite fallback bars for Chart Lab
+- chain-service fallback bars for Chart Lab
 - IV term-structure sync
 - historical replay snapshots served by the shared backend
 
@@ -288,6 +300,13 @@ $PYTHON = powershell -NoProfile -ExecutionPolicy Bypass -File .\powershell_scrip
 ```
 
 Use this when you only need replay snapshots for the main workspace and do not need Chart Lab bars, IV term-structure sync, or live execution.
+
+Replay data requires the shared options-chain-service to be running
+(`Options DB/chain_service`: `python3 chain_server.py`, default
+`http://127.0.0.1:8750`). The `start_historical_replay` launchers
+(.bat/.ps1 and `start_historical_replay_mac.command`) probe `/health` and
+start it automatically; when starting `historical_server.py` by hand, start
+the chain service yourself first.
 
 ## Python Resolution
 
@@ -334,11 +353,12 @@ managed_reprice_max_updates = 12
 managed_reprice_timeout_seconds = 600
 ```
 
-Optional historical DB override:
+Optional historical data overrides:
 
 ```ini
 [historical]
-sqlite_db_path = sqlite_spy/spy_options.db
+chain_service_url = http://127.0.0.1:8750
+rates_sqlite_db_path = sqlite_spy/rates.db
 ```
 
 Important distinction:
@@ -491,7 +511,7 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
 | `ib_server_order_tracking.py` | combo/hedge tracking payload builders and event-consumer handlers |
 | `historical_server.py` | historical replay-only backend |
 | `historical_replay_service.py` | replay payload builder |
-| `historical_data.py` | SQLite historical data access |
+| `historical_data.py` | historical data access: chains/bars via options-chain-service HTTP, rates via sqlite_spy/rates.db |
 | `iv_term_structure_service.py` | Python IV term-structure selection helpers |
 | `trade_execution/` | execution engine and IBKR adapter |
 | `trade_execution/adapters/ibkr_hedge.py` | single-instrument STK/FUT hedge execution helpers |

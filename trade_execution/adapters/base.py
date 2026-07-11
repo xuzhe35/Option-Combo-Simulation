@@ -23,6 +23,9 @@ class BrokerExecutionAdapter(ABC):
     async def cancel_managed_combo_order(self, websocket, raw_data):
         raise NotImplementedError
 
+    async def cancel_close_plan_confirmation(self, websocket, raw_data):
+        raise NotImplementedError
+
     async def validate_hedge_order(self, websocket, request):
         raise NotImplementedError
 

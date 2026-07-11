@@ -9,7 +9,51 @@
         throw new Error('OptionComboDateUtils must be loaded before pricing_core.js');
     }
 
-    const { diffDays, calendarToTradingDays, normalizeDateInput } = dateUtils;
+    const { diffDays, calendarToTradingDays, countWeightedDays, normalizeDateInput } = dateUtils;
+
+    // Simulation time basis: weight of a non-trading day (weekend/holiday)
+    // relative to a trading day. 1 = pure calendar clock (TWS convention,
+    // historical behavior), 0 = pure trading-day clock, in between = weighted.
+    // Configured from app state via configureSimTimeBasis(); defaults to the
+    // legacy calendar clock so nothing changes until the user opts in.
+    let simTimeBasisWeekendWeight = 1;
+
+    function normalizeWeekendWeight(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return 1;
+        }
+        return Math.min(1, Math.max(0, parsed));
+    }
+
+    function configureSimTimeBasis(options) {
+        simTimeBasisWeekendWeight = normalizeWeekendWeight(options && options.weekendWeight);
+        return simTimeBasisWeekendWeight;
+    }
+
+    function getSimTimeBasisWeekendWeight() {
+        return simTimeBasisWeekendWeight;
+    }
+
+    // Effective days per year on the weighted clock: 252 trading days plus
+    // the non-trading remainder at its configured weight. At weight 1 this is
+    // exactly 365, reproducing the calendar clock.
+    function weightedDaysPerYear(weekendWeight) {
+        return 252 + (365 - 252) * weekendWeight;
+    }
+
+    // Convert a calendar-annualized IV (TWS convention) onto the weighted
+    // clock, preserving the option's total variance as of the anchor date:
+    // iv^2 * (anchorCalDte/365) === converted^2 * (anchorEffDte/effYear).
+    function convertIvToWeightedClock(iv, anchorCalDte, anchorEffDte, weekendWeight) {
+        if (!Number.isFinite(iv) || iv <= 0
+            || !Number.isFinite(anchorCalDte) || anchorCalDte <= 0
+            || !Number.isFinite(anchorEffDte) || anchorEffDte <= 0) {
+            return iv;
+        }
+        const effYear = weightedDaysPerYear(weekendWeight);
+        return iv * Math.sqrt((anchorCalDte / 365.0) / (anchorEffDte / effYear));
+    }
 
     function normalCDF(x) {
         let sign = (x < 0) ? -1 : 1;
@@ -244,11 +288,37 @@
         const isExpired = expDateObj <= simDateObj;
         const calDTE = isExpired ? 0 : diffDays(globalSimulatedDateStr, leg.expDate);
         const tradDTE = isExpired ? 0 : calendarToTradingDays(globalSimulatedDateStr, leg.expDate);
-        const T = calDTE / 365.0;
+        const weekendWeight = simTimeBasisWeekendWeight;
         const baseIv = hasUsableLegIv(leg) ? leg.iv : null;
+
+        let T = calDTE / 365.0;
+        let effectiveBaseIv = baseIv;
+        if (!isExpired && weekendWeight < 1) {
+            const effYear = weightedDaysPerYear(weekendWeight);
+            let effDTE = countWeightedDays(globalSimulatedDateStr, leg.expDate, weekendWeight);
+            if (calDTE > 0 && effDTE <= 0) {
+                // Not expired, but only non-trading days remain on a
+                // zero-weight clock (e.g. Saturday before a Monday expiry).
+                // Keep a half trading day so the leg is not marked to
+                // intrinsic before its last session has happened.
+                effDTE = 0.5;
+            }
+            T = effDTE / effYear;
+
+            if (baseIv !== null) {
+                // The TWS quote is calendar-annualized as of the quote date,
+                // so the conversion factor is anchored there — not at the
+                // simulated date — and stays frozen as the clock advances.
+                const anchorDate = globalBaseDateStr || globalSimulatedDateStr;
+                const anchorCalDte = diffDays(anchorDate, leg.expDate);
+                const anchorEffDte = countWeightedDays(anchorDate, leg.expDate, weekendWeight);
+                effectiveBaseIv = convertIvToWeightedClock(baseIv, anchorCalDte, anchorEffDte, weekendWeight);
+            }
+        }
+
         const simIV = isExpired
             ? 0
-            : (baseIv !== null ? Math.max(0.001, baseIv + globalIvOffset) : null);
+            : (effectiveBaseIv !== null ? Math.max(0.001, effectiveBaseIv + globalIvOffset) : null);
         const contractMultiplier = getMultiplier(resolvedProfile);
         const settlementUnitsPerContract = getSettlementUnitsPerContract(resolvedProfile);
         const posMultiplier = leg.pos * contractMultiplier;
@@ -264,6 +334,10 @@
             if (hasUsableCurrentQuote(leg)) {
                 effectiveCostPerShare = leg.currentPrice;
             } else if (globalBaseDateStr && globalUnderlyingPrice !== null && globalInterestRate !== null) {
+                // Priced as of the base date, where the weighted clock gives
+                // the identical price by construction (the IV conversion
+                // preserves total variance at its anchor), so the calendar
+                // form is kept for simplicity on every time basis.
                 const baseCalDTE = diffDays(globalBaseDateStr, leg.expDate);
                 const baseT = baseCalDTE / 365.0;
 
@@ -360,6 +434,10 @@
         calculateOptionPrice,
         calculateBlack76Price,
         calculatePrice,
+        configureSimTimeBasis,
+        getSimTimeBasisWeekendWeight,
+        weightedDaysPerYear,
+        convertIvToWeightedClock,
         resolveInstrumentProfile,
         isUnderlyingLeg,
         getMultiplier,

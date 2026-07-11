@@ -6,6 +6,7 @@ const suites = [
     require('./iv_term_structure_page.test'),
     require('./calendar_handoff.test'),
     require('./group_order_builder.test'),
+    require('./leg_position_check.test'),
     require('./trade_trigger_logic.test'),
     require('./combo_order_transport.test'),
     require('./page_capabilities.test'),

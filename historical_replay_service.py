@@ -1,7 +1,11 @@
 import os
 from datetime import datetime
 
-from historical_data import HistoricalReplayStore
+from historical_data import (
+    DEFAULT_CHAIN_SERVICE_URL,
+    DEFAULT_RATES_DB,
+    HistoricalReplayStore,
+)
 
 
 def normalize_symbol(value):
@@ -46,8 +50,13 @@ def normalize_history_lookup_date(value):
 
 
 class HistoricalReplayService:
-    def __init__(self, db_path, logger=None):
-        self.store = HistoricalReplayStore(os.path.abspath(db_path), logger=logger)
+    def __init__(self, chain_service_url=DEFAULT_CHAIN_SERVICE_URL,
+                 rates_db_path=DEFAULT_RATES_DB, logger=None):
+        self.store = HistoricalReplayStore(
+            chain_service_url,
+            os.path.abspath(rates_db_path) if rates_db_path else '',
+            logger=logger,
+        )
 
     def build_snapshot_payload(self, requested_date, underlying_request, options_data):
         underlying_symbol = normalize_symbol(

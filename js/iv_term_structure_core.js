@@ -48,6 +48,50 @@
         return _roundNumber(callMark + putMark, 4);
     }
 
+    function _parseUtcDate(value) {
+        const compact = String(value || '').trim().replace(/[-/]/g, '');
+        if (!/^\d{8}$/.test(compact)) {
+            return null;
+        }
+        const date = new Date(`${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}T00:00:00Z`);
+        return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    function countTradingDays(startDateStr, endDateStr) {
+        const start = _parseUtcDate(startDateStr);
+        const end = _parseUtcDate(endDateStr);
+        if (!start || !end || start > end) {
+            return null;
+        }
+
+        let days = 0;
+        const current = new Date(start);
+        while (current < end) {
+            const dayOfWeek = current.getUTCDay();
+            const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+            const isHoliday = typeof globalScope.isMarketHoliday === 'function'
+                && globalScope.isMarketHoliday(current.toISOString().slice(0, 10));
+            if (!isWeekend && !isHoliday) {
+                days += 1;
+            }
+            current.setUTCDate(current.getUTCDate() + 1);
+        }
+        return days;
+    }
+
+    // Re-annualize a calendar-day IV onto a trading-day clock so expiries on
+    // both sides of a weekend become comparable: the option's total variance
+    // iv^2 * (calDte/365) is preserved and divided by tradDte/252 instead,
+    // which removes the dead weekend days from the denominator.
+    function computeTradingDayAnnualizedIv(iv, calDte, tradDte) {
+        if (!Number.isFinite(iv) || iv <= 0
+            || !Number.isFinite(calDte) || calDte <= 0
+            || !Number.isFinite(tradDte) || tradDte <= 0) {
+            return null;
+        }
+        return _roundNumber(iv * Math.sqrt((calDte * 252) / (tradDte * 365)), 6);
+    }
+
     function _normalizeExpiryKey(value) {
         const normalized = String(value || '').trim().replace(/-/g, '');
         return /^\d{8}$/.test(normalized) ? normalized : '';
@@ -65,7 +109,7 @@
         return (Array.isArray(rows) ? rows : []).find((row) => _getRowExpiry(row) === expiry) || null;
     }
 
-    function buildExpiryDetailRows(expiryRows, quotesBySubId) {
+    function buildExpiryDetailRows(expiryRows, quotesBySubId, anchorDate) {
         const quotes = quotesBySubId && typeof quotesBySubId === 'object'
             ? quotesBySubId
             : {};
@@ -80,17 +124,26 @@
                 const callMark = _coercePositiveNumber(callQuote && callQuote.mark);
                 const putMark = _coercePositiveNumber(putQuote && putQuote.mark);
                 const atmStraddleMark = _computeStraddleMark(callMark, putMark);
+                const dte = Math.max(0, parseInt(entry && entry.dte, 10) || 0);
+                const tradDte = countTradingDays(anchorDate, entry && entry.expiry);
+                const callIvTd = computeTradingDayAnnualizedIv(callIv, dte, tradDte);
+                const putIvTd = computeTradingDayAnnualizedIv(putIv, dte, tradDte);
 
                 return {
                     expiry: String(entry && entry.expiry || '').trim(),
-                    dte: Math.max(0, parseInt(entry && entry.dte, 10) || 0),
+                    dte,
+                    tradDte,
                     atmStrike: _coercePositiveNumber(entry && entry.atmStrike),
                     callIv,
                     putIv,
                     atmIv,
+                    callIvTd,
+                    putIvTd,
+                    atmIvTd: _computeAverageIv(callIvTd, putIvTd),
                     callMark,
                     putMark,
                     atmStraddleMark,
+                    subscriptionSelected: !(entry && entry.subscriptionSelected === false),
                     hasCompletePair: Number.isFinite(callIv) && Number.isFinite(putIv),
                     hasCompleteStraddle: Number.isFinite(atmStraddleMark),
                     atmCallSubId: String(entry && entry.atmCallSubId || '').trim(),
@@ -139,13 +192,18 @@
                 targetDays: bucket.targetDays,
                 matchedExpiry: match ? String(match.expiry || '') : null,
                 matchedDte: match && Number.isFinite(match.dte) ? match.dte : null,
+                tradDte: match && Number.isFinite(match.tradDte) ? match.tradDte : null,
                 atmStrike: match && Number.isFinite(match.atmStrike) ? match.atmStrike : null,
                 callIv: match && Number.isFinite(match.callIv) ? match.callIv : null,
                 putIv: match && Number.isFinite(match.putIv) ? match.putIv : null,
                 atmIv: match && Number.isFinite(match.atmIv) ? match.atmIv : null,
+                callIvTd: match && Number.isFinite(match.callIvTd) ? match.callIvTd : null,
+                putIvTd: match && Number.isFinite(match.putIvTd) ? match.putIvTd : null,
+                atmIvTd: match && Number.isFinite(match.atmIvTd) ? match.atmIvTd : null,
                 callMark: match && Number.isFinite(match.callMark) ? match.callMark : null,
                 putMark: match && Number.isFinite(match.putMark) ? match.putMark : null,
                 atmStraddleMark: match && Number.isFinite(match.atmStraddleMark) ? match.atmStraddleMark : null,
+                subscriptionSelected: !match || match.subscriptionSelected !== false,
                 hasCompletePair: !!(match && match.hasCompletePair === true),
                 hasCompleteStraddle: !!(match && match.hasCompleteStraddle === true),
             };
@@ -353,6 +411,8 @@
     globalScope.OptionComboIvTermStructureCore = {
         DEFAULT_BUCKET_DEFINITIONS: cloneBucketDefinitions(DEFAULT_BUCKET_DEFINITIONS),
         cloneBucketDefinitions,
+        countTradingDays,
+        computeTradingDayAnnualizedIv,
         buildExpiryDetailRows,
         buildBucketRows,
         buildStraddleComparisonRows,

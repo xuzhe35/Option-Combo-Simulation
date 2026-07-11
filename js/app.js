@@ -98,6 +98,8 @@ const state = {
     historicalAvailableEndDate: '',
     interestRate: 0.03, // 3% default risk-free rate
     ivOffset: 0.0, // 0%
+    simTimeBasis: 'calendar', // 'calendar' (TWS default) | 'trading' | 'weighted'
+    simWeekendWeight: 0.3, // λ: weekend/holiday variance weight used by 'weighted'
     greeksEnabled: false,
     deltaHedge: OptionComboSessionLogic.createDefaultDeltaHedgeConfig(),
     primaryControlPanelCollapsed: false,
@@ -106,6 +108,9 @@ const state = {
     liveComboOrderAccounts: [],
     liveComboOrderAccountsConnected: false,
     selectedLiveComboOrderAccount: '',
+    portfolioPositions: [],
+    portfolioPositionsConnected: false,
+    pendingLegExistsCheckGroupId: '',
     forwardRateSamples: [],
     futuresPool: [],
     viewMode: 'active', // 'active' (Historical Entry Cost) or 'trial' (Current Live Price)
@@ -431,10 +436,19 @@ function renderGroups() {
                 : productRegistry.supportsUnderlyingLegs(symbol);
         },
         requestPortfolioAvgCostSnapshot,
+        requestLegExistsCheck: typeof requestLegExistsCheck === 'function'
+            ? requestLegExistsCheck
+            : null,
         requestContinueManagedComboOrder,
         requestConcedeManagedComboOrder,
+        requestManualConcedeManagedComboOrder: typeof requestManualConcedeManagedComboOrder === 'function'
+            ? requestManualConcedeManagedComboOrder
+            : null,
         requestCancelManagedComboOrder,
         requestCloseGroupComboOrder,
+        requestEquivalentCloseGroupComboOrder: typeof requestEquivalentCloseGroupComboOrder === 'function'
+            ? requestEquivalentCloseGroupComboOrder
+            : null,
         requestCloseLegComboOrder: typeof requestCloseLegComboOrder === 'function'
             ? requestCloseLegComboOrder
             : null,
@@ -592,7 +606,25 @@ function _applyPortfolioDerivedData(derivedData, options = {}) {
     }
 }
 
+function _syncSimTimeBasisPricingConfig() {
+    const pricingCore = typeof OptionComboPricingCore !== 'undefined' ? OptionComboPricingCore : null;
+    const sessionLogic = typeof OptionComboSessionLogic !== 'undefined' ? OptionComboSessionLogic : null;
+    if (!pricingCore
+        || typeof pricingCore.configureSimTimeBasis !== 'function'
+        || !sessionLogic
+        || typeof sessionLogic.resolveSimWeekendWeight !== 'function') {
+        return;
+    }
+    pricingCore.configureSimTimeBasis({
+        weekendWeight: sessionLogic.resolveSimWeekendWeight(
+            state.simTimeBasis,
+            state.simWeekendWeight
+        ),
+    });
+}
+
 function updateDerivedValues() {
+    _syncSimTimeBasisPricingConfig();
     const derivedData = _cachePortfolioDerivedData(
         OptionComboValuation.computePortfolioDerivedData(state)
     );
@@ -1151,6 +1183,8 @@ function applyImportedState(normalizedState, importedSessionTitle = '') {
     state.historicalAvailableEndDate = '';
     state.interestRate = normalizedState.interestRate;
     state.ivOffset = normalizedState.ivOffset;
+    state.simTimeBasis = OptionComboSessionLogic.normalizeSimTimeBasis(normalizedState.simTimeBasis);
+    state.simWeekendWeight = OptionComboSessionLogic.normalizeSimWeekendWeight(normalizedState.simWeekendWeight);
     state.greeksEnabled = normalizedState.greeksEnabled === true;
     state.deltaHedge = OptionComboSessionLogic.normalizeDeltaHedgeConfig(normalizedState.deltaHedge);
     state.primaryControlPanelCollapsed = normalizedState.primaryControlPanelCollapsed === true;

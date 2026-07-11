@@ -17,6 +17,7 @@ from ib_server_ws import (
     purge_combo_order_tracking_for_websocket,
     purge_hedge_order_tracking_for_websocket,
 )
+from ib_server_market_data import cancel_all_api_market_data_subscriptions
 
 
 class _FakeWebSocket:
@@ -104,10 +105,12 @@ class IbServerWsHandlerTests(unittest.TestCase):
     def _build_env(self):
         sent_messages = []
         snapshot_calls = []
+        position_snapshot_calls = []
         managed_snapshot_calls = []
         cancel_iv_calls = []
         unsubscribe_calls = []
         ensure_connect_calls = []
+        reset_api_subscription_calls = []
         active_hedge_snapshot_calls = []
         iv_subscription_calls = []
         historical_bar_calls = []
@@ -123,6 +126,17 @@ class IbServerWsHandlerTests(unittest.TestCase):
         async def ensure_ib_connect_task():
             ensure_connect_calls.append(True)
             return 'Connecting to IB.'
+
+        async def reset_all_api_market_data_subscriptions(client_ip):
+            reset_api_subscription_calls.append(client_ip)
+            return {
+                'action': 'api_market_data_subscriptions_reset',
+                'success': True,
+                'knownTickerCount': 4,
+                'trackedClientCount': 2,
+                'reconnecting': True,
+                'message': 'All API market-data subscriptions were cleared.',
+            }
 
         def unsubscribe_client_safely(websocket):
             unsubscribe_calls.append(websocket)
@@ -195,6 +209,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
             'historical_replay_service': historical_replay_service,
             'execution_engine': _ExecutionEngineStub(),
             'send_portfolio_avg_cost_snapshot': lambda websocket: snapshot_calls.append(websocket),
+            'send_portfolio_positions_snapshot': lambda websocket: position_snapshot_calls.append(websocket),
             'send_managed_accounts_snapshot': lambda websocket: managed_snapshot_calls.append(websocket),
             'cancel_iv_term_structure_sync_task': cancel_iv_term_structure_sync_task,
             'unsubscribe_client_safely': unsubscribe_client_safely,
@@ -215,6 +230,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
                 'message': message,
             },
             'ensure_ib_connect_task': ensure_ib_connect_task,
+            'reset_all_api_market_data_subscriptions': reset_all_api_market_data_subscriptions,
             'build_active_hedge_orders_snapshot': build_active_hedge_orders_snapshot,
             'build_active_combo_orders_snapshot': build_active_combo_orders_snapshot,
             'normalize_bool': lambda value, default=False: default if value is None else str(value).strip().lower() in ('1', 'true', 'yes', 'on'),
@@ -247,10 +263,12 @@ class IbServerWsHandlerTests(unittest.TestCase):
             '_captures': {
                 'sent_messages': sent_messages,
                 'snapshot_calls': snapshot_calls,
+                'position_snapshot_calls': position_snapshot_calls,
                 'managed_snapshot_calls': managed_snapshot_calls,
                 'cancel_iv_calls': cancel_iv_calls,
                 'unsubscribe_calls': unsubscribe_calls,
                 'ensure_connect_calls': ensure_connect_calls,
+                'reset_api_subscription_calls': reset_api_subscription_calls,
                 'active_hedge_snapshot_calls': active_hedge_snapshot_calls,
                 'active_combo_snapshot_calls': active_combo_snapshot_calls,
                 'iv_subscription_calls': iv_subscription_calls,
@@ -286,6 +304,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
 
         self.assertEqual(sent_messages, [])
         self.assertEqual(snapshot_calls, [websocket])
+        self.assertEqual(env['_captures']['position_snapshot_calls'], [websocket])
         self.assertEqual(managed_snapshot_calls, [websocket])
         self.assertEqual(cancel_iv_calls, [websocket])
         self.assertEqual(unsubscribe_calls, [websocket])
@@ -334,6 +353,15 @@ class IbServerWsHandlerTests(unittest.TestCase):
 
         self.assertEqual(managed_snapshot_calls, [websocket, websocket])
 
+    def test_handle_ws_client_routes_portfolio_positions_snapshot_action(self):
+        env, *_rest = self._build_env()
+        websocket = _FakeWebSocket(messages=[json.dumps({'action': 'request_portfolio_positions_snapshot'})])
+        handler = build_ws_client_handler(env)
+
+        asyncio.run(handler(websocket))
+
+        self.assertEqual(env['_captures']['position_snapshot_calls'], [websocket, websocket])
+
     def test_handle_ws_client_routes_ib_connection_status_action(self):
         (
             env,
@@ -378,6 +406,136 @@ class IbServerWsHandlerTests(unittest.TestCase):
             'connected': False,
             'message': 'Connecting to IB.',
         })
+
+    def test_global_api_subscription_reset_requires_explicit_confirmation(self):
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {'action': 'reset_api_market_data_subscriptions'},
+            client_ip='10.0.0.8',
+        ))
+
+        self.assertEqual(env['_captures']['reset_api_subscription_calls'], [])
+        self.assertEqual(len(sent_messages), 1)
+        self.assertFalse(sent_messages[0][1]['success'])
+        self.assertIn('confirmation', sent_messages[0][1]['message'].lower())
+
+    def test_global_api_subscription_reset_broadcasts_to_every_connected_session(self):
+        env, sent_messages, *_ = self._build_env()
+        requester = _FakeWebSocket()
+        other_session = _FakeWebSocket()
+        env['connected_clients'].update((requester, other_session))
+
+        asyncio.run(dispatch_client_message(
+            env,
+            requester,
+            {'action': 'reset_api_market_data_subscriptions', 'confirmed': True},
+            client_ip='10.0.0.9',
+        ))
+
+        self.assertEqual(env['_captures']['reset_api_subscription_calls'], ['10.0.0.9'])
+        recipients = {sent_websocket for sent_websocket, _payload in sent_messages}
+        self.assertEqual(recipients, {requester, other_session})
+        self.assertTrue(all(payload['success'] for _websocket, payload in sent_messages))
+
+    def test_subscription_started_before_global_reset_cannot_open_a_late_stream(self):
+        env, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        env['client_subscriptions'][websocket] = {}
+        generation = [3]
+        env['get_api_market_data_generation'] = lambda: generation[0]
+
+        async def qualify_after_reset(contract, request=None):
+            generation[0] += 1
+            return type('QualifiedContract', (), {
+                'conId': 404,
+                'secType': 'STK',
+                'symbol': 'SPY',
+            })()
+
+        env['qualify_one'] = qualify_after_reset
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {
+                'action': 'subscribe',
+                'underlying': {'secType': 'STK', 'symbol': 'SPY'},
+                'options': [],
+                'futures': [],
+                'stocks': [],
+            },
+        ))
+
+        self.assertEqual(env['ib'].req_mkt_data_calls, [])
+        self.assertEqual(env['client_subscriptions'][websocket], {})
+
+    def test_subscription_arriving_during_global_reset_is_rejected(self):
+        env, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        env['client_subscriptions'][websocket] = {}
+        env['get_api_market_data_generation'] = lambda: 7
+        env['api_market_data_reset_in_progress'] = lambda: True
+
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {
+                'action': 'subscribe',
+                'underlying': {'secType': 'STK', 'symbol': 'SPY'},
+                'options': [],
+                'futures': [],
+                'stocks': [],
+            },
+        ))
+
+        self.assertEqual(env['ib'].req_mkt_data_calls, [])
+        self.assertEqual(env['client_subscriptions'][websocket], {})
+
+    def test_cancel_all_api_market_data_subscriptions_clears_every_session(self):
+        first_contract = type('Contract', (), {'conId': 101})()
+        duplicate_contract = type('Contract', (), {'conId': 101})()
+        second_contract = type('Contract', (), {'conId': 202})()
+        first_ticker = _FakeTicker(first_contract)
+        duplicate_ticker = _FakeTicker(duplicate_contract)
+        second_ticker = _FakeTicker(second_contract)
+
+        class _ResettableIB:
+            def __init__(self):
+                self.cancelled = []
+
+            def tickers(self):
+                return [first_ticker, second_ticker]
+
+            def cancelMktData(self, contract):
+                self.cancelled.append(contract.conId)
+                return True
+
+        fake_ib = _ResettableIB()
+        first_session = object()
+        second_session = object()
+        subscriptions = {
+            first_session: {'first': first_ticker, 'duplicate': duplicate_ticker},
+            second_session: {'second': second_ticker},
+        }
+        generic_ticks = {101: {'106'}, 202: set()}
+
+        result = cancel_all_api_market_data_subscriptions(
+            ib=fake_ib,
+            client_subscriptions=subscriptions,
+            generic_ticks_by_con_id=generic_ticks,
+        )
+
+        self.assertEqual(result, {
+            'knownTickerCount': 2,
+            'cancelledTickerCount': 2,
+            'cancelErrorCount': 0,
+        })
+        self.assertEqual(fake_ib.cancelled, [101, 202])
+        self.assertEqual(subscriptions, {first_session: {}, second_session: {}})
+        self.assertEqual(generic_ticks, {})
 
     def test_handle_ws_client_routes_active_hedge_snapshot_action(self):
         (

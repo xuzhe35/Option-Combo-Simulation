@@ -130,6 +130,75 @@ module.exports = {
             },
         },
         {
+            name: 'keeps subscription timeout errors visible during progress and completion',
+            run() {
+                const ctx = loadPageContext(null);
+                const buildStatus = ctx.OptionComboIvTermStructurePage._test.buildSubscriptionStatus;
+                const timeoutPayload = {
+                    resolvedExpiryCount: 5,
+                    totalExpiryCount: 8,
+                    expectedOptionCount: 10,
+                    attemptedOptionCount: 4,
+                    subscribedOptionCount: 2,
+                    failedOptionCount: 2,
+                    timedOutOptionCount: 2,
+                    subscriptionErrorMessage: 'Option subscription timed out after 8.0s while resolving SPY 20260717 750C.',
+                };
+
+                const progress = buildStatus(timeoutPayload);
+                assert.equal(progress.kind, 'error');
+                assert.match(progress.message, /timed out after 8\.0s/);
+                assert.match(progress.message, /still running/);
+                assert.match(progress.message, /timed out 2/);
+
+                const complete = buildStatus(timeoutPayload, { complete: true });
+                assert.equal(complete.kind, 'error');
+                assert.match(complete.message, /Sync finished/);
+                assert.match(complete.message, /2 failed, 2 timed out/);
+
+                const healthyProgress = buildStatus({
+                    resolvedExpiryCount: 5,
+                    totalExpiryCount: 8,
+                    expectedOptionCount: 10,
+                    attemptedOptionCount: 2,
+                    subscribedOptionCount: 2,
+                    failedOptionCount: 0,
+                });
+                assert.equal(healthyProgress.kind, 'success');
+                assert.doesNotMatch(healthyProgress.message, /failed 8/);
+            },
+        },
+        {
+            name: 'preserves the real IB connection state when a global stream reset fails',
+            run() {
+                const ctx = loadPageContext(null);
+                const buildStatus = ctx.OptionComboIvTermStructurePage._test.buildIbStatusAfterApiMarketDataReset;
+                const previous = {
+                    connected: true,
+                    connecting: false,
+                    host: '127.0.0.1',
+                };
+
+                assert.deepEqual(
+                    JSON.parse(JSON.stringify(buildStatus(previous, { success: false }, 'Reset failed.'))),
+                    {
+                        connected: true,
+                        connecting: false,
+                        host: '127.0.0.1',
+                        message: 'Reset failed.',
+                    }
+                );
+                assert.deepEqual(
+                    JSON.parse(JSON.stringify(buildStatus(previous, { success: true, reconnecting: true }, 'Reconnecting.'))),
+                    {
+                        connected: false,
+                        connecting: true,
+                        message: 'Reconnecting.',
+                    }
+                );
+            },
+        },
+        {
             name: 'lays out cards as expandable rows with SPY expanded by default',
             run() {
                 const ctx = loadPageContext(null);
@@ -185,6 +254,8 @@ module.exports = {
                 const payload = testApi.buildSubscribePayload(card);
 
                 assert.match(html, /Underlying FUT Month/);
+                assert.match(html, /Live Option Streams/);
+                assert.match(html, /10 streams \(5 expiries\)/);
                 assert.match(html, /data-action="futures-contract-month"/);
                 assert.match(html, /value="202608"/);
                 assert.equal(payload.underlying.secType, 'FUT');
@@ -194,6 +265,7 @@ module.exports = {
                 assert.equal(payload.optionTemplate.secType, 'FOP');
                 assert.equal(payload.optionTemplate.underlyingContractMonth, '202608');
                 assert.equal(payload.optionTemplate.underlyingMultiplier, '1000');
+                assert.equal(payload.maxOptionStreams, 10);
 
                 const siCard = testApi.createCardState({
                     symbol: 'SI',
@@ -205,6 +277,32 @@ module.exports = {
                 assert.equal(siPayload.underlying.contractMonth, '202608');
                 assert.equal(siPayload.underlying.multiplier, '5000');
                 assert.equal(siPayload.optionTemplate.underlyingMultiplier, '5000');
+
+                const esCard = testApi.createCardState({
+                    symbol: 'ES',
+                    historyPath: 'iv_term_structure/data/ES.json',
+                    futuresContractMonth: '202609',
+                }, { isExpanded: true });
+                const esPayload = testApi.buildSubscribePayload(esCard);
+                assert.equal(esPayload.underlying.secType, 'FUT');
+                assert.equal(esPayload.underlying.symbol, 'ES');
+                assert.equal(esPayload.underlying.exchange, 'CME');
+                assert.equal(esPayload.underlying.contractMonth, '202609');
+                assert.equal(esPayload.underlying.multiplier, '50');
+                assert.equal(esPayload.optionTemplate.secType, 'FOP');
+                assert.equal(esPayload.optionTemplate.exchange, 'CME');
+                assert.equal(esPayload.optionTemplate.underlyingContractMonth, '202609');
+                assert.equal(esPayload.optionTemplate.underlyingMultiplier, '50');
+
+                const allStreamsCard = testApi.createCardState({
+                    symbol: 'SPY',
+                    historyPath: 'iv_term_structure/data/SPY.json',
+                    maxOptionStreams: 0,
+                }, { isExpanded: true });
+                const allStreamsPayload = testApi.buildSubscribePayload(allStreamsCard);
+                const allStreamsHtml = testApi.buildOptionStreamLimitControl(allStreamsCard);
+                assert.equal(allStreamsPayload.maxOptionStreams, 0);
+                assert.match(allStreamsHtml, /value="0" selected>All streams/);
             },
         },
         {
@@ -259,8 +357,33 @@ module.exports = {
                 assert.doesNotMatch(html, /<th>Call IV<\/th>/);
                 assert.doesNotMatch(html, /<th>Put IV<\/th>/);
                 assert.doesNotMatch(html, /<th>ATM IV<\/th>/);
+                assert.match(html, />TD IV<\/th>/);
                 assert.match(html, /12%\/13%/);
-                assert.equal((html.match(/<th>/g) || []).length, 6);
+                assert.equal((html.match(/<th[\s>]/g) || []).length, 7);
+            },
+        },
+        {
+            name: 'renders the trading-day IV cell from converted pair values',
+            run() {
+                const ctx = loadPageContext(null);
+                const { buildIvPairTdCell } = ctx.OptionComboIvTermStructurePage._test;
+
+                assert.match(
+                    buildIvPairTdCell({ callIvTd: 0.2410, putIvTd: 0.2395, tradDte: 3 }),
+                    /24\.1%\/23\.95%/
+                );
+                assert.match(
+                    buildIvPairTdCell({ callIvTd: 0.2410, putIvTd: 0.2395, tradDte: 3 }),
+                    /Trading DTE: 3/
+                );
+                assert.match(
+                    buildIvPairTdCell({ callIvTd: null, putIvTd: null }),
+                    /ivts-missing/
+                );
+                assert.match(
+                    buildIvPairTdCell({ subscriptionSelected: false, callIvTd: 0.2, putIvTd: 0.2 }),
+                    /Not subscribed/
+                );
             },
         },
         {
@@ -596,6 +719,13 @@ module.exports = {
                 assert.equal(restored.sortBy, 'best_iv_ratio');
                 assert.equal(restored.showAll, true);
                 assert.equal(testApi.loadSavedCalendarFinderConfig('QQQ'), null);
+
+                assert.equal(testApi.loadSavedOptionStreamLimit('SPY'), null);
+                testApi.saveOptionStreamLimit('spy', 20);
+                assert.equal(testApi.loadSavedOptionStreamLimit('SPY'), 20);
+                testApi.saveOptionStreamLimit('spy', 'all');
+                assert.equal(testApi.loadSavedOptionStreamLimit('SPY'), 0);
+                assert.equal(testApi.loadSavedOptionStreamLimit('QQQ'), null);
 
                 store.optionComboIvtsCalendarFinder = '{broken json';
                 assert.equal(testApi.loadSavedCalendarFinderConfig('SPY'), null);

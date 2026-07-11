@@ -3,7 +3,7 @@
 Import the U.S. Treasury daily yield curve history plus a synchronized single-rate proxy.
 
 Default behavior:
-- uses sqlite_spy/spy_options.db
+- uses sqlite_spy/rates.db
 - uses today as the default end date
 - stores the full Treasury par-yield curve in yield_curve_daily_rates
 - syncs one selected tenor into risk_free_daily_rates for the app's current single `r`
@@ -17,7 +17,7 @@ risk_free_daily_rates because the app currently has only one `r` input.
 Examples:
     python scripts/import_treasury_risk_free_rate.py
     python scripts/import_treasury_risk_free_rate.py --proxy-tenor 3m
-    python scripts/import_treasury_risk_free_rate.py --db-path sqlite_spy/spy_options.db
+    python scripts/import_treasury_risk_free_rate.py --db-path sqlite_spy/rates.db
     python scripts/import_treasury_risk_free_rate.py --start 2008-01-02 --end 2025-04-07
 """
 
@@ -103,7 +103,7 @@ def _project_root() -> str:
 
 
 def _default_db_path() -> str:
-    return os.path.join(_project_root(), "sqlite_spy", "spy_options.db")
+    return os.path.join(_project_root(), "sqlite_spy", "rates.db")
 
 
 def _parse_date(value: str) -> date:
@@ -142,17 +142,29 @@ def _get_or_create_date_id(
 
 
 def _resolve_option_quote_date_range(conn: sqlite3.Connection) -> tuple[date, date]:
-    row = conn.execute(
-        """
-        SELECT MIN(d.date), MAX(d.date)
-        FROM options_data od
-        JOIN dates d ON d.date_id = od.date_ref
-        """
-    ).fetchone()
+    # rates.db has no options_data table (chains live in the shared
+    # options-chain-service DB), so range inference only works against the
+    # legacy bundled DB. Fall back to the rates tables themselves.
+    try:
+        row = conn.execute(
+            """
+            SELECT MIN(d.date), MAX(d.date)
+            FROM options_data od
+            JOIN dates d ON d.date_id = od.date_ref
+            """
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = conn.execute(
+            """
+            SELECT MIN(d.date), MAX(d.date)
+            FROM risk_free_daily_rates rf
+            JOIN dates d ON d.date_id = rf.date_ref
+            """
+        ).fetchone()
 
     if not row or not row[0] or not row[1]:
         raise RuntimeError(
-            "Could not infer quote-date range from options_data. Pass --start and --end explicitly."
+            "Could not infer a quote-date range. Pass --start and --end explicitly."
         )
 
     return _parse_date(str(row[0])), _parse_date(str(row[1]))
@@ -382,7 +394,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--db-path",
         default=_default_db_path(),
-        help="Path to the SQLite DB. Defaults to sqlite_spy/spy_options.db",
+        help="Path to the SQLite DB. Defaults to sqlite_spy/rates.db",
     )
     parser.add_argument(
         "--proxy-tenor",

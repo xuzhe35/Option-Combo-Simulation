@@ -45,12 +45,28 @@ class HistoricalBarsResponsePayload(TypedDict, total=False):
     requestId: str
 
 
+class ApiMarketDataResetPayload(TypedDict, total=False):
+    action: str
+    success: bool
+    requestedBy: str
+    trackedClientCount: int
+    stoppedIvSyncCount: int
+    knownTickerCount: int
+    cancelledTickerCount: int
+    cancelErrorCount: int
+    connectionWasConnected: bool
+    connectionReset: bool
+    reconnecting: bool
+    message: str
+
+
 class IvTermStructureExpiryRowPayload(TypedDict, total=False):
     expiry: str
     dte: int
     atmStrike: float | None
     atmCallSubId: str
     atmPutSubId: str
+    subscriptionSelected: bool
 
 
 class IvTermStructureOptionDescriptor(TypedDict):
@@ -67,12 +83,18 @@ class IvTermStructureSnapshotPayload(TypedDict, total=False):
     anchorDate: str
     maxDte: int
     strikeRadius: int
+    maxOptionStreams: int
     underlyingPrice: float | None
     underlyingQuote: QuoteSnapshot | None
     expiryRows: list[IvTermStructureExpiryRowPayload]
     optionDescriptors: dict[str, IvTermStructureOptionDescriptor]
     subscribedOptionCount: int
     expectedOptionCount: int
+    attemptedOptionCount: int
+    failedOptionCount: int
+    timedOutOptionCount: int
+    subscriptionErrorMessage: str
+    sharedAtmProbeTimedOut: bool
     subscriptionPending: bool
     warning: str
     message: str
@@ -80,7 +102,7 @@ class IvTermStructureSnapshotPayload(TypedDict, total=False):
     requestedUnderlyingContractMonth: str
 
 
-class IvTermStructureCatalogPatchPayload(TypedDict):
+class IvTermStructureCatalogPatchPayload(TypedDict, total=False):
     action: str
     symbol: str
     expiryRows: list[IvTermStructureExpiryRowPayload]
@@ -89,14 +111,25 @@ class IvTermStructureCatalogPatchPayload(TypedDict):
     totalExpiryCount: int
     subscribedOptionCount: int
     expectedOptionCount: int
+    attemptedOptionCount: int
+    failedOptionCount: int
+    timedOutOptionCount: int
+    subscriptionErrorMessage: str
+    sharedAtmProbeTimedOut: bool
     subscriptionPending: bool
+    message: str
 
 
-class IvTermStructureSyncCompletePayload(TypedDict):
+class IvTermStructureSyncCompletePayload(TypedDict, total=False):
     action: str
     symbol: str
     subscribedOptionCount: int
     expectedOptionCount: int
+    attemptedOptionCount: int
+    failedOptionCount: int
+    timedOutOptionCount: int
+    subscriptionErrorMessage: str
+    sharedAtmProbeTimedOut: bool
 
 
 class IvTermStructureErrorPayload(TypedDict):
