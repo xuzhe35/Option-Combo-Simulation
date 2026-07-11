@@ -443,6 +443,36 @@ module.exports = {
             },
         },
         {
+            name: 'requests a one-unit partial group close and forces combo-only execution',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY', underlyingPrice: 600,
+                    simulatedDate: '2026-07-11', baseDate: '2026-07-11',
+                    allowLiveComboOrders: true, selectedLiveComboOrderAccount: 'U1',
+                    groups: [{
+                        id: 'partial_close', viewMode: 'active',
+                        closeExecution: {
+                            executionMode: 'preview', strategy: 'auto', quantity: 1,
+                            repriceThreshold: 0.01, timeInForce: 'DAY', pendingRequest: false,
+                        },
+                        legs: [
+                            { id: 'call', type: 'call', pos: 5, strike: 600, expDate: '2026-09-18', cost: 10, closePrice: null },
+                            { id: 'put', type: 'put', pos: 5, strike: 600, expDate: '2026-09-18', cost: 8, closePrice: null },
+                        ],
+                    }], hedges: [],
+                };
+                const harness = buildHarness({ state });
+
+                const result = harness.api.requestCloseGroupComboOrder(state.groups[0]);
+
+                assert.equal(result, true);
+                assert.equal(harness.sent[0].closeQuantity, 1);
+                assert.equal(harness.sent[0].closeMaxQuantity, 5);
+                assert.equal(harness.sent[0].closeStrategy, 'combo');
+                assert.deepEqual(Array.from(harness.sent[0].legs, (leg) => leg.pos), [-1, -1]);
+            },
+        },
+        {
             name: 'requests explicit expiry-equivalent close planning from the manual action',
             run() {
                 const state = {
@@ -1413,6 +1443,49 @@ module.exports = {
                 });
                 assert.equal(state.groups[0].legs[1].cost, 7.96);
                 assert.equal(state.groups[0].legs[1].closePrice, 6.74);
+            },
+        },
+        {
+            name: 'applies cumulative partial-close fills idempotently and keeps remaining legs open',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    groups: [{
+                        id: 'partial_straddle',
+                        viewMode: 'active',
+                        closeExecution: {
+                            executionMode: 'submit', pendingRequest: false, status: 'submitted',
+                            lastPreview: {
+                                executionMode: 'submit', executionIntent: 'close', requestSource: 'close_group', orderId: 801,
+                            },
+                        },
+                        legs: [
+                            { id: 'call', type: 'call', pos: 5, cost: 10, closePrice: null },
+                            { id: 'put', type: 'put', pos: 5, cost: 8, closePrice: null },
+                        ],
+                    }],
+                };
+                const harness = buildHarness({ state });
+                const update = {
+                    action: 'combo_order_fill_cost_update',
+                    groupId: 'partial_straddle',
+                    orderFill: {
+                        executionMode: 'submit', executionIntent: 'close', requestSource: 'close_group', orderId: 801,
+                        legs: [
+                            { id: 'call', avgFillPrice: 12, filledQuantity: 1, targetPosition: -1, sourcePosition: 5, sourceCost: 10, sourceRealizedPnl: 0, multiplier: '100' },
+                            { id: 'put', avgFillPrice: 7, filledQuantity: 1, targetPosition: -1, sourcePosition: 5, sourceCost: 8, sourceRealizedPnl: 0, multiplier: '100' },
+                        ],
+                    },
+                };
+
+                harness.api._test.applyComboOrderFillCostUpdate(update);
+                harness.api._test.applyComboOrderFillCostUpdate(update);
+
+                assert.equal(state.groups[0].legs[0].pos, 4);
+                assert.equal(state.groups[0].legs[1].pos, 4);
+                assert.equal(state.groups[0].legs[0].closePrice, null);
+                assert.equal(state.groups[0].legs[0].partialCloseRealizedPnl, 200);
+                assert.equal(state.groups[0].legs[1].partialCloseRealizedPnl, -100);
             },
         },
         {

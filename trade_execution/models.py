@@ -220,6 +220,9 @@ class ComboLegRequest:
     observed_bid: Optional[float] = None
     observed_ask: Optional[float] = None
     observed_mark: Optional[float] = None
+    source_position: Optional[int] = None
+    source_cost: Optional[float] = None
+    source_realized_pnl: float = 0.0
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "ComboLegRequest":
@@ -244,6 +247,16 @@ class ComboLegRequest:
             observed_bid=_parse_optional_float(payload.get("observedBid") or payload.get("observed_bid")),
             observed_ask=_parse_optional_float(payload.get("observedAsk") or payload.get("observed_ask")),
             observed_mark=_parse_optional_float(payload.get("observedMark") or payload.get("observed_mark")),
+            source_position=(
+                _parse_int(payload.get("sourcePosition") or payload.get("source_position"))
+                if payload.get("sourcePosition") is not None or payload.get("source_position") is not None
+                else None
+            ),
+            source_cost=_parse_optional_float(payload.get("sourceCost") or payload.get("source_cost")),
+            source_realized_pnl=(
+                _parse_optional_float(payload.get("sourceRealizedPnl") or payload.get("source_realized_pnl"))
+                or 0.0
+            ),
         )
 
 

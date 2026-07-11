@@ -764,6 +764,10 @@
                                 </div>
                                 <div class="close-group-body">
                                     <div class="close-group-order-controls">
+                                        <label class="small text-muted close-group-quantity-control" style="display:flex;align-items:center;gap:0.35rem;white-space:nowrap;" title="Number of complete strategy units to close. For +5 Call / +5 Put, Close Qty 1 leaves +4 / +4.">
+                                            <span>Close Qty</span>
+                                            <input type="number" class="leg-input close-group-quantity" min="1" step="1" style="width:72px;">
+                                        </label>
                                         <select class="leg-input close-group-strategy" style="width: 148px;" title="Auto detects one-sided illiquid option quotes; Combo Only never substitutes expiry-equivalent hedges.">
                                             <option value="auto">Auto Liquidity</option>
                                             <option value="combo">Combo Only</option>
@@ -1212,28 +1216,28 @@
     <script src="js/index_forward_rate.js"></script>
     <script src="js/pricing_context.js?v=20260322-histsimdate"></script>
     <script src="js/trade_trigger_logic.js"></script>
-    <script src="js/group_order_builder.js?v=20260710-expiry-equivalent"></script>
+    <script src="js/group_order_builder.js?v=20260711-partial-close"></script>
     <script src="js/leg_position_check.js?v=20260711-leg-exists"></script>
     <script src="js/order_safety.js?v=20260711-safe-execution"></script>
     <script src="js/order_confirmation_ui.js?v=20260711-safe-execution"></script>
     <script src="js/distribution_proxy_config.js"></script>
     <script src="js/pricing_core.js?v=20260711-time-basis"></script>
     <script src="js/bsm.js"></script>
-    <script src="js/chart.js?v=20260602-profit-loss-ratio"></script>
+    <script src="js/chart.js?v=20260711-partial-close"></script>
     <script src="js/prob_charts.js?v=20260414-probivfix"></script>
     <script src="js/chart_controls.js?v=20260414-probivfix"></script>
-    <script src="js/amortized.js?v=20260322-histsimdate"></script>
-    <script src="js/valuation.js?v=20260322-histsimdate"></script>
-    <script src="js/session_logic.js?v=20260711-time-basis"></script>
+    <script src="js/amortized.js?v=20260711-partial-close"></script>
+    <script src="js/valuation.js?v=20260711-partial-close"></script>
+    <script src="js/session_logic.js?v=20260711-partial-close"></script>
     <script src="js/session_ui.js?v=20260322-histsimdate"></script>
     <script src="js/control_panel_ui.js?v=20260711-time-basis"></script>
     <script src="js/hedge_editor_ui.js"></script>
-    <script src="js/group_editor_ui.js?v=20260711-no-confirm-checkbox"></script>
+    <script src="js/group_editor_ui.js?v=20260711-partial-close"></script>
     <script src="js/hedge_ui.js"></script>
     <script src="js/group_ui.js?v=20260710-close-plan-revocation"></script>
     <script src="js/global_ui.js"></script>
     <script src="js/page_capabilities.js"></script>
-    <script src="js/combo_order_transport.js?v=20260711-leg-exists"></script>
+    <script src="js/combo_order_transport.js?v=20260711-partial-close"></script>
     <script src="js/delta_hedge_transport.js"></script>
     <script src="js/app.js?v=20260711-time-basis"></script>
     <script src="js/ws_client.js?v=20260711-leg-exists"></script>

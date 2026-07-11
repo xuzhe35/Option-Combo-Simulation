@@ -426,5 +426,51 @@ module.exports = {
                 assert.equal(payload.legs[0].observedBid, undefined);
             },
         },
+        {
+            name: 'builds a one-unit partial close while preserving strategy leg ratios',
+            run() {
+                const ctx = loadBrowserScripts(['js/product_registry.js', 'js/group_order_builder.js']);
+                const group = {
+                    id: 'straddle_5',
+                    name: 'Long Straddle x5',
+                    legs: [
+                        { id: 'call', type: 'call', pos: 5, strike: 600, expDate: '2026-09-18', cost: 12 },
+                        { id: 'put', type: 'put', pos: 5, strike: 600, expDate: '2026-09-18', cost: 10 },
+                    ],
+                };
+                const payload = ctx.OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(
+                    group,
+                    { underlyingSymbol: 'SPY', simulatedDate: '2026-07-11' },
+                    { intent: 'close', executionMode: 'preview', closeQuantity: 1 }
+                );
+
+                assert.equal(ctx.OptionComboGroupOrderBuilder.resolveGroupCloseQuantity(group), 5);
+                assert.equal(payload.closeQuantity, 1);
+                assert.equal(payload.closeMaxQuantity, 5);
+                assert.deepEqual(Array.from(payload.legs, (leg) => leg.pos), [-1, -1]);
+                assert.deepEqual(Array.from(payload.legs, (leg) => leg.sourcePosition), [5, 5]);
+            },
+        },
+        {
+            name: 'scales a 1-2-1 butterfly by complete combo units',
+            run() {
+                const ctx = loadBrowserScripts(['js/product_registry.js', 'js/group_order_builder.js']);
+                const group = {
+                    id: 'fly_5',
+                    legs: [
+                        { id: 'low', type: 'call', pos: 5, strike: 590, expDate: '2026-09-18' },
+                        { id: 'mid', type: 'call', pos: -10, strike: 600, expDate: '2026-09-18' },
+                        { id: 'high', type: 'call', pos: 5, strike: 610, expDate: '2026-09-18' },
+                    ],
+                };
+                const legs = ctx.OptionComboGroupOrderBuilder.buildGroupOrderLegRequests(
+                    group,
+                    { underlyingSymbol: 'SPY', simulatedDate: '2026-07-11' },
+                    { intent: 'close', closeQuantity: 2 }
+                );
+
+                assert.deepEqual(Array.from(legs, (leg) => leg.pos), [-2, 4, -2]);
+            },
+        },
     ],
 };

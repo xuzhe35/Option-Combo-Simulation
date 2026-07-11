@@ -1302,5 +1302,26 @@ module.exports = {
                 almostEqual(result.legResults[0].simPricePerShare, expectedPrice, 1e-6);
             },
         },
+        {
+            name: 'keeps realized pnl from partial closes alongside remaining open position pnl',
+            run() {
+                const ctx = loadValuationContext();
+                const result = ctx.OptionComboValuation.computeGroupDerivedData({
+                    id: 'partial_stock', viewMode: 'active', settleUnderlyingPrice: null,
+                    legs: [{
+                        id: 'stock', type: 'stock', pos: 4, cost: 100,
+                        currentPrice: 110, currentPriceSource: 'live', closePrice: null,
+                        partialCloseRealizedPnl: 200,
+                    }],
+                }, {
+                    underlyingSymbol: 'SPY', underlyingPrice: 110,
+                    baseDate: '2026-07-11', simulatedDate: '2026-07-11',
+                    interestRate: 0.03, ivOffset: 0, marketDataMode: 'live', greeksEnabled: false,
+                });
+
+                assert.equal(result.groupPnL, 240);
+                assert.equal(result.groupLivePnL, 240);
+            },
+        },
     ],
 };

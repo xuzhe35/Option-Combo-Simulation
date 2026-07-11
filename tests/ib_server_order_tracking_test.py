@@ -167,6 +167,10 @@ class IbServerOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
                     'strike': 500,
                     'expDate': '20240621',
                     'targetPosition': 1,
+                    'sourcePosition': 5,
+                    'sourceCost': 1.0,
+                    'sourceRealizedPnl': 25.0,
+                    'multiplier': '100',
                     'expectedExecutionSide': 'BUY',
                 },
             ],
@@ -196,6 +200,9 @@ class IbServerOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload['action'], 'combo_order_fill_cost_update')
         self.assertEqual(len(payload['orderFill']['legs']), 1)
         self.assertEqual(payload['orderFill']['legs'][0]['avgFillPrice'], 1.25)
+        self.assertEqual(payload['orderFill']['legs'][0]['sourcePosition'], 5)
+        self.assertEqual(payload['orderFill']['legs'][0]['sourceCost'], 1.0)
+        self.assertEqual(payload['orderFill']['legs'][0]['sourceRealizedPnl'], 25.0)
         self.assertEqual(tracking['fillTotals']['leg_call']['filledQuantity'], 2.0)
 
     async def test_hedge_status_update_preserves_metadata_fields(self):

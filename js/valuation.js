@@ -505,16 +505,19 @@
         );
         const simulationAvailable = Number.isFinite(simPricePerShare);
         const simValue = simulationAvailable ? processedLeg.posMultiplier * simPricePerShare : null;
-        const pnl = simulationAvailable ? (simValue - processedLeg.costBasis) : null;
+        const partialCloseRealizedPnl = Number.isFinite(parseFloat(leg.partialCloseRealizedPnl))
+            ? parseFloat(leg.partialCloseRealizedPnl)
+            : 0;
+        const pnl = simulationAvailable ? (simValue - processedLeg.costBasis + partialCloseRealizedPnl) : null;
         const isClosed = isClosedLeg(leg);
         const livePnlQuote = resolveLegSelectedLivePrice(group, leg);
         const liveDelta = resolveLegLiveDelta(leg, underlyingProfile, greeksEnabled);
         const hasLivePnl = activeViewMode === 'active'
-            && livePnlQuote.available
-            && (leg.cost !== 0 || livePnlQuote.price !== 0 || isClosed);
+            && ((livePnlQuote.available && (leg.cost !== 0 || livePnlQuote.price !== 0 || isClosed))
+                || Math.abs(partialCloseRealizedPnl) > 0.0001);
         const liveLegPnL = livePnlQuote.available
-            ? (livePnlQuote.price - leg.cost) * processedLeg.posMultiplier
-            : 0;
+            ? (livePnlQuote.price - leg.cost) * processedLeg.posMultiplier + partialCloseRealizedPnl
+            : partialCloseRealizedPnl;
         const effectiveLivePnL = isClosed ? pnl : liveLegPnL;
         const ivText = processedLeg.isUnderlyingLeg
             ? ''
@@ -533,6 +536,7 @@
             isClosed,
             hasLivePnl,
             liveLegPnL,
+            partialCloseRealizedPnl,
             effectiveLivePnL,
             livePnlSource: livePnlQuote.source,
             deltaEligible: !isClosed,
@@ -570,6 +574,7 @@
         let groupCost = 0;
         let groupSimValue = 0;
         let groupLivePnL = 0;
+        let groupPartialCloseRealizedPnl = 0;
         let groupHasLiveData = false;
         let groupUsesPortfolioLivePnl = false;
         let groupSimulationAvailable = true;
@@ -585,6 +590,7 @@
                 underlyingProfile
             );
             groupCost += legResult.processedLeg.costBasis;
+            groupPartialCloseRealizedPnl += legResult.partialCloseRealizedPnl || 0;
             if (legResult.simulationAvailable) {
                 groupSimValue += legResult.simValue;
             } else {
@@ -616,7 +622,10 @@
             groupCost,
             groupSimulationAvailable,
             groupSimValue: groupSimulationAvailable ? groupSimValue : null,
-            groupPnL: groupSimulationAvailable ? (groupSimValue - groupCost) : null,
+            groupPnL: groupSimulationAvailable
+                ? (groupSimValue - groupCost + groupPartialCloseRealizedPnl)
+                : null,
+            groupPartialCloseRealizedPnl,
             groupLivePnL,
             groupHasLiveData,
             groupUsesPortfolioLivePnl,
@@ -633,6 +642,10 @@
         const optionLegRedundancy = computeOptionLegRedundancy(globalState && globalState.groups);
 
         const globalTotalCost = includedGroupResults.reduce((sum, result) => sum + result.groupCost, 0);
+        const globalPartialCloseRealizedPnl = includedGroupResults.reduce(
+            (sum, result) => sum + (result.groupPartialCloseRealizedPnl || 0),
+            0
+        );
         const globalSimulationAvailable = includedGroupResults.every(result => result.groupSimulationAvailable !== false);
         const globalSimulatedValue = globalSimulationAvailable
             ? includedGroupResults.reduce((sum, result) => sum + result.groupSimValue, 0)
@@ -661,7 +674,10 @@
             globalTotalCost,
             globalSimulationAvailable,
             globalSimulatedValue,
-            globalPnL: globalSimulationAvailable ? (globalSimulatedValue - globalTotalCost) : null,
+            globalPnL: globalSimulationAvailable
+                ? (globalSimulatedValue - globalTotalCost + globalPartialCloseRealizedPnl)
+                : null,
+            globalPartialCloseRealizedPnl,
             globalLivePnL,
             hasAnyLiveData,
             globalHedgePnL,

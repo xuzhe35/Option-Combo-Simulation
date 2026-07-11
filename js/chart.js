@@ -187,6 +187,10 @@ class PnLChart {
                 globalState.marketDataMode
             );
         });
+        const partialCloseRealizedPnl = group.legs.reduce((sum, leg) => {
+            const value = parseFloat(leg && leg.partialCloseRealizedPnl);
+            return sum + (Number.isFinite(value) ? value : 0);
+        }, 0);
         const hasUnavailableSimulation = processedLegs.some(leg =>
             !leg.isUnderlyingLeg && !leg.isExpired && !Number.isFinite(leg.simIV)
         );
@@ -241,7 +245,7 @@ class PnLChart {
                 simValue += l.posMultiplier * pricePerShare;
             }
 
-            const pnl = simValue - totalCostBasis;
+            const pnl = simValue - totalCostBasis + partialCloseRealizedPnl;
             data.push({ x: currentS, y: pnl });
 
             if (pnl < trueMinPnL) trueMinPnL = pnl;
