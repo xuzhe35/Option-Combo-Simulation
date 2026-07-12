@@ -150,6 +150,13 @@
 2. **纸面跟踪**：用 sim open 按仪表盘建议模拟开仓，积累规则的样本外记录。
 3. 后续实验（未排期）：ES 直测（需 ES 期权历史链）、外围长跨式保费摊销的三账本总决算、周中 regime 翻转的转仓规则量化。
 
+## 6. 修订记录
+
+**2026-07-12（外部 Code Review 三项修正 + 区界复验）**
+1. 水位不足时 fail-closed：LONG DISPLACEMENT 区在水位计样本 <8 时不再给出反蝶结构建议（原实现 fail-open），改为 `awaiting_watermark` 态（"区支持反蝶，水位待证明，继续采样"）。
+2. 交易日历统一：此前研究与仪表盘均使用"仅剔周末"的 weekday 时钟（两者一致，故区界内部自洽）；现统一为真实交易所日历（回测用 chain service 的 trading-dates，页面加载 `market_holidays.js` 激活假日钩子）。**真日历下复验**：regime 标签翻转仅 SPY 3.0% / QQQ 3.8%；三区制组合 SPY +10,378（Sharpe 0.78，原 0.84）、QQQ +8,740（Sharpe **0.72**，原 0.55，改善）。**冻结区界 0.95/1.05 经复验保持成立。**
+3. slope 分类改用未舍入值（原实现先舍入到 4 位再比较，0.94996 会被错归中性区），舍入仅用于显示；补充了阈值两侧 epsilon 测试。
+
 ## 附录 A. 公式
 
 - TD IV：`iv_td = iv_cal × √( (calDTE/365) / (effDTE/effYear) )`，`effDTE = tradDTE + λ(calDTE−tradDTE)`，`effYear = 252+113λ`，λ 冻结 0.3（信号用）。

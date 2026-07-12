@@ -2075,7 +2075,9 @@
             ? `${suggestion.structure} — ${suggestion.exitRule}`
             : (suggestion.stance === 'no_signal'
                 ? 'No signal: subscribe/sync the ~7d and ~14d expiries.'
-                : 'No options this week; delta book only.');
+                : (suggestion.stance === 'awaiting_watermark'
+                    ? 'Zone favors reverse fly, but the watermark must prove it first — keep weekly samples, no structure yet.'
+                    : 'No options this week; delta book only.'));
 
         return `
             <div class="ivts-strategy-signal is-${escapeHtml(zone)}"

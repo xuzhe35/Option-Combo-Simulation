@@ -542,6 +542,23 @@ module.exports = {
                 ]);
                 assert.equal(contango.zone, 'long_displacement');
 
+                // Boundary classification uses the UNROUNDED slope: a raw
+                // slope of 0.94996 (which rounds to 0.9500 for display) must
+                // stay in long_displacement; 1.05004 must stay sell_calendar.
+                const factorRatio = core.computeTradingDayAnnualizedIv(1, 14, 10, 0.3)
+                    / core.computeTradingDayAnnualizedIv(1, 7, 5, 0.3);
+                const justBelow = core.computeRegimeSignal([
+                    row('20260717', 7, 5, 0.94996 * 0.2 * factorRatio),
+                    row('20260724', 14, 10, 0.2),
+                ]);
+                assert.equal(justBelow.zone, 'long_displacement');
+                assert.equal(justBelow.slope, 0.95); // display rounds, class does not
+                const justAbove = core.computeRegimeSignal([
+                    row('20260717', 7, 5, 1.05004 * 0.2 * factorRatio),
+                    row('20260724', 14, 10, 0.2),
+                ]);
+                assert.equal(justAbove.zone, 'sell_calendar');
+
                 // Missing back expiry -> insufficient, never a fake zone.
                 const missing = core.computeRegimeSignal([row('20260717', 7, 5, 0.2)]);
                 assert.equal(missing.status, 'insufficient');
@@ -634,9 +651,14 @@ module.exports = {
                 assert.equal(veto.stance, 'stand_down');
                 assert.ok(veto.reasons.some((r) => r.includes('veto')));
 
-                // Collecting watermark does not block the zone signal.
+                // Fail closed: a collecting (or absent) watermark cannot prove
+                // the displacement era, so no structure is suggested yet.
                 const collecting = core.buildStrategySuggestion(okSignal('long_displacement', 0.9), wmCollecting);
-                assert.equal(collecting.stance, 'long_displacement');
+                assert.equal(collecting.stance, 'awaiting_watermark');
+                assert.equal(collecting.structure, null);
+                assert.ok(collecting.reasons.some((r) => r.includes('3/8')));
+                const absent = core.buildStrategySuggestion(okSignal('long_displacement', 0.9), null);
+                assert.equal(absent.stance, 'awaiting_watermark');
 
                 const neutral = core.buildStrategySuggestion(okSignal('stand_down', 1.0), wmOk);
                 assert.equal(neutral.stance, 'stand_down');

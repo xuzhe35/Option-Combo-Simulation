@@ -473,22 +473,31 @@
             return { status: 'insufficient', reason: 'no usable back expiry (~2x front DTE)' };
         }
 
-        const frontIvTd = computeTradingDayAnnualizedIv(front.atmIv, front.dte, front.tradDte, opts.signalLambda);
-        const backIvTd = computeTradingDayAnnualizedIv(back.atmIv, back.dte, back.tradDte, opts.signalLambda);
-        if (!frontIvTd || !backIvTd) {
+        // Classify on the UNROUNDED ratio; rounding is display-only. A slope
+        // of 0.94996 must land in long_displacement, not get rounded onto the
+        // 0.95 boundary first.
+        const tdRaw = (iv, calDte, tradDte) => {
+            const effDte = tradDte + opts.signalLambda * (calDte - tradDte);
+            const effYear = 252 + opts.signalLambda * (365 - 252);
+            return iv * Math.sqrt((calDte / 365) / (effDte / effYear));
+        };
+        const frontIvTd = tdRaw(front.atmIv, front.dte, front.tradDte);
+        const backIvTd = tdRaw(back.atmIv, back.dte, back.tradDte);
+        if (!Number.isFinite(frontIvTd) || !Number.isFinite(backIvTd)
+            || frontIvTd <= 0 || backIvTd <= 0) {
             return { status: 'insufficient', reason: 'trading-day IV conversion failed' };
         }
 
-        const slope = _roundNumber(frontIvTd / backIvTd, 4);
-        const zone = slope < opts.zoneLow
+        const rawSlope = frontIvTd / backIvTd;
+        const zone = rawSlope < opts.zoneLow
             ? 'long_displacement'
-            : (slope > opts.zoneHigh ? 'sell_calendar' : 'stand_down');
+            : (rawSlope > opts.zoneHigh ? 'sell_calendar' : 'stand_down');
         return {
             status: 'ok',
-            slope,
+            slope: _roundNumber(rawSlope, 4),
             zone,
-            front: { expiry: front.expiry, dte: front.dte, ivTd: frontIvTd },
-            back: { expiry: back.expiry, dte: back.dte, ivTd: backIvTd },
+            front: { expiry: front.expiry, dte: front.dte, ivTd: _roundNumber(frontIvTd, 6) },
+            back: { expiry: back.expiry, dte: back.dte, ivTd: _roundNumber(backIvTd, 6) },
         };
     }
 
@@ -585,15 +594,20 @@
             };
         }
         if (signal.zone === 'long_displacement') {
-            if (watermark && watermark.status === 'ok' && watermark.mean !== null && watermark.mean < opts.watermarkFloor) {
+            // Fail closed: the reverse fly is only suggested once the
+            // watermark PROVES displacement is underpriced in the current
+            // era. Insufficient history cannot prove that.
+            if (!watermark || watermark.status !== 'ok' || watermark.mean === null) {
+                const count = watermark && Number.isFinite(watermark.count) ? watermark.count : 0;
+                const required = watermark && Number.isFinite(watermark.required) ? watermark.required : opts.watermarkMinCount;
+                reasons.push(`zone favors reverse fly, but the displacement watermark is still collecting (${count}/${required}) — keep weekly samples, no structure yet`);
+                return { stance: 'awaiting_watermark', structure: null, exitRule: null, reasons };
+            }
+            if (watermark.mean < opts.watermarkFloor) {
                 reasons.push(`displacement watermark ${watermark.mean} < ${opts.watermarkFloor} (sellers-era pricing) — veto`);
                 return { stance: 'stand_down', structure: null, exitRule: null, reasons };
             }
-            if (watermark && watermark.status === 'collecting') {
-                reasons.push(`watermark still collecting (${watermark.count}/${watermark.required}) — zone signal only`);
-            } else if (watermark && watermark.status === 'ok') {
-                reasons.push(`displacement watermark ${watermark.mean} (n=${watermark.count})`);
-            }
+            reasons.push(`displacement watermark ${watermark.mean} (n=${watermark.count})`);
             return {
                 stance: 'long_displacement',
                 structure: 'Reverse iron fly: buy front ATM straddle, sell wings one EM away',

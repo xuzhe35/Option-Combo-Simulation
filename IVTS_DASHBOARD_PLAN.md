@@ -21,10 +21,13 @@ tracking happens through the existing sim-open workflow on the main pages.
    shows a "collecting n/8" state. Below 0.95 it vetoes the reverse-fly
    suggestion (2010-14-era displacement pricing).
 3. **Suggestion line** — zone × watermark mapped to the frozen playbook:
-   - LONG DISPLACEMENT + watermark OK → "Reverse iron fly: buy front ATM
-     straddle, sell ±EM wings. Hold to expiry (no early profit-take)."
+   - LONG DISPLACEMENT + watermark OK (≥ 0.95) → "Reverse iron fly: buy front
+     ATM straddle, sell ±EM wings. Hold to expiry (no early profit-take)."
    - LONG DISPLACEMENT + watermark < 0.95 → "Stand down — displacement is not
      underpriced in the current era."
+   - LONG DISPLACEMENT + watermark collecting (< 8 observations) →
+     **fail closed**: `awaiting_watermark`, zone shown but no structure
+     suggested — insufficient history cannot prove the era.
    - SELL CALENDAR → "Calendar: sell front ATM straddle, buy ~2×DTE back.
      Exit at +50% of debit or front expiry."
    - STAND DOWN → "No options this week; delta book only."

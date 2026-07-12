@@ -59,15 +59,14 @@ def _parse_date(text):
     return datetime.strptime(text, "%Y-%m-%d").date()
 
 
-def _weekday_count(start, end):
-    """Weekdays in [start, end); same convention as the app's trading clock."""
-    days = 0
-    current = start
-    while current < end:
-        if current.weekday() < 5:
-            days += 1
-        current = current.fromordinal(current.toordinal() + 1)
-    return days
+def _trading_day_count(sorted_trading_dates, start, end):
+    """Actual trading days in [start, end), from the exchange calendar the
+    chain service exposes — weekends AND market holidays excluded, matching
+    the dashboard's countTradingDays with the holiday hook loaded."""
+    import bisect
+    lo = bisect.bisect_left(sorted_trading_dates, start)
+    hi = bisect.bisect_left(sorted_trading_dates, end)
+    return hi - lo
 
 
 def _td_iv(iv, cal_dte, trad_dte, lam):
@@ -121,6 +120,28 @@ def _atm_strike(quotes, spot):
         if best is None or dist < best_dist:
             best, best_dist = strike, dist
     return best
+
+
+def _nearest_shared_strike(front_quotes, back_quotes, target):
+    """Nearest strike with usable call+put marks in BOTH expiries."""
+    best, best_dist = None, None
+    for strike in sorted({s for (s, t) in front_quotes}):
+        usable = all(
+            _usable_mark(chain.get((strike, opt)))
+            for chain in (front_quotes, back_quotes)
+            for opt in ("call", "put")
+        )
+        if not usable:
+            continue
+        dist = abs(strike - target)
+        if best is None or dist < best_dist:
+            best, best_dist = strike, dist
+    return best
+
+
+def _quote_delta(quote):
+    delta = (quote or {}).get("delta")
+    return delta if isinstance(delta, (int, float)) else None
 
 
 def _wing_strikes(quotes, atm, width):
@@ -208,26 +229,45 @@ def run(args):
             skip("no shared ATM strike")
             continue
 
-        front_call = front_chain[(atm, "call")]
-        front_put = front_chain[(atm, "put")]
-        back_call = back_chain[(atm, "call")]
-        back_put = back_chain[(atm, "put")]
+        atm_call_mark = _usable_mark(front_chain.get((atm, "call")))
+        atm_put_mark = _usable_mark(front_chain.get((atm, "put")))
+        if atm_call_mark is None or atm_put_mark is None:
+            skip("unusable ATM marks")
+            continue
+        expected_move = atm_call_mark + atm_put_mark
+
+        # Optional positive-delta lean: shift the structure center above spot
+        # by a fraction of the expected move. The regime tag below still uses
+        # the true ATM quotes — the lean is ours, not the market's.
+        center = atm
+        if args.center_offset_em:
+            center = _nearest_shared_strike(
+                front_chain, back_chain, spot + args.center_offset_em * expected_move
+            )
+            if center is None:
+                skip("no shared center strike")
+                continue
+
+        front_call = front_chain[(center, "call")]
+        front_put = front_chain[(center, "put")]
+        back_call = back_chain[(center, "call")]
+        back_put = back_chain[(center, "put")]
         marks = [_usable_mark(q) for q in (front_call, front_put, back_call, back_put)]
         if any(m is None for m in marks):
-            skip("unusable ATM marks")
+            skip("unusable center marks")
             continue
         fc, fp, bc, bp = marks
         straddle_credit = fc + fp
         back_cost = bc + bp
 
-        wing_call, wing_put = _wing_strikes(front_chain, atm, straddle_credit)
+        wing_call, wing_put = _wing_strikes(front_chain, center, straddle_credit)
         if wing_call is None or wing_put is None:
             skip("no wings")
             continue
         wc = _usable_mark(front_chain[(wing_call, "call")])
         wp = _usable_mark(front_chain[(wing_put, "put")])
         fly_credit = straddle_credit - wc - wp
-        fly_maxloss = max(wing_call - atm, atm - wing_put) - fly_credit
+        fly_maxloss = max(wing_call - center, center - wing_put) - fly_credit
         if fly_credit <= 0 or fly_maxloss <= 0:
             skip("degenerate fly")
             continue
@@ -238,10 +278,12 @@ def run(args):
             continue
 
         # Regime tag on the weighted trading-day clock.
-        front_trad = _weekday_count(entry, front)
-        back_trad = _weekday_count(entry, back)
-        front_iv = [q.get("impliedVolatility") for q in (front_call, front_put)]
-        back_iv = [q.get("impliedVolatility") for q in (back_call, back_put)]
+        front_trad = _trading_day_count(trading_dates, entry, front)
+        back_trad = _trading_day_count(trading_dates, entry, back)
+        atm_quotes = (front_chain[(atm, "call")], front_chain[(atm, "put")],
+                      back_chain[(atm, "call")], back_chain[(atm, "put")])
+        front_iv = [q.get("impliedVolatility") for q in atm_quotes[:2]]
+        back_iv = [q.get("impliedVolatility") for q in atm_quotes[2:]]
         if not all(front_iv) or not all(back_iv):
             skip("missing IV")
             continue
@@ -263,7 +305,7 @@ def run(args):
         settle = exit_under["bar"]["close"]
 
         exit_marks = []
-        for opt_type, strike in (("call", atm), ("put", atm)):
+        for opt_type, strike in (("call", center), ("put", center)):
             payload = _get("/v1/quote", {
                 "symbol": args.symbol, "date": front.isoformat(),
                 "expiration": back.isoformat(), "type": opt_type,
@@ -275,12 +317,23 @@ def run(args):
             continue
         # EOD marks on deep-ITM legs are often stale below intrinsic; the
         # straddle can always be exercised, so floor each leg at intrinsic.
-        call_exit = max(exit_marks[0], max(settle - atm, 0))
-        put_exit = max(exit_marks[1], max(atm - settle, 0))
+        call_exit = max(exit_marks[0], max(settle - center, 0))
+        put_exit = max(exit_marks[1], max(center - settle, 0))
         back_exit = call_exit + put_exit
 
-        straddle_intrinsic = abs(settle - atm)
+        straddle_intrinsic = abs(settle - center)
         wing_intrinsic = max(settle - wing_call, 0) + max(wing_put - settle, 0)
+
+        deltas = [_quote_delta(q) for q in (
+            front_call, front_put,
+            front_chain[(wing_call, "call")], front_chain[(wing_put, "put")],
+            back_call, back_put,
+        )]
+        fly_delta = cal_delta = None
+        if all(d is not None for d in deltas):
+            dc, dp, dwc, dwp, dbc, dbp = deltas
+            fly_delta = round((-dc - dp + dwc + dwp) * 100, 1)
+            cal_delta = round((dbc + dbp - dc - dp) * 100, 1)
 
         slip = args.slippage
         fly_pnl = (fly_credit - straddle_intrinsic + wing_intrinsic - slip * 4) * 100
@@ -292,6 +345,11 @@ def run(args):
             "back": back.isoformat(),
             "spot": round(spot, 2),
             "atm": atm,
+            "center": center,
+            "wing_call": wing_call,
+            "wing_put": wing_put,
+            "fly_delta": fly_delta,
+            "cal_delta": cal_delta,
             "settle": round(settle, 2),
             "regime": regime,
             "slope_td": round(slope_td, 4),
@@ -306,7 +364,120 @@ def run(args):
             "cal_ror": round(cal_pnl / (cal_debit * 100), 4),
         })
 
-    return trades, skips
+    return trades, skips, trading_dates
+
+
+def _leg_mark(symbol, day, expiration, opt_type, strike):
+    payload = _get("/v1/quote", {
+        "symbol": symbol, "date": day.isoformat(),
+        "expiration": expiration.isoformat(), "type": opt_type,
+        "strike": strike, "mode": "exact",
+    })
+    return _usable_mark((payload or {}).get("quote"))
+
+
+def fetch_daily_marks(args, trades, trading_dates, path):
+    """EOD close-out values for both structures on every day of each trade."""
+    fields = ["entry", "date", "straddle_value", "wings_value", "back_value"]
+    rows = []
+    for trade in trades:
+        entry = _parse_date(trade["entry"])
+        front = _parse_date(trade["front"])
+        back = _parse_date(trade["back"])
+        center = trade["center"]
+        for day in trading_dates:
+            if not (entry < day < front):
+                continue
+            sc = _leg_mark(args.symbol, day, front, "call", center)
+            sp = _leg_mark(args.symbol, day, front, "put", center)
+            wc = _leg_mark(args.symbol, day, front, "call", trade["wing_call"])
+            wp = _leg_mark(args.symbol, day, front, "put", trade["wing_put"])
+            bc = _leg_mark(args.symbol, day, back, "call", center)
+            bp = _leg_mark(args.symbol, day, back, "put", center)
+            if sc is None or sp is None:
+                continue
+            rows.append({
+                "entry": trade["entry"],
+                "date": day.isoformat(),
+                "straddle_value": round(sc + sp, 4),
+                "wings_value": round(wc + wp, 4) if wc is not None and wp is not None else "",
+                "back_value": round(bc + bp, 4) if bc is not None and bp is not None else "",
+            })
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    return rows
+
+
+EXIT_RULES = ("hold", "tp25", "tp50", "sl100", "tp50_sl100")
+
+
+def evaluate_exit_rules(trades, mark_rows):
+    """Exit-rule P&L per structure. Targets/stops are fractions of the fly
+    credit / calendar debit; the first day a threshold is crossed exits at
+    that day's marks, otherwise the trade rides to the hold-to-expiry P&L."""
+    by_entry = {}
+    for row in mark_rows:
+        by_entry.setdefault(row["entry"], []).append(row)
+
+    results = {("fly", rule): [] for rule in EXIT_RULES}
+    results.update({("cal", rule): [] for rule in EXIT_RULES})
+
+    for trade in trades:
+        days = sorted(by_entry.get(trade["entry"], []), key=lambda r: r["date"])
+        fly_base = trade["fly_credit"] * 100
+        cal_base = trade["cal_debit"] * 100
+
+        fly_path, cal_path = [], []
+        for row in days:
+            if row["straddle_value"] == "":
+                continue
+            straddle = float(row["straddle_value"])
+            if row["wings_value"] != "":
+                fly_path.append((trade["fly_credit"] - (straddle - float(row["wings_value"]))) * 100)
+            if row["back_value"] != "":
+                cal_path.append(((float(row["back_value"]) - straddle) - trade["cal_debit"]) * 100)
+
+        for structure, path, base, final in (
+            ("fly", fly_path, fly_base, trade["fly_pnl"]),
+            ("cal", cal_path, cal_base, trade["cal_pnl"]),
+        ):
+            for rule in EXIT_RULES:
+                pnl, held = final, len(path) + 1
+                for index, value in enumerate(path):
+                    take = ((rule in ("tp25",) and value >= 0.25 * base)
+                            or (rule in ("tp50", "tp50_sl100") and value >= 0.50 * base)
+                            or (rule in ("sl100", "tp50_sl100") and value <= -1.00 * base))
+                    if take:
+                        pnl, held = value, index + 1
+                        break
+                results[(structure, rule)].append({
+                    "regime": trade["regime"], "pnl": pnl, "held": held,
+                })
+    return results
+
+
+def print_exit_report(results):
+    print("\n### exit rules (mean$ / median$ / win% / avg days held)")
+    for regime in ("contango", "backwardation", None):
+        label = regime or "ALL"
+        print(f"\n-- {label} --")
+        for structure in ("fly", "cal"):
+            parts = []
+            for rule in EXIT_RULES:
+                sample = [r for r in results[(structure, rule)]
+                          if regime is None or r["regime"] == regime]
+                if not sample:
+                    parts.append(f"{rule}: -")
+                    continue
+                pnls = [r["pnl"] for r in sample]
+                held = statistics.mean(r["held"] for r in sample)
+                parts.append(f"{rule}: {statistics.mean(pnls):+.1f}/"
+                             f"{statistics.median(pnls):+.1f}/"
+                             f"{100 * sum(1 for p in pnls if p > 0) / len(pnls):.0f}%/"
+                             f"{held:.1f}d")
+            print(f"  {structure}: " + "  ".join(parts))
 
 
 def _stats(values):
@@ -347,10 +518,16 @@ def main():
     parser.add_argument("--lambda", dest="lam", type=float, default=0.3)
     parser.add_argument("--slippage", type=float, default=0.0,
                         help="dollars per share per traded leg")
+    parser.add_argument("--center-offset-em", type=float, default=0.0,
+                        help="shift the structure center by this many expected "
+                             "moves above spot (positive-delta lean)")
+    parser.add_argument("--marks-csv", default="",
+                        help="fetch daily leg marks between entry and front "
+                             "expiry, write them here, and evaluate exit rules")
     parser.add_argument("--csv", default="")
     args = parser.parse_args()
 
-    trades, skips = run(args)
+    trades, skips, trading_dates = run(args)
     if not trades:
         print("No trades produced.", skips)
         sys.exit(1)
@@ -363,8 +540,14 @@ def main():
         print(f"Wrote {len(trades)} trades to {args.csv}")
 
     print(f"\nSymbol {args.symbol}  entries {trades[0]['entry']} .. {trades[-1]['entry']}"
-          f"  trades {len(trades)}  lambda {args.lam}  slippage {args.slippage}/share/leg")
+          f"  trades {len(trades)}  lambda {args.lam}  slippage {args.slippage}/share/leg"
+          f"  centerOffsetEM {args.center_offset_em}")
     print(f"Skips: {skips}")
+    deltas_fly = [t["fly_delta"] for t in trades if t["fly_delta"] is not None]
+    deltas_cal = [t["cal_delta"] for t in trades if t["cal_delta"] is not None]
+    if deltas_fly and deltas_cal:
+        print(f"Entry delta (shares/1-lot): fly mean {statistics.mean(deltas_fly):+.1f}"
+              f"  cal mean {statistics.mean(deltas_cal):+.1f}")
 
     for regime in ("contango", "backwardation"):
         subset = [t for t in trades if t["regime"] == regime]
@@ -392,6 +575,11 @@ def main():
             ("cal RoR", _stats([t["cal_ror"] * 100 for t in trades])),
         ],
     )
+
+    if args.marks_csv:
+        mark_rows = fetch_daily_marks(args, trades, trading_dates, args.marks_csv)
+        print(f"\nWrote {len(mark_rows)} daily mark rows to {args.marks_csv}")
+        print_exit_report(evaluate_exit_rules(trades, mark_rows))
 
 
 if __name__ == "__main__":

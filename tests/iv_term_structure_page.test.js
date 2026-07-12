@@ -411,13 +411,17 @@ module.exports = {
                 assert.match(html, /Calendar: sell front ATM straddle/);
                 assert.match(html, /suggestion only/);
 
+                // With no accumulated samples the watermark cannot prove the
+                // era, so the deep-contango zone shows but withholds the
+                // reverse-fly structure (fail closed).
                 const contango = buildStrategySignalPanel(
                     { symbol: 'SPY' },
                     { detailRows: [row('20260717', 7, 5, 0.15), row('20260724', 14, 10, 0.21)] },
                     { samples: [] }
                 );
                 assert.match(contango, /LONG DISPLACEMENT/);
-                assert.match(contango, /Reverse iron fly/);
+                assert.doesNotMatch(contango, /Reverse iron fly: buy/);
+                assert.match(contango, /watermark must prove it first/);
 
                 const empty = buildStrategySignalPanel({ symbol: 'SPY' }, { detailRows: [] }, { samples: [] });
                 assert.match(empty, /NO SIGNAL/);
