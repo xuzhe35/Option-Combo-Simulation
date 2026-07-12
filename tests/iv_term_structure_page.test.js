@@ -391,6 +391,40 @@ module.exports = {
             },
         },
         {
+            name: 'renders the strategy signal panel with zone, slope, watermark, and suggestion',
+            run() {
+                const ctx = loadPageContext(null);
+                const { buildStrategySignalPanel } = ctx.OptionComboIvTermStructurePage._test;
+                const row = (expiry, dte, tradDte, atmIv) => ({
+                    expiry, dte, tradDte, atmIv, hasCompletePair: true, subscriptionSelected: true,
+                });
+
+                const html = buildStrategySignalPanel(
+                    { symbol: 'SPY' },
+                    { detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)] },
+                    { samples: [] }
+                );
+                assert.match(html, /SELL CALENDAR/);
+                assert.match(html, /is-sell_calendar/);
+                assert.match(html, /TD slope/);
+                assert.match(html, /collecting 0\/8/);
+                assert.match(html, /Calendar: sell front ATM straddle/);
+                assert.match(html, /suggestion only/);
+
+                const contango = buildStrategySignalPanel(
+                    { symbol: 'SPY' },
+                    { detailRows: [row('20260717', 7, 5, 0.15), row('20260724', 14, 10, 0.21)] },
+                    { samples: [] }
+                );
+                assert.match(contango, /LONG DISPLACEMENT/);
+                assert.match(contango, /Reverse iron fly/);
+
+                const empty = buildStrategySignalPanel({ symbol: 'SPY' }, { detailRows: [] }, { samples: [] });
+                assert.match(empty, /NO SIGNAL/);
+                assert.match(empty, /subscribe\/sync/);
+            },
+        },
+        {
             name: 'normalizes and persists the global TD IV lambda with a 0.3 default',
             run() {
                 const stored = {};

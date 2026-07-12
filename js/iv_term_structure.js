@@ -2042,6 +2042,55 @@
         `;
     }
 
+    const STRATEGY_ZONE_LABELS = Object.freeze({
+        long_displacement: 'LONG DISPLACEMENT',
+        stand_down: 'STAND DOWN',
+        sell_calendar: 'SELL CALENDAR',
+        no_signal: 'NO SIGNAL',
+    });
+
+    function buildStrategySignalPanel(card, comparedRows, historyDocument) {
+        const coreApi = core();
+        if (typeof coreApi.computeRegimeSignal !== 'function') {
+            return '';
+        }
+        const detailRows = comparedRows && Array.isArray(comparedRows.detailRows)
+            ? comparedRows.detailRows
+            : [];
+        const samples = historyDocument && Array.isArray(historyDocument.samples)
+            ? historyDocument.samples
+            : [];
+        const signal = coreApi.computeRegimeSignal(detailRows);
+        const watermark = coreApi.computeDisplacementWatermark(samples);
+        const suggestion = coreApi.buildStrategySuggestion(signal, watermark);
+
+        const zone = signal.status === 'ok' ? signal.zone : 'no_signal';
+        const slopeText = signal.status === 'ok'
+            ? `${signal.slope.toFixed(3)} · F ${escapeHtml(signal.front.expiry)} (${signal.front.dte}d) / B ${escapeHtml(signal.back.expiry)} (${signal.back.dte}d)`
+            : escapeHtml(signal.reason || 'sync the nearest expiries first');
+        const watermarkText = watermark.status === 'ok'
+            ? `${watermark.mean.toFixed(2)} (n=${watermark.count})`
+            : `collecting ${watermark.count}/${watermark.required}`;
+        const suggestionText = suggestion.structure
+            ? `${suggestion.structure} — ${suggestion.exitRule}`
+            : (suggestion.stance === 'no_signal'
+                ? 'No signal: subscribe/sync the ~7d and ~14d expiries.'
+                : 'No options this week; delta book only.');
+
+        return `
+            <div class="ivts-strategy-signal is-${escapeHtml(zone)}"
+                title="Frozen playbook from VRP_RESEARCH_MEMO.md: slope<0.95 reverse iron fly (hold), 0.95-1.05 stand down, >1.05 calendar (tp50). Signal lambda fixed at 0.3 regardless of the TD IV display lambda. Watermark = realized |move| / expected move from your accumulated samples; <0.95 vetoes the reverse fly.">
+                <div class="ivts-strategy-headline">
+                    <span class="ivts-strategy-zone">${STRATEGY_ZONE_LABELS[zone] || zone}</span>
+                    <span class="ivts-strategy-disclaimer">suggestion only · paper/sim first</span>
+                </div>
+                <div class="ivts-strategy-row"><span>TD slope (λ=0.3)</span><span>${slopeText}</span></div>
+                <div class="ivts-strategy-row"><span>|move|/EM watermark</span><span>${watermarkText}</span></div>
+                <div class="ivts-strategy-row ivts-strategy-suggestion"><span>This week</span><span>${escapeHtml(suggestionText)}</span></div>
+            </div>
+        `;
+    }
+
     function buildCardBodyMarkup(card) {
         const historyDocument = readOnlyHistoryDocument(card);
         const comparedRows = buildComparedRows(card);
@@ -2050,6 +2099,7 @@
                 ${escapeHtml(card.statusMessage)}
             </div>
 
+            ${buildStrategySignalPanel(card, comparedRows, historyDocument)}
             ${buildOptionStreamLimitControl(card)}
             ${buildFuturesContractControl(card)}
 
@@ -2618,6 +2668,7 @@
             normalizeTdIvLambda,
             loadSavedTdIvLambda,
             saveTdIvLambda,
+            buildStrategySignalPanel,
             captureCardViewState,
             restoreCardViewState,
         },

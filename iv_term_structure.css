@@ -392,6 +392,67 @@ body {
     margin-bottom: 14px;
 }
 
+.ivts-strategy-signal {
+    border: 1px solid var(--ivts-border);
+    border-left-width: 4px;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    display: grid;
+    gap: 4px;
+    font-size: 0.9rem;
+}
+
+.ivts-strategy-signal.is-long_displacement { border-left-color: #7c5cff; background: rgba(124, 92, 255, 0.06); }
+.ivts-strategy-signal.is-sell_calendar { border-left-color: #14935c; background: rgba(20, 147, 92, 0.06); }
+.ivts-strategy-signal.is-stand_down { border-left-color: #9aa3b2; background: rgba(154, 163, 178, 0.08); }
+.ivts-strategy-signal.is-no_signal { border-left-color: #d0d5dd; }
+
+.ivts-strategy-headline {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.ivts-strategy-zone {
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    font-size: 0.82rem;
+}
+
+.ivts-strategy-signal.is-long_displacement .ivts-strategy-zone { color: #6443f5; }
+.ivts-strategy-signal.is-sell_calendar .ivts-strategy-zone { color: #0f7a4c; }
+.ivts-strategy-signal.is-stand_down .ivts-strategy-zone,
+.ivts-strategy-signal.is-no_signal .ivts-strategy-zone { color: var(--ivts-muted); }
+
+.ivts-strategy-disclaimer {
+    color: var(--ivts-muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.ivts-strategy-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.ivts-strategy-row > span:first-child {
+    color: var(--ivts-muted);
+    white-space: nowrap;
+    font-size: 0.8rem;
+}
+
+.ivts-strategy-row > span:last-child {
+    text-align: right;
+}
+
+.ivts-strategy-suggestion > span:last-child {
+    font-weight: 600;
+}
+
 .ivts-subscription-control {
     display: flex;
     gap: 12px;
