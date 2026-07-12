@@ -118,8 +118,10 @@ function _computeHolidaysForYear(year) {
     // 5. Memorial Day — Last Monday of May
     holidays.push(_lastWeekday(year, 4, 1));
 
-    // 6. Juneteenth — June 19
-    holidays.push(_observe(new Date(Date.UTC(year, 5, 19))));
+    // 6. Juneteenth — June 19 (NYSE holiday only since 2022)
+    if (year >= 2022) {
+        holidays.push(_observe(new Date(Date.UTC(year, 5, 19))));
+    }
 
     // 7. Independence Day — July 4
     holidays.push(_observe(new Date(Date.UTC(year, 6, 4))));
@@ -135,6 +137,26 @@ function _computeHolidaysForYear(year) {
 
     return holidays.map(_fmtDate);
 }
+
+/**
+ * Ad-hoc full-day market closures that no rule can predict: presidential
+ * mourning days, disaster closures, and similar one-offs.
+ *
+ * Maintained by `python3 scripts/sync_market_holidays.py --write`, which
+ * diffs this rule engine against the actual exchange trading dates in the
+ * options-chain-service database and regenerates the block below. For a
+ * closure announced for a FUTURE date (not yet visible in market data),
+ * add the 'YYYY-MM-DD' line manually — the next sync run will keep it if
+ * the data confirms it.
+ */
+// BEGIN GENERATED CLOSURES (scripts/sync_market_holidays.py)
+const MARKET_CLOSURE_EXCEPTIONS = new Set([
+    '2012-10-29', // Hurricane Sandy
+    '2012-10-30', // Hurricane Sandy
+    '2018-12-05', // National day of mourning — George H. W. Bush
+    '2025-01-09', // National day of mourning — Jimmy Carter
+]);
+// END GENERATED CLOSURES
 
 // Internal cache: year → Set of date strings
 const _holidayCache = {};
@@ -154,6 +176,9 @@ function _getHolidaysForYear(year) {
  * This is the public API used by calendarToTradingDays() in bsm.js.
  */
 function isMarketHoliday(dateStr) {
+    if (MARKET_CLOSURE_EXCEPTIONS.has(dateStr)) {
+        return true;
+    }
     const year = parseInt(dateStr.slice(0, 4), 10);
     return _getHolidaysForYear(year).has(dateStr);
 }

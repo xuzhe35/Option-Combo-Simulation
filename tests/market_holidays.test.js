@@ -68,5 +68,27 @@ module.exports = {
                 assert.equal(first, second);
             },
         },
+        {
+            name: 'gates Juneteenth to 2022+ (NYSE adopted it that year)',
+            run() {
+                const ctx = loadBrowserScripts(['js/market_holidays.js']);
+
+                assert.equal(ctx.isMarketHoliday('2021-06-18'), false);
+                assert.equal(ctx.isMarketHoliday('2021-06-19'), false);
+                assert.equal(ctx.isMarketHoliday('2022-06-20'), true); // Sun 19th observed Monday
+                assert.equal(ctx.isMarketHoliday('2026-06-19'), true);
+            },
+        },
+        {
+            name: 'recognizes ad-hoc closure exceptions that rules cannot predict',
+            run() {
+                const ctx = loadBrowserScripts(['js/market_holidays.js']);
+
+                assert.equal(ctx.isMarketHoliday('2012-10-29'), true); // Hurricane Sandy
+                assert.equal(ctx.isMarketHoliday('2018-12-05'), true); // Bush mourning day
+                assert.equal(ctx.isMarketHoliday('2025-01-09'), true); // Carter mourning day
+                assert.equal(ctx.isMarketHoliday('2018-12-06'), false);
+            },
+        },
     ],
 };

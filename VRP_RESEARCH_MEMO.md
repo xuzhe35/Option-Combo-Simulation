@@ -164,6 +164,15 @@
 - 水位计：`ratio = |ΔS| / (EM₀·√(间隔/前月DTE))`，滚动均值（26 个观测），<0.95 停正挂腿。
 - 三区：slope = TD IV(≈7DTE) / TD IV(≈14DTE)；<0.95 反蝶持有到期；0.95~1.05 空仓；>1.05 Calendar（tp50）。
 
+## 附录 B0. 交易日历维护手册
+
+`js/market_holidays.js` 是规则引擎（第 N 个星期一、复活节算法、周末顺延），**常规年份零维护**。规则之外的两类情况由 `scripts/sync_market_holidays.py` 管理——它以 chain 数据库里的真实交易所日历为准绳逐日 diff（已消费 `/v1/audit/missing-dates`，自动排除"市场开市但数据缺失"的供应商缺口）：
+
+- **年度体检**（可选，一月跑一次）：`python3 scripts/sync_market_holidays.py` → 输出 OK 即健康（复验基线：2008-2026 共 4,647 个交易日精确匹配）；
+- **发生临时休市时**（治丧日/灾害）：当天先手动在 GENERATED CLOSURES 块加一行（未来日期数据看不到）；待行情数据管线覆盖到该日后跑 `--write`，脚本会以数据确认并规整该块（演练验证：删除-检测-修复-字节级复原全通过）；
+- 六月节已按 `year >= 2022` 门控（2010–2021 不再误标）；已登记例外：桑迪 2012-10-29/30、老布什 2018-12-05、卡特 2025-01-09。
+- 注意：回测的 regime 打标不依赖此 JS 日历（直接用数据的 trading-dates，自维护）；此日历只服务实时仪表盘与主页面模拟时钟。
+
 ## 附录 B. 数据与脚本位置
 
 - 回测主脚本：`scripts/backtest_calendar_vs_iron_fly.py`（参数见 docstring；`--marks-csv` 出场规则；`--center-offset-em` 偏心）。
