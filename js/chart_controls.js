@@ -529,6 +529,10 @@ window.addEventListener('resize', () => {
 // forward-looking volatility input from today's market.
 function computePortfolioMeanSimIV() {
     const productRegistry = _getProductRegistryApi();
+    const underlyingProfile = productRegistry
+        && typeof productRegistry.resolveUnderlyingProfile === 'function'
+        ? productRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
+        : null;
     const isOptionLeg = productRegistry
         && typeof productRegistry.isOptionLeg === 'function'
         ? productRegistry.isOptionLeg
@@ -564,7 +568,7 @@ function computePortfolioMeanSimIV() {
                         anchorPrice,
                         state.interestRate,
                         activeViewMode,
-                        null,
+                        underlyingProfile,
                         state.marketDataMode
                     );
 

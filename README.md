@@ -8,7 +8,7 @@ The repo currently has three frontend surfaces:
 
 1. `index.html` - main portfolio workspace
 2. `chart_lab.html` - shared workspace plus experimental daily-bar projection
-3. `iv_term_structure.html` - standalone live ETF IV term-structure monitor
+3. `iv_term_structure.html` - standalone live ETF / futures-option IV term-structure monitor
 
 It also has two optional Python WebSocket backends:
 
@@ -68,9 +68,10 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
   - one-group or included-global projection
   - IB daily bars with chain-service fallback through `ib_server.py`
 - IV Term Structure:
-  - standalone ETF monitor
+  - standalone ETF / futures-option monitor
   - per-symbol sync/update from IB
   - ATM call/put IV aggregation by expiry
+  - calendar-day IV plus trading-day IV with one global weekend/holiday variance weight (`TD IV λ`, default `0.30`)
   - configurable DTE buckets
   - per-symbol JSON history files
 - Session persistence:
@@ -137,6 +138,9 @@ Default configured symbols:
 - `GLD`
 - `SLV`
 - `USO`
+- `CL`
+- `SI`
+- `ES`
 
 ## Backend Responsibilities
 
@@ -471,7 +475,8 @@ Current flow:
 4. backend resolves option chains and ATM strike windows
 5. backend streams live option quote/IV updates
 6. frontend aggregates call/put ATM IV by expiry and DTE bucket
-7. user samples into the selected history document
+7. frontend derives TD IV from the global `TD IV λ` lens without resubscribing
+8. user samples into the selected history document
 
 The JS core and Python service helpers are kept DOM/IB side-effect free for tests.
 
@@ -522,6 +527,58 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
 | `trade_execution/safety.py` | one-time payload- and position-bound execution authorization |
 | `runtime_contracts.py` | typed shared backend payload contracts |
 | `scripts/cleanup_runtime_logs.py` | local log/pid cleanup helper |
+
+## Official Exchange Calendar Refresh
+
+Forward calendars are downloaded from official sources and committed as a
+browser-ready snapshot:
+
+- NYSE: public `Holidays & Trading Hours` HTML table
+- CME/NYMEX/COMEX: CME Reference Data API v3 `tradingSchedules`, resolved per
+  product (`ES`, `NQ`, `MES`, `MNQ`, `CL`, `GC`, `SI`, `HG`)
+
+Run the refresh once each weekend:
+
+```bash
+./sync_exchange_calendars_mac.command
+```
+
+```powershell
+.\sync_exchange_calendars.bat
+```
+
+CME requires an OAuth API ID created under CME Group Login → Customer Center →
+My Profile → API Management. Set `CME_API_ID` and `CME_API_SECRET` in the
+process environment; never commit them. A short-lived `CME_ACCESS_TOKEN` is
+also accepted. Futures/options attributes use CME's default entitlement.
+
+For an NYSE-only bootstrap, explicitly pass `--nyse-only` on macOS/POSIX or
+`-NyseOnly` on PowerShell. This does not invent futures calendars: IVTS stays
+fail-closed for any product whose official snapshot is missing or stale.
+
+Generated files:
+
+- `exchange_calendars/official_exchange_calendars.json` — reviewable source snapshot
+- `js/official_exchange_calendars.generated.js` — ordered browser runtime data
+
+The downloader verifies TLS, validates table/API structure, and refuses to
+write on parsing errors. The old `scripts/sync_market_holidays.py` rule/database
+diff implementation is retired; the filename now delegates to this official
+sync so an old maintenance command cannot create a second calendar authority.
+IVTS treats a snapshot older than 14 days as unavailable, so missing a weekly
+refresh cannot silently leave strategy advice running on stale schedules.
+CME full-day closures are derived from missing weekdays in the official
+Business Trade Date sequence (and from dates with no `open` event). Snapshots
+created by the older `has open`-only derivation are rejected by the browser and
+must be refreshed before futures IVTS suggestions are enabled.
+
+All live/forward browser date calculations resolve the product `calendarId`
+through this snapshot. There is no Easter/nth-weekday/weekend-observance rule
+fallback: missing, stale, or out-of-range official data returns calendar
+unavailable. Historical replay is the sole exception because the current
+official downloads do not cover the full archive; it uses the chain service's
+explicit observed-session list, never a holiday formula. Research backtests
+overlay the official snapshot wherever its coverage overlaps the archive.
 
 ## Tests
 

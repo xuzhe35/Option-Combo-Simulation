@@ -2,70 +2,101 @@ const assert = require('node:assert/strict');
 
 const { loadBrowserScripts } = require('./helpers/load-browser-scripts');
 
+function snapshot(fetchedAt = new Date().toISOString()) {
+    return {
+        calendars: {
+            NYSE: {
+                calendarKey: 'NYSE', fetchedAt,
+                coverageStart: '2026-01-01', coverageEnd: '2028-12-31',
+                closures: [{ date: '2026-07-03', status: 'closed' }],
+                earlyCloses: [{ date: '2026-11-27', status: 'early_close' }],
+            },
+            'CME:ES': {
+                calendarKey: 'CME:ES', fetchedAt,
+                sourceKind: 'cme_reference_data_api',
+                derivationVersion: 'business-trade-date-gaps-v2',
+                coverageStart: '2025-07-09', coverageEnd: '2028-05-05',
+                closures: [{ date: '2026-07-03', status: 'closed' }],
+                earlyCloses: [],
+            },
+        },
+    };
+}
+
+function loadCalendar(customSnapshot = snapshot(), withDateUtils = false) {
+    return loadBrowserScripts([
+        'js/market_holidays.js',
+        ...(withDateUtils ? ['js/date_utils.js'] : []),
+    ], { OptionComboOfficialExchangeCalendars: customSnapshot });
+}
+
 module.exports = {
     name: 'market_holidays.js',
     tests: [
         {
-            name: 'computes Easter Sunday and Good Friday for 2026 correctly',
+            name: 'uses official closure and early-close records only',
             run() {
-                const ctx = loadBrowserScripts(['js/market_holidays.js']);
-
-                assert.equal(ctx._fmtDate(ctx._easterSunday(2026)), '2026-04-05');
-                assert.equal(ctx.isMarketHoliday('2026-04-03'), true);
-                assert.equal(ctx.isMarketHoliday('2026-04-02'), false);
+                const ctx = loadCalendar();
+                assert.equal(ctx.isMarketHoliday('2026-07-03', 'NYSE'), true);
+                assert.equal(ctx.isMarketHoliday('2026-07-02', 'NYSE'), false);
+                assert.equal(ctx.getOfficialExchangeCalendarDay('NYSE', '2026-11-27').status, 'early_close');
+                assert.equal(ctx.isMarketHoliday('2026-07-03', 'CME:ES'), true);
             },
         },
         {
-            name: 'applies NYSE weekend observance rules for fixed-date holidays',
+            name: 'returns unknown instead of applying rules outside official coverage',
             run() {
-                const ctx = loadBrowserScripts(['js/market_holidays.js']);
-
-                assert.equal(
-                    ctx._fmtDate(ctx._observe(new Date(Date.UTC(2021, 11, 25)))),
-                    '2021-12-24'
-                );
-                assert.equal(
-                    ctx._fmtDate(ctx._observe(new Date(Date.UTC(2023, 0, 1)))),
-                    '2023-01-02'
-                );
+                const ctx = loadCalendar();
+                assert.equal(ctx.isMarketHoliday('2025-01-09', 'NYSE'), null);
+                assert.equal(ctx.isMarketHoliday('2029-01-01', 'NYSE'), null);
+                assert.equal(ctx.getOfficialExchangeCalendarDay('NYSE', '2025-01-09').status, 'unavailable');
             },
         },
         {
-            name: 'computes nth and last weekday helpers in UTC',
+            name: 'rejects stale snapshots and legacy CME derivations',
             run() {
-                const ctx = loadBrowserScripts(['js/market_holidays.js']);
+                const stale = snapshot('2020-01-01T00:00:00Z');
+                const staleCtx = loadCalendar(stale);
+                assert.equal(staleCtx.isOfficialExchangeCalendarAvailable('NYSE', '2026-01-01'), false);
 
-                assert.equal(
-                    ctx._fmtDate(ctx._nthWeekday(2026, 0, 1, 3)),
-                    '2026-01-19'
-                );
-                assert.equal(
-                    ctx._fmtDate(ctx._lastWeekday(2026, 4, 1)),
-                    '2026-05-25'
-                );
+                const legacy = snapshot();
+                legacy.calendars['CME:ES'].derivationVersion = 'legacy';
+                const legacyCtx = loadCalendar(legacy);
+                assert.equal(legacyCtx.isOfficialExchangeCalendarAvailable('CME:ES', '2026-07-01'), false);
             },
         },
         {
-            name: 'marks known NYSE holidays and excludes nearby trading days',
+            name: 'date helpers carry product calendar keys and fail closed when unavailable',
             run() {
-                const ctx = loadBrowserScripts(['js/market_holidays.js']);
-                const holidays2026 = ctx._computeHolidaysForYear(2026);
-
-                assert.equal(holidays2026.length, 10);
-                assert.ok(holidays2026.includes('2026-07-03'));
-                assert.ok(holidays2026.includes('2026-11-26'));
-                assert.equal(ctx.isMarketHoliday('2026-11-26'), true);
-                assert.equal(ctx.isMarketHoliday('2026-11-27'), false);
+                const ctx = loadCalendar(snapshot(), true);
+                assert.equal(ctx.OptionComboDateUtils.calendarToTradingDays(
+                    '2026-07-02', '2026-07-07', 'NYSE'
+                ), 2);
+                assert.equal(ctx.OptionComboDateUtils.calendarToTradingDays(
+                    '2026-07-02', '2026-07-07', 'CME:ES'
+                ), 2);
+                assert.equal(ctx.OptionComboDateUtils.calendarToTradingDays(
+                    '2025-01-02', '2025-01-04', 'NYSE'
+                ), null);
             },
         },
         {
-            name: 'caches holiday sets by year',
+            name: 'historical observed sessions override unavailable forward coverage without rules',
             run() {
-                const ctx = loadBrowserScripts(['js/market_holidays.js']);
-                const first = ctx._getHolidaysForYear(2026);
-                const second = ctx._getHolidaysForYear(2026);
-
-                assert.equal(first, second);
+                const ctx = loadCalendar(snapshot(), true);
+                const observed = ['2018-12-03', '2018-12-04', '2018-12-06', '2018-12-07'];
+                assert.equal(ctx.OptionComboDateUtils.calendarToTradingDays(
+                    '2018-12-03', '2018-12-07', 'NYSE', observed
+                ), 3);
+                assert.deepEqual(
+                    Array.from(ctx.OptionComboDateUtils.listTradingDays(
+                        '2018-12-03', '2018-12-07', 'NYSE', observed
+                    )),
+                    observed
+                );
+                assert.equal(ctx.OptionComboDateUtils.calendarToTradingDays(
+                    '2018-12-03', '2018-12-10', 'NYSE', observed
+                ), null);
             },
         },
     ],

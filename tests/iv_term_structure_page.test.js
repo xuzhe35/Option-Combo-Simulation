@@ -5,6 +5,8 @@ const { loadBrowserScripts } = require('./helpers/load-browser-scripts');
 function loadPageContext(activeElement) {
     const listeners = {};
     return loadBrowserScripts([
+        'js/official_exchange_calendars.generated.js',
+        'js/market_holidays.js',
         'js/product_registry.js',
         'js/iv_term_structure_core.js',
         'js/iv_term_structure.js',
@@ -388,6 +390,59 @@ module.exports = {
                     buildIvPairTdCell({ subscriptionSelected: false, callIvTd: 0.2, putIvTd: 0.2 }),
                     /Not subscribed/
                 );
+            },
+        },
+        {
+            name: 'renders the strategy signal panel with zone, slope, watermark, and suggestion',
+            run() {
+                const ctx = loadPageContext(null);
+                const { buildStrategySignalPanel } = ctx.OptionComboIvTermStructurePage._test;
+                const row = (expiry, dte, tradDte, atmIv) => ({
+                    expiry, dte, tradDte, atmIv, hasCompletePair: true, subscriptionSelected: true,
+                });
+
+                const html = buildStrategySignalPanel(
+                    { symbol: 'SPY' },
+                    { detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)] },
+                    { samples: [] }
+                );
+                assert.match(html, /SELL CALENDAR/);
+                assert.match(html, /is-sell_calendar/);
+                assert.match(html, /TD slope/);
+                assert.match(html, /collecting 0\/8/);
+                assert.match(html, /Calendar: sell front ATM straddle/);
+                assert.match(html, /suggestion only/);
+
+                // With no accumulated samples the watermark cannot prove the
+                // era, so the deep-contango zone shows but withholds the
+                // reverse-fly structure (fail closed).
+                const contango = buildStrategySignalPanel(
+                    { symbol: 'SPY' },
+                    { detailRows: [row('20260717', 7, 5, 0.15), row('20260724', 14, 10, 0.21)] },
+                    { samples: [] }
+                );
+                assert.match(contango, /LONG DISPLACEMENT/);
+                assert.doesNotMatch(contango, /Reverse iron fly: buy/);
+                assert.match(contango, /watermark must prove it first/);
+
+                const empty = buildStrategySignalPanel({ symbol: 'SPY' }, { detailRows: [] }, { samples: [] });
+                assert.match(empty, /NO SIGNAL/);
+                assert.match(empty, /subscribe\/sync/);
+
+                // A missing or legacy CME snapshot fails closed: the proxy
+                // slope remains visible, but no strategy is presented.
+                ctx.OptionComboOfficialExchangeCalendars.calendars['CME:ES'].derivationVersion = 'legacy';
+                const es = buildStrategySignalPanel(
+                    { symbol: 'ES', profile: { calendarId: 'CME:ES' } },
+                    { detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)] },
+                    { samples: [] }
+                );
+                assert.match(es, /calendar unavailable \(CME:ES official snapshot missing\/stale\)/);
+                assert.match(es, /CALENDAR UNAVAILABLE/);
+                assert.match(es, /is-calendar_unavailable/);
+                assert.match(es, /official trading calendar is unavailable — no strategy suggestion/);
+                assert.doesNotMatch(es, /SELL CALENDAR/);
+                assert.doesNotMatch(es, /Calendar: sell front ATM straddle/);
             },
         },
         {

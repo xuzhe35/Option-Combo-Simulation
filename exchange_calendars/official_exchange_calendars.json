@@ -1,0 +1,1551 @@
+{
+  "version": 2,
+  "generatedAt": "2026-07-12T16:01:54+00:00",
+  "calendars": {
+    "NYSE": {
+      "calendarKey": "NYSE",
+      "sourceKind": "official_html",
+      "sourceUrl": "https://www.nyse.com/trade/hours-calendars",
+      "fetchedAt": "2026-07-12T16:01:54+00:00",
+      "coverageStart": "2026-01-01",
+      "coverageEnd": "2028-12-31",
+      "closures": [
+        {
+          "date": "2026-01-01",
+          "name": "New Year’s Day",
+          "status": "closed"
+        },
+        {
+          "date": "2026-01-19",
+          "name": "Martin Luther King, Jr. Day",
+          "status": "closed"
+        },
+        {
+          "date": "2026-02-16",
+          "name": "Washington's Birthday",
+          "status": "closed"
+        },
+        {
+          "date": "2026-04-03",
+          "name": "Good Friday",
+          "status": "closed"
+        },
+        {
+          "date": "2026-05-25",
+          "name": "Memorial Day",
+          "status": "closed"
+        },
+        {
+          "date": "2026-06-19",
+          "name": "Juneteenth National Independence Day",
+          "status": "closed"
+        },
+        {
+          "date": "2026-07-03",
+          "name": "Independence Day",
+          "status": "closed"
+        },
+        {
+          "date": "2026-09-07",
+          "name": "Labor Day",
+          "status": "closed"
+        },
+        {
+          "date": "2026-11-26",
+          "name": "Thanksgiving Day",
+          "status": "closed"
+        },
+        {
+          "date": "2026-12-25",
+          "name": "Christmas Day",
+          "status": "closed"
+        },
+        {
+          "date": "2027-01-01",
+          "name": "New Year’s Day",
+          "status": "closed"
+        },
+        {
+          "date": "2027-01-18",
+          "name": "Martin Luther King, Jr. Day",
+          "status": "closed"
+        },
+        {
+          "date": "2027-02-15",
+          "name": "Washington's Birthday",
+          "status": "closed"
+        },
+        {
+          "date": "2027-03-26",
+          "name": "Good Friday",
+          "status": "closed"
+        },
+        {
+          "date": "2027-05-31",
+          "name": "Memorial Day",
+          "status": "closed"
+        },
+        {
+          "date": "2027-06-18",
+          "name": "Juneteenth National Independence Day",
+          "status": "closed"
+        },
+        {
+          "date": "2027-07-05",
+          "name": "Independence Day",
+          "status": "closed"
+        },
+        {
+          "date": "2027-09-06",
+          "name": "Labor Day",
+          "status": "closed"
+        },
+        {
+          "date": "2027-11-25",
+          "name": "Thanksgiving Day",
+          "status": "closed"
+        },
+        {
+          "date": "2027-12-24",
+          "name": "Christmas Day",
+          "status": "closed"
+        },
+        {
+          "date": "2028-01-17",
+          "name": "Martin Luther King, Jr. Day",
+          "status": "closed"
+        },
+        {
+          "date": "2028-02-21",
+          "name": "Washington's Birthday",
+          "status": "closed"
+        },
+        {
+          "date": "2028-04-14",
+          "name": "Good Friday",
+          "status": "closed"
+        },
+        {
+          "date": "2028-05-29",
+          "name": "Memorial Day",
+          "status": "closed"
+        },
+        {
+          "date": "2028-06-19",
+          "name": "Juneteenth National Independence Day",
+          "status": "closed"
+        },
+        {
+          "date": "2028-07-04",
+          "name": "Independence Day",
+          "status": "closed"
+        },
+        {
+          "date": "2028-09-04",
+          "name": "Labor Day",
+          "status": "closed"
+        },
+        {
+          "date": "2028-11-23",
+          "name": "Thanksgiving Day",
+          "status": "closed"
+        },
+        {
+          "date": "2028-12-25",
+          "name": "Christmas Day",
+          "status": "closed"
+        }
+      ],
+      "earlyCloses": [
+        {
+          "date": "2026-11-27",
+          "status": "early_close",
+          "closeTime": "13:00",
+          "optionCloseTime": "13:15",
+          "timezone": "America/New_York"
+        },
+        {
+          "date": "2026-12-24",
+          "status": "early_close",
+          "closeTime": "13:00",
+          "optionCloseTime": "13:15",
+          "timezone": "America/New_York"
+        },
+        {
+          "date": "2027-11-26",
+          "status": "early_close",
+          "closeTime": "13:00",
+          "optionCloseTime": "13:15",
+          "timezone": "America/New_York"
+        },
+        {
+          "date": "2028-07-03",
+          "status": "early_close",
+          "closeTime": "13:00",
+          "optionCloseTime": "13:15",
+          "timezone": "America/New_York"
+        },
+        {
+          "date": "2028-11-24",
+          "status": "early_close",
+          "closeTime": "13:00",
+          "optionCloseTime": "13:15",
+          "timezone": "America/New_York"
+        }
+      ],
+      "sourceSha256": "791dcb6020a5ee658e1a444bbc08143b821b9a1f21a28088912f786890d5e36b"
+    },
+    "CME:ES": {
+      "calendarKey": "CME:ES",
+      "productCode": "ES",
+      "globexGroupCode": "EW",
+      "sourceKind": "cme_reference_data_api",
+      "sourceUrl": "https://refdata.api.cmegroup.com/refdata/v3/tradingSchedules",
+      "fetchedAt": "2026-07-12T16:01:54+00:00",
+      "derivationVersion": "business-trade-date-gaps-v2",
+      "coverageStart": "2025-07-09",
+      "coverageEnd": "2028-05-05",
+      "sourceTradingDateCount": 713,
+      "sourceWeekdayCount": 713,
+      "closures": [
+        {
+          "date": "2025-09-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-11-27",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-02-16",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-05-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-06-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-07-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-09-07",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-11-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-02-15",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-03-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-05-31",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-06-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-07-05",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-09-06",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-11-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-12-24",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-01-17",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-02-21",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-04-14",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        }
+      ],
+      "earlyCloses": []
+    },
+    "CME:NQ": {
+      "calendarKey": "CME:NQ",
+      "productCode": "NQ",
+      "globexGroupCode": "NW",
+      "sourceKind": "cme_reference_data_api",
+      "sourceUrl": "https://refdata.api.cmegroup.com/refdata/v3/tradingSchedules",
+      "fetchedAt": "2026-07-12T16:01:54+00:00",
+      "derivationVersion": "business-trade-date-gaps-v2",
+      "coverageStart": "2025-07-09",
+      "coverageEnd": "2028-05-05",
+      "sourceTradingDateCount": 713,
+      "sourceWeekdayCount": 713,
+      "closures": [
+        {
+          "date": "2025-09-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-11-27",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-02-16",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-05-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-06-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-07-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-09-07",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-11-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-02-15",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-03-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-05-31",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-06-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-07-05",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-09-06",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-11-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-12-24",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-01-17",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-02-21",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-04-14",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        }
+      ],
+      "earlyCloses": []
+    },
+    "CME:MES": {
+      "calendarKey": "CME:MES",
+      "productCode": "MES",
+      "globexGroupCode": "MS",
+      "sourceKind": "cme_reference_data_api",
+      "sourceUrl": "https://refdata.api.cmegroup.com/refdata/v3/tradingSchedules",
+      "fetchedAt": "2026-07-12T16:01:54+00:00",
+      "derivationVersion": "business-trade-date-gaps-v2",
+      "coverageStart": "2025-07-09",
+      "coverageEnd": "2028-05-05",
+      "sourceTradingDateCount": 713,
+      "sourceWeekdayCount": 713,
+      "closures": [
+        {
+          "date": "2025-09-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-11-27",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-02-16",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-05-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-06-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-07-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-09-07",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-11-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-02-15",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-03-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-05-31",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-06-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-07-05",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-09-06",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-11-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-12-24",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-01-17",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-02-21",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-04-14",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        }
+      ],
+      "earlyCloses": []
+    },
+    "CME:MNQ": {
+      "calendarKey": "CME:MNQ",
+      "productCode": "MNQ",
+      "globexGroupCode": "NQ",
+      "sourceKind": "cme_reference_data_api",
+      "sourceUrl": "https://refdata.api.cmegroup.com/refdata/v3/tradingSchedules",
+      "fetchedAt": "2026-07-12T16:01:54+00:00",
+      "derivationVersion": "business-trade-date-gaps-v2",
+      "coverageStart": "2025-07-09",
+      "coverageEnd": "2028-05-05",
+      "sourceTradingDateCount": 713,
+      "sourceWeekdayCount": 713,
+      "closures": [
+        {
+          "date": "2025-09-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-11-27",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-02-16",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-05-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-06-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-07-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-09-07",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-11-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-02-15",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-03-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-05-31",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-06-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-07-05",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-09-06",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-11-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-12-24",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-01-17",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-02-21",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-04-14",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        }
+      ],
+      "earlyCloses": []
+    },
+    "NYMEX:CL": {
+      "calendarKey": "NYMEX:CL",
+      "productCode": "CL",
+      "globexGroupCode": "CL",
+      "sourceKind": "cme_reference_data_api",
+      "sourceUrl": "https://refdata.api.cmegroup.com/refdata/v3/tradingSchedules",
+      "fetchedAt": "2026-07-12T16:01:54+00:00",
+      "derivationVersion": "business-trade-date-gaps-v2",
+      "coverageStart": "2025-07-09",
+      "coverageEnd": "2028-05-05",
+      "sourceTradingDateCount": 712,
+      "sourceWeekdayCount": 712,
+      "closures": [
+        {
+          "date": "2025-09-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-11-27",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-02-16",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-04-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-05-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-06-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-07-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-09-07",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-11-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-02-15",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-03-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-05-31",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-06-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-07-05",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-09-06",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-11-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-12-24",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-01-17",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-02-21",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-04-14",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        }
+      ],
+      "earlyCloses": []
+    },
+    "COMEX:GC": {
+      "calendarKey": "COMEX:GC",
+      "productCode": "GC",
+      "globexGroupCode": "GC",
+      "sourceKind": "cme_reference_data_api",
+      "sourceUrl": "https://refdata.api.cmegroup.com/refdata/v3/tradingSchedules",
+      "fetchedAt": "2026-07-12T16:01:54+00:00",
+      "derivationVersion": "business-trade-date-gaps-v2",
+      "coverageStart": "2025-07-09",
+      "coverageEnd": "2028-05-05",
+      "sourceTradingDateCount": 712,
+      "sourceWeekdayCount": 712,
+      "closures": [
+        {
+          "date": "2025-09-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-11-27",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-02-16",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-04-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-05-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-06-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-07-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-09-07",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-11-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-02-15",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-03-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-05-31",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-06-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-07-05",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-09-06",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-11-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-12-24",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-01-17",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-02-21",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-04-14",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        }
+      ],
+      "earlyCloses": []
+    },
+    "COMEX:SI": {
+      "calendarKey": "COMEX:SI",
+      "productCode": "SI",
+      "globexGroupCode": "SI",
+      "sourceKind": "cme_reference_data_api",
+      "sourceUrl": "https://refdata.api.cmegroup.com/refdata/v3/tradingSchedules",
+      "fetchedAt": "2026-07-12T16:01:54+00:00",
+      "derivationVersion": "business-trade-date-gaps-v2",
+      "coverageStart": "2025-07-09",
+      "coverageEnd": "2028-05-05",
+      "sourceTradingDateCount": 712,
+      "sourceWeekdayCount": 712,
+      "closures": [
+        {
+          "date": "2025-09-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-11-27",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-02-16",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-04-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-05-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-06-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-07-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-09-07",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-11-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-02-15",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-03-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-05-31",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-06-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-07-05",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-09-06",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-11-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-12-24",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-01-17",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-02-21",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-04-14",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        }
+      ],
+      "earlyCloses": []
+    },
+    "COMEX:HG": {
+      "calendarKey": "COMEX:HG",
+      "productCode": "HG",
+      "globexGroupCode": "HG",
+      "sourceKind": "cme_reference_data_api",
+      "sourceUrl": "https://refdata.api.cmegroup.com/refdata/v3/tradingSchedules",
+      "fetchedAt": "2026-07-12T16:01:54+00:00",
+      "derivationVersion": "business-trade-date-gaps-v2",
+      "coverageStart": "2025-07-09",
+      "coverageEnd": "2028-05-05",
+      "sourceTradingDateCount": 712,
+      "sourceWeekdayCount": 712,
+      "closures": [
+        {
+          "date": "2025-09-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-11-27",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2025-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-01-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-02-16",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-04-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-05-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-06-19",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-07-03",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-09-07",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-11-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2026-12-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-01",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-01-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-02-15",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-03-26",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-05-31",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-06-18",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-07-05",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-09-06",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-11-25",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2027-12-24",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-01-17",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-02-21",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        },
+        {
+          "date": "2028-04-14",
+          "status": "closed",
+          "name": "CME official schedule: no business trade date",
+          "reason": "missing_business_trade_date"
+        }
+      ],
+      "earlyCloses": []
+    }
+  }
+}

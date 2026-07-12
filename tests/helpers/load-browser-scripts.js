@@ -7,6 +7,22 @@ function loadBrowserScripts(relativePaths, overrides = {}) {
     const scriptQueue = [];
     const seenPaths = new Set();
     for (const relativePath of relativePaths) {
+        if (relativePath === 'js/market_holidays.js'
+            && !Object.prototype.hasOwnProperty.call(overrides, 'OptionComboOfficialExchangeCalendars')
+            && !seenPaths.has('js/official_exchange_calendars.generated.js')) {
+            scriptQueue.push('js/official_exchange_calendars.generated.js');
+            seenPaths.add('js/official_exchange_calendars.generated.js');
+        }
+        if (relativePath === 'js/iv_term_structure_core.js'
+            && !seenPaths.has('js/market_holidays.js')) {
+            if (!Object.prototype.hasOwnProperty.call(overrides, 'OptionComboOfficialExchangeCalendars')
+                && !seenPaths.has('js/official_exchange_calendars.generated.js')) {
+                scriptQueue.push('js/official_exchange_calendars.generated.js');
+                seenPaths.add('js/official_exchange_calendars.generated.js');
+            }
+            scriptQueue.push('js/market_holidays.js');
+            seenPaths.add('js/market_holidays.js');
+        }
         if (relativePath === 'js/ws_client.js' && !seenPaths.has('js/combo_order_transport.js')) {
             scriptQueue.push('js/combo_order_transport.js');
             seenPaths.add('js/combo_order_transport.js');
@@ -46,6 +62,7 @@ function loadBrowserScripts(relativePaths, overrides = {}) {
 
 function loadPricingContext() {
     return loadBrowserScripts([
+        'js/official_exchange_calendars.generated.js',
         'js/market_holidays.js',
         'js/date_utils.js',
         'js/product_registry.js',
@@ -58,6 +75,7 @@ function loadPricingContext() {
 
 function loadAmortizedContext() {
     return loadBrowserScripts([
+        'js/official_exchange_calendars.generated.js',
         'js/market_holidays.js',
         'js/date_utils.js',
         'js/product_registry.js',
@@ -70,6 +88,7 @@ function loadAmortizedContext() {
 
 function loadValuationContext() {
     return loadBrowserScripts([
+        'js/official_exchange_calendars.generated.js',
         'js/market_holidays.js',
         'js/date_utils.js',
         'js/product_registry.js',

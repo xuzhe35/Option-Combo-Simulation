@@ -1500,11 +1500,13 @@
         const snapshot = card.catalog && Array.isArray(card.catalog.expiryRows)
             ? card.catalog.expiryRows
             : [];
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
         return core().buildExpiryDetailRows(
             snapshot,
             card.quotesBySubId,
             card.catalog && card.catalog.anchorDate,
-            normalizeTdIvLambda(runtime.tdIvWeekendWeight)
+            normalizeTdIvLambda(runtime.tdIvWeekendWeight),
+            profile.calendarId || 'NYSE'
         );
     }
 
@@ -2042,6 +2044,81 @@
         `;
     }
 
+    const STRATEGY_ZONE_LABELS = Object.freeze({
+        long_displacement: 'LONG DISPLACEMENT',
+        stand_down: 'STAND DOWN',
+        sell_calendar: 'SELL CALENDAR',
+        calendar_unavailable: 'CALENDAR UNAVAILABLE',
+        no_signal: 'NO SIGNAL',
+    });
+
+    function buildStrategySignalPanel(card, comparedRows, historyDocument) {
+        const coreApi = core();
+        if (typeof coreApi.computeRegimeSignal !== 'function') {
+            return '';
+        }
+        const detailRows = comparedRows && Array.isArray(comparedRows.detailRows)
+            ? comparedRows.detailRows
+            : [];
+        const samples = historyDocument && Array.isArray(historyDocument.samples)
+            ? historyDocument.samples
+            : [];
+        const signal = coreApi.computeRegimeSignal(detailRows);
+        const watermark = coreApi.computeDisplacementWatermark(samples);
+        const profile = card && card.profile ? card.profile : null;
+        const calendarId = String(profile && profile.calendarId || 'NYSE').toUpperCase();
+        const coverageStart = signal.status === 'ok'
+            ? String(card && card.catalog && card.catalog.anchorDate || signal.front.expiry || '')
+            : '';
+        const coverageEnd = signal.status === 'ok' ? signal.back.expiry : coverageStart;
+        const calendarAvailable = typeof globalScope.isOfficialExchangeCalendarAvailable === 'function'
+            ? globalScope.isOfficialExchangeCalendarAvailable(calendarId, coverageStart, coverageEnd)
+            : calendarId === 'NYSE';
+        const suggestion = signal.status !== 'ok' || calendarAvailable
+            ? coreApi.buildStrategySuggestion(signal, watermark)
+            : { stance: 'calendar_unavailable', structure: null, exitRule: null };
+
+        const zone = signal.status === 'ok'
+            ? (calendarAvailable ? signal.zone : 'calendar_unavailable')
+            : 'no_signal';
+        const calendarNote = calendarAvailable
+            ? ''
+            : ` · calendar unavailable (${escapeHtml(calendarId)} official snapshot missing/stale)`;
+        const slopeText = signal.status === 'ok'
+            ? `${signal.slope.toFixed(3)} · F ${escapeHtml(signal.front.expiry)} (${signal.front.dte}d) / B ${escapeHtml(signal.back.expiry)} (${signal.back.dte}d)${calendarNote}`
+            : escapeHtml(signal.reason || 'sync the nearest expiries first');
+        const watermarkText = watermark.status === 'ok'
+            ? `${watermark.mean.toFixed(2)} (n=${watermark.count})`
+            : `collecting ${watermark.count}/${watermark.required}`;
+        const suggestionText = suggestion.structure
+            ? `${suggestion.structure} — ${suggestion.exitRule}`
+            : (suggestion.stance === 'no_signal'
+                ? 'No signal: subscribe/sync the ~7d and ~14d expiries.'
+                : (suggestion.stance === 'calendar_unavailable'
+                    ? `${calendarId} official trading calendar is unavailable — no strategy suggestion.`
+                    : (suggestion.stance === 'awaiting_watermark'
+                        ? 'Zone favors reverse fly, but the watermark must prove it first — keep weekly samples, no structure yet.'
+                        : 'No options this week; delta book only.')));
+        const panelTitle = signal.status !== 'ok'
+            ? 'Sync the required front and back expiries before evaluating the official-calendar strategy signal.'
+            : (calendarAvailable
+            ? 'Frozen playbook from VRP_RESEARCH_MEMO.md: slope<0.95 reverse iron fly (hold), 0.95-1.05 stand down, >1.05 calendar (tp50). Signal lambda fixed at 0.3 regardless of the TD IV display lambda. Watermark = realized |move| / expected move from your accumulated samples; <0.95 vetoes the reverse fly.'
+            : `${calendarId} official trading calendar is missing or does not cover these expiries. No strategy suggestion is produced.`);
+
+        return `
+            <div class="ivts-strategy-signal is-${escapeHtml(zone)}"
+                title="${escapeHtml(panelTitle)}">
+                <div class="ivts-strategy-headline">
+                    <span class="ivts-strategy-zone">${STRATEGY_ZONE_LABELS[zone] || zone}</span>
+                    <span class="ivts-strategy-disclaimer">suggestion only · paper/sim first</span>
+                </div>
+                <div class="ivts-strategy-row"><span>TD slope (λ=0.3)</span><span>${slopeText}</span></div>
+                <div class="ivts-strategy-row"><span>|move|/EM watermark</span><span>${watermarkText}</span></div>
+                <div class="ivts-strategy-row ivts-strategy-suggestion"><span>This week</span><span>${escapeHtml(suggestionText)}</span></div>
+            </div>
+        `;
+    }
+
     function buildCardBodyMarkup(card) {
         const historyDocument = readOnlyHistoryDocument(card);
         const comparedRows = buildComparedRows(card);
@@ -2050,6 +2127,7 @@
                 ${escapeHtml(card.statusMessage)}
             </div>
 
+            ${buildStrategySignalPanel(card, comparedRows, historyDocument)}
             ${buildOptionStreamLimitControl(card)}
             ${buildFuturesContractControl(card)}
 
@@ -2618,6 +2696,7 @@
             normalizeTdIvLambda,
             loadSavedTdIvLambda,
             saveTdIvLambda,
+            buildStrategySignalPanel,
             captureCardViewState,
             restoreCardViewState,
         },

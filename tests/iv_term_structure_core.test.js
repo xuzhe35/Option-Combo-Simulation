@@ -401,8 +401,11 @@ module.exports = {
                 assert.equal(core.countTradingDays('', '20260713'), null);
                 assert.equal(core.countTradingDays('2026-07-14', '20260713'), null);
 
-                ctx.isMarketHoliday = (dateKey) => dateKey === '2026-07-09';
-                assert.equal(core.countTradingDays('2026-07-08', '20260710'), 1);
+                ctx.isMarketHoliday = (dateKey, calendarKey) => (
+                    dateKey === '2026-07-09' && calendarKey === 'CME:ES'
+                );
+                assert.equal(core.countTradingDays('2026-07-08', '20260710', 'NYSE'), 2);
+                assert.equal(core.countTradingDays('2026-07-08', '20260710', 'CME:ES'), 1);
             },
         },
         {
@@ -500,6 +503,171 @@ module.exports = {
                 );
                 assert.equal(calendarRows[0].callIvTd, 0.25);
                 assert.equal(calendarRows[0].putIvTd, 0.21);
+            },
+        },
+        {
+            name: 'classifies the regime zone from the frozen-lambda TD slope',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                const row = (expiry, dte, tradDte, atmIv) => ({
+                    expiry, dte, tradDte, atmIv, hasCompletePair: true, subscriptionSelected: true,
+                });
+
+                // Fair pricing: choose the back calendar IV so both legs carry
+                // the same frozen-lambda TD IV; the conversion is linear in iv,
+                // so back it out from the converter itself -> slope 1, stand_down.
+                const frontTd = core.computeTradingDayAnnualizedIv(0.2, 7, 5, 0.3);
+                const backIv = frontTd / core.computeTradingDayAnnualizedIv(1, 14, 10, 0.3);
+                const fair = core.computeRegimeSignal([
+                    row('20260717', 7, 5, 0.2),
+                    row('20260724', 14, 10, backIv),
+                ]);
+                assert.equal(fair.status, 'ok');
+                assert.equal(fair.zone, 'stand_down');
+                assert.ok(Math.abs(fair.slope - 1) < 0.001);
+
+                const backwardation = core.computeRegimeSignal([
+                    row('20260717', 7, 5, 0.30),
+                    row('20260724', 14, 10, 0.22),
+                ]);
+                assert.equal(backwardation.zone, 'sell_calendar');
+                assert.ok(backwardation.slope > 1.05);
+                assert.equal(backwardation.front.dte, 7);
+                assert.equal(backwardation.back.dte, 14);
+
+                const contango = core.computeRegimeSignal([
+                    row('20260717', 7, 5, 0.15),
+                    row('20260724', 14, 10, 0.21),
+                ]);
+                assert.equal(contango.zone, 'long_displacement');
+
+                // Boundary classification uses the UNROUNDED slope: a raw
+                // slope of 0.94996 (which rounds to 0.9500 for display) must
+                // stay in long_displacement; 1.05004 must stay sell_calendar.
+                const factorRatio = core.computeTradingDayAnnualizedIv(1, 14, 10, 0.3)
+                    / core.computeTradingDayAnnualizedIv(1, 7, 5, 0.3);
+                const justBelow = core.computeRegimeSignal([
+                    row('20260717', 7, 5, 0.94996 * 0.2 * factorRatio),
+                    row('20260724', 14, 10, 0.2),
+                ]);
+                assert.equal(justBelow.zone, 'long_displacement');
+                assert.equal(justBelow.slope, 0.95); // display rounds, class does not
+                const justAbove = core.computeRegimeSignal([
+                    row('20260717', 7, 5, 1.05004 * 0.2 * factorRatio),
+                    row('20260724', 14, 10, 0.2),
+                ]);
+                assert.equal(justAbove.zone, 'sell_calendar');
+
+                // Missing back expiry -> insufficient, never a fake zone.
+                const missing = core.computeRegimeSignal([row('20260717', 7, 5, 0.2)]);
+                assert.equal(missing.status, 'insufficient');
+                // Unsubscribed rows are ignored.
+                const unsub = core.computeRegimeSignal([
+                    row('20260717', 7, 5, 0.2),
+                    { ...row('20260724', 14, 10, 0.2), subscriptionSelected: false },
+                ]);
+                assert.equal(unsub.status, 'insufficient');
+            },
+        },
+        {
+            name: 'computes the displacement watermark from history samples with scaling and a minimum count',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                const sample = (quoteDate, price, em) => ({
+                    quoteDate, underlyingPrice: price,
+                    details: [{ dte: 7, atmStraddleMark: em }],
+                });
+
+                // 9 weekly samples, each week the underlying moves exactly one
+                // scaled EM -> every ratio = 1.0.
+                const samples = [];
+                let price = 500;
+                const dates = ['2026-01-02', '2026-01-09', '2026-01-16', '2026-01-23', '2026-01-30',
+                               '2026-02-06', '2026-02-13', '2026-02-20', '2026-02-27'];
+                for (const d of dates) {
+                    samples.push(sample(d, price, 5));
+                    price += 5 * Math.sqrt(7 / 7); // gap 7d, frontDte 7 -> scale 1
+                }
+                const wm = core.computeDisplacementWatermark(samples);
+                assert.equal(wm.status, 'ok');
+                assert.equal(wm.count, 8);
+                assert.ok(Math.abs(wm.mean - 1) < 1e-9);
+
+                // Fewer than 8 usable pairs -> collecting.
+                const collecting = core.computeDisplacementWatermark(samples.slice(0, 5));
+                assert.equal(collecting.status, 'collecting');
+                assert.equal(collecting.count, 4);
+
+                // Same-day duplicate samples dedupe (last wins); >12d gaps skipped.
+                const noisy = [
+                    sample('2026-03-02', 500, 5),
+                    sample('2026-03-02', 501, 5),
+                    sample('2026-03-30', 520, 5), // 28d gap -> skipped
+                ];
+                const skipped = core.computeDisplacementWatermark(noisy);
+                assert.equal(skipped.count, 0);
+
+                // Time scaling: 3-day gap against a 7-DTE EM shrinks the
+                // expected move by sqrt(3/7).
+                const scaled = core.computeDisplacementWatermark([
+                    sample('2026-04-06', 500, 7),
+                    sample('2026-04-09', 500 + 7 * Math.sqrt(3 / 7), 7),
+                ]);
+                assert.equal(scaled.status, 'collecting');
+                assert.ok(Math.abs(scaled.latest - 1) < 1e-4);
+            },
+        },
+        {
+            name: 'maps zone and watermark onto the frozen strategy playbook',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const okSignal = (zone, slope) => ({
+                    status: 'ok', zone, slope,
+                    front: { expiry: '20260717', dte: 7, ivTd: 0.2 },
+                    back: { expiry: '20260724', dte: 14, ivTd: 0.2 },
+                });
+                const wmOk = { status: 'ok', mean: 1.08, count: 26, required: 8 };
+                const wmLow = { status: 'ok', mean: 0.88, count: 26, required: 8 };
+                const wmCollecting = { status: 'collecting', mean: null, count: 3, required: 8 };
+
+                const cal = core.buildStrategySuggestion(okSignal('sell_calendar', 1.12), wmOk);
+                assert.equal(cal.stance, 'sell_calendar');
+                assert.match(cal.exitRule, /\+50%/);
+
+                const rev = core.buildStrategySuggestion(okSignal('long_displacement', 0.9), wmOk);
+                assert.equal(rev.stance, 'long_displacement');
+                assert.match(rev.exitRule, /Hold to expiry/);
+
+                // The watermark veto: displacement era gone -> stand down.
+                const veto = core.buildStrategySuggestion(okSignal('long_displacement', 0.9), wmLow);
+                assert.equal(veto.stance, 'stand_down');
+                assert.ok(veto.reasons.some((r) => r.includes('veto')));
+
+                // Fail closed: a collecting (or absent) watermark cannot prove
+                // the displacement era, so no structure is suggested yet.
+                const collecting = core.buildStrategySuggestion(okSignal('long_displacement', 0.9), wmCollecting);
+                assert.equal(collecting.stance, 'awaiting_watermark');
+                assert.equal(collecting.structure, null);
+                assert.ok(collecting.reasons.some((r) => r.includes('3/8')));
+                const absent = core.buildStrategySuggestion(okSignal('long_displacement', 0.9), null);
+                assert.equal(absent.stance, 'awaiting_watermark');
+
+                const neutral = core.buildStrategySuggestion(okSignal('stand_down', 1.0), wmOk);
+                assert.equal(neutral.stance, 'stand_down');
+
+                const none = core.buildStrategySuggestion({ status: 'insufficient', reason: 'x' }, wmOk);
+                assert.equal(none.stance, 'no_signal');
             },
         },
         {

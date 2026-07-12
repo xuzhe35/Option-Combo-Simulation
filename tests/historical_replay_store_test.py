@@ -80,6 +80,11 @@ class MockChainServiceHandler(BaseHTTPRequestHandler):
             return self._json(200, {"symbol": "SPY", "barSize": "1 day",
                                     "count": len(bars), "bars": bars})
 
+        if route == "/v1/trading-dates":
+            return self._json(200, {
+                "symbol": "SPY", "dates": sorted(BARS), "count": len(BARS),
+            })
+
         if route == "/v1/quote":
             if (params.get("date") == "2022-01-03"
                     and params.get("expiration") == "2022-02-18"
@@ -171,6 +176,12 @@ class HistoricalReplayStoreTest(unittest.TestCase):
         self.assertEqual(quote["volume"], 120000)
         self.assertIn("adjClose", quote)
         self.assertIn("source", quote)
+
+    def test_trading_dates_are_observed_service_sessions(self):
+        self.assertEqual(
+            self.store.get_trading_dates("SPY"),
+            ["2022-01-03", "2022-01-04"],
+        )
 
     def test_underlying_snapshot_without_date_returns_latest(self):
         snapshot = self.store.get_underlying_snapshot("SPY", "")
@@ -281,6 +292,10 @@ class SnapshotPayloadIntegrationTest(unittest.TestCase):
             payload["historicalReplay"]["availableStartDate"], "2008-01-02"
         )
         self.assertEqual(len(payload["historicalReplay"]["yieldCurvePoints"]), 2)
+        self.assertEqual(
+            payload["historicalReplay"]["observedTradingDates"],
+            ["2022-01-03", "2022-01-04"],
+        )
         self.assertEqual(payload["options"]["leg1"]["mark"], 8.05)
         self.assertEqual(payload["options"]["leg2"], {"missing": True})
 

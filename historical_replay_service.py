@@ -57,6 +57,7 @@ class HistoricalReplayService:
             os.path.abspath(rates_db_path) if rates_db_path else '',
             logger=logger,
         )
+        self._trading_dates_cache = {}
 
     def build_snapshot_payload(self, requested_date, underlying_request, options_data):
         underlying_symbol = normalize_symbol(
@@ -64,6 +65,12 @@ class HistoricalReplayService:
             or (underlying_request or {}).get('enteredSymbol')
         )
         date_bounds = self.store.get_underlying_date_bounds(underlying_symbol) or {}
+        if underlying_symbol not in self._trading_dates_cache:
+            self._trading_dates_cache[underlying_symbol] = self.store.get_trading_dates(
+                underlying_symbol,
+                date_bounds.get('startDate', ''),
+                date_bounds.get('endDate', ''),
+            )
         payload = {
             "underlyingPrice": None,
             "underlyingQuote": None,
@@ -77,6 +84,7 @@ class HistoricalReplayService:
                 "dataSource": "historical",
                 "availableStartDate": date_bounds.get('startDate', ''),
                 "availableEndDate": date_bounds.get('endDate', ''),
+                "observedTradingDates": self._trading_dates_cache.get(underlying_symbol, []),
                 "expiryUnderlyingQuotes": {},
                 "riskFreeRateEffectiveDate": '',
                 "riskFreeRateSource": '',

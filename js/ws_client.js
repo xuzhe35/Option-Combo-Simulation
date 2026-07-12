@@ -3257,6 +3257,11 @@ function _applyHistoricalReplayMetadata(data) {
     let stateChanged = false;
     const availableStartDate = String(data.historicalReplay.availableStartDate || '').trim();
     const availableEndDate = String(data.historicalReplay.availableEndDate || '').trim();
+    const observedTradingDates = Array.isArray(data.historicalReplay.observedTradingDates)
+        ? data.historicalReplay.observedTradingDates
+            .map((value) => String(value || '').trim())
+            .filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value))
+        : [];
     const effectiveDate = String(data.historicalReplay.effectiveDate || '').trim();
     const riskFreeRate = parseFloat(data.riskFreeRate);
     if (_isHistoricalMode() && effectiveDate) {
@@ -3267,6 +3272,17 @@ function _applyHistoricalReplayMetadata(data) {
         if (availableEndDate && state.historicalAvailableEndDate !== availableEndDate) {
             state.historicalAvailableEndDate = availableEndDate;
             stateChanged = true;
+        }
+        if (observedTradingDates.length > 0) {
+            const currentDates = Array.isArray(state.historicalTradingDates)
+                ? state.historicalTradingDates
+                : [];
+            if (currentDates.length !== observedTradingDates.length
+                || currentDates[0] !== observedTradingDates[0]
+                || currentDates[currentDates.length - 1] !== observedTradingDates[observedTradingDates.length - 1]) {
+                state.historicalTradingDates = observedTradingDates;
+                stateChanged = true;
+            }
         }
         if ((!state.baseDate)
             || (availableStartDate && state.baseDate < availableStartDate)
