@@ -69,6 +69,25 @@ def _trading_day_count(sorted_trading_dates, start, end):
     return hi - lo
 
 
+def _prepare_calendar(data_dates, gap_dates, start, end):
+    """Split the two roles of the date list.
+
+    * entries: last DATA day of each ISO week inside [start, end] — entry
+      selection stays data-driven (no point entering a day with no quotes).
+    * calendar: data dates PLUS audit-confirmed vendor gaps (days the market
+      traded but the dataset lost) — trading-day counts must not treat a
+      data hole as a holiday.
+    Returns (entries, calendar_sorted, last_covered_date).
+    """
+    calendar = sorted(set(data_dates) | set(gap_dates))
+    by_week = {}
+    for day in data_dates:
+        if start <= day <= end:
+            by_week.setdefault(day.isocalendar()[:2], []).append(day)
+    entries = sorted(max(days) for days in by_week.values())
+    return entries, calendar, (calendar[-1] if calendar else None)
+
+
 def _td_iv(iv, cal_dte, trad_dte, lam):
     """Weighted-clock re-annualization; mirrors the frontend formula."""
     if not iv or iv <= 0 or cal_dte <= 0 or trad_dte <= 0:
@@ -160,20 +179,17 @@ def _wing_strikes(quotes, atm, width):
 
 def run(args):
     lam = args.lam
+    # Full-range fetches: the calendar must extend past args.end because the
+    # last entries' back expiries land beyond it.
     dates_payload = _get("/v1/trading-dates", {
-        "symbol": args.symbol, "start": args.start, "end": args.end,
+        "symbol": args.symbol, "start": "1900-01-01", "end": "2999-12-31",
     })
-    trading_dates = [_parse_date(d) for d in dates_payload["dates"]]
-    trading_set = set(trading_dates)
-
-    # Last trading day of each ISO week (handles Friday holidays).
-    entries = []
-    by_week = {}
-    for d in trading_dates:
-        by_week.setdefault(d.isocalendar()[:2], []).append(d)
-    for week_dates in by_week.values():
-        entries.append(max(week_dates))
-    entries.sort()
+    data_dates = [_parse_date(d) for d in dates_payload["dates"]]
+    audit_payload = _get("/v1/audit/missing-dates", {"symbol": args.symbol}) or {}
+    gap_dates = [_parse_date(item["quoteDate"])
+                 for item in audit_payload.get("missingDates", [])]
+    entries, trading_dates, last_covered = _prepare_calendar(
+        data_dates, gap_dates, _parse_date(args.start), _parse_date(args.end))
 
     trades = []
     skips = {}
@@ -201,6 +217,11 @@ def run(args):
                             front_dte + 4, back_target + 5)
         if back is None:
             skip("no back expiry")
+            continue
+        if last_covered is None or back > last_covered:
+            # The exchange calendar cannot count trading days out to this
+            # back expiry; a truncated count would distort the regime slope.
+            skip("calendar coverage")
             continue
 
         under = _get("/v1/underlying", {

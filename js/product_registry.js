@@ -12,6 +12,10 @@
     const DEFAULT_PROFILE = Object.freeze({
         family: 'DEFAULT_EQUITY',
         displayName: 'Equity / ETF option',
+        // Exchange holiday calendar the instrument settles/trades on. Only
+        // NYSE is implemented (js/market_holidays.js); other ids mark that
+        // the NYSE clock is a proxy until a real calendar is wired.
+        calendarId: 'NYSE',
         optionSecType: 'OPT',
         underlyingSecType: 'STK',
         optionSymbol: null,
@@ -39,6 +43,7 @@
     const FAMILY_PROFILES = Object.freeze({
         ES: {
             family: 'ES',
+            calendarId: 'CME',
             displayName: 'E-mini S&P 500 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -58,6 +63,7 @@
         },
         NQ: {
             family: 'NQ',
+            calendarId: 'CME',
             displayName: 'E-mini Nasdaq-100 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -77,6 +83,7 @@
         },
         MES: {
             family: 'MES',
+            calendarId: 'CME',
             displayName: 'Micro E-mini S&P 500 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -95,6 +102,7 @@
         },
         MNQ: {
             family: 'MNQ',
+            calendarId: 'CME',
             displayName: 'Micro E-mini Nasdaq-100 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -113,6 +121,7 @@
         },
         CL: {
             family: 'CL',
+            calendarId: 'NYMEX',
             displayName: 'Light Sweet Crude Oil futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -132,6 +141,7 @@
         },
         GC: {
             family: 'GC',
+            calendarId: 'COMEX',
             displayName: 'Gold futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -151,6 +161,7 @@
         },
         SI: {
             family: 'SI',
+            calendarId: 'COMEX',
             displayName: 'Silver futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -171,6 +182,7 @@
         },
         HG: {
             family: 'HG',
+            calendarId: 'COMEX',
             displayName: 'Copper futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',

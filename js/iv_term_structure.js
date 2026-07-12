@@ -2065,8 +2065,13 @@
         const suggestion = coreApi.buildStrategySuggestion(signal, watermark);
 
         const zone = signal.status === 'ok' ? signal.zone : 'no_signal';
+        const profile = card && card.profile ? card.profile : null;
+        const calendarId = String(profile && profile.calendarId || 'NYSE').toUpperCase();
+        const calendarNote = calendarId === 'NYSE'
+            ? ''
+            : ` · NYSE-proxy clock (${escapeHtml(calendarId)} calendar not wired)`;
         const slopeText = signal.status === 'ok'
-            ? `${signal.slope.toFixed(3)} · F ${escapeHtml(signal.front.expiry)} (${signal.front.dte}d) / B ${escapeHtml(signal.back.expiry)} (${signal.back.dte}d)`
+            ? `${signal.slope.toFixed(3)} · F ${escapeHtml(signal.front.expiry)} (${signal.front.dte}d) / B ${escapeHtml(signal.back.expiry)} (${signal.back.dte}d)${calendarNote}`
             : escapeHtml(signal.reason || 'sync the nearest expiries first');
         const watermarkText = watermark.status === 'ok'
             ? `${watermark.mean.toFixed(2)} (n=${watermark.count})`

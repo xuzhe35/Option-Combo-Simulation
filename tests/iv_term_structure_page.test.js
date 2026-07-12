@@ -426,6 +426,14 @@ module.exports = {
                 const empty = buildStrategySignalPanel({ symbol: 'SPY' }, { detailRows: [] }, { samples: [] });
                 assert.match(empty, /NO SIGNAL/);
                 assert.match(empty, /subscribe\/sync/);
+
+                // CME-family cards disclose that the NYSE clock is a proxy.
+                const es = buildStrategySignalPanel(
+                    { symbol: 'ES', profile: { calendarId: 'CME' } },
+                    { detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)] },
+                    { samples: [] }
+                );
+                assert.match(es, /NYSE-proxy clock \(CME calendar not wired\)/);
             },
         },
         {

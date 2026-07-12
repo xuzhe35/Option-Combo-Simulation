@@ -157,6 +157,10 @@
 2. 交易日历统一：此前研究与仪表盘均使用"仅剔周末"的 weekday 时钟（两者一致，故区界内部自洽）；现统一为真实交易所日历（回测用 chain service 的 trading-dates，页面加载 `market_holidays.js` 激活假日钩子）。**真日历下复验**：regime 标签翻转仅 SPY 3.0% / QQQ 3.8%；三区制组合 SPY +10,378（Sharpe 0.78，原 0.84）、QQQ +8,740（Sharpe **0.72**，原 0.55，改善）。**冻结区界 0.95/1.05 经复验保持成立。**
 3. slope 分类改用未舍入值（原实现先舍入到 4 位再比较，0.94996 会被错归中性区），舍入仅用于显示；补充了阈值两侧 epsilon 测试。
 
+**2026-07-12（第二轮 Review 两项修正）**
+4. 品种日历归属：product_registry 增加 `calendarId`（股票/ETF=NYSE；ES/NQ/MES/MNQ=CME；CL=NYMEX；GC/SI/HG=COMEX）。真实日历仅实现了 NYSE；非 NYSE 品种的仪表盘 TD slope 行显式标注 "NYSE-proxy clock (XXX calendar not wired)"。接入 CME/NYMEX/COMEX 真日历列为未来工作（首选方案：chain service 增加独立的 /exchange-calendar 接口）。
+5. 回测日历两处修正：(a) 审计确认的供应商数据缺口（2018-11-06、2019-09-03、2020-06-23）回补进交易日计数（此前被误当休市日）；(b) 日历改为全量拉取并在 back expiry 超出日历覆盖时跳过该笔（此前最后两周的 back trad DTE 被静默截断）。复验：SPY 仅 4 周换区、QQQ 零换区，末尾 2 笔正确跳过；三区制 SPY +10,376（Sharpe 0.78）、QQQ +8,176（0.68）——**结论不变**。新增 `tests/backtest_calendar_helpers_test.py` 覆盖两个修正点。
+
 ## 附录 A. 公式
 
 - TD IV：`iv_td = iv_cal × √( (calDTE/365) / (effDTE/effYear) )`，`effDTE = tradDTE + λ(calDTE−tradDTE)`，`effYear = 252+113λ`，λ 冻结 0.3（信号用）。
