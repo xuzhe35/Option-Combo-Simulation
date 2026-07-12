@@ -17,6 +17,7 @@
     // Configured from app state via configureSimTimeBasis(); defaults to the
     // legacy calendar clock so nothing changes until the user opts in.
     let simTimeBasisWeekendWeight = 1;
+    let simObservedTradingDates = null;
 
     function normalizeWeekendWeight(value) {
         const parsed = parseFloat(value);
@@ -28,6 +29,9 @@
 
     function configureSimTimeBasis(options) {
         simTimeBasisWeekendWeight = normalizeWeekendWeight(options && options.weekendWeight);
+        simObservedTradingDates = options && Array.isArray(options.observedTradingDates)
+            ? options.observedTradingDates.slice()
+            : null;
         return simTimeBasisWeekendWeight;
     }
 
@@ -287,7 +291,14 @@
 
         const isExpired = expDateObj <= simDateObj;
         const calDTE = isExpired ? 0 : diffDays(globalSimulatedDateStr, leg.expDate);
-        const tradDTE = isExpired ? 0 : calendarToTradingDays(globalSimulatedDateStr, leg.expDate);
+        const calendarKey = String(resolvedProfile && resolvedProfile.calendarId || 'NYSE').toUpperCase();
+        const observedTradingDates = marketDataMode === 'historical' ? simObservedTradingDates : null;
+        const tradDTE = isExpired
+            ? 0
+            : calendarToTradingDays(
+                globalSimulatedDateStr, leg.expDate, calendarKey, observedTradingDates
+            );
+        const calendarAvailable = isExpired || tradDTE !== null;
         const weekendWeight = simTimeBasisWeekendWeight;
         const baseIv = hasUsableLegIv(leg) ? leg.iv : null;
 
@@ -295,24 +306,40 @@
         let effectiveBaseIv = baseIv;
         if (!isExpired && weekendWeight < 1) {
             const effYear = weightedDaysPerYear(weekendWeight);
-            let effDTE = countWeightedDays(globalSimulatedDateStr, leg.expDate, weekendWeight);
-            if (calDTE > 0 && effDTE <= 0) {
+            let effDTE = countWeightedDays(
+                globalSimulatedDateStr, leg.expDate, weekendWeight,
+                calendarKey, observedTradingDates
+            );
+            if (effDTE === null) {
+                T = null;
+                effectiveBaseIv = null;
+            }
+            if (effDTE !== null && calDTE > 0 && effDTE <= 0) {
                 // Not expired, but only non-trading days remain on a
                 // zero-weight clock (e.g. Saturday before a Monday expiry).
                 // Keep a half trading day so the leg is not marked to
                 // intrinsic before its last session has happened.
                 effDTE = 0.5;
             }
-            T = effDTE / effYear;
+            if (effDTE !== null) {
+                T = effDTE / effYear;
+            }
 
-            if (baseIv !== null) {
+            if (baseIv !== null && effDTE !== null) {
                 // The TWS quote is calendar-annualized as of the quote date,
                 // so the conversion factor is anchored there — not at the
                 // simulated date — and stays frozen as the clock advances.
                 const anchorDate = globalBaseDateStr || globalSimulatedDateStr;
                 const anchorCalDte = diffDays(anchorDate, leg.expDate);
-                const anchorEffDte = countWeightedDays(anchorDate, leg.expDate, weekendWeight);
-                effectiveBaseIv = convertIvToWeightedClock(baseIv, anchorCalDte, anchorEffDte, weekendWeight);
+                const anchorEffDte = countWeightedDays(
+                    anchorDate, leg.expDate, weekendWeight,
+                    calendarKey, observedTradingDates
+                );
+                effectiveBaseIv = anchorEffDte === null
+                    ? null
+                    : convertIvToWeightedClock(
+                        baseIv, anchorCalDte, anchorEffDte, weekendWeight
+                    );
             }
         }
 
@@ -366,6 +393,8 @@
             isExpired,
             calDTE,
             tradDTE,
+            calendarKey,
+            calendarAvailable,
             T,
             simIV,
             simIVAvailable: isExpired || simIV !== null,

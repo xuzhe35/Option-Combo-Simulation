@@ -406,6 +406,7 @@ body {
 .ivts-strategy-signal.is-long_displacement { border-left-color: #7c5cff; background: rgba(124, 92, 255, 0.06); }
 .ivts-strategy-signal.is-sell_calendar { border-left-color: #14935c; background: rgba(20, 147, 92, 0.06); }
 .ivts-strategy-signal.is-stand_down { border-left-color: #9aa3b2; background: rgba(154, 163, 178, 0.08); }
+.ivts-strategy-signal.is-calendar_unavailable { border-left-color: #b7791f; background: rgba(183, 121, 31, 0.08); }
 .ivts-strategy-signal.is-no_signal { border-left-color: #d0d5dd; }
 
 .ivts-strategy-headline {
@@ -423,6 +424,7 @@ body {
 
 .ivts-strategy-signal.is-long_displacement .ivts-strategy-zone { color: #6443f5; }
 .ivts-strategy-signal.is-sell_calendar .ivts-strategy-zone { color: #0f7a4c; }
+.ivts-strategy-signal.is-calendar_unavailable .ivts-strategy-zone { color: #975a16; }
 .ivts-strategy-signal.is-stand_down .ivts-strategy-zone,
 .ivts-strategy-signal.is-no_signal .ivts-strategy-zone { color: var(--ivts-muted); }
 

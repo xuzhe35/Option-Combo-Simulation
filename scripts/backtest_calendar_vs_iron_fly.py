@@ -38,9 +38,12 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 SERVICE_URL = "http://127.0.0.1:8750"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+OFFICIAL_CALENDAR_PATH = PROJECT_ROOT / "exchange_calendars" / "official_exchange_calendars.json"
 
 
 def _get(path, params):
@@ -69,23 +72,62 @@ def _trading_day_count(sorted_trading_dates, start, end):
     return hi - lo
 
 
-def _prepare_calendar(data_dates, gap_dates, start, end):
+def _load_official_calendar(calendar_key="NYSE"):
+    try:
+        payload = json.loads(OFFICIAL_CALENDAR_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return (payload.get("calendars") or {}).get(calendar_key)
+
+
+def _overlay_official_calendar(observed_dates, official_calendar):
+    """Replace the official coverage window with downloaded exchange truth."""
+    if not official_calendar:
+        return sorted(set(observed_dates))
+    try:
+        coverage_start = _parse_date(official_calendar["coverageStart"])
+        coverage_end = _parse_date(official_calendar["coverageEnd"])
+    except (KeyError, TypeError, ValueError):
+        return sorted(set(observed_dates))
+    closures = {
+        _parse_date(item["date"])
+        for item in official_calendar.get("closures", [])
+        if isinstance(item, dict) and item.get("date")
+    }
+    merged = {day for day in observed_dates
+              if day < coverage_start or day > coverage_end}
+    current = coverage_start
+    while current <= coverage_end:
+        if current.weekday() < 5 and current not in closures:
+            merged.add(current)
+        current += timedelta(days=1)
+    return sorted(merged)
+
+
+def _prepare_calendar(data_dates, gap_dates, start, end, calendar_dates=None):
     """Split the two roles of the date list.
 
-    * entries: last DATA day of each ISO week inside [start, end] — entry
-      selection stays data-driven (no point entering a day with no quotes).
+    * entries: the actual last exchange session of each ISO week inside
+      [start, end], but only when that session has data. If the final session
+      is an audit-confirmed vendor gap, the week is skipped rather than
+      silently shifting the strategy to an earlier entry day.
     * calendar: data dates PLUS audit-confirmed vendor gaps (days the market
       traded but the dataset lost) — trading-day counts must not treat a
       data hole as a holiday.
-    Returns (entries, calendar_sorted, last_covered_date).
+    Returns (entries, calendar_sorted, last_covered_date,
+    missing_entry_dates).
     """
-    calendar = sorted(set(data_dates) | set(gap_dates))
+    calendar = sorted(set(calendar_dates) if calendar_dates is not None
+                      else (set(data_dates) | set(gap_dates)))
+    data_set = set(data_dates)
     by_week = {}
-    for day in data_dates:
+    for day in calendar:
         if start <= day <= end:
             by_week.setdefault(day.isocalendar()[:2], []).append(day)
-    entries = sorted(max(days) for days in by_week.values())
-    return entries, calendar, (calendar[-1] if calendar else None)
+    weekly_last_sessions = sorted(max(days) for days in by_week.values())
+    entries = [day for day in weekly_last_sessions if day in data_set]
+    missing_entry_dates = [day for day in weekly_last_sessions if day not in data_set]
+    return entries, calendar, (calendar[-1] if calendar else None), missing_entry_dates
 
 
 def _td_iv(iv, cal_dte, trad_dte, lam):
@@ -188,11 +230,17 @@ def run(args):
     audit_payload = _get("/v1/audit/missing-dates", {"symbol": args.symbol}) or {}
     gap_dates = [_parse_date(item["quoteDate"])
                  for item in audit_payload.get("missingDates", [])]
-    entries, trading_dates, last_covered = _prepare_calendar(
-        data_dates, gap_dates, _parse_date(args.start), _parse_date(args.end))
+    observed_calendar = sorted(set(data_dates) | set(gap_dates))
+    official_calendar = _load_official_calendar("NYSE")
+    calendar_dates = _overlay_official_calendar(observed_calendar, official_calendar)
+    entries, trading_dates, last_covered, missing_entry_dates = _prepare_calendar(
+        data_dates, gap_dates, _parse_date(args.start), _parse_date(args.end),
+        calendar_dates=calendar_dates)
 
     trades = []
     skips = {}
+    if missing_entry_dates:
+        skips["missing entry-day data"] = len(missing_entry_dates)
 
     def skip(reason):
         skips[reason] = skips.get(reason, 0) + 1

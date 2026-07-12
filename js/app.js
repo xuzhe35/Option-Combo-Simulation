@@ -96,6 +96,7 @@ const state = {
     historicalQuoteDate: '',
     historicalAvailableStartDate: '',
     historicalAvailableEndDate: '',
+    historicalTradingDates: [],
     interestRate: 0.03, // 3% default risk-free rate
     ivOffset: 0.0, // 0%
     simTimeBasis: 'calendar', // 'calendar' (TWS default) | 'trading' | 'weighted'
@@ -620,6 +621,9 @@ function _syncSimTimeBasisPricingConfig() {
             state.simTimeBasis,
             state.simWeekendWeight
         ),
+        observedTradingDates: state.marketDataMode === 'historical'
+            ? state.historicalTradingDates
+            : null,
     });
 }
 

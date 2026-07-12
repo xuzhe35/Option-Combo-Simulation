@@ -7,7 +7,7 @@
     <title>IV Term Structure</title>
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="stylesheet" href="iv_term_structure.css?v=20260712-strategy-signal">
+    <link rel="stylesheet" href="iv_term_structure.css?v=20260712-calendar-guard">
 </head>
 
 <body>
@@ -67,11 +67,12 @@
 
     <input type="file" id="ivtsHistoryFileInput" accept=".json" hidden>
 
-    <script src="js/market_holidays.js"></script>
-    <script src="js/product_registry.js?v=20260712-calendar-id"></script>
+    <script src="js/official_exchange_calendars.generated.js?v=20260713-v2"></script>
+    <script src="js/market_holidays.js?v=20260713-official-only"></script>
+    <script src="js/product_registry.js?v=20260713-calendar-routing"></script>
     <script src="js/calendar_handoff.js?v=20260612c"></script>
     <script src="js/iv_term_structure_core.js?v=20260712-strategy-signal-v2"></script>
-    <script src="js/iv_term_structure.js?v=20260712-strategy-signal-v3"></script>
+    <script src="js/iv_term_structure.js?v=20260712-calendar-guard"></script>
 </body>
 
 </html>

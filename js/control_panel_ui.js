@@ -24,6 +24,19 @@
             : null;
     }
 
+    function _resolveCalendarContext(state) {
+        const registry = _getRegistry();
+        const profile = registry && typeof registry.resolveUnderlyingProfile === 'function'
+            ? registry.resolveUnderlyingProfile(state && state.underlyingSymbol)
+            : null;
+        return {
+            calendarKey: String(profile && profile.calendarId || 'NYSE').toUpperCase(),
+            observedTradingDates: _isHistoricalMode(state)
+                ? state && state.historicalTradingDates
+                : null,
+        };
+    }
+
     function _getIndexForwardRateApi() {
         return globalScope.OptionComboIndexForwardRate && typeof globalScope.OptionComboIndexForwardRate === 'object'
             ? globalScope.OptionComboIndexForwardRate
@@ -179,7 +192,11 @@
 
         const dateUtils = _getDateUtils();
         if (dateUtils && typeof dateUtils.listTradingDays === 'function') {
-            return dateUtils.listTradingDays(startDate, endDate);
+            const calendarContext = _resolveCalendarContext(state);
+            return dateUtils.listTradingDays(
+                startDate, endDate,
+                calendarContext.calendarKey, calendarContext.observedTradingDates
+            );
         }
 
         if (startDate === endDate) {
@@ -1276,17 +1293,23 @@
             && typeof dateUtils.diffDays === 'function'
             ? dateUtils.diffDays(state.baseDate, state.simulatedDate)
             : 0;
+        const calendarContext = _resolveCalendarContext(state);
         const tradDays = dateUtils
             && typeof dateUtils.calendarToTradingDays === 'function'
-            ? dateUtils.calendarToTradingDays(state.baseDate, state.simulatedDate)
-            : days;
+            ? dateUtils.calendarToTradingDays(
+                state.baseDate, state.simulatedDate,
+                calendarContext.calendarKey, calendarContext.observedTradingDates
+            )
+            : null;
         simDateInput.value = state.simulatedDate || state.baseDate || '';
         dpSlider.min = '0';
         if (!dpSlider.max || parseInt(dpSlider.max, 10) < days) {
             dpSlider.max = String(Math.max(days, 365));
         }
         dpSlider.value = String(days);
-        dpDisplay.textContent = `+${tradDays} td / +${days} cd`;
+        dpDisplay.textContent = tradDays === null
+            ? `calendar unavailable / +${days} cd`
+            : `+${tradDays} td / +${days} cd`;
     }
 
     function refreshBoundDynamicControls() {
@@ -1574,11 +1597,17 @@
             }
             state.simulatedDate = newDateStr;
             const days = diffDays(state.baseDate, state.simulatedDate);
-            const tradDays = calendarToTradingDays(state.baseDate, state.simulatedDate);
+            const calendarContext = _resolveCalendarContext(state);
+            const tradDays = calendarToTradingDays(
+                state.baseDate, state.simulatedDate,
+                calendarContext.calendarKey, calendarContext.observedTradingDates
+            );
             dpSlider.value = days;
             const dpDisplay = _getElement('daysPassedDisplay');
             if (dpDisplay) {
-                dpDisplay.textContent = `+${tradDays} td / +${days} cd`;
+                dpDisplay.textContent = tradDays === null
+                    ? `calendar unavailable / +${days} cd`
+                    : `+${tradDays} td / +${days} cd`;
             }
             _syncUnderlyingContractMonthUI(state, false);
             _renderForwardRateSamples(state, _boundDeps);
@@ -1607,10 +1636,16 @@
             const dNum = parseInt(e.target.value, 10);
             state.simulatedDate = addDays(state.baseDate, dNum);
             simDateInput.value = state.simulatedDate;
-            const tradDays = calendarToTradingDays(state.baseDate, state.simulatedDate);
+            const calendarContext = _resolveCalendarContext(state);
+            const tradDays = calendarToTradingDays(
+                state.baseDate, state.simulatedDate,
+                calendarContext.calendarKey, calendarContext.observedTradingDates
+            );
             const dpDisplay = _getElement('daysPassedDisplay');
             if (dpDisplay) {
-                dpDisplay.textContent = `+${tradDays} td / +${dNum} cd`;
+                dpDisplay.textContent = tradDays === null
+                    ? `calendar unavailable / +${dNum} cd`
+                    : `+${tradDays} td / +${dNum} cd`;
             }
             _syncUnderlyingContractMonthUI(state, false);
             _renderForwardRateSamples(state, _boundDeps);

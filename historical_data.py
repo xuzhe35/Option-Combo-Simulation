@@ -127,6 +127,28 @@ class HistoricalReplayStore:
                     return {'startDate': str(start), 'endDate': str(end)}
         return None
 
+    def get_trading_dates(self, symbol, start_date='', end_date=''):
+        """Return observed exchange sessions from the chain service.
+
+        This is historical evidence, not a holiday-rule calculation. It is
+        used only when the downloaded forward official snapshot does not
+        cover an old replay range.
+        """
+        normalized_symbol = str(symbol or '').strip().upper()
+        if not normalized_symbol:
+            return []
+        payload = self._get('/v1/trading-dates', {
+            'symbol': normalized_symbol,
+            'start': _normalize_iso_date(start_date) if start_date else '1900-01-01',
+            'end': _normalize_iso_date(end_date) if end_date else _LATEST_SENTINEL_DATE,
+        })
+        dates = []
+        for value in (payload or {}).get('dates', []):
+            normalized = _normalize_iso_date(value)
+            if normalized:
+                dates.append(normalized)
+        return sorted(set(dates))
+
     def _underlying_snapshot_from_bar(self, requested_date, payload):
         bar = (payload or {}).get('bar') or {}
         close_price = bar.get('close')

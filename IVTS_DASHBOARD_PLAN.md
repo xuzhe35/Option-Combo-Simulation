@@ -51,6 +51,12 @@ tracking happens through the existing sim-open workflow on the main pages.
 - **DOM-free core**: all three computations live in
   `js/iv_term_structure_core.js` so they are unit-testable and reusable later
   by any auto-suggestion pipeline.
+- **Official exchange calendars only**: forward dates come from the generated
+  official snapshot. NYSE is downloaded from its public Holidays & Trading
+  Hours table; CME-owned products are resolved product-by-product through the
+  CME Reference Data API Trading Schedules endpoint. The page fails closed
+  with `CALENDAR UNAVAILABLE` whenever the relevant official snapshot is
+  missing, stale, or does not cover the selected back expiry.
 
 ## Steps
 

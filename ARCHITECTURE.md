@@ -15,7 +15,7 @@ Runtime surfaces:
    - overlays portfolio payoff projections onto daily bars
 
 3. `iv_term_structure.html`
-   - standalone live ETF IV term-structure monitor
+   - standalone live ETF / futures-option IV term-structure monitor
    - syncs ATM option pairs by expiry and appends samples to per-symbol JSON history files
 
 4. Python backends
@@ -78,39 +78,40 @@ It currently:
 Current `index.html` load order:
 
 1. `js/t_params_db.js`
-2. `js/market_holidays.js`
-3. `js/date_utils.js`
-4. `js/product_registry.js`
-5. `js/index_forward_rate.js`
-6. `js/pricing_context.js`
-7. `js/trade_trigger_logic.js`
-8. `js/group_order_builder.js`
-9. `js/leg_position_check.js`
-10. `js/order_safety.js`
-11. `js/order_confirmation_ui.js`
-12. `js/delta_hedge_logic.js`
-13. `js/distribution_proxy_config.js`
-14. `js/pricing_core.js`
-15. `js/bsm.js`
-16. `js/chart.js`
-17. `js/prob_charts.js`
-18. `js/chart_controls.js`
-19. `js/amortized.js`
-20. `js/valuation.js`
-21. `js/session_logic.js`
-22. `js/session_ui.js`
-23. `js/control_panel_ui.js`
-24. `js/hedge_editor_ui.js`
-25. `js/group_editor_ui.js`
-26. `js/hedge_ui.js`
-27. `js/group_ui.js`
-28. `js/global_ui.js`
-29. `js/page_capabilities.js`
-30. `js/combo_order_transport.js`
-31. `js/delta_hedge_transport.js`
-32. `js/delta_hedge_ui.js`
-33. `js/app.js`
-34. `js/ws_client.js`
+2. `js/official_exchange_calendars.generated.js`
+3. `js/market_holidays.js`
+4. `js/date_utils.js`
+5. `js/product_registry.js`
+6. `js/index_forward_rate.js`
+7. `js/pricing_context.js`
+8. `js/trade_trigger_logic.js`
+9. `js/group_order_builder.js`
+10. `js/leg_position_check.js`
+11. `js/order_safety.js`
+12. `js/order_confirmation_ui.js`
+13. `js/delta_hedge_logic.js`
+14. `js/distribution_proxy_config.js`
+15. `js/pricing_core.js`
+16. `js/bsm.js`
+17. `js/chart.js`
+18. `js/prob_charts.js`
+19. `js/chart_controls.js`
+20. `js/amortized.js`
+21. `js/valuation.js`
+22. `js/session_logic.js`
+23. `js/session_ui.js`
+24. `js/control_panel_ui.js`
+25. `js/hedge_editor_ui.js`
+26. `js/group_editor_ui.js`
+27. `js/hedge_ui.js`
+28. `js/group_ui.js`
+29. `js/global_ui.js`
+30. `js/page_capabilities.js`
+31. `js/combo_order_transport.js`
+32. `js/delta_hedge_transport.js`
+33. `js/delta_hedge_ui.js`
+34. `js/app.js`
+35. `js/ws_client.js`
 
 `chart_lab.html` keeps the same shared shell ordering where relevant, but intentionally omits the Delta Hedge panel logic/UI. Its tail order is:
 
@@ -269,6 +270,12 @@ Responsibilities:
 - bucket definitions and DTE matching
 - ATM strike window selection
 - live call/put IV aggregation
+- calendar-day IV and trading-day IV derived through one global weekend/holiday variance weight
+- `js/market_holidays.js` is an official-snapshot reader only; it contains no
+  holiday rule engine. `js/date_utils.js` carries each product's `calendarId`
+  through pricing and UI calculations and fails closed outside official
+  coverage. Historical replay supplies explicit observed session dates from
+  the chain service for archive years that the forward snapshot cannot cover.
 - per-symbol historical sample documents
 - testable DOM-free JS and Python selection helpers
 

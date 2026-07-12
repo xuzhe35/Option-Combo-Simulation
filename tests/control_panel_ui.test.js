@@ -250,6 +250,9 @@ module.exports = {
 
                 state.historicalAvailableStartDate = '2025-04-07';
                 state.historicalAvailableEndDate = '2025-04-10';
+                state.historicalTradingDates = [
+                    '2025-04-07', '2025-04-08', '2025-04-09', '2025-04-10',
+                ];
                 state.baseDate = '2025-04-07';
                 state.simulatedDate = '2025-04-07';
                 state.historicalQuoteDate = '2025-04-07';

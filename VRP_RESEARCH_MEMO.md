@@ -154,12 +154,12 @@
 
 **2026-07-12（外部 Code Review 三项修正 + 区界复验）**
 1. 水位不足时 fail-closed：LONG DISPLACEMENT 区在水位计样本 <8 时不再给出反蝶结构建议（原实现 fail-open），改为 `awaiting_watermark` 态（"区支持反蝶，水位待证明，继续采样"）。
-2. 交易日历统一：此前研究与仪表盘均使用"仅剔周末"的 weekday 时钟（两者一致，故区界内部自洽）；现统一为真实交易所日历（回测用 chain service 的 trading-dates，页面加载 `market_holidays.js` 激活假日钩子）。**真日历下复验**：regime 标签翻转仅 SPY 3.0% / QQQ 3.8%；三区制组合 SPY +10,378（Sharpe 0.78，原 0.84）、QQQ +8,740（Sharpe **0.72**，原 0.55，改善）。**冻结区界 0.95/1.05 经复验保持成立。**
+2. 交易日历统一：此前研究与仪表盘均使用"仅剔周末"的 weekday 时钟（两者一致，故区界内部自洽）；现统一为真实交易所日历：官方快照覆盖区间直接使用 NYSE/CME 官方数据，更早的历史回放使用 chain service 的实际交易会话清单，不再计算节假日规则。**真日历下复验**：regime 标签翻转仅 SPY 3.0% / QQQ 3.8%；三区制组合 SPY +10,378（Sharpe 0.78，原 0.84）、QQQ +8,740（Sharpe **0.72**，原 0.55，改善）。**冻结区界 0.95/1.05 经复验保持成立。**
 3. slope 分类改用未舍入值（原实现先舍入到 4 位再比较，0.94996 会被错归中性区），舍入仅用于显示；补充了阈值两侧 epsilon 测试。
 
 **2026-07-12（第二轮 Review 两项修正）**
-4. 品种日历归属：product_registry 增加 `calendarId`（股票/ETF=NYSE；ES/NQ/MES/MNQ=CME；CL=NYMEX；GC/SI/HG=COMEX）。真实日历仅实现了 NYSE；非 NYSE 品种的仪表盘 TD slope 行显式标注 "NYSE-proxy clock (XXX calendar not wired)"。接入 CME/NYMEX/COMEX 真日历列为未来工作（首选方案：chain service 增加独立的 /exchange-calendar 接口）。
-5. 回测日历两处修正：(a) 审计确认的供应商数据缺口（2018-11-06、2019-09-03、2020-06-23）回补进交易日计数（此前被误当休市日）；(b) 日历改为全量拉取并在 back expiry 超出日历覆盖时跳过该笔（此前最后两周的 back trad DTE 被静默截断）。复验：SPY 仅 4 周换区、QQQ 零换区，末尾 2 笔正确跳过；三区制 SPY +10,376（Sharpe 0.78）、QQQ +8,176（0.68）——**结论不变**。新增 `tests/backtest_calendar_helpers_test.py` 覆盖两个修正点。
+4. 品种日历归属：product_registry 使用产品级 `calendarId`（如 `CME:ES`、`NYMEX:CL`、`COMEX:SI`）。未来日期只认 `scripts/sync_official_exchange_calendars.py` 下载的官方快照：NYSE 公共年度日历 + CME Reference Data API 产品级 Trading Schedules。缺失、过期或覆盖不到后月到期日时 **fail-closed 不产生策略建议**，不再用 NYSE 规则代理期货品种。
+5. 回测日历三处修正：(a) 审计确认的供应商数据缺口（2018-11-06、2019-09-03、2020-06-23）回补进交易日计数（此前被误当休市日）；(b) 日历改为全量拉取并在 back expiry 超出日历覆盖时跳过该笔（此前最后两周的 back trad DTE 被静默截断）；(c) 若每周最后真实交易日恰为供应商缺口，跳过整周并记录 `missing entry-day data`，不再静默提前到前一个有数据日。复验：SPY 仅 4 周换区、QQQ 零换区，末尾 2 笔正确跳过；三区制 SPY +10,376（Sharpe 0.78）、QQQ +8,176（0.68）——**结论不变**。`tests/backtest_calendar_helpers_test.py` 覆盖三个修正点。
 
 ## 附录 A. 公式
 
@@ -170,12 +170,12 @@
 
 ## 附录 B0. 交易日历维护手册
 
-`js/market_holidays.js` 是规则引擎（第 N 个星期一、复活节算法、周末顺延），**常规年份零维护**。规则之外的两类情况由 `scripts/sync_market_holidays.py` 管理——它以 chain 数据库里的真实交易所日历为准绳逐日 diff（已消费 `/v1/audit/missing-dates`，自动排除"市场开市但数据缺失"的供应商缺口）：
+`js/market_holidays.js` 现在只读取官方快照，不包含第 N 个星期一、复活节、周末顺延或手工例外规则。
 
-- **年度体检**（可选，一月跑一次）：`python3 scripts/sync_market_holidays.py` → 输出 OK 即健康（复验基线：2008-2026 共 4,647 个交易日精确匹配）；
-- **发生临时休市时**（治丧日/灾害）：当天先手动在 GENERATED CLOSURES 块加一行（未来日期数据看不到）；待行情数据管线覆盖到该日后跑 `--write`，脚本会以数据确认并规整该块（演练验证：删除-检测-修复-字节级复原全通过）；
-- 六月节已按 `year >= 2022` 门控（2010–2021 不再误标）；已登记例外：桑迪 2012-10-29/30、老布什 2018-12-05、卡特 2025-01-09。
-- 注意：回测的 regime 打标不依赖此 JS 日历（直接用数据的 trading-dates，自维护）；此日历只服务实时仪表盘与主页面模拟时钟。
+- **每周维护**：`./sync_exchange_calendars_mac.command` 或 `sync_exchange_calendars.bat`；
+- **失败策略**：快照缺失、超过 14 天或不覆盖目标日期时返回 calendar unavailable，不假定开市；
+- **历史区间**：仅使用行情服务中实际观测到的交易会话及已审计数据缺口，不从规则反推休市。`scripts/sync_market_holidays.py` 只是兼容入口，会转调官方同步脚本。
+- **回测覆盖**：官方快照覆盖区间会覆盖历史观测日期；快照之前仅使用实际会话，不重建节假日规则。
 
 ## 附录 B. 数据与脚本位置
 

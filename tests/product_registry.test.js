@@ -19,6 +19,7 @@ module.exports = {
                 assert.equal(profile.optionSecType, 'OPT');
                 assert.equal(profile.underlyingSecType, 'STK');
                 assert.equal(profile.optionMultiplier, 100);
+                assert.equal(profile.calendarId, 'NYSE');
                 assert.equal(profile.supportsAmortizedMode, true);
                 assert.equal(profile.supportsLegacyLiveData, true);
                 assert.equal(profile.supportsUnderlyingLegs, true);
@@ -33,6 +34,7 @@ module.exports = {
                 assert.equal(profile.optionSecType, 'FOP');
                 assert.equal(profile.underlyingSecType, 'FUT');
                 assert.equal(profile.optionMultiplier, 50);
+                assert.equal(profile.calendarId, 'CME:ES');
                 assert.equal(profile.underlyingLegMultiplier, 50);
                 assert.equal(profile.settlementUnitsPerContract, 1);
                 assert.equal(profile.supportsAmortizedMode, false);
@@ -52,6 +54,7 @@ module.exports = {
                 assert.equal(profile.optionExchange, 'NYMEX');
                 assert.equal(profile.underlyingExchange, 'NYMEX');
                 assert.equal(profile.optionMultiplier, 1000);
+                assert.equal(profile.calendarId, 'NYMEX:CL');
                 assert.equal(profile.tradingClass, 'ML3');
                 assert.equal(profile.supportsLegacyLiveData, true);
                 assert.equal(profile.supportsUnderlyingLegs, true);
@@ -62,6 +65,7 @@ module.exports = {
                 assert.equal(siProfile.optionExchange, 'COMEX');
                 assert.equal(siProfile.underlyingExchange, 'COMEX');
                 assert.equal(siProfile.optionMultiplier, 5000);
+                assert.equal(siProfile.calendarId, 'COMEX:SI');
                 assert.equal(siProfile.tradingClass, 'S3T');
             },
         },

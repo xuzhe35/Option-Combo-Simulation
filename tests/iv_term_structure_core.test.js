@@ -401,8 +401,11 @@ module.exports = {
                 assert.equal(core.countTradingDays('', '20260713'), null);
                 assert.equal(core.countTradingDays('2026-07-14', '20260713'), null);
 
-                ctx.isMarketHoliday = (dateKey) => dateKey === '2026-07-09';
-                assert.equal(core.countTradingDays('2026-07-08', '20260710'), 1);
+                ctx.isMarketHoliday = (dateKey, calendarKey) => (
+                    dateKey === '2026-07-09' && calendarKey === 'CME:ES'
+                );
+                assert.equal(core.countTradingDays('2026-07-08', '20260710', 'NYSE'), 2);
+                assert.equal(core.countTradingDays('2026-07-08', '20260710', 'CME:ES'), 1);
             },
         },
         {

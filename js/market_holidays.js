@@ -1,184 +1,85 @@
 /**
- * NYSE Market Holidays — Rule-Based Engine
- * ==========================================
- * Dynamically computes US market holidays for any year using official NYSE rules.
- * No static data to maintain; works indefinitely without annual regeneration.
+ * Official exchange-calendar runtime.
  *
- * Holiday rules (9 observed holidays):
- *   1. New Year's Day           — Jan 1
- *   2. Martin Luther King Day   — 3rd Monday of January
- *   3. Presidents' Day          — 3rd Monday of February
- *   4. Good Friday              — Friday before Easter Sunday (Anonymous Gregorian algorithm)
- *   5. Memorial Day             — Last Monday of May
- *   6. Juneteenth               — June 19
- *   7. Independence Day         — July 4
- *   8. Labor Day                — 1st Monday of September
- *   9. Thanksgiving Day         — 4th Thursday of November
- *  10. Christmas Day            — Dec 25
- *
- * Weekend observance rules:
- *   - If a fixed-date holiday falls on Saturday → observed on Friday
- *   - If a fixed-date holiday falls on Sunday  → observed on Monday
- *
- * References:
- *   https://www.nyse.com/markets/hours-calendars
+ * This module intentionally contains no holiday rules. Forward/current dates
+ * come only from js/official_exchange_calendars.generated.js. Historical
+ * replay can supply an explicit list of observed exchange sessions through
+ * OptionComboDateUtils; missing official coverage is never guessed here.
  */
 
 'use strict';
 
-/**
- * Compute Easter Sunday for a given year using the Anonymous Gregorian algorithm.
- * Returns a Date object in UTC.
- */
-function _easterSunday(year) {
-    const a = year % 19;
-    const b = Math.floor(year / 100);
-    const c = year % 100;
-    const d = Math.floor(b / 4);
-    const e = b % 4;
-    const f = Math.floor((b + 8) / 25);
-    const g = Math.floor((b - f + 1) / 3);
-    const h = (19 * a + b - d - g + 15) % 30;
-    const i = Math.floor(c / 4);
-    const k = c % 4;
-    const l = (32 + 2 * e + 2 * i - h - k) % 7;
-    const m = Math.floor((a + 11 * h + 22 * l) / 451);
-    const month = Math.floor((h + l - 7 * m + 114) / 31); // 3 = March, 4 = April
-    const day = ((h + l - 7 * m + 114) % 31) + 1;
-    return new Date(Date.UTC(year, month - 1, day));
+const OFFICIAL_CALENDAR_MAX_AGE_DAYS = 14;
+const CME_CALENDAR_DERIVATION_VERSION = 'business-trade-date-gaps-v2';
+
+function _officialCalendar(calendarKey) {
+    const snapshot = typeof globalThis.OptionComboOfficialExchangeCalendars === 'object'
+        ? globalThis.OptionComboOfficialExchangeCalendars
+        : null;
+    const calendars = snapshot && snapshot.calendars && typeof snapshot.calendars === 'object'
+        ? snapshot.calendars
+        : {};
+    return calendars[String(calendarKey || 'NYSE').toUpperCase()] || null;
 }
 
-/**
- * Format a UTC Date to 'YYYY-MM-DD' string.
- */
-function _fmtDate(d) {
-    return d.toISOString().slice(0, 10);
+function _officialDateKey(value) {
+    const compact = String(value || '').slice(0, 10).replace(/[-/]/g, '');
+    return /^\d{8}$/.test(compact)
+        ? `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`
+        : '';
 }
 
-/**
- * Get the Nth occurrence of a given weekday in a month.
- * @param {number} year
- * @param {number} month - 0-indexed (0 = January)
- * @param {number} dayOfWeek - 0 = Sunday, 1 = Monday, ..., 6 = Saturday
- * @param {number} n - 1-indexed (1 = first, 2 = second, etc.)
- * @returns {Date}
- */
-function _nthWeekday(year, month, dayOfWeek, n) {
-    const first = new Date(Date.UTC(year, month, 1));
-    let diff = (dayOfWeek - first.getUTCDay() + 7) % 7;
-    const day = 1 + diff + (n - 1) * 7;
-    return new Date(Date.UTC(year, month, day));
+function _officialCalendarIsFresh(calendar) {
+    const fetchedAt = new Date(calendar && calendar.fetchedAt || '');
+    return !Number.isNaN(fetchedAt.getTime())
+        && Date.now() - fetchedAt.getTime() <= OFFICIAL_CALENDAR_MAX_AGE_DAYS * 86400000;
 }
 
-/**
- * Get the last occurrence of a given weekday in a month.
- */
-function _lastWeekday(year, month, dayOfWeek) {
-    const last = new Date(Date.UTC(year, month + 1, 0)); // last day of month
-    let diff = (last.getUTCDay() - dayOfWeek + 7) % 7;
-    return new Date(Date.UTC(year, month, last.getUTCDate() - diff));
-}
-
-/**
- * Apply the NYSE weekend observance rule to a fixed-date holiday:
- *   Saturday → observed on Friday, Sunday → observed on Monday.
- */
-function _observe(date) {
-    const dow = date.getUTCDay();
-    if (dow === 6) { // Saturday → Friday
-        return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - 1));
+function isOfficialExchangeCalendarAvailable(calendarKey, startDate, endDate) {
+    const calendar = _officialCalendar(calendarKey);
+    if (!calendar || !calendar.coverageStart || !calendar.coverageEnd
+        || !_officialCalendarIsFresh(calendar)) {
+        return false;
     }
-    if (dow === 0) { // Sunday → Monday
-        return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1));
+    if (calendar.sourceKind === 'cme_reference_data_api'
+        && calendar.derivationVersion !== CME_CALENDAR_DERIVATION_VERSION) {
+        return false;
     }
-    return date;
+    const start = _officialDateKey(startDate);
+    const end = _officialDateKey(endDate || startDate);
+    return !!start && !!end
+        && start >= calendar.coverageStart
+        && end <= calendar.coverageEnd;
+}
+
+function getOfficialExchangeCalendarDay(calendarKey, dateStr) {
+    const calendar = _officialCalendar(calendarKey);
+    const key = _officialDateKey(dateStr);
+    if (!calendar || !key || !isOfficialExchangeCalendarAvailable(calendarKey, key, key)) {
+        return {
+            available: false,
+            status: 'unavailable',
+            calendarKey: String(calendarKey || 'NYSE').toUpperCase(),
+        };
+    }
+    const closure = (calendar.closures || []).find((item) => item && item.date === key);
+    const earlyClose = (calendar.earlyCloses || []).find((item) => item && item.date === key);
+    return {
+        available: true,
+        status: closure ? 'closed' : (earlyClose ? 'early_close' : 'open'),
+        calendarKey: calendar.calendarKey || String(calendarKey || 'NYSE').toUpperCase(),
+        detail: closure || earlyClose || null,
+        sourceUrl: calendar.sourceUrl || '',
+        fetchedAt: calendar.fetchedAt || '',
+    };
 }
 
 /**
- * Compute all NYSE market holidays for a given year.
- * @param {number} year
- * @returns {string[]} Array of 'YYYY-MM-DD' date strings
+ * Return true/false only when the official snapshot covers the date.
+ * Return null when unavailable so callers cannot silently treat an unknown
+ * weekday as open.
  */
-function _computeHolidaysForYear(year) {
-    const holidays = [];
-
-    // 1. New Year's Day — Jan 1
-    holidays.push(_observe(new Date(Date.UTC(year, 0, 1))));
-
-    // 2. Martin Luther King Jr. Day — 3rd Monday of January
-    holidays.push(_nthWeekday(year, 0, 1, 3));
-
-    // 3. Presidents' Day — 3rd Monday of February
-    holidays.push(_nthWeekday(year, 1, 1, 3));
-
-    // 4. Good Friday — 2 days before Easter Sunday
-    const easter = _easterSunday(year);
-    holidays.push(new Date(Date.UTC(year, easter.getUTCMonth(), easter.getUTCDate() - 2)));
-
-    // 5. Memorial Day — Last Monday of May
-    holidays.push(_lastWeekday(year, 4, 1));
-
-    // 6. Juneteenth — June 19 (NYSE holiday only since 2022)
-    if (year >= 2022) {
-        holidays.push(_observe(new Date(Date.UTC(year, 5, 19))));
-    }
-
-    // 7. Independence Day — July 4
-    holidays.push(_observe(new Date(Date.UTC(year, 6, 4))));
-
-    // 8. Labor Day — 1st Monday of September
-    holidays.push(_nthWeekday(year, 8, 1, 1));
-
-    // 9. Thanksgiving Day — 4th Thursday of November
-    holidays.push(_nthWeekday(year, 10, 4, 4));
-
-    // 10. Christmas Day — Dec 25
-    holidays.push(_observe(new Date(Date.UTC(year, 11, 25))));
-
-    return holidays.map(_fmtDate);
-}
-
-/**
- * Ad-hoc full-day market closures that no rule can predict: presidential
- * mourning days, disaster closures, and similar one-offs.
- *
- * Maintained by `python3 scripts/sync_market_holidays.py --write`, which
- * diffs this rule engine against the actual exchange trading dates in the
- * options-chain-service database and regenerates the block below. For a
- * closure announced for a FUTURE date (not yet visible in market data),
- * add the 'YYYY-MM-DD' line manually — the next sync run will keep it if
- * the data confirms it.
- */
-// BEGIN GENERATED CLOSURES (scripts/sync_market_holidays.py)
-const MARKET_CLOSURE_EXCEPTIONS = new Set([
-    '2012-10-29', // Hurricane Sandy
-    '2012-10-30', // Hurricane Sandy
-    '2018-12-05', // National day of mourning — George H. W. Bush
-    '2025-01-09', // National day of mourning — Jimmy Carter
-]);
-// END GENERATED CLOSURES
-
-// Internal cache: year → Set of date strings
-const _holidayCache = {};
-
-/**
- * Get the Set of holiday date strings for a given year (cached).
- */
-function _getHolidaysForYear(year) {
-    if (!_holidayCache[year]) {
-        _holidayCache[year] = new Set(_computeHolidaysForYear(year));
-    }
-    return _holidayCache[year];
-}
-
-/**
- * Check if a date string 'YYYY-MM-DD' is a NYSE market holiday.
- * This is the public API used by calendarToTradingDays() in bsm.js.
- */
-function isMarketHoliday(dateStr) {
-    if (MARKET_CLOSURE_EXCEPTIONS.has(dateStr)) {
-        return true;
-    }
-    const year = parseInt(dateStr.slice(0, 4), 10);
-    return _getHolidaysForYear(year).has(dateStr);
+function isMarketHoliday(dateStr, calendarKey = 'NYSE') {
+    const official = getOfficialExchangeCalendarDay(calendarKey, dateStr);
+    return official.available ? official.status === 'closed' : null;
 }

@@ -5,6 +5,8 @@ const { loadBrowserScripts } = require('./helpers/load-browser-scripts');
 function loadPageContext(activeElement) {
     const listeners = {};
     return loadBrowserScripts([
+        'js/official_exchange_calendars.generated.js',
+        'js/market_holidays.js',
         'js/product_registry.js',
         'js/iv_term_structure_core.js',
         'js/iv_term_structure.js',
@@ -427,13 +429,20 @@ module.exports = {
                 assert.match(empty, /NO SIGNAL/);
                 assert.match(empty, /subscribe\/sync/);
 
-                // CME-family cards disclose that the NYSE clock is a proxy.
+                // A missing or legacy CME snapshot fails closed: the proxy
+                // slope remains visible, but no strategy is presented.
+                ctx.OptionComboOfficialExchangeCalendars.calendars['CME:ES'].derivationVersion = 'legacy';
                 const es = buildStrategySignalPanel(
-                    { symbol: 'ES', profile: { calendarId: 'CME' } },
+                    { symbol: 'ES', profile: { calendarId: 'CME:ES' } },
                     { detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)] },
                     { samples: [] }
                 );
-                assert.match(es, /NYSE-proxy clock \(CME calendar not wired\)/);
+                assert.match(es, /calendar unavailable \(CME:ES official snapshot missing\/stale\)/);
+                assert.match(es, /CALENDAR UNAVAILABLE/);
+                assert.match(es, /is-calendar_unavailable/);
+                assert.match(es, /official trading calendar is unavailable — no strategy suggestion/);
+                assert.doesNotMatch(es, /SELL CALENDAR/);
+                assert.doesNotMatch(es, /Calendar: sell front ATM straddle/);
             },
         },
         {

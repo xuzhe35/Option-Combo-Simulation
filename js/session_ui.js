@@ -41,6 +41,19 @@
         return '0.01';
     }
 
+    function resolveCalendarContext(state) {
+        const registry = getProductRegistry();
+        const profile = registry && typeof registry.resolveUnderlyingProfile === 'function'
+            ? registry.resolveUnderlyingProfile(state && state.underlyingSymbol)
+            : null;
+        return {
+            calendarKey: String(profile && profile.calendarId || 'NYSE').toUpperCase(),
+            observedTradingDates: state && state.marketDataMode === 'historical'
+                ? state.historicalTradingDates
+                : null,
+        };
+    }
+
     function normalizeImportedSessionTitle(rawTitle) {
         const normalized = String(rawTitle || '').trim();
         if (!normalized) {
@@ -185,12 +198,19 @@
                 : (replayDate || state.baseDate || ''))
             : state.simulatedDate;
         const days = dateHelpers.diffDays(state.baseDate, simulationDate);
-        const tradingDays = dateHelpers.calendarToTradingDays(state.baseDate, simulationDate);
+        const calendarContext = resolveCalendarContext(state);
+        const tradingDays = dateHelpers.calendarToTradingDays(
+            state.baseDate, simulationDate,
+            calendarContext.calendarKey, calendarContext.observedTradingDates
+        );
         const replayDays = marketDataMode === 'historical'
             ? dateHelpers.diffDays(state.baseDate, replayDate || state.baseDate)
             : 0;
         const replayTradingDays = marketDataMode === 'historical'
-            ? dateHelpers.calendarToTradingDays(state.baseDate, replayDate || state.baseDate)
+            ? dateHelpers.calendarToTradingDays(
+                state.baseDate, replayDate || state.baseDate,
+                calendarContext.calendarKey, calendarContext.observedTradingDates
+            )
             : 0;
 
         syncWorkspaceChrome(state);
@@ -331,12 +351,16 @@
         simulatedDateInput.value = simulationDate;
 
         document.getElementById('daysPassedSlider').value = days;
-        document.getElementById('daysPassedDisplay').textContent = `+${tradingDays} td / +${days} cd`;
+        document.getElementById('daysPassedDisplay').textContent = tradingDays === null
+            ? `calendar unavailable / +${days} cd`
+            : `+${tradingDays} td / +${days} cd`;
         if (historicalReplaySlider) {
-            historicalReplaySlider.value = String(replayTradingDays);
+            historicalReplaySlider.value = String(replayTradingDays === null ? 0 : replayTradingDays);
         }
         if (historicalReplayDaysDisplay) {
-            historicalReplayDaysDisplay.textContent = `+${replayTradingDays} td / +${replayDays} cd`;
+            historicalReplayDaysDisplay.textContent = replayTradingDays === null
+                ? `calendar unavailable / +${replayDays} cd`
+                : `+${replayTradingDays} td / +${replayDays} cd`;
         }
 
         document.getElementById('interestRate').value = interestRatePercent.toFixed(2);

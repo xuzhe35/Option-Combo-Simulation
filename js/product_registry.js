@@ -43,7 +43,7 @@
     const FAMILY_PROFILES = Object.freeze({
         ES: {
             family: 'ES',
-            calendarId: 'CME',
+            calendarId: 'CME:ES',
             displayName: 'E-mini S&P 500 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -63,7 +63,7 @@
         },
         NQ: {
             family: 'NQ',
-            calendarId: 'CME',
+            calendarId: 'CME:NQ',
             displayName: 'E-mini Nasdaq-100 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -83,7 +83,7 @@
         },
         MES: {
             family: 'MES',
-            calendarId: 'CME',
+            calendarId: 'CME:MES',
             displayName: 'Micro E-mini S&P 500 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -102,7 +102,7 @@
         },
         MNQ: {
             family: 'MNQ',
-            calendarId: 'CME',
+            calendarId: 'CME:MNQ',
             displayName: 'Micro E-mini Nasdaq-100 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -121,7 +121,7 @@
         },
         CL: {
             family: 'CL',
-            calendarId: 'NYMEX',
+            calendarId: 'NYMEX:CL',
             displayName: 'Light Sweet Crude Oil futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -141,7 +141,7 @@
         },
         GC: {
             family: 'GC',
-            calendarId: 'COMEX',
+            calendarId: 'COMEX:GC',
             displayName: 'Gold futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -161,7 +161,7 @@
         },
         SI: {
             family: 'SI',
-            calendarId: 'COMEX',
+            calendarId: 'COMEX:SI',
             displayName: 'Silver futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -182,7 +182,7 @@
         },
         HG: {
             family: 'HG',
-            calendarId: 'COMEX',
+            calendarId: 'COMEX:HG',
             displayName: 'Copper futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -338,21 +338,16 @@
         ));
     }
 
-    function _isTradingDate(dateText) {
+    function _isTradingDate(dateText, calendarKey = 'NYSE') {
         if (typeof globalScope.OptionComboDateUtils !== 'undefined'
             && typeof globalScope.OptionComboDateUtils.isTradingDay === 'function') {
-            return globalScope.OptionComboDateUtils.isTradingDay(dateText);
+            return globalScope.OptionComboDateUtils.isTradingDay(dateText, calendarKey);
         }
 
         if (typeof globalScope.isTradingDay === 'function') {
-            return globalScope.isTradingDay(dateText);
+            return globalScope.isTradingDay(dateText, calendarKey);
         }
-
-        const parts = _parseIsoDateParts(dateText);
-        if (!parts) return false;
-        const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
-        const weekday = date.getUTCDay();
-        return weekday !== 0 && weekday !== 6;
+        return null;
     }
 
     function _toContractMonthValue(year, month) {
@@ -384,20 +379,27 @@
         return new Date(Date.UTC(year, month - 1, thirdFridayDay));
     }
 
-    function _getPreviousTradingDayUtc(date) {
+    function _getPreviousTradingDayUtc(date, calendarKey = 'NYSE') {
         let cursor = _addUtcDays(date, -1);
-        while (!_isTradingDate(_formatUtcDate(cursor))) {
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            const tradingDate = _isTradingDate(_formatUtcDate(cursor), calendarKey);
+            if (tradingDate === true) return cursor;
+            if (tradingDate === null) return null;
             cursor = _addUtcDays(cursor, -1);
         }
-        return cursor;
+        return null;
     }
 
-    function _getSpxStandardMonthlyLastTradingDate(year, month) {
+    function _getSpxStandardMonthlyLastTradingDate(year, month, calendarKey = 'NYSE') {
         let settlementDate = _getThirdFridayUtc(year, month);
-        while (!_isTradingDate(_formatUtcDate(settlementDate))) {
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            const tradingDate = _isTradingDate(_formatUtcDate(settlementDate), calendarKey);
+            if (tradingDate === true) break;
+            if (tradingDate === null) return '';
             settlementDate = _addUtcDays(settlementDate, -1);
         }
-        return _formatUtcDate(_getPreviousTradingDayUtc(settlementDate));
+        const previous = _getPreviousTradingDayUtc(settlementDate, calendarKey);
+        return previous ? _formatUtcDate(previous) : '';
     }
 
     function resolveDefaultUnderlyingContractMonth(symbol, referenceDate) {
@@ -466,7 +468,9 @@
         if (profile.family === 'SPX') {
             const parts = _parseIsoDateParts(expDate);
             if (parts) {
-                const standardMonthlyLastTradingDate = _getSpxStandardMonthlyLastTradingDate(parts.year, parts.month);
+                const standardMonthlyLastTradingDate = _getSpxStandardMonthlyLastTradingDate(
+                    parts.year, parts.month, profile.calendarId
+                );
                 if (standardMonthlyLastTradingDate === `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`) {
                     return 'SPX';
                 }

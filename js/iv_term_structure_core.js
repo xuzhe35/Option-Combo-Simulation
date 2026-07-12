@@ -57,11 +57,22 @@
         return Number.isNaN(date.getTime()) ? null : date;
     }
 
-    function countTradingDays(startDateStr, endDateStr) {
+    function countTradingDays(startDateStr, endDateStr, calendarKey = 'NYSE') {
         const start = _parseUtcDate(startDateStr);
         const end = _parseUtcDate(endDateStr);
         if (!start || !end || start > end) {
             return null;
+        }
+        if (start < end && typeof globalScope.isOfficialExchangeCalendarAvailable === 'function') {
+            const lastIncluded = new Date(end);
+            lastIncluded.setUTCDate(lastIncluded.getUTCDate() - 1);
+            if (!globalScope.isOfficialExchangeCalendarAvailable(
+                calendarKey,
+                start.toISOString().slice(0, 10),
+                lastIncluded.toISOString().slice(0, 10)
+            )) {
+                return null;
+            }
         }
 
         let days = 0;
@@ -70,7 +81,11 @@
             const dayOfWeek = current.getUTCDay();
             const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
             const isHoliday = typeof globalScope.isMarketHoliday === 'function'
-                && globalScope.isMarketHoliday(current.toISOString().slice(0, 10));
+                ? globalScope.isMarketHoliday(current.toISOString().slice(0, 10), calendarKey)
+                : null;
+            if (!isWeekend && isHoliday === null) {
+                return null;
+            }
             if (!isWeekend && !isHoliday) {
                 days += 1;
             }
@@ -123,7 +138,7 @@
         return (Array.isArray(rows) ? rows : []).find((row) => _getRowExpiry(row) === expiry) || null;
     }
 
-    function buildExpiryDetailRows(expiryRows, quotesBySubId, anchorDate, weekendWeight = 0) {
+    function buildExpiryDetailRows(expiryRows, quotesBySubId, anchorDate, weekendWeight = 0, calendarKey = 'NYSE') {
         const quotes = quotesBySubId && typeof quotesBySubId === 'object'
             ? quotesBySubId
             : {};
@@ -140,7 +155,7 @@
                 const putMark = _coercePositiveNumber(putQuote && putQuote.mark);
                 const atmStraddleMark = _computeStraddleMark(callMark, putMark);
                 const dte = Math.max(0, parseInt(entry && entry.dte, 10) || 0);
-                const tradDte = countTradingDays(anchorDate, entry && entry.expiry);
+                const tradDte = countTradingDays(anchorDate, entry && entry.expiry, calendarKey);
                 const callIvTd = computeTradingDayAnnualizedIv(callIv, dte, tradDte, lambda);
                 const putIvTd = computeTradingDayAnnualizedIv(putIv, dte, tradDte, lambda);
 
@@ -156,6 +171,7 @@
                     putIvTd,
                     atmIvTd: _computeAverageIv(callIvTd, putIvTd),
                     tdIvWeekendWeight: lambda,
+                    calendarKey,
                     callMark,
                     putMark,
                     atmStraddleMark,
