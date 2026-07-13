@@ -463,6 +463,11 @@
             if (suffix && defaultTradingClass.length >= 2) {
                 return `${defaultTradingClass.slice(0, -1)}${suffix}`;
             }
+            // Friday weekly/monthly class names are week-specific in TWS
+            // (for example ES EW3) and cannot be derived from weekday alone.
+            // Leave the class unspecified so IB qualifies by the complete
+            // FOP contract instead of first rejecting a fabricated E3A/Q3A.
+            if (weekday === 5) return null;
         }
 
         if (profile.family === 'SPX') {
@@ -492,7 +497,7 @@
         const profile = resolveUnderlyingProfile(symbol);
         return {
             symbol: resolveOptionSymbol(symbol, expDate) || profile.optionSymbol || profile.enteredSymbol || null,
-            tradingClass: resolveTradingClass(symbol, expDate) || profile.tradingClass || null,
+            tradingClass: resolveTradingClass(symbol, expDate),
         };
     }
 

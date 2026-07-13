@@ -317,6 +317,7 @@ Current server responsibilities:
 - pooled live quote subscriptions, including generic-tick upgrades for Greeks
 - managed-account snapshot fan-out
 - portfolio average-cost snapshot fan-out
+- authoritative `ib.positions()` quantity snapshot fan-out for Leg Exists and Close checks; do not use `updatePortfolioEvent` as the complete position universe
 - combo preview / validation / submit dispatch through `trade_execution/`
 - Delta Hedge validation / preview / submit / cancel dispatch through `trade_execution/`
 - historical replay snapshots through `HistoricalReplayService`

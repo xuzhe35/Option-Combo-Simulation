@@ -110,6 +110,8 @@ module.exports = {
                 assert.equal(registry.resolveTradingClass('ES', '2026-03-18'), 'E3C');
                 assert.equal(registry.resolveTradingClass('NQ', '2026-03-17'), 'Q3B');
                 assert.equal(registry.resolveTradingClass('NQ', '2026-03-19'), 'Q3D');
+                assert.equal(registry.resolveTradingClass('ES', '2026-07-17'), null);
+                assert.equal(registry.resolveOptionContractSpec('ES', '2026-07-17').tradingClass, null);
             },
         },
         {

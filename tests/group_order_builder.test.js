@@ -82,6 +82,8 @@ module.exports = {
 
                 assert.equal(payload.profile.family, 'ES');
                 assert.equal(payload.profile.priceIncrement, 0.01);
+                assert.equal(payload.legs[0].tradingClass, undefined);
+                assert.equal(payload.legs[1].tradingClass, undefined);
             },
         },
         {

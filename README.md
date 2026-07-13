@@ -154,7 +154,7 @@ Current responsibilities include:
 - managed account snapshots for live order routing
 - portfolio average-cost snapshots
 - combo validation / preview / test-submit / submit
-- account-level portfolio position snapshots for leg existence checks and pre-submit netting warnings
+- authoritative account-level `ib.positions()` snapshots for leg existence checks, close validation, and pre-submit netting warnings; `updatePortfolioEvent` remains the separate average-cost/valuation feed
 - delta hedge validation / preview / submit / cancel
 - managed repricing supervision
 - close-group execution

@@ -44,6 +44,7 @@ except ImportError:
     class _DummyIB:
         def __init__(self):
             self.updatePortfolioEvent = _DummyEvent()
+            self.positionEvent = _DummyEvent()
             self.orderStatusEvent = _DummyEvent()
             self.execDetailsEvent = _DummyEvent()
             self.errorEvent = _DummyEvent()
@@ -52,6 +53,9 @@ except ImportError:
             return False
 
         def managedAccounts(self):
+            return []
+
+        def positions(self):
             return []
 
         def reqMarketDataType(self, *_args, **_kwargs):
@@ -1023,6 +1027,22 @@ class IbServerIvTermStructureTests(unittest.TestCase):
 
 
 class IbServerMicroFamilyDefaultsTests(unittest.TestCase):
+    def test_friday_es_fop_request_does_not_force_monday_trading_class(self):
+        contract = ib_server._build_contract_from_request({
+            'secType': 'FOP',
+            'symbol': 'ES',
+            'exchange': 'CME',
+            'currency': 'USD',
+            'multiplier': '50',
+            'tradingClass': 'E3A',
+            'right': 'C',
+            'strike': 7590,
+            'expDate': '20260717',
+        })
+
+        self.assertEqual(contract.lastTradeDateOrContractMonth, '20260717')
+        self.assertEqual(contract.tradingClass, '')
+
     def test_supported_live_families_include_micro_equity_index_futures_options(self):
         self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MES']['underlying_sec_type'], 'FUT')
         self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MES']['option_sec_type'], 'FOP')
@@ -1070,6 +1090,73 @@ class IbServerMicroFamilyDefaultsTests(unittest.TestCase):
         self.assertEqual(si_request['exchange'], 'COMEX')
         self.assertEqual(si_request['multiplier'], '5000')
         self.assertEqual(si_request['contractMonth'], '202605')
+
+
+class IbServerPortfolioPositionSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        self._original_ib = ib_server.ib
+        self._original_cache = dict(ib_server.portfolio_position_cache)
+        self._original_ready = ib_server.portfolio_positions_snapshot_ready
+
+    def tearDown(self):
+        ib_server.ib = self._original_ib
+        ib_server.portfolio_position_cache.clear()
+        ib_server.portfolio_position_cache.update(self._original_cache)
+        ib_server.portfolio_positions_snapshot_ready = self._original_ready
+
+    def test_snapshot_reads_fop_positions_from_req_positions_collection(self):
+        class _ConnectedIb:
+            def isConnected(self):
+                return True
+
+            def positions(self):
+                return [
+                    SimpleNamespace(
+                        account='U19322426',
+                        position=-4,
+                        contract=SimpleNamespace(
+                            conId=91001,
+                            secType='FOP',
+                            symbol='ES',
+                            localSymbol='ES   260717C07590000',
+                            lastTradeDateOrContractMonth='20260717',
+                            right='C',
+                            strike=7590,
+                            multiplier='50',
+                            tradingClass='EW3',
+                        ),
+                    ),
+                    SimpleNamespace(
+                        account='U19322426',
+                        position=-4,
+                        contract=SimpleNamespace(
+                            conId=91002,
+                            secType='FOP',
+                            symbol='ES',
+                            localSymbol='ES   260717P07590000',
+                            lastTradeDateOrContractMonth='20260717',
+                            right='P',
+                            strike=7590,
+                            multiplier='50',
+                            tradingClass='EW3',
+                        ),
+                    ),
+                ]
+
+        ib_server.ib = _ConnectedIb()
+        ib_server.portfolio_position_cache.clear()
+        ib_server.portfolio_positions_snapshot_ready = False
+
+        payload = ib_server._build_portfolio_positions_payload()
+
+        self.assertTrue(payload['ibConnected'])
+        self.assertTrue(payload['positionsReady'])
+        self.assertEqual(len(payload['items']), 2)
+        self.assertEqual(
+            [(item['right'], item['position'], item['tradingClass']) for item in payload['items']],
+            [('C', -4.0, 'EW3'), ('P', -4.0, 'EW3')],
+        )
+        self.assertEqual(len(ib_server.portfolio_position_cache), 2)
 
 
 class IbServerExecutionDispatchTests(unittest.TestCase):
@@ -1803,6 +1890,42 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(ValueError, 'Close blocked.*No matching TWS portfolio position'):
             await adapter.validate_combo_order(object(), request)
+
+    def test_close_plan_distinguishes_unready_snapshot_from_confirmed_empty_snapshot(self):
+        request = ComboOrderRequest(
+            group_id='group_snapshot_readiness',
+            group_name='Snapshot Readiness',
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='U1',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[self._build_close_leg('missing_call', 1, 'C')],
+        )
+        unready_adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: [],
+            portfolio_positions_ready_provider=lambda: False,
+        )
+        with self.assertRaisesRegex(ValueError, 'positions are not ready'):
+            unready_adapter._build_assignment_aware_close_plan(request)
+
+        ready_adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: [],
+            portfolio_positions_ready_provider=lambda: True,
+        )
+        with self.assertRaisesRegex(ValueError, 'Close blocked.*No matching TWS portfolio position'):
+            ready_adapter._build_assignment_aware_close_plan(request)
 
     async def test_validate_checked_close_includes_live_option_and_underlying_legs(self):
         validated_leg_ids = []
