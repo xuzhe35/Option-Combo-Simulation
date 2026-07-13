@@ -139,6 +139,7 @@ api_market_data_generation = 0
 qualified_underlyings = {}
 portfolio_avg_cost_cache = {}
 portfolio_position_cache = {}
+portfolio_positions_snapshot_ready = False
 portfolio_position_broadcast_task = None
 combo_order_tracking_by_order_id = {}
 combo_order_tracking_by_perm_id = {}
@@ -525,7 +526,8 @@ execution_adapter = IbkrExecutionAdapter(
     logger=logging.getLogger('trade_execution.ibkr'),
     emit_order_update=_emit_combo_order_update,
     on_combo_order_placed=_record_combo_order_placement,
-    portfolio_positions_provider=lambda: list(portfolio_position_cache.values()),
+    portfolio_positions_provider=lambda: _get_authoritative_portfolio_position_items(),
+    portfolio_positions_ready_provider=lambda: portfolio_positions_snapshot_ready,
 )
 
 execution_engine = ExecutionEngine(
@@ -661,6 +663,39 @@ def _serialize_portfolio_position_item(portfolio_item):
     }
 
 
+def _get_authoritative_portfolio_position_items():
+    """Refresh position quantities from IB's completed reqPositions snapshot.
+
+    updatePortfolioEvent is account-update/valuation oriented and is not
+    guaranteed to cover every FOP/FUT position in every TWS configuration.
+    IB.positions() is the authoritative, startup-synchronized quantity set.
+    """
+    global portfolio_positions_snapshot_ready
+    if not ib.isConnected():
+        portfolio_positions_snapshot_ready = False
+        portfolio_position_cache.clear()
+        return []
+
+    try:
+        raw_positions = list(ib.positions() or [])
+    except Exception:
+        portfolio_positions_snapshot_ready = False
+        logging.exception("Failed to read authoritative TWS position snapshot")
+        return list(portfolio_position_cache.values())
+
+    refreshed = {}
+    for position_item in raw_positions:
+        serialized = _serialize_portfolio_position_item(position_item)
+        if serialized is None:
+            continue
+        refreshed[_portfolio_avg_cost_cache_key(serialized)] = serialized
+
+    portfolio_position_cache.clear()
+    portfolio_position_cache.update(refreshed)
+    portfolio_positions_snapshot_ready = True
+    return list(refreshed.values())
+
+
 def _build_portfolio_avg_cost_payload(items):
     return {
         'action': 'portfolio_avg_cost_update',
@@ -669,18 +704,12 @@ def _build_portfolio_avg_cost_payload(items):
 
 
 def _build_portfolio_positions_payload():
-    is_ready = getattr(ib, 'isReady', None)
-    try:
-        positions_ready = bool(ib.isConnected()) and (
-            bool(is_ready()) if callable(is_ready) else True
-        )
-    except Exception:
-        positions_ready = False
+    items = _get_authoritative_portfolio_position_items()
     return {
         'action': 'portfolio_positions_snapshot',
-        'items': list(portfolio_position_cache.values()),
+        'items': items,
         'ibConnected': ib.isConnected(),
-        'positionsReady': positions_ready,
+        'positionsReady': portfolio_positions_snapshot_ready,
     }
 
 
@@ -816,7 +845,24 @@ def on_update_portfolio_item(portfolio_item):
     _broadcast_portfolio_avg_cost_items([item])
 
 
+def on_position_item(position_item):
+    """Keep the authoritative quantity cache current between snapshots."""
+    global portfolio_positions_snapshot_ready
+    serialized = _serialize_portfolio_position_item(position_item)
+    position_key = _portfolio_avg_cost_cache_key_from_contract(
+        getattr(position_item, 'account', '') or '',
+        getattr(position_item, 'contract', None),
+    )
+    if serialized is not None:
+        portfolio_position_cache[_portfolio_avg_cost_cache_key(serialized)] = serialized
+    elif position_key is not None:
+        portfolio_position_cache.pop(position_key, None)
+    portfolio_positions_snapshot_ready = True
+    _schedule_portfolio_positions_broadcast()
+
+
 ib.updatePortfolioEvent += on_update_portfolio_item
+ib.positionEvent += on_position_item
 
 
 _tracking_env = _build_order_tracking_environment()
@@ -1037,6 +1083,19 @@ def _resolve_weekly_fop_trading_class(symbol, expiry, current_trading_class):
         expiry_date = datetime.strptime(expiry, '%Y%m%d')
     except (TypeError, ValueError):
         return base_trading_class
+
+    normalized_symbol = _normalize_symbol(symbol)
+    configured_trading_class = str(defaults.get('trading_class') or '').strip().upper()
+    requested_trading_class = str(current_trading_class or '').strip().upper()
+    if (
+        normalized_symbol in {'ES', 'NQ'}
+        and expiry_date.weekday() == 4
+        and requested_trading_class in {'', configured_trading_class}
+    ):
+        # Friday FOP trading classes are week-specific (for example EW3), so
+        # the Mon-Thu E3A/Q3A seed is actively misleading. Qualify the exact
+        # expiry/right/strike without a trading class and let IB resolve it.
+        return ''
 
     weekday_suffix = {
         0: 'A',  # Monday

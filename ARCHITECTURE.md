@@ -316,7 +316,7 @@ Responsibilities:
 - pooled live underlying, option, futures, and stock-hedge subscriptions
 - product-aware IBKR contract qualification
 - portfolio average-cost snapshots
-- full account-level portfolio position snapshots used by Group/Global Leg Exists Check
+- full account-level position snapshots from `ib.positions()` used by Group/Global Leg Exists Check and close validation; quantity truth does not depend on `updatePortfolioEvent`
 - managed account snapshots
 - historical daily bars for Chart Lab
 - chain-service daily-bar fallback for Chart Lab

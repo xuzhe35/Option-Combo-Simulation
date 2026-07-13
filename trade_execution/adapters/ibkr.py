@@ -70,6 +70,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         emit_order_update=None,
         on_combo_order_placed=None,
         portfolio_positions_provider=None,
+        portfolio_positions_ready_provider=None,
     ):
         self.ib = ib
         self.client_subscriptions = client_subscriptions
@@ -80,6 +81,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.emit_order_update = emit_order_update
         self.on_combo_order_placed = on_combo_order_placed
         self.portfolio_positions_provider = portfolio_positions_provider
+        self.portfolio_positions_ready_provider = portfolio_positions_ready_provider
         self.what_if_timeout_seconds = 4.0
         self.tick_size_request_timeout_seconds = 4.0
         self.underlying_close_settle_seconds = 3.0
@@ -1374,6 +1376,17 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             return []
         return [item for item in (items or []) if isinstance(item, dict)]
 
+    def _portfolio_positions_are_ready(self):
+        if callable(self.portfolio_positions_ready_provider):
+            try:
+                return self.portfolio_positions_ready_provider() is True
+            except Exception:
+                self.logger.exception('Failed to read TWS position snapshot readiness.')
+                return False
+        # Backward-compatible for adapters/tests that provide a synchronous
+        # position collection without a separate readiness signal.
+        return callable(self.portfolio_positions_provider)
+
     def _portfolio_item_matches_account(self, item, account):
         requested_account = str(account or '').strip()
         if not requested_account:
@@ -1386,34 +1399,6 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         except (TypeError, ValueError):
             return 0.0
         return position if abs(position) > 0.000001 else 0.0
-
-    def _portfolio_has_symbol_snapshot(self, request, items):
-        requested_account = str(getattr(request, 'account', '') or '').strip()
-        requested_symbols = set()
-        profile = getattr(request, 'profile', None) or {}
-        for symbol in (
-            getattr(request, 'underlying_symbol', ''),
-            profile.get('underlyingSymbol'),
-            profile.get('optionSymbol'),
-        ):
-            normalized = self._normalize_symbol(symbol)
-            if normalized:
-                requested_symbols.add(normalized)
-        for leg_request in getattr(request, 'legs', None) or []:
-            for symbol in (leg_request.symbol, leg_request.underlying_symbol):
-                normalized = self._normalize_symbol(symbol)
-                if normalized:
-                    requested_symbols.add(normalized)
-
-        if not requested_symbols:
-            return bool(items)
-
-        for item in items:
-            if not self._portfolio_item_matches_account(item, requested_account):
-                continue
-            if self._normalize_symbol(item.get('symbol')) in requested_symbols:
-                return True
-        return False
 
     def _find_portfolio_item_for_leg(self, leg_request, request, items):
         sec_type = self._normalize_symbol(leg_request.sec_type)
@@ -1592,7 +1577,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         )
         messages.insert(
             1,
-            'Using the latest cached TWS portfolio snapshot. Refresh/sync TWS before closing if positions changed.'
+            'Using the latest synchronized TWS position snapshot. Run Leg Exists Check again if positions changed.'
         )
         if underlying_legs and not any('legged workflow' in str(message) for message in messages):
             messages.insert(
@@ -1923,7 +1908,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             }
 
         portfolio_items = self._get_portfolio_position_items()
-        if not self._portfolio_has_symbol_snapshot(request, portfolio_items):
+        if not self._portfolio_positions_are_ready():
             raise ValueError(
                 'TWS portfolio positions are not ready for Close position checks. '
                 'Refresh/sync the TWS portfolio snapshot, then try Close Group again.'

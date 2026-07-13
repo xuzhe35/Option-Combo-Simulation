@@ -282,8 +282,9 @@
                     currency: profile.currency || 'USD',
                     multiplier: String(profile.optionMultiplier || 100),
                     underlyingMultiplier: String(profile.optionMultiplier || 100),
-                    tradingClass: optionContractSpec?.tradingClass
-                        || (profile.tradingClass || undefined),
+                    tradingClass: optionContractSpec
+                        ? (optionContractSpec.tradingClass || undefined)
+                        : (profile.tradingClass || undefined),
                     right: leg.type.charAt(0).toUpperCase(),
                     strike: leg.strike,
                     expDate: String(leg.expDate || '').replace(/-/g, ''),
