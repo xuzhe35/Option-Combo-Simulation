@@ -413,6 +413,18 @@ module.exports = {
                 assert.match(html, /Calendar: sell front ATM straddle/);
                 assert.match(html, /suggestion only/);
 
+                // Studied symbols carry the per-family MRR research reference
+                // eras; instruments outside the study show no borrowed number.
+                assert.match(html, /MRR research ref/);
+                assert.match(html, /2020-26 1\.10/);
+                assert.match(html, /S&amp;P 500 complex/);
+                const unstudied = buildStrategySignalPanel(
+                    { symbol: 'TLT' },
+                    { detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)] },
+                    { samples: [] }
+                );
+                assert.doesNotMatch(unstudied, /MRR research ref/);
+
                 // With no accumulated samples the watermark cannot prove the
                 // era, so the deep-contango zone shows but withholds the
                 // reverse-fly structure (fail closed).
@@ -438,6 +450,10 @@ module.exports = {
                     { samples: [] }
                 );
                 assert.match(es, /calendar unavailable \(CME:ES official snapshot missing\/stale\)/);
+                // FOP families disclose which ETF chain the reference eras
+                // were measured on.
+                assert.match(es, /MRR research ref/);
+                assert.match(es, /via SPY/);
                 assert.match(es, /CALENDAR UNAVAILABLE/);
                 assert.match(es, /is-calendar_unavailable/);
                 assert.match(es, /official trading calendar is unavailable — no strategy suggestion/);

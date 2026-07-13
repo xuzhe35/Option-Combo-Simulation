@@ -2090,6 +2090,16 @@
         const watermarkText = watermark.status === 'ok'
             ? `${watermark.mean.toFixed(2)} (n=${watermark.count})`
             : `collecting ${watermark.count}/${watermark.required}`;
+        const benchmarkFamily = String(profile && (profile.enteredSymbol || profile.family) || (card && card.symbol) || '').toUpperCase();
+        const mrrBenchmark = typeof coreApi.getMrrResearchBenchmark === 'function'
+            ? coreApi.getMrrResearchBenchmark(benchmarkFamily)
+            : null;
+        const mrrBenchmarkRow = mrrBenchmark
+            ? `<div class="ivts-strategy-row" title="${escapeHtml(`Deep-contango era means from the E10/E11 backtests, measured on ${mrrBenchmark.measuredOn} chains. Reference only — the live per-symbol MRR above decides the gate. ${mrrBenchmark.note}`)}">`
+                + '<span>MRR research ref</span>'
+                + `<span>${escapeHtml(mrrBenchmark.eras.map((era) => `${era.span} ${era.value.toFixed(2)}`).join(' · '))} (${escapeHtml(mrrBenchmark.label)}${mrrBenchmark.measuredOn === benchmarkFamily ? '' : ` via ${escapeHtml(mrrBenchmark.measuredOn)}`})</span>`
+                + '</div>'
+            : '';
         const suggestionText = suggestion.structure
             ? `${suggestion.structure} — ${suggestion.exitRule}`
             : (suggestion.stance === 'no_signal'
@@ -2102,7 +2112,7 @@
         const panelTitle = signal.status !== 'ok'
             ? 'Sync the required front and back expiries before evaluating the official-calendar strategy signal.'
             : (calendarAvailable
-            ? 'Frozen playbook from VRP_RESEARCH_MEMO.md: slope<0.95 reverse iron fly (hold), 0.95-1.05 stand down, >1.05 calendar (tp50). Signal lambda fixed at 0.3 regardless of the TD IV display lambda. Watermark = realized |move| / expected move from your accumulated samples; <0.95 vetoes the reverse fly.'
+            ? 'Frozen playbook from VRP_RESEARCH_MEMO.md: slope<0.95 reverse iron fly (hold), 0.95-1.05 stand down, >1.05 calendar (tp50). Signal lambda fixed at 0.3 regardless of the TD IV display lambda. MRR (Move Realization Ratio) = realized |move| / expected move over your accumulated samples; the watermark gate vetoes the reverse fly below 0.95.'
             : `${calendarId} official trading calendar is missing or does not cover these expiries. No strategy suggestion is produced.`);
 
         return `
@@ -2113,7 +2123,8 @@
                     <span class="ivts-strategy-disclaimer">suggestion only · paper/sim first</span>
                 </div>
                 <div class="ivts-strategy-row"><span>TD slope (λ=0.3)</span><span>${slopeText}</span></div>
-                <div class="ivts-strategy-row"><span>|move|/EM watermark</span><span>${watermarkText}</span></div>
+                <div class="ivts-strategy-row"><span>MRR watermark (|move|/EM)</span><span>${watermarkText}</span></div>
+                ${mrrBenchmarkRow}
                 <div class="ivts-strategy-row ivts-strategy-suggestion"><span>This week</span><span>${escapeHtml(suggestionText)}</span></div>
             </div>
         `;

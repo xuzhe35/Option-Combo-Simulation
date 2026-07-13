@@ -587,6 +587,84 @@
         };
     }
 
+    // Historical MRR (Move Realization Ratio) era means measured in the
+    // deep-contango zone — the regime the watermark actually gates. All
+    // values come from the E10/E11 backtests in VRP_RESEARCH_MEMO.md and are
+    // reference context only; the live per-symbol watermark decides. Values
+    // for futures families are proxied from the ETF chains they were
+    // measured on (`measuredOn`).
+    const MRR_RESEARCH_BENCHMARKS = Object.freeze({
+        SP500: Object.freeze({
+            label: 'S&P 500 complex',
+            measuredOn: 'SPY',
+            eras: Object.freeze([
+                Object.freeze({ span: '2010-14', value: 0.88 }),
+                Object.freeze({ span: '2015-19', value: 0.92 }),
+                Object.freeze({ span: '2020-26', value: 1.10 }),
+            ]),
+            note: 'Equity drift keeps the 2020s above the 0.95 floor; the gate has been open in the current era.',
+        }),
+        NDX100: Object.freeze({
+            label: 'Nasdaq-100 complex',
+            measuredOn: 'QQQ',
+            eras: Object.freeze([
+                Object.freeze({ span: '2010-14', value: 1.11 }),
+                Object.freeze({ span: '2015-19', value: 1.09 }),
+                Object.freeze({ span: '2020-26', value: 1.05 }),
+            ]),
+            note: 'Above water in all three eras — the most trend-taxed underlying in the study.',
+        }),
+        GOLD: Object.freeze({
+            label: 'Gold',
+            measuredOn: 'GLD',
+            eras: Object.freeze([
+                Object.freeze({ span: '2010-14', value: 1.09 }),
+                Object.freeze({ span: '2015-19', value: 0.99 }),
+                Object.freeze({ span: '2020-24', value: 0.78 }),
+                Object.freeze({ span: '2025-26', value: 1.37 }),
+            ]),
+            note: 'Regime-driven: gate correctly shut 2020-24 (reverse fly bled) and wide open in the 2025-26 trend. Trust the live reading.',
+        }),
+        SILVER: Object.freeze({
+            label: 'Silver',
+            measuredOn: 'SLV',
+            eras: Object.freeze([
+                Object.freeze({ span: '2010-14', value: 0.84 }),
+                Object.freeze({ span: '2015-19', value: 1.04 }),
+                Object.freeze({ span: '2020-24', value: 1.03 }),
+                Object.freeze({ span: '2025-26', value: 1.35 }),
+            ]),
+            note: 'Hovers near the floor; on SLV the per-lot premium was too thin to survive costs (E11) — SI futures scale helps.',
+        }),
+        OIL: Object.freeze({
+            label: 'Crude oil',
+            measuredOn: 'USO',
+            eras: Object.freeze([
+                Object.freeze({ span: '2010-14', value: 1.07 }),
+                Object.freeze({ span: '2015-19', value: 0.94 }),
+                Object.freeze({ span: '2020-24', value: 1.05 }),
+                Object.freeze({ span: '2025-26', value: 0.90 }),
+            ]),
+            note: 'Oscillates around the floor with no persistent drift; the reverse-fly leg never earned outside 2022 (E11). Calendar leg only.',
+        }),
+    });
+
+    const MRR_BENCHMARK_BY_FAMILY = Object.freeze({
+        SPY: 'SP500', SPX: 'SP500', ES: 'SP500', MES: 'SP500',
+        QQQ: 'NDX100', NDX: 'NDX100', NQ: 'NDX100', MNQ: 'NDX100',
+        GLD: 'GOLD', GC: 'GOLD',
+        SLV: 'SILVER', SI: 'SILVER',
+        USO: 'OIL', CL: 'OIL',
+    });
+
+    // Research-era MRR context for a symbol/family, or null when the
+    // instrument was never part of the study (no number is better than a
+    // borrowed one).
+    function getMrrResearchBenchmark(symbolOrFamily) {
+        const key = MRR_BENCHMARK_BY_FAMILY[String(symbolOrFamily || '').trim().toUpperCase()];
+        return key ? MRR_RESEARCH_BENCHMARKS[key] : null;
+    }
+
     // The frozen playbook: zone x watermark -> what to do this week.
     function buildStrategySuggestion(signal, watermark, options) {
         const opts = _signalOptions(options);
@@ -668,6 +746,7 @@
         STRATEGY_SIGNAL_DEFAULTS,
         computeRegimeSignal,
         computeDisplacementWatermark,
+        getMrrResearchBenchmark,
         buildStrategySuggestion,
         buildSampleRecord,
     };
