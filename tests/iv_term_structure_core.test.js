@@ -671,6 +671,33 @@ module.exports = {
             },
         },
         {
+            name: 'exposes per-family MRR research benchmarks with ETF proxy attribution',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                // FOP families resolve to the ETF-measured research asset.
+                const gold = core.getMrrResearchBenchmark('GC');
+                assert.ok(gold);
+                assert.equal(gold.measuredOn, 'GLD');
+                assert.equal(core.getMrrResearchBenchmark('GLD'), gold);
+                assert.ok(gold.eras.some((era) => era.span === '2020-24' && era.value === 0.78));
+                assert.ok(gold.eras.some((era) => era.span === '2025-26' && era.value === 1.37));
+
+                const sp = core.getMrrResearchBenchmark('es');
+                assert.ok(sp);
+                assert.equal(sp.measuredOn, 'SPY');
+                assert.ok(sp.eras.some((era) => era.span === '2020-26' && era.value === 1.10));
+
+                // Instruments outside the study get no borrowed number.
+                assert.equal(core.getMrrResearchBenchmark('TLT'), null);
+                assert.equal(core.getMrrResearchBenchmark('DEFAULT_EQUITY'), null);
+                assert.equal(core.getMrrResearchBenchmark(''), null);
+            },
+        },
+        {
             name: 'leaves trading-day IV empty without an anchor date and propagates it into buckets',
             run() {
                 const ctx = loadBrowserScripts([
