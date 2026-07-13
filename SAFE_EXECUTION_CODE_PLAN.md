@@ -1,4 +1,4 @@
-# Safe Execution And Delta Hedge Completion Plan
+# Execution Safety Contract
 
 **Updated:** 2026-07-11
 
@@ -19,7 +19,7 @@ or after the account position snapshot changed.
 6. Submit only when the token, session, payload fingerprint, and position snapshot still match.
 7. Attribute fills to explicit Group or hedge allocations with full contract metadata.
 
-## Implemented In This Change
+## Current Implementation
 
 - `js/order_safety.js`
   - canonical hedge intent
@@ -34,7 +34,7 @@ or after the account position snapshot changed.
   - removed confirmation-UI fail-open
   - carries a backend one-time execution authorization from validation to submit
   - confirmation sends the frozen validated payload instead of rebuilding it from mutable UI state
-  - TIF, managed reprice threshold, and concession ratio are covered by the backend fingerprint
+  - TIF, managed reprice threshold, concession ratio, routing/contract identity, multipliers, observed pricing inputs, and profile terms are covered by the backend fingerprint
   - confirmation describes the actual managed server-pricing workflow rather than an undefined client LMT
 - Close Plan
   - retains its richer staged-plan dialog and existing one-time Close Plan token

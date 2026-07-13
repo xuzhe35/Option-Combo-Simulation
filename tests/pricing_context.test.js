@@ -159,7 +159,7 @@ module.exports = {
                     expDate: '2026-04-16',
                 });
 
-                assert.equal(forwardPrice.toFixed(4), '5852.4540');
+                assert.equal(forwardPrice.toFixed(4), (5800 * Math.exp(0.0003 * 30)).toFixed(4));
             },
         },
         {
@@ -199,7 +199,7 @@ module.exports = {
                     expDate: '2026-06-18',
                 });
 
-                assert.equal(forwardPrice.toFixed(4), '6076.5167');
+                assert.equal(forwardPrice.toFixed(4), (5800 * Math.exp(0.0005 * 93)).toFixed(4));
             },
         },
         {

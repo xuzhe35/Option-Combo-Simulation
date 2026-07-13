@@ -26,8 +26,9 @@ module.exports = {
                 assert.equal(snapshot.callMid, 126);
                 assert.equal(snapshot.putMid, 171);
                 assert.equal(snapshot.syntheticForward, 5755);
-                assert.equal(snapshot.dailyCarry.toFixed(8), '0.00002898');
-                assert.equal(snapshot.impliedRate.toFixed(6), '0.010577');
+                const expectedDailyCarry = Math.log(5755 / 5750) / 30;
+                assert.ok(Math.abs(snapshot.dailyCarry - expectedDailyCarry) < 1e-12);
+                assert.ok(Math.abs(snapshot.impliedRate - expectedDailyCarry * 365) < 1e-12);
             },
         },
         {
@@ -63,8 +64,9 @@ module.exports = {
 
                 assert.equal(result.snapshot.syntheticForward, 5851);
                 assert.equal(sample.isStale, false);
-                assert.equal(sample.dailyCarry.toFixed(8), '0.00000190');
-                assert.equal(sample.impliedRate.toFixed(6), '0.000692');
+                const expectedDailyCarry = Math.log(5851 / 5850) / 90;
+                assert.ok(Math.abs(sample.dailyCarry - expectedDailyCarry) < 1e-12);
+                assert.ok(Math.abs(sample.impliedRate - expectedDailyCarry * 365) < 1e-12);
                 assert.equal(typeof sample.lastComputedAt, 'string');
             },
         },

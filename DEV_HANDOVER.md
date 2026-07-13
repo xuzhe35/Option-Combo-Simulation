@@ -1,6 +1,6 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-07-05
+**Updated:** 2026-07-12
 
 ## 1. Current Product State
 
@@ -10,6 +10,7 @@ Current surfaces:
 
 - `index.html` for the main portfolio workspace
 - `chart_lab.html` for the shared workspace plus the experimental Chart Lab tab
+- `iv_term_structure.html` for the standalone ETF / futures-option IV term-structure monitor
 - `ib_server.py` as the live-backend composition entry point
 - `ib_server_ws.py` for live backend WebSocket session routing
 - `ib_server_order_tracking.py` for combo/hedge tracking payloads and IB event consumers
@@ -97,12 +98,27 @@ Current surfaces:
 - one-group or included-global projection
 - same simulated-date concept as the shared portfolio runtime
 
+### IV term structure
+
+- ETF plus FOP cards configured in `iv_term_structure/iv_term_structure_config.json`
+- ATM call/put aggregation, calendar finder, bucket history, and per-symbol option-stream limits
+- one global `TD IV λ` control (default `0.30`) that re-annualizes every card without resubscribing
+- forward trading calendars come only from the generated official snapshot:
+  NYSE public calendar plus CME Reference Data API product schedules
+- run `sync_exchange_calendars_mac.command` or `sync_exchange_calendars.bat`
+- the browser has no computed-holiday fallback; product `calendarId` is passed
+  through date utilities, pricing, simulation controls, and IVTS. Missing or
+  stale coverage is unavailable rather than assumed open. Historical replay
+  receives observed exchange sessions from the chain service.
+  weekly; products without official coverage remain fail-closed in IVTS
+
 ## 3. Important Entry Points
 
 ### Frontend
 
 - `index.html`
 - `chart_lab.html`
+- `iv_term_structure.html`
 
 ### Backends
 
@@ -138,7 +154,9 @@ POSIX / macOS:
 
 - `start_option_combo.sh`
 - `start_option_combo_mac.command`
+- `start_historical_replay_mac.command`
 - `install_ib_bridge_deps_mac.command`
+- `cleanup_logs_mac.command`
 
 ## 4. Where To Look First
 
@@ -342,9 +360,9 @@ Not implemented there today:
 - `chart_lab.html` is still experimental.
 - Chart Lab always opens `ws://127.0.0.1:<port>`; it does not expose a host override like `index.html`.
 - Chart Lab daily bars come from `request_historical_bars`, which currently exists in `ib_server.py`, not `historical_server.py`.
-- The SQLite daily-bar fallback for Chart Lab is therefore only reachable through `ib_server.py`.
+- The options-chain-service daily-bar fallback for Chart Lab is therefore only reachable through `ib_server.py`.
 - `historical_server.py` normalizes its bind host to localhost and is replay-only by design.
-- Reloading the page does not reconstruct an old managed-order supervision session.
+- Active-order recovery only rebinds orders when workspace/group identity and backend tracking metadata still match; browser-only automation state is not backend-persisted.
 - `contract_specs/*.xml` remain reference material; runtime truth lives in `js/product_registry.js`.
 - If multiple unmanaged `ib_server.py` processes are running, broker-status debugging becomes unreliable because the browser may be talking to a different process than the logs you are inspecting.
 
@@ -390,8 +408,8 @@ That runner currently includes the main suites wired in `tests/run.js`, such as:
 
 Important nuance:
 
-- there are additional test files under `tests/`
-- not every file in that folder is currently included in `tests/run.js`
+- `tests/run.js` includes every `tests/*.test.js` suite, including forward-carry and pricing-context coverage
+- the full Python suite is `python -m unittest discover -s tests -p "*_test.py"` using the project-resolved interpreter
 - WebSocket routing coverage for the live backend now lives in `tests/ib_server_ws_test.py`
 - combo-order transport coverage now lives in `tests/combo_order_transport.test.js`
 - live tracking-consumer coverage now lives in `tests/ib_server_order_tracking_test.py`

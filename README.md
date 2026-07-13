@@ -173,8 +173,7 @@ Live market-data streams are pooled by qualified contract id. A second subscript
 This is the lightweight historical replay server. Since 2026-07 it no longer
 reads a bundled SQLite copy: option chains and underlying daily bars come from
 the shared **options-chain-service** (`Options DB/chain_service/chain_server.py`,
-default `http://127.0.0.1:8750`, backed by the Databento cleaned DB with
-SPY/QQQ/GLD/SLV/TLT/USO through 2026-06). Risk-free rates and the treasury
+default `http://127.0.0.1:8750`). Risk-free rates and the treasury
 yield curve still come from the small local `sqlite_spy/rates.db` (extracted
 from the legacy DB by `scripts/extract_rates_db.py`).
 
@@ -548,13 +547,22 @@ Run the refresh once each weekend:
 ```
 
 CME requires an OAuth API ID created under CME Group Login → Customer Center →
-My Profile → API Management. Set `CME_API_ID` and `CME_API_SECRET` in the
-process environment; never commit them. A short-lived `CME_ACCESS_TOKEN` is
-also accepted. Futures/options attributes use CME's default entitlement.
+My Profile → API Management. Both launchers read `api_id` / `api_secret` (or a
+short-lived `access_token`) from the `[cme]` section of `config.local.ini`
+(gitignored — copy `config.local.ini.example` and fill it in), so a
+double-click or an unattended weekly job works without typing arguments.
+`CME_API_ID` / `CME_API_SECRET` / `CME_ACCESS_TOKEN` already present in the
+environment always win over the file, letting a scheduler inject secrets
+without writing them to disk. Never commit real values. Futures/options
+attributes use CME's default entitlement.
 
 For an NYSE-only bootstrap, explicitly pass `--nyse-only` on macOS/POSIX or
 `-NyseOnly` on PowerShell. This does not invent futures calendars: IVTS stays
-fail-closed for any product whose official snapshot is missing or stale.
+fail-closed for any product whose official snapshot is missing or stale. If the
+weekly job runs with no CME credentials **and** no `--nyse-only`, the Python
+sync fails before writing anything (NYSE included), so the scheduler must
+supply one or the other — monitor its exit code; non-zero means nothing was
+refreshed.
 
 Generated files:
 
@@ -590,6 +598,9 @@ The default Node runner is:
 node .\tests\run.js
 ```
 
+The runner includes all `tests/*.test.js` suites, including forward-carry and
+pricing-context coverage.
+
 It currently runs the suites wired into `tests/run.js`, including:
 
 - market holidays
@@ -619,7 +630,11 @@ Python tests also exist for selected backend helpers:
 - `tests/iv_term_structure_service_test.py`
 - `tests/smoke_delta_hedge_ws_test.py`
 
-Additional test files may exist in `tests/`, but not every file is included by the default Node runner.
+Run the full Python suite with the resolved project interpreter:
+
+```powershell
+& $PYTHON -m unittest discover -s tests -p "*_test.py"
+```
 
 ## Related Docs
 

@@ -556,7 +556,7 @@ Current data flow:
 
 1. read current frontend state through `window.__optionComboApp.getState()`
 2. request daily bars from `ib_server.py`
-3. fall back to SQLite daily bars when IB bars are unavailable
+3. fall back to options-chain-service daily bars when IB bars are unavailable
 4. read selected projection source:
    - one group
    - included global portfolio
@@ -608,7 +608,7 @@ Use `cleanup_logs.bat` or `cleanup_logs_mac.command` for periodic runtime log cl
 ## 11. Current Known Boundaries
 
 - `contract_specs/*.xml` are reference assets rather than runtime truth.
-- Page reload does not reconstruct a previous managed execution session.
+- Active-order recovery requires matching workspace/group identity and backend tracking metadata; browser-only automation state is not backend-persisted.
 - Chart Lab is experimental and uses daily bars only.
 - The projection lab aligns price, but not true future time.
 - `historical_server.py` cannot serve Chart Lab bars or IV term-structure sync.
