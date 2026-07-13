@@ -17,6 +17,7 @@ import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import closing
 from datetime import datetime
 
 
@@ -91,16 +92,19 @@ class HistoricalReplayStore:
             with urllib.request.urlopen(url, timeout=self.timeout) as response:
                 return json.loads(response.read().decode('utf-8'))
         except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                return None
-            body = ''
             try:
-                body = exc.read().decode('utf-8', 'replace')
-            except Exception:
-                pass
-            raise ChainServiceError(
-                f"options chain service error {exc.code} for {path}: {body[:200]}"
-            )
+                if exc.code == 404:
+                    return None
+                body = ''
+                try:
+                    body = exc.read().decode('utf-8', 'replace')
+                except Exception:
+                    pass
+                raise ChainServiceError(
+                    f"options chain service error {exc.code} for {path}: {body[:200]}"
+                )
+            finally:
+                exc.close()
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             raise ChainServiceError(
                 f"options chain service unreachable at {self.chain_service_url} "
@@ -340,7 +344,7 @@ class HistoricalReplayStore:
         requested_date = _normalize_iso_date(quote_date) if quote_date else ''
 
         try:
-            with self._connect_rates() as conn:
+            with closing(self._connect_rates()) as conn:
                 effective_date = self._resolve_effective_rates_date(
                     conn, 'risk_free_daily_rates', requested_date
                 )
@@ -374,7 +378,7 @@ class HistoricalReplayStore:
         requested_date = _normalize_iso_date(quote_date) if quote_date else ''
 
         try:
-            with self._connect_rates() as conn:
+            with closing(self._connect_rates()) as conn:
                 effective_date = self._resolve_effective_rates_date(
                     conn, 'yield_curve_daily_rates', requested_date
                 )

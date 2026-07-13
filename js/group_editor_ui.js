@@ -221,9 +221,13 @@
 
     function _normalizeComboStrategy(value) {
         const normalized = String(value || '').trim().toLowerCase();
-        return ['bull_spread', 'bear_spread', 'straddle', 'strangle', 'butterfly'].includes(normalized)
+        return ['bull_spread', 'bear_spread', 'straddle', 'strangle', 'butterfly', 'reverse_butterfly'].includes(normalized)
             ? normalized
             : 'bull_spread';
+    }
+
+    function _isButterflyStrategy(strategy) {
+        return strategy === 'butterfly' || strategy === 'reverse_butterfly';
     }
 
     function _getButterflyWingWidthOptions(state) {
@@ -311,7 +315,7 @@
         };
     }
 
-    function calculateButterflyRiskFromLegPrices(prices, wingWidth) {
+    function calculateButterflyRiskFromLegPrices(prices, wingWidth, strategy = 'butterfly') {
         const lowerPut = _normalizePositiveNumber(prices && prices.lowerPut);
         const middlePut = _normalizePositiveNumber(prices && prices.middlePut);
         const middleCall = _normalizePositiveNumber(prices && prices.middleCall);
@@ -321,19 +325,25 @@
             return null;
         }
 
-        const netCredit = middlePut + middleCall - lowerPut - upperCall;
-        const maxProfit = netCredit;
-        const maxLoss = width - netCredit;
+        const bodyPremium = middlePut + middleCall - lowerPut - upperCall;
+        const isReverse = strategy === 'reverse_butterfly';
+        const maxProfit = isReverse ? width - bodyPremium : bodyPremium;
+        const maxLoss = isReverse ? bodyPremium : width - bodyPremium;
         if (!(maxProfit > 0) || !(maxLoss > 0)) {
             return null;
         }
-        return {
+        const result = {
             maxProfit,
             maxLoss,
             profitLossRatio: maxProfit / maxLoss,
-            netCredit,
             wingWidth: width,
         };
+        if (isReverse) {
+            result.netDebit = bodyPremium;
+        } else {
+            result.netCredit = bodyPremium;
+        }
+        return result;
     }
 
     function _buildButterflyCandidate(state, expDate, middleStrike, wingWidth) {
@@ -362,7 +372,7 @@
         };
     }
 
-    function _evaluateButterflyCandidate(candidate) {
+    function _evaluateButterflyCandidate(candidate, strategy = 'butterfly') {
         if (!candidate || !Array.isArray(candidate.quoteRequests)) {
             return null;
         }
@@ -372,13 +382,13 @@
             middleCall: _resolveQuoteMidById(candidate.quoteRequests[2] && candidate.quoteRequests[2].id),
             upperCall: _resolveQuoteMidById(candidate.quoteRequests[3] && candidate.quoteRequests[3].id),
         };
-        const risk = calculateButterflyRiskFromLegPrices(prices, candidate.wingWidth);
+        const risk = calculateButterflyRiskFromLegPrices(prices, candidate.wingWidth, strategy);
         return risk ? { ...candidate, risk } : null;
     }
 
-    function _chooseButterflyCandidate(candidates, targetRatio) {
+    function _chooseButterflyCandidate(candidates, targetRatio, strategy = 'butterfly') {
         const evaluated = (Array.isArray(candidates) ? candidates : [])
-            .map(_evaluateButterflyCandidate)
+            .map((candidate) => _evaluateButterflyCandidate(candidate, strategy))
             .filter(Boolean);
         if (evaluated.length === 0) {
             return null;
@@ -450,7 +460,7 @@
             };
         }
 
-        if (strategy === 'butterfly') {
+        if (_isButterflyStrategy(strategy)) {
             if (strikes.lower === null || strikes.middle === null || strikes.upper === null) {
                 return { success: false, reason: 'Enter valid lower, middle, and upper strikes.' };
             }
@@ -459,12 +469,19 @@
             }
             return {
                 success: true,
-                specs: [
-                    { type: 'put', pos: 1, strike: strikes.lower },
-                    { type: 'put', pos: -1, strike: strikes.middle },
-                    { type: 'call', pos: -1, strike: strikes.middle },
-                    { type: 'call', pos: 1, strike: strikes.upper },
-                ],
+                specs: strategy === 'reverse_butterfly'
+                    ? [
+                        { type: 'put', pos: -1, strike: strikes.lower },
+                        { type: 'put', pos: 1, strike: strikes.middle },
+                        { type: 'call', pos: 1, strike: strikes.middle },
+                        { type: 'call', pos: -1, strike: strikes.upper },
+                    ]
+                    : [
+                        { type: 'put', pos: 1, strike: strikes.lower },
+                        { type: 'put', pos: -1, strike: strikes.middle },
+                        { type: 'call', pos: -1, strike: strikes.middle },
+                        { type: 'call', pos: 1, strike: strikes.upper },
+                    ],
             };
         }
 
@@ -535,13 +552,13 @@
             strike: spec.strike,
             expDate,
         }));
-        if (strategy === 'butterfly') {
+        if (_isButterflyStrategy(strategy)) {
             const wingWidth = _getButterflyWingWidthFromStrikes(strikes);
             const candidate = _buildButterflyCandidate(state, expDate, strikes.middle, wingWidth);
-            const evaluated = _evaluateButterflyCandidate(candidate);
+            const evaluated = _evaluateButterflyCandidate(candidate, strategy);
             group.comboTemplate = {
-                strategy: 'butterfly',
-                kind: 'iron_butterfly',
+                strategy,
+                kind: strategy === 'reverse_butterfly' ? 'reverse_iron_butterfly' : 'iron_butterfly',
                 lowerStrike: strikes.lower,
                 middleStrike: strikes.middle,
                 upperStrike: strikes.upper,
@@ -586,7 +603,7 @@
         const butterflyTools = dialog.querySelector('.combo-template-butterfly-tools');
 
         const showLower = strategy !== 'straddle';
-        const showMiddle = strategy === 'straddle' || strategy === 'butterfly';
+        const showMiddle = strategy === 'straddle' || _isButterflyStrategy(strategy);
         const showUpper = strategy !== 'straddle';
 
         if (lowerField) lowerField.style.display = showLower ? 'block' : 'none';
@@ -603,7 +620,7 @@
             upperLabel.textContent = strategy === 'strangle' ? 'Call Strike' : 'Upper Strike';
         }
         if (butterflyTools) {
-            butterflyTools.style.display = strategy === 'butterfly' ? 'block' : 'none';
+            butterflyTools.style.display = _isButterflyStrategy(strategy) ? 'block' : 'none';
         }
     }
 
@@ -1027,7 +1044,10 @@
         }
         const targetInput = dialog.querySelector('.combo-template-target-ratio');
         const targetRatio = targetInput ? targetInput.value : '';
-        const selected = _chooseButterflyCandidate(candidates, targetRatio);
+        const strategy = _normalizeComboStrategy(
+            dialog.querySelector('.combo-template-strategy')?.value
+        );
+        const selected = _chooseButterflyCandidate(candidates, targetRatio, strategy);
         if (selected) {
             _selectButterflyCandidateInDialog(dialog, selected);
             return true;
@@ -1090,6 +1110,7 @@
                             <option value="straddle">Straddle</option>
                             <option value="strangle">Strangle</option>
                             <option value="butterfly">Butterfly</option>
+                            <option value="reverse_butterfly">Reverse Butterfly</option>
                         </select>
                     </div>
                     <div class="combo-template-section">
@@ -1183,7 +1204,7 @@
             strategyInput.addEventListener('change', () => {
                 if (dialog._comboContext) {
                     _setComboTemplateDefaultInputs(dialog, dialog._comboContext.state);
-                    if (_normalizeComboStrategy(strategyInput.value) === 'butterfly') {
+                    if (_isButterflyStrategy(_normalizeComboStrategy(strategyInput.value))) {
                         _syncButterflyWidthControls(dialog, dialog._comboContext.state);
                     }
                 }
@@ -1227,7 +1248,7 @@
             if (input) {
                 input.addEventListener('change', () => {
                     const context = dialog._comboContext || {};
-                    if (_normalizeComboStrategy(strategyInput && strategyInput.value) === 'butterfly') {
+                    if (_isButterflyStrategy(_normalizeComboStrategy(strategyInput && strategyInput.value))) {
                         _applyButterflyWingWidthToDialog(dialog, context.state, _getButterflyWidthInputValue(dialog));
                         _setButterflyRiskStatus(dialog, null, '');
                         _resetButterflyQuoteTable(dialog);

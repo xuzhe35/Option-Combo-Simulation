@@ -476,25 +476,27 @@
         return null;
     }
 
-    function _calculateIronButterflyRisk(group) {
-        if (!group || !group.comboTemplate || group.comboTemplate.strategy !== 'butterfly') {
+    function _calculateButterflyRisk(group) {
+        const strategy = String(group && group.comboTemplate && group.comboTemplate.strategy || '');
+        if (!group || !group.comboTemplate || (strategy !== 'butterfly' && strategy !== 'reverse_butterfly')) {
             return null;
         }
+        const isReverse = strategy === 'reverse_butterfly';
         const legs = Array.isArray(group.legs) ? group.legs : [];
         const lowerStrike = parseFloat(group.comboTemplate.lowerStrike);
         const middleStrike = parseFloat(group.comboTemplate.middleStrike);
         const upperStrike = parseFloat(group.comboTemplate.upperStrike);
         const lowerPut = legs.find((leg) => String(leg.type).toLowerCase() === 'put'
-            && (parseFloat(leg.pos) || 0) > 0
+            && (isReverse ? (parseFloat(leg.pos) || 0) < 0 : (parseFloat(leg.pos) || 0) > 0)
             && Math.abs((parseFloat(leg.strike) || 0) - lowerStrike) < 0.0001);
         const middlePut = legs.find((leg) => String(leg.type).toLowerCase() === 'put'
-            && (parseFloat(leg.pos) || 0) < 0
+            && (isReverse ? (parseFloat(leg.pos) || 0) > 0 : (parseFloat(leg.pos) || 0) < 0)
             && Math.abs((parseFloat(leg.strike) || 0) - middleStrike) < 0.0001);
         const middleCall = legs.find((leg) => String(leg.type).toLowerCase() === 'call'
-            && (parseFloat(leg.pos) || 0) < 0
+            && (isReverse ? (parseFloat(leg.pos) || 0) > 0 : (parseFloat(leg.pos) || 0) < 0)
             && Math.abs((parseFloat(leg.strike) || 0) - middleStrike) < 0.0001);
         const upperCall = legs.find((leg) => String(leg.type).toLowerCase() === 'call'
-            && (parseFloat(leg.pos) || 0) > 0
+            && (isReverse ? (parseFloat(leg.pos) || 0) < 0 : (parseFloat(leg.pos) || 0) > 0)
             && Math.abs((parseFloat(leg.strike) || 0) - upperStrike) < 0.0001);
 
         const lowerPutPrice = _resolvePositiveLegPrice(lowerPut);
@@ -508,19 +510,24 @@
             return group.comboTemplate.risk || null;
         }
 
-        const netCredit = middlePutPrice + middleCallPrice - lowerPutPrice - upperCallPrice;
-        const maxProfit = netCredit;
-        const maxLoss = width - netCredit;
+        const bodyPremium = middlePutPrice + middleCallPrice - lowerPutPrice - upperCallPrice;
+        const maxProfit = isReverse ? width - bodyPremium : bodyPremium;
+        const maxLoss = isReverse ? bodyPremium : width - bodyPremium;
         if (!(maxProfit > 0) || !(maxLoss > 0)) {
             return group.comboTemplate.risk || null;
         }
-        return {
+        const result = {
             maxProfit,
             maxLoss,
             profitLossRatio: maxProfit / maxLoss,
             wingWidth: width,
-            netCredit,
         };
+        if (isReverse) {
+            result.netDebit = bodyPremium;
+        } else {
+            result.netCredit = bodyPremium;
+        }
+        return result;
     }
 
     function _ensureComboRiskSummaryEl(card) {
@@ -548,20 +555,22 @@
         if (!el) {
             return;
         }
-        if (!group || !group.comboTemplate || group.comboTemplate.strategy !== 'butterfly') {
+        const strategy = String(group && group.comboTemplate && group.comboTemplate.strategy || '');
+        if (!group || !group.comboTemplate || (strategy !== 'butterfly' && strategy !== 'reverse_butterfly')) {
             el.style.display = 'none';
             el.textContent = '';
             return;
         }
-        const risk = _calculateIronButterflyRisk(group);
+        const risk = _calculateButterflyRisk(group);
+        const label = strategy === 'reverse_butterfly' ? 'Reverse Butterfly Risk' : 'Butterfly Risk';
         if (!risk) {
             el.style.display = 'block';
-            el.textContent = 'Butterfly Risk: waiting for option quotes to calculate MaxProfit / MaxLoss.';
+            el.textContent = `${label}: waiting for option quotes to calculate MaxProfit / MaxLoss.`;
             return;
         }
         el.style.display = 'block';
         el.textContent = [
-            `Butterfly Risk: MaxProfit ${currencyFormatter.format(risk.maxProfit)}`,
+            `${label}: MaxProfit ${currencyFormatter.format(risk.maxProfit)}`,
             `MaxLoss ${currencyFormatter.format(risk.maxLoss)}`,
             `Ratio ${risk.profitLossRatio.toFixed(3)}`,
             `Wing ${risk.wingWidth}`,

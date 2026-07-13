@@ -164,6 +164,15 @@ module.exports = {
                             ['call', 1, 440, '2026-04-19'],
                         ],
                     },
+                    {
+                        strategy: 'reverse_butterfly',
+                        expected: [
+                            ['put', -1, 430, '2026-04-19'],
+                            ['put', 1, 435, '2026-04-19'],
+                            ['call', 1, 435, '2026-04-19'],
+                            ['call', -1, 440, '2026-04-19'],
+                        ],
+                    },
                 ];
 
                 cases.forEach((testCase) => {
@@ -201,13 +210,23 @@ module.exports = {
                     assert.equal(subscriptionCalls, 1, testCase.strategy);
                     assert.equal(renderCalls, 1, testCase.strategy);
                     assert.equal(state.comboTemplateQuoteRequests.length, 0, testCase.strategy);
-                    if (testCase.strategy === 'butterfly') {
-                        assert.equal(group.comboTemplate.strategy, 'butterfly');
+                    if (testCase.strategy === 'butterfly' || testCase.strategy === 'reverse_butterfly') {
+                        assert.equal(group.comboTemplate.strategy, testCase.strategy);
                         assert.equal(group.comboTemplate.wingWidth, 5);
-                        assert.equal(group.comboTemplate.risk.maxProfit, 3);
-                        assert.equal(group.comboTemplate.risk.maxLoss, 2);
-                        assert.equal(group.comboTemplate.risk.profitLossRatio, 1.5);
-                        assert.equal(group.liveData, true, 'butterfly template should enable market data');
+                        if (testCase.strategy === 'reverse_butterfly') {
+                            assert.equal(group.comboTemplate.kind, 'reverse_iron_butterfly');
+                            assert.equal(group.comboTemplate.risk.maxProfit, 2);
+                            assert.equal(group.comboTemplate.risk.maxLoss, 3);
+                            assert.ok(Math.abs(group.comboTemplate.risk.profitLossRatio - (2 / 3)) < 0.000001);
+                            assert.equal(group.comboTemplate.risk.netDebit, 3);
+                        } else {
+                            assert.equal(group.comboTemplate.kind, 'iron_butterfly');
+                            assert.equal(group.comboTemplate.risk.maxProfit, 3);
+                            assert.equal(group.comboTemplate.risk.maxLoss, 2);
+                            assert.equal(group.comboTemplate.risk.profitLossRatio, 1.5);
+                            assert.equal(group.comboTemplate.risk.netCredit, 3);
+                        }
+                        assert.equal(group.liveData, true, 'butterfly templates should enable market data');
                     } else {
                         assert.equal(!!group.liveData, false, testCase.strategy);
                     }
@@ -229,6 +248,24 @@ module.exports = {
                 assert.equal(risk.maxProfit, 3);
                 assert.equal(risk.maxLoss, 2);
                 assert.equal(risk.profitLossRatio, 1.5);
+            },
+        },
+        {
+            name: 'calculates reverse iron butterfly max profit to max loss ratio from leg prices',
+            run() {
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js']);
+
+                const risk = ctx.OptionComboGroupEditorUI._test.calculateButterflyRiskFromLegPrices({
+                    lowerPut: 0.8,
+                    middlePut: 2.5,
+                    middleCall: 2.3,
+                    upperCall: 1.0,
+                }, 5, 'reverse_butterfly');
+
+                assert.equal(risk.maxProfit, 2);
+                assert.equal(risk.maxLoss, 3);
+                assert.ok(Math.abs(risk.profitLossRatio - (2 / 3)) < 0.000001);
+                assert.equal(risk.netDebit, 3);
             },
         },
         {

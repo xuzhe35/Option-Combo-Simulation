@@ -3,3 +3,19 @@
 ; Example:
 ; executable = C:\Users\yourname\AppData\Local\Programs\Python\Python313\python.exe
 executable =
+
+[cme]
+; Official CME Reference Data API OAuth credentials (cmegroup.com ->
+; My Profile -> API Management). Used ONLY by the weekly exchange-calendar
+; sync (sync_exchange_calendars_mac.command / sync_exchange_calendars.bat) to
+; refresh the CME/NYMEX/COMEX product calendars.
+;
+; config.local.ini is gitignored - never commit real values. Leaving these
+; blank makes the launchers fall back to an NYSE-only refresh (CME products
+; then fail closed once their snapshot ages past 14 days). An explicit
+; CME_API_ID / CME_API_SECRET (or CME_ACCESS_TOKEN) already in the environment
+; always wins over the file, so a scheduler can inject secrets without disk.
+api_id =
+api_secret =
+; Optional: a short-lived pre-fetched bearer token instead of api_id/secret.
+access_token =

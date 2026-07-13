@@ -25,11 +25,14 @@ class ExecutionPlanAuthorizer:
                 "secType": str(payload.get("secType") or "").upper(),
                 "symbol": str(payload.get("symbol") or "").upper(),
                 "exchange": str(payload.get("exchange") or "").upper(),
+                "currency": str(payload.get("currency") or "USD").upper(),
                 "contractMonth": str(payload.get("contractMonth") or "")[:6],
+                "multiplier": str(payload.get("multiplier") or ""),
                 "orderAction": str(payload.get("orderAction") or "").upper(),
                 "quantity": int(float(payload.get("quantity") or 0)),
                 "orderType": str(payload.get("orderType") or "LMT").upper(),
                 "limitPrice": float(payload.get("limitPrice")) if payload.get("limitPrice") not in (None, "") else None,
+                "timeInForce": str(payload.get("timeInForce") or "DAY").upper(),
             })
             return common
         legs = []
@@ -38,14 +41,27 @@ class ExecutionPlanAuthorizer:
                 "id": str(leg.get("id") or ""),
                 "secType": str(leg.get("secType") or "").upper(),
                 "symbol": str(leg.get("symbol") or "").upper(),
+                "underlyingSymbol": str(leg.get("underlyingSymbol") or "").upper(),
+                "exchange": str(leg.get("exchange") or "").upper(),
+                "underlyingExchange": str(leg.get("underlyingExchange") or "").upper(),
+                "currency": str(leg.get("currency") or "USD").upper(),
+                "multiplier": str(leg.get("multiplier") or ""),
+                "underlyingMultiplier": str(leg.get("underlyingMultiplier") or ""),
+                "tradingClass": str(leg.get("tradingClass") or "").upper(),
                 "contractMonth": str(leg.get("contractMonth") or "")[:6],
+                "underlyingContractMonth": str(leg.get("underlyingContractMonth") or "")[:6],
                 "expDate": str(leg.get("expDate") or "").replace("-", ""),
                 "right": str(leg.get("right") or "").upper(),
                 "strike": float(leg.get("strike")) if leg.get("strike") not in (None, "") else None,
                 "pos": int(float(leg.get("pos") or 0)),
+                "observedBid": float(leg.get("observedBid")) if leg.get("observedBid") not in (None, "") else None,
+                "observedAsk": float(leg.get("observedAsk")) if leg.get("observedAsk") not in (None, "") else None,
+                "observedMark": float(leg.get("observedMark")) if leg.get("observedMark") not in (None, "") else None,
             })
         common.update({
             "groupId": str(payload.get("groupId") or ""),
+            "underlyingSymbol": str(payload.get("underlyingSymbol") or "").upper(),
+            "underlyingContractMonth": str(payload.get("underlyingContractMonth") or "")[:6],
             "executionIntent": str(payload.get("executionIntent") or "open").lower(),
             "timeInForce": str(payload.get("timeInForce") or "DAY").upper(),
             "managedRepriceThreshold": (
@@ -56,6 +72,11 @@ class ExecutionPlanAuthorizer:
                 float(payload.get("managedConcessionRatio"))
                 if payload.get("managedConcessionRatio") not in (None, "") else None
             ),
+            "observedUnderlyingPrice": (
+                float(payload.get("observedUnderlyingPrice"))
+                if payload.get("observedUnderlyingPrice") not in (None, "") else None
+            ),
+            "profile": payload.get("profile") if isinstance(payload.get("profile"), dict) else {},
             "legs": legs,
         })
         return common
