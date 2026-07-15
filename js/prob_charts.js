@@ -152,7 +152,7 @@ self.onmessage = function(e) {
         const finalPrice = currentPrice * Math.exp(logRet);
         const binIdx = Math.floor((finalPrice - minS) / binWidth);
         const inRange = (binIdx >= 0 && binIdx < bins);
-        
+
         if (inRange) {
             counts[binIdx]++;
         }
@@ -160,7 +160,7 @@ self.onmessage = function(e) {
         // Exact BSM path pricing if legs provided (calculate for ALL paths for true Expectation)
         if (legs && legs.length > 0) {
             let pathPnL = 0.0;
-            
+
             for (let l = 0; l < legs.length; l++) {
                 const leg = legs[l];
                 const legPrice = finalPrice * (leg.underlyingScale || 1);
