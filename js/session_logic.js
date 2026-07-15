@@ -468,7 +468,7 @@
 
     function normalizeSimTimeBasis(value) {
         const normalized = String(value || '').trim().toLowerCase();
-        return ['calendar', 'trading', 'weighted'].includes(normalized) ? normalized : 'calendar';
+        return ['calendar', 'trading', 'weighted'].includes(normalized) ? normalized : 'weighted';
     }
 
     function normalizeSimWeekendWeight(value) {

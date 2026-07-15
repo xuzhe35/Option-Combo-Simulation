@@ -334,6 +334,75 @@ function _computePortfolioPnLAtPrice(price) {
  * Simple moving-average smoother to make the MC histogram look continuous.
  * Window of 7 gives a gentle blur without distorting the shape.
  */
+// -----------------------------------------------------------------------
+// Regime-conditioned overlay (VRP_RESEARCH_MEMO.md E13/E17): historical
+// weekly terminal displacements (z, in EM units) for the selected TD-slope
+// zone, replayed at today's anchor/EM scale. Pure function for testability.
+// -----------------------------------------------------------------------
+
+const REGIME_CONDITION_LABELS = {
+    dc: 'Deep contango (<0.95)',
+    n: 'Neutral (0.95-1.05)',
+    bw: 'Backwardation (>1.05)',
+};
+
+function _getRegimeConditionSelection() {
+    const select = document.getElementById('regimeConditionSelect');
+    const value = select ? String(select.value || 'off') : 'off';
+    return REGIME_CONDITION_LABELS[value] ? value : 'off';
+}
+
+function _getRegimeConditionalZs(distributionSymbol, zoneKey) {
+    const db = typeof REGIME_CONDITIONAL_SAMPLES !== 'undefined' ? REGIME_CONDITIONAL_SAMPLES : null;
+    const entry = db && db.symbols ? db.symbols[distributionSymbol] : null;
+    const zs = entry ? entry[zoneKey] : null;
+    return Array.isArray(zs) && zs.length >= 30 ? zs : null;
+}
+
+/**
+ * Build the conditional overlay: KDE density on the bin grid plus the exact
+ * conditional expected P&L (sample mean of the portfolio P&L at each
+ * replayed terminal price).
+ *
+ * @param {number[]} zSamples  weekly (settle-center)/EM outcomes
+ * @param {number} anchorPrice today's anchor price (density center)
+ * @param {number} em          today's expected move in dollars for the
+ *                             simulation horizon (0.7979*S*sigma*sqrt(T));
+ *                             the sqrt(T) inside EM is what adapts the
+ *                             weekly z shape to other horizons.
+ * @param {ArrayLike<number>} binCenters
+ * @param {(price: number) => number} pnlAt
+ */
+function _buildConditionalOverlay(zSamples, anchorPrice, em, binCenters, pnlAt) {
+    if (!zSamples || !(anchorPrice > 0) || !(em > 0)) return null;
+    const n = zSamples.length;
+    const prices = new Float64Array(n);
+    let evSum = 0;
+    let mean = 0;
+    for (let i = 0; i < n; i++) {
+        prices[i] = anchorPrice + zSamples[i] * em;
+        mean += prices[i];
+        evSum += pnlAt(prices[i]);
+    }
+    mean /= n;
+    let variance = 0;
+    for (let i = 0; i < n; i++) variance += (prices[i] - mean) ** 2;
+    const sd = Math.sqrt(variance / n);
+    if (!(sd > 0)) return null;
+    const bandwidth = 1.06 * sd * Math.pow(n, -0.2);
+    const density = new Float64Array(binCenters.length);
+    const norm = 1 / (n * bandwidth * Math.sqrt(2 * Math.PI));
+    for (let b = 0; b < binCenters.length; b++) {
+        let acc = 0;
+        for (let i = 0; i < n; i++) {
+            const u = (binCenters[b] - prices[i]) / bandwidth;
+            acc += Math.exp(-0.5 * u * u);
+        }
+        density[b] = acc * norm;
+    }
+    return { density, expectedPnL: evSum / n, n };
+}
+
 function _smooth(arr, window = 7) {
     const result = new Float64Array(arr.length);
     const half = Math.floor(window / 2);
@@ -397,9 +466,9 @@ class ProbabilityChart {
         this._cache = null;
     }
 
-    draw(binCenters, tDensity, normalDensity, minS, maxS, currentPrice, anchorInfo) {
+    draw(binCenters, tDensity, normalDensity, minS, maxS, currentPrice, anchorInfo, condOverlay) {
         // Save args so we can redraw on resize without re-simulating
-        this._cache = { binCenters, tDensity, normalDensity, minS, maxS, currentPrice, anchorInfo };
+        this._cache = { binCenters, tDensity, normalDensity, minS, maxS, currentPrice, anchorInfo, condOverlay };
 
         const { ctx, w, h } = _resizeCanvas(this.canvas, 220);
         ctx.clearRect(0, 0, w, h);
@@ -412,12 +481,14 @@ class ProbabilityChart {
         // Apply visual smoothing (does NOT affect E[P&L] calculation)
         const tSmooth = _smooth(tDensity, 7);
         const nSmooth = _smooth(normalDensity, 5);
+        const cSmooth = condOverlay && condOverlay.density ? _smooth(condOverlay.density, 3) : null;
 
         // Y scale: max density + 10% headroom
         let maxD = 0;
         for (let i = 0; i < bins; i++) {
             if (tSmooth[i] > maxD) maxD = tSmooth[i];
             if (nSmooth[i] > maxD) maxD = nSmooth[i];
+            if (cSmooth && cSmooth[i] > maxD) maxD = cSmooth[i];
         }
         if (maxD === 0) { _drawPlaceholder(this.canvas, 'No paths landed in range', 220); return; }
         maxD *= 1.1;
@@ -500,6 +571,16 @@ class ProbabilityChart {
         ctx.stroke();
         ctx.setLineDash([]);
 
+        // Regime-conditioned density: solid teal line
+        if (cSmooth) {
+            ctx.beginPath();
+            ctx.moveTo(mapX(binCenters[0]), mapY(cSmooth[0]));
+            for (let i = 1; i < bins; i++) ctx.lineTo(mapX(binCenters[i]), mapY(cSmooth[i]));
+            ctx.strokeStyle = 'rgba(13, 148, 136, 0.95)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
         // Current price vertical reference
         if (currentPrice >= minS && currentPrice <= maxS) {
             const px = mapX(currentPrice);
@@ -551,12 +632,27 @@ class ProbabilityChart {
         ctx.setLineDash([]);
         ctx.fillStyle = '#374151';
         ctx.fillText('Normal / Lognormal (BSM baseline)', lx + 22, ly + 24);
+
+        // Conditioned swatch
+        if (cSmooth && condOverlay) {
+            ctx.beginPath();
+            ctx.moveTo(lx, ly + 38);
+            ctx.lineTo(lx + 16, ly + 38);
+            ctx.strokeStyle = 'rgba(13, 148, 136, 0.95)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.fillStyle = '#374151';
+            ctx.fillText(
+                `Conditioned: ${condOverlay.label} (n=${condOverlay.n} weeks)`,
+                lx + 22, ly + 38
+            );
+        }
     }
 
     redraw() {
         if (this._cache) {
             const c = this._cache;
-            this.draw(c.binCenters, c.tDensity, c.normalDensity, c.minS, c.maxS, c.currentPrice, c.anchorInfo);
+            this.draw(c.binCenters, c.tDensity, c.normalDensity, c.minS, c.maxS, c.currentPrice, c.anchorInfo, c.condOverlay);
         }
     }
 }
@@ -811,6 +907,7 @@ function updateProbCharts() {
         _probChart && _probChart.drawEmpty('Select at least one included group to see probability analysis.');
         _epnlChart && _epnlChart.drawEmpty('Select at least one included group to see expected P&L density.');
         _setExpectedPnLBadge(null);
+        _setCondExpectedPnLBadge('off', null);
         _setAnchorInfoText(null);
         _setInfoText('No globally included legs in portfolio.');
         return;
@@ -829,6 +926,7 @@ function updateProbCharts() {
         _probChart && _probChart.drawEmpty('Advance the simulation date to see probabilities.');
         _epnlChart && _epnlChart.drawEmpty('No future days to simulate (simulation date = today).');
         _setExpectedPnLBadge(null);
+        _setCondExpectedPnLBadge('off', null);
         _setAnchorInfoText(null);
         _setInfoText('Simulation date = today  (0 days).');
         return;
@@ -840,6 +938,7 @@ function updateProbCharts() {
         _probChart && _probChart.drawEmpty('No usable option IV found to scale the distribution.');
         _epnlChart && _epnlChart.drawEmpty('');
         _setExpectedPnLBadge(null);
+        _setCondExpectedPnLBadge('off', null);
         _setAnchorInfoText(null);
         _setInfoText('Probability analysis needs at least one usable option IV input.');
         return;
@@ -872,6 +971,7 @@ function updateProbCharts() {
         _probChart && _probChart.drawEmpty(`No distribution parameters for ${distributionLabel}. Please run backend script.`);
         _epnlChart && _epnlChart.drawEmpty(`Run: python scripts/fit_underlying.py ${distributionSymbol}`);
         _setExpectedPnLBadge(null);
+        _setCondExpectedPnLBadge('off', null);
         _setAnchorInfoText(anchorInfo);
         _setInfoText(`Missing distribution parameters for ${distributionLabel}.`);
         return;
@@ -892,6 +992,7 @@ function updateProbCharts() {
     const proxyInfoText = distributionSymbol === underlying ? '' : ` | Dist Proxy: ${distributionSymbol}`;
     _setInfoText(`Simulating 1M paths × ${nCalDays} cd  (IV ${(portfolioIV * 100).toFixed(1)}%${driftLabel})${proxyInfoText}…`);
     _setExpectedPnLBadge(null);
+    _setCondExpectedPnLBadge('off', null);
 
     // Terminate any previous in-flight simulation
     if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
@@ -954,6 +1055,7 @@ function updateProbCharts() {
     const _useRandomWalk = useRandomWalk;
     const _underlying = underlying;
     const _distributionSymbol = distributionSymbol;
+    const _regimeZone = _getRegimeConditionSelection();
 
     _activeWorker.onmessage = (e) => {
         _activeWorker = null;
@@ -973,9 +1075,24 @@ function updateProbCharts() {
             pnlValues[i] = _computePortfolioPnLAtPrice(binCenters[i]);
         }
 
+        // --- Regime-conditioned overlay (historical zone outcomes replayed
+        //     at today's anchor/EM scale) ---
+        let condOverlay = null;
+        if (_regimeZone !== 'off') {
+            const zs = _getRegimeConditionalZs(_distributionSymbol, _regimeZone);
+            const em = 0.7979 * _currentPrice * _portfolioIV * Math.sqrt(_nCalDays / 365);
+            const built = zs
+                ? _buildConditionalOverlay(zs, _currentPrice, em, binCenters, _computePortfolioPnLAtPrice)
+                : null;
+            condOverlay = built
+                ? { ...built, label: REGIME_CONDITION_LABELS[_regimeZone], zone: _regimeZone }
+                : null;
+        }
+        _setCondExpectedPnLBadge(_regimeZone, condOverlay);
+
         // --- Render Chart 2 ---
         if (_probChart) {
-            _probChart.draw(binCenters, tDensity, normalDensity, minS, maxS, _currentPrice, anchorInfo);
+            _probChart.draw(binCenters, tDensity, normalDensity, minS, maxS, _currentPrice, anchorInfo, condOverlay);
         }
 
         // --- Render Chart 3 ---
@@ -1025,6 +1142,23 @@ function _setExpectedPnLBadge(value) {
     const sign = value >= 0 ? '+' : '';
     el.textContent = `Expected P&L: ${sign}${currencyFormatter.format(value)}`;
     el.style.color = value >= 0 ? '#059669' : '#DC2626';
+}
+
+function _setCondExpectedPnLBadge(zone, overlay) {
+    const el = document.getElementById('condExpectedPnLBadge');
+    if (!el) return;
+    if (!zone || zone === 'off') {
+        el.textContent = '';
+        return;
+    }
+    if (!overlay) {
+        el.textContent = `Conditioned: no ${REGIME_CONDITION_LABELS[zone] || zone} samples for this underlying`;
+        el.style.color = '#9CA3AF';
+        return;
+    }
+    const sign = overlay.expectedPnL >= 0 ? '+' : '';
+    el.textContent = `Conditioned (${overlay.label}, n=${overlay.n}): ${sign}${currencyFormatter.format(overlay.expectedPnL)}`;
+    el.style.color = overlay.expectedPnL >= 0 ? '#0D9488' : '#DC2626';
 }
 
 function _setInfoText(text) {

@@ -468,6 +468,61 @@
         return best;
     }
 
+    // Unrounded trading-day IV on the FROZEN signal lambda clock. Null when
+    // the inputs cannot produce a positive finite value.
+    function _signalTdIvRaw(iv, calDte, tradDte, lambda) {
+        if (!Number.isFinite(iv) || iv <= 0
+            || !Number.isFinite(calDte) || calDte <= 0
+            || !Number.isFinite(tradDte) || tradDte <= 0) {
+            return null;
+        }
+        const effDte = tradDte + lambda * (calDte - tradDte);
+        const effYear = 252 + lambda * (365 - 252);
+        const value = iv * Math.sqrt((calDte / 365) / (effDte / effYear));
+        return Number.isFinite(value) && value > 0 ? value : null;
+    }
+
+    // Pairwise TD slope of every row against a baseline expiry, playbook
+    // convention: shorter-DTE leg on top, so >1 reads as backwardation for
+    // that pair no matter which side of the baseline the row sits. Uses the
+    // FROZEN signal lambda — exploration data; the regime signal itself
+    // stays pinned to ~7d front / ~2x back.
+    function annotateTdSlopeVsBaseline(rows, baselineExpiry, options) {
+        const opts = _signalOptions(options);
+        const sourceRows = Array.isArray(rows) ? rows : [];
+        const normalizedBaseline = _normalizeExpiryKey(baselineExpiry);
+        const baselineRow = normalizedBaseline
+            ? sourceRows.find((row) => row && row.hasCompletePair !== false
+                && _getRowExpiry(row) === normalizedBaseline) || null
+            : null;
+        const baselineTd = baselineRow
+            ? _signalTdIvRaw(baselineRow.atmIv, baselineRow.dte, baselineRow.tradDte, opts.signalLambda)
+            : null;
+
+        return sourceRows.map((row) => {
+            let slope = null;
+            let pairRatio = null;
+            if (baselineTd != null && row && row.hasCompletePair !== false
+                && _getRowExpiry(row) !== normalizedBaseline) {
+                const rowTd = _signalTdIvRaw(row.atmIv, row.dte, row.tradDte, opts.signalLambda);
+                if (rowTd != null) {
+                    slope = row.dte >= baselineRow.dte ? baselineTd / rowTd : rowTd / baselineTd;
+                    pairRatio = Math.max(row.dte, baselineRow.dte) / Math.min(row.dte, baselineRow.dte);
+                }
+            }
+            return {
+                ...(row && typeof row === 'object' ? row : {}),
+                tdSlopeVsBaseline: slope != null ? _roundNumber(slope, 4) : null,
+                // DTE ratio of the pair. The 0.95/1.05 thresholds are only
+                // meaningful near the calibrated ~2x geometry: wider pairs sit
+                // naturally lower (SPY 14/90 median ~0.91, <0.95 is the
+                // MAJORITY state there — normal upward term structure, not
+                // deep contango).
+                tdSlopePairRatio: pairRatio != null ? _roundNumber(pairRatio, 4) : null,
+            };
+        });
+    }
+
     // Front(~7 DTE)/back(~2x) ATM IV ratio on the trading-day clock with the
     // FROZEN signal lambda — independent of whatever display lambda the TD IV
     // column is currently using.
@@ -492,15 +547,9 @@
         // Classify on the UNROUNDED ratio; rounding is display-only. A slope
         // of 0.94996 must land in long_displacement, not get rounded onto the
         // 0.95 boundary first.
-        const tdRaw = (iv, calDte, tradDte) => {
-            const effDte = tradDte + opts.signalLambda * (calDte - tradDte);
-            const effYear = 252 + opts.signalLambda * (365 - 252);
-            return iv * Math.sqrt((calDte / 365) / (effDte / effYear));
-        };
-        const frontIvTd = tdRaw(front.atmIv, front.dte, front.tradDte);
-        const backIvTd = tdRaw(back.atmIv, back.dte, back.tradDte);
-        if (!Number.isFinite(frontIvTd) || !Number.isFinite(backIvTd)
-            || frontIvTd <= 0 || backIvTd <= 0) {
+        const frontIvTd = _signalTdIvRaw(front.atmIv, front.dte, front.tradDte, opts.signalLambda);
+        const backIvTd = _signalTdIvRaw(back.atmIv, back.dte, back.tradDte, opts.signalLambda);
+        if (frontIvTd == null || backIvTd == null) {
             return { status: 'insufficient', reason: 'trading-day IV conversion failed' };
         }
 
@@ -538,6 +587,16 @@
         return Math.round((parse(toKey) - parse(fromKey)) / 86400000);
     }
 
+    // Wall-clock instant a sample was taken. Samples merged from several
+    // sources (manual history + hourly automatic file) arrive concatenated,
+    // not interleaved, so "latest of the day" must be decided on this rather
+    // than on array position. Unparseable timestamps sort oldest so a sample
+    // with a real timestamp always wins over one without.
+    function _sampleTimestamp(sample) {
+        const parsed = Date.parse(String(sample && sample.sampledAt || '').trim());
+        return Number.isFinite(parsed) ? parsed : -Infinity;
+    }
+
     // Realized displacement over implied expected move, from the symbol's
     // accumulated history samples: for each adjacent pair of samples 3-12
     // calendar days apart, ratio = |dS| / (EM0 * sqrt(gap/frontDte0)).
@@ -549,7 +608,13 @@
         for (const sample of (Array.isArray(samples) ? samples : [])) {
             const key = _sampleDateKey(sample);
             if (key && Number.isFinite(sample.underlyingPrice) && sample.underlyingPrice > 0) {
-                byDate.set(key, sample); // last sample of a day wins
+                // Latest sample of a day wins, decided on sampledAt: the
+                // caller may hand us several sources concatenated in source
+                // order rather than in chronological order.
+                const incumbent = byDate.get(key);
+                if (!incumbent || _sampleTimestamp(sample) >= _sampleTimestamp(incumbent)) {
+                    byDate.set(key, sample);
+                }
             }
         }
         const ordered = [...byDate.keys()].sort().map((key) => ({ key, sample: byDate.get(key) }));
@@ -746,6 +811,7 @@
         STRATEGY_SIGNAL_DEFAULTS,
         computeRegimeSignal,
         computeDisplacementWatermark,
+        annotateTdSlopeVsBaseline,
         getMrrResearchBenchmark,
         buildStrategySuggestion,
         buildSampleRecord,

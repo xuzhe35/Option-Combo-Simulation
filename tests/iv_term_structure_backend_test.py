@@ -127,6 +127,36 @@ class IvTermStructureBackendTests(unittest.TestCase):
         self.assertEqual(len(selections['20260717']['contractRows']), 2)
         self.assertEqual(len(selections['20260724']['contractRows']), 2)
 
+    def test_equity_chain_merge_skips_adjusted_trading_classes_when_standard_chain_exists(self):
+        merged = merge_iv_term_structure_chain_fields(
+            [
+                _FakeOptionChain(
+                    'SPY',
+                    ['20260828', '20260831', '20260918'],
+                    multiplier='100',
+                    exchange='SMART',
+                ),
+                _FakeOptionChain(
+                    '2SPY',
+                    ['20260911'],
+                    multiplier='100',
+                    exchange='SMART',
+                ),
+            ],
+            {
+                'secType': 'OPT',
+                'symbol': 'SPY',
+                'exchange': 'SMART',
+                'multiplier': '100',
+            },
+        )
+
+        self.assertEqual(
+            merged['expirations'],
+            ['20260828', '20260831', '20260918'],
+        )
+        self.assertEqual(merged['tradingClass'], 'SPY')
+
     def test_option_qualification_timeout_returns_without_blocking_the_sync(self):
         websocket = object()
         fake_ib = _FakeIB()

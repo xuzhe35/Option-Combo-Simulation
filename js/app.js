@@ -99,7 +99,7 @@ const state = {
     historicalTradingDates: [],
     interestRate: 0.03, // 3% default risk-free rate
     ivOffset: 0.0, // 0%
-    simTimeBasis: 'calendar', // 'calendar' (TWS default) | 'trading' | 'weighted'
+    simTimeBasis: 'weighted', // 'calendar' (TWS default) | 'trading' | 'weighted'
     simWeekendWeight: 0.3, // λ: weekend/holiday variance weight used by 'weighted'
     greeksEnabled: false,
     deltaHedge: OptionComboSessionLogic.createDefaultDeltaHedgeConfig(),

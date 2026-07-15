@@ -126,6 +126,7 @@ def filter_iv_term_structure_option_chains(option_chains, option_template):
 
     template = option_template if isinstance(option_template, dict) else {}
     template_sec_type = normalize_symbol(template.get('secType') or template.get('sec_type'))
+    template_symbol = normalize_symbol(template.get('symbol'))
     template_multiplier = str(template.get('multiplier') or '').strip()
     template_exchange = str(template.get('exchange') or '').strip().upper()
     template_trading_class = str(template.get('tradingClass') or template.get('trading_class') or '').strip().upper()
@@ -153,6 +154,18 @@ def filter_iv_term_structure_option_chains(option_chains, option_template):
         ]
         if trading_class_matches:
             chains = trading_class_matches
+    elif template_symbol and template_sec_type != 'FOP':
+        # Equity/index SecDef responses may include adjusted deliverables such
+        # as 2SPY alongside the standard SPY chain. Their expiries can look
+        # valid in the merged calendar but have no standard C/P contracts at
+        # the requested strike. Prefer the exact-symbol trading class whenever
+        # IB exposes one; keep the broader set only when no exact class exists.
+        standard_trading_class_matches = [
+            chain for chain in chains
+            if str(getattr(chain, 'tradingClass', '') or '').strip().upper() == template_symbol
+        ]
+        if standard_trading_class_matches:
+            chains = standard_trading_class_matches
 
     return chains
 

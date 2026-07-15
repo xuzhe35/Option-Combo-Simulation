@@ -72,6 +72,10 @@ It currently:
 - uses `request_ib_connection_status` and `connect_ib` to show/connect IB state
 - builds bucket rows in `js/iv_term_structure_core.js`
 - can append samples to opened/imported per-symbol JSON history documents
+- can load/resume a separate writable per-symbol auto-sample JSON as the
+  visible append target, or create a new one, then refresh/append an ATM
+  snapshot hourly while the page is open; manual and automatic samples are
+  merged only for signal computation, not into either source file
 
 ## 3. Ordered Script Runtime
 
@@ -269,6 +273,8 @@ Responsibilities:
 - standalone per-symbol IV monitor UI
 - bucket definitions and DTE matching
 - ATM strike window selection
+- standard equity/index trading-class filtering so adjusted deliverables such
+  as `2SPY` do not leak into the normal expiry calendar
 - live call/put IV aggregation
 - calendar-day IV and trading-day IV derived through one global weekend/holiday variance weight
 - `js/market_holidays.js` is an official-snapshot reader only; it contains no

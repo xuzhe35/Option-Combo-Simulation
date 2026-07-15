@@ -211,6 +211,20 @@ module.exports = {
             },
         },
         {
+            name: 'exposes per-family near-ATM strike increments with $1 generic equities',
+            run() {
+                const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
+                const registry = ctx.OptionComboProductRegistry;
+                assert.equal(registry.resolveUnderlyingProfile('ES').strikeIncrement, 5);
+                assert.equal(registry.resolveUnderlyingProfile('NQ').strikeIncrement, 10);
+                assert.equal(registry.resolveUnderlyingProfile('CL').strikeIncrement, 0.5);
+                assert.equal(registry.resolveUnderlyingProfile('SI').strikeIncrement, 0.25);
+                assert.equal(registry.resolveUnderlyingProfile('SPX').strikeIncrement, 5);
+                assert.equal(registry.resolveUnderlyingProfile('QQQ').strikeIncrement, 1);
+                assert.equal(registry.resolveUnderlyingProfile('SPY').strikeIncrement, 1);
+            },
+        },
+        {
             name: 'resolves SPX monthly and weekly contract identity from last trading date',
             run() {
                 const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);

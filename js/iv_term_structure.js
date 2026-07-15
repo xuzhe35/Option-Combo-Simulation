@@ -47,6 +47,10 @@
     const OPTION_STREAM_LIMIT_CHOICES = Object.freeze([10, 20, 40, 0]);
     const TD_IV_LAMBDA_STORAGE_KEY = 'optionComboIvtsTdIvLambdaGlobal';
     const DEFAULT_TD_IV_LAMBDA = 0.3;
+    const AUTO_SAMPLE_INTERVAL_MS = 60 * 60 * 1000;
+    const AUTO_SAMPLE_MONITOR_INTERVAL_MS = 60 * 1000;
+    const AUTO_SAMPLE_RETRY_DELAY_MS = 5 * 60 * 1000;
+    const AUTO_HISTORY_PURPOSE = 'iv-term-structure-auto-samples';
     const CARD_VIEW_STATE_SECTIONS = Object.freeze([
         {
             key: 'calendar',
@@ -71,6 +75,7 @@
         cardsBySymbol: new Map(),
         pendingFileSymbol: '',
         renderTimerId: null,
+        autoSampleMonitorTimerId: null,
         controlWs: null,
         controlWsOpenPromise: null,
         ibStatusPollTimerId: null,
@@ -276,6 +281,64 @@
             return card.bundledHistoryDocument;
         }
         return normalizeHistoryDocument(null, card.symbol);
+    }
+
+    function normalizeAutoHistoryDocument(rawDocument, symbol) {
+        const normalized = normalizeHistoryDocument(rawDocument, symbol);
+        return {
+            symbol,
+            version: 1,
+            purpose: AUTO_HISTORY_PURPOSE,
+            cadenceMinutes: AUTO_SAMPLE_INTERVAL_MS / 60000,
+            samples: normalized.samples,
+        };
+    }
+
+    // Manual history + hourly automatic file, merged for the strategy panel.
+    // Each source is chronological on its own but concatenating them is not,
+    // so sort on sampledAt: downstream readers (the MRR watermark) resolve
+    // one representative sample per day and must see the real latest one.
+    function strategyHistoryDocument(card) {
+        const manual = readOnlyHistoryDocument(card);
+        const automatic = card && card.autoHistoryDocument
+            ? normalizeAutoHistoryDocument(card.autoHistoryDocument, card.symbol)
+            : normalizeAutoHistoryDocument(null, card && card.symbol);
+        const merged = manual.samples.concat(automatic.samples);
+        const sampleTime = (sample) => {
+            const parsed = Date.parse(String(sample && sample.sampledAt || '').trim());
+            return Number.isFinite(parsed) ? parsed : -Infinity;
+        };
+        merged.sort((a, b) => sampleTime(a) - sampleTime(b));
+        return normalizeHistoryDocument({ samples: merged }, card.symbol);
+    }
+
+    function latestAutoSample(autoHistoryDocument) {
+        const samples = autoHistoryDocument && Array.isArray(autoHistoryDocument.samples)
+            ? autoHistoryDocument.samples
+            : [];
+        return samples.length ? samples[samples.length - 1] : null;
+    }
+
+    function shouldRunAutoSample(autoHistoryDocument, nowValue = new Date()) {
+        const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
+        if (!Number.isFinite(now.getTime())) {
+            return false;
+        }
+        const latest = latestAutoSample(autoHistoryDocument);
+        if (!latest) {
+            return true;
+        }
+        const sampledAt = new Date(latest.sampledAt);
+        if (!Number.isFinite(sampledAt.getTime())) {
+            return true;
+        }
+        // Elapsed time is the only trigger. A "the UTC date changed" clause
+        // would be redundant on every gap this already catches (including a
+        // page closed for days) and would additionally fire a sample minutes
+        // after the previous one whenever the UTC day rolled over mid-cadence
+        // — 00:00 UTC is ~20:00 ET, which is not a boundary this sampler has
+        // any reason to care about.
+        return now.getTime() - sampledAt.getTime() >= AUTO_SAMPLE_INTERVAL_MS;
     }
 
     function normalizeCalendarFinderConfig(rawConfig) {
@@ -584,6 +647,14 @@
             wsOpenPromise: null,
             syncInProgress: false,
             sampleInProgress: false,
+            autoSampleInProgress: false,
+            autoFileSelectionInProgress: false,
+            autoSamplingEnabled: false,
+            autoHistoryDocument: null,
+            autoFileHandle: null,
+            autoFileName: '',
+            autoSampleRetryAfter: 0,
+            lastAutoSampleLabel: '',
             catalog: null,
             quotesBySubId: {},
             underlyingPrice: null,
@@ -1511,19 +1582,33 @@
     }
 
     function resolveSelectedStraddleBaselineExpiry(card, detailRows) {
+        const rows = Array.isArray(detailRows) ? detailRows : [];
         const selected = normalizeExpiryKey(card && card.straddleBaselineExpiry);
-        if (!selected) {
-            return '';
+        if (selected && rows.some((row) => normalizeExpiryKey(row && row.expiry) === selected)) {
+            return selected;
         }
-        return (Array.isArray(detailRows) ? detailRows : []).some((row) => normalizeExpiryKey(row && row.expiry) === selected)
-            ? selected
-            : '';
+        // Default baseline: the usable expiry nearest 7 DTE (the playbook
+        // front leg), so the Vs Base and TD Slope columns work out of the box.
+        let best = null;
+        for (const row of rows) {
+            if (!row || row.hasCompletePair === false
+                || !Number.isFinite(row.dte) || row.dte <= 0) {
+                continue;
+            }
+            if (best === null || Math.abs(row.dte - 7) < Math.abs(best.dte - 7)) {
+                best = row;
+            }
+        }
+        return best ? normalizeExpiryKey(best.expiry) : '';
     }
 
     function buildComparedRows(card) {
         const detailRows = buildDetailRows(card);
         const baselineExpiry = resolveSelectedStraddleBaselineExpiry(card, detailRows);
-        const comparedDetailRows = core().buildStraddleComparisonRows(detailRows, baselineExpiry);
+        let comparedDetailRows = core().buildStraddleComparisonRows(detailRows, baselineExpiry);
+        if (typeof core().annotateTdSlopeVsBaseline === 'function') {
+            comparedDetailRows = core().annotateTdSlopeVsBaseline(comparedDetailRows, baselineExpiry);
+        }
         const bucketDefinitions = runtime.config && Array.isArray(runtime.config.bucketDefinitions)
             ? runtime.config.bucketDefinitions
             : null;
@@ -1630,6 +1715,294 @@
         URL.revokeObjectURL(url);
     }
 
+    function buildCurrentSampleRecord(card) {
+        const comparedRows = buildComparedRows(card);
+        return core().buildSampleRecord(
+            card.symbol,
+            card.underlyingPrice,
+            comparedRows.bucketRows,
+            comparedRows.detailRows,
+            new Date().toISOString(),
+            card.catalog && card.catalog.anchorDate,
+            comparedRows.baselineExpiry
+        );
+    }
+
+    function hasUsableWatermarkSeed(sampleRecord) {
+        return !!(
+            sampleRecord
+            && Number.isFinite(sampleRecord.underlyingPrice)
+            && sampleRecord.underlyingPrice > 0
+            && Array.isArray(sampleRecord.details)
+            && sampleRecord.details.some((row) => (
+                row
+                && Number.isFinite(row.dte)
+                && row.dte >= 4
+                && row.dte <= 10
+                && Number.isFinite(row.atmStraddleMark)
+                && row.atmStraddleMark > 0
+            ))
+        );
+    }
+
+    async function readAutoHistoryFile(fileHandle, symbol) {
+        const file = await fileHandle.getFile();
+        const text = await file.text();
+        if (!text.trim()) {
+            return normalizeAutoHistoryDocument(null, symbol);
+        }
+        const payload = JSON.parse(text);
+        if (payload && payload.symbol && String(payload.symbol).trim().toUpperCase() !== symbol) {
+            throw new Error(`Selected auto-sample file belongs to ${payload.symbol}, not ${symbol}.`);
+        }
+        if (!payload || payload.purpose !== AUTO_HISTORY_PURPOSE) {
+            throw new Error('Selected file is not an IV Term Structure automatic-sample JSON.');
+        }
+        return normalizeAutoHistoryDocument(payload, symbol);
+    }
+
+    async function ensureAutoFileWritePermission(fileHandle) {
+        if (!fileHandle || typeof fileHandle.requestPermission !== 'function') {
+            return;
+        }
+        const permission = await fileHandle.requestPermission({ mode: 'readwrite' });
+        if (permission !== 'granted') {
+            throw new Error('Write access to the selected Auto JSON was not granted.');
+        }
+    }
+
+    async function writeAutoHistoryDocument(card) {
+        if (!card.autoFileHandle || typeof card.autoFileHandle.createWritable !== 'function') {
+            throw new Error('The automatic sample file is no longer writable. Load the Auto JSON again to restore append access.');
+        }
+        const writable = await card.autoFileHandle.createWritable();
+        await writable.write(JSON.stringify(card.autoHistoryDocument, null, 2));
+        await writable.close();
+    }
+
+    function bindAutoHistoryFile(card, fileHandle, historyDocument) {
+        card.autoFileHandle = fileHandle;
+        card.autoFileName = String(fileHandle.name || `${card.symbol}.ivts-auto.json`);
+        card.autoHistoryDocument = historyDocument;
+        const latest = latestAutoSample(historyDocument);
+        card.lastAutoSampleLabel = latest && latest.sampledAt ? latest.sampledAt : '';
+    }
+
+    async function loadAutoHistoryFile(card) {
+        if (typeof globalScope.showOpenFilePicker !== 'function') {
+            throw new Error('Loading an automatic JSON requires Chrome or Edge File System Access support.');
+        }
+        const [fileHandle] = await globalScope.showOpenFilePicker({
+            types: [{
+                description: 'IV Term Structure automatic samples',
+                accept: { 'application/json': ['.json'] },
+            }],
+            multiple: false,
+        });
+        await ensureAutoFileWritePermission(fileHandle);
+        const historyDocument = await readAutoHistoryFile(fileHandle, card.symbol);
+        bindAutoHistoryFile(card, fileHandle, historyDocument);
+        return historyDocument;
+    }
+
+    async function createAutoHistoryFile(card) {
+        if (typeof globalScope.showSaveFilePicker !== 'function') {
+            throw new Error('Automatic JSON sampling requires a browser with the File System Access API (Chrome or Edge).');
+        }
+        const fileHandle = await globalScope.showSaveFilePicker({
+            suggestedName: `${card.symbol}.ivts-auto.json`,
+            types: [{
+                description: 'IV Term Structure automatic samples',
+                accept: { 'application/json': ['.json'] },
+            }],
+        });
+        const historyDocument = await readAutoHistoryFile(fileHandle, card.symbol);
+        bindAutoHistoryFile(card, fileHandle, historyDocument);
+        // showSaveFilePicker creates a zero-byte file. Initialize it before
+        // any market-data work so a slow/failed first sync still leaves a
+        // valid, inspectable automatic-history document on disk.
+        await writeAutoHistoryDocument(card);
+        return historyDocument;
+    }
+
+    async function prepareAutoHistoryFile(card) {
+        if (!card.autoFileHandle) {
+            throw new Error('Load an existing Auto JSON or create a new one first.');
+        }
+        const historyDocument = await readAutoHistoryFile(card.autoFileHandle, card.symbol);
+        card.autoHistoryDocument = historyDocument;
+        const latest = latestAutoSample(historyDocument);
+        card.lastAutoSampleLabel = latest && latest.sampledAt ? latest.sampledAt : '';
+        return 'reused';
+    }
+
+    function autoSampleButtonLabel(card) {
+        if (card && card.autoSamplingEnabled) {
+            return 'Stop Auto Sample';
+        }
+        return card && card.autoFileHandle ? 'Resume Auto Sample' : 'Start Auto Sample';
+    }
+
+    function autoAppendTargetLabel(card) {
+        return card && card.autoFileHandle && card.autoFileName
+            ? card.autoFileName
+            : 'Not selected';
+    }
+
+    function stopAutoSampling(card, options = {}) {
+        card.autoSamplingEnabled = false;
+        card.autoSampleRetryAfter = 0;
+        if (options.setStatus !== false) {
+            setCardStatus(
+                card,
+                `Automatic sampling stopped. ${card.autoHistoryDocument ? `${card.autoHistoryDocument.samples.length} samples remain in ${card.autoFileName}.` : ''}`,
+                ''
+            );
+        }
+        card.forceBodyRefreshOnce = true;
+        render(true);
+    }
+
+    async function runAutoSample(card, reason = 'hourly', options = {}) {
+        if (!card || !card.autoSamplingEnabled || card.autoSampleInProgress) {
+            return false;
+        }
+        if (card.syncInProgress || card.sampleInProgress) {
+            card.autoSampleRetryAfter = Date.now() + AUTO_SAMPLE_RETRY_DELAY_MS;
+            return false;
+        }
+
+        card.autoSampleInProgress = true;
+        card.autoSampleRetryAfter = 0;
+        setCardStatus(card, `Auto Sample (${reason}): preparing a valid ATM snapshot...`, '');
+        render(true);
+
+        try {
+            let sampleRecord = options.preferCachedSnapshot === true && hasUsableLiveSnapshot(card)
+                ? buildCurrentSampleRecord(card)
+                : null;
+            if (!hasUsableWatermarkSeed(sampleRecord)) {
+                await syncCard(card, { waitForQuotes: true, quoteTimeoutMs: 3500 });
+                sampleRecord = buildCurrentSampleRecord(card);
+            }
+            if (!hasUsableWatermarkSeed(sampleRecord)) {
+                throw new Error('No usable 4-10 DTE ATM straddle mark is available yet.');
+            }
+
+            // Re-read immediately before writing so a file edited outside this
+            // page is not silently replaced with an older in-memory copy.
+            const historyDocument = await readAutoHistoryFile(card.autoFileHandle, card.symbol);
+            historyDocument.samples = historyDocument.samples.concat(sampleRecord);
+            card.autoHistoryDocument = historyDocument;
+            await writeAutoHistoryDocument(card);
+            card.lastAutoSampleLabel = sampleRecord.sampledAt;
+            card.forceBodyRefreshOnce = true;
+            setCardStatus(
+                card,
+                `Auto Sample saved (${reason}). ${historyDocument.samples.length} hourly samples in ${card.autoFileName}; next check in 1 hour.`,
+                'success'
+            );
+            return true;
+        } catch (error) {
+            card.autoSampleRetryAfter = Date.now() + AUTO_SAMPLE_RETRY_DELAY_MS;
+            setCardStatus(
+                card,
+                `Auto Sample failed; retrying in about 5 minutes. ${error.message || error}`,
+                'error'
+            );
+            return false;
+        } finally {
+            card.autoSampleInProgress = false;
+            render(true);
+        }
+    }
+
+    async function resumeAutoSampling(card, reason = 'resumed') {
+        await prepareAutoHistoryFile(card);
+        card.autoSamplingEnabled = true;
+        card.forceBodyRefreshOnce = true;
+        render(true);
+        if (shouldRunAutoSample(card.autoHistoryDocument, new Date())) {
+            await runAutoSample(card, reason, { preferCachedSnapshot: true });
+            return;
+        }
+        setCardStatus(
+            card,
+            `Automatic sampling resumed. Appending hourly to ${card.autoFileName}; the latest sample is not due yet.`,
+            'success'
+        );
+        render(true);
+    }
+
+    async function selectAndResumeAutoFile(card, mode) {
+        if (card.autoSampleInProgress || card.autoFileSelectionInProgress) {
+            return;
+        }
+        const wasEnabled = card.autoSamplingEnabled;
+        const previousFileHandle = card.autoFileHandle;
+        card.autoFileSelectionInProgress = true;
+        card.autoSamplingEnabled = false;
+        card.forceBodyRefreshOnce = true;
+        render(true);
+        try {
+            if (mode === 'load') {
+                await loadAutoHistoryFile(card);
+            } else {
+                await createAutoHistoryFile(card);
+            }
+            await resumeAutoSampling(card, mode === 'load' ? 'loaded/resumed' : 'new file');
+        } catch (error) {
+            // Resuming the previous file is only safe while the card still
+            // points at it — a dismissed picker. Once a new handle is bound,
+            // failing here means that file is unusable, so sampling stays off
+            // rather than letting the hourly monitor run against it.
+            card.autoSamplingEnabled = wasEnabled && card.autoFileHandle === previousFileHandle;
+            if (error && error.name === 'AbortError') {
+                return;
+            }
+            setCardStatus(
+                card,
+                error.message || (mode === 'load' ? 'Unable to load the automatic JSON.' : 'Unable to create the automatic JSON.'),
+                'error'
+            );
+        } finally {
+            card.autoFileSelectionInProgress = false;
+            card.forceBodyRefreshOnce = true;
+            render(true);
+        }
+    }
+
+    async function startAutoSampling(card) {
+        if (card.autoSamplingEnabled) {
+            stopAutoSampling(card);
+            return;
+        }
+        try {
+            await resumeAutoSampling(card, 'resumed');
+        } catch (error) {
+            if (error && error.name === 'AbortError') {
+                return;
+            }
+            setCardStatus(card, error.message || 'Unable to start automatic sampling.', 'error');
+            render(true);
+        }
+    }
+
+    function checkAutoSamplers(reason = 'hourly') {
+        const now = new Date();
+        runtime.cardsBySymbol.forEach((card) => {
+            if (!card.autoSamplingEnabled || card.autoSampleInProgress) {
+                return;
+            }
+            if (card.autoSampleRetryAfter > Date.now()) {
+                return;
+            }
+            if (shouldRunAutoSample(card.autoHistoryDocument, now)) {
+                runAutoSample(card, reason);
+            }
+        });
+    }
+
     async function sampleCard(card) {
         const canWriteViaHandle = !!(card.currentFileHandle && typeof card.currentFileHandle.createWritable === 'function');
         const canWriteViaFallbackImport = !globalScope.showOpenFilePicker && !!card.historyDocument;
@@ -1660,16 +2033,7 @@
             if (shouldResyncBeforeSample) {
                 await syncCard(card, { waitForQuotes: true, quoteTimeoutMs: 2500 });
             }
-            const comparedRows = buildComparedRows(card);
-            const sampleRecord = core().buildSampleRecord(
-                card.symbol,
-                card.underlyingPrice,
-                comparedRows.bucketRows,
-                comparedRows.detailRows,
-                new Date().toISOString(),
-                card.catalog && card.catalog.anchorDate,
-                comparedRows.baselineExpiry
-            );
+            const sampleRecord = buildCurrentSampleRecord(card);
             const historyDocument = normalizeHistoryDocument(readOnlyHistoryDocument(card), card.symbol);
             historyDocument.samples = historyDocument.samples.concat(sampleRecord);
             card.historyDocument = historyDocument;
@@ -1691,6 +2055,36 @@
         return row && row.atmStraddleMark != null
             ? escapeHtml(formatMoney(row.atmStraddleMark))
             : '<span class="ivts-missing">Insufficient</span>';
+    }
+
+    function buildTdSlopeCell(row, baselineExpiry) {
+        if (!baselineExpiry) {
+            return '<span class="ivts-missing">--</span>';
+        }
+        if (row && row.isStraddleBaseline) {
+            return '<span class="ivts-ratio">base</span>';
+        }
+        if (!row || row.tdSlopeVsBaseline == null) {
+            return '<span class="ivts-missing">--</span>';
+        }
+        const defaults = core().STRATEGY_SIGNAL_DEFAULTS || {};
+        const low = Number.isFinite(defaults.zoneLow) ? defaults.zoneLow : 0.95;
+        const high = Number.isFinite(defaults.zoneHigh) ? defaults.zoneHigh : 1.05;
+        // The 0.95/1.05 thresholds are calibrated on the ~2x pair geometry.
+        // Wider pairs sit naturally below 1 (normal upward term structure:
+        // SPY 14/90 median ~0.91), so zone colors would be misleading there.
+        const nearPlaybookGeometry = Number.isFinite(row.tdSlopePairRatio)
+            && row.tdSlopePairRatio >= 1.5 && row.tdSlopePairRatio <= 2.6;
+        const zoneClass = nearPlaybookGeometry
+            ? (row.tdSlopeVsBaseline > high
+                ? ' is-slope-backwardation'
+                : (row.tdSlopeVsBaseline < low ? ' is-slope-contango' : ''))
+            : '';
+        const title = 'TD IV ratio of the (this expiry, baseline) pair, shorter leg on top, frozen λ=0.3. '
+            + `Zone colors (<${low.toFixed(2)} / >${high.toFixed(2)}) apply only near the calibrated ~2x DTE geometry; `
+            + 'wider pairs sit naturally lower — a normal upward term structure, not deep contango. '
+            + 'Exploration only: the strategy signal above stays pinned to the ~7d front / ~2x back pair.';
+        return `<span class="ivts-ratio${zoneClass}" title="${escapeHtml(title)}">${escapeHtml(row.tdSlopeVsBaseline.toFixed(3))}</span>`;
     }
 
     function buildStraddleRatioCell(row, baselineExpiry) {
@@ -1749,7 +2143,7 @@
                 </label>
                 <div class="ivts-baseline-row">
                     <select id="ivtsBaseline-${escapeHtml(card.symbol)}" class="ivts-baseline-select" data-action="baseline" data-symbol="${escapeHtml(card.symbol)}">
-                        <option value="">Select expiry</option>
+                        <option value="">Auto: nearest 7 DTE</option>
                         ${detailRows.map((row) => {
                             const expiry = normalizeExpiryKey(row && row.expiry);
                             const priceLabel = row && row.atmStraddleMark != null
@@ -2018,6 +2412,7 @@
                             <th>ATM Strike</th>
                             <th>Call/Put IV</th>
                             <th title="Trading-day annualized IV (weekends removed from the clock); comparable across a weekend.">TD IV</th>
+                            <th title="Pairwise TD slope vs the baseline expiry (shorter leg on top, frozen λ=0.3). Same convention and thresholds as the strategy signal's zones.">TD Slope</th>
                             <th>ATM Straddle</th>
                             <th>Vs Base</th>
                         </tr>
@@ -2030,12 +2425,13 @@
                                 <td>${row.atmStrike != null ? escapeHtml(formatNumber(row.atmStrike, 2)) : '<span class="ivts-missing">--</span>'}</td>
                                 <td>${buildIvPairCell(row)}</td>
                                 <td>${buildIvPairTdCell(row)}</td>
+                                <td>${buildTdSlopeCell(row, baselineExpiry)}</td>
                                 <td>${buildStraddlePriceCell(row)}</td>
                                 <td>${buildStraddleRatioCell(row, baselineExpiry)}</td>
                             </tr>
                         `).join('') || `
                             <tr>
-                                <td colspan="7" class="ivts-missing">No expiry rows have been synced yet.</td>
+                                <td colspan="8" class="ivts-missing">No expiry rows have been synced yet.</td>
                             </tr>
                         `}
                     </tbody>
@@ -2087,6 +2483,15 @@
         const slopeText = signal.status === 'ok'
             ? `${signal.slope.toFixed(3)} · F ${escapeHtml(signal.front.expiry)} (${signal.front.dte}d) / B ${escapeHtml(signal.back.expiry)} (${signal.back.dte}d)${calendarNote}`
             : escapeHtml(signal.reason || 'sync the nearest expiries first');
+        const signalDefaults = coreApi.STRATEGY_SIGNAL_DEFAULTS || {};
+        const zoneLow = Number.isFinite(signalDefaults.zoneLow) ? signalDefaults.zoneLow : 0.95;
+        const zoneHigh = Number.isFinite(signalDefaults.zoneHigh) ? signalDefaults.zoneHigh : 1.05;
+        const zoneMapText = [
+            { key: 'long_displacement', text: `<${zoneLow.toFixed(2)} reverse fly` },
+            { key: 'stand_down', text: `${zoneLow.toFixed(2)}–${zoneHigh.toFixed(2)} stand down` },
+            { key: 'sell_calendar', text: `>${zoneHigh.toFixed(2)} calendar` },
+        ].map((segment) => `<span class="ivts-zone-seg${zone === segment.key ? ' is-active' : ''}">${escapeHtml(segment.text)}</span>`)
+            .join('<span class="ivts-zone-sep">·</span>');
         const watermarkText = watermark.status === 'ok'
             ? `${watermark.mean.toFixed(2)} (n=${watermark.count})`
             : `collecting ${watermark.count}/${watermark.required}`;
@@ -2123,6 +2528,7 @@
                     <span class="ivts-strategy-disclaimer">suggestion only · paper/sim first</span>
                 </div>
                 <div class="ivts-strategy-row"><span>TD slope (λ=0.3)</span><span>${slopeText}</span></div>
+                <div class="ivts-strategy-row"><span>Zones</span><span class="ivts-zone-map">${zoneMapText}</span></div>
                 <div class="ivts-strategy-row"><span>MRR watermark (|move|/EM)</span><span>${watermarkText}</span></div>
                 ${mrrBenchmarkRow}
                 <div class="ivts-strategy-row ivts-strategy-suggestion"><span>This week</span><span>${escapeHtml(suggestionText)}</span></div>
@@ -2131,7 +2537,11 @@
     }
 
     function buildCardBodyMarkup(card) {
-        const historyDocument = readOnlyHistoryDocument(card);
+        const historyDocument = strategyHistoryDocument(card);
+        const autoHistoryDocument = normalizeAutoHistoryDocument(card.autoHistoryDocument, card.symbol);
+        const autoStatus = card.autoSamplingEnabled
+            ? (card.autoSampleInProgress ? 'Sampling now' : `Running hourly · ${card.autoFileName || 'auto JSON'}`)
+            : (card.autoFileHandle ? 'Paused' : 'Not configured');
         const comparedRows = buildComparedRows(card);
         return `
             <div class="ivts-status ${card.statusKind ? `is-${escapeHtml(card.statusKind)}` : ''}">
@@ -2148,7 +2558,7 @@
                     <span class="ivts-fact-value">${card.underlyingPrice != null ? `$${formatNumber(card.underlyingPrice, 2)}` : '--'}</span>
                 </div>
                 <div class="ivts-fact">
-                    <span class="ivts-fact-label">History Samples</span>
+                    <span class="ivts-fact-label">Combined Samples</span>
                     <span class="ivts-fact-value">${historyDocument.samples.length}</span>
                 </div>
                 <div class="ivts-fact">
@@ -2158,6 +2568,20 @@
                 <div class="ivts-fact">
                     <span class="ivts-fact-label">Last Sample</span>
                     <span class="ivts-fact-value">${escapeHtml(formatTimestamp(card.lastSampleLabel))}</span>
+                </div>
+                <div class="ivts-fact">
+                    <span class="ivts-fact-label">Auto Samples</span>
+                    <span class="ivts-fact-value">${autoHistoryDocument.samples.length}</span>
+                </div>
+                <div class="ivts-fact">
+                    <span class="ivts-fact-label">Auto Sampling</span>
+                    <span class="ivts-fact-value">${escapeHtml(autoStatus)}</span>
+                    <span class="ivts-fact-note">Last: ${escapeHtml(formatTimestamp(card.lastAutoSampleLabel))}</span>
+                </div>
+                <div class="ivts-fact">
+                    <span class="ivts-fact-label">Append Target</span>
+                    <span class="ivts-fact-value">${escapeHtml(autoAppendTargetLabel(card))}</span>
+                    <span class="ivts-fact-note">Hourly automatic samples are written only to this file.</span>
                 </div>
             </div>
 
@@ -2220,11 +2644,13 @@
     }
 
     function buildCardHeaderSummary(card) {
-        const historyDocument = readOnlyHistoryDocument(card);
+        const historyDocument = strategyHistoryDocument(card);
         return `
             <div class="ivts-card-overview" aria-label="${escapeHtml(card.symbol)} summary">
                 <span>Underlying <strong data-field="header-underlying">${card.underlyingPrice != null ? `$${formatNumber(card.underlyingPrice, 2)}` : '--'}</strong></span>
                 <span>Samples <strong data-field="header-samples">${historyDocument.samples.length}</strong></span>
+                <span>Auto <strong data-field="header-auto-status">${card.autoSamplingEnabled ? 'Hourly' : 'Off'}</strong></span>
+                <span>Append Target <strong data-field="header-auto-target">${escapeHtml(autoAppendTargetLabel(card))}</strong></span>
                 <span>Last Sync <strong data-field="header-last-sync">${escapeHtml(formatTimestamp(card.lastSyncLabel))}</strong></span>
             </div>
             <div class="ivts-card-header-status ${card.statusKind ? `is-${escapeHtml(card.statusKind)}` : ''}" data-field="header-status">
@@ -2234,7 +2660,8 @@
     }
 
     function buildCardMarkup(card) {
-        const sampleDisabled = card.syncInProgress || card.sampleInProgress || (!card.currentFileHandle && (globalScope.showOpenFilePicker || !card.historyDocument));
+        const busy = card.syncInProgress || card.sampleInProgress || card.autoSampleInProgress || card.autoFileSelectionInProgress;
+        const sampleDisabled = busy || (!card.currentFileHandle && (globalScope.showOpenFilePicker || !card.historyDocument));
         const unsubscribeDisabled = !card.ws || (card.ws.readyState !== WebSocket.OPEN && card.ws.readyState !== WebSocket.CONNECTING);
         const expanded = card.isExpanded === true;
         return `
@@ -2256,8 +2683,11 @@
                     <div class="ivts-actions">
                         <button class="ivts-btn" data-action="open" data-symbol="${escapeHtml(card.symbol)}">Open History</button>
                         <button class="ivts-btn ivts-btn-muted" data-action="unsubscribe" data-symbol="${escapeHtml(card.symbol)}" ${unsubscribeDisabled ? 'disabled' : ''}>Unsubscribe</button>
-                        <button class="ivts-btn ivts-btn-primary" data-action="sync" data-symbol="${escapeHtml(card.symbol)}" ${card.syncInProgress || card.sampleInProgress ? 'disabled' : ''}>Sync/Update</button>
+                        <button class="ivts-btn ivts-btn-primary" data-action="sync" data-symbol="${escapeHtml(card.symbol)}" ${busy ? 'disabled' : ''}>Sync/Update</button>
                         <button class="ivts-btn ivts-btn-warm" data-action="sample" data-symbol="${escapeHtml(card.symbol)}" ${sampleDisabled ? 'disabled' : ''}>Sample</button>
+                        <button class="ivts-btn ivts-btn-auto" data-action="auto-load" data-symbol="${escapeHtml(card.symbol)}" ${busy ? 'disabled' : ''}>Load/Resume Auto JSON</button>
+                        <button class="ivts-btn ivts-btn-muted" data-action="auto-new" data-symbol="${escapeHtml(card.symbol)}" ${busy ? 'disabled' : ''}>New Auto JSON</button>
+                        <button class="ivts-btn ivts-btn-auto ${card.autoSamplingEnabled ? 'is-running' : ''}" data-action="auto-sample" data-symbol="${escapeHtml(card.symbol)}" ${card.autoFileHandle ? '' : 'hidden'} ${busy ? 'disabled' : ''}>${autoSampleButtonLabel(card)}</button>
                     </div>
                 </div>
                 <div id="ivts-card-body-${escapeHtml(card.symbol)}" class="ivts-card-body" ${expanded ? '' : 'hidden'}>
@@ -2286,9 +2716,11 @@
             }
         }
 
-        const historyDocument = readOnlyHistoryDocument(card);
+        const historyDocument = strategyHistoryDocument(card);
         const headerUnderlying = cardNode.querySelector('[data-field="header-underlying"]');
         const headerSamples = cardNode.querySelector('[data-field="header-samples"]');
+        const headerAutoStatus = cardNode.querySelector('[data-field="header-auto-status"]');
+        const headerAutoTarget = cardNode.querySelector('[data-field="header-auto-target"]');
         const headerLastSync = cardNode.querySelector('[data-field="header-last-sync"]');
         const headerStatus = cardNode.querySelector('[data-field="header-status"]');
         if (headerUnderlying) {
@@ -2296,6 +2728,14 @@
         }
         if (headerSamples) {
             headerSamples.textContent = String(historyDocument.samples.length);
+        }
+        if (headerAutoStatus) {
+            headerAutoStatus.textContent = card.autoSamplingEnabled
+                ? (card.autoSampleInProgress ? 'Sampling' : 'Hourly')
+                : (card.autoFileHandle ? 'Paused' : 'Off');
+        }
+        if (headerAutoTarget) {
+            headerAutoTarget.textContent = autoAppendTargetLabel(card);
         }
         if (headerLastSync) {
             headerLastSync.textContent = formatTimestamp(card.lastSyncLabel);
@@ -2319,21 +2759,37 @@
 
         updateCardChrome(card, cardNode);
 
-        const sampleDisabled = card.syncInProgress || card.sampleInProgress || (!card.currentFileHandle && (globalScope.showOpenFilePicker || !card.historyDocument));
+        const busy = card.syncInProgress || card.sampleInProgress || card.autoSampleInProgress || card.autoFileSelectionInProgress;
+        const sampleDisabled = busy || (!card.currentFileHandle && (globalScope.showOpenFilePicker || !card.historyDocument));
         const unsubscribeDisabled = !card.ws || (card.ws.readyState !== WebSocket.OPEN && card.ws.readyState !== WebSocket.CONNECTING);
         const openButton = cardNode.querySelector('[data-action="open"]');
         const syncButton = cardNode.querySelector('[data-action="sync"]');
         const sampleButton = cardNode.querySelector('[data-action="sample"]');
+        const autoLoadButton = cardNode.querySelector('[data-action="auto-load"]');
+        const autoNewButton = cardNode.querySelector('[data-action="auto-new"]');
+        const autoSampleButton = cardNode.querySelector('[data-action="auto-sample"]');
         const unsubscribeButton = cardNode.querySelector('[data-action="unsubscribe"]');
 
         if (openButton) {
             openButton.disabled = false;
         }
         if (syncButton) {
-            syncButton.disabled = !!(card.syncInProgress || card.sampleInProgress);
+            syncButton.disabled = !!busy;
         }
         if (sampleButton) {
             sampleButton.disabled = !!sampleDisabled;
+        }
+        if (autoLoadButton) {
+            autoLoadButton.disabled = !!busy;
+        }
+        if (autoNewButton) {
+            autoNewButton.disabled = !!busy;
+        }
+        if (autoSampleButton) {
+            autoSampleButton.hidden = !card.autoFileHandle;
+            autoSampleButton.disabled = !!busy;
+            autoSampleButton.textContent = autoSampleButtonLabel(card);
+            autoSampleButton.classList.toggle('is-running', card.autoSamplingEnabled);
         }
         if (unsubscribeButton) {
             unsubscribeButton.disabled = !!unsubscribeDisabled;
@@ -2560,6 +3016,10 @@
 
     function closeAllSocketsForPageExit() {
         clearIbStatusPollTimer();
+        if (runtime.autoSampleMonitorTimerId != null) {
+            clearInterval(runtime.autoSampleMonitorTimerId);
+            runtime.autoSampleMonitorTimerId = null;
+        }
         if (runtime.controlWs) {
             try {
                 runtime.controlWs.close(1000, 'pagehide');
@@ -2577,6 +3037,15 @@
                 // Ignore best-effort shutdown failures during page exit.
             }
         });
+    }
+
+    function startAutoSampleMonitor() {
+        if (runtime.autoSampleMonitorTimerId != null) {
+            return;
+        }
+        runtime.autoSampleMonitorTimerId = setInterval(() => {
+            checkAutoSamplers('hourly');
+        }, AUTO_SAMPLE_MONITOR_INTERVAL_MS);
     }
 
     function bindContainerInteractions() {
@@ -2620,6 +3089,18 @@
             }
             if (action === 'sample') {
                 sampleCard(card);
+                return;
+            }
+            if (action === 'auto-load') {
+                await selectAndResumeAutoFile(card, 'load');
+                return;
+            }
+            if (action === 'auto-new') {
+                await selectAndResumeAutoFile(card, 'new');
+                return;
+            }
+            if (action === 'auto-sample') {
+                await startAutoSampling(card);
                 return;
             }
             if (action === 'calendar-show-all') {
@@ -2689,6 +3170,7 @@
             isOptionStreamLimitElement,
             isFocusedBaselineSelectInCard,
             getPrimaryExpiryRows,
+            resolveSelectedStraddleBaselineExpiry,
             formatIvPair,
             buildIvPairTdCell,
             buildSubscribePayload,
@@ -2708,6 +3190,17 @@
             loadSavedTdIvLambda,
             saveTdIvLambda,
             buildStrategySignalPanel,
+            normalizeAutoHistoryDocument,
+            strategyHistoryDocument,
+            shouldRunAutoSample,
+            hasUsableWatermarkSeed,
+            writeAutoHistoryDocument,
+            bindAutoHistoryFile,
+            loadAutoHistoryFile,
+            createAutoHistoryFile,
+            prepareAutoHistoryFile,
+            autoSampleButtonLabel,
+            autoAppendTargetLabel,
             captureCardViewState,
             restoreCardViewState,
         },
@@ -2840,6 +3333,13 @@
             }
             globalScope.addEventListener('pagehide', closeAllSocketsForPageExit, { capture: true });
             globalScope.addEventListener('beforeunload', closeAllSocketsForPageExit, { capture: true });
+            globalScope.addEventListener('focus', () => checkAutoSamplers('page focus'));
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) {
+                    checkAutoSamplers('page visible');
+                }
+            });
+            startAutoSampleMonitor();
             render(true);
             requestIbStatus();
         } catch (error) {

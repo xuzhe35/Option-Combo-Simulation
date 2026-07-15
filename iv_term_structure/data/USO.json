@@ -4,6 +4,702 @@
   "samples": [
     {
       "symbol": "USO",
+      "sampledAt": "2025-10-03T20:00:00.000Z",
+      "quoteDate": "2025-10-03",
+      "underlyingPrice": 71.71,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251010",
+          "dte": 7,
+          "atmStrike": 71.5,
+          "callIv": 0.30755,
+          "putIv": 0.31731,
+          "atmIv": 0.31243,
+          "callMark": 1.365,
+          "putMark": 1.125,
+          "atmStraddleMark": 2.49,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-10-10T20:00:00.000Z",
+      "quoteDate": "2025-10-10",
+      "underlyingPrice": 69.39,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251017",
+          "dte": 7,
+          "atmStrike": 69.5,
+          "callIv": 0.33682,
+          "putIv": 0.33682,
+          "atmIv": 0.33682,
+          "callMark": 1.265,
+          "putMark": 1.325,
+          "atmStraddleMark": 2.59,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-10-17T20:00:00.000Z",
+      "quoteDate": "2025-10-17",
+      "underlyingPrice": 67.98,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251024",
+          "dte": 7,
+          "atmStrike": 68.0,
+          "callIv": 0.2978,
+          "putIv": 0.30755,
+          "atmIv": 0.302675,
+          "callMark": 1.125,
+          "putMark": 1.135,
+          "atmStraddleMark": 2.26,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-10-24T20:00:00.000Z",
+      "quoteDate": "2025-10-24",
+      "underlyingPrice": 73.18,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251031",
+          "dte": 7,
+          "atmStrike": 73.0,
+          "callIv": 0.34658,
+          "putIv": 0.35633,
+          "atmIv": 0.35145499999999996,
+          "callMark": 1.545,
+          "putMark": 1.335,
+          "atmStraddleMark": 2.88,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-10-31T20:00:00.000Z",
+      "quoteDate": "2025-10-31",
+      "underlyingPrice": 72.56,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251107",
+          "dte": 7,
+          "atmStrike": 72.5,
+          "callIv": 0.30755,
+          "putIv": 0.31731,
+          "atmIv": 0.31243,
+          "callMark": 1.295,
+          "putMark": 1.22,
+          "atmStraddleMark": 2.515,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-11-07T20:00:00.000Z",
+      "quoteDate": "2025-11-07",
+      "underlyingPrice": 71.26,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251114",
+          "dte": 7,
+          "atmStrike": 71.5,
+          "callIv": 0.26853,
+          "putIv": 0.26853,
+          "atmIv": 0.26853,
+          "callMark": 0.95,
+          "putMark": 1.14,
+          "atmStraddleMark": 2.09,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-11-14T20:00:00.000Z",
+      "quoteDate": "2025-11-14",
+      "underlyingPrice": 71.38,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251121",
+          "dte": 7,
+          "atmStrike": 71.5,
+          "callIv": 0.2978,
+          "putIv": 0.2978,
+          "atmIv": 0.2978,
+          "callMark": 1.13,
+          "putMark": 1.205,
+          "atmStraddleMark": 2.335,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-11-21T20:00:00.000Z",
+      "quoteDate": "2025-11-21",
+      "underlyingPrice": 69.3,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251128",
+          "dte": 7,
+          "atmStrike": 69.5,
+          "callIv": 0.26853,
+          "putIv": 0.27829,
+          "atmIv": 0.27341,
+          "callMark": 0.96,
+          "putMark": 1.16,
+          "atmStraddleMark": 2.12,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-11-28T20:00:00.000Z",
+      "quoteDate": "2025-11-28",
+      "underlyingPrice": 71.07,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251205",
+          "dte": 7,
+          "atmStrike": 71.0,
+          "callIv": 0.30755,
+          "putIv": 0.30755,
+          "atmIv": 0.30755,
+          "callMark": 1.25,
+          "putMark": 1.135,
+          "atmStraddleMark": 2.385,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-12-05T20:00:00.000Z",
+      "quoteDate": "2025-12-05",
+      "underlyingPrice": 71.92,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251212",
+          "dte": 7,
+          "atmStrike": 72.0,
+          "callIv": 0.23926,
+          "putIv": 0.23926,
+          "atmIv": 0.23926,
+          "callMark": 0.915,
+          "putMark": 0.98,
+          "atmStraddleMark": 1.895,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-12-12T20:00:00.000Z",
+      "quoteDate": "2025-12-12",
+      "underlyingPrice": 68.81,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251219",
+          "dte": 7,
+          "atmStrike": 69.0,
+          "callIv": 0.23926,
+          "putIv": 0.23926,
+          "atmIv": 0.23926,
+          "callMark": 0.85,
+          "putMark": 0.985,
+          "atmStraddleMark": 1.835,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-12-19T20:00:00.000Z",
+      "quoteDate": "2025-12-19",
+      "underlyingPrice": 68.03,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251226",
+          "dte": 7,
+          "atmStrike": 68.0,
+          "callIv": 0.22951,
+          "putIv": 0.23926,
+          "atmIv": 0.234385,
+          "callMark": 0.91,
+          "putMark": 0.865,
+          "atmStraddleMark": 1.775,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2025-12-26T20:00:00.000Z",
+      "quoteDate": "2025-12-26",
+      "underlyingPrice": 68.48,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260102",
+          "dte": 7,
+          "atmStrike": 68.5,
+          "callIv": 0.24902,
+          "putIv": 0.24902,
+          "atmIv": 0.24902,
+          "callMark": 0.955,
+          "putMark": 0.935,
+          "atmStraddleMark": 1.89,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-01-02T20:00:00.000Z",
+      "quoteDate": "2026-01-02",
+      "underlyingPrice": 68.96,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260109",
+          "dte": 7,
+          "atmStrike": 69.0,
+          "callIv": 0.21975,
+          "putIv": 0.23926,
+          "atmIv": 0.22950500000000001,
+          "callMark": 0.855,
+          "putMark": 0.885,
+          "atmStraddleMark": 1.74,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-01-09T20:00:00.000Z",
+      "quoteDate": "2026-01-09",
+      "underlyingPrice": 70.78,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260116",
+          "dte": 7,
+          "atmStrike": 71.0,
+          "callIv": 0.3856,
+          "putIv": 0.36609,
+          "atmIv": 0.375845,
+          "callMark": 1.415,
+          "putMark": 1.515,
+          "atmStraddleMark": 2.93,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-01-16T20:00:00.000Z",
+      "quoteDate": "2026-01-16",
+      "underlyingPrice": 71.65,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260123",
+          "dte": 7,
+          "atmStrike": 71.5,
+          "callIv": 0.33682,
+          "putIv": 0.34658,
+          "atmIv": 0.3417,
+          "callMark": 1.445,
+          "putMark": 1.265,
+          "atmStraddleMark": 2.71,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-01-23T20:00:00.000Z",
+      "quoteDate": "2026-01-23",
+      "underlyingPrice": 73.95,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260130",
+          "dte": 7,
+          "atmStrike": 74.0,
+          "callIv": 0.45389,
+          "putIv": 0.46365,
+          "atmIv": 0.45877,
+          "callMark": 1.87,
+          "putMark": 1.88,
+          "atmStraddleMark": 3.75,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-01-30T20:00:00.000Z",
+      "quoteDate": "2026-01-30",
+      "underlyingPrice": 79.52,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260206",
+          "dte": 7,
+          "atmStrike": 80.0,
+          "callIv": 0.60999,
+          "putIv": 0.61974,
+          "atmIv": 0.614865,
+          "callMark": 2.475,
+          "putMark": 2.94,
+          "atmStraddleMark": 5.415,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-02-06T20:00:00.000Z",
+      "quoteDate": "2026-02-06",
+      "underlyingPrice": 76.99,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260213",
+          "dte": 7,
+          "atmStrike": 77.0,
+          "callIv": 0.49292,
+          "putIv": 0.50267,
+          "atmIv": 0.497795,
+          "callMark": 2.12,
+          "putMark": 2.1,
+          "atmStraddleMark": 4.22,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-02-13T20:00:00.000Z",
+      "quoteDate": "2026-02-13",
+      "underlyingPrice": 76.22,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260220",
+          "dte": 7,
+          "atmStrike": 76.0,
+          "callIv": 0.34658,
+          "putIv": 0.35633,
+          "atmIv": 0.35145499999999996,
+          "callMark": 1.61,
+          "putMark": 1.38,
+          "atmStraddleMark": 2.99,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-02-20T20:00:00.000Z",
+      "quoteDate": "2026-02-20",
+      "underlyingPrice": 80.85,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260227",
+          "dte": 7,
+          "atmStrike": 81.0,
+          "callIv": 0.4734,
+          "putIv": 0.48316,
+          "atmIv": 0.47828,
+          "callMark": 2.08,
+          "putMark": 2.22,
+          "atmStraddleMark": 4.3,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-02-27T20:00:00.000Z",
+      "quoteDate": "2026-02-27",
+      "underlyingPrice": 81.95,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260306",
+          "dte": 7,
+          "atmStrike": 82.0,
+          "callIv": 0.73681,
+          "putIv": 0.70754,
+          "atmIv": 0.722175,
+          "callMark": 3.35,
+          "putMark": 3.2,
+          "atmStraddleMark": 6.55,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-03-06T20:00:00.000Z",
+      "quoteDate": "2026-03-06",
+      "underlyingPrice": 108.77,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260313",
+          "dte": 7,
+          "atmStrike": 109.0,
+          "callIv": 1.32216,
+          "putIv": 1.39045,
+          "atmIv": 1.3563049999999999,
+          "callMark": 7.875,
+          "putMark": 8.425,
+          "atmStraddleMark": 16.3,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-03-13T20:00:00.000Z",
+      "quoteDate": "2026-03-13",
+      "underlyingPrice": 119.89,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260320",
+          "dte": 7,
+          "atmStrike": 120.0,
+          "callIv": 1.2929,
+          "putIv": 1.32216,
+          "atmIv": 1.3075299999999999,
+          "callMark": 8.575,
+          "putMark": 8.775,
+          "atmStraddleMark": 17.35,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-03-20T20:00:00.000Z",
+      "quoteDate": "2026-03-20",
+      "underlyingPrice": 121.43,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260327",
+          "dte": 7,
+          "atmStrike": 121.0,
+          "callIv": 0.93193,
+          "putIv": 0.92217,
+          "atmIv": 0.92705,
+          "callMark": 6.475,
+          "putMark": 5.925,
+          "atmStraddleMark": 12.4,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-03-27T20:00:00.000Z",
+      "quoteDate": "2026-03-27",
+      "underlyingPrice": 124.2,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260402",
+          "dte": 6,
+          "atmStrike": 124.0,
+          "callIv": 1.01973,
+          "putIv": 1.049,
+          "atmIv": 1.034365,
+          "callMark": 6.625,
+          "putMark": 6.5,
+          "atmStraddleMark": 13.125,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-04-02T20:00:00.000Z",
+      "quoteDate": "2026-04-02",
+      "underlyingPrice": 137.92,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260408",
+          "dte": 6,
+          "atmStrike": 138.0,
+          "callIv": 0.99046,
+          "putIv": 1.00998,
+          "atmIv": 1.00022,
+          "callMark": 6.975,
+          "putMark": 7.125,
+          "atmStraddleMark": 14.1,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-04-10T20:00:00.000Z",
+      "quoteDate": "2026-04-10",
+      "underlyingPrice": 124.82,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260417",
+          "dte": 7,
+          "atmStrike": 125.0,
+          "callIv": 0.81486,
+          "putIv": 0.82461,
+          "atmIv": 0.819735,
+          "callMark": 5.575,
+          "putMark": 5.75,
+          "atmStraddleMark": 11.325,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-04-17T20:00:00.000Z",
+      "quoteDate": "2026-04-17",
+      "underlyingPrice": 116.04,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260424",
+          "dte": 7,
+          "atmStrike": 116.0,
+          "callIv": 0.85388,
+          "putIv": 0.87339,
+          "atmIv": 0.8636349999999999,
+          "callMark": 5.5,
+          "putMark": 5.525,
+          "atmStraddleMark": 11.025,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
       "sampledAt": "2026-04-23T15:51:32.043Z",
       "quoteDate": "2026-04-23",
       "underlyingPrice": 131.82,
@@ -769,6 +1465,246 @@
           "atmPutSubId": "__ivts__|USO|20261016|132|P"
         }
       ]
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-05-01T20:00:00.000Z",
+      "quoteDate": "2026-05-01",
+      "underlyingPrice": 142.8,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260508",
+          "dte": 7,
+          "atmStrike": 143.0,
+          "callIv": 0.90266,
+          "putIv": 0.88315,
+          "atmIv": 0.8929050000000001,
+          "callMark": 7.075,
+          "putMark": 7.025,
+          "atmStraddleMark": 14.1,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-05-08T20:00:00.000Z",
+      "quoteDate": "2026-05-08",
+      "underlyingPrice": 133.59,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260515",
+          "dte": 7,
+          "atmStrike": 134.0,
+          "callIv": 0.72706,
+          "putIv": 0.73681,
+          "atmIv": 0.731935,
+          "callMark": 5.225,
+          "putMark": 5.625,
+          "atmStraddleMark": 10.85,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-05-15T20:00:00.000Z",
+      "quoteDate": "2026-05-15",
+      "underlyingPrice": 148.23,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260522",
+          "dte": 7,
+          "atmStrike": 148.0,
+          "callIv": 0.7173,
+          "putIv": 0.72706,
+          "atmIv": 0.72218,
+          "callMark": 6.05,
+          "putMark": 5.75,
+          "atmStraddleMark": 11.8,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-05-22T20:00:00.000Z",
+      "quoteDate": "2026-05-22",
+      "underlyingPrice": 140.92,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260529",
+          "dte": 7,
+          "atmStrike": 141.0,
+          "callIv": 0.84413,
+          "putIv": 0.86364,
+          "atmIv": 0.853885,
+          "callMark": 6.575,
+          "putMark": 6.7,
+          "atmStraddleMark": 13.275,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-05-29T20:00:00.000Z",
+      "quoteDate": "2026-05-29",
+      "underlyingPrice": 129.09,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260605",
+          "dte": 7,
+          "atmStrike": 129.0,
+          "callIv": 0.59047,
+          "putIv": 0.60023,
+          "atmIv": 0.59535,
+          "callMark": 4.3,
+          "putMark": 4.175,
+          "atmStraddleMark": 8.475,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-06-05T20:00:00.000Z",
+      "quoteDate": "2026-06-05",
+      "underlyingPrice": 133.02,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260612",
+          "dte": 7,
+          "atmStrike": 133.0,
+          "callIv": 0.51243,
+          "putIv": 0.53194,
+          "atmIv": 0.522185,
+          "callMark": 3.825,
+          "putMark": 3.85,
+          "atmStraddleMark": 7.675,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-06-12T20:00:00.000Z",
+      "quoteDate": "2026-06-12",
+      "underlyingPrice": 125.43,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260618",
+          "dte": 6,
+          "atmStrike": 125.0,
+          "callIv": 0.51243,
+          "putIv": 0.50267,
+          "atmIv": 0.50755,
+          "callMark": 3.525,
+          "putMark": 2.97,
+          "atmStraddleMark": 6.495,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-06-18T20:00:00.000Z",
+      "quoteDate": "2026-06-18",
+      "underlyingPrice": 114.87,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260624",
+          "dte": 6,
+          "atmStrike": 115.0,
+          "callIv": 0.50267,
+          "putIv": 0.49292,
+          "atmIv": 0.497795,
+          "callMark": 2.93,
+          "putMark": 2.95,
+          "atmStraddleMark": 5.88,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-06-26T20:00:00.000Z",
+      "quoteDate": "2026-06-26",
+      "underlyingPrice": 105.48,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260702",
+          "dte": 6,
+          "atmStrike": 105.0,
+          "callIv": 0.41487,
+          "putIv": 0.40511,
+          "atmIv": 0.40999,
+          "callMark": 2.485,
+          "putMark": 1.905,
+          "atmStraddleMark": 4.39,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
+    },
+    {
+      "symbol": "USO",
+      "sampledAt": "2026-06-29T20:00:00.000Z",
+      "quoteDate": "2026-06-29",
+      "underlyingPrice": 107.08,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260708",
+          "dte": 9,
+          "atmStrike": 107.0,
+          "callIv": 0.39536,
+          "putIv": 0.3856,
+          "atmIv": 0.39048,
+          "callMark": 2.755,
+          "putMark": 2.48,
+          "atmStraddleMark": 5.235,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true
     }
   ]
 }

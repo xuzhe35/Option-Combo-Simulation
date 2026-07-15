@@ -334,6 +334,18 @@ body {
     border-color: #efcfb2;
 }
 
+.ivts-btn-auto {
+    background: #f3f0ff;
+    color: #6746d8;
+    border-color: #cfc4f7;
+}
+
+.ivts-btn-auto.is-running {
+    background: #6746d8;
+    color: #fff;
+    border-color: #6746d8;
+}
+
 .ivts-btn-danger {
     background: #fff0ed;
     color: var(--ivts-error);
@@ -455,6 +467,25 @@ body {
     font-weight: 600;
 }
 
+.ivts-zone-map {
+    display: inline-flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+    color: var(--ivts-muted);
+}
+
+.ivts-zone-seg.is-active {
+    font-weight: 700;
+    color: inherit;
+}
+
+.ivts-strategy-signal.is-long_displacement .ivts-zone-seg.is-active { color: #6443f5; }
+.ivts-strategy-signal.is-sell_calendar .ivts-zone-seg.is-active { color: #0f7a4c; }
+
+.ivts-ratio.is-slope-backwardation { color: #0f7a4c; font-weight: 600; }
+.ivts-ratio.is-slope-contango { color: #6443f5; font-weight: 600; }
+
 .ivts-subscription-control {
     display: flex;
     gap: 12px;
@@ -553,6 +584,13 @@ body {
 .ivts-fact-value {
     font-size: 1.05rem;
     font-weight: 600;
+}
+
+.ivts-fact-note {
+    display: block;
+    margin-top: 5px;
+    color: var(--ivts-muted);
+    font-size: 0.78rem;
 }
 
 .ivts-baseline-control {

@@ -177,9 +177,24 @@
     }
 
     function _getStrikeIncrement(state) {
+        // Futures/index families pin their own grid (ES 5, NDX 25, CL 0.5...)
+        // and win outright — those are listed contract specs, not guesses.
+        // Generic equities/ETFs only carry the registry's $1 placeholder,
+        // which is right across the liquid ETF range (SPY/QQQ/GLD...) but not
+        // at the extremes, so they stay on the price heuristic: it reads the
+        // same $1 ladder from 20 up, and still widens for 1000+ names and
+        // tightens for penny-ish ones.
+        const registry = _getProductRegistryApi();
+        if (registry && typeof registry.resolveUnderlyingProfile === 'function') {
+            const profile = registry.resolveUnderlyingProfile(state && state.underlyingSymbol);
+            const increment = parseFloat(profile && profile.strikeIncrement);
+            const isFamilyPinned = !!(profile && profile.family && profile.family !== 'DEFAULT_EQUITY');
+            if (isFamilyPinned && Number.isFinite(increment) && increment > 0) {
+                return increment;
+            }
+        }
         const underlying = Math.abs(parseFloat(state && state.underlyingPrice) || 0);
         if (underlying >= 1000) return 25;
-        if (underlying >= 100) return 5;
         if (underlying >= 20) return 1;
         const step = parseFloat(getPriceInputStep(state && state.underlyingSymbol));
         return Number.isFinite(step) && step > 0 ? Math.max(step, 0.5) : 0.5;
@@ -235,7 +250,7 @@
         if (underlying >= 1000) {
             return [25, 50, 75, 100, 150, 200, 250, 300];
         }
-        return [5, 10, 15, 20, 25, 50, 100, 150];
+        return [1, 2, 3, 4, 5, 10, 15, 20, 25, 50, 100, 150];
     }
 
     function _normalizePositiveNumber(value) {
@@ -693,9 +708,7 @@
         select.innerHTML = options
             .map((value) => `<option value="${value}">${_formatComboNumber(value, 2)}</option>`)
             .join('') + '<option value="custom">Custom</option>';
-        const defaultWidth = options.includes(100)
-            ? 100
-            : options[Math.min(1, options.length - 1)];
+        const defaultWidth = options[0];
         select.value = String(defaultWidth);
         manualInput.value = String(defaultWidth);
         manualInput.disabled = true;
@@ -875,6 +888,60 @@
         tbody.innerHTML = rowsHtml.join('');
     }
 
+    function _scrollButterflyQuoteTableToStrike(dialog, targetStrike) {
+        const scrollEl = dialog && dialog.querySelector('.combo-template-butterfly-quote-scroll');
+        const target = _parseComboStrike(targetStrike);
+        if (!scrollEl || target === null || typeof dialog.querySelectorAll !== 'function') {
+            return false;
+        }
+        const rows = Array.from(dialog.querySelectorAll('.combo-template-butterfly-quote-body tr') || []);
+        let bestRow = null;
+        let bestDistance = Infinity;
+        rows.forEach((row) => {
+            const strike = _parseComboStrike(row && row.dataset && row.dataset.strike);
+            if (strike === null) {
+                return;
+            }
+            const distance = Math.abs(strike - target);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestRow = row;
+            }
+        });
+        if (!bestRow) {
+            return false;
+        }
+        const rowTop = Number.isFinite(bestRow.offsetTop) ? bestRow.offsetTop : 0;
+        const rowHeight = Number.isFinite(bestRow.offsetHeight) && bestRow.offsetHeight > 0
+            ? bestRow.offsetHeight
+            : 0;
+        const viewportHeight = Number.isFinite(scrollEl.clientHeight) && scrollEl.clientHeight > 0
+            ? scrollEl.clientHeight
+            : 0;
+        scrollEl.scrollTop = Math.max(0, rowTop - Math.max(0, (viewportHeight - rowHeight) / 2));
+        return true;
+    }
+
+    function _scheduleButterflyQuoteTableScrollToStrike(dialog, targetStrike) {
+        const target = _parseComboStrike(targetStrike);
+        if (!dialog || target === null) {
+            return false;
+        }
+        const run = () => _scrollButterflyQuoteTableToStrike(dialog, target);
+        const requestFrame = globalScope.requestAnimationFrame
+            || (typeof requestAnimationFrame === 'function' ? requestAnimationFrame : null);
+        if (typeof requestFrame === 'function') {
+            requestFrame(run);
+            return true;
+        }
+        const timer = globalScope.setTimeout || (typeof setTimeout === 'function' ? setTimeout : null);
+        if (typeof timer === 'function') {
+            timer(run, 0);
+            return true;
+        }
+        return run();
+    }
+
     function _getButterflyQuoteProgress(candidates) {
         const quoteIds = new Set();
         let receivedQuoteCount = 0;
@@ -974,6 +1041,7 @@
             return;
         }
         dialog._butterflyQuoteTimer = timer(() => {
+            _processPendingEmFit(dialog);
             _updateButterflyQuoteTable(dialog);
             if (dialog && dialog._comboContext && dialog.style.display !== 'none') {
                 _scheduleButterflyQuoteTableRefresh(dialog);
@@ -989,6 +1057,7 @@
         const context = dialog._comboContext || {};
         _clearComboTemplateQuoteRequests(context.state, context.deps);
         dialog._butterflyCandidates = [];
+        dialog._emFitPending = null;
         const quotePanel = dialog.querySelector('.combo-template-butterfly-quote-panel');
         const tbody = dialog.querySelector('.combo-template-butterfly-quote-body');
         const progressEl = dialog.querySelector('.combo-template-butterfly-progress');
@@ -1030,7 +1099,131 @@
                 : `Already subscribed ${uniqueQuoteCount} option quotes.`
         );
         _updateButterflyQuoteTable(dialog);
+        _scheduleButterflyQuoteTableScrollToStrike(
+            dialog,
+            dialog.querySelector('.combo-template-middle-strike')?.value
+        );
         _scheduleButterflyQuoteTableRefresh(dialog);
+        return true;
+    }
+
+    // ---- EM fit: auto-place wings at a multiple of the ATM straddle ----
+    // The playbook's reverse-fly wings sit at +-1.0x EM (EM = ATM straddle
+    // mid, the market's priced weekly move); 1.25x is the sanctioned wider
+    // variant (VRP_RESEARCH_MEMO.md E16). Two-phase flow so it only needs
+    // 4-6 quote subscriptions: middle straddle first (to learn EM), then the
+    // two wings at the rounded target width.
+
+    // Quotes the Subscribe grid still needs, rebuilt from the live candidate
+    // list rather than read back out of state. An EM fit rewrites the request
+    // list as (grid + this fit) instead of appending to it, so a second fit
+    // cannot strand the first fit's wings on the subscription budget — the
+    // 4-6 quote ceiling above is the whole point of the two-phase flow.
+    function _emFitBaselineQuoteRequests(dialog) {
+        const candidates = Array.isArray(dialog && dialog._butterflyCandidates)
+            ? dialog._butterflyCandidates
+            : [];
+        const requests = [];
+        candidates.forEach((candidate) => {
+            requests.push(...(candidate && candidate.quoteRequests ? candidate.quoteRequests : []));
+        });
+        return requests;
+    }
+
+    function _applyEmFitQuoteRequests(dialog, context, requests) {
+        const changed = _setComboTemplateQuoteRequests(context.state, [
+            ..._emFitBaselineQuoteRequests(dialog),
+            ...requests,
+        ]);
+        if (changed && context.deps && typeof context.deps.handleLiveSubscriptions === 'function') {
+            context.deps.handleLiveSubscriptions();
+        }
+        return changed;
+    }
+
+    function _startEmFitFromDialog(dialog, multiple) {
+        const context = dialog && dialog._comboContext;
+        if (!context || !context.state) {
+            return false;
+        }
+        const expDate = _normalizeDateValue(dialog.querySelector('.combo-template-expiry')?.value);
+        const middle = _parseComboStrike(dialog.querySelector('.combo-template-middle-strike')?.value);
+        const normalizedMultiple = _normalizePositiveNumber(multiple);
+        if (!expDate || middle === null || normalizedMultiple === null) {
+            _setButterflyRiskStatus(dialog, null, 'Enter a valid expiration and middle strike first.');
+            return false;
+        }
+        const putRequest = _buildComboTemplateQuoteRequest(context.state, expDate, 'put', middle);
+        const callRequest = _buildComboTemplateQuoteRequest(context.state, expDate, 'call', middle);
+        dialog._emFitPending = {
+            multiple: normalizedMultiple,
+            expDate,
+            middle,
+            strategy: _normalizeComboStrategy(dialog.querySelector('.combo-template-strategy')?.value),
+            middlePutId: putRequest.id,
+            middleCallId: callRequest.id,
+            em: null,
+            candidate: null,
+            requests: [putRequest, callRequest],
+        };
+        _applyEmFitQuoteRequests(dialog, context, dialog._emFitPending.requests);
+        _setButterflyRiskStatus(
+            dialog,
+            null,
+            `EM fit ${_formatComboNumber(normalizedMultiple, 2)}x: waiting for the ATM straddle quotes...`
+        );
+        _processPendingEmFit(dialog);
+        _scheduleButterflyQuoteTableRefresh(dialog);
+        return true;
+    }
+
+    function _processPendingEmFit(dialog) {
+        const pending = dialog && dialog._emFitPending;
+        const context = dialog && dialog._comboContext;
+        if (!pending || !context || !context.state) {
+            return false;
+        }
+        if (!pending.candidate) {
+            const putMid = _resolveQuoteMidById(pending.middlePutId);
+            const callMid = _resolveQuoteMidById(pending.middleCallId);
+            if (putMid === null || callMid === null) {
+                return false;
+            }
+            const em = putMid + callMid;
+            const increment = _getStrikeIncrement(context.state);
+            const width = Math.max(increment, _roundToIncrement(em * pending.multiple, increment));
+            const candidate = _buildButterflyCandidate(context.state, pending.expDate, pending.middle, width);
+            if (!candidate) {
+                dialog._emFitPending = null;
+                _setButterflyRiskStatus(dialog, null, 'EM fit failed: could not build wings at the target width.');
+                return false;
+            }
+            pending.em = em;
+            pending.candidate = candidate;
+            // Keep the straddle subscribed alongside the wings: a reverse fly
+            // doubles up on one right, so the candidate's own legs do not
+            // necessarily cover both sides of the middle strike.
+            pending.requests = [...pending.requests, ...candidate.quoteRequests];
+            _applyEmFitQuoteRequests(dialog, context, pending.requests);
+            _setButterflyRiskStatus(
+                dialog,
+                null,
+                `EM ${_formatComboNumber(em, 2)} -> wings +-${_formatComboNumber(candidate.wingWidth, 2)} `
+                + `(${_formatComboNumber(pending.multiple, 2)}x EM). Waiting for wing quotes...`
+            );
+        }
+        const evaluated = _evaluateButterflyCandidate(pending.candidate, pending.strategy);
+        if (!evaluated) {
+            return false;
+        }
+        _selectButterflyCandidateInDialog(dialog, evaluated);
+        const statusEl = dialog.querySelector('.combo-template-butterfly-risk-status');
+        if (statusEl) {
+            statusEl.textContent = `EM ${_formatComboNumber(pending.em, 2)} x ${_formatComboNumber(pending.multiple, 2)}`
+                + ` -> ${_formatComboNumber(evaluated.lower, 4)} / ${_formatComboNumber(evaluated.middle, 4)}`
+                + ` / ${_formatComboNumber(evaluated.upper, 4)} | ${statusEl.textContent}`;
+        }
+        dialog._emFitPending = null;
         return true;
     }
 
@@ -1064,6 +1257,7 @@
         const context = dialog._comboContext || {};
         _clearComboTemplateQuoteRequests(context.state, context.deps);
         dialog._butterflyCandidates = [];
+        dialog._emFitPending = null;
         dialog.style.display = 'none';
         dialog._comboContext = null;
         _setComboTemplateError(dialog, '');
@@ -1148,6 +1342,14 @@
                         </div>
                         <div class="combo-template-butterfly-risk-status small text-muted" style="min-height: 1.25rem; margin-top: 0.75rem;"></div>
                         <div class="combo-template-butterfly-actions">
+                            <button type="button" class="btn btn-secondary btn-sm combo-template-em-fit-btn" data-em-multiple="1"
+                                title="Auto-place wings at the ATM straddle price (EM). Playbook reverse-fly width — subscribes only the straddle + the two wings.">
+                                Fit 1.0&times;EM
+                            </button>
+                            <button type="button" class="btn btn-secondary btn-sm combo-template-em-fit-btn" data-em-multiple="1.25"
+                                title="Wings at 1.25x the ATM straddle price — the sanctioned wider variant (higher mean, rougher path).">
+                                Fit 1.25&times;EM
+                            </button>
                             <button type="button" class="btn btn-secondary btn-sm combo-template-subscribe-butterfly-btn">
                                 Subscribe
                             </button>
@@ -1261,6 +1463,11 @@
                 _subscribeButterflyCandidateQuotes(dialog);
             });
         }
+        dialog.querySelectorAll('.combo-template-em-fit-btn').forEach((button) => {
+            button.addEventListener('click', () => {
+                _startEmFitFromDialog(dialog, parseFloat(button.getAttribute('data-em-multiple')));
+            });
+        });
         if (findComboBtn) {
             findComboBtn.addEventListener('click', () => {
                 _findButterflyComboFromQuotes(dialog);
@@ -3416,11 +3623,16 @@
         _test: {
             describeLegIvInput: _describeLegIvInput,
             resolveSimulatedOpenPrice: _resolveSimulatedOpenPrice,
+            getStrikeIncrement: _getStrikeIncrement,
             getDefaultComboStrikes: _getDefaultComboStrikes,
             calculateButterflyRiskFromLegPrices,
             collectButterflyQuoteRows: _collectButterflyQuoteRows,
+            scrollButterflyQuoteTableToStrike: _scrollButterflyQuoteTableToStrike,
+            scheduleButterflyQuoteTableScrollToStrike: _scheduleButterflyQuoteTableScrollToStrike,
             buildButterflyCandidateGrid: _buildButterflyCandidateGrid,
             chooseButterflyCandidate: _chooseButterflyCandidate,
+            startEmFitFromDialog: _startEmFitFromDialog,
+            processPendingEmFit: _processPendingEmFit,
         },
     };
     globalScope.toggleGroupCollapse = toggleGroupCollapse;

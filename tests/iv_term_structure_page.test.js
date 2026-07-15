@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 
 const { loadBrowserScripts } = require('./helpers/load-browser-scripts');
 
-function loadPageContext(activeElement) {
+function loadPageContext(activeElement, overrides = {}) {
     const listeners = {};
     return loadBrowserScripts([
         'js/official_exchange_calendars.generated.js',
@@ -11,6 +11,7 @@ function loadPageContext(activeElement) {
         'js/iv_term_structure_core.js',
         'js/iv_term_structure.js',
     ], {
+        ...overrides,
         document: {
             readyState: 'loading',
             activeElement,
@@ -308,6 +309,183 @@ module.exports = {
             },
         },
         {
+            name: 'renders per-symbol hourly auto sampling controls and combines auto history for strategy use',
+            run() {
+                const ctx = loadPageContext(null);
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                const card = testApi.createCardState({
+                    symbol: 'SPY',
+                    historyPath: 'iv_term_structure/data/SPY.json',
+                }, { isExpanded: true });
+                card.bundledHistoryDocument = { symbol: 'SPY', version: 1, samples: [{ sampledAt: '2026-07-10T14:00:00Z' }] };
+                card.autoHistoryDocument = testApi.normalizeAutoHistoryDocument({
+                    samples: [{ sampledAt: '2026-07-11T14:00:00Z' }],
+                }, 'SPY');
+                card.autoFileName = 'SPY.ivts-auto.json';
+                card.autoSamplingEnabled = true;
+
+                const combined = testApi.strategyHistoryDocument(card);
+                const html = testApi.buildCardMarkup(card);
+
+                assert.equal(combined.samples.length, 2);
+                assert.match(html, /data-action="auto-load"/);
+                assert.match(html, /Load\/Resume Auto JSON/);
+                assert.match(html, /data-action="auto-new"/);
+                assert.match(html, /New Auto JSON/);
+                assert.match(html, /data-action="auto-sample"/);
+                assert.match(html, /Stop Auto Sample/);
+                assert.match(html, /Auto Samples/);
+                assert.match(html, /Append Target/);
+                assert.match(html, /SPY\.ivts-auto\.json/);
+            },
+        },
+        {
+            name: 'runs auto sampling on elapsed time alone, not on the UTC date',
+            run() {
+                const ctx = loadPageContext(null);
+                const { shouldRunAutoSample } = ctx.OptionComboIvTermStructurePage._test;
+                const history = {
+                    samples: [{ sampledAt: '2026-07-13T10:00:00.000Z' }],
+                };
+
+                assert.equal(shouldRunAutoSample({ samples: [] }, new Date('2026-07-13T10:10:00.000Z')), true);
+                assert.equal(shouldRunAutoSample(history, new Date('2026-07-13T10:59:59.000Z')), false);
+                assert.equal(shouldRunAutoSample(history, new Date('2026-07-13T11:00:00.000Z')), true);
+
+                // A long lapse (page closed for days) is already covered by the
+                // elapsed check — no separate date trigger needed.
+                assert.equal(shouldRunAutoSample(history, new Date('2026-07-16T09:00:00.000Z')), true);
+
+                // Rolling past 00:00 UTC must not force an off-cadence sample:
+                // it is ~20:00 ET, minutes after the 23:30 UTC sample here.
+                const lateSample = { samples: [{ sampledAt: '2026-07-13T23:30:00.000Z' }] };
+                assert.equal(shouldRunAutoSample(lateSample, new Date('2026-07-14T00:01:00.000Z')), false);
+                assert.equal(shouldRunAutoSample(lateSample, new Date('2026-07-14T00:30:00.000Z')), true);
+            },
+        },
+        {
+            name: 'requires a usable near-seven-day straddle before saving an auto sample',
+            run() {
+                const ctx = loadPageContext(null);
+                const { hasUsableWatermarkSeed } = ctx.OptionComboIvTermStructurePage._test;
+
+                assert.equal(hasUsableWatermarkSeed({
+                    underlyingPrice: 600,
+                    details: [{ dte: 7, atmStraddleMark: 8.25 }],
+                }), true);
+                assert.equal(hasUsableWatermarkSeed({
+                    underlyingPrice: 600,
+                    details: [{ dte: 14, atmStraddleMark: 12 }],
+                }), false);
+                assert.equal(hasUsableWatermarkSeed({
+                    underlyingPrice: 600,
+                    details: [{ dte: 7, atmStraddleMark: null }],
+                }), false);
+            },
+        },
+        {
+            name: 'loads an existing automatic JSON as the current append target',
+            async run() {
+                const fileHandle = {
+                    name: 'SPY.ivts-auto.json',
+                    async getFile() {
+                        return {
+                            async text() {
+                                return JSON.stringify({
+                                    symbol: 'SPY',
+                                    purpose: 'iv-term-structure-auto-samples',
+                                    samples: [{ sampledAt: '2026-07-13T15:00:00.000Z' }],
+                                });
+                            },
+                        };
+                    },
+                    async createWritable() {
+                        return { async write() {}, async close() {} };
+                    },
+                };
+                const ctx = loadPageContext(null, {
+                    async showOpenFilePicker() {
+                        return [fileHandle];
+                    },
+                });
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                const card = testApi.createCardState({
+                    symbol: 'SPY',
+                    historyPath: 'iv_term_structure/data/SPY.json',
+                });
+
+                await testApi.loadAutoHistoryFile(card);
+
+                assert.equal(card.autoFileHandle, fileHandle);
+                assert.equal(card.autoHistoryDocument.samples.length, 1);
+                assert.equal(card.lastAutoSampleLabel, '2026-07-13T15:00:00.000Z');
+                assert.equal(testApi.autoAppendTargetLabel(card), 'SPY.ivts-auto.json');
+            },
+        },
+        {
+            name: 'initializes an automatic sample file as valid JSON before the first live sample',
+            async run() {
+                const ctx = loadPageContext(null);
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                let written = '';
+                const card = testApi.createCardState({
+                    symbol: 'SPY',
+                    historyPath: 'iv_term_structure/data/SPY.json',
+                });
+                card.autoHistoryDocument = testApi.normalizeAutoHistoryDocument(null, 'SPY');
+                card.autoFileHandle = {
+                    async createWritable() {
+                        return {
+                            async write(value) {
+                                written = value;
+                            },
+                            async close() {},
+                        };
+                    },
+                };
+
+                await testApi.writeAutoHistoryDocument(card);
+                const parsed = JSON.parse(written);
+
+                assert.equal(parsed.symbol, 'SPY');
+                assert.equal(parsed.purpose, 'iv-term-structure-auto-samples');
+                assert.equal(parsed.cadenceMinutes, 60);
+                assert.equal(parsed.samples.length, 0);
+            },
+        },
+        {
+            name: 'reuses the selected automatic sample file when sampling resumes in the same page session',
+            async run() {
+                const ctx = loadPageContext(null);
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                const card = testApi.createCardState({
+                    symbol: 'SPY',
+                    historyPath: 'iv_term_structure/data/SPY.json',
+                });
+                card.autoFileHandle = {
+                    name: 'SPY.ivts-auto.json',
+                    async getFile() {
+                        return {
+                            async text() {
+                                return JSON.stringify({
+                                    symbol: 'SPY',
+                                    purpose: 'iv-term-structure-auto-samples',
+                                    samples: [{ sampledAt: '2026-07-14T01:00:00.000Z' }],
+                                });
+                            },
+                        };
+                    },
+                };
+
+                const result = await testApi.prepareAutoHistoryFile(card);
+
+                assert.equal(result, 'reused');
+                assert.equal(card.autoHistoryDocument.samples.length, 1);
+                assert.equal(card.lastAutoSampleLabel, '2026-07-14T01:00:00.000Z');
+                assert.equal(testApi.autoSampleButtonLabel(card), 'Resume Auto Sample');
+            },
+        },
+        {
             name: 'uses all expiry detail rows as the primary visible table',
             run() {
                 const ctx = loadPageContext(null);
@@ -361,7 +539,7 @@ module.exports = {
                 assert.doesNotMatch(html, /<th>ATM IV<\/th>/);
                 assert.match(html, />TD IV<\/th>/);
                 assert.match(html, /12%\/13%/);
-                assert.equal((html.match(/<th[\s>]/g) || []).length, 7);
+                assert.equal((html.match(/<th[\s>]/g) || []).length, 8);
             },
         },
         {
@@ -393,6 +571,49 @@ module.exports = {
             },
         },
         {
+            name: 'defaults the straddle baseline to the nearest-7-DTE expiry and renders the TD Slope column',
+            run() {
+                const ctx = loadPageContext(null);
+                const { resolveSelectedStraddleBaselineExpiry, buildPrimaryExpiryTable } = ctx.OptionComboIvTermStructurePage._test;
+                const rows = [
+                    { expiry: '20260714', dte: 1, tradDte: 1, atmIv: 0.1523, hasCompletePair: true },
+                    { expiry: '20260715', dte: 2, tradDte: 2, atmIv: 0.1375, hasCompletePair: true },
+                    { expiry: '20260720', dte: 7, tradDte: 5, atmIv: 0.1150, hasCompletePair: true },
+                    { expiry: '20260724', dte: 11, tradDte: 9, atmIv: 0.1100, hasCompletePair: true },
+                ];
+
+                // No explicit selection -> nearest 7 DTE; explicit selection wins;
+                // stale selection falls back to the default.
+                assert.equal(resolveSelectedStraddleBaselineExpiry({}, rows), '20260720');
+                assert.equal(resolveSelectedStraddleBaselineExpiry({ straddleBaselineExpiry: '20260715' }, rows), '20260715');
+                assert.equal(resolveSelectedStraddleBaselineExpiry({ straddleBaselineExpiry: '20991231' }, rows), '20260720');
+
+                const core = ctx.OptionComboIvTermStructureCore;
+                const annotated = core.annotateTdSlopeVsBaseline(
+                    core.buildStraddleComparisonRows(rows, '20260715'), '20260715');
+                const table = buildPrimaryExpiryTable({ detailRows: annotated, baselineExpiry: '20260715' });
+                assert.match(table, /TD Slope/);
+                assert.match(table, />base</);
+                // 1d IV over 2d IV -> backwardation coloring on that pair.
+                assert.match(table, /is-slope-backwardation/);
+
+                // Wide pairs (DTE ratio far from the calibrated ~2x) show the
+                // number without zone coloring: a normal upward term structure
+                // sits below 0.95 there, and painting it purple would read as
+                // a reverse-fly signal.
+                const wideRows = [
+                    { expiry: '20260720', dte: 7, tradDte: 5, atmIv: 0.1150, hasCompletePair: true },
+                    { expiry: '20261009', dte: 88, tradDte: 62, atmIv: 0.1600, hasCompletePair: true },
+                ];
+                const wideAnnotated = core.annotateTdSlopeVsBaseline(
+                    core.buildStraddleComparisonRows(wideRows, '20260720'), '20260720');
+                assert.ok(wideAnnotated[1].tdSlopeVsBaseline < 0.95);
+                const wideTable = buildPrimaryExpiryTable({ detailRows: wideAnnotated, baselineExpiry: '20260720' });
+                assert.doesNotMatch(wideTable, /is-slope-contango/);
+                assert.doesNotMatch(wideTable, /is-slope-backwardation/);
+            },
+        },
+        {
             name: 'renders the strategy signal panel with zone, slope, watermark, and suggestion',
             run() {
                 const ctx = loadPageContext(null);
@@ -418,6 +639,15 @@ module.exports = {
                 assert.match(html, /MRR research ref/);
                 assert.match(html, /2020-26 1\.10/);
                 assert.match(html, /S&amp;P 500 complex/);
+
+                // The zone map spells out the frozen thresholds and lights up
+                // the active zone (here: backwardation -> calendar).
+                assert.match(html, /Zones/);
+                assert.match(html, /&lt;0\.95 reverse fly/);
+                assert.match(html, /0\.95–1\.05 stand down/);
+                assert.match(html, /&gt;1\.05 calendar/);
+                assert.match(html, /is-active">&gt;1\.05 calendar/);
+                assert.doesNotMatch(html, /is-active">&lt;0\.95 reverse fly/);
                 const unstudied = buildStrategySignalPanel(
                     { symbol: 'TLT' },
                     { detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)] },
@@ -436,6 +666,7 @@ module.exports = {
                 assert.match(contango, /LONG DISPLACEMENT/);
                 assert.doesNotMatch(contango, /Reverse iron fly: buy/);
                 assert.match(contango, /watermark must prove it first/);
+                assert.match(contango, /is-active">&lt;0\.95 reverse fly/);
 
                 const empty = buildStrategySignalPanel({ symbol: 'SPY' }, { detailRows: [] }, { samples: [] });
                 assert.match(empty, /NO SIGNAL/);

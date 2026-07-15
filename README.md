@@ -130,6 +130,12 @@ Current behavior:
 - loads bundled history files from `iv_term_structure/data/*.json`
 - uses `ib_server.py` for IB connection status and live IV sync
 - appends samples to an opened/imported per-symbol history JSON document
+- can load/resume an existing per-symbol `*.ivts-auto.json` as the explicit
+  append target, or create a new one; a due ATM snapshot is appended
+  immediately, then hourly while the page remains open — elapsed time is the
+  only thing that makes a sample due, so reopening a page that sat idle for
+  days appends once, not once per missed day; automatic samples are combined
+  with manual history for MRR while the raw hourly rows remain preserved
 
 Default configured symbols:
 
@@ -475,7 +481,9 @@ Current flow:
 5. backend streams live option quote/IV updates
 6. frontend aggregates call/put ATM IV by expiry and DTE bucket
 7. frontend derives TD IV from the global `TD IV λ` lens without resubscribing
-8. user samples into the selected history document
+8. user samples into the selected history document, or loads/resumes an
+   existing per-symbol auto JSON (or creates a new one) as the hourly append
+   target
 
 The JS core and Python service helpers are kept DOM/IB side-effect free for tests.
 

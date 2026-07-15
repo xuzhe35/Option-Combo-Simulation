@@ -102,7 +102,22 @@ Current surfaces:
 
 - ETF plus FOP cards configured in `iv_term_structure/iv_term_structure_config.json`
 - ATM call/put aggregation, calendar finder, bucket history, and per-symbol option-stream limits
+- equity/index SecDef discovery prefers the exact-symbol standard trading
+  class and excludes adjusted roots such as `2SPY` from the expiry calendar
 - one global `TD IV λ` control (default `0.30`) that re-annualizes every card without resubscribing
+- per-symbol `Load/Resume Auto JSON` selects an existing writable auto-sample
+  file as the explicit append target; `New Auto JSON` creates one, and a
+  separate stop/resume control pauses or resumes the bound target
+- a due sample is taken immediately after load/create, then refreshed and
+  appended hourly while the page stays open; a 60s monitor plus focus and
+  visibility checks only ask whether a sample is *due* — due-ness is elapsed
+  time alone (`shouldRunAutoSample`), never the calendar date. A date trigger
+  would be redundant with the elapsed check on every real gap, and would
+  additionally fire minutes after the previous sample whenever the UTC day
+  rolled over mid-cadence (00:00 UTC is ~20:00 ET, a boundary this sampler has
+  no reason to care about).
+- hourly automatic rows are retained, while MRR continues to dedupe by quote
+  date and therefore uses the last valid sample for each date
 - forward trading calendars come only from the generated official snapshot:
   NYSE public calendar plus CME Reference Data API product schedules
 - run `sync_exchange_calendars_mac.command` or `sync_exchange_calendars.bat`

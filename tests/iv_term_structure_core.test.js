@@ -626,6 +626,55 @@ module.exports = {
             },
         },
         {
+            name: 'resolves the daily watermark sample on sampledAt, not on array position',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                const stamped = (quoteDate, sampledAt, price) => ({
+                    quoteDate,
+                    sampledAt,
+                    underlyingPrice: price,
+                    details: [{ dte: 7, atmStraddleMark: 5 }],
+                });
+
+                // How a merged history actually arrives: the manual file
+                // concatenated ahead of the hourly automatic file, so source
+                // order and chronological order disagree. The 15:55 manual
+                // close sample must beat the 13:00 automatic one on both days.
+                const manual = [
+                    stamped('2026-05-04', '2026-05-04T19:55:00Z', 500),
+                    stamped('2026-05-11', '2026-05-11T19:55:00Z', 505),
+                ];
+                const automatic = [
+                    stamped('2026-05-04', '2026-05-04T17:00:00Z', 400),
+                    stamped('2026-05-11', '2026-05-11T17:00:00Z', 400),
+                ];
+                const merged = core.computeDisplacementWatermark(manual.concat(automatic));
+                // |505 - 500| / 5 = 1.0. Had the trailing automatic samples
+                // won, both days would read 400 and the ratio would be 0.
+                assert.equal(merged.count, 1);
+                assert.ok(Math.abs(merged.latest - 1) < 1e-9);
+
+                // Sorted input must agree with concatenated input.
+                const sorted = core.computeDisplacementWatermark(
+                    manual.concat(automatic).sort((a, b) => Date.parse(a.sampledAt) - Date.parse(b.sampledAt))
+                );
+                assert.deepEqual(sorted, merged);
+
+                // Without timestamps there is nothing better than array order,
+                // so the historical last-wins behaviour stays.
+                const untimestamped = core.computeDisplacementWatermark([
+                    { quoteDate: '2026-05-04', underlyingPrice: 500, details: [{ dte: 7, atmStraddleMark: 5 }] },
+                    { quoteDate: '2026-05-11', underlyingPrice: 400, details: [{ dte: 7, atmStraddleMark: 5 }] },
+                    { quoteDate: '2026-05-11', underlyingPrice: 505, details: [{ dte: 7, atmStraddleMark: 5 }] },
+                ]);
+                assert.ok(Math.abs(untimestamped.latest - 1) < 1e-9);
+            },
+        },
+        {
             name: 'maps zone and watermark onto the frozen strategy playbook',
             run() {
                 const ctx = loadBrowserScripts([
@@ -668,6 +717,58 @@ module.exports = {
 
                 const none = core.buildStrategySuggestion({ status: 'insufficient', reason: 'x' }, wmOk);
                 assert.equal(none.stance, 'no_signal');
+            },
+        },
+        {
+            name: 'annotates pairwise TD slope vs baseline with shorter-leg-on-top convention',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const rows = [
+                    { expiry: '20260713', dte: 0, tradDte: 0, atmIv: 0.1721, hasCompletePair: true },
+                    { expiry: '20260715', dte: 2, tradDte: 2, atmIv: 0.1375, hasCompletePair: true },
+                    { expiry: '20260717', dte: 4, tradDte: 4, atmIv: 0.1337, hasCompletePair: true },
+                    { expiry: '20260720', dte: 7, tradDte: 5, atmIv: 0.1150, hasCompletePair: true },
+                    { expiry: '20260724', dte: 11, tradDte: 9, atmIv: 0.1100, hasCompletePair: false },
+                ];
+
+                const vs2d = core.annotateTdSlopeVsBaseline(rows, '20260715');
+                const byExpiry = (annotated, expiry) => annotated.find((r) => r.expiry === expiry);
+                // Baseline row itself carries no slope; 0 DTE cannot convert;
+                // incomplete pairs are excluded.
+                assert.equal(byExpiry(vs2d, '20260715').tdSlopeVsBaseline, null);
+                assert.equal(byExpiry(vs2d, '20260713').tdSlopeVsBaseline, null);
+                assert.equal(byExpiry(vs2d, '20260724').tdSlopeVsBaseline, null);
+                // 2d IV above 4d IV -> that pair reads backwardation (>1).
+                const pair24 = byExpiry(vs2d, '20260717').tdSlopeVsBaseline;
+                assert.ok(pair24 > 1, `expected 2d/4d pair > 1, got ${pair24}`);
+
+                // Shorter-leg-on-top: the same pair yields the same slope no
+                // matter which side is chosen as baseline.
+                const vs4d = core.annotateTdSlopeVsBaseline(rows, '20260717');
+                assert.equal(byExpiry(vs4d, '20260715').tdSlopeVsBaseline, pair24);
+
+                // The pair's DTE ratio rides along so the UI can confine the
+                // 0.95/1.05 coloring to the calibrated ~2x geometry.
+                assert.equal(byExpiry(vs2d, '20260717').tdSlopePairRatio, 2);
+                assert.equal(byExpiry(vs2d, '20260720').tdSlopePairRatio, 3.5);
+                assert.equal(byExpiry(vs2d, '20260715').tdSlopePairRatio, null);
+
+                // The ~7d/~11d pair must agree with the regime signal's slope.
+                const signal = core.computeRegimeSignal(rows.map((r) => ({
+                    ...r, hasCompletePair: r.expiry !== '20260724' ? r.hasCompletePair : true,
+                })));
+                const vs7d = core.annotateTdSlopeVsBaseline(rows.map((r) => ({
+                    ...r, hasCompletePair: r.expiry !== '20260724' ? r.hasCompletePair : true,
+                })), '20260720');
+                assert.equal(signal.status, 'ok');
+                assert.equal(byExpiry(vs7d, '20260724').tdSlopeVsBaseline, signal.slope);
+
+                // No baseline -> annotation present but null everywhere.
+                const none = core.annotateTdSlopeVsBaseline(rows, '');
+                assert.ok(none.every((r) => r.tdSlopeVsBaseline === null));
             },
         },
         {

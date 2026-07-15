@@ -22,8 +22,12 @@ module.exports = {
                 const ctx = loadSessionLogicContext();
                 const logic = ctx.OptionComboSessionLogic;
 
-                assert.equal(logic.normalizeSimTimeBasis(), 'calendar');
-                assert.equal(logic.normalizeSimTimeBasis('bogus'), 'calendar');
+                // Unrecognized input falls back to the weighted (λ=0.3) clock,
+                // not the TWS calendar convention: weekends carrying full
+                // variance is the assumption we deliberately reject.
+                assert.equal(logic.normalizeSimTimeBasis(), 'weighted');
+                assert.equal(logic.normalizeSimTimeBasis('bogus'), 'weighted');
+                assert.equal(logic.normalizeSimTimeBasis('calendar'), 'calendar');
                 assert.equal(logic.normalizeSimTimeBasis('Trading'), 'trading');
                 assert.equal(logic.normalizeSimTimeBasis('weighted'), 'weighted');
 
@@ -37,7 +41,10 @@ module.exports = {
                 assert.equal(logic.resolveSimWeekendWeight('trading', 0.45), 0);
                 assert.equal(logic.resolveSimWeekendWeight('weighted', 0.45), 0.45);
                 assert.equal(logic.resolveSimWeekendWeight('weighted', 'bad'), 0.3);
-                assert.equal(logic.resolveSimWeekendWeight('unknown', 0.45), 1);
+                // An unrecognized basis normalizes to 'weighted', so it honors
+                // the supplied λ instead of snapping to the calendar clock's 1.
+                assert.equal(logic.resolveSimWeekendWeight('unknown', 0.45), 0.45);
+                assert.equal(logic.resolveSimWeekendWeight('unknown', 'bad'), 0.3);
             },
         },
         {
