@@ -545,6 +545,29 @@ module.exports = {
                 ]);
                 assert.equal(contango.zone, 'long_displacement');
 
+                // A positive vendor-floor leg must not create a fake extreme
+                // slope. ATM-only research fixtures remain supported, while
+                // live rows that expose leg IVs must clear the floor on both.
+                const sentinel = core.computeRegimeSignal([
+                    { ...row('20260717', 7, 5, 0.15), callIv: 0.15, putIv: 0.15 },
+                    { ...row('20260724', 14, 10, 0.09), callIv: 0.01488, putIv: 0.16 },
+                ]);
+                assert.equal(sentinel.status, 'insufficient');
+
+                const priceMismatch = core.computeRegimeSignal([
+                    { ...row('20260717', 7, 5, 0.15), atmStrike: 500, atmStraddleMark: 10 },
+                    { ...row('20260724', 14, 10, 0.07), atmStrike: 500, atmStraddleMark: 15 },
+                ]);
+                assert.equal(priceMismatch.status, 'insufficient');
+
+                // Live rows cannot bypass the same price/IV gate by omitting
+                // the marks or strike while still exposing leg IVs.
+                const missingLivePriceEvidence = core.computeRegimeSignal([
+                    { ...row('20260717', 7, 5, 0.20), callIv: 0.20, putIv: 0.20 },
+                    { ...row('20260724', 14, 10, 0.20), callIv: 0.20, putIv: 0.20 },
+                ]);
+                assert.equal(missingLivePriceEvidence.status, 'insufficient');
+
                 // Boundary classification uses the UNROUNDED slope: a raw
                 // slope of 0.94996 (which rounds to 0.9500 for display) must
                 // stay in long_displacement; 1.05004 must stay sell_calendar.
@@ -574,7 +597,54 @@ module.exports = {
             },
         },
         {
-            name: 'computes the displacement watermark from history samples with scaling and a minimum count',
+            name: 'requires one fresh complete server snapshot for all four signal legs',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const asOf = '2026-07-17T20:20:00Z';
+                const row = (expiry, dte, tradDte, atmIv, snapshotId = 'close-1', quoteAsOf = asOf) => ({
+                    expiry, dte, tradDte, atmIv,
+                    hasCompletePair: true, subscriptionSelected: true,
+                    callSnapshotId: snapshotId, putSnapshotId: snapshotId,
+                    callQuoteAsOf: quoteAsOf, putQuoteAsOf: quoteAsOf,
+                });
+                const rows = [
+                    row('20260717', 7, 5, 0.30),
+                    row('20260724', 14, 10, 0.22),
+                ];
+                const signal = core.computeRegimeSignal(rows);
+                const evidence = {
+                    payloadAsOf: asOf, snapshotId: 'close-1', coherent: true, quoteComplete: true,
+                };
+                assert.equal(
+                    core.evaluateSignalSnapshotCoherence(rows, signal, evidence).status,
+                    'ok'
+                );
+
+                const mixed = rows.map((entry, index) => (
+                    index === 1 ? { ...entry, putSnapshotId: 'incremental-2' } : entry
+                ));
+                assert.equal(
+                    core.evaluateSignalSnapshotCoherence(mixed, signal, evidence).status,
+                    'mixed_snapshot_legs'
+                );
+                const stale = rows.map((entry, index) => (
+                    index === 0 ? { ...entry, callQuoteAsOf: '2026-07-17T20:00:00Z' } : entry
+                ));
+                assert.equal(
+                    core.evaluateSignalSnapshotCoherence(stale, signal, evidence).status,
+                    'stale_snapshot_leg'
+                );
+                assert.equal(
+                    core.evaluateSignalSnapshotCoherence(rows, signal, {
+                        ...evidence, coherent: false, quoteComplete: false,
+                    }).status,
+                    'incoherent_snapshot'
+                );
+            },
+        },
+        {
+            name: 'computes MRR from official weekly closes instead of adjacent dense daily samples',
             run() {
                 const ctx = loadBrowserScripts([
                     'js/iv_term_structure_core.js',
@@ -582,51 +652,66 @@ module.exports = {
                 const core = ctx.OptionComboIvTermStructureCore;
 
                 const sample = (quoteDate, price, em) => ({
-                    quoteDate, underlyingPrice: price,
+                    symbol: 'SPY', quoteDate, underlyingPrice: price, backfilled: true,
                     details: [{ dte: 7, atmStraddleMark: em }],
                 });
 
-                // 9 weekly samples, each week the underlying moves exactly one
-                // scaled EM -> every ratio = 1.0.
+                // A deliberately dense sequence has a noisy Tuesday plus the
+                // official Friday close in every week. Adjacent-day logic
+                // would produce 17 noisy ratios; official weekly-close logic
+                // must produce exactly eight, all equal to 1.0.
+                const tuesdays = ['2026-01-06', '2026-01-13', '2026-01-20', '2026-01-27', '2026-02-03',
+                                  '2026-02-10', '2026-02-17', '2026-02-24', '2026-03-03'];
+                const fridays = ['2026-01-09', '2026-01-16', '2026-01-23', '2026-01-30', '2026-02-06',
+                                 '2026-02-13', '2026-02-20', '2026-02-27', '2026-03-06'];
                 const samples = [];
-                let price = 500;
-                const dates = ['2026-01-02', '2026-01-09', '2026-01-16', '2026-01-23', '2026-01-30',
-                               '2026-02-06', '2026-02-13', '2026-02-20', '2026-02-27'];
-                for (const d of dates) {
-                    samples.push(sample(d, price, 5));
-                    price += 5 * Math.sqrt(7 / 7); // gap 7d, frontDte 7 -> scale 1
+                for (let index = 0; index < fridays.length; index += 1) {
+                    samples.push(sample(tuesdays[index], 100 + index * 37, 5));
+                    samples.push(sample(fridays[index], 500 + index * 5, 5));
                 }
-                const wm = core.computeDisplacementWatermark(samples);
+                const wm = core.computeDisplacementWatermark(samples, { asOf: '2026-03-09T12:00:00Z' });
                 assert.equal(wm.status, 'ok');
                 assert.equal(wm.count, 8);
                 assert.ok(Math.abs(wm.mean - 1) < 1e-9);
+                assert.equal(wm.weeklySampleCount, 9);
+                assert.equal(wm.latestOfficialSampleDate, '2026-03-06');
+                assert.equal(wm.latestObservationDate, '2026-03-06');
+                assert.equal(wm.asOf, '2026-03-09');
+                assert.equal(wm.ageDays, 3);
+                assert.equal(wm.calendarKey, 'NYSE');
 
                 // Fewer than 8 usable pairs -> collecting.
-                const collecting = core.computeDisplacementWatermark(samples.slice(0, 5));
+                const collecting = core.computeDisplacementWatermark(
+                    fridays.slice(0, 5).map((date, index) => sample(date, 500 + index * 5, 5)),
+                    { asOf: '2026-02-09' }
+                );
                 assert.equal(collecting.status, 'collecting');
                 assert.equal(collecting.count, 4);
 
-                // Same-day duplicate samples dedupe (last wins); >12d gaps skipped.
-                const noisy = [
-                    sample('2026-03-02', 500, 5),
-                    sample('2026-03-02', 501, 5),
-                    sample('2026-03-30', 520, 5), // 28d gap -> skipped
-                ];
-                const skipped = core.computeDisplacementWatermark(noisy);
+                // Both dates are official closes, but a missing intervening
+                // week creates a >12d gap and therefore no observation.
+                const skipped = core.computeDisplacementWatermark([
+                    sample('2026-03-06', 500, 5),
+                    sample('2026-03-27', 520, 5),
+                ], { asOf: '2026-03-30' });
                 assert.equal(skipped.count, 0);
 
-                // Time scaling: 3-day gap against a 7-DTE EM shrinks the
-                // expected move by sqrt(3/7).
+                // Independence Day closes NYSE on Friday 3 July, so Thursday
+                // 2 July is the official week close. The Monday snapshot is
+                // ignored, and the 6-day close-to-close gap scales the EM.
                 const scaled = core.computeDisplacementWatermark([
-                    sample('2026-04-06', 500, 7),
-                    sample('2026-04-09', 500 + 7 * Math.sqrt(3 / 7), 7),
-                ]);
+                    sample('2026-06-26', 500, 7),
+                    sample('2026-06-29', 900, 7),
+                    sample('2026-07-02', 500 + 7 * Math.sqrt(6 / 7), 7),
+                ], { asOf: '2026-07-06' });
                 assert.equal(scaled.status, 'collecting');
                 assert.ok(Math.abs(scaled.latest - 1) < 1e-4);
+                assert.equal(scaled.latestOfficialSampleDate, '2026-07-02');
+                assert.equal(scaled.missingOfficialCloseWeeks, 0);
             },
         },
         {
-            name: 'resolves the daily watermark sample on sampledAt, not on array position',
+            name: 'excludes incomplete weeks and fails closed on stale or unavailable MRR history',
             run() {
                 const ctx = loadBrowserScripts([
                     'js/iv_term_structure_core.js',
@@ -640,38 +725,111 @@ module.exports = {
                     details: [{ dte: 7, atmStraddleMark: 5 }],
                 });
 
-                // How a merged history actually arrives: the manual file
-                // concatenated ahead of the hourly automatic file, so source
-                // order and chronological order disagree. The 15:55 manual
-                // close sample must beat the 13:00 automatic one on both days.
+                // How merged history actually arrives: manual snapshots are
+                // concatenated ahead of hourly automatic snapshots, so source
+                // order and timestamp order disagree. The latest snapshot on
+                // each official Friday must win.
                 const manual = [
-                    stamped('2026-05-04', '2026-05-04T19:55:00Z', 500),
-                    stamped('2026-05-11', '2026-05-11T19:55:00Z', 505),
+                    stamped('2026-05-08', '2026-05-08T20:20:00Z', 500),
+                    stamped('2026-05-15', '2026-05-15T20:20:00Z', 505),
                 ];
                 const automatic = [
-                    stamped('2026-05-04', '2026-05-04T17:00:00Z', 400),
-                    stamped('2026-05-11', '2026-05-11T17:00:00Z', 400),
+                    stamped('2026-05-08', '2026-05-08T17:00:00Z', 400),
+                    stamped('2026-05-15', '2026-05-15T17:00:00Z', 400),
+                    // Much later after-hours marks must not replace the
+                    // 16:20 ET observation nearest the 16:15 option close.
+                    stamped('2026-05-08', '2026-05-08T23:00:00Z', 900),
+                    stamped('2026-05-15', '2026-05-15T23:00:00Z', 100),
                 ];
-                const merged = core.computeDisplacementWatermark(manual.concat(automatic));
+                const options = { asOf: '2026-05-18' };
+                const merged = core.computeDisplacementWatermark(manual.concat(automatic), options);
                 // |505 - 500| / 5 = 1.0. Had the trailing automatic samples
                 // won, both days would read 400 and the ratio would be 0.
                 assert.equal(merged.count, 1);
                 assert.ok(Math.abs(merged.latest - 1) < 1e-9);
 
+                const lateOnly = core.computeDisplacementWatermark([
+                    stamped('2026-05-08', '2026-05-08T23:00:00Z', 900),
+                    stamped('2026-05-15', '2026-05-15T23:00:00Z', 100),
+                ], options);
+                assert.equal(lateOnly.weeklySampleCount, 0);
+                assert.equal(lateOnly.incompleteOfficialCloseWeeks, 2);
+
                 // Sorted input must agree with concatenated input.
                 const sorted = core.computeDisplacementWatermark(
-                    manual.concat(automatic).sort((a, b) => Date.parse(a.sampledAt) - Date.parse(b.sampledAt))
+                    manual.concat(automatic).sort((a, b) => Date.parse(a.sampledAt) - Date.parse(b.sampledAt)),
+                    options
                 );
                 assert.deepEqual(sorted, merged);
 
                 // Without timestamps there is nothing better than array order,
                 // so the historical last-wins behaviour stays.
                 const untimestamped = core.computeDisplacementWatermark([
-                    { quoteDate: '2026-05-04', underlyingPrice: 500, details: [{ dte: 7, atmStraddleMark: 5 }] },
-                    { quoteDate: '2026-05-11', underlyingPrice: 400, details: [{ dte: 7, atmStraddleMark: 5 }] },
-                    { quoteDate: '2026-05-11', underlyingPrice: 505, details: [{ dte: 7, atmStraddleMark: 5 }] },
-                ]);
+                    { quoteDate: '2026-05-08', officialClose: true, underlyingPrice: 500, details: [{ dte: 7, atmStraddleMark: 5 }] },
+                    { quoteDate: '2026-05-15', officialClose: true, underlyingPrice: 400, details: [{ dte: 7, atmStraddleMark: 5 }] },
+                    { quoteDate: '2026-05-15', officialClose: true, underlyingPrice: 505, details: [{ dte: 7, atmStraddleMark: 5 }] },
+                ], options);
                 assert.ok(Math.abs(untimestamped.latest - 1) < 1e-9);
+
+                const middayOnly = core.computeDisplacementWatermark([
+                    stamped('2026-05-08', '2026-05-08T17:00:00Z', 500),
+                    stamped('2026-05-15', '2026-05-15T17:00:00Z', 505),
+                ], options);
+                assert.equal(middayOnly.weeklySampleCount, 0);
+                assert.equal(middayOnly.incompleteOfficialCloseWeeks, 2);
+
+                // The current week is excluded even when an hourly sample is
+                // present. Once the week is over, a Monday-only partial sample
+                // still cannot stand in for Thursday 2 July's official close.
+                const partial = core.computeDisplacementWatermark([
+                    stamped('2026-06-26', '2026-06-26T20:20:00Z', 500),
+                    stamped('2026-06-29', '2026-06-29T20:20:00Z', 510),
+                ], { asOf: '2026-07-06' });
+                assert.equal(partial.weeklySampleCount, 1);
+                assert.equal(partial.missingOfficialCloseWeeks, 1);
+                assert.equal(partial.latestOfficialSampleDate, '2026-06-26');
+
+                const incomplete = core.computeDisplacementWatermark([
+                    ...manual,
+                    stamped('2026-05-18', '2026-05-18T19:55:00Z', 510),
+                ], { asOf: '2026-05-20' });
+                assert.equal(incomplete.excludedCurrentWeekSamples, 1);
+                assert.equal(incomplete.latestOfficialSampleDate, '2026-05-15');
+
+                // The current final session becomes usable after its official
+                // close; no artificial wait until Monday. The same sample is
+                // future/incomplete when evaluated five minutes earlier.
+                const fridaySample = stamped('2026-05-22', '2026-05-22T20:15:00Z', 510);
+                const beforeClose = core.computeDisplacementWatermark(
+                    [...manual, fridaySample], { asOf: '2026-05-22T20:14:00Z' }
+                );
+                assert.equal(beforeClose.latestOfficialSampleDate, '2026-05-15');
+                const afterClose = core.computeDisplacementWatermark(
+                    [...manual, fridaySample], { asOf: '2026-05-22T20:20:00Z' }
+                );
+                assert.equal(afterClose.latestOfficialSampleDate, '2026-05-22');
+                assert.equal(afterClose.count, 2);
+
+                const stale = core.computeDisplacementWatermark(manual, { asOf: '2026-06-01' });
+                assert.equal(stale.status, 'stale');
+                assert.equal(stale.ageDays, 17);
+                assert.equal(stale.mean, null);
+                assert.match(stale.reason, /17 days old/);
+
+                ctx.isOfficialExchangeCalendarAvailable = () => false;
+                const unavailable = core.computeDisplacementWatermark(manual, options);
+                assert.equal(unavailable.status, 'calendar_unavailable');
+                assert.equal(unavailable.mean, null);
+
+                // Historical backfill provenance is allowed before the
+                // downloaded official snapshot coverage; ordinary samples
+                // above remain unavailable under the same calendar failure.
+                const validatedHistory = manual.map((sample) => ({
+                    ...sample, backfilled: true, weeklySessionValidated: true,
+                }));
+                const historical = core.computeDisplacementWatermark(validatedHistory, options);
+                assert.equal(historical.status, 'collecting');
+                assert.equal(historical.count, 1);
             },
         },
         {
@@ -689,6 +847,10 @@ module.exports = {
                 const wmOk = { status: 'ok', mean: 1.08, count: 26, required: 8 };
                 const wmLow = { status: 'ok', mean: 0.88, count: 26, required: 8 };
                 const wmCollecting = { status: 'collecting', mean: null, count: 3, required: 8 };
+                const wmStale = {
+                    status: 'stale', mean: null, count: 26, required: 8,
+                    reason: 'latest official weekly MRR observation is 17 days old',
+                };
 
                 const cal = core.buildStrategySuggestion(okSignal('sell_calendar', 1.12), wmOk);
                 assert.equal(cal.stance, 'sell_calendar');
@@ -711,6 +873,10 @@ module.exports = {
                 assert.ok(collecting.reasons.some((r) => r.includes('3/8')));
                 const absent = core.buildStrategySuggestion(okSignal('long_displacement', 0.9), null);
                 assert.equal(absent.stance, 'awaiting_watermark');
+                const stale = core.buildStrategySuggestion(okSignal('long_displacement', 0.9), wmStale);
+                assert.equal(stale.stance, 'awaiting_watermark');
+                assert.equal(stale.structure, null);
+                assert.ok(stale.reasons.some((r) => r.includes('17 days old')));
 
                 const neutral = core.buildStrategySuggestion(okSignal('stand_down', 1.0), wmOk);
                 assert.equal(neutral.stance, 'stand_down');

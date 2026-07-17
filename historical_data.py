@@ -1,10 +1,12 @@
 """Historical replay data access.
 
-Option chains and underlying daily bars come from the shared options-chain
-microservice (Options DB workspace, default http://127.0.0.1:8750) instead of
-a bundled multi-GB SQLite copy. Risk-free rates and the treasury yield curve
-are not part of that service; they live in the small local sqlite_spy/rates.db
-(extracted from the legacy DB by scripts/extract_rates_db.py).
+Option chains and underlying daily bars come from an external options-chain
+microservice over HTTP (default http://127.0.0.1:8750) instead of a bundled
+multi-GB SQLite copy. That service is swappable and this module does not care
+where it lives: see chain_service_config.py. Risk-free rates and the treasury
+yield curve are not part of that service; they live in the small local
+sqlite_spy/rates.db (extracted from the legacy DB by
+scripts/extract_rates_db.py).
 
 The public surface (HistoricalReplayStore method names, arguments, and return
 shapes) is unchanged from the bundled-SQLite implementation, so
@@ -20,8 +22,8 @@ import urllib.request
 from contextlib import closing
 from datetime import datetime
 
+from chain_service_config import DEFAULT_CHAIN_SERVICE_URL
 
-DEFAULT_CHAIN_SERVICE_URL = 'http://127.0.0.1:8750'
 DEFAULT_RATES_DB = os.path.join('sqlite_spy', 'rates.db')
 _LATEST_SENTINEL_DATE = '2999-12-31'
 
@@ -106,10 +108,13 @@ class HistoricalReplayStore:
             finally:
                 exc.close()
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            # Deliberately no "start it with..." hint naming a local path: the
+            # service may be remote or vendor-hosted, in which case such advice
+            # would send the reader chasing a directory that does not exist.
             raise ChainServiceError(
                 f"options chain service unreachable at {self.chain_service_url} "
-                f"({exc}). Start it with: python3 chain_server.py "
-                f"(Options DB/chain_service/)"
+                f"({exc}). Check it is running, or repoint it via "
+                f"config.ini [historical] chain_service_url."
             )
 
     def check_service(self):

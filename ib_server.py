@@ -11,6 +11,7 @@ from datetime import datetime
 from ib_async import *
 import websockets
 
+from chain_service_config import resolve_chain_service_url
 from historical_replay_service import HistoricalReplayService, normalize_replay_date
 from ib_server_order_tracking import (
     build_active_combo_orders_snapshot as build_active_combo_orders_snapshot_via_module,
@@ -69,6 +70,7 @@ from ib_server_market_data import (
     unsubscribe_client_safely as unsubscribe_client_safely_via_market_data,
 )
 from ib_server_ws import (
+    IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_DEFAULT,
     build_ws_client_handler,
     dispatch_execution_action as dispatch_ws_execution_action,
     purge_combo_order_tracking_for_websocket as purge_combo_order_tracking_for_websocket,
@@ -98,9 +100,12 @@ MANAGED_REPRICE_THRESHOLD_DEFAULT = config.getfloat('execution', 'managed_repric
 MANAGED_REPRICE_INTERVAL_SECONDS = config.getfloat('execution', 'managed_reprice_interval_seconds', fallback=2.0)
 MANAGED_REPRICE_MAX_UPDATES = config.getint('execution', 'managed_reprice_max_updates', fallback=12)
 MANAGED_REPRICE_TIMEOUT_SECONDS = config.getfloat('execution', 'managed_reprice_timeout_seconds', fallback=600.0)
-CHAIN_SERVICE_URL = config.get(
-    'historical', 'chain_service_url', fallback='http://127.0.0.1:8750'
-).strip()
+IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS = config.getfloat(
+    'iv_term_structure',
+    'catalog_timeout_seconds',
+    fallback=IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_DEFAULT,
+)
+CHAIN_SERVICE_URL = resolve_chain_service_url(config)
 RATES_SQLITE_DB = os.path.abspath(
     config.get('historical', 'rates_sqlite_db_path', fallback=os.path.join('sqlite_spy', 'rates.db'))
 )
@@ -134,6 +139,8 @@ market_data_generic_ticks_by_con_id = {}
 client_subscription_settings = {}
 ib_connect_task = None
 iv_term_structure_sync_tasks = {}
+iv_term_structure_contract_details_semaphore = asyncio.Semaphore(4)
+iv_term_structure_option_subscription_semaphore = asyncio.Semaphore(4)
 api_market_data_reset_lock = asyncio.Lock()
 api_market_data_generation = 0
 qualified_underlyings = {}
@@ -746,8 +753,10 @@ def _build_managed_accounts_payload():
 async def send_message_safe(ws, message):
     try:
         await ws.send(message)
-    except Exception:
-        pass
+        return True
+    except Exception as exc:
+        logging.warning("WebSocket send failed for %r: %s", getattr(ws, 'remote_address', None), exc)
+        return False
 
 
 def _broadcast_managed_accounts_snapshot():
@@ -1420,6 +1429,8 @@ def _build_iv_term_structure_environment():
         'market_data_generic_ticks_by_con_id': market_data_generic_ticks_by_con_id,
         'client_subscription_settings': client_subscription_settings,
         'iv_term_structure_sync_tasks': iv_term_structure_sync_tasks,
+        'iv_term_structure_contract_details_semaphore': iv_term_structure_contract_details_semaphore,
+        'iv_term_structure_option_subscription_semaphore': iv_term_structure_option_subscription_semaphore,
         'get_api_market_data_generation': _get_api_market_data_generation,
         'api_market_data_reset_in_progress': _api_market_data_reset_in_progress,
         'send_message_safe': send_message_safe,
@@ -1649,6 +1660,7 @@ def _build_ws_handler_environment():
         'get_client_subscription_settings': _get_client_subscription_settings,
         'qualify_one': _qualify_one,
         'handle_iv_term_structure_subscription': _handle_iv_term_structure_subscription,
+        'iv_term_structure_catalog_timeout_seconds': IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS,
         'build_ib_connection_status_payload': _build_ib_connection_status_payload,
         'ensure_ib_connect_task': _ensure_ib_connect_task,
         'reset_all_api_market_data_subscriptions': _reset_all_api_market_data_subscriptions,

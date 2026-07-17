@@ -95,7 +95,16 @@ def _from_service(symbol, start="2010-01-01", end="2099-01-01"):
             continue
         f_iv = [fchain[(atm, t)].get("impliedVolatility") for t in ("call", "put")]
         b_iv = [bchain[(batm, t)].get("impliedVolatility") for t in ("call", "put")]
-        if not all(f_iv) or not all(b_iv):
+        if not lib._usable_signal_ivs(f_iv + b_iv):
+            continue
+        bc = lib._usable_mark(bchain.get((batm, "call")))
+        bp = lib._usable_mark(bchain.get((batm, "put")))
+        if bc is None or bp is None or not (
+            lib._signal_iv_price_consistent(sum(f_iv) / 2, fc + fp, atm, fdte)
+            and lib._signal_iv_price_consistent(
+                sum(b_iv) / 2, bc + bp, batm, (back - entry).days
+            )
+        ):
             continue
         ftd = lib._td_iv(sum(f_iv) / 2, fdte, lib._trading_day_count(trading_dates, entry, front), 0.3)
         btd = lib._td_iv(sum(b_iv) / 2, (back - entry).days,

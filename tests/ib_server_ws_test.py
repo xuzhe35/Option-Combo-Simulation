@@ -895,6 +895,43 @@ class IbServerWsHandlerTests(unittest.TestCase):
             {'action': 'subscribe_iv_term_structure', 'underlying': {'secType': 'IND', 'symbol': 'SPX'}},
         )])
 
+    def test_iv_term_structure_catalog_timeout_returns_explicit_error(self):
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        # The dispatcher floors the timeout, so this lands at 1s, not 0.01s.
+        # The stall must outlast that floor by enough that scheduling jitter
+        # cannot let it win the race, but stay finite so a regressed timeout
+        # fails here instead of hanging the suite.
+        env['iv_term_structure_catalog_timeout_seconds'] = 0.01
+
+        async def stalled_subscription(_websocket, _client_ip, _data):
+            await asyncio.sleep(30)
+
+        env['handle_iv_term_structure_subscription'] = stalled_subscription
+
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {
+                'action': 'subscribe_iv_term_structure',
+                'underlying': {'secType': 'FUT', 'symbol': 'CL'},
+                'optionTemplate': {'symbol': 'CL'},
+            },
+            client_ip='10.0.0.8',
+        ))
+
+        self.assertEqual(len(sent_messages), 1)
+        payload = sent_messages[0][1]
+        self.assertEqual(payload['action'], 'iv_term_structure_error')
+        self.assertEqual(payload['symbol'], 'CL')
+        self.assertIn('timed out', payload['message'])
+        self.assertIn('2158', payload['message'])
+        self.assertTrue(payload['payloadAsOf'])
+        self.assertTrue(payload['batchId'])
+        self.assertIs(payload['quoteComplete'], False)
+        self.assertIs(payload['coherent'], False)
+        self.assertEqual(payload['coherenceReason'], 'error_payload_no_quote_snapshot')
+
     def test_handle_ws_client_routes_active_combo_snapshot_action(self):
         (
             env,

@@ -81,7 +81,7 @@ Current surfaces:
 
 ### Historical replay
 
-- replay snapshots via the shared options-chain-service (`Options DB/chain_service`, http://127.0.0.1:8750) plus local `sqlite_spy/rates.db` for rates
+- replay snapshots via the options-chain-service (default http://127.0.0.1:8750) plus local `sqlite_spy/rates.db` for rates. The service is external and swappable; `chain_service_config.py` is the only place that knows where it lives, resolving `config.ini [historical]` with `OPTION_COMBO_CHAIN_SERVICE_URL` / `_DIR` env overrides. Blank `chain_service_dir` means remote/vendor-hosted, so the launchers report it unreachable instead of trying to start a local server
 - historical date-range metadata
 - replay-date stepping
 - historical risk-free rate hydration

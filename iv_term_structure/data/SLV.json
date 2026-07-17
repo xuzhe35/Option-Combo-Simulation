@@ -4,7 +4,595 @@
   "samples": [
     {
       "symbol": "SLV",
-      "sampledAt": "2025-10-03T20:00:00.000Z",
+      "sampledAt": "2025-05-09T20:15:00Z",
+      "quoteDate": "2025-05-09",
+      "underlyingPrice": 29.8,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250516",
+          "dte": 7,
+          "atmStrike": 30.0,
+          "callIv": 0.25877,
+          "putIv": 0.26853,
+          "atmIv": 0.26365,
+          "callMark": 0.345,
+          "putMark": 0.53,
+          "atmStraddleMark": 0.875,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-05-09T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-05-16T20:15:00Z",
+      "quoteDate": "2025-05-16",
+      "underlyingPrice": 29.3,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250523",
+          "dte": 7,
+          "atmStrike": 29.5,
+          "callIv": 0.25877,
+          "putIv": 0.22951,
+          "atmIv": 0.24414,
+          "callMark": 0.34,
+          "putMark": 0.46,
+          "atmStraddleMark": 0.8,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-05-16T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-05-23T20:15:00Z",
+      "quoteDate": "2025-05-23",
+      "underlyingPrice": 30.45,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250530",
+          "dte": 7,
+          "atmStrike": 30.5,
+          "callIv": 0.25877,
+          "putIv": 0.24902,
+          "atmIv": 0.253895,
+          "callMark": 0.435,
+          "putMark": 0.43,
+          "atmStraddleMark": 0.865,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-05-23T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-05-30T20:15:00Z",
+      "quoteDate": "2025-05-30",
+      "underlyingPrice": 30.0,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250606",
+          "dte": 7,
+          "atmStrike": 30.0,
+          "callIv": 0.21975,
+          "putIv": 0.23926,
+          "atmIv": 0.22950500000000001,
+          "callMark": 0.38,
+          "putMark": 0.38,
+          "atmStraddleMark": 0.76,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-05-30T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-06-06T20:15:00Z",
+      "quoteDate": "2025-06-06",
+      "underlyingPrice": 32.69,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250613",
+          "dte": 7,
+          "atmStrike": 32.5,
+          "callIv": 0.27829,
+          "putIv": 0.2978,
+          "atmIv": 0.288045,
+          "callMark": 0.62,
+          "putMark": 0.44,
+          "atmStraddleMark": 1.06,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-06-06T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-06-13T20:15:00Z",
+      "quoteDate": "2025-06-13",
+      "underlyingPrice": 32.97,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250620",
+          "dte": 7,
+          "atmStrike": 33.0,
+          "callIv": 0.26853,
+          "putIv": 0.27829,
+          "atmIv": 0.27341,
+          "callMark": 0.495,
+          "putMark": 0.505,
+          "atmStraddleMark": 1.0,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-06-13T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-06-20T20:15:00Z",
+      "quoteDate": "2025-06-20",
+      "underlyingPrice": 32.72,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250627",
+          "dte": 7,
+          "atmStrike": 32.5,
+          "callIv": 0.22951,
+          "putIv": 0.23926,
+          "atmIv": 0.234385,
+          "callMark": 0.55,
+          "putMark": 0.315,
+          "atmStraddleMark": 0.865,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-06-20T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-06-27T20:15:00Z",
+      "quoteDate": "2025-06-27",
+      "underlyingPrice": 32.62,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250703",
+          "dte": 6,
+          "atmStrike": 32.5,
+          "callIv": 0.22951,
+          "putIv": 0.22951,
+          "atmIv": 0.22951,
+          "callMark": 0.465,
+          "putMark": 0.32,
+          "atmStraddleMark": 0.785,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-06-27T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-07-03T20:15:00Z",
+      "quoteDate": "2025-07-03",
+      "underlyingPrice": 33.51,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250709",
+          "dte": 6,
+          "atmStrike": 33.5,
+          "callIv": 0.21975,
+          "putIv": 0.21975,
+          "atmIv": 0.21975,
+          "callMark": 0.4,
+          "putMark": 0.36,
+          "atmStraddleMark": 0.76,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-07-03T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-07-11T20:15:00Z",
+      "quoteDate": "2025-07-11",
+      "underlyingPrice": 35.03,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250718",
+          "dte": 7,
+          "atmStrike": 35.0,
+          "callIv": 0.27829,
+          "putIv": 0.31731,
+          "atmIv": 0.29779999999999995,
+          "callMark": 0.57,
+          "putMark": 0.58,
+          "atmStraddleMark": 1.15,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-07-11T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-07-18T20:15:00Z",
+      "quoteDate": "2025-07-18",
+      "underlyingPrice": 34.61,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250725",
+          "dte": 7,
+          "atmStrike": 34.5,
+          "callIv": 0.22951,
+          "putIv": 0.21,
+          "atmIv": 0.21975499999999998,
+          "callMark": 0.505,
+          "putMark": 0.325,
+          "atmStraddleMark": 0.83,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-07-18T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-07-25T20:15:00Z",
+      "quoteDate": "2025-07-25",
+      "underlyingPrice": 34.66,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250801",
+          "dte": 7,
+          "atmStrike": 34.5,
+          "callIv": 0.24902,
+          "putIv": 0.24902,
+          "atmIv": 0.24902,
+          "callMark": 0.57,
+          "putMark": 0.38,
+          "atmStraddleMark": 0.95,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-07-25T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-08-01T20:15:00Z",
+      "quoteDate": "2025-08-01",
+      "underlyingPrice": 33.59,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250808",
+          "dte": 7,
+          "atmStrike": 33.5,
+          "callIv": 0.22951,
+          "putIv": 0.21,
+          "atmIv": 0.21975499999999998,
+          "callMark": 0.485,
+          "putMark": 0.345,
+          "atmStraddleMark": 0.83,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-08-01T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-08-08T20:15:00Z",
+      "quoteDate": "2025-08-08",
+      "underlyingPrice": 34.88,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250815",
+          "dte": 7,
+          "atmStrike": 35.0,
+          "callIv": 0.21975,
+          "putIv": 0.23926,
+          "atmIv": 0.22950500000000001,
+          "callMark": 0.375,
+          "putMark": 0.5,
+          "atmStraddleMark": 0.875,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-08-08T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-08-15T20:15:00Z",
+      "quoteDate": "2025-08-15",
+      "underlyingPrice": 34.5,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250822",
+          "dte": 7,
+          "atmStrike": 34.5,
+          "callIv": 0.19048,
+          "putIv": 0.20024,
+          "atmIv": 0.19536,
+          "callMark": 0.37,
+          "putMark": 0.36,
+          "atmStraddleMark": 0.73,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-08-15T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-08-22T20:15:00Z",
+      "quoteDate": "2025-08-22",
+      "underlyingPrice": 35.34,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250829",
+          "dte": 7,
+          "atmStrike": 35.5,
+          "callIv": 0.20024,
+          "putIv": 0.20024,
+          "atmIv": 0.20024,
+          "callMark": 0.33,
+          "putMark": 0.46,
+          "atmStraddleMark": 0.79,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-08-22T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-08-29T20:15:00Z",
+      "quoteDate": "2025-08-29",
+      "underlyingPrice": 36.19,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250905",
+          "dte": 7,
+          "atmStrike": 36.0,
+          "callIv": 0.18073,
+          "putIv": 0.23926,
+          "atmIv": 0.209995,
+          "callMark": 0.48,
+          "putMark": 0.38,
+          "atmStraddleMark": 0.86,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-08-29T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-09-05T20:15:00Z",
+      "quoteDate": "2025-09-05",
+      "underlyingPrice": 37.21,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250912",
+          "dte": 7,
+          "atmStrike": 37.0,
+          "callIv": 0.20024,
+          "putIv": 0.24902,
+          "atmIv": 0.22463,
+          "callMark": 0.555,
+          "putMark": 0.385,
+          "atmStraddleMark": 0.94,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-09-05T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-09-12T20:15:00Z",
+      "quoteDate": "2025-09-12",
+      "underlyingPrice": 38.34,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250919",
+          "dte": 7,
+          "atmStrike": 38.5,
+          "callIv": 0.21975,
+          "putIv": 0.26853,
+          "atmIv": 0.24414,
+          "callMark": 0.41,
+          "putMark": 0.63,
+          "atmStraddleMark": 1.04,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-09-12T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-09-19T20:15:00Z",
+      "quoteDate": "2025-09-19",
+      "underlyingPrice": 39.04,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250926",
+          "dte": 7,
+          "atmStrike": 39.0,
+          "callIv": 0.21975,
+          "putIv": 0.25877,
+          "atmIv": 0.23926,
+          "callMark": 0.515,
+          "putMark": 0.525,
+          "atmStraddleMark": 1.04,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-09-19T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-09-26T20:15:00Z",
+      "quoteDate": "2025-09-26",
+      "underlyingPrice": 41.86,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251003",
+          "dte": 7,
+          "atmStrike": 42.0,
+          "callIv": 0.2978,
+          "putIv": 0.30755,
+          "atmIv": 0.302675,
+          "callMark": 0.635,
+          "putMark": 0.755,
+          "atmStraddleMark": 1.39,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-09-26T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SLV",
+      "sampledAt": "2025-10-03T20:15:00Z",
       "quoteDate": "2025-10-03",
       "underlyingPrice": 43.52,
       "buckets": [],
@@ -24,11 +612,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-10-03T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-10-10T20:00:00.000Z",
+      "sampledAt": "2025-10-10T20:15:00Z",
       "quoteDate": "2025-10-10",
       "underlyingPrice": 45.43,
       "buckets": [],
@@ -48,11 +640,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-10-10T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-10-17T20:00:00.000Z",
+      "sampledAt": "2025-10-17T20:15:00Z",
       "quoteDate": "2025-10-17",
       "underlyingPrice": 46.99,
       "buckets": [],
@@ -72,11 +668,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-10-17T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-10-24T20:00:00.000Z",
+      "sampledAt": "2025-10-24T20:15:00Z",
       "quoteDate": "2025-10-24",
       "underlyingPrice": 43.99,
       "buckets": [],
@@ -96,11 +696,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-10-24T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-10-31T20:00:00.000Z",
+      "sampledAt": "2025-10-31T20:15:00Z",
       "quoteDate": "2025-10-31",
       "underlyingPrice": 44.01,
       "buckets": [],
@@ -120,11 +724,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-10-31T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-11-07T20:00:00.000Z",
+      "sampledAt": "2025-11-07T21:15:00Z",
       "quoteDate": "2025-11-07",
       "underlyingPrice": 43.92,
       "buckets": [],
@@ -144,11 +752,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-11-07T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-11-14T20:00:00.000Z",
+      "sampledAt": "2025-11-14T21:15:00Z",
       "quoteDate": "2025-11-14",
       "underlyingPrice": 45.96,
       "buckets": [],
@@ -168,11 +780,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-11-14T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-11-21T20:00:00.000Z",
+      "sampledAt": "2025-11-21T21:15:00Z",
       "quoteDate": "2025-11-21",
       "underlyingPrice": 45.3,
       "buckets": [],
@@ -192,11 +808,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-11-21T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-11-28T20:00:00.000Z",
+      "sampledAt": "2025-11-28T21:15:00Z",
       "quoteDate": "2025-11-28",
       "underlyingPrice": 51.21,
       "buckets": [],
@@ -216,11 +836,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-11-28T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-12-05T20:00:00.000Z",
+      "sampledAt": "2025-12-05T21:15:00Z",
       "quoteDate": "2025-12-05",
       "underlyingPrice": 52.95,
       "buckets": [],
@@ -240,11 +864,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-12-05T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-12-12T20:00:00.000Z",
+      "sampledAt": "2025-12-12T21:15:00Z",
       "quoteDate": "2025-12-12",
       "underlyingPrice": 56.1,
       "buckets": [],
@@ -264,11 +892,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-12-12T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-12-19T20:00:00.000Z",
+      "sampledAt": "2025-12-19T21:15:00Z",
       "quoteDate": "2025-12-19",
       "underlyingPrice": 60.93,
       "buckets": [],
@@ -288,11 +920,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-12-19T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2025-12-26T20:00:00.000Z",
+      "sampledAt": "2025-12-26T21:15:00Z",
       "quoteDate": "2025-12-26",
       "underlyingPrice": 71.12,
       "buckets": [],
@@ -312,11 +948,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-12-26T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-01-02T20:00:00.000Z",
+      "sampledAt": "2026-01-02T21:15:00Z",
       "quoteDate": "2026-01-02",
       "underlyingPrice": 65.75,
       "buckets": [],
@@ -336,11 +976,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-01-02T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-01-09T20:00:00.000Z",
+      "sampledAt": "2026-01-09T21:15:00Z",
       "quoteDate": "2026-01-09",
       "underlyingPrice": 72.38,
       "buckets": [],
@@ -360,11 +1004,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-01-09T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-01-16T20:00:00.000Z",
+      "sampledAt": "2026-01-16T21:15:00Z",
       "quoteDate": "2026-01-16",
       "underlyingPrice": 81.02,
       "buckets": [],
@@ -384,11 +1032,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-01-16T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-01-23T20:00:00.000Z",
+      "sampledAt": "2026-01-23T21:15:00Z",
       "quoteDate": "2026-01-23",
       "underlyingPrice": 92.91,
       "buckets": [],
@@ -408,11 +1060,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-01-23T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-01-30T20:00:00.000Z",
+      "sampledAt": "2026-01-30T21:15:00Z",
       "quoteDate": "2026-01-30",
       "underlyingPrice": 75.44,
       "buckets": [],
@@ -432,11 +1088,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-01-30T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-02-06T20:00:00.000Z",
+      "sampledAt": "2026-02-06T21:15:00Z",
       "quoteDate": "2026-02-06",
       "underlyingPrice": 70.19,
       "buckets": [],
@@ -456,11 +1116,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-02-06T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-02-13T20:00:00.000Z",
+      "sampledAt": "2026-02-13T21:15:00Z",
       "quoteDate": "2026-02-13",
       "underlyingPrice": 69.72,
       "buckets": [],
@@ -480,11 +1144,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-02-13T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-02-20T20:00:00.000Z",
+      "sampledAt": "2026-02-20T21:15:00Z",
       "quoteDate": "2026-02-20",
       "underlyingPrice": 76.62,
       "buckets": [],
@@ -504,11 +1172,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-02-20T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-02-27T20:00:00.000Z",
+      "sampledAt": "2026-02-27T21:15:00Z",
       "quoteDate": "2026-02-27",
       "underlyingPrice": 84.99,
       "buckets": [],
@@ -528,11 +1200,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-02-27T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-03-06T20:00:00.000Z",
+      "sampledAt": "2026-03-06T21:15:00Z",
       "quoteDate": "2026-03-06",
       "underlyingPrice": 75.94,
       "buckets": [],
@@ -552,11 +1228,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-03-06T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-03-13T20:00:00.000Z",
+      "sampledAt": "2026-03-13T20:15:00Z",
       "quoteDate": "2026-03-13",
       "underlyingPrice": 72.69,
       "buckets": [],
@@ -576,11 +1256,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-03-13T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-03-20T20:00:00.000Z",
+      "sampledAt": "2026-03-20T20:15:00Z",
       "quoteDate": "2026-03-20",
       "underlyingPrice": 61.52,
       "buckets": [],
@@ -600,11 +1284,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-03-20T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-03-27T20:00:00.000Z",
+      "sampledAt": "2026-03-27T20:15:00Z",
       "quoteDate": "2026-03-27",
       "underlyingPrice": 63.44,
       "buckets": [],
@@ -624,11 +1312,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-03-27T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-04-02T20:00:00.000Z",
+      "sampledAt": "2026-04-02T20:15:00Z",
       "quoteDate": "2026-04-02",
       "underlyingPrice": 65.79,
       "buckets": [],
@@ -648,11 +1340,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-04-02T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-04-10T20:00:00.000Z",
+      "sampledAt": "2026-04-10T20:15:00Z",
       "quoteDate": "2026-04-10",
       "underlyingPrice": 69.08,
       "buckets": [],
@@ -672,11 +1368,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-04-10T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-04-17T20:00:00.000Z",
+      "sampledAt": "2026-04-17T20:15:00Z",
       "quoteDate": "2026-04-17",
       "underlyingPrice": 73.63,
       "buckets": [],
@@ -696,7 +1396,11 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-04-17T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
@@ -1021,7 +1725,7 @@
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-04-24T20:00:00.000Z",
+      "sampledAt": "2026-04-24T20:15:00Z",
       "quoteDate": "2026-04-24",
       "underlyingPrice": 68.79,
       "buckets": [],
@@ -1041,11 +1745,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-04-24T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-05-01T20:00:00.000Z",
+      "sampledAt": "2026-05-01T20:15:00Z",
       "quoteDate": "2026-05-01",
       "underlyingPrice": 68.29,
       "buckets": [],
@@ -1065,11 +1773,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-05-01T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-05-08T20:00:00.000Z",
+      "sampledAt": "2026-05-08T20:15:00Z",
       "quoteDate": "2026-05-08",
       "underlyingPrice": 73.01,
       "buckets": [],
@@ -1089,11 +1801,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-05-08T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-05-15T20:00:00.000Z",
+      "sampledAt": "2026-05-15T20:15:00Z",
       "quoteDate": "2026-05-15",
       "underlyingPrice": 69.04,
       "buckets": [],
@@ -1113,11 +1829,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-05-15T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-05-22T20:00:00.000Z",
+      "sampledAt": "2026-05-22T20:15:00Z",
       "quoteDate": "2026-05-22",
       "underlyingPrice": 68.36,
       "buckets": [],
@@ -1137,11 +1857,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-05-22T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-05-29T20:00:00.000Z",
+      "sampledAt": "2026-05-29T20:15:00Z",
       "quoteDate": "2026-05-29",
       "underlyingPrice": 68.33,
       "buckets": [],
@@ -1161,11 +1885,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-05-29T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-06-05T20:00:00.000Z",
+      "sampledAt": "2026-06-05T20:15:00Z",
       "quoteDate": "2026-06-05",
       "underlyingPrice": 61.57,
       "buckets": [],
@@ -1185,11 +1913,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-06-05T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-06-12T20:00:00.000Z",
+      "sampledAt": "2026-06-12T20:15:00Z",
       "quoteDate": "2026-06-12",
       "underlyingPrice": 61.29,
       "buckets": [],
@@ -1209,11 +1941,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-06-12T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-06-18T20:00:00.000Z",
+      "sampledAt": "2026-06-18T20:15:00Z",
       "quoteDate": "2026-06-18",
       "underlyingPrice": 59.51,
       "buckets": [],
@@ -1233,11 +1969,15 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-06-18T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     },
     {
       "symbol": "SLV",
-      "sampledAt": "2026-06-26T20:00:00.000Z",
+      "sampledAt": "2026-06-26T20:15:00Z",
       "quoteDate": "2026-06-26",
       "underlyingPrice": 53.28,
       "buckets": [],
@@ -1257,31 +1997,11 @@
           "atmPutSubId": ""
         }
       ],
-      "backfilled": true
-    },
-    {
-      "symbol": "SLV",
-      "sampledAt": "2026-06-29T20:00:00.000Z",
-      "quoteDate": "2026-06-29",
-      "underlyingPrice": 52.68,
-      "buckets": [],
-      "details": [
-        {
-          "expiry": "20260706",
-          "dte": 7,
-          "atmStrike": 52.5,
-          "callIv": 0.42462,
-          "putIv": 0.42462,
-          "atmIv": 0.42462,
-          "callMark": 1.345,
-          "putMark": 1.14,
-          "atmStraddleMark": 2.485,
-          "hasCompletePair": true,
-          "atmCallSubId": "",
-          "atmPutSubId": ""
-        }
-      ],
-      "backfilled": true
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-06-26T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     }
   ]
 }

@@ -51,6 +51,8 @@
     const AUTO_SAMPLE_MONITOR_INTERVAL_MS = 60 * 1000;
     const AUTO_SAMPLE_RETRY_DELAY_MS = 5 * 60 * 1000;
     const AUTO_HISTORY_PURPOSE = 'iv-term-structure-auto-samples';
+    const IV_TERM_STRUCTURE_SNAPSHOT_TIMEOUT_MS = 90 * 1000;
+    const NYSE_OPTION_CLOSE_MINUTES = 16 * 60 + 15;
     const CARD_VIEW_STATE_SECTIONS = Object.freeze([
         {
             key: 'calendar',
@@ -263,6 +265,249 @@
             .replace(/'/g, '&#39;');
     }
 
+    function normalizeDateKey(value) {
+        const compact = String(value || '').slice(0, 10).replace(/[-/]/g, '');
+        return /^\d{8}$/.test(compact)
+            ? `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`
+            : '';
+    }
+
+    function dateKeyAtOffset(dateKey, offsetDays) {
+        const normalized = normalizeDateKey(dateKey);
+        if (!normalized) {
+            return '';
+        }
+        const [year, month, day] = normalized.split('-').map(Number);
+        const value = new Date(Date.UTC(year, month - 1, day + offsetDays));
+        return value.toISOString().slice(0, 10);
+    }
+
+    function isoWeekMonday(dateKey) {
+        const normalized = normalizeDateKey(dateKey);
+        if (!normalized) {
+            return '';
+        }
+        const day = new Date(`${normalized}T00:00:00Z`).getUTCDay();
+        return dateKeyAtOffset(normalized, -(day === 0 ? 6 : day - 1));
+    }
+
+    function officialWeekFinalSession(calendarId, dateKey) {
+        const monday = isoWeekMonday(dateKey);
+        if (!monday || typeof globalScope.getOfficialExchangeCalendarDay !== 'function') {
+            return { status: 'calendar_unavailable', date: '' };
+        }
+        let finalSession = '';
+        for (let offset = 0; offset < 5; offset += 1) {
+            const candidate = dateKeyAtOffset(monday, offset);
+            const info = globalScope.getOfficialExchangeCalendarDay(calendarId, candidate);
+            if (!info || info.available !== true) {
+                return { status: 'calendar_unavailable', date: '' };
+            }
+            if (info.status !== 'closed') {
+                finalSession = candidate;
+            }
+        }
+        return finalSession
+            ? { status: 'ok', date: finalSession }
+            : { status: 'calendar_unavailable', date: '' };
+    }
+
+    function localTimestampParts(value, timeZone) {
+        const parsed = new Date(value);
+        if (!Number.isFinite(parsed.getTime())) {
+            return null;
+        }
+        const formatter = new Intl.DateTimeFormat('en-CA', {
+            timeZone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hourCycle: 'h23',
+        });
+        const parts = {};
+        formatter.formatToParts(parsed).forEach((part) => {
+            if (part.type !== 'literal') {
+                parts[part.type] = part.value;
+            }
+        });
+        return {
+            date: `${parts.year}-${parts.month}-${parts.day}`,
+            minuteOfDay: Number(parts.hour) * 60 + Number(parts.minute),
+            timestamp: parsed.getTime(),
+        };
+    }
+
+    function currentExchangeDate(calendarId, nowValue = new Date()) {
+        const timeZone = String(calendarId || '').toUpperCase() === 'NYSE'
+            ? 'America/New_York'
+            : 'America/Chicago';
+        const parts = localTimestampParts(nowValue, timeZone);
+        return parts ? parts.date : new Date(nowValue).toISOString().slice(0, 10);
+    }
+
+    function officialSessionClosePolicy(calendarId, dateKey) {
+        if (typeof globalScope.getOfficialExchangeCalendarDay !== 'function') {
+            return null;
+        }
+        const info = globalScope.getOfficialExchangeCalendarDay(calendarId, dateKey);
+        if (!info || info.available !== true || info.status === 'closed') {
+            return null;
+        }
+        const detail = info.detail && typeof info.detail === 'object' ? info.detail : {};
+        const timeZone = String(detail.timezone || (
+            String(calendarId || '').toUpperCase() === 'NYSE'
+                ? 'America/New_York'
+                : 'America/Chicago'
+        ));
+        const rawClose = String(detail.optionCloseTime || detail.closeTime || '').trim();
+        if (rawClose) {
+            const match = rawClose.match(/^(\d{1,2}):(\d{2})$/);
+            if (match) {
+                return {
+                    timeZone,
+                    closeMinutes: Number(match[1]) * 60 + Number(match[2]),
+                    source: 'official_early_close',
+                };
+            }
+        }
+        if (String(calendarId || '').toUpperCase() === 'NYSE') {
+            return {
+                timeZone: 'America/New_York',
+                closeMinutes: NYSE_OPTION_CLOSE_MINUTES,
+                source: 'nyse_option_close_policy',
+            };
+        }
+        // The generated CME calendars currently prove trade dates, not each
+        // product's option close time. Same-day CME/FOP action therefore
+        // remains fail-closed; a later local date is unambiguously complete.
+        return { timeZone, closeMinutes: null, source: 'close_time_unavailable' };
+    }
+
+    function evaluateSessionTimestamp(calendarId, sessionDate, timestamp) {
+        const dateKey = normalizeDateKey(sessionDate);
+        const policy = officialSessionClosePolicy(calendarId, dateKey);
+        if (!dateKey || !policy) {
+            return { status: 'calendar_unavailable' };
+        }
+        const local = localTimestampParts(timestamp, policy.timeZone);
+        if (!local) {
+            return { status: 'missing_timestamp' };
+        }
+        if (local.date < dateKey) {
+            return { status: 'future', localDate: local.date };
+        }
+        if (local.date > dateKey) {
+            return { status: 'complete', localDate: local.date, source: policy.source };
+        }
+        if (!Number.isFinite(policy.closeMinutes)) {
+            return { status: 'close_time_unavailable', localDate: local.date };
+        }
+        return local.minuteOfDay >= policy.closeMinutes
+            ? { status: 'complete', localDate: local.date, source: policy.source }
+            : { status: 'pre_close', localDate: local.date, source: policy.source };
+    }
+
+    function resolveCardCalendarId(card) {
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
+        return String(profile && profile.calendarId || 'NYSE').toUpperCase();
+    }
+
+    function latestCompletedOfficialWeek(calendarId, nowValue) {
+        const localDate = currentExchangeDate(calendarId, nowValue);
+        const currentWeek = officialWeekFinalSession(calendarId, localDate);
+        if (currentWeek.status !== 'ok') {
+            return { status: 'calendar_unavailable', date: '' };
+        }
+        const currentCompletion = evaluateSessionTimestamp(calendarId, currentWeek.date, nowValue);
+        if (currentCompletion.status === 'complete') {
+            return { status: 'ok', date: currentWeek.date };
+        }
+        const previousWeekDate = dateKeyAtOffset(isoWeekMonday(localDate), -1);
+        return officialWeekFinalSession(calendarId, previousWeekDate);
+    }
+
+    function evaluateWeeklySignalReadiness(card, nowValue = new Date(), context = {}) {
+        const calendarId = resolveCardCalendarId(card);
+        const anchorDate = normalizeDateKey(card && card.catalog && card.catalog.anchorDate);
+        // Only the server-declared payload time is evidence. lastSyncLabel is
+        // presentation state and must never turn client receipt time into an
+        // actionable weekly close.
+        const signalAsOf = String(card && card.catalog && card.catalog.payloadAsOf || '').trim();
+        if (!anchorDate || !signalAsOf) {
+            return { status: 'missing_snapshot', actionable: false, calendarId, anchorDate, signalAsOf };
+        }
+        const weekEnd = officialWeekFinalSession(calendarId, anchorDate);
+        if (weekEnd.status !== 'ok') {
+            return { status: 'calendar_unavailable', actionable: false, calendarId, anchorDate, signalAsOf };
+        }
+        if (anchorDate !== weekEnd.date) {
+            return {
+                status: 'partial_week', actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: weekEnd.date,
+            };
+        }
+        const completion = evaluateSessionTimestamp(calendarId, anchorDate, signalAsOf);
+        if (completion.status !== 'complete') {
+            return {
+                status: completion.status, actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: weekEnd.date,
+            };
+        }
+        if (completion.localDate !== anchorDate) {
+            return {
+                status: 'off_session_snapshot', actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: weekEnd.date,
+            };
+        }
+        const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
+        if (!Number.isFinite(now.getTime()) || Date.parse(signalAsOf) > now.getTime()) {
+            return {
+                status: 'future', actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: weekEnd.date,
+            };
+        }
+        const latestWeek = latestCompletedOfficialWeek(calendarId, now);
+        if (latestWeek.status !== 'ok') {
+            return {
+                status: 'calendar_unavailable', actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: '',
+            };
+        }
+        if (anchorDate !== latestWeek.date) {
+            return {
+                status: 'stale_anchor', actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: latestWeek.date,
+            };
+        }
+
+        const coreApi = core();
+        const detailRows = Array.isArray(context && context.detailRows)
+            ? context.detailRows
+            : buildDetailRows(card);
+        const signal = context && context.signal
+            ? context.signal
+            : coreApi.computeRegimeSignal(detailRows);
+        const coherence = typeof coreApi.evaluateSignalSnapshotCoherence === 'function'
+            ? coreApi.evaluateSignalSnapshotCoherence(detailRows, signal, card && card.catalog)
+            : { status: 'incoherent_snapshot', coherent: false };
+        if (!coherence.coherent) {
+            return {
+                status: coherence.status, actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: latestWeek.date, snapshotId: coherence.snapshotId || '',
+            };
+        }
+        // The official close is observation time, after the regular entry
+        // session. Until a separately backtested next-session execution rule
+        // exists, a fully coherent close signal is complete but not executable.
+        return {
+            status: 'execution_protocol_unavailable', actionable: false, signalComplete: true,
+            calendarId, anchorDate, signalAsOf, expectedSession: latestWeek.date,
+            snapshotId: coherence.snapshotId,
+        };
+    }
+
     function normalizeHistoryDocument(rawDocument, symbol) {
         const raw = rawDocument && typeof rawDocument === 'object' ? rawDocument : {};
         const rawSamples = Array.isArray(raw.samples) ? raw.samples : [];
@@ -294,10 +539,8 @@
         };
     }
 
-    // Manual history + hourly automatic file, merged for the strategy panel.
-    // Each source is chronological on its own but concatenating them is not,
-    // so sort on sampledAt: downstream readers (the MRR watermark) resolve
-    // one representative sample per day and must see the real latest one.
+    // Manual history + hourly automatic file. The core is the sole authority
+    // that reduces these raw observations to official weekly closes.
     function strategyHistoryDocument(card) {
         const manual = readOnlyHistoryDocument(card);
         const automatic = card && card.autoHistoryDocument
@@ -620,7 +863,7 @@
     function createCardState(entry, options = {}) {
         const profile = resolveProfile(entry.symbol);
         const isFop = isFuturesOptionProfile(profile);
-        const today = new Date().toISOString().slice(0, 10);
+        const today = currentExchangeDate(profile.calendarId || 'NYSE');
         const futuresContractMonth = isFop
             ? (
                 normalizeFuturesContractMonth(entry.futuresContractMonth)
@@ -803,6 +1046,27 @@
         }
         card.underlyingPrice = parsed;
         return true;
+    }
+
+    function serverPayloadAsOf(payload) {
+        const value = String(payload && payload.payloadAsOf || '').trim();
+        return Number.isFinite(Date.parse(value)) ? value : '';
+    }
+
+    function quoteWithServerSnapshotEvidence(quote, payload) {
+        const source = quote && typeof quote === 'object' ? quote : {};
+        const payloadAsOf = serverPayloadAsOf(payload);
+        const quoteAsOf = String(source.quoteAsOf || payloadAsOf || '').trim();
+        const snapshotId = String(
+            source.snapshotId || source.batchId
+            || payload && (payload.snapshotId || payload.batchId)
+            || ''
+        ).trim();
+        return {
+            ...source,
+            ...(quoteAsOf ? { quoteAsOf } : {}),
+            ...(snapshotId ? { snapshotId } : {}),
+        };
     }
 
     function sortExpiryRows(rows) {
@@ -1047,7 +1311,7 @@
                 multiplier: String(profile.optionMultiplier || 100),
                 tradingClass: profile.tradingClass || '',
             },
-            anchorDate: new Date().toISOString().slice(0, 10),
+            anchorDate: currentExchangeDate(profile.calendarId || 'NYSE'),
             maxDte: runtime.config ? runtime.config.maxDte : EMBEDDED_DEFAULT_CONFIG.maxDte,
             strikeRadius: runtime.config ? runtime.config.strikeRadius : EMBEDDED_DEFAULT_CONFIG.strikeRadius,
             maxOptionStreams: normalizeOptionStreamLimit(card && card.maxOptionStreams),
@@ -1130,8 +1394,14 @@
                 if (String(payload.symbol || '').trim().toUpperCase() !== card.symbol) {
                     return;
                 }
-                card.catalog = payload;
+                const payloadAsOf = serverPayloadAsOf(payload);
+                card.catalog = { ...payload, payloadAsOf };
                 card.quotesBySubId = {};
+                if (payload.options && typeof payload.options === 'object') {
+                    Object.entries(payload.options).forEach(([subId, quote]) => {
+                        card.quotesBySubId[subId] = quoteWithServerSnapshotEvidence(quote, payload);
+                    });
+                }
                 card.catalogPatchCount = 0;
                 armCatalogPatchWatchdog(card);
                 updateUnderlyingPrice(card, payload && payload.underlyingPrice);
@@ -1141,7 +1411,7 @@
                     saveFuturesContractMonth(card.symbol, resolvedFuturesContractMonth);
                     card.forceBodyRefreshOnce = true;
                 }
-                card.lastSyncLabel = new Date().toISOString();
+                card.lastSyncLabel = payloadAsOf;
                 setCardStatus(
                     card,
                     payload.warning
@@ -1224,8 +1494,11 @@
 
             if (payload && payload.options && typeof payload.options === 'object') {
                 Object.entries(payload.options).forEach(([subId, quote]) => {
-                    card.quotesBySubId[subId] = quote;
+                    card.quotesBySubId[subId] = quoteWithServerSnapshotEvidence(quote, payload);
                 });
+                // A changed-ticker packet is partial by construction. It may
+                // update individual quote evidence, but it cannot advance the
+                // catalog's coherent whole-curve payloadAsOf.
                 render();
             }
         });
@@ -1551,7 +1824,7 @@
                 const timeoutId = setTimeout(() => {
                     card.pendingCatalog = null;
                     reject(new Error('Timed out while waiting for the IV term structure snapshot.'));
-                }, 30000);
+                }, IV_TERM_STRUCTURE_SNAPSHOT_TIMEOUT_MS);
                 card.pendingCatalog = { resolve, reject, timeoutId };
                 ws.send(JSON.stringify(buildSubscribePayload(card)));
             });
@@ -2445,10 +2718,12 @@
         stand_down: 'STAND DOWN',
         sell_calendar: 'SELL CALENDAR',
         calendar_unavailable: 'CALENDAR UNAVAILABLE',
+        preview: 'PREVIEW / NO ACTION',
+        mrr_unavailable: 'MRR UNAVAILABLE',
         no_signal: 'NO SIGNAL',
     });
 
-    function buildStrategySignalPanel(card, comparedRows, historyDocument) {
+    function buildStrategySignalPanel(card, comparedRows, historyDocument, nowValue = new Date()) {
         const coreApi = core();
         if (typeof coreApi.computeRegimeSignal !== 'function') {
             return '';
@@ -2460,9 +2735,16 @@
             ? historyDocument.samples
             : [];
         const signal = coreApi.computeRegimeSignal(detailRows);
-        const watermark = coreApi.computeDisplacementWatermark(samples);
-        const profile = card && card.profile ? card.profile : null;
-        const calendarId = String(profile && profile.calendarId || 'NYSE').toUpperCase();
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
+        const calendarId = resolveCardCalendarId(card);
+        const signalReadiness = evaluateWeeklySignalReadiness(card, nowValue, { detailRows, signal });
+        const watermark = coreApi.computeDisplacementWatermark(samples, {
+            // MRR freshness is judged against wall-clock now. The signal's
+            // close timestamp authenticates that signal only; it must not
+            // rewind the watermark staleness clock.
+            asOf: nowValue,
+            calendarKey: calendarId,
+        });
         const coverageStart = signal.status === 'ok'
             ? String(card && card.catalog && card.catalog.anchorDate || signal.front.expiry || '')
             : '';
@@ -2470,13 +2752,23 @@
         const calendarAvailable = typeof globalScope.isOfficialExchangeCalendarAvailable === 'function'
             ? globalScope.isOfficialExchangeCalendarAvailable(calendarId, coverageStart, coverageEnd)
             : calendarId === 'NYSE';
-        const suggestion = signal.status !== 'ok' || calendarAvailable
+        let suggestion = signal.status !== 'ok' || calendarAvailable
             ? coreApi.buildStrategySuggestion(signal, watermark)
             : { stance: 'calendar_unavailable', structure: null, exitRule: null };
+        if (signal.status === 'ok' && calendarAvailable && !signalReadiness.actionable) {
+            suggestion = signalReadiness.signalComplete
+                ? { stance: 'awaiting_execution_protocol', structure: null, exitRule: null }
+                : { stance: 'awaiting_official_close', structure: null, exitRule: null };
+        }
 
-        const zone = signal.status === 'ok'
+        const signalZone = signal.status === 'ok'
             ? (calendarAvailable ? signal.zone : 'calendar_unavailable')
             : 'no_signal';
+        const zone = signalZone === 'calendar_unavailable' || signalZone === 'no_signal'
+            ? signalZone
+            : (!signalReadiness.actionable
+                ? 'preview'
+                : (suggestion.stance === 'awaiting_watermark' ? 'mrr_unavailable' : signalZone));
         const calendarNote = calendarAvailable
             ? ''
             : ` · calendar unavailable (${escapeHtml(calendarId)} official snapshot missing/stale)`;
@@ -2490,11 +2782,49 @@
             { key: 'long_displacement', text: `<${zoneLow.toFixed(2)} reverse fly` },
             { key: 'stand_down', text: `${zoneLow.toFixed(2)}–${zoneHigh.toFixed(2)} stand down` },
             { key: 'sell_calendar', text: `>${zoneHigh.toFixed(2)} calendar` },
-        ].map((segment) => `<span class="ivts-zone-seg${zone === segment.key ? ' is-active' : ''}">${escapeHtml(segment.text)}</span>`)
+        ].map((segment) => `<span class="ivts-zone-seg${signalZone === segment.key ? ' is-active' : ''}">${escapeHtml(segment.text)}</span>`)
             .join('<span class="ivts-zone-sep">·</span>');
-        const watermarkText = watermark.status === 'ok'
+        const watermarkValue = watermark.status === 'ok'
             ? `${watermark.mean.toFixed(2)} (n=${watermark.count})`
-            : `collecting ${watermark.count}/${watermark.required}`;
+            : (watermark.status === 'collecting'
+                ? `collecting ${watermark.count}/${watermark.required}`
+                : `n=${watermark.count}/${watermark.required}`);
+        const watermarkDiagnostics = [
+            Number(watermark.missingOfficialCloseWeeks) > 0
+                ? `${watermark.missingOfficialCloseWeeks} missing weekly close`
+                : '',
+            Number(watermark.incompleteOfficialCloseWeeks) > 0
+                ? `${watermark.incompleteOfficialCloseWeeks} incomplete weekly close`
+                : '',
+        ].filter(Boolean).join(' · ');
+        const watermarkText = watermark.status === 'ok'
+            ? `${watermarkValue}${watermark.latestObservationDate ? ` · through ${watermark.latestObservationDate}` : ''}`
+            : `${watermark.status}${watermark.reason ? `: ${watermark.reason}` : ''}`
+                + `${watermark.latestObservationDate ? ` · last ${watermark.latestObservationDate}` : ''}`
+                + ` · ${watermarkValue}${watermarkDiagnostics ? ` · ${watermarkDiagnostics}` : ''}`;
+        const readinessLabels = {
+            ok: 'official weekly close observed / no action',
+            missing_snapshot: 'no timestamped snapshot',
+            calendar_unavailable: 'official calendar unavailable',
+            partial_week: `partial week; expected ${signalReadiness.expectedSession || '--'}`,
+            pre_close: 'preview before official option close',
+            close_time_unavailable: 'official option close time unavailable',
+            missing_timestamp: 'snapshot timestamp missing',
+            future: 'future-dated snapshot rejected',
+            off_session_snapshot: 'snapshot is not from the official weekly-close session',
+            stale_anchor: `stale anchor; expected ${signalReadiness.expectedSession || '--'}`,
+            missing_snapshot_timestamp: 'server snapshot timestamp missing',
+            missing_snapshot_id: 'server snapshot id missing',
+            incoherent_snapshot: 'server reports an incremental/incomplete curve',
+            insufficient_signal: 'required signal legs unavailable',
+            missing_snapshot_leg: 'required snapshot leg missing',
+            mixed_snapshot_legs: 'required legs span different snapshots',
+            stale_snapshot_leg: 'required leg quote is stale within the snapshot',
+            execution_protocol_unavailable: 'official signal complete; no next-session execution protocol',
+        };
+        const signalAsOfText = signalReadiness.signalAsOf
+            ? `${signalReadiness.signalAsOf} · ${readinessLabels[signalReadiness.status] || signalReadiness.status}`
+            : (readinessLabels[signalReadiness.status] || signalReadiness.status);
         const benchmarkFamily = String(profile && (profile.enteredSymbol || profile.family) || (card && card.symbol) || '').toUpperCase();
         const mrrBenchmark = typeof coreApi.getMrrResearchBenchmark === 'function'
             ? coreApi.getMrrResearchBenchmark(benchmarkFamily)
@@ -2511,13 +2841,17 @@
                 ? 'No signal: subscribe/sync the ~7d and ~14d expiries.'
                 : (suggestion.stance === 'calendar_unavailable'
                     ? `${calendarId} official trading calendar is unavailable — no strategy suggestion.`
+                    : (suggestion.stance === 'awaiting_execution_protocol'
+                        ? 'Preview only: the official weekly-close signal is complete, but no backtested next-session execution protocol exists.'
+                    : (suggestion.stance === 'awaiting_official_close'
+                        ? 'Preview only: sync the official final weekly session after option close before acting.'
                     : (suggestion.stance === 'awaiting_watermark'
                         ? 'Zone favors reverse fly, but the watermark must prove it first — keep weekly samples, no structure yet.'
-                        : 'No options this week; delta book only.')));
+                        : 'No options this week; delta book only.')))));
         const panelTitle = signal.status !== 'ok'
             ? 'Sync the required front and back expiries before evaluating the official-calendar strategy signal.'
             : (calendarAvailable
-            ? 'Frozen playbook from VRP_RESEARCH_MEMO.md: slope<0.95 reverse iron fly (hold), 0.95-1.05 stand down, >1.05 calendar (tp50). Signal lambda fixed at 0.3 regardless of the TD IV display lambda. MRR (Move Realization Ratio) = realized |move| / expected move over your accumulated samples; the watermark gate vetoes the reverse fly below 0.95.'
+            ? 'Frozen playbook from VRP_RESEARCH_MEMO.md: slope<0.95 reverse iron fly (hold), 0.95-1.05 stand down, >1.05 calendar (tp50). Signal lambda fixed at 0.3 regardless of the TD IV display lambda. Official-close signals remain preview-only until a next-session execution protocol is separately backtested; reverse-fly research also requires fresh, verified weekly-close MRR history.'
             : `${calendarId} official trading calendar is missing or does not cover these expiries. No strategy suggestion is produced.`);
 
         return `
@@ -2528,6 +2862,7 @@
                     <span class="ivts-strategy-disclaimer">suggestion only · paper/sim first</span>
                 </div>
                 <div class="ivts-strategy-row"><span>TD slope (λ=0.3)</span><span>${slopeText}</span></div>
+                <div class="ivts-strategy-row"><span>Signal as of</span><span>${escapeHtml(signalAsOfText)}</span></div>
                 <div class="ivts-strategy-row"><span>Zones</span><span class="ivts-zone-map">${zoneMapText}</span></div>
                 <div class="ivts-strategy-row"><span>MRR watermark (|move|/EM)</span><span>${watermarkText}</span></div>
                 ${mrrBenchmarkRow}
@@ -3159,6 +3494,7 @@
 
     globalScope.OptionComboIvTermStructurePage = {
         _test: {
+            IV_TERM_STRUCTURE_SNAPSHOT_TIMEOUT_MS,
             normalizeWsHost,
             normalizeWsPort,
             normalizeFuturesContractMonth,
@@ -3190,6 +3526,12 @@
             loadSavedTdIvLambda,
             saveTdIvLambda,
             buildStrategySignalPanel,
+            officialWeekFinalSession,
+            latestCompletedOfficialWeek,
+            evaluateSessionTimestamp,
+            evaluateWeeklySignalReadiness,
+            serverPayloadAsOf,
+            quoteWithServerSnapshotEvidence,
             normalizeAutoHistoryDocument,
             strategyHistoryDocument,
             shouldRunAutoSample,

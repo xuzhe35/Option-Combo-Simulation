@@ -131,8 +131,18 @@ def run(args):
         back_atm = lib._atm_strike(back_chain, spot)
         back_iv = [back_chain[(back_atm, t)].get("impliedVolatility")
                    for t in ("call", "put")] if back_atm is not None else [None]
-        if not all(front_iv) or not all(back_iv):
-            skip("missing IV")
+        if not lib._usable_signal_ivs(front_iv + back_iv):
+            skip("missing or vendor-floor IV")
+            continue
+        back_call = lib._usable_mark(back_chain.get((back_atm, "call")))
+        back_put = lib._usable_mark(back_chain.get((back_atm, "put")))
+        if back_call is None or back_put is None or not (
+            lib._signal_iv_price_consistent(sum(front_iv) / 2, fc + fp, atm, front_dte)
+            and lib._signal_iv_price_consistent(
+                sum(back_iv) / 2, back_call + back_put, back_atm, (back - entry).days
+            )
+        ):
+            skip("ATM price/IV inconsistency")
             continue
         front_iv_td = lib._td_iv(sum(front_iv) / 2, front_dte, front_trad, lam)
         back_iv_td = lib._td_iv(sum(back_iv) / 2, (back - entry).days, back_trad, lam)

@@ -1,10 +1,23 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from runtime_contracts import LiveMarketDataPayload, ManualUnderlyingSyncPayload, OptionQuoteSnapshot, QuoteSnapshot
+
+
+def server_utc_now_iso() -> str:
+    """Return a server-generated, timezone-explicit UTC payload timestamp."""
+    return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
+def stamp_quote_as_of(quote: QuoteSnapshot, quote_as_of: str) -> QuoteSnapshot:
+    """Attach receipt-batch evidence without mutating a shared ticker object."""
+    stamped_quote: QuoteSnapshot = dict(quote)
+    stamped_quote['quoteAsOf'] = quote_as_of
+    return stamped_quote
 
 
 def extract_market_price(ticker: Any) -> float | None:
@@ -196,6 +209,8 @@ def build_pending_tickers_handler(env):
         if not env['connected_clients']:
             return
 
+        payload_as_of = server_utc_now_iso()
+        batch_id = uuid4().hex
         changed_ticker_ids, changed_contract_ids = collect_changed_ticker_keys(tickers)
         process_all = not (changed_ticker_ids or changed_contract_ids)
 
@@ -206,6 +221,11 @@ def build_pending_tickers_handler(env):
 
             wants_greeks = client_wants_greeks(ws, env['client_subscription_settings'])
             payload: LiveMarketDataPayload = {
+                'payloadAsOf': payload_as_of,
+                'batchId': batch_id,
+                'quoteComplete': False,
+                'coherent': False,
+                'coherenceReason': 'incremental_changed_tickers_only',
                 'underlyingPrice': None,
                 'underlyingQuote': None,
                 'options': {},
@@ -220,6 +240,7 @@ def build_pending_tickers_handler(env):
                     sec_type = getattr(getattr(ticker, 'contract', None), 'secType', '')
                     quote = extract_quote_snapshot(ticker, sec_type)
                     if quote is not None:
+                        quote = stamp_quote_as_of(quote, payload_as_of)
                         payload['underlyingPrice'] = quote['mark']
                         payload['underlyingQuote'] = quote
                         has_data = True
@@ -234,12 +255,14 @@ def build_pending_tickers_handler(env):
                     stock_sym = sub_id.replace('stock_', '')
                     quote = extract_quote_snapshot(ticker, 'STK')
                     if quote is not None:
+                        quote = stamp_quote_as_of(quote, payload_as_of)
                         payload['stocks'][stock_sym] = quote
                         has_data = True
                 elif sub_id.startswith('future_'):
                     future_id = sub_id.replace('future_', '')
                     quote = extract_quote_snapshot(ticker, 'FUT')
                     if quote is not None:
+                        quote = stamp_quote_as_of(quote, payload_as_of)
                         payload['futures'][future_id] = quote
                         has_data = True
                 else:
@@ -247,6 +270,7 @@ def build_pending_tickers_handler(env):
                     quote = extract_quote_snapshot(ticker, sec_type)
                     if quote is None:
                         continue
+                    quote = stamp_quote_as_of(quote, payload_as_of)
 
                     iv = extract_option_iv(ticker)
                     delta = extract_option_delta(ticker) if wants_greeks else None

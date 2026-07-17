@@ -178,10 +178,12 @@ Live market-data streams are pooled by qualified contract id. A second subscript
 
 This is the lightweight historical replay server. Since 2026-07 it no longer
 reads a bundled SQLite copy: option chains and underlying daily bars come from
-the shared **options-chain-service** (`Options DB/chain_service/chain_server.py`,
-default `http://127.0.0.1:8750`). Risk-free rates and the treasury
-yield curve still come from the small local `sqlite_spy/rates.db` (extracted
-from the legacy DB by `scripts/extract_rates_db.py`).
+an external **options-chain-service** over HTTP (default
+`http://127.0.0.1:8750`). That service is deliberately swappable — see
+[Pointing at a different chain service](#pointing-at-a-different-chain-service).
+Risk-free rates and the treasury yield curve still come from the small local
+`sqlite_spy/rates.db` (extracted from the legacy DB by
+`scripts/extract_rates_db.py`).
 
 Current responsibilities:
 
@@ -311,9 +313,9 @@ $PYTHON = powershell -NoProfile -ExecutionPolicy Bypass -File .\powershell_scrip
 
 Use this when you only need replay snapshots for the main workspace and do not need Chart Lab bars, IV term-structure sync, or live execution.
 
-Replay data requires the shared options-chain-service to be running
-(`Options DB/chain_service`: `python3 chain_server.py`, default
-`http://127.0.0.1:8750`). The `start_historical_replay` launchers
+Replay data requires the options-chain-service to be running (default
+`http://127.0.0.1:8750`; bundled layout is `Options DB/chain_service`:
+`python3 chain_server.py`). The `start_historical_replay` launchers
 (.bat/.ps1 and `start_historical_replay_mac.command`) probe `/health` and
 start it automatically; when starting `historical_server.py` by hand, start
 the chain service yourself first.
@@ -361,14 +363,62 @@ managed_reprice_threshold_default = 0.01
 managed_reprice_interval_seconds = 2.0
 managed_reprice_max_updates = 12
 managed_reprice_timeout_seconds = 600
+
+[iv_term_structure]
+catalog_timeout_seconds = 75
 ```
+
+`catalog_timeout_seconds` bounds IB contract/option-chain discovery for a sync
+request. On expiry the browser gets an error naming the market-data (2104) and
+sec-def (2158) farms instead of stalling. Raise it when a slow sec-def farm makes
+wide FOP chains legitimately overrun, but keep it under the browser's own 90s
+backstop — past that the client gives up first and reports no cause. Values below
+1s are floored.
 
 Optional historical data overrides:
 
 ```ini
 [historical]
 chain_service_url = http://127.0.0.1:8750
+chain_service_dir = ../../Options DB/chain_service
 rates_sqlite_db_path = sqlite_spy/rates.db
+```
+
+#### Pointing at a different chain service
+
+The options-chain-service lives outside this repo and is meant to be replaced —
+by a copy at a new path after moving the project, or by a different vendor's
+feed. Nothing in the code hardcodes where it is; `chain_service_config.py`
+resolves it, and everything downstream talks HTTP.
+
+Two independent knobs, each resolved as **env var → `config.ini` → default**:
+
+| Setting | Env override | Meaning |
+| --- | --- | --- |
+| `chain_service_url` | `OPTION_COMBO_CHAIN_SERVICE_URL` | Where to talk to the service. The only one that matters at runtime. |
+| `chain_service_dir` | `OPTION_COMBO_CHAIN_SERVICE_DIR` | Where its `chain_server.py` lives, so the replay launchers can start it for you. Relative paths resolve against this repo, not your shell's cwd. **Leave empty when the service is remote** and not ours to start. |
+
+Common cases:
+
+```bash
+# Moved either project: pin an absolute path (or a new relative one).
+chain_service_dir = /Users/you/projects/Options DB/chain_service
+
+# Bought a vendor feed: point the url out, and blank the dir so the launchers
+# stop trying to start a local server that no longer exists.
+chain_service_url = https://vendor.example/v2/chains
+chain_service_dir =
+
+# Try a provider for one run without touching tracked config:
+OPTION_COMBO_CHAIN_SERVICE_URL=https://vendor.example/v2/chains \
+  ./start_historical_replay_mac.command
+```
+
+Check what the stack will actually use:
+
+```bash
+python3 chain_service_config.py --url
+python3 chain_service_config.py --dir     # empty output means "remote"
 ```
 
 Important distinction:

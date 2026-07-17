@@ -68,6 +68,16 @@ module.exports = {
     name: 'iv_term_structure.js',
     tests: [
         {
+            name: 'allows remote IB catalog discovery up to ninety seconds',
+            run() {
+                const ctx = loadPageContext(null);
+                assert.equal(
+                    ctx.OptionComboIvTermStructurePage._test.IV_TERM_STRUCTURE_SNAPSHOT_TIMEOUT_MS,
+                    90 * 1000
+                );
+            },
+        },
+        {
             name: 'detects focused baseline select inside a card before body rerenders',
             run() {
                 const baselineSelect = {
@@ -620,18 +630,32 @@ module.exports = {
                 const { buildStrategySignalPanel } = ctx.OptionComboIvTermStructurePage._test;
                 const row = (expiry, dte, tradDte, atmIv) => ({
                     expiry, dte, tradDte, atmIv, hasCompletePair: true, subscriptionSelected: true,
+                    callSnapshotId: 'weekly-close-1', putSnapshotId: 'weekly-close-1',
+                    callQuoteAsOf: '2026-07-17T20:20:00Z', putQuoteAsOf: '2026-07-17T20:20:00Z',
                 });
+                const now = new Date('2026-07-17T20:21:00Z');
+                const actionableCard = {
+                    symbol: 'SPY',
+                    catalog: {
+                        anchorDate: '2026-07-17', payloadAsOf: '2026-07-17T20:20:00Z',
+                        snapshotId: 'weekly-close-1', coherent: true, quoteComplete: true,
+                    },
+                };
 
                 const html = buildStrategySignalPanel(
-                    { symbol: 'SPY' },
+                    actionableCard,
                     { detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)] },
-                    { samples: [] }
+                    { samples: [] },
+                    now
                 );
-                assert.match(html, /SELL CALENDAR/);
-                assert.match(html, /is-sell_calendar/);
+                assert.match(html, /PREVIEW \/ NO ACTION/);
+                assert.match(html, /is-preview/);
                 assert.match(html, /TD slope/);
+                assert.match(html, /Signal as of/);
+                assert.match(html, /official signal complete; no next-session execution protocol/);
                 assert.match(html, /collecting 0\/8/);
-                assert.match(html, /Calendar: sell front ATM straddle/);
+                assert.doesNotMatch(html, /Calendar: sell front ATM straddle/);
+                assert.match(html, /no backtested next-session execution protocol exists/);
                 assert.match(html, /suggestion only/);
 
                 // Studied symbols carry the per-family MRR research reference
@@ -649,9 +673,10 @@ module.exports = {
                 assert.match(html, /is-active">&gt;1\.05 calendar/);
                 assert.doesNotMatch(html, /is-active">&lt;0\.95 reverse fly/);
                 const unstudied = buildStrategySignalPanel(
-                    { symbol: 'TLT' },
+                    { ...actionableCard, symbol: 'TLT' },
                     { detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)] },
-                    { samples: [] }
+                    { samples: [] },
+                    now
                 );
                 assert.doesNotMatch(unstudied, /MRR research ref/);
 
@@ -659,16 +684,31 @@ module.exports = {
                 // era, so the deep-contango zone shows but withholds the
                 // reverse-fly structure (fail closed).
                 const contango = buildStrategySignalPanel(
-                    { symbol: 'SPY' },
+                    actionableCard,
                     { detailRows: [row('20260717', 7, 5, 0.15), row('20260724', 14, 10, 0.21)] },
-                    { samples: [] }
+                    { samples: [] },
+                    now
                 );
-                assert.match(contango, /LONG DISPLACEMENT/);
+                assert.match(contango, /PREVIEW \/ NO ACTION/);
                 assert.doesNotMatch(contango, /Reverse iron fly: buy/);
-                assert.match(contango, /watermark must prove it first/);
+                assert.match(contango, /no backtested next-session execution protocol exists/);
                 assert.match(contango, /is-active">&lt;0\.95 reverse fly/);
 
-                const empty = buildStrategySignalPanel({ symbol: 'SPY' }, { detailRows: [] }, { samples: [] });
+                // Signal timestamp authenticates the curve but must not rewind
+                // the MRR staleness clock away from wall-clock now.
+                const originalWatermark = ctx.OptionComboIvTermStructureCore.computeDisplacementWatermark;
+                let watermarkAsOf = null;
+                ctx.OptionComboIvTermStructureCore.computeDisplacementWatermark = (samples, options) => {
+                    watermarkAsOf = options.asOf;
+                    return originalWatermark(samples, options);
+                };
+                buildStrategySignalPanel(actionableCard, {
+                    detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)],
+                }, { samples: [] }, now);
+                assert.equal(watermarkAsOf, now);
+                ctx.OptionComboIvTermStructureCore.computeDisplacementWatermark = originalWatermark;
+
+                const empty = buildStrategySignalPanel(actionableCard, { detailRows: [] }, { samples: [] }, now);
                 assert.match(empty, /NO SIGNAL/);
                 assert.match(empty, /subscribe\/sync/);
 
@@ -690,6 +730,131 @@ module.exports = {
                 assert.match(es, /official trading calendar is unavailable — no strategy suggestion/);
                 assert.doesNotMatch(es, /SELL CALENDAR/);
                 assert.doesNotMatch(es, /Calendar: sell front ATM straddle/);
+            },
+        },
+        {
+            name: 'keeps weekly strategy signals non-actionable until a timestamped official close',
+            run() {
+                const ctx = loadPageContext(null);
+                const { evaluateWeeklySignalReadiness, buildStrategySignalPanel } = ctx.OptionComboIvTermStructurePage._test;
+                const partialCard = {
+                    symbol: 'SPY',
+                    catalog: { anchorDate: '2026-07-13', payloadAsOf: '2026-07-13T21:00:00Z' },
+                };
+                const preCloseCard = {
+                    symbol: 'SPY',
+                    catalog: { anchorDate: '2026-07-17', payloadAsOf: '2026-07-17T20:14:00Z' },
+                };
+                const closedCard = {
+                    symbol: 'SPY',
+                    catalog: {
+                        anchorDate: '2026-07-17', payloadAsOf: '2026-07-17T20:15:00Z',
+                        batchId: 'close-batch', coherent: true, quoteComplete: true,
+                    },
+                };
+                const coherentRows = (asOf, snapshotId = 'close-batch') => [
+                    {
+                        expiry: '20260717', dte: 7, tradDte: 5, atmIv: 0.30,
+                        hasCompletePair: true, subscriptionSelected: true,
+                        callSnapshotId: snapshotId, putSnapshotId: snapshotId,
+                        callQuoteAsOf: asOf, putQuoteAsOf: asOf,
+                    },
+                    {
+                        expiry: '20260724', dte: 14, tradDte: 10, atmIv: 0.22,
+                        hasCompletePair: true, subscriptionSelected: true,
+                        callSnapshotId: snapshotId, putSnapshotId: snapshotId,
+                        callQuoteAsOf: asOf, putQuoteAsOf: asOf,
+                    },
+                ];
+                const contextFor = (asOf, snapshotId) => {
+                    const detailRows = coherentRows(asOf, snapshotId);
+                    return { detailRows, signal: ctx.OptionComboIvTermStructureCore.computeRegimeSignal(detailRows) };
+                };
+
+                assert.equal(
+                    evaluateWeeklySignalReadiness(partialCard, new Date('2026-07-13T21:01:00Z')).status,
+                    'partial_week'
+                );
+                assert.equal(
+                    evaluateWeeklySignalReadiness(preCloseCard, new Date('2026-07-17T20:16:00Z')).status,
+                    'pre_close'
+                );
+                const completed = evaluateWeeklySignalReadiness(
+                        closedCard,
+                        new Date('2026-07-17T20:16:00Z'),
+                        contextFor('2026-07-17T20:15:00Z', 'close-batch')
+                    );
+                assert.equal(completed.status, 'execution_protocol_unavailable');
+                assert.equal(completed.signalComplete, true);
+                assert.equal(completed.actionable, false);
+                assert.equal(
+                    evaluateWeeklySignalReadiness(closedCard, new Date('2026-07-17T20:14:00Z')).status,
+                    'future'
+                );
+
+                // Independence Day is observed Friday 3 July, so Thursday is
+                // the official final session. A coherent close observation is
+                // complete but still non-executable without a tested entry rule.
+                const holidayComplete = evaluateWeeklySignalReadiness({
+                    symbol: 'SPY',
+                    catalog: {
+                        anchorDate: '2026-07-02', payloadAsOf: '2026-07-02T20:15:00Z',
+                        snapshotId: 'holiday-close', coherent: true, quoteComplete: true,
+                    },
+                }, new Date('2026-07-02T20:16:00Z'), {
+                    detailRows: coherentRows('2026-07-02T20:15:00Z', 'holiday-close'),
+                    signal: ctx.OptionComboIvTermStructureCore.computeRegimeSignal(
+                        coherentRows('2026-07-02T20:15:00Z', 'holiday-close')
+                    ),
+                });
+                assert.equal(holidayComplete.status, 'execution_protocol_unavailable');
+                assert.equal(holidayComplete.signalComplete, true);
+                assert.equal(holidayComplete.actionable, false);
+
+                // An older, internally valid Friday cannot be paired with a
+                // newer week's quotes once the newer official close exists.
+                const staleAnchor = {
+                    symbol: 'SPY',
+                    catalog: {
+                        anchorDate: '2026-07-10', payloadAsOf: '2026-07-10T20:15:00Z',
+                        snapshotId: 'old-close', coherent: true, quoteComplete: true,
+                    },
+                };
+                assert.equal(evaluateWeeklySignalReadiness(
+                    staleAnchor,
+                    new Date('2026-07-17T20:16:00Z'),
+                    contextFor('2026-07-10T20:15:00Z', 'old-close')
+                ).status, 'stale_anchor');
+
+                // Client receipt time is presentation-only, and an
+                // incremental changed-ticker batch cannot certify the curve.
+                assert.equal(evaluateWeeklySignalReadiness({
+                    symbol: 'SPY',
+                    catalog: { anchorDate: '2026-07-17' },
+                    lastSyncLabel: '2026-07-17T20:15:00Z',
+                }, new Date('2026-07-17T20:16:00Z')).status, 'missing_snapshot');
+                assert.equal(evaluateWeeklySignalReadiness({
+                    symbol: 'SPY',
+                    catalog: {
+                        anchorDate: '2026-07-17', payloadAsOf: '2026-07-17T20:15:00Z',
+                        batchId: 'incremental', coherent: false, quoteComplete: false,
+                    },
+                }, new Date('2026-07-17T20:16:00Z'), contextFor(
+                    '2026-07-17T20:15:00Z', 'incremental'
+                )).status, 'incoherent_snapshot');
+
+                const row = (expiry, dte, tradDte, atmIv) => ({
+                    expiry, dte, tradDte, atmIv, hasCompletePair: true, subscriptionSelected: true,
+                });
+                const preview = buildStrategySignalPanel(
+                    preCloseCard,
+                    { detailRows: [row('20260717', 7, 5, 0.30), row('20260724', 14, 10, 0.22)] },
+                    { samples: [] },
+                    new Date('2026-07-17T20:16:00Z')
+                );
+                assert.match(preview, /PREVIEW \/ NO ACTION/);
+                assert.match(preview, /preview before official option close/);
+                assert.doesNotMatch(preview, /Calendar: sell front ATM straddle/);
             },
         },
         {

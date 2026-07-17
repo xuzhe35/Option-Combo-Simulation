@@ -29,6 +29,12 @@ def weekdays(start, count):
 
 
 class TradingDayCountTest(unittest.TestCase):
+    def test_vendor_floor_iv_fails_closed(self):
+        self.assertTrue(backtest._usable_signal_ivs([0.15, 0.16, 0.17, 0.18]))
+        self.assertFalse(backtest._usable_signal_ivs([0.15, 0.16, 0.01488, 0.18]))
+        self.assertTrue(backtest._signal_iv_price_consistent(0.15, 3.15, 115, 19))
+        self.assertFalse(backtest._signal_iv_price_consistent(0.01488, 3.15, 115, 19))
+
     def test_official_calendar_replaces_observed_dates_inside_coverage(self):
         observed = [date(2026, 7, 2), date(2026, 7, 3), date(2026, 7, 6)]
         official = {
