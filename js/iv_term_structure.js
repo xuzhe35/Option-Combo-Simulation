@@ -47,6 +47,12 @@
     const OPTION_STREAM_LIMIT_CHOICES = Object.freeze([10, 20, 40, 0]);
     const TD_IV_LAMBDA_STORAGE_KEY = 'optionComboIvtsTdIvLambdaGlobal';
     const DEFAULT_TD_IV_LAMBDA = 0.3;
+    const AUTO_SAMPLE_INTERVAL_MS = 60 * 60 * 1000;
+    const AUTO_SAMPLE_MONITOR_INTERVAL_MS = 60 * 1000;
+    const AUTO_SAMPLE_RETRY_DELAY_MS = 5 * 60 * 1000;
+    const AUTO_HISTORY_PURPOSE = 'iv-term-structure-auto-samples';
+    const IV_TERM_STRUCTURE_SNAPSHOT_TIMEOUT_MS = 90 * 1000;
+    const NYSE_OPTION_CLOSE_MINUTES = 16 * 60 + 15;
     const CARD_VIEW_STATE_SECTIONS = Object.freeze([
         {
             key: 'calendar',
@@ -71,6 +77,7 @@
         cardsBySymbol: new Map(),
         pendingFileSymbol: '',
         renderTimerId: null,
+        autoSampleMonitorTimerId: null,
         controlWs: null,
         controlWsOpenPromise: null,
         ibStatusPollTimerId: null,
@@ -258,6 +265,249 @@
             .replace(/'/g, '&#39;');
     }
 
+    function normalizeDateKey(value) {
+        const compact = String(value || '').slice(0, 10).replace(/[-/]/g, '');
+        return /^\d{8}$/.test(compact)
+            ? `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`
+            : '';
+    }
+
+    function dateKeyAtOffset(dateKey, offsetDays) {
+        const normalized = normalizeDateKey(dateKey);
+        if (!normalized) {
+            return '';
+        }
+        const [year, month, day] = normalized.split('-').map(Number);
+        const value = new Date(Date.UTC(year, month - 1, day + offsetDays));
+        return value.toISOString().slice(0, 10);
+    }
+
+    function isoWeekMonday(dateKey) {
+        const normalized = normalizeDateKey(dateKey);
+        if (!normalized) {
+            return '';
+        }
+        const day = new Date(`${normalized}T00:00:00Z`).getUTCDay();
+        return dateKeyAtOffset(normalized, -(day === 0 ? 6 : day - 1));
+    }
+
+    function officialWeekFinalSession(calendarId, dateKey) {
+        const monday = isoWeekMonday(dateKey);
+        if (!monday || typeof globalScope.getOfficialExchangeCalendarDay !== 'function') {
+            return { status: 'calendar_unavailable', date: '' };
+        }
+        let finalSession = '';
+        for (let offset = 0; offset < 5; offset += 1) {
+            const candidate = dateKeyAtOffset(monday, offset);
+            const info = globalScope.getOfficialExchangeCalendarDay(calendarId, candidate);
+            if (!info || info.available !== true) {
+                return { status: 'calendar_unavailable', date: '' };
+            }
+            if (info.status !== 'closed') {
+                finalSession = candidate;
+            }
+        }
+        return finalSession
+            ? { status: 'ok', date: finalSession }
+            : { status: 'calendar_unavailable', date: '' };
+    }
+
+    function localTimestampParts(value, timeZone) {
+        const parsed = new Date(value);
+        if (!Number.isFinite(parsed.getTime())) {
+            return null;
+        }
+        const formatter = new Intl.DateTimeFormat('en-CA', {
+            timeZone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hourCycle: 'h23',
+        });
+        const parts = {};
+        formatter.formatToParts(parsed).forEach((part) => {
+            if (part.type !== 'literal') {
+                parts[part.type] = part.value;
+            }
+        });
+        return {
+            date: `${parts.year}-${parts.month}-${parts.day}`,
+            minuteOfDay: Number(parts.hour) * 60 + Number(parts.minute),
+            timestamp: parsed.getTime(),
+        };
+    }
+
+    function currentExchangeDate(calendarId, nowValue = new Date()) {
+        const timeZone = String(calendarId || '').toUpperCase() === 'NYSE'
+            ? 'America/New_York'
+            : 'America/Chicago';
+        const parts = localTimestampParts(nowValue, timeZone);
+        return parts ? parts.date : new Date(nowValue).toISOString().slice(0, 10);
+    }
+
+    function officialSessionClosePolicy(calendarId, dateKey) {
+        if (typeof globalScope.getOfficialExchangeCalendarDay !== 'function') {
+            return null;
+        }
+        const info = globalScope.getOfficialExchangeCalendarDay(calendarId, dateKey);
+        if (!info || info.available !== true || info.status === 'closed') {
+            return null;
+        }
+        const detail = info.detail && typeof info.detail === 'object' ? info.detail : {};
+        const timeZone = String(detail.timezone || (
+            String(calendarId || '').toUpperCase() === 'NYSE'
+                ? 'America/New_York'
+                : 'America/Chicago'
+        ));
+        const rawClose = String(detail.optionCloseTime || detail.closeTime || '').trim();
+        if (rawClose) {
+            const match = rawClose.match(/^(\d{1,2}):(\d{2})$/);
+            if (match) {
+                return {
+                    timeZone,
+                    closeMinutes: Number(match[1]) * 60 + Number(match[2]),
+                    source: 'official_early_close',
+                };
+            }
+        }
+        if (String(calendarId || '').toUpperCase() === 'NYSE') {
+            return {
+                timeZone: 'America/New_York',
+                closeMinutes: NYSE_OPTION_CLOSE_MINUTES,
+                source: 'nyse_option_close_policy',
+            };
+        }
+        // The generated CME calendars currently prove trade dates, not each
+        // product's option close time. Same-day CME/FOP action therefore
+        // remains fail-closed; a later local date is unambiguously complete.
+        return { timeZone, closeMinutes: null, source: 'close_time_unavailable' };
+    }
+
+    function evaluateSessionTimestamp(calendarId, sessionDate, timestamp) {
+        const dateKey = normalizeDateKey(sessionDate);
+        const policy = officialSessionClosePolicy(calendarId, dateKey);
+        if (!dateKey || !policy) {
+            return { status: 'calendar_unavailable' };
+        }
+        const local = localTimestampParts(timestamp, policy.timeZone);
+        if (!local) {
+            return { status: 'missing_timestamp' };
+        }
+        if (local.date < dateKey) {
+            return { status: 'future', localDate: local.date };
+        }
+        if (local.date > dateKey) {
+            return { status: 'complete', localDate: local.date, source: policy.source };
+        }
+        if (!Number.isFinite(policy.closeMinutes)) {
+            return { status: 'close_time_unavailable', localDate: local.date };
+        }
+        return local.minuteOfDay >= policy.closeMinutes
+            ? { status: 'complete', localDate: local.date, source: policy.source }
+            : { status: 'pre_close', localDate: local.date, source: policy.source };
+    }
+
+    function resolveCardCalendarId(card) {
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
+        return String(profile && profile.calendarId || 'NYSE').toUpperCase();
+    }
+
+    function latestCompletedOfficialWeek(calendarId, nowValue) {
+        const localDate = currentExchangeDate(calendarId, nowValue);
+        const currentWeek = officialWeekFinalSession(calendarId, localDate);
+        if (currentWeek.status !== 'ok') {
+            return { status: 'calendar_unavailable', date: '' };
+        }
+        const currentCompletion = evaluateSessionTimestamp(calendarId, currentWeek.date, nowValue);
+        if (currentCompletion.status === 'complete') {
+            return { status: 'ok', date: currentWeek.date };
+        }
+        const previousWeekDate = dateKeyAtOffset(isoWeekMonday(localDate), -1);
+        return officialWeekFinalSession(calendarId, previousWeekDate);
+    }
+
+    function evaluateWeeklySignalReadiness(card, nowValue = new Date(), context = {}) {
+        const calendarId = resolveCardCalendarId(card);
+        const anchorDate = normalizeDateKey(card && card.catalog && card.catalog.anchorDate);
+        // Only the server-declared payload time is evidence. lastSyncLabel is
+        // presentation state and must never turn client receipt time into an
+        // actionable weekly close.
+        const signalAsOf = String(card && card.catalog && card.catalog.payloadAsOf || '').trim();
+        if (!anchorDate || !signalAsOf) {
+            return { status: 'missing_snapshot', actionable: false, calendarId, anchorDate, signalAsOf };
+        }
+        const weekEnd = officialWeekFinalSession(calendarId, anchorDate);
+        if (weekEnd.status !== 'ok') {
+            return { status: 'calendar_unavailable', actionable: false, calendarId, anchorDate, signalAsOf };
+        }
+        if (anchorDate !== weekEnd.date) {
+            return {
+                status: 'partial_week', actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: weekEnd.date,
+            };
+        }
+        const completion = evaluateSessionTimestamp(calendarId, anchorDate, signalAsOf);
+        if (completion.status !== 'complete') {
+            return {
+                status: completion.status, actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: weekEnd.date,
+            };
+        }
+        if (completion.localDate !== anchorDate) {
+            return {
+                status: 'off_session_snapshot', actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: weekEnd.date,
+            };
+        }
+        const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
+        if (!Number.isFinite(now.getTime()) || Date.parse(signalAsOf) > now.getTime()) {
+            return {
+                status: 'future', actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: weekEnd.date,
+            };
+        }
+        const latestWeek = latestCompletedOfficialWeek(calendarId, now);
+        if (latestWeek.status !== 'ok') {
+            return {
+                status: 'calendar_unavailable', actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: '',
+            };
+        }
+        if (anchorDate !== latestWeek.date) {
+            return {
+                status: 'stale_anchor', actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: latestWeek.date,
+            };
+        }
+
+        const coreApi = core();
+        const detailRows = Array.isArray(context && context.detailRows)
+            ? context.detailRows
+            : buildDetailRows(card);
+        const signal = context && context.signal
+            ? context.signal
+            : coreApi.computeRegimeSignal(detailRows);
+        const coherence = typeof coreApi.evaluateSignalSnapshotCoherence === 'function'
+            ? coreApi.evaluateSignalSnapshotCoherence(detailRows, signal, card && card.catalog)
+            : { status: 'incoherent_snapshot', coherent: false };
+        if (!coherence.coherent) {
+            return {
+                status: coherence.status, actionable: false, calendarId, anchorDate,
+                signalAsOf, expectedSession: latestWeek.date, snapshotId: coherence.snapshotId || '',
+            };
+        }
+        // The official close is observation time, after the regular entry
+        // session. Until a separately backtested next-session execution rule
+        // exists, a fully coherent close signal is complete but not executable.
+        return {
+            status: 'execution_protocol_unavailable', actionable: false, signalComplete: true,
+            calendarId, anchorDate, signalAsOf, expectedSession: latestWeek.date,
+            snapshotId: coherence.snapshotId,
+        };
+    }
+
     function normalizeHistoryDocument(rawDocument, symbol) {
         const raw = rawDocument && typeof rawDocument === 'object' ? rawDocument : {};
         const rawSamples = Array.isArray(raw.samples) ? raw.samples : [];
@@ -276,6 +526,62 @@
             return card.bundledHistoryDocument;
         }
         return normalizeHistoryDocument(null, card.symbol);
+    }
+
+    function normalizeAutoHistoryDocument(rawDocument, symbol) {
+        const normalized = normalizeHistoryDocument(rawDocument, symbol);
+        return {
+            symbol,
+            version: 1,
+            purpose: AUTO_HISTORY_PURPOSE,
+            cadenceMinutes: AUTO_SAMPLE_INTERVAL_MS / 60000,
+            samples: normalized.samples,
+        };
+    }
+
+    // Manual history + hourly automatic file. The core is the sole authority
+    // that reduces these raw observations to official weekly closes.
+    function strategyHistoryDocument(card) {
+        const manual = readOnlyHistoryDocument(card);
+        const automatic = card && card.autoHistoryDocument
+            ? normalizeAutoHistoryDocument(card.autoHistoryDocument, card.symbol)
+            : normalizeAutoHistoryDocument(null, card && card.symbol);
+        const merged = manual.samples.concat(automatic.samples);
+        const sampleTime = (sample) => {
+            const parsed = Date.parse(String(sample && sample.sampledAt || '').trim());
+            return Number.isFinite(parsed) ? parsed : -Infinity;
+        };
+        merged.sort((a, b) => sampleTime(a) - sampleTime(b));
+        return normalizeHistoryDocument({ samples: merged }, card.symbol);
+    }
+
+    function latestAutoSample(autoHistoryDocument) {
+        const samples = autoHistoryDocument && Array.isArray(autoHistoryDocument.samples)
+            ? autoHistoryDocument.samples
+            : [];
+        return samples.length ? samples[samples.length - 1] : null;
+    }
+
+    function shouldRunAutoSample(autoHistoryDocument, nowValue = new Date()) {
+        const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
+        if (!Number.isFinite(now.getTime())) {
+            return false;
+        }
+        const latest = latestAutoSample(autoHistoryDocument);
+        if (!latest) {
+            return true;
+        }
+        const sampledAt = new Date(latest.sampledAt);
+        if (!Number.isFinite(sampledAt.getTime())) {
+            return true;
+        }
+        // Elapsed time is the only trigger. A "the UTC date changed" clause
+        // would be redundant on every gap this already catches (including a
+        // page closed for days) and would additionally fire a sample minutes
+        // after the previous one whenever the UTC day rolled over mid-cadence
+        // — 00:00 UTC is ~20:00 ET, which is not a boundary this sampler has
+        // any reason to care about.
+        return now.getTime() - sampledAt.getTime() >= AUTO_SAMPLE_INTERVAL_MS;
     }
 
     function normalizeCalendarFinderConfig(rawConfig) {
@@ -557,7 +863,7 @@
     function createCardState(entry, options = {}) {
         const profile = resolveProfile(entry.symbol);
         const isFop = isFuturesOptionProfile(profile);
-        const today = new Date().toISOString().slice(0, 10);
+        const today = currentExchangeDate(profile.calendarId || 'NYSE');
         const futuresContractMonth = isFop
             ? (
                 normalizeFuturesContractMonth(entry.futuresContractMonth)
@@ -584,6 +890,14 @@
             wsOpenPromise: null,
             syncInProgress: false,
             sampleInProgress: false,
+            autoSampleInProgress: false,
+            autoFileSelectionInProgress: false,
+            autoSamplingEnabled: false,
+            autoHistoryDocument: null,
+            autoFileHandle: null,
+            autoFileName: '',
+            autoSampleRetryAfter: 0,
+            lastAutoSampleLabel: '',
             catalog: null,
             quotesBySubId: {},
             underlyingPrice: null,
@@ -732,6 +1046,27 @@
         }
         card.underlyingPrice = parsed;
         return true;
+    }
+
+    function serverPayloadAsOf(payload) {
+        const value = String(payload && payload.payloadAsOf || '').trim();
+        return Number.isFinite(Date.parse(value)) ? value : '';
+    }
+
+    function quoteWithServerSnapshotEvidence(quote, payload) {
+        const source = quote && typeof quote === 'object' ? quote : {};
+        const payloadAsOf = serverPayloadAsOf(payload);
+        const quoteAsOf = String(source.quoteAsOf || payloadAsOf || '').trim();
+        const snapshotId = String(
+            source.snapshotId || source.batchId
+            || payload && (payload.snapshotId || payload.batchId)
+            || ''
+        ).trim();
+        return {
+            ...source,
+            ...(quoteAsOf ? { quoteAsOf } : {}),
+            ...(snapshotId ? { snapshotId } : {}),
+        };
     }
 
     function sortExpiryRows(rows) {
@@ -976,7 +1311,7 @@
                 multiplier: String(profile.optionMultiplier || 100),
                 tradingClass: profile.tradingClass || '',
             },
-            anchorDate: new Date().toISOString().slice(0, 10),
+            anchorDate: currentExchangeDate(profile.calendarId || 'NYSE'),
             maxDte: runtime.config ? runtime.config.maxDte : EMBEDDED_DEFAULT_CONFIG.maxDte,
             strikeRadius: runtime.config ? runtime.config.strikeRadius : EMBEDDED_DEFAULT_CONFIG.strikeRadius,
             maxOptionStreams: normalizeOptionStreamLimit(card && card.maxOptionStreams),
@@ -1059,8 +1394,14 @@
                 if (String(payload.symbol || '').trim().toUpperCase() !== card.symbol) {
                     return;
                 }
-                card.catalog = payload;
+                const payloadAsOf = serverPayloadAsOf(payload);
+                card.catalog = { ...payload, payloadAsOf };
                 card.quotesBySubId = {};
+                if (payload.options && typeof payload.options === 'object') {
+                    Object.entries(payload.options).forEach(([subId, quote]) => {
+                        card.quotesBySubId[subId] = quoteWithServerSnapshotEvidence(quote, payload);
+                    });
+                }
                 card.catalogPatchCount = 0;
                 armCatalogPatchWatchdog(card);
                 updateUnderlyingPrice(card, payload && payload.underlyingPrice);
@@ -1070,7 +1411,7 @@
                     saveFuturesContractMonth(card.symbol, resolvedFuturesContractMonth);
                     card.forceBodyRefreshOnce = true;
                 }
-                card.lastSyncLabel = new Date().toISOString();
+                card.lastSyncLabel = payloadAsOf;
                 setCardStatus(
                     card,
                     payload.warning
@@ -1153,8 +1494,11 @@
 
             if (payload && payload.options && typeof payload.options === 'object') {
                 Object.entries(payload.options).forEach(([subId, quote]) => {
-                    card.quotesBySubId[subId] = quote;
+                    card.quotesBySubId[subId] = quoteWithServerSnapshotEvidence(quote, payload);
                 });
+                // A changed-ticker packet is partial by construction. It may
+                // update individual quote evidence, but it cannot advance the
+                // catalog's coherent whole-curve payloadAsOf.
                 render();
             }
         });
@@ -1480,7 +1824,7 @@
                 const timeoutId = setTimeout(() => {
                     card.pendingCatalog = null;
                     reject(new Error('Timed out while waiting for the IV term structure snapshot.'));
-                }, 30000);
+                }, IV_TERM_STRUCTURE_SNAPSHOT_TIMEOUT_MS);
                 card.pendingCatalog = { resolve, reject, timeoutId };
                 ws.send(JSON.stringify(buildSubscribePayload(card)));
             });
@@ -1511,19 +1855,33 @@
     }
 
     function resolveSelectedStraddleBaselineExpiry(card, detailRows) {
+        const rows = Array.isArray(detailRows) ? detailRows : [];
         const selected = normalizeExpiryKey(card && card.straddleBaselineExpiry);
-        if (!selected) {
-            return '';
+        if (selected && rows.some((row) => normalizeExpiryKey(row && row.expiry) === selected)) {
+            return selected;
         }
-        return (Array.isArray(detailRows) ? detailRows : []).some((row) => normalizeExpiryKey(row && row.expiry) === selected)
-            ? selected
-            : '';
+        // Default baseline: the usable expiry nearest 7 DTE (the playbook
+        // front leg), so the Vs Base and TD Slope columns work out of the box.
+        let best = null;
+        for (const row of rows) {
+            if (!row || row.hasCompletePair === false
+                || !Number.isFinite(row.dte) || row.dte <= 0) {
+                continue;
+            }
+            if (best === null || Math.abs(row.dte - 7) < Math.abs(best.dte - 7)) {
+                best = row;
+            }
+        }
+        return best ? normalizeExpiryKey(best.expiry) : '';
     }
 
     function buildComparedRows(card) {
         const detailRows = buildDetailRows(card);
         const baselineExpiry = resolveSelectedStraddleBaselineExpiry(card, detailRows);
-        const comparedDetailRows = core().buildStraddleComparisonRows(detailRows, baselineExpiry);
+        let comparedDetailRows = core().buildStraddleComparisonRows(detailRows, baselineExpiry);
+        if (typeof core().annotateTdSlopeVsBaseline === 'function') {
+            comparedDetailRows = core().annotateTdSlopeVsBaseline(comparedDetailRows, baselineExpiry);
+        }
         const bucketDefinitions = runtime.config && Array.isArray(runtime.config.bucketDefinitions)
             ? runtime.config.bucketDefinitions
             : null;
@@ -1630,6 +1988,294 @@
         URL.revokeObjectURL(url);
     }
 
+    function buildCurrentSampleRecord(card) {
+        const comparedRows = buildComparedRows(card);
+        return core().buildSampleRecord(
+            card.symbol,
+            card.underlyingPrice,
+            comparedRows.bucketRows,
+            comparedRows.detailRows,
+            new Date().toISOString(),
+            card.catalog && card.catalog.anchorDate,
+            comparedRows.baselineExpiry
+        );
+    }
+
+    function hasUsableWatermarkSeed(sampleRecord) {
+        return !!(
+            sampleRecord
+            && Number.isFinite(sampleRecord.underlyingPrice)
+            && sampleRecord.underlyingPrice > 0
+            && Array.isArray(sampleRecord.details)
+            && sampleRecord.details.some((row) => (
+                row
+                && Number.isFinite(row.dte)
+                && row.dte >= 4
+                && row.dte <= 10
+                && Number.isFinite(row.atmStraddleMark)
+                && row.atmStraddleMark > 0
+            ))
+        );
+    }
+
+    async function readAutoHistoryFile(fileHandle, symbol) {
+        const file = await fileHandle.getFile();
+        const text = await file.text();
+        if (!text.trim()) {
+            return normalizeAutoHistoryDocument(null, symbol);
+        }
+        const payload = JSON.parse(text);
+        if (payload && payload.symbol && String(payload.symbol).trim().toUpperCase() !== symbol) {
+            throw new Error(`Selected auto-sample file belongs to ${payload.symbol}, not ${symbol}.`);
+        }
+        if (!payload || payload.purpose !== AUTO_HISTORY_PURPOSE) {
+            throw new Error('Selected file is not an IV Term Structure automatic-sample JSON.');
+        }
+        return normalizeAutoHistoryDocument(payload, symbol);
+    }
+
+    async function ensureAutoFileWritePermission(fileHandle) {
+        if (!fileHandle || typeof fileHandle.requestPermission !== 'function') {
+            return;
+        }
+        const permission = await fileHandle.requestPermission({ mode: 'readwrite' });
+        if (permission !== 'granted') {
+            throw new Error('Write access to the selected Auto JSON was not granted.');
+        }
+    }
+
+    async function writeAutoHistoryDocument(card) {
+        if (!card.autoFileHandle || typeof card.autoFileHandle.createWritable !== 'function') {
+            throw new Error('The automatic sample file is no longer writable. Load the Auto JSON again to restore append access.');
+        }
+        const writable = await card.autoFileHandle.createWritable();
+        await writable.write(JSON.stringify(card.autoHistoryDocument, null, 2));
+        await writable.close();
+    }
+
+    function bindAutoHistoryFile(card, fileHandle, historyDocument) {
+        card.autoFileHandle = fileHandle;
+        card.autoFileName = String(fileHandle.name || `${card.symbol}.ivts-auto.json`);
+        card.autoHistoryDocument = historyDocument;
+        const latest = latestAutoSample(historyDocument);
+        card.lastAutoSampleLabel = latest && latest.sampledAt ? latest.sampledAt : '';
+    }
+
+    async function loadAutoHistoryFile(card) {
+        if (typeof globalScope.showOpenFilePicker !== 'function') {
+            throw new Error('Loading an automatic JSON requires Chrome or Edge File System Access support.');
+        }
+        const [fileHandle] = await globalScope.showOpenFilePicker({
+            types: [{
+                description: 'IV Term Structure automatic samples',
+                accept: { 'application/json': ['.json'] },
+            }],
+            multiple: false,
+        });
+        await ensureAutoFileWritePermission(fileHandle);
+        const historyDocument = await readAutoHistoryFile(fileHandle, card.symbol);
+        bindAutoHistoryFile(card, fileHandle, historyDocument);
+        return historyDocument;
+    }
+
+    async function createAutoHistoryFile(card) {
+        if (typeof globalScope.showSaveFilePicker !== 'function') {
+            throw new Error('Automatic JSON sampling requires a browser with the File System Access API (Chrome or Edge).');
+        }
+        const fileHandle = await globalScope.showSaveFilePicker({
+            suggestedName: `${card.symbol}.ivts-auto.json`,
+            types: [{
+                description: 'IV Term Structure automatic samples',
+                accept: { 'application/json': ['.json'] },
+            }],
+        });
+        const historyDocument = await readAutoHistoryFile(fileHandle, card.symbol);
+        bindAutoHistoryFile(card, fileHandle, historyDocument);
+        // showSaveFilePicker creates a zero-byte file. Initialize it before
+        // any market-data work so a slow/failed first sync still leaves a
+        // valid, inspectable automatic-history document on disk.
+        await writeAutoHistoryDocument(card);
+        return historyDocument;
+    }
+
+    async function prepareAutoHistoryFile(card) {
+        if (!card.autoFileHandle) {
+            throw new Error('Load an existing Auto JSON or create a new one first.');
+        }
+        const historyDocument = await readAutoHistoryFile(card.autoFileHandle, card.symbol);
+        card.autoHistoryDocument = historyDocument;
+        const latest = latestAutoSample(historyDocument);
+        card.lastAutoSampleLabel = latest && latest.sampledAt ? latest.sampledAt : '';
+        return 'reused';
+    }
+
+    function autoSampleButtonLabel(card) {
+        if (card && card.autoSamplingEnabled) {
+            return 'Stop Auto Sample';
+        }
+        return card && card.autoFileHandle ? 'Resume Auto Sample' : 'Start Auto Sample';
+    }
+
+    function autoAppendTargetLabel(card) {
+        return card && card.autoFileHandle && card.autoFileName
+            ? card.autoFileName
+            : 'Not selected';
+    }
+
+    function stopAutoSampling(card, options = {}) {
+        card.autoSamplingEnabled = false;
+        card.autoSampleRetryAfter = 0;
+        if (options.setStatus !== false) {
+            setCardStatus(
+                card,
+                `Automatic sampling stopped. ${card.autoHistoryDocument ? `${card.autoHistoryDocument.samples.length} samples remain in ${card.autoFileName}.` : ''}`,
+                ''
+            );
+        }
+        card.forceBodyRefreshOnce = true;
+        render(true);
+    }
+
+    async function runAutoSample(card, reason = 'hourly', options = {}) {
+        if (!card || !card.autoSamplingEnabled || card.autoSampleInProgress) {
+            return false;
+        }
+        if (card.syncInProgress || card.sampleInProgress) {
+            card.autoSampleRetryAfter = Date.now() + AUTO_SAMPLE_RETRY_DELAY_MS;
+            return false;
+        }
+
+        card.autoSampleInProgress = true;
+        card.autoSampleRetryAfter = 0;
+        setCardStatus(card, `Auto Sample (${reason}): preparing a valid ATM snapshot...`, '');
+        render(true);
+
+        try {
+            let sampleRecord = options.preferCachedSnapshot === true && hasUsableLiveSnapshot(card)
+                ? buildCurrentSampleRecord(card)
+                : null;
+            if (!hasUsableWatermarkSeed(sampleRecord)) {
+                await syncCard(card, { waitForQuotes: true, quoteTimeoutMs: 3500 });
+                sampleRecord = buildCurrentSampleRecord(card);
+            }
+            if (!hasUsableWatermarkSeed(sampleRecord)) {
+                throw new Error('No usable 4-10 DTE ATM straddle mark is available yet.');
+            }
+
+            // Re-read immediately before writing so a file edited outside this
+            // page is not silently replaced with an older in-memory copy.
+            const historyDocument = await readAutoHistoryFile(card.autoFileHandle, card.symbol);
+            historyDocument.samples = historyDocument.samples.concat(sampleRecord);
+            card.autoHistoryDocument = historyDocument;
+            await writeAutoHistoryDocument(card);
+            card.lastAutoSampleLabel = sampleRecord.sampledAt;
+            card.forceBodyRefreshOnce = true;
+            setCardStatus(
+                card,
+                `Auto Sample saved (${reason}). ${historyDocument.samples.length} hourly samples in ${card.autoFileName}; next check in 1 hour.`,
+                'success'
+            );
+            return true;
+        } catch (error) {
+            card.autoSampleRetryAfter = Date.now() + AUTO_SAMPLE_RETRY_DELAY_MS;
+            setCardStatus(
+                card,
+                `Auto Sample failed; retrying in about 5 minutes. ${error.message || error}`,
+                'error'
+            );
+            return false;
+        } finally {
+            card.autoSampleInProgress = false;
+            render(true);
+        }
+    }
+
+    async function resumeAutoSampling(card, reason = 'resumed') {
+        await prepareAutoHistoryFile(card);
+        card.autoSamplingEnabled = true;
+        card.forceBodyRefreshOnce = true;
+        render(true);
+        if (shouldRunAutoSample(card.autoHistoryDocument, new Date())) {
+            await runAutoSample(card, reason, { preferCachedSnapshot: true });
+            return;
+        }
+        setCardStatus(
+            card,
+            `Automatic sampling resumed. Appending hourly to ${card.autoFileName}; the latest sample is not due yet.`,
+            'success'
+        );
+        render(true);
+    }
+
+    async function selectAndResumeAutoFile(card, mode) {
+        if (card.autoSampleInProgress || card.autoFileSelectionInProgress) {
+            return;
+        }
+        const wasEnabled = card.autoSamplingEnabled;
+        const previousFileHandle = card.autoFileHandle;
+        card.autoFileSelectionInProgress = true;
+        card.autoSamplingEnabled = false;
+        card.forceBodyRefreshOnce = true;
+        render(true);
+        try {
+            if (mode === 'load') {
+                await loadAutoHistoryFile(card);
+            } else {
+                await createAutoHistoryFile(card);
+            }
+            await resumeAutoSampling(card, mode === 'load' ? 'loaded/resumed' : 'new file');
+        } catch (error) {
+            // Resuming the previous file is only safe while the card still
+            // points at it — a dismissed picker. Once a new handle is bound,
+            // failing here means that file is unusable, so sampling stays off
+            // rather than letting the hourly monitor run against it.
+            card.autoSamplingEnabled = wasEnabled && card.autoFileHandle === previousFileHandle;
+            if (error && error.name === 'AbortError') {
+                return;
+            }
+            setCardStatus(
+                card,
+                error.message || (mode === 'load' ? 'Unable to load the automatic JSON.' : 'Unable to create the automatic JSON.'),
+                'error'
+            );
+        } finally {
+            card.autoFileSelectionInProgress = false;
+            card.forceBodyRefreshOnce = true;
+            render(true);
+        }
+    }
+
+    async function startAutoSampling(card) {
+        if (card.autoSamplingEnabled) {
+            stopAutoSampling(card);
+            return;
+        }
+        try {
+            await resumeAutoSampling(card, 'resumed');
+        } catch (error) {
+            if (error && error.name === 'AbortError') {
+                return;
+            }
+            setCardStatus(card, error.message || 'Unable to start automatic sampling.', 'error');
+            render(true);
+        }
+    }
+
+    function checkAutoSamplers(reason = 'hourly') {
+        const now = new Date();
+        runtime.cardsBySymbol.forEach((card) => {
+            if (!card.autoSamplingEnabled || card.autoSampleInProgress) {
+                return;
+            }
+            if (card.autoSampleRetryAfter > Date.now()) {
+                return;
+            }
+            if (shouldRunAutoSample(card.autoHistoryDocument, now)) {
+                runAutoSample(card, reason);
+            }
+        });
+    }
+
     async function sampleCard(card) {
         const canWriteViaHandle = !!(card.currentFileHandle && typeof card.currentFileHandle.createWritable === 'function');
         const canWriteViaFallbackImport = !globalScope.showOpenFilePicker && !!card.historyDocument;
@@ -1660,16 +2306,7 @@
             if (shouldResyncBeforeSample) {
                 await syncCard(card, { waitForQuotes: true, quoteTimeoutMs: 2500 });
             }
-            const comparedRows = buildComparedRows(card);
-            const sampleRecord = core().buildSampleRecord(
-                card.symbol,
-                card.underlyingPrice,
-                comparedRows.bucketRows,
-                comparedRows.detailRows,
-                new Date().toISOString(),
-                card.catalog && card.catalog.anchorDate,
-                comparedRows.baselineExpiry
-            );
+            const sampleRecord = buildCurrentSampleRecord(card);
             const historyDocument = normalizeHistoryDocument(readOnlyHistoryDocument(card), card.symbol);
             historyDocument.samples = historyDocument.samples.concat(sampleRecord);
             card.historyDocument = historyDocument;
@@ -1691,6 +2328,36 @@
         return row && row.atmStraddleMark != null
             ? escapeHtml(formatMoney(row.atmStraddleMark))
             : '<span class="ivts-missing">Insufficient</span>';
+    }
+
+    function buildTdSlopeCell(row, baselineExpiry) {
+        if (!baselineExpiry) {
+            return '<span class="ivts-missing">--</span>';
+        }
+        if (row && row.isStraddleBaseline) {
+            return '<span class="ivts-ratio">base</span>';
+        }
+        if (!row || row.tdSlopeVsBaseline == null) {
+            return '<span class="ivts-missing">--</span>';
+        }
+        const defaults = core().STRATEGY_SIGNAL_DEFAULTS || {};
+        const low = Number.isFinite(defaults.zoneLow) ? defaults.zoneLow : 0.95;
+        const high = Number.isFinite(defaults.zoneHigh) ? defaults.zoneHigh : 1.05;
+        // The 0.95/1.05 thresholds are calibrated on the ~2x pair geometry.
+        // Wider pairs sit naturally below 1 (normal upward term structure:
+        // SPY 14/90 median ~0.91), so zone colors would be misleading there.
+        const nearPlaybookGeometry = Number.isFinite(row.tdSlopePairRatio)
+            && row.tdSlopePairRatio >= 1.5 && row.tdSlopePairRatio <= 2.6;
+        const zoneClass = nearPlaybookGeometry
+            ? (row.tdSlopeVsBaseline > high
+                ? ' is-slope-backwardation'
+                : (row.tdSlopeVsBaseline < low ? ' is-slope-contango' : ''))
+            : '';
+        const title = 'TD IV ratio of the (this expiry, baseline) pair, shorter leg on top, frozen λ=0.3. '
+            + `Zone colors (<${low.toFixed(2)} / >${high.toFixed(2)}) apply only near the calibrated ~2x DTE geometry; `
+            + 'wider pairs sit naturally lower — a normal upward term structure, not deep contango. '
+            + 'Exploration only: the strategy signal above stays pinned to the ~7d front / ~2x back pair.';
+        return `<span class="ivts-ratio${zoneClass}" title="${escapeHtml(title)}">${escapeHtml(row.tdSlopeVsBaseline.toFixed(3))}</span>`;
     }
 
     function buildStraddleRatioCell(row, baselineExpiry) {
@@ -1749,7 +2416,7 @@
                 </label>
                 <div class="ivts-baseline-row">
                     <select id="ivtsBaseline-${escapeHtml(card.symbol)}" class="ivts-baseline-select" data-action="baseline" data-symbol="${escapeHtml(card.symbol)}">
-                        <option value="">Select expiry</option>
+                        <option value="">Auto: nearest 7 DTE</option>
                         ${detailRows.map((row) => {
                             const expiry = normalizeExpiryKey(row && row.expiry);
                             const priceLabel = row && row.atmStraddleMark != null
@@ -2018,6 +2685,7 @@
                             <th>ATM Strike</th>
                             <th>Call/Put IV</th>
                             <th title="Trading-day annualized IV (weekends removed from the clock); comparable across a weekend.">TD IV</th>
+                            <th title="Pairwise TD slope vs the baseline expiry (shorter leg on top, frozen λ=0.3). Same convention and thresholds as the strategy signal's zones.">TD Slope</th>
                             <th>ATM Straddle</th>
                             <th>Vs Base</th>
                         </tr>
@@ -2030,12 +2698,13 @@
                                 <td>${row.atmStrike != null ? escapeHtml(formatNumber(row.atmStrike, 2)) : '<span class="ivts-missing">--</span>'}</td>
                                 <td>${buildIvPairCell(row)}</td>
                                 <td>${buildIvPairTdCell(row)}</td>
+                                <td>${buildTdSlopeCell(row, baselineExpiry)}</td>
                                 <td>${buildStraddlePriceCell(row)}</td>
                                 <td>${buildStraddleRatioCell(row, baselineExpiry)}</td>
                             </tr>
                         `).join('') || `
                             <tr>
-                                <td colspan="7" class="ivts-missing">No expiry rows have been synced yet.</td>
+                                <td colspan="8" class="ivts-missing">No expiry rows have been synced yet.</td>
                             </tr>
                         `}
                     </tbody>
@@ -2049,10 +2718,12 @@
         stand_down: 'STAND DOWN',
         sell_calendar: 'SELL CALENDAR',
         calendar_unavailable: 'CALENDAR UNAVAILABLE',
+        preview: 'PREVIEW / NO ACTION',
+        mrr_unavailable: 'MRR UNAVAILABLE',
         no_signal: 'NO SIGNAL',
     });
 
-    function buildStrategySignalPanel(card, comparedRows, historyDocument) {
+    function buildStrategySignalPanel(card, comparedRows, historyDocument, nowValue = new Date()) {
         const coreApi = core();
         if (typeof coreApi.computeRegimeSignal !== 'function') {
             return '';
@@ -2064,9 +2735,16 @@
             ? historyDocument.samples
             : [];
         const signal = coreApi.computeRegimeSignal(detailRows);
-        const watermark = coreApi.computeDisplacementWatermark(samples);
-        const profile = card && card.profile ? card.profile : null;
-        const calendarId = String(profile && profile.calendarId || 'NYSE').toUpperCase();
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
+        const calendarId = resolveCardCalendarId(card);
+        const signalReadiness = evaluateWeeklySignalReadiness(card, nowValue, { detailRows, signal });
+        const watermark = coreApi.computeDisplacementWatermark(samples, {
+            // MRR freshness is judged against wall-clock now. The signal's
+            // close timestamp authenticates that signal only; it must not
+            // rewind the watermark staleness clock.
+            asOf: nowValue,
+            calendarKey: calendarId,
+        });
         const coverageStart = signal.status === 'ok'
             ? String(card && card.catalog && card.catalog.anchorDate || signal.front.expiry || '')
             : '';
@@ -2074,22 +2752,79 @@
         const calendarAvailable = typeof globalScope.isOfficialExchangeCalendarAvailable === 'function'
             ? globalScope.isOfficialExchangeCalendarAvailable(calendarId, coverageStart, coverageEnd)
             : calendarId === 'NYSE';
-        const suggestion = signal.status !== 'ok' || calendarAvailable
+        let suggestion = signal.status !== 'ok' || calendarAvailable
             ? coreApi.buildStrategySuggestion(signal, watermark)
             : { stance: 'calendar_unavailable', structure: null, exitRule: null };
+        if (signal.status === 'ok' && calendarAvailable && !signalReadiness.actionable) {
+            suggestion = signalReadiness.signalComplete
+                ? { stance: 'awaiting_execution_protocol', structure: null, exitRule: null }
+                : { stance: 'awaiting_official_close', structure: null, exitRule: null };
+        }
 
-        const zone = signal.status === 'ok'
+        const signalZone = signal.status === 'ok'
             ? (calendarAvailable ? signal.zone : 'calendar_unavailable')
             : 'no_signal';
+        const zone = signalZone === 'calendar_unavailable' || signalZone === 'no_signal'
+            ? signalZone
+            : (!signalReadiness.actionable
+                ? 'preview'
+                : (suggestion.stance === 'awaiting_watermark' ? 'mrr_unavailable' : signalZone));
         const calendarNote = calendarAvailable
             ? ''
             : ` · calendar unavailable (${escapeHtml(calendarId)} official snapshot missing/stale)`;
         const slopeText = signal.status === 'ok'
             ? `${signal.slope.toFixed(3)} · F ${escapeHtml(signal.front.expiry)} (${signal.front.dte}d) / B ${escapeHtml(signal.back.expiry)} (${signal.back.dte}d)${calendarNote}`
             : escapeHtml(signal.reason || 'sync the nearest expiries first');
-        const watermarkText = watermark.status === 'ok'
+        const signalDefaults = coreApi.STRATEGY_SIGNAL_DEFAULTS || {};
+        const zoneLow = Number.isFinite(signalDefaults.zoneLow) ? signalDefaults.zoneLow : 0.95;
+        const zoneHigh = Number.isFinite(signalDefaults.zoneHigh) ? signalDefaults.zoneHigh : 1.05;
+        const zoneMapText = [
+            { key: 'long_displacement', text: `<${zoneLow.toFixed(2)} reverse fly` },
+            { key: 'stand_down', text: `${zoneLow.toFixed(2)}–${zoneHigh.toFixed(2)} stand down` },
+            { key: 'sell_calendar', text: `>${zoneHigh.toFixed(2)} calendar` },
+        ].map((segment) => `<span class="ivts-zone-seg${signalZone === segment.key ? ' is-active' : ''}">${escapeHtml(segment.text)}</span>`)
+            .join('<span class="ivts-zone-sep">·</span>');
+        const watermarkValue = watermark.status === 'ok'
             ? `${watermark.mean.toFixed(2)} (n=${watermark.count})`
-            : `collecting ${watermark.count}/${watermark.required}`;
+            : (watermark.status === 'collecting'
+                ? `collecting ${watermark.count}/${watermark.required}`
+                : `n=${watermark.count}/${watermark.required}`);
+        const watermarkDiagnostics = [
+            Number(watermark.missingOfficialCloseWeeks) > 0
+                ? `${watermark.missingOfficialCloseWeeks} missing weekly close`
+                : '',
+            Number(watermark.incompleteOfficialCloseWeeks) > 0
+                ? `${watermark.incompleteOfficialCloseWeeks} incomplete weekly close`
+                : '',
+        ].filter(Boolean).join(' · ');
+        const watermarkText = watermark.status === 'ok'
+            ? `${watermarkValue}${watermark.latestObservationDate ? ` · through ${watermark.latestObservationDate}` : ''}`
+            : `${watermark.status}${watermark.reason ? `: ${watermark.reason}` : ''}`
+                + `${watermark.latestObservationDate ? ` · last ${watermark.latestObservationDate}` : ''}`
+                + ` · ${watermarkValue}${watermarkDiagnostics ? ` · ${watermarkDiagnostics}` : ''}`;
+        const readinessLabels = {
+            ok: 'official weekly close observed / no action',
+            missing_snapshot: 'no timestamped snapshot',
+            calendar_unavailable: 'official calendar unavailable',
+            partial_week: `partial week; expected ${signalReadiness.expectedSession || '--'}`,
+            pre_close: 'preview before official option close',
+            close_time_unavailable: 'official option close time unavailable',
+            missing_timestamp: 'snapshot timestamp missing',
+            future: 'future-dated snapshot rejected',
+            off_session_snapshot: 'snapshot is not from the official weekly-close session',
+            stale_anchor: `stale anchor; expected ${signalReadiness.expectedSession || '--'}`,
+            missing_snapshot_timestamp: 'server snapshot timestamp missing',
+            missing_snapshot_id: 'server snapshot id missing',
+            incoherent_snapshot: 'server reports an incremental/incomplete curve',
+            insufficient_signal: 'required signal legs unavailable',
+            missing_snapshot_leg: 'required snapshot leg missing',
+            mixed_snapshot_legs: 'required legs span different snapshots',
+            stale_snapshot_leg: 'required leg quote is stale within the snapshot',
+            execution_protocol_unavailable: 'official signal complete; no next-session execution protocol',
+        };
+        const signalAsOfText = signalReadiness.signalAsOf
+            ? `${signalReadiness.signalAsOf} · ${readinessLabels[signalReadiness.status] || signalReadiness.status}`
+            : (readinessLabels[signalReadiness.status] || signalReadiness.status);
         const benchmarkFamily = String(profile && (profile.enteredSymbol || profile.family) || (card && card.symbol) || '').toUpperCase();
         const mrrBenchmark = typeof coreApi.getMrrResearchBenchmark === 'function'
             ? coreApi.getMrrResearchBenchmark(benchmarkFamily)
@@ -2106,13 +2841,17 @@
                 ? 'No signal: subscribe/sync the ~7d and ~14d expiries.'
                 : (suggestion.stance === 'calendar_unavailable'
                     ? `${calendarId} official trading calendar is unavailable — no strategy suggestion.`
+                    : (suggestion.stance === 'awaiting_execution_protocol'
+                        ? 'Preview only: the official weekly-close signal is complete, but no backtested next-session execution protocol exists.'
+                    : (suggestion.stance === 'awaiting_official_close'
+                        ? 'Preview only: sync the official final weekly session after option close before acting.'
                     : (suggestion.stance === 'awaiting_watermark'
                         ? 'Zone favors reverse fly, but the watermark must prove it first — keep weekly samples, no structure yet.'
-                        : 'No options this week; delta book only.')));
+                        : 'No options this week; delta book only.')))));
         const panelTitle = signal.status !== 'ok'
             ? 'Sync the required front and back expiries before evaluating the official-calendar strategy signal.'
             : (calendarAvailable
-            ? 'Frozen playbook from VRP_RESEARCH_MEMO.md: slope<0.95 reverse iron fly (hold), 0.95-1.05 stand down, >1.05 calendar (tp50). Signal lambda fixed at 0.3 regardless of the TD IV display lambda. MRR (Move Realization Ratio) = realized |move| / expected move over your accumulated samples; the watermark gate vetoes the reverse fly below 0.95.'
+            ? 'Frozen playbook from VRP_RESEARCH_MEMO.md: slope<0.95 reverse iron fly (hold), 0.95-1.05 stand down, >1.05 calendar (tp50). Signal lambda fixed at 0.3 regardless of the TD IV display lambda. Official-close signals remain preview-only until a next-session execution protocol is separately backtested; reverse-fly research also requires fresh, verified weekly-close MRR history.'
             : `${calendarId} official trading calendar is missing or does not cover these expiries. No strategy suggestion is produced.`);
 
         return `
@@ -2123,6 +2862,8 @@
                     <span class="ivts-strategy-disclaimer">suggestion only · paper/sim first</span>
                 </div>
                 <div class="ivts-strategy-row"><span>TD slope (λ=0.3)</span><span>${slopeText}</span></div>
+                <div class="ivts-strategy-row"><span>Signal as of</span><span>${escapeHtml(signalAsOfText)}</span></div>
+                <div class="ivts-strategy-row"><span>Zones</span><span class="ivts-zone-map">${zoneMapText}</span></div>
                 <div class="ivts-strategy-row"><span>MRR watermark (|move|/EM)</span><span>${watermarkText}</span></div>
                 ${mrrBenchmarkRow}
                 <div class="ivts-strategy-row ivts-strategy-suggestion"><span>This week</span><span>${escapeHtml(suggestionText)}</span></div>
@@ -2131,7 +2872,11 @@
     }
 
     function buildCardBodyMarkup(card) {
-        const historyDocument = readOnlyHistoryDocument(card);
+        const historyDocument = strategyHistoryDocument(card);
+        const autoHistoryDocument = normalizeAutoHistoryDocument(card.autoHistoryDocument, card.symbol);
+        const autoStatus = card.autoSamplingEnabled
+            ? (card.autoSampleInProgress ? 'Sampling now' : `Running hourly · ${card.autoFileName || 'auto JSON'}`)
+            : (card.autoFileHandle ? 'Paused' : 'Not configured');
         const comparedRows = buildComparedRows(card);
         return `
             <div class="ivts-status ${card.statusKind ? `is-${escapeHtml(card.statusKind)}` : ''}">
@@ -2148,7 +2893,7 @@
                     <span class="ivts-fact-value">${card.underlyingPrice != null ? `$${formatNumber(card.underlyingPrice, 2)}` : '--'}</span>
                 </div>
                 <div class="ivts-fact">
-                    <span class="ivts-fact-label">History Samples</span>
+                    <span class="ivts-fact-label">Combined Samples</span>
                     <span class="ivts-fact-value">${historyDocument.samples.length}</span>
                 </div>
                 <div class="ivts-fact">
@@ -2158,6 +2903,20 @@
                 <div class="ivts-fact">
                     <span class="ivts-fact-label">Last Sample</span>
                     <span class="ivts-fact-value">${escapeHtml(formatTimestamp(card.lastSampleLabel))}</span>
+                </div>
+                <div class="ivts-fact">
+                    <span class="ivts-fact-label">Auto Samples</span>
+                    <span class="ivts-fact-value">${autoHistoryDocument.samples.length}</span>
+                </div>
+                <div class="ivts-fact">
+                    <span class="ivts-fact-label">Auto Sampling</span>
+                    <span class="ivts-fact-value">${escapeHtml(autoStatus)}</span>
+                    <span class="ivts-fact-note">Last: ${escapeHtml(formatTimestamp(card.lastAutoSampleLabel))}</span>
+                </div>
+                <div class="ivts-fact">
+                    <span class="ivts-fact-label">Append Target</span>
+                    <span class="ivts-fact-value">${escapeHtml(autoAppendTargetLabel(card))}</span>
+                    <span class="ivts-fact-note">Hourly automatic samples are written only to this file.</span>
                 </div>
             </div>
 
@@ -2220,11 +2979,13 @@
     }
 
     function buildCardHeaderSummary(card) {
-        const historyDocument = readOnlyHistoryDocument(card);
+        const historyDocument = strategyHistoryDocument(card);
         return `
             <div class="ivts-card-overview" aria-label="${escapeHtml(card.symbol)} summary">
                 <span>Underlying <strong data-field="header-underlying">${card.underlyingPrice != null ? `$${formatNumber(card.underlyingPrice, 2)}` : '--'}</strong></span>
                 <span>Samples <strong data-field="header-samples">${historyDocument.samples.length}</strong></span>
+                <span>Auto <strong data-field="header-auto-status">${card.autoSamplingEnabled ? 'Hourly' : 'Off'}</strong></span>
+                <span>Append Target <strong data-field="header-auto-target">${escapeHtml(autoAppendTargetLabel(card))}</strong></span>
                 <span>Last Sync <strong data-field="header-last-sync">${escapeHtml(formatTimestamp(card.lastSyncLabel))}</strong></span>
             </div>
             <div class="ivts-card-header-status ${card.statusKind ? `is-${escapeHtml(card.statusKind)}` : ''}" data-field="header-status">
@@ -2234,7 +2995,8 @@
     }
 
     function buildCardMarkup(card) {
-        const sampleDisabled = card.syncInProgress || card.sampleInProgress || (!card.currentFileHandle && (globalScope.showOpenFilePicker || !card.historyDocument));
+        const busy = card.syncInProgress || card.sampleInProgress || card.autoSampleInProgress || card.autoFileSelectionInProgress;
+        const sampleDisabled = busy || (!card.currentFileHandle && (globalScope.showOpenFilePicker || !card.historyDocument));
         const unsubscribeDisabled = !card.ws || (card.ws.readyState !== WebSocket.OPEN && card.ws.readyState !== WebSocket.CONNECTING);
         const expanded = card.isExpanded === true;
         return `
@@ -2256,8 +3018,11 @@
                     <div class="ivts-actions">
                         <button class="ivts-btn" data-action="open" data-symbol="${escapeHtml(card.symbol)}">Open History</button>
                         <button class="ivts-btn ivts-btn-muted" data-action="unsubscribe" data-symbol="${escapeHtml(card.symbol)}" ${unsubscribeDisabled ? 'disabled' : ''}>Unsubscribe</button>
-                        <button class="ivts-btn ivts-btn-primary" data-action="sync" data-symbol="${escapeHtml(card.symbol)}" ${card.syncInProgress || card.sampleInProgress ? 'disabled' : ''}>Sync/Update</button>
+                        <button class="ivts-btn ivts-btn-primary" data-action="sync" data-symbol="${escapeHtml(card.symbol)}" ${busy ? 'disabled' : ''}>Sync/Update</button>
                         <button class="ivts-btn ivts-btn-warm" data-action="sample" data-symbol="${escapeHtml(card.symbol)}" ${sampleDisabled ? 'disabled' : ''}>Sample</button>
+                        <button class="ivts-btn ivts-btn-auto" data-action="auto-load" data-symbol="${escapeHtml(card.symbol)}" ${busy ? 'disabled' : ''}>Load/Resume Auto JSON</button>
+                        <button class="ivts-btn ivts-btn-muted" data-action="auto-new" data-symbol="${escapeHtml(card.symbol)}" ${busy ? 'disabled' : ''}>New Auto JSON</button>
+                        <button class="ivts-btn ivts-btn-auto ${card.autoSamplingEnabled ? 'is-running' : ''}" data-action="auto-sample" data-symbol="${escapeHtml(card.symbol)}" ${card.autoFileHandle ? '' : 'hidden'} ${busy ? 'disabled' : ''}>${autoSampleButtonLabel(card)}</button>
                     </div>
                 </div>
                 <div id="ivts-card-body-${escapeHtml(card.symbol)}" class="ivts-card-body" ${expanded ? '' : 'hidden'}>
@@ -2286,9 +3051,11 @@
             }
         }
 
-        const historyDocument = readOnlyHistoryDocument(card);
+        const historyDocument = strategyHistoryDocument(card);
         const headerUnderlying = cardNode.querySelector('[data-field="header-underlying"]');
         const headerSamples = cardNode.querySelector('[data-field="header-samples"]');
+        const headerAutoStatus = cardNode.querySelector('[data-field="header-auto-status"]');
+        const headerAutoTarget = cardNode.querySelector('[data-field="header-auto-target"]');
         const headerLastSync = cardNode.querySelector('[data-field="header-last-sync"]');
         const headerStatus = cardNode.querySelector('[data-field="header-status"]');
         if (headerUnderlying) {
@@ -2296,6 +3063,14 @@
         }
         if (headerSamples) {
             headerSamples.textContent = String(historyDocument.samples.length);
+        }
+        if (headerAutoStatus) {
+            headerAutoStatus.textContent = card.autoSamplingEnabled
+                ? (card.autoSampleInProgress ? 'Sampling' : 'Hourly')
+                : (card.autoFileHandle ? 'Paused' : 'Off');
+        }
+        if (headerAutoTarget) {
+            headerAutoTarget.textContent = autoAppendTargetLabel(card);
         }
         if (headerLastSync) {
             headerLastSync.textContent = formatTimestamp(card.lastSyncLabel);
@@ -2319,21 +3094,37 @@
 
         updateCardChrome(card, cardNode);
 
-        const sampleDisabled = card.syncInProgress || card.sampleInProgress || (!card.currentFileHandle && (globalScope.showOpenFilePicker || !card.historyDocument));
+        const busy = card.syncInProgress || card.sampleInProgress || card.autoSampleInProgress || card.autoFileSelectionInProgress;
+        const sampleDisabled = busy || (!card.currentFileHandle && (globalScope.showOpenFilePicker || !card.historyDocument));
         const unsubscribeDisabled = !card.ws || (card.ws.readyState !== WebSocket.OPEN && card.ws.readyState !== WebSocket.CONNECTING);
         const openButton = cardNode.querySelector('[data-action="open"]');
         const syncButton = cardNode.querySelector('[data-action="sync"]');
         const sampleButton = cardNode.querySelector('[data-action="sample"]');
+        const autoLoadButton = cardNode.querySelector('[data-action="auto-load"]');
+        const autoNewButton = cardNode.querySelector('[data-action="auto-new"]');
+        const autoSampleButton = cardNode.querySelector('[data-action="auto-sample"]');
         const unsubscribeButton = cardNode.querySelector('[data-action="unsubscribe"]');
 
         if (openButton) {
             openButton.disabled = false;
         }
         if (syncButton) {
-            syncButton.disabled = !!(card.syncInProgress || card.sampleInProgress);
+            syncButton.disabled = !!busy;
         }
         if (sampleButton) {
             sampleButton.disabled = !!sampleDisabled;
+        }
+        if (autoLoadButton) {
+            autoLoadButton.disabled = !!busy;
+        }
+        if (autoNewButton) {
+            autoNewButton.disabled = !!busy;
+        }
+        if (autoSampleButton) {
+            autoSampleButton.hidden = !card.autoFileHandle;
+            autoSampleButton.disabled = !!busy;
+            autoSampleButton.textContent = autoSampleButtonLabel(card);
+            autoSampleButton.classList.toggle('is-running', card.autoSamplingEnabled);
         }
         if (unsubscribeButton) {
             unsubscribeButton.disabled = !!unsubscribeDisabled;
@@ -2560,6 +3351,10 @@
 
     function closeAllSocketsForPageExit() {
         clearIbStatusPollTimer();
+        if (runtime.autoSampleMonitorTimerId != null) {
+            clearInterval(runtime.autoSampleMonitorTimerId);
+            runtime.autoSampleMonitorTimerId = null;
+        }
         if (runtime.controlWs) {
             try {
                 runtime.controlWs.close(1000, 'pagehide');
@@ -2577,6 +3372,15 @@
                 // Ignore best-effort shutdown failures during page exit.
             }
         });
+    }
+
+    function startAutoSampleMonitor() {
+        if (runtime.autoSampleMonitorTimerId != null) {
+            return;
+        }
+        runtime.autoSampleMonitorTimerId = setInterval(() => {
+            checkAutoSamplers('hourly');
+        }, AUTO_SAMPLE_MONITOR_INTERVAL_MS);
     }
 
     function bindContainerInteractions() {
@@ -2620,6 +3424,18 @@
             }
             if (action === 'sample') {
                 sampleCard(card);
+                return;
+            }
+            if (action === 'auto-load') {
+                await selectAndResumeAutoFile(card, 'load');
+                return;
+            }
+            if (action === 'auto-new') {
+                await selectAndResumeAutoFile(card, 'new');
+                return;
+            }
+            if (action === 'auto-sample') {
+                await startAutoSampling(card);
                 return;
             }
             if (action === 'calendar-show-all') {
@@ -2678,6 +3494,7 @@
 
     globalScope.OptionComboIvTermStructurePage = {
         _test: {
+            IV_TERM_STRUCTURE_SNAPSHOT_TIMEOUT_MS,
             normalizeWsHost,
             normalizeWsPort,
             normalizeFuturesContractMonth,
@@ -2689,6 +3506,7 @@
             isOptionStreamLimitElement,
             isFocusedBaselineSelectInCard,
             getPrimaryExpiryRows,
+            resolveSelectedStraddleBaselineExpiry,
             formatIvPair,
             buildIvPairTdCell,
             buildSubscribePayload,
@@ -2708,6 +3526,23 @@
             loadSavedTdIvLambda,
             saveTdIvLambda,
             buildStrategySignalPanel,
+            officialWeekFinalSession,
+            latestCompletedOfficialWeek,
+            evaluateSessionTimestamp,
+            evaluateWeeklySignalReadiness,
+            serverPayloadAsOf,
+            quoteWithServerSnapshotEvidence,
+            normalizeAutoHistoryDocument,
+            strategyHistoryDocument,
+            shouldRunAutoSample,
+            hasUsableWatermarkSeed,
+            writeAutoHistoryDocument,
+            bindAutoHistoryFile,
+            loadAutoHistoryFile,
+            createAutoHistoryFile,
+            prepareAutoHistoryFile,
+            autoSampleButtonLabel,
+            autoAppendTargetLabel,
             captureCardViewState,
             restoreCardViewState,
         },
@@ -2840,6 +3675,13 @@
             }
             globalScope.addEventListener('pagehide', closeAllSocketsForPageExit, { capture: true });
             globalScope.addEventListener('beforeunload', closeAllSocketsForPageExit, { capture: true });
+            globalScope.addEventListener('focus', () => checkAutoSamplers('page focus'));
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) {
+                    checkAutoSamplers('page visible');
+                }
+            });
+            startAutoSampleMonitor();
             render(true);
             requestIbStatus();
         } catch (error) {

@@ -7,13 +7,20 @@ from typing import Any
 from ib_async import Stock
 from websockets.exceptions import ConnectionClosed
 
+from ib_server_iv_term_structure import build_iv_term_structure_payload_evidence
 from ib_server_market_data import cancel_mkt_data_if_unused, req_mkt_data_pooled
 from runtime_contracts import (
     ApiMarketDataResetPayload,
     HistoricalBarsResponsePayload,
     HistoricalReplayErrorPayload,
+    IvTermStructureErrorPayload,
     ManualUnderlyingSyncPayload,
 )
+
+IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_DEFAULT = 75.0
+# Floors a misconfigured 0/negative timeout so catalog resolution always gets a
+# usable window. Tests that stall the handler must outlast this, not undercut it.
+IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_FLOOR = 1.0
 
 
 def purge_combo_order_tracking_for_websocket(
@@ -380,7 +387,45 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
     elif action == 'subscribe':
         await _handle_subscribe(env, websocket, data, client_ip)
     elif action == 'subscribe_iv_term_structure':
-        await env['handle_iv_term_structure_subscription'](websocket, client_ip, data)
+        try:
+            timeout_seconds = max(
+                IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_FLOOR,
+                float(env.get(
+                    'iv_term_structure_catalog_timeout_seconds',
+                    IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_DEFAULT,
+                )),
+            )
+        except (TypeError, ValueError):
+            timeout_seconds = IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_DEFAULT
+        try:
+            await asyncio.wait_for(
+                env['handle_iv_term_structure_subscription'](websocket, client_ip, data),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            underlying = data.get('underlying') if isinstance(data.get('underlying'), dict) else {}
+            option_template = data.get('optionTemplate') if isinstance(data.get('optionTemplate'), dict) else {}
+            symbol = str(
+                option_template.get('symbol')
+                or underlying.get('symbol')
+                or ''
+            ).strip().upper()
+            logging.warning(
+                "IV term structure catalog resolution timed out for %s after %.1fs",
+                symbol or '<missing>',
+                timeout_seconds,
+            )
+            timeout_payload: IvTermStructureErrorPayload = {
+                **build_iv_term_structure_payload_evidence('error_payload_no_quote_snapshot'),
+                'action': 'iv_term_structure_error',
+                'symbol': symbol,
+                'message': (
+                    f'IB contract/option-chain discovery timed out after {timeout_seconds:.0f}s. '
+                    'Confirm market-data farm 2104 and sec-def farm 2158 are connected, '
+                    'then retry with fewer option streams.'
+                ),
+            }
+            await env['send_message_safe'](websocket, json.dumps(timeout_payload))
     elif action == 'request_ib_connection_status':
         await env['send_message_safe'](
             websocket,

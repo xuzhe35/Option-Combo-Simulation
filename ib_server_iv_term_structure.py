@@ -3,10 +3,16 @@ import json
 import logging
 from datetime import datetime
 from typing import Any
+from uuid import uuid4
 
 from ib_async import Contract
 
-from ib_server_market_data import cancel_mkt_data_if_unused, req_mkt_data_pooled
+from ib_server_market_data import (
+    cancel_mkt_data_if_unused,
+    req_mkt_data_pooled,
+    server_utc_now_iso,
+    stamp_quote_as_of,
+)
 from runtime_contracts import (
     IvTermStructureCatalogPatchPayload,
     IvTermStructureErrorPayload,
@@ -26,6 +32,17 @@ IV_TERM_STRUCTURE_OPTION_QUALIFY_TIMEOUT_SECONDS = 8.0
 IV_TERM_STRUCTURE_OPTION_SUBSCRIPTION_CONCURRENCY = 4
 IV_TERM_STRUCTURE_SHARED_ATM_PROBE_TIMEOUT_SECONDS = 20.0
 IV_TERM_STRUCTURE_DEFAULT_MAX_OPTION_STREAMS = 10
+
+
+def build_iv_term_structure_payload_evidence(coherence_reason: str) -> dict[str, Any]:
+    """Describe why an IVTS payload is not a coherent full-curve quote snapshot."""
+    return {
+        'payloadAsOf': server_utc_now_iso(),
+        'batchId': uuid4().hex,
+        'quoteComplete': False,
+        'coherent': False,
+        'coherenceReason': str(coherence_reason or 'no_complete_quote_snapshot'),
+    }
 
 
 def normalize_symbol(value: Any) -> str:
@@ -126,6 +143,7 @@ def filter_iv_term_structure_option_chains(option_chains, option_template):
 
     template = option_template if isinstance(option_template, dict) else {}
     template_sec_type = normalize_symbol(template.get('secType') or template.get('sec_type'))
+    template_symbol = normalize_symbol(template.get('symbol'))
     template_multiplier = str(template.get('multiplier') or '').strip()
     template_exchange = str(template.get('exchange') or '').strip().upper()
     template_trading_class = str(template.get('tradingClass') or template.get('trading_class') or '').strip().upper()
@@ -153,6 +171,18 @@ def filter_iv_term_structure_option_chains(option_chains, option_template):
         ]
         if trading_class_matches:
             chains = trading_class_matches
+    elif template_symbol and template_sec_type != 'FOP':
+        # Equity/index SecDef responses may include adjusted deliverables such
+        # as 2SPY alongside the standard SPY chain. Their expiries can look
+        # valid in the merged calendar but have no standard C/P contracts at
+        # the requested strike. Prefer the exact-symbol trading class whenever
+        # IB exposes one; keep the broader set only when no exact class exists.
+        standard_trading_class_matches = [
+            chain for chain in chains
+            if str(getattr(chain, 'tradingClass', '') or '').strip().upper() == template_symbol
+        ]
+        if standard_trading_class_matches:
+            chains = standard_trading_class_matches
 
     return chains
 
@@ -220,9 +250,16 @@ async def fetch_iv_term_structure_contract_rows_for_expiry(
     if qualified_underlying is not None and getattr(qualified_underlying, 'conId', None):
         probe.underConId = qualified_underlying.conId
 
+    async def request_contract_details():
+        semaphore = env.get('iv_term_structure_contract_details_semaphore')
+        if semaphore is None:
+            return await env['ib'].reqContractDetailsAsync(probe)
+        async with semaphore:
+            return await env['ib'].reqContractDetailsAsync(probe)
+
     try:
         contract_details_list = await asyncio.wait_for(
-            env['ib'].reqContractDetailsAsync(probe),
+            request_contract_details(),
             timeout=max(0.5, float(timeout_seconds or 0.0)),
         )
     except asyncio.TimeoutError:
@@ -305,9 +342,16 @@ async def fetch_iv_term_structure_contract_rows_for_exact_strike(
     if qualified_underlying is not None and getattr(qualified_underlying, 'conId', None):
         probe.underConId = qualified_underlying.conId
 
+    async def request_contract_details():
+        semaphore = env.get('iv_term_structure_contract_details_semaphore')
+        if semaphore is None:
+            return await env['ib'].reqContractDetailsAsync(probe)
+        async with semaphore:
+            return await env['ib'].reqContractDetailsAsync(probe)
+
     try:
         contract_details_list = await asyncio.wait_for(
-            env['ib'].reqContractDetailsAsync(probe),
+            request_contract_details(),
             timeout=max(0.25, float(timeout_seconds or 0.0)),
         )
     except asyncio.TimeoutError:
@@ -1062,10 +1106,13 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             ))
         except (TypeError, ValueError):
             subscription_concurrency = IV_TERM_STRUCTURE_OPTION_SUBSCRIPTION_CONCURRENCY
-        option_subscription_semaphore = asyncio.Semaphore(max(1, subscription_concurrency))
+        option_subscription_semaphore = env.get('iv_term_structure_option_subscription_semaphore')
+        if option_subscription_semaphore is None:
+            option_subscription_semaphore = asyncio.Semaphore(max(1, subscription_concurrency))
 
         async def send_sync_progress(message):
             patch_payload: IvTermStructureCatalogPatchPayload = {
+                **build_iv_term_structure_payload_evidence('catalog_progress_without_complete_option_quotes'),
                 'action': 'iv_term_structure_catalog_patch',
                 'symbol': option_symbol,
                 'expiryRows': [],
@@ -1218,6 +1265,7 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
                     subscribed_count = subscribed_option_count
 
                 patch_payload: IvTermStructureCatalogPatchPayload = {
+                    **build_iv_term_structure_payload_evidence('catalog_progress_without_complete_option_quotes'),
                     'action': 'iv_term_structure_catalog_patch',
                     'symbol': option_symbol,
                     'expiryRows': [expiry_payload_row],
@@ -1271,6 +1319,7 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
                         timed_out_count = timed_out_option_count
                         current_error_message = subscription_error_message
                     patch_payload = {
+                        **build_iv_term_structure_payload_evidence('catalog_progress_without_complete_option_quotes'),
                         'action': 'iv_term_structure_catalog_patch',
                         'symbol': option_symbol,
                         'expiryRows': [],
@@ -1303,6 +1352,7 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             await asyncio.gather(*(process_expiry(expiry_row) for expiry_row in prioritized_expiry_rows))
 
         complete_payload: IvTermStructureSyncCompletePayload = {
+            **build_iv_term_structure_payload_evidence('subscriptions_ready_without_coherent_quote_snapshot'),
             'action': 'iv_term_structure_sync_complete',
             'symbol': option_symbol,
             'subscribedOptionCount': subscribed_option_count,
@@ -1326,6 +1376,7 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             normalize_symbol(symbol) or '<missing>',
         )
         error_payload: IvTermStructureErrorPayload = {
+            **build_iv_term_structure_payload_evidence('error_payload_no_quote_snapshot'),
             'action': 'iv_term_structure_error',
             'symbol': normalize_symbol(symbol),
             'message': f'Background IV option subscription failed: {exc}',
@@ -1353,6 +1404,7 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
 
     if not env['ib'].isConnected():
         error_payload: IvTermStructureErrorPayload = {
+            **build_iv_term_structure_payload_evidence('error_payload_no_quote_snapshot'),
             'action': 'iv_term_structure_error',
             'symbol': normalize_symbol((data.get('underlying') or {}).get('symbol')),
             'message': 'IB is not connected.',
@@ -1395,6 +1447,7 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
     )
     if underlying_sec_type == 'FUT' and not underlying_contract_month:
         error_payload = {
+            **build_iv_term_structure_payload_evidence('error_payload_no_quote_snapshot'),
             'action': 'iv_term_structure_error',
             'symbol': underlying_symbol,
             'message': f'Choose an underlying futures month for {underlying_symbol or "this FOP"} before syncing.',
@@ -1424,6 +1477,7 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
         underlying_contract = env['build_contract_from_request'](underlying_request)
     except Exception as exc:
         error_payload = {
+            **build_iv_term_structure_payload_evidence('error_payload_no_quote_snapshot'),
             'action': 'iv_term_structure_error',
             'symbol': underlying_symbol,
             'message': f'Invalid underlying request: {exc}',
@@ -1448,6 +1502,7 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
                 details.append(f"x{underlying_multiplier_hint}")
             underlying_description = f"FUT {' '.join(details)}"
         error_payload = {
+            **build_iv_term_structure_payload_evidence('error_payload_no_quote_snapshot'),
             'action': 'iv_term_structure_error',
             'symbol': underlying_symbol,
             'message': f'Failed to qualify underlying {underlying_description}.',
@@ -1458,6 +1513,7 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
     request_option_chains = getattr(env['ib'], 'reqSecDefOptParamsAsync', None)
     if not callable(request_option_chains):
         error_payload = {
+            **build_iv_term_structure_payload_evidence('error_payload_no_quote_snapshot'),
             'action': 'iv_term_structure_error',
             'symbol': underlying_symbol,
             'message': 'The current ib_async build does not expose reqSecDefOptParamsAsync.',
@@ -1568,6 +1624,7 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
 
     if underlying_price is None:
         error_payload = {
+            **build_iv_term_structure_payload_evidence('error_payload_no_quote_snapshot'),
             'action': 'iv_term_structure_error',
             'symbol': underlying_symbol,
             'message': f'No live underlying quote is available yet for {underlying_symbol or "the requested symbol"}.',
@@ -1611,7 +1668,15 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
         )
         expiry_payload_rows.append(bundle['expiryPayloadRow'])
 
+    snapshot_evidence = build_iv_term_structure_payload_evidence(
+        'catalog_without_complete_option_quotes',
+    )
+    underlying_quote = stamp_quote_as_of(
+        underlying_quote,
+        snapshot_evidence['payloadAsOf'],
+    )
     payload: IvTermStructureSnapshotPayload = {
+        **snapshot_evidence,
         'action': 'iv_term_structure_snapshot',
         'symbol': option_symbol,
         'anchorDate': anchor_date,

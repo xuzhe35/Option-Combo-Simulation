@@ -41,6 +41,36 @@ import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+
+# Historical vendor feeds use values such as 0.01488 as an IV floor/sentinel.
+# Such an ATM observation can turn an ordinary curve into a 9x slope, so the
+# regime classifier must fail closed rather than treating any positive IV as
+# valid evidence.
+SIGNAL_IV_FLOOR = 0.03
+
+
+def _usable_signal_ivs(values, floor=SIGNAL_IV_FLOOR):
+    return all(
+        isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value > floor
+        for value in values
+    )
+
+
+def _signal_iv_price_consistent(
+    iv, straddle_mid, strike, dte, ratio_min=0.75, ratio_max=1.25
+):
+    """Conservative ATM price/IV check; not a replacement IV estimator."""
+    values = (iv, straddle_mid, strike, dte)
+    if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in values):
+        return False
+    if min(values) <= 0:
+        return False
+    price_iv = straddle_mid / (math.sqrt(2 / math.pi) * strike * math.sqrt(dte / 365))
+    ratio = iv / price_iv
+    return math.isfinite(ratio) and ratio_min <= ratio <= ratio_max
+
 SERVICE_URL = "http://127.0.0.1:8750"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OFFICIAL_CALENDAR_PATH = PROJECT_ROOT / "exchange_calendars" / "official_exchange_calendars.json"
@@ -353,11 +383,24 @@ def run(args):
                       back_chain[(atm, "call")], back_chain[(atm, "put")])
         front_iv = [q.get("impliedVolatility") for q in atm_quotes[:2]]
         back_iv = [q.get("impliedVolatility") for q in atm_quotes[2:]]
-        if not all(front_iv) or not all(back_iv):
-            skip("missing IV")
+        if not _usable_signal_ivs(front_iv + back_iv):
+            skip("missing or vendor-floor IV")
             continue
-        front_iv_td = _td_iv(sum(front_iv) / 2, front_dte, front_trad, lam)
-        back_iv_td = _td_iv(sum(back_iv) / 2, (back - entry).days, back_trad, lam)
+        atm_marks = [_usable_mark(quote) for quote in atm_quotes]
+        front_signal_iv = sum(front_iv) / 2
+        back_signal_iv = sum(back_iv) / 2
+        if any(mark is None for mark in atm_marks) or not (
+            _signal_iv_price_consistent(
+                front_signal_iv, sum(atm_marks[:2]), atm, front_dte
+            )
+            and _signal_iv_price_consistent(
+                back_signal_iv, sum(atm_marks[2:]), atm, (back - entry).days
+            )
+        ):
+            skip("ATM price/IV inconsistency")
+            continue
+        front_iv_td = _td_iv(front_signal_iv, front_dte, front_trad, lam)
+        back_iv_td = _td_iv(back_signal_iv, (back - entry).days, back_trad, lam)
         if not front_iv_td or not back_iv_td:
             skip("bad IV conversion")
             continue

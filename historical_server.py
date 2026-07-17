@@ -7,6 +7,7 @@ import signal
 
 import websockets
 
+from chain_service_config import resolve_chain_service_url
 from historical_replay_service import (
     HistoricalReplayService,
     describe_contract_request,
@@ -22,9 +23,7 @@ config.read('config.ini')
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_HOST = '127.0.0.1'
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
-CHAIN_SERVICE_URL = config.get(
-    'historical', 'chain_service_url', fallback='http://127.0.0.1:8750'
-).strip()
+CHAIN_SERVICE_URL = resolve_chain_service_url(config)
 RATES_SQLITE_DB = os.path.abspath(
     config.get('historical', 'rates_sqlite_db_path', fallback=os.path.join('sqlite_spy', 'rates.db'))
 )
@@ -56,8 +55,8 @@ try:
 except Exception as exc:
     logging.warning(
         "Options chain service is NOT reachable at %s — historical replay "
-        "requests will fail until it is started "
-        "(Options DB/chain_service: python3 chain_server.py). Error: %s",
+        "requests will fail until it answers. Repoint it via config.ini "
+        "[historical] chain_service_url. Error: %s",
         CHAIN_SERVICE_URL,
         exc,
     )

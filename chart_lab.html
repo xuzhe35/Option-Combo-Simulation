@@ -244,12 +244,12 @@
                         <div class="control-group">
                             <label for="simTimeBasis" title="How simulated time decays across weekends and holidays. Calendar = TWS convention (weekends decay in full). Trading days = weekends carry no variance. Weighted = each weekend day counts as λ of a trading day. Switching never changes today's prices, only the decay path.">
                                 Time Basis (Weekend θ)
-                                <span class="value-display" id="simTimeBasisDisplay">λ=1.00</span>
+                                <span class="value-display" id="simTimeBasisDisplay">λ=0.30</span>
                             </label>
                             <select id="simTimeBasis" class="number-input">
                                 <option value="calendar">Calendar (TWS default)</option>
                                 <option value="trading">Trading days (λ=0)</option>
-                                <option value="weighted">Weighted weekends (λ)</option>
+                                <option value="weighted" selected>Weighted weekends (λ)</option>
                             </select>
                             <input type="number" id="simWeekendWeight" class="number-input" value="0.30" step="0.05" min="0" max="1" style="display: none;" title="Weekend/holiday variance weight λ: 0 = trading-day clock, 1 = calendar clock.">
                         </div>
@@ -483,7 +483,16 @@
                                     <input type="checkbox" id="randomWalkToggle" onchange="updateProbCharts()">
                                     <span>Random Walk</span>
                                 </label>
+                                <select id="regimeConditionSelect" class="number-input" style="width: auto; font-size: 12px; padding: 2px 6px;"
+                                    onchange="updateProbCharts()"
+                                    title="Overlay the historical outcome density of weeks that shared the selected TD-slope zone (7d/14d, lambda=0.3), replayed at today's price/EM scale. Reference only; see VRP_RESEARCH_MEMO.md E13/E17.">
+                                    <option value="off">Unconditioned</option>
+                                    <option value="dc">Deep contango (&lt;0.95)</option>
+                                    <option value="n">Neutral (0.95-1.05)</option>
+                                    <option value="bw">Backwardation (&gt;1.05)</option>
+                                </select>
                                 <div id="expectedPnLBadge" style="font-weight: 600; font-size: 0.95rem;"></div>
+                                <div id="condExpectedPnLBadge" style="font-weight: 600; font-size: 0.85rem;"></div>
                                 <button class="btn btn-secondary btn-sm" onclick="toggleProbCharts(this)">Show
                                     Analysis</button>
                                 <button class="btn btn-primary btn-sm" onclick="updateProbCharts()"
@@ -890,7 +899,7 @@
                                         onclick="toggleChart(this)">Show Chart</button>
                                 </div>
                             </div>
-                            
+
                             <!-- Amortization Banner (Outside flex flow) -->
                             <div class="amortization-container mt-3" style="display: none; padding: 1rem; border-radius: 0.5rem; color: #856404; background-color: #fff3cd; border: 2px dashed #ffeeba; font-weight: 600; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.05); font-size: 1.15rem;">
                                 👉 <span class="amortization-text"></span>
@@ -899,7 +908,7 @@
                             <!-- Amortization Chart Container -->
                             <div class="amortization-chart-container mt-3"
                                 style="display: none; border-top: 1px solid var(--border-color); padding-top: 1rem;">
-                                
+
                                 <h4 class="h4-style m-0 mb-3" style="color: var(--primary-color); display: flex; align-items: center; justify-content: space-between;">
                                     <span>Amortized Cost Basis Simulation</span>
                                     <button class="btn btn-sm btn-secondary" onclick="toggleAmortizationChart(this.closest('.amortization-chart-container').previousElementSibling.previousElementSibling.querySelector('.btn-simulate-amortized'))">Close</button>
@@ -1210,10 +1219,11 @@
 
     <!-- Scripts -->
     <script src="js/t_params_db.js"></script>
+    <script src="js/regime_conditional_samples.generated.js?v=20260715-v1"></script>
     <script src="js/official_exchange_calendars.generated.js?v=20260713-v2"></script>
     <script src="js/market_holidays.js?v=20260713-official-only"></script>
     <script src="js/date_utils.js?v=20260713-product-calendar"></script>
-    <script src="js/product_registry.js?v=20260713-position-fop-fix"></script>
+    <script src="js/product_registry.js?v=20260715-strike-increment"></script>
     <script src="js/index_forward_rate.js"></script>
     <script src="js/pricing_context.js?v=20260322-histsimdate"></script>
     <script src="js/trade_trigger_logic.js"></script>
@@ -1225,7 +1235,7 @@
     <script src="js/pricing_core.js?v=20260713-product-calendar"></script>
     <script src="js/bsm.js"></script>
     <script src="js/chart.js?v=20260711-partial-close"></script>
-    <script src="js/prob_charts.js?v=20260414-probivfix"></script>
+    <script src="js/prob_charts.js?v=20260715-regime-conditioned"></script>
     <script src="js/chart_controls.js?v=20260713-product-calendar"></script>
     <script src="js/amortized.js?v=20260711-partial-close"></script>
     <script src="js/valuation.js?v=20260711-partial-close"></script>
@@ -1233,7 +1243,7 @@
     <script src="js/session_ui.js?v=20260713-product-calendar"></script>
     <script src="js/control_panel_ui.js?v=20260713-product-calendar"></script>
     <script src="js/hedge_editor_ui.js"></script>
-    <script src="js/group_editor_ui.js?v=20260713-reverse-butterfly"></script>
+    <script src="js/group_editor_ui.js?v=20260715-quote-scroll"></script>
     <script src="js/hedge_ui.js"></script>
     <script src="js/group_ui.js?v=20260713-reverse-butterfly"></script>
     <script src="js/global_ui.js"></script>

@@ -4,6 +4,1406 @@
   "samples": [
     {
       "symbol": "SPY",
+      "sampledAt": "2025-05-09T20:15:00Z",
+      "quoteDate": "2025-05-09",
+      "underlyingPrice": 564.34,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250516",
+          "dte": 7,
+          "atmStrike": 564.0,
+          "callIv": 0.21,
+          "putIv": 0.21,
+          "atmIv": 0.21,
+          "callMark": 6.835,
+          "putMark": 6.035,
+          "atmStraddleMark": 12.87,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-05-09T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-05-16T20:15:00Z",
+      "quoteDate": "2025-05-16",
+      "underlyingPrice": 594.2,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250523",
+          "dte": 7,
+          "atmStrike": 594.0,
+          "callIv": 0.13195,
+          "putIv": 0.13195,
+          "atmIv": 0.13195,
+          "callMark": 4.555,
+          "putMark": 4.145,
+          "atmStraddleMark": 8.7,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-05-16T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-05-23T20:15:00Z",
+      "quoteDate": "2025-05-23",
+      "underlyingPrice": 579.11,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250530",
+          "dte": 7,
+          "atmStrike": 579.0,
+          "callIv": 0.18073,
+          "putIv": 0.19048,
+          "atmIv": 0.18560500000000002,
+          "callMark": 5.985,
+          "putMark": 5.925,
+          "atmStraddleMark": 11.91,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-05-23T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-05-30T20:15:00Z",
+      "quoteDate": "2025-05-30",
+      "underlyingPrice": 589.39,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250606",
+          "dte": 7,
+          "atmStrike": 589.0,
+          "callIv": 0.16122,
+          "putIv": 0.16122,
+          "atmIv": 0.16122,
+          "callMark": 5.75,
+          "putMark": 4.695,
+          "atmStraddleMark": 10.445,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-05-30T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-06-06T20:15:00Z",
+      "quoteDate": "2025-06-06",
+      "underlyingPrice": 599.14,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250613",
+          "dte": 7,
+          "atmStrike": 599.0,
+          "callIv": 0.13195,
+          "putIv": 0.13195,
+          "atmIv": 0.13195,
+          "callMark": 4.755,
+          "putMark": 4.105,
+          "atmStraddleMark": 8.86,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-06-06T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-06-13T20:15:00Z",
+      "quoteDate": "2025-06-13",
+      "underlyingPrice": 597.0,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250620",
+          "dte": 7,
+          "atmStrike": 597.0,
+          "callIv": 0.16122,
+          "putIv": 0.18073,
+          "atmIv": 0.170975,
+          "callMark": 5.52,
+          "putMark": 5.755,
+          "atmStraddleMark": 11.275,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-06-13T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-06-20T20:15:00Z",
+      "quoteDate": "2025-06-20",
+      "underlyingPrice": 594.28,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250627",
+          "dte": 7,
+          "atmStrike": 594.0,
+          "callIv": 0.17097,
+          "putIv": 0.15146,
+          "atmIv": 0.161215,
+          "callMark": 5.9,
+          "putMark": 4.72,
+          "atmStraddleMark": 10.62,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-06-20T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-06-27T20:15:00Z",
+      "quoteDate": "2025-06-27",
+      "underlyingPrice": 614.91,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250703",
+          "dte": 6,
+          "atmStrike": 615.0,
+          "callIv": 0.10268,
+          "putIv": 0.12219,
+          "atmIv": 0.112435,
+          "callMark": 3.49,
+          "putMark": 3.535,
+          "atmStraddleMark": 7.025,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-06-27T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-07-03T20:15:00Z",
+      "quoteDate": "2025-07-03",
+      "underlyingPrice": 625.34,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250710",
+          "dte": 7,
+          "atmStrike": 625.0,
+          "callIv": 0.11244,
+          "putIv": 0.11244,
+          "atmIv": 0.11244,
+          "callMark": 4.23,
+          "putMark": 3.595,
+          "atmStraddleMark": 7.825,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-07-03T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-07-11T20:15:00Z",
+      "quoteDate": "2025-07-11",
+      "underlyingPrice": 623.62,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250718",
+          "dte": 7,
+          "atmStrike": 624.0,
+          "callIv": 0.11244,
+          "putIv": 0.12219,
+          "atmIv": 0.117315,
+          "callMark": 3.865,
+          "putMark": 4.05,
+          "atmStraddleMark": 7.915,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-07-11T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-07-18T20:15:00Z",
+      "quoteDate": "2025-07-18",
+      "underlyingPrice": 627.58,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250725",
+          "dte": 7,
+          "atmStrike": 628.0,
+          "callIv": 0.10268,
+          "putIv": 0.10268,
+          "atmIv": 0.10268,
+          "callMark": 3.55,
+          "putMark": 3.515,
+          "atmStraddleMark": 7.065,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-07-18T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-07-25T20:15:00Z",
+      "quoteDate": "2025-07-25",
+      "underlyingPrice": 637.1,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250801",
+          "dte": 7,
+          "atmStrike": 637.0,
+          "callIv": 0.12219,
+          "putIv": 0.12219,
+          "atmIv": 0.12219,
+          "callMark": 4.5,
+          "putMark": 3.95,
+          "atmStraddleMark": 8.45,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-07-25T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-08-01T20:15:00Z",
+      "quoteDate": "2025-08-01",
+      "underlyingPrice": 621.72,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250808",
+          "dte": 7,
+          "atmStrike": 622.0,
+          "callIv": 0.18073,
+          "putIv": 0.16122,
+          "atmIv": 0.170975,
+          "callMark": 6.185,
+          "putMark": 5.51,
+          "atmStraddleMark": 11.695,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-08-01T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-08-08T20:15:00Z",
+      "quoteDate": "2025-08-08",
+      "underlyingPrice": 637.18,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250815",
+          "dte": 7,
+          "atmStrike": 637.0,
+          "callIv": 0.13195,
+          "putIv": 0.10268,
+          "atmIv": 0.117315,
+          "callMark": 5.03,
+          "putMark": 3.24,
+          "atmStraddleMark": 8.27,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-08-08T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-08-15T20:15:00Z",
+      "quoteDate": "2025-08-15",
+      "underlyingPrice": 643.44,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250822",
+          "dte": 7,
+          "atmStrike": 643.0,
+          "callIv": 0.11244,
+          "putIv": 0.11244,
+          "atmIv": 0.11244,
+          "callMark": 4.325,
+          "putMark": 3.62,
+          "atmStraddleMark": 7.945,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-08-15T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-08-22T20:15:00Z",
+      "quoteDate": "2025-08-22",
+      "underlyingPrice": 645.31,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250829",
+          "dte": 7,
+          "atmStrike": 645.0,
+          "callIv": 0.11244,
+          "putIv": 0.10268,
+          "atmIv": 0.10755999999999999,
+          "callMark": 4.275,
+          "putMark": 3.375,
+          "atmStraddleMark": 7.65,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-08-22T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-08-29T20:15:00Z",
+      "quoteDate": "2025-08-29",
+      "underlyingPrice": 645.05,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250905",
+          "dte": 7,
+          "atmStrike": 645.0,
+          "callIv": 0.10268,
+          "putIv": 0.11244,
+          "atmIv": 0.10755999999999999,
+          "callMark": 4.11,
+          "putMark": 3.585,
+          "atmStraddleMark": 7.695,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-08-29T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-09-05T20:15:00Z",
+      "quoteDate": "2025-09-05",
+      "underlyingPrice": 647.24,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250912",
+          "dte": 7,
+          "atmStrike": 647.0,
+          "callIv": 0.10268,
+          "putIv": 0.11244,
+          "atmIv": 0.10755999999999999,
+          "callMark": 3.975,
+          "putMark": 3.575,
+          "atmStraddleMark": 7.55,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-09-05T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-09-12T20:15:00Z",
+      "quoteDate": "2025-09-12",
+      "underlyingPrice": 657.41,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250919",
+          "dte": 7,
+          "atmStrike": 657.0,
+          "callIv": 0.09292,
+          "putIv": 0.13195,
+          "atmIv": 0.11243500000000001,
+          "callMark": 3.805,
+          "putMark": 4.2,
+          "atmStraddleMark": 8.005,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-09-12T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-09-19T20:15:00Z",
+      "quoteDate": "2025-09-19",
+      "underlyingPrice": 663.7,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20250926",
+          "dte": 7,
+          "atmStrike": 664.0,
+          "callIv": 0.09292,
+          "putIv": 0.10268,
+          "atmIv": 0.0978,
+          "callMark": 3.535,
+          "putMark": 3.515,
+          "atmStraddleMark": 7.05,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-09-19T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-09-26T20:15:00Z",
+      "quoteDate": "2025-09-26",
+      "underlyingPrice": 661.82,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251003",
+          "dte": 7,
+          "atmStrike": 662.0,
+          "callIv": 0.11244,
+          "putIv": 0.10268,
+          "atmIv": 0.10755999999999999,
+          "callMark": 4.325,
+          "putMark": 3.495,
+          "atmStraddleMark": 7.82,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-09-26T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-10-03T20:15:00Z",
+      "quoteDate": "2025-10-03",
+      "underlyingPrice": 669.21,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251010",
+          "dte": 7,
+          "atmStrike": 669.0,
+          "callIv": 0.10268,
+          "putIv": 0.11244,
+          "atmIv": 0.10755999999999999,
+          "callMark": 4.185,
+          "putMark": 3.68,
+          "atmStraddleMark": 7.865,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-10-03T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-10-10T20:15:00Z",
+      "quoteDate": "2025-10-10",
+      "underlyingPrice": 653.02,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251017",
+          "dte": 7,
+          "atmStrike": 653.0,
+          "callIv": 0.21,
+          "putIv": 0.18073,
+          "atmIv": 0.195365,
+          "callMark": 7.84,
+          "putMark": 6.26,
+          "atmStraddleMark": 14.1,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-10-10T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-10-17T20:15:00Z",
+      "quoteDate": "2025-10-17",
+      "underlyingPrice": 664.39,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251024",
+          "dte": 7,
+          "atmStrike": 664.0,
+          "callIv": 0.18073,
+          "putIv": 0.16122,
+          "atmIv": 0.170975,
+          "callMark": 6.965,
+          "putMark": 5.4,
+          "atmStraddleMark": 12.365,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-10-17T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-10-24T20:15:00Z",
+      "quoteDate": "2025-10-24",
+      "underlyingPrice": 677.25,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251031",
+          "dte": 7,
+          "atmStrike": 677.0,
+          "callIv": 0.13195,
+          "putIv": 0.13195,
+          "atmIv": 0.13195,
+          "callMark": 5.19,
+          "putMark": 4.685,
+          "atmStraddleMark": 9.875,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-10-24T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-10-31T20:15:00Z",
+      "quoteDate": "2025-10-31",
+      "underlyingPrice": 682.06,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251107",
+          "dte": 7,
+          "atmStrike": 682.0,
+          "callIv": 0.13195,
+          "putIv": 0.13195,
+          "atmIv": 0.13195,
+          "callMark": 5.24,
+          "putMark": 4.62,
+          "atmStraddleMark": 9.86,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-10-31T20:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-11-07T21:15:00Z",
+      "quoteDate": "2025-11-07",
+      "underlyingPrice": 670.97,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251114",
+          "dte": 7,
+          "atmStrike": 671.0,
+          "callIv": 0.17097,
+          "putIv": 0.15146,
+          "atmIv": 0.161215,
+          "callMark": 6.54,
+          "putMark": 5.3,
+          "atmStraddleMark": 11.84,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-11-07T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-11-14T21:15:00Z",
+      "quoteDate": "2025-11-14",
+      "underlyingPrice": 671.93,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251121",
+          "dte": 7,
+          "atmStrike": 672.0,
+          "callIv": 0.19048,
+          "putIv": 0.17097,
+          "atmIv": 0.18072500000000002,
+          "callMark": 7.165,
+          "putMark": 6.075,
+          "atmStraddleMark": 13.24,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-11-14T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-11-21T21:15:00Z",
+      "quoteDate": "2025-11-21",
+      "underlyingPrice": 659.03,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251128",
+          "dte": 7,
+          "atmStrike": 659.0,
+          "callIv": 0.19048,
+          "putIv": 0.18073,
+          "atmIv": 0.18560500000000002,
+          "callMark": 7.33,
+          "putMark": 6.22,
+          "atmStraddleMark": 13.55,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-11-21T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-11-28T21:15:00Z",
+      "quoteDate": "2025-11-28",
+      "underlyingPrice": 683.39,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251205",
+          "dte": 7,
+          "atmStrike": 683.0,
+          "callIv": 0.11244,
+          "putIv": 0.11244,
+          "atmIv": 0.11244,
+          "callMark": 4.58,
+          "putMark": 3.98,
+          "atmStraddleMark": 8.56,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-11-28T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-12-05T21:15:00Z",
+      "quoteDate": "2025-12-05",
+      "underlyingPrice": 685.69,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251212",
+          "dte": 7,
+          "atmStrike": 686.0,
+          "callIv": 0.13195,
+          "putIv": 0.12219,
+          "atmIv": 0.12707000000000002,
+          "callMark": 4.94,
+          "putMark": 4.455,
+          "atmStraddleMark": 9.395,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-12-05T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-12-12T21:15:00Z",
+      "quoteDate": "2025-12-12",
+      "underlyingPrice": 681.76,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251219",
+          "dte": 7,
+          "atmStrike": 682.0,
+          "callIv": 0.12219,
+          "putIv": 0.15146,
+          "atmIv": 0.136825,
+          "callMark": 4.67,
+          "putMark": 5.49,
+          "atmStraddleMark": 10.16,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-12-12T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-12-19T21:15:00Z",
+      "quoteDate": "2025-12-19",
+      "underlyingPrice": 680.59,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20251226",
+          "dte": 7,
+          "atmStrike": 681.0,
+          "callIv": 0.08317,
+          "putIv": 0.08317,
+          "atmIv": 0.08317,
+          "callMark": 3.185,
+          "putMark": 3.025,
+          "atmStraddleMark": 6.21,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-12-19T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2025-12-26T21:15:00Z",
+      "quoteDate": "2025-12-26",
+      "underlyingPrice": 690.31,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260102",
+          "dte": 7,
+          "atmStrike": 690.0,
+          "callIv": 0.07341,
+          "putIv": 0.07341,
+          "atmIv": 0.07341,
+          "callMark": 3.15,
+          "putMark": 2.505,
+          "atmStraddleMark": 5.655,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2025-12-26T21:15:00Z",
+      "weeklySessionSource": "observed_sessions_plus_gap_audit"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-01-02T21:15:00Z",
+      "quoteDate": "2026-01-02",
+      "underlyingPrice": 683.17,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260109",
+          "dte": 7,
+          "atmStrike": 683.0,
+          "callIv": 0.11244,
+          "putIv": 0.10268,
+          "atmIv": 0.10755999999999999,
+          "callMark": 4.495,
+          "putMark": 3.585,
+          "atmStraddleMark": 8.08,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-01-02T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-01-09T21:15:00Z",
+      "quoteDate": "2026-01-09",
+      "underlyingPrice": 694.07,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260116",
+          "dte": 7,
+          "atmStrike": 694.0,
+          "callIv": 0.09292,
+          "putIv": 0.10268,
+          "atmIv": 0.0978,
+          "callMark": 4.0,
+          "putMark": 3.565,
+          "atmStraddleMark": 7.565,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-01-09T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-01-16T21:15:00Z",
+      "quoteDate": "2026-01-16",
+      "underlyingPrice": 691.66,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260123",
+          "dte": 7,
+          "atmStrike": 692.0,
+          "callIv": 0.09292,
+          "putIv": 0.10268,
+          "atmIv": 0.0978,
+          "callMark": 3.775,
+          "putMark": 3.67,
+          "atmStraddleMark": 7.445,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-01-16T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-01-23T21:15:00Z",
+      "quoteDate": "2026-01-23",
+      "underlyingPrice": 689.23,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260130",
+          "dte": 7,
+          "atmStrike": 689.0,
+          "callIv": 0.12219,
+          "putIv": 0.1417,
+          "atmIv": 0.13194499999999998,
+          "callMark": 5.105,
+          "putMark": 5.13,
+          "atmStraddleMark": 10.235,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-01-23T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-01-30T21:15:00Z",
+      "quoteDate": "2026-01-30",
+      "underlyingPrice": 691.97,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260206",
+          "dte": 7,
+          "atmStrike": 692.0,
+          "callIv": 0.1417,
+          "putIv": 0.15146,
+          "atmIv": 0.14658,
+          "callMark": 5.47,
+          "putMark": 5.475,
+          "atmStraddleMark": 10.945,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-01-30T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-02-06T21:15:00Z",
+      "quoteDate": "2026-02-06",
+      "underlyingPrice": 690.62,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260213",
+          "dte": 7,
+          "atmStrike": 691.0,
+          "callIv": 0.1417,
+          "putIv": 0.1417,
+          "atmIv": 0.1417,
+          "callMark": 5.485,
+          "putMark": 5.52,
+          "atmStraddleMark": 11.005,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-02-06T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-02-13T21:15:00Z",
+      "quoteDate": "2026-02-13",
+      "underlyingPrice": 681.75,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260220",
+          "dte": 7,
+          "atmStrike": 682.0,
+          "callIv": 0.17097,
+          "putIv": 0.17097,
+          "atmIv": 0.17097,
+          "callMark": 6.49,
+          "putMark": 6.285,
+          "atmStraddleMark": 12.775,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-02-13T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-02-20T21:15:00Z",
+      "quoteDate": "2026-02-20",
+      "underlyingPrice": 689.43,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260227",
+          "dte": 7,
+          "atmStrike": 689.0,
+          "callIv": 0.16122,
+          "putIv": 0.15146,
+          "atmIv": 0.15634,
+          "callMark": 6.555,
+          "putMark": 5.35,
+          "atmStraddleMark": 11.905,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-02-20T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-02-27T21:15:00Z",
+      "quoteDate": "2026-02-27",
+      "underlyingPrice": 685.99,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260306",
+          "dte": 7,
+          "atmStrike": 686.0,
+          "callIv": 0.17097,
+          "putIv": 0.17097,
+          "atmIv": 0.17097,
+          "callMark": 6.53,
+          "putMark": 6.07,
+          "atmStraddleMark": 12.6,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-02-27T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-03-06T21:15:00Z",
+      "quoteDate": "2026-03-06",
+      "underlyingPrice": 672.38,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260313",
+          "dte": 7,
+          "atmStrike": 672.0,
+          "callIv": 0.25877,
+          "putIv": 0.26853,
+          "atmIv": 0.26365,
+          "callMark": 10.07,
+          "putMark": 9.43,
+          "atmStraddleMark": 19.5,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-03-06T21:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-03-13T20:15:00Z",
+      "quoteDate": "2026-03-13",
+      "underlyingPrice": 662.29,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260320",
+          "dte": 7,
+          "atmStrike": 662.0,
+          "callIv": 0.23926,
+          "putIv": 0.28804,
+          "atmIv": 0.26365,
+          "callMark": 9.165,
+          "putMark": 10.285,
+          "atmStraddleMark": 19.45,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-03-13T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-03-20T20:15:00Z",
+      "quoteDate": "2026-03-20",
+      "underlyingPrice": 648.57,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260327",
+          "dte": 7,
+          "atmStrike": 649.0,
+          "callIv": 0.26853,
+          "putIv": 0.22951,
+          "atmIv": 0.24902,
+          "callMark": 9.725,
+          "putMark": 8.305,
+          "atmStraddleMark": 18.03,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-03-20T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-03-27T20:15:00Z",
+      "quoteDate": "2026-03-27",
+      "underlyingPrice": 634.09,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260402",
+          "dte": 6,
+          "atmStrike": 634.0,
+          "callIv": 0.27829,
+          "putIv": 0.28804,
+          "atmIv": 0.283165,
+          "callMark": 9.12,
+          "putMark": 9.09,
+          "atmStraddleMark": 18.21,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-03-27T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-04-02T20:15:00Z",
+      "quoteDate": "2026-04-02",
+      "underlyingPrice": 655.83,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260409",
+          "dte": 7,
+          "atmStrike": 656.0,
+          "callIv": 0.19048,
+          "putIv": 0.19048,
+          "atmIv": 0.19048,
+          "callMark": 7.01,
+          "putMark": 6.84,
+          "atmStraddleMark": 13.85,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-04-02T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-04-10T20:15:00Z",
+      "quoteDate": "2026-04-10",
+      "underlyingPrice": 679.46,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260417",
+          "dte": 7,
+          "atmStrike": 679.0,
+          "callIv": 0.1417,
+          "putIv": 0.15146,
+          "atmIv": 0.14658,
+          "callMark": 5.965,
+          "putMark": 5.115,
+          "atmStraddleMark": 11.08,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-04-10T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-04-17T20:15:00Z",
+      "quoteDate": "2026-04-17",
+      "underlyingPrice": 710.14,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260424",
+          "dte": 7,
+          "atmStrike": 710.0,
+          "callIv": 0.13195,
+          "putIv": 0.12219,
+          "atmIv": 0.12707000000000002,
+          "callMark": 5.53,
+          "putMark": 4.655,
+          "atmStraddleMark": 10.185,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-04-17T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
       "sampledAt": "2026-04-23T15:45:04.357Z",
       "quoteDate": "2026-04-23",
       "underlyingPrice": 711.51,
@@ -1276,6 +2676,286 @@
           "atmPutSubId": "__ivts__|SPY|20260930|710|P"
         }
       ]
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-04-24T20:15:00Z",
+      "quoteDate": "2026-04-24",
+      "underlyingPrice": 713.94,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260501",
+          "dte": 7,
+          "atmStrike": 714.0,
+          "callIv": 0.15146,
+          "putIv": 0.16122,
+          "atmIv": 0.15634,
+          "callMark": 6.235,
+          "putMark": 6.085,
+          "atmStraddleMark": 12.32,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-04-24T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-05-01T20:15:00Z",
+      "quoteDate": "2026-05-01",
+      "underlyingPrice": 720.65,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260508",
+          "dte": 7,
+          "atmStrike": 721.0,
+          "callIv": 0.12219,
+          "putIv": 0.13195,
+          "atmIv": 0.12707000000000002,
+          "callMark": 4.845,
+          "putMark": 5.025,
+          "atmStraddleMark": 9.87,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-05-01T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-05-08T20:15:00Z",
+      "quoteDate": "2026-05-08",
+      "underlyingPrice": 737.62,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260515",
+          "dte": 7,
+          "atmStrike": 738.0,
+          "callIv": 0.12219,
+          "putIv": 0.12219,
+          "atmIv": 0.12219,
+          "callMark": 4.945,
+          "putMark": 5.025,
+          "atmStraddleMark": 9.97,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-05-08T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-05-15T20:15:00Z",
+      "quoteDate": "2026-05-15",
+      "underlyingPrice": 739.17,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260522",
+          "dte": 7,
+          "atmStrike": 739.0,
+          "callIv": 0.1417,
+          "putIv": 0.17097,
+          "atmIv": 0.156335,
+          "callMark": 6.015,
+          "putMark": 6.575,
+          "atmStraddleMark": 12.59,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-05-15T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-05-22T20:15:00Z",
+      "quoteDate": "2026-05-22",
+      "underlyingPrice": 745.64,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260529",
+          "dte": 7,
+          "atmStrike": 746.0,
+          "callIv": 0.12219,
+          "putIv": 0.12219,
+          "atmIv": 0.12219,
+          "callMark": 5.21,
+          "putMark": 4.775,
+          "atmStraddleMark": 9.985,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-05-22T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-05-29T20:15:00Z",
+      "quoteDate": "2026-05-29",
+      "underlyingPrice": 756.48,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260605",
+          "dte": 7,
+          "atmStrike": 756.0,
+          "callIv": 0.11244,
+          "putIv": 0.10268,
+          "atmIv": 0.10755999999999999,
+          "callMark": 5.175,
+          "putMark": 3.975,
+          "atmStraddleMark": 9.15,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-05-29T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-06-05T20:15:00Z",
+      "quoteDate": "2026-06-05",
+      "underlyingPrice": 737.55,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260612",
+          "dte": 7,
+          "atmStrike": 738.0,
+          "callIv": 0.15146,
+          "putIv": 0.22951,
+          "atmIv": 0.19048500000000002,
+          "callMark": 6.155,
+          "putMark": 9.25,
+          "atmStraddleMark": 15.405,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-06-05T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-06-12T20:15:00Z",
+      "quoteDate": "2026-06-12",
+      "underlyingPrice": 741.75,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260618",
+          "dte": 6,
+          "atmStrike": 742.0,
+          "callIv": 0.15146,
+          "putIv": 0.17097,
+          "atmIv": 0.161215,
+          "callMark": 5.93,
+          "putMark": 6.295,
+          "atmStraddleMark": 12.225,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-06-12T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-06-18T20:15:00Z",
+      "quoteDate": "2026-06-18",
+      "underlyingPrice": 746.74,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260625",
+          "dte": 7,
+          "atmStrike": 747.0,
+          "callIv": 0.13195,
+          "putIv": 0.11244,
+          "atmIv": 0.122195,
+          "callMark": 5.57,
+          "putMark": 4.335,
+          "atmStraddleMark": 9.905,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-06-18T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
+    },
+    {
+      "symbol": "SPY",
+      "sampledAt": "2026-06-26T20:15:00Z",
+      "quoteDate": "2026-06-26",
+      "underlyingPrice": 728.99,
+      "buckets": [],
+      "details": [
+        {
+          "expiry": "20260702",
+          "dte": 6,
+          "atmStrike": 729.0,
+          "callIv": 0.21975,
+          "putIv": 0.12219,
+          "atmIv": 0.17097,
+          "callMark": 8.55,
+          "putMark": 4.415,
+          "atmStraddleMark": 12.965,
+          "hasCompletePair": true,
+          "atmCallSubId": "",
+          "atmPutSubId": ""
+        }
+      ],
+      "backfilled": true,
+      "weeklySessionValidated": true,
+      "calendarId": "NYSE",
+      "sessionCloseAt": "2026-06-26T20:15:00Z",
+      "weeklySessionSource": "official_snapshot"
     }
   ]
 }

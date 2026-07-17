@@ -4,6 +4,7 @@ const suites = [
     require('./index_forward_rate.test'),
     require('./pricing_context.test'),
     require('./distribution_proxy_config.test'),
+    require('./prob_charts.test'),
     require('./iv_term_structure_core.test'),
     require('./iv_term_structure_page.test'),
     require('./calendar_handoff.test'),

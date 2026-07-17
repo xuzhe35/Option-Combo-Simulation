@@ -83,6 +83,6 @@ tracking happens through the existing sim-open workflow on the main pages.
 - Handing the suggestion off to index.html as a prebuilt combo group (reuse
   `calendar_handoff.js` mechanics; add a reverse-fly template) — after paper
   tracking proves out.
-- Auto-refresh cadence / notifications; ES-specific EM conventions.
+- Notifications and ES-specific EM conventions.
 - Any order creation. The existing close-plan/one-time-token safety layer is
   the model: a human confirms every transition from suggestion to order.

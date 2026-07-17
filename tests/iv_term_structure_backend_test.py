@@ -4,6 +4,7 @@ import pathlib
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 
@@ -26,6 +27,7 @@ except ModuleNotFoundError:
 
 
 from ib_server_iv_term_structure import (
+    fetch_iv_term_structure_contract_rows_for_exact_strike,
     handle_iv_term_structure_subscription,
     merge_iv_term_structure_chain_fields,
     normalize_max_option_streams,
@@ -33,6 +35,7 @@ from ib_server_iv_term_structure import (
     run_iv_term_structure_option_sync,
     subscribe_iv_term_structure_option_request,
 )
+from ib_server_market_data import build_pending_tickers_handler
 
 
 class _FakeOptionChain:
@@ -71,6 +74,15 @@ class _FakeIB:
 
 
 class IvTermStructureBackendTests(unittest.TestCase):
+    def assert_server_time_evidence(self, payload, reason=None):
+        parsed = datetime.fromisoformat(payload['payloadAsOf'].replace('Z', '+00:00'))
+        self.assertEqual(parsed.utcoffset(), timezone.utc.utcoffset(parsed))
+        self.assertTrue(payload['batchId'])
+        self.assertIs(payload['quoteComplete'], False)
+        self.assertIs(payload['coherent'], False)
+        if reason is not None:
+            self.assertEqual(payload['coherenceReason'], reason)
+
     def test_option_stream_limit_keeps_complete_call_put_pairs(self):
         self.assertEqual(normalize_max_option_streams(None), 10)
         self.assertEqual(normalize_max_option_streams(11), 10)
@@ -126,6 +138,71 @@ class IvTermStructureBackendTests(unittest.TestCase):
         self.assertEqual(selections['20260717']['atm_strike'], 750.0)
         self.assertEqual(len(selections['20260717']['contractRows']), 2)
         self.assertEqual(len(selections['20260724']['contractRows']), 2)
+
+    def test_contract_detail_requests_share_a_global_concurrency_limit(self):
+        class ConcurrencyIB:
+            def __init__(self):
+                self.active = 0
+                self.max_active = 0
+
+            async def reqContractDetailsAsync(self, _contract):
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                try:
+                    await asyncio.sleep(0.01)
+                    return []
+                finally:
+                    self.active -= 1
+
+        fake_ib = ConcurrencyIB()
+        env = {
+            'ib': fake_ib,
+            'iv_term_structure_contract_details_semaphore': asyncio.Semaphore(1),
+        }
+
+        async def exercise():
+            await asyncio.gather(
+                fetch_iv_term_structure_contract_rows_for_exact_strike(
+                    env, 'SPY', 'OPT', 'SMART', 'USD', '100', '20260717', 750,
+                ),
+                fetch_iv_term_structure_contract_rows_for_exact_strike(
+                    env, 'CL', 'FOP', 'NYMEX', 'USD', '1000', '20260717', 75,
+                ),
+            )
+
+        asyncio.run(exercise())
+
+        self.assertEqual(fake_ib.max_active, 1)
+
+    def test_equity_chain_merge_skips_adjusted_trading_classes_when_standard_chain_exists(self):
+        merged = merge_iv_term_structure_chain_fields(
+            [
+                _FakeOptionChain(
+                    'SPY',
+                    ['20260828', '20260831', '20260918'],
+                    multiplier='100',
+                    exchange='SMART',
+                ),
+                _FakeOptionChain(
+                    '2SPY',
+                    ['20260911'],
+                    multiplier='100',
+                    exchange='SMART',
+                ),
+            ],
+            {
+                'secType': 'OPT',
+                'symbol': 'SPY',
+                'exchange': 'SMART',
+                'multiplier': '100',
+            },
+        )
+
+        self.assertEqual(
+            merged['expirations'],
+            ['20260828', '20260831', '20260918'],
+        )
+        self.assertEqual(merged['tradingClass'], 'SPY')
 
     def test_option_qualification_timeout_returns_without_blocking_the_sync(self):
         websocket = object()
@@ -307,6 +384,10 @@ class IvTermStructureBackendTests(unittest.TestCase):
 
         complete = sent_messages[-1]
         self.assertEqual(complete['action'], 'iv_term_structure_sync_complete')
+        self.assert_server_time_evidence(
+            complete,
+            'subscriptions_ready_without_coherent_quote_snapshot',
+        )
         self.assertEqual(complete['expectedOptionCount'], 10)
         self.assertEqual(complete['attemptedOptionCount'], 10)
         self.assertEqual(complete['subscribedOptionCount'], 10)
@@ -330,6 +411,73 @@ class IvTermStructureBackendTests(unittest.TestCase):
         self.assertEqual(len(patched_rows), 6)
         self.assertEqual(sum(row['subscriptionSelected'] is True for row in patched_rows), 5)
         self.assertEqual(sum(row['subscriptionSelected'] is False for row in patched_rows), 1)
+        for catalog_patch in (
+            payload
+            for payload in sent_messages
+            if payload.get('action') == 'iv_term_structure_catalog_patch'
+        ):
+            self.assert_server_time_evidence(
+                catalog_patch,
+                'catalog_progress_without_complete_option_quotes',
+            )
+
+    def test_incremental_live_ivts_quotes_carry_per_leg_server_time_and_fail_closed(self):
+        websocket = object()
+        sent_messages = []
+
+        def option_ticker(con_id, bid, ask):
+            contract = type('Contract', (), {
+                'conId': con_id,
+                'secType': 'OPT',
+                'symbol': 'SPY',
+            })()
+            greeks = type('Greeks', (), {'impliedVol': 0.2})()
+            return type('Ticker', (), {
+                'contract': contract,
+                'bid': bid,
+                'ask': ask,
+                'modelGreeks': greeks,
+            })()
+
+        changed_ticker = option_ticker(101, 1.0, 1.2)
+        unchanged_ticker = option_ticker(102, 2.0, 2.2)
+
+        async def send_message_safe(_websocket, message):
+            sent_messages.append(json.loads(message))
+
+        env = {
+            'connected_clients': {websocket},
+            'client_subscriptions': {
+                websocket: {
+                    '__ivts__|SPY|20260717|750|C': changed_ticker,
+                    '__ivts__|SPY|20260717|750|P': unchanged_ticker,
+                },
+            },
+            'client_subscription_settings': {},
+            'send_message_safe': send_message_safe,
+            'log_option_iv_debug_if_needed': lambda *_args: None,
+        }
+        handler = build_pending_tickers_handler(env)
+
+        async def exercise_handler():
+            handler([changed_ticker])
+            await asyncio.sleep(0)
+
+        asyncio.run(exercise_handler())
+
+        self.assertEqual(len(sent_messages), 1)
+        payload = sent_messages[0]
+        self.assert_server_time_evidence(
+            payload,
+            'incremental_changed_tickers_only',
+        )
+        self.assertEqual(
+            list(payload['options']),
+            ['__ivts__|SPY|20260717|750|C'],
+        )
+        changed_quote = payload['options']['__ivts__|SPY|20260717|750|C']
+        self.assertEqual(changed_quote['quoteAsOf'], payload['payloadAsOf'])
+        self.assertEqual(changed_quote['mark'], 1.1)
 
     def test_fop_underlying_request_uses_template_multiplier_to_avoid_si_ambiguity(self):
         websocket = object()
@@ -420,6 +568,14 @@ class IvTermStructureBackendTests(unittest.TestCase):
         self.assertEqual(captured_underlying_requests[0]['currency'], 'USD')
         self.assertEqual(fake_ib.secdef_calls, [('SI', 'COMEX', 'FUT', 505405746)])
         self.assertEqual(sent_messages[0]['action'], 'iv_term_structure_snapshot')
+        self.assert_server_time_evidence(
+            sent_messages[0],
+            'catalog_without_complete_option_quotes',
+        )
+        self.assertEqual(
+            sent_messages[0]['underlyingQuote']['quoteAsOf'],
+            sent_messages[0]['payloadAsOf'],
+        )
 
     def test_fop_chain_merge_does_not_filter_to_one_requested_trading_class(self):
         merged = merge_iv_term_structure_chain_fields(
@@ -544,6 +700,11 @@ class IvTermStructureBackendTests(unittest.TestCase):
 
         snapshot = sent_messages[0]
         self.assertEqual(snapshot['action'], 'iv_term_structure_snapshot')
+        self.assert_server_time_evidence(
+            snapshot,
+            'catalog_without_complete_option_quotes',
+        )
+        self.assertEqual(snapshot['underlyingQuote']['quoteAsOf'], snapshot['payloadAsOf'])
         self.assertEqual(snapshot['requestedUnderlyingContractMonth'], '202607')
         self.assertEqual(snapshot['underlyingContractMonth'], '202609')
         self.assertIn('using SI 202609 instead', snapshot['message'])

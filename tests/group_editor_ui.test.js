@@ -346,6 +346,191 @@ module.exports = {
             },
         },
         {
+            name: 'strike increment pins family grids and keeps the price heuristic for generic equities',
+            run() {
+                const ctx = loadBrowserScripts(['js/product_registry.js', 'js/group_editor_ui.js']);
+                const increment = ctx.OptionComboGroupEditorUI._test.getStrikeIncrement;
+
+                // Family profiles are listed contract specs and win outright,
+                // whatever the price heuristic would have said.
+                assert.equal(increment({ underlyingSymbol: 'ES', underlyingPrice: 6800 }), 5);
+                assert.equal(increment({ underlyingSymbol: 'NDX', underlyingPrice: 24000 }), 25);
+                assert.equal(increment({ underlyingSymbol: 'CL', underlyingPrice: 70 }), 0.5);
+                assert.equal(increment({ underlyingSymbol: 'HG', underlyingPrice: 5 }), 0.05);
+
+                // Generic equities/ETFs carry only the registry's price-blind
+                // $1 placeholder, so the price heuristic stays live for them.
+                // The liquid range still lands on the $1 ladder...
+                assert.equal(increment({ underlyingSymbol: 'QQQ', underlyingPrice: 718.24 }), 1);
+                assert.equal(increment({ underlyingSymbol: 'SPY', underlyingPrice: 640 }), 1);
+                assert.equal(increment({ underlyingSymbol: 'SLV', underlyingPrice: 34 }), 1);
+                // ...but the extremes must not collapse onto $1.
+                assert.equal(increment({ underlyingSymbol: 'BRKA_LIKE', underlyingPrice: 1500 }), 25);
+                assert.equal(increment({ underlyingSymbol: 'PENNYISH', underlyingPrice: 8 }), 0.5);
+            },
+        },
+        {
+            name: 'strike increment honors the product registry default $1 ETF grid',
+            run() {
+                const ctx = loadBrowserScripts(['js/product_registry.js', 'js/group_editor_ui.js']);
+                const grid = ctx.OptionComboGroupEditorUI._test.buildButterflyCandidateGrid;
+
+                // QQQ at 718: liquid ETFs default to $1 strikes — the grid
+                // must produce candidates off the old $5 tier (e.g. width 14).
+                const qqq = grid({ underlyingPrice: 718.24, underlyingSymbol: 'QQQ' }, '2026-07-24', 718, null);
+                assert.ok(qqq.length > 0);
+                assert.ok(qqq.some((c) => c.wingWidth % 5 !== 0),
+                    'expected $1-grid widths on QQQ');
+                qqq.forEach((c) => {
+                    assert.equal(c.lower % 1, 0);
+                    assert.equal(c.upper % 1, 0);
+                });
+
+                // ES at 6800: the registry pins the 5-point futures grid even
+                // though the price heuristic alone would say 25.
+                const es = grid({ underlyingPrice: 6800, underlyingSymbol: 'ES' }, '2026-07-24', 6800, null);
+                assert.ok(es.length > 0);
+                es.forEach((c) => {
+                    assert.equal(c.middle % 5, 0);
+                    assert.equal(c.lower % 5, 0);
+                    assert.equal(c.upper % 5, 0);
+                });
+                assert.ok(es.some((c) => c.wingWidth % 25 !== 0),
+                    'expected 5-point widths on ES, not the old 25 tier');
+            },
+        },
+        {
+            name: 'EM fit places wings at a multiple of the ATM straddle in two quote phases',
+            run() {
+                const quotes = {
+                    // ATM straddle: 4.80 + 4.90 -> EM 9.70; x1.0 rounds to the
+                    // 5-point increment -> wings at 740 / 760.
+                    combo_template_SPY_20260720_P_750: { bid: 4.7, ask: 4.9 },
+                    combo_template_SPY_20260720_C_750: { bid: 4.8, ask: 5.0 },
+                };
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js'], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(id) {
+                            return quotes[id] || null;
+                        },
+                    },
+                });
+                const state = { underlyingPrice: 750, underlyingSymbol: 'SPY' };
+                let subscriptionRefreshes = 0;
+                const statusEl = {
+                    textContent: '',
+                    classList: { add() {}, remove() {}, toggle() {} },
+                };
+                const fields = {
+                    '.combo-template-expiry': { value: '2026-07-20' },
+                    '.combo-template-middle-strike': { value: '750' },
+                    '.combo-template-lower-strike': { value: '' },
+                    '.combo-template-upper-strike': { value: '' },
+                    '.combo-template-strategy': { value: 'reverse_butterfly' },
+                    '.combo-template-butterfly-risk-status': statusEl,
+                    '.combo-template-wing-width-manual': { value: '', disabled: false },
+                    '.combo-template-wing-width-select': { value: '', options: [] },
+                };
+                const dialog = {
+                    style: { display: 'none' },
+                    _comboContext: {
+                        state,
+                        deps: { handleLiveSubscriptions() { subscriptionRefreshes += 1; } },
+                    },
+                    querySelector(selector) {
+                        return fields[selector] || null;
+                    },
+                };
+                const testApi = ctx.OptionComboGroupEditorUI._test;
+
+                // Phase 1: straddle quotes are live, wing quotes are not — the
+                // fit computes EM, requests the wings, and stays pending.
+                testApi.startEmFitFromDialog(dialog, 1);
+                assert.ok(dialog._emFitPending, 'fit should wait for wing quotes');
+                assert.equal(fields['.combo-template-lower-strike'].value, '');
+                assert.match(statusEl.textContent, /EM 9\.7 -> wings \+-10/);
+                const requestIds = state.comboTemplateQuoteRequests.map((request) => request.id);
+                assert.ok(requestIds.includes('combo_template_SPY_20260720_P_740'));
+                assert.ok(requestIds.includes('combo_template_SPY_20260720_C_760'));
+                assert.ok(subscriptionRefreshes >= 1);
+
+                // Phase 2: wing quotes arrive -> strikes are filled in and the
+                // pending fit clears.
+                quotes.combo_template_SPY_20260720_P_740 = { bid: 1.9, ask: 2.1 };
+                quotes.combo_template_SPY_20260720_C_760 = { bid: 1.4, ask: 1.6 };
+                assert.equal(testApi.processPendingEmFit(dialog), true);
+                assert.equal(dialog._emFitPending, null);
+                assert.equal(fields['.combo-template-lower-strike'].value, '740');
+                assert.equal(fields['.combo-template-upper-strike'].value, '760');
+                assert.match(statusEl.textContent, /EM 9\.7 x 1 -> 740 \/ 750 \/ 760/);
+
+                // Reverse-fly economics of the fitted wings: debit = straddle
+                // minus wing credit, capped profit = width - debit.
+                const risk = testApi.calculateButterflyRiskFromLegPrices({
+                    lowerPut: 2.0, middlePut: 4.8, middleCall: 4.9, upperCall: 1.5,
+                }, 10, 'reverse_butterfly');
+                assert.ok(Math.abs(risk.netDebit - 6.2) < 1e-9);
+                assert.ok(Math.abs(risk.maxProfit - 3.8) < 1e-9);
+
+                // Refitting at a wider multiple must retire the 740/760 wings
+                // rather than stack on top of them: the two-phase flow exists
+                // to stay inside a 4-6 quote budget. EM 9.70 x 1.25 = 12.125,
+                // rounded to the $1 grid -> width 12 -> wings at 738 / 762.
+                quotes.combo_template_SPY_20260720_P_738 = { bid: 1.4, ask: 1.6 };
+                quotes.combo_template_SPY_20260720_C_762 = { bid: 1.0, ask: 1.2 };
+                testApi.startEmFitFromDialog(dialog, 1.25);
+                testApi.processPendingEmFit(dialog);
+                const refitIds = state.comboTemplateQuoteRequests.map((request) => request.id);
+                assert.ok(refitIds.includes('combo_template_SPY_20260720_P_738'), 'expected the 1.25x wings');
+                assert.ok(refitIds.includes('combo_template_SPY_20260720_C_762'), 'expected the 1.25x wings');
+                assert.ok(!refitIds.includes('combo_template_SPY_20260720_P_740'),
+                    'the 1.0x wings must not stay subscribed after a refit');
+                assert.ok(!refitIds.includes('combo_template_SPY_20260720_C_760'),
+                    'the 1.0x wings must not stay subscribed after a refit');
+                assert.ok(refitIds.length <= 6, `expected a 4-6 quote budget, got ${refitIds.length}`);
+            },
+        },
+        {
+            name: 'an EM fit keeps the Subscribe grid quotes it did not create',
+            run() {
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js'], {
+                    OptionComboWsLiveQuotes: { getOptionQuote() { return null; } },
+                });
+                const testApi = ctx.OptionComboGroupEditorUI._test;
+                const state = { underlyingPrice: 750, underlyingSymbol: 'SPY' };
+                const fields = {
+                    '.combo-template-expiry': { value: '2026-07-20' },
+                    '.combo-template-middle-strike': { value: '750' },
+                    '.combo-template-strategy': { value: 'reverse_butterfly' },
+                    '.combo-template-butterfly-risk-status': {
+                        textContent: '',
+                        classList: { add() {}, remove() {}, toggle() {} },
+                    },
+                };
+                const dialog = {
+                    style: { display: 'none' },
+                    _comboContext: { state, deps: {} },
+                    // Grid the user subscribed before reaching for the EM fit.
+                    _butterflyCandidates: [{
+                        quoteRequests: [
+                            { id: 'grid_P_700', type: 'put', strike: 700 },
+                            { id: 'grid_C_800', type: 'call', strike: 800 },
+                        ],
+                    }],
+                    querySelector(selector) {
+                        return fields[selector] || null;
+                    },
+                };
+
+                testApi.startEmFitFromDialog(dialog, 1);
+                const ids = state.comboTemplateQuoteRequests.map((request) => request.id);
+                assert.ok(ids.includes('grid_P_700'), 'grid quotes must survive an EM fit');
+                assert.ok(ids.includes('grid_C_800'), 'grid quotes must survive an EM fit');
+                assert.ok(ids.includes('combo_template_SPY_20260720_P_750'));
+                assert.ok(ids.includes('combo_template_SPY_20260720_C_750'));
+            },
+        },
+        {
             name: 'collapses butterfly quote rows to one sorted row per strike',
             run() {
                 const ctx = loadBrowserScripts(['js/group_editor_ui.js']);
@@ -388,6 +573,65 @@ module.exports = {
                 const upperRow = rows.find(row => row.strike === 7625);
                 assert.equal(upperRow.putRequest, null);
                 assert.equal(upperRow.callRequest.id, 'C_7625');
+            },
+        },
+        {
+            name: 'scrolls butterfly quote table to the nearest middle strike',
+            run() {
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js']);
+                const scrollEl = { clientHeight: 120, scrollTop: 0 };
+                const rows = [
+                    { dataset: { strike: '715' }, offsetTop: 0, offsetHeight: 30 },
+                    { dataset: { strike: '718' }, offsetTop: 90, offsetHeight: 30 },
+                    { dataset: { strike: '720' }, offsetTop: 150, offsetHeight: 30 },
+                ];
+                const dialog = {
+                    querySelector(selector) {
+                        return selector === '.combo-template-butterfly-quote-scroll' ? scrollEl : null;
+                    },
+                    querySelectorAll(selector) {
+                        return selector === '.combo-template-butterfly-quote-body tr' ? rows : [];
+                    },
+                };
+
+                const didScroll = ctx.OptionComboGroupEditorUI._test.scrollButterflyQuoteTableToStrike(dialog, 718.4);
+
+                assert.equal(didScroll, true);
+                // 718 is the nearest row, centered in the 120px viewport.
+                assert.equal(scrollEl.scrollTop, 45);
+            },
+        },
+        {
+            name: 'schedules butterfly quote table scroll after the panel can lay out',
+            run() {
+                let scheduled = null;
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js'], {
+                    requestAnimationFrame(callback) {
+                        scheduled = callback;
+                        return 1;
+                    },
+                });
+                const scrollEl = { clientHeight: 120, scrollTop: 0 };
+                const rows = [
+                    { dataset: { strike: '715' }, offsetTop: 0, offsetHeight: 30 },
+                    { dataset: { strike: '718' }, offsetTop: 90, offsetHeight: 30 },
+                ];
+                const dialog = {
+                    querySelector(selector) {
+                        return selector === '.combo-template-butterfly-quote-scroll' ? scrollEl : null;
+                    },
+                    querySelectorAll(selector) {
+                        return selector === '.combo-template-butterfly-quote-body tr' ? rows : [];
+                    },
+                };
+
+                const didSchedule = ctx.OptionComboGroupEditorUI._test.scheduleButterflyQuoteTableScrollToStrike(dialog, 718);
+
+                assert.equal(didSchedule, true);
+                assert.equal(scrollEl.scrollTop, 0);
+                assert.equal(typeof scheduled, 'function');
+                scheduled();
+                assert.equal(scrollEl.scrollTop, 45);
             },
         },
         {

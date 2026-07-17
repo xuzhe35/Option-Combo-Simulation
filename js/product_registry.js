@@ -16,6 +16,14 @@
         // NYSE is implemented (js/market_holidays.js); other ids mark that
         // the NYSE clock is a proxy until a real calendar is wired.
         calendarId: 'NYSE',
+        // Near-the-money strike spacing for the front months. Product families
+        // below pin their real listed grid when it is coarser or fractional,
+        // and callers treat those as authoritative. This generic $1 value is
+        // only a price-blind placeholder for the liquid ETF range — callers
+        // that know the underlying price (see group_editor_ui's
+        // _getStrikeIncrement) prefer their own heuristic for DEFAULT_EQUITY,
+        // since $1 is wrong for both 1000+ and penny-ish names.
+        strikeIncrement: 1,
         optionSecType: 'OPT',
         underlyingSecType: 'STK',
         optionSymbol: null,
@@ -43,6 +51,7 @@
     const FAMILY_PROFILES = Object.freeze({
         ES: {
             family: 'ES',
+            strikeIncrement: 5,
             calendarId: 'CME:ES',
             displayName: 'E-mini S&P 500 futures option',
             optionSecType: 'FOP',
@@ -63,6 +72,7 @@
         },
         NQ: {
             family: 'NQ',
+            strikeIncrement: 10,
             calendarId: 'CME:NQ',
             displayName: 'E-mini Nasdaq-100 futures option',
             optionSecType: 'FOP',
@@ -83,6 +93,7 @@
         },
         MES: {
             family: 'MES',
+            strikeIncrement: 5,
             calendarId: 'CME:MES',
             displayName: 'Micro E-mini S&P 500 futures option',
             optionSecType: 'FOP',
@@ -102,6 +113,7 @@
         },
         MNQ: {
             family: 'MNQ',
+            strikeIncrement: 10,
             calendarId: 'CME:MNQ',
             displayName: 'Micro E-mini Nasdaq-100 futures option',
             optionSecType: 'FOP',
@@ -121,6 +133,7 @@
         },
         CL: {
             family: 'CL',
+            strikeIncrement: 0.5,
             calendarId: 'NYMEX:CL',
             displayName: 'Light Sweet Crude Oil futures option',
             optionSecType: 'FOP',
@@ -141,6 +154,7 @@
         },
         GC: {
             family: 'GC',
+            strikeIncrement: 5,
             calendarId: 'COMEX:GC',
             displayName: 'Gold futures option',
             optionSecType: 'FOP',
@@ -161,6 +175,7 @@
         },
         SI: {
             family: 'SI',
+            strikeIncrement: 0.25,
             calendarId: 'COMEX:SI',
             displayName: 'Silver futures option',
             optionSecType: 'FOP',
@@ -182,6 +197,7 @@
         },
         HG: {
             family: 'HG',
+            strikeIncrement: 0.05,
             calendarId: 'COMEX:HG',
             displayName: 'Copper futures option',
             optionSecType: 'FOP',
@@ -204,6 +220,7 @@
         },
         SPX: {
             family: 'SPX',
+            strikeIncrement: 5,
             displayName: 'S&P 500 index option',
             optionSecType: 'OPT',
             underlyingSecType: 'IND',
@@ -226,6 +243,7 @@
         },
         NDX: {
             family: 'NDX',
+            strikeIncrement: 25,
             displayName: 'Nasdaq-100 index option',
             optionSecType: 'OPT',
             underlyingSecType: 'IND',

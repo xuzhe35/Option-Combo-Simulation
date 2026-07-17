@@ -5,7 +5,19 @@ from __future__ import annotations
 from typing import Any, TypedDict
 
 
-class QuoteSnapshot(TypedDict):
+class QuoteTimeEvidence(TypedDict, total=False):
+    quoteAsOf: str
+
+
+class PayloadTimeEvidence(TypedDict, total=False):
+    payloadAsOf: str
+    batchId: str
+    quoteComplete: bool
+    coherent: bool
+    coherenceReason: str
+
+
+class QuoteSnapshot(QuoteTimeEvidence):
     bid: float
     ask: float
     mark: float
@@ -16,7 +28,7 @@ class OptionQuoteSnapshot(QuoteSnapshot, total=False):
     delta: float
 
 
-class LiveMarketDataPayload(TypedDict):
+class LiveMarketDataPayload(PayloadTimeEvidence):
     underlyingPrice: float | None
     underlyingQuote: QuoteSnapshot | None
     options: dict[str, OptionQuoteSnapshot]
@@ -77,7 +89,7 @@ class IvTermStructureOptionDescriptor(TypedDict):
     isAtm: bool
 
 
-class IvTermStructureSnapshotPayload(TypedDict, total=False):
+class IvTermStructureSnapshotPayload(PayloadTimeEvidence, total=False):
     action: str
     symbol: str
     anchorDate: str
@@ -102,7 +114,7 @@ class IvTermStructureSnapshotPayload(TypedDict, total=False):
     requestedUnderlyingContractMonth: str
 
 
-class IvTermStructureCatalogPatchPayload(TypedDict, total=False):
+class IvTermStructureCatalogPatchPayload(PayloadTimeEvidence, total=False):
     action: str
     symbol: str
     expiryRows: list[IvTermStructureExpiryRowPayload]
@@ -120,7 +132,7 @@ class IvTermStructureCatalogPatchPayload(TypedDict, total=False):
     message: str
 
 
-class IvTermStructureSyncCompletePayload(TypedDict, total=False):
+class IvTermStructureSyncCompletePayload(PayloadTimeEvidence, total=False):
     action: str
     symbol: str
     subscribedOptionCount: int
@@ -132,7 +144,7 @@ class IvTermStructureSyncCompletePayload(TypedDict, total=False):
     sharedAtmProbeTimedOut: bool
 
 
-class IvTermStructureErrorPayload(TypedDict):
+class IvTermStructureErrorPayload(PayloadTimeEvidence):
     action: str
     symbol: str
     message: str

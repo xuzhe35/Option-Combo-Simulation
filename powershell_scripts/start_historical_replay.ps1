@@ -6,10 +6,13 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Resolve-OptionComboPython -ProjectRoot $projectRoot).Path
 $workdir = $projectRoot
 
-# Historical replay data now comes from the shared options-chain-service
-# (Options DB workspace). Start it first if it is not already running.
-$chainServiceUrl = 'http://127.0.0.1:8750'
-$chainServiceScript = Join-Path $projectRoot '..\..\Options DB\chain_service\chain_server.py'
+# Historical replay data comes from an external, swappable options-chain-service.
+# Where it lives is config, not knowledge this script owns: ask
+# chain_service_config.py so config.ini and the env overrides stay the one
+# source of truth. An empty script path means the service is remote and not
+# ours to start. See config.ini [historical].
+$chainServiceUrl = (& $python (Join-Path $projectRoot 'chain_service_config.py') --url).Trim()
+$chainServiceScript = (& $python (Join-Path $projectRoot 'chain_service_config.py') --script).Trim()
 
 $chainServiceUp = $false
 try {
@@ -18,14 +21,20 @@ try {
 } catch { }
 
 if (-not $chainServiceUp) {
-    if (Test-Path $chainServiceScript) {
+    if (-not $chainServiceScript) {
+        Write-Warning "Options chain service not reachable at $chainServiceUrl."
+        Write-Warning 'It is configured as remote (chain_service_dir is empty), so this script will not start it.'
+        Write-Warning 'Historical replay will fail until that service answers.'
+    } elseif (Test-Path $chainServiceScript) {
         $chainServiceDir = Split-Path -Parent $chainServiceScript
+        # Deliberately the plain launcher python, not our venv: the chain
+        # service is a separate project that brings its own dependencies.
         $chainCommand = 'cd /d "{0}" && "{1}" chain_server.py' -f $chainServiceDir, $python
         Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', $chainCommand -WorkingDirectory $chainServiceDir | Out-Null
         Write-Host "Starting options chain service: $chainServiceScript"
     } else {
-        Write-Warning "Options chain service not reachable at $chainServiceUrl and script not found at $chainServiceScript."
-        Write-Warning "Historical replay will fail until the chain service is running."
+        Write-Warning "Options chain service not reachable at $chainServiceUrl and no chain_server.py at $chainServiceScript."
+        Write-Warning 'Fix chain_service_dir in config.ini (or set OPTION_COMBO_CHAIN_SERVICE_DIR), or blank it if the service is remote.'
     }
 } else {
     Write-Host "Options chain service already running at $chainServiceUrl"
