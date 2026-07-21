@@ -534,7 +534,11 @@
         };
     }
 
-    function computeLegDerivedData(group, leg, globalState, activeViewMode, anchorUnderlyingPrice, usesScenarioUnderlying, underlyingProfile) {
+    // `anchorUnderlyingPrice` is the price the group is being evaluated at, which in
+    // settlement/amortized modes is the scenario price, not the live underlier.
+    // `liveAnchorUnderlyingPrice` is the genuine current underlier; it is optional so
+    // the exported entry point keeps working, and is re-derived when omitted.
+    function computeLegDerivedData(group, leg, globalState, activeViewMode, anchorUnderlyingPrice, usesScenarioUnderlying, underlyingProfile, liveAnchorUnderlyingPrice = null) {
         const greeksEnabled = isGreeksEnabled(globalState);
         const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
             ? pricingContext.resolveSimulationDate(globalState)
@@ -549,6 +553,25 @@
             usesScenarioUnderlying,
             anchorUnderlyingPrice
         );
+        // processLegData stamps the leg's live anchor, and computeSimulatedPrice
+        // compares the price it is evaluating against that anchor to decide whether
+        // the observable mark reproduces exactly. The anchor must therefore always be
+        // the current underlier, never the scenario price, or the comparison is
+        // trivially true and every settlement scenario collapses onto the live mark.
+        // chart.js and prob_charts.js keep the same split.
+        const resolvedLiveAnchorPrice = Number.isFinite(liveAnchorUnderlyingPrice)
+            ? liveAnchorUnderlyingPrice
+            : (pricingContext && typeof pricingContext.resolveAnchorUnderlyingPrice === 'function'
+                ? pricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
+                : globalState.underlyingPrice);
+        const legAnchorUnderlyingPrice = pricingContext
+            && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
+            ? pricingContext.resolveLegCurrentUnderlyingPrice(
+                globalState,
+                leg,
+                resolvedLiveAnchorPrice
+            )
+            : resolvedLiveAnchorPrice;
         const legInterestRate = pricingContext && typeof pricingContext.resolveLegInterestRate === 'function'
             ? pricingContext.resolveLegInterestRate(globalState, leg, globalState.interestRate)
             : globalState.interestRate;
@@ -591,7 +614,7 @@
             simulationDate,
             globalState.ivOffset,
             quoteDate,
-            legUnderlyingPrice,
+            legAnchorUnderlyingPrice,
             legInterestRate,
             activeViewMode,
             underlyingProfile,
@@ -744,7 +767,8 @@
                 activeViewMode,
                 evalUnderlyingPrice,
                 usesScenarioUnderlying,
-                underlyingProfile
+                underlyingProfile,
+                liveAnchorUnderlyingPrice
             );
             groupCost += legResult.processedLeg.costBasis;
             groupPartialCloseRealizedPnl += legResult.partialCloseRealizedPnl || 0;

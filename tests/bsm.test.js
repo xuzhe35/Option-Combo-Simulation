@@ -603,6 +603,45 @@ module.exports = {
                 assert.equal('2026-07-12' in normalized.byDate, false);
                 assert.equal('garbage' in normalized.byDate, false);
                 assert.equal(normalized.minWeight, -3);
+                assert.equal(normalized.differsFromCalendar, true);
+            },
+        },
+        {
+            name: 'a weekend weighted ABOVE 1 still diverges from the calendar clock',
+            run() {
+                const ctx = loadPricingContext();
+                const dateUtils = ctx.OptionComboDateUtils;
+                const pricingCore = ctx.OptionComboPricingCore;
+
+                // Price-derived lambdas are deliberately unclamped, so an
+                // event-heavy weekend can exceed 1. minWeight only ever tracks
+                // the MINIMUM, so it cannot see this; differsFromCalendar must.
+                const heavy = {
+                    default: 1,
+                    byDate: { '2026-04-04': 1.35, '2026-04-05': 1.35 },
+                };
+                const spec = dateUtils.normalizeWeekendWeightSpec(heavy);
+                assert.equal(spec.minWeight, 1, 'minWeight cannot detect an above-1 weekend');
+                assert.equal(spec.differsFromCalendar, true);
+                assert.equal(
+                    pricingCore.weekendWeightActive(heavy),
+                    true,
+                    'the weighted-clock path must run, otherwise the weekend is priced at 1.0'
+                );
+
+                // The under-weighting this guards against: weighting the two
+                // weekend days at 1.35 instead of 1.0 must move the clock.
+                assert.equal(
+                    dateUtils.countWeightedDays('2026-04-02', '2026-04-06', heavy),
+                    2 + 1.35 + 1.35
+                );
+
+                // A genuinely flat spec is still the calendar clock.
+                const flat = { default: 1, byDate: { '2026-04-04': 1, '2026-04-05': 1 } };
+                assert.equal(dateUtils.normalizeWeekendWeightSpec(flat).differsFromCalendar, false);
+                assert.equal(pricingCore.weekendWeightActive(flat), false);
+                assert.equal(dateUtils.normalizeWeekendWeightSpec(0.3).differsFromCalendar, true);
+                assert.equal(dateUtils.normalizeWeekendWeightSpec(1).differsFromCalendar, false);
             },
         },
         {

@@ -117,9 +117,12 @@ module.exports = {
                             underlyingSymbol: 'SPX',
                             underlyingPrice: 6100.5,
                             liveQuoteAsOf: '2026-07-20T19:59:58.000Z',
+                            // Deliberately DISTINCT from liveQuoteAsOf above:
+                            // a sentinel that a substituted timestamp cannot
+                            // accidentally match. See the assertions below.
                             indexForwardRateSamples: [{
                                 spotPrice: 6100.5,
-                                quoteAsOf: '2026-07-20T19:59:58.000Z',
+                                quoteAsOf: '2026-07-20T19:59:41.000Z',
                             }],
                         },
                     },
@@ -130,10 +133,11 @@ module.exports = {
                             underlyingSymbol: 'ES',
                             underlyingPrice: 6336.25,
                             liveQuoteAsOf: '2026-07-20T19:59:57.000Z',
+                            // Distinct sentinel, as above.
                             futuresPool: [{
                                 id: 'es-sep',
                                 mark: 6336.25,
-                                quoteAsOf: '2026-07-20T19:59:57.000Z',
+                                quoteAsOf: '2026-07-20T19:59:12.000Z',
                                 contractMonth: '202609',
                             }],
                         },
@@ -147,16 +151,33 @@ module.exports = {
                     assert.equal(snapshot.liveQuoteAsOf, testCase.state.liveQuoteAsOf);
                     assert.notEqual(snapshot.underlyingPrice, testCase.chartOnlyPrice);
                 });
-                assert.equal(
-                    buildProjectionPricingState(cases[0].state, cases[0].chartOnlyPrice)
-                        .indexForwardRateSamples[0].quoteAsOf,
-                    cases[0].state.liveQuoteAsOf
+                // Asserting these nested timestamps against liveQuoteAsOf would
+                // compare two copies of the same author-written literal and hold
+                // for ANY implementation. buildProjectionPricingState is a
+                // shallow spread, so there is no nested propagation to pin.
+                // What IS worth pinning is the documented contract at that
+                // boundary: the Chart Lab price stream must never rewrite the
+                // main socket's carry / futures observations. The sentinels
+                // differ from liveQuoteAsOf, so a substituted timestamp fails.
+                const indexSnapshot = buildProjectionPricingState(
+                    cases[0].state, cases[0].chartOnlyPrice
                 );
                 assert.equal(
-                    buildProjectionPricingState(cases[1].state, cases[1].chartOnlyPrice)
-                        .futuresPool[0].quoteAsOf,
-                    cases[1].state.liveQuoteAsOf
+                    indexSnapshot.indexForwardRateSamples[0].quoteAsOf,
+                    '2026-07-20T19:59:41.000Z'
                 );
+                assert.equal(indexSnapshot.indexForwardRateSamples[0].spotPrice, 6100.5);
+                assert.notEqual(
+                    indexSnapshot.indexForwardRateSamples[0].spotPrice,
+                    cases[0].chartOnlyPrice
+                );
+
+                const fopSnapshot = buildProjectionPricingState(
+                    cases[1].state, cases[1].chartOnlyPrice
+                );
+                assert.equal(fopSnapshot.futuresPool[0].quoteAsOf, '2026-07-20T19:59:12.000Z');
+                assert.equal(fopSnapshot.futuresPool[0].mark, 6336.25);
+                assert.notEqual(fopSnapshot.futuresPool[0].mark, cases[1].chartOnlyPrice);
             },
         },
         {

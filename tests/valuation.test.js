@@ -1591,5 +1591,85 @@ module.exports = {
                 assert.equal(mark.legResults[0].pnl, null);
             },
         },
+        {
+            // Regression: processLegData was handed the scenario price, so the
+            // leg anchor always matched the price being evaluated and the live
+            // mark short circuit fired for every settlement scenario. The group
+            // value froze at the live mark until an ivOffset nudge escaped it.
+            name: 'settlement group value tracks the settlement price instead of pinning to the live mark',
+            run() {
+                const ctx = loadValuationContext();
+                const buildGroup = settleUnderlyingPrice => ({
+                    id: 'settle-anchor',
+                    viewMode: 'settlement',
+                    settleUnderlyingPrice,
+                    legs: [{
+                        id: 'l1',
+                        type: 'call',
+                        pos: 1,
+                        strike: 100,
+                        expDate: '2026-09-18',
+                        expiryAsOf: '2026-09-18T20:00:00Z',
+                        iv: 0.25,
+                        cost: 4.10,
+                        currentPrice: 4.10,
+                        currentPriceSource: 'live',
+                        closePrice: null,
+                    }],
+                });
+                const buildState = group => ({
+                    underlyingSymbol: 'QQQ',
+                    underlyingPrice: 100,
+                    baseDate: '2026-07-10',
+                    simulatedDate: '2026-07-10',
+                    liveQuoteDate: '2026-07-10',
+                    liveQuoteAsOf: '2026-07-10T18:00:00Z',
+                    marketDataMode: 'live',
+                    projectionConvergenceMode: 'legacy-input-iv',
+                    useMarketDiscountCurve: false,
+                    simulationTiming: {
+                        available: true,
+                        status: 'ok',
+                        simulationDate: '2026-07-10',
+                        targetAsOf: '2026-07-10T18:00:00Z',
+                    },
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    hedges: [],
+                    groups: [group],
+                });
+                const simValueAt = settleUnderlyingPrice => {
+                    const group = buildGroup(settleUnderlyingPrice);
+                    const result = ctx.OptionComboValuation.computeGroupDerivedData(
+                        group,
+                        buildState(group)
+                    );
+                    assert.equal(
+                        result.groupSimulationAvailable,
+                        true,
+                        `simulation must be available at settle price ${settleUnderlyingPrice}`
+                    );
+                    return result.groupSimValue;
+                };
+
+                const down = simValueAt(70);
+                const flat = simValueAt(100);
+                const up = simValueAt(130);
+
+                assert.notEqual(down, flat, 'a -30% settlement must not equal the flat case');
+                assert.notEqual(flat, up, 'a +30% settlement must not equal the flat case');
+                assert.notEqual(down, up, 'the -30% and +30% settlements must not be identical');
+
+                // Long 100-strike call held to a 2026-09-18 expiry: worth almost
+                // nothing 30% below the strike and roughly its intrinsic 30 a
+                // share (3000 on one contract) 30% above it.
+                assert.ok(down < 5, `expected the -30% settlement to be near worthless, got ${down}`);
+                assert.ok(
+                    up > 2800 && up < 3400,
+                    `expected the +30% settlement to be near intrinsic (~3000), got ${up}`
+                );
+                assert.ok(down < flat && flat < up, 'long-call value must rise with the settlement price');
+            },
+        },
     ],
 };

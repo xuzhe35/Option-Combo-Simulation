@@ -1130,6 +1130,263 @@ module.exports = {
             },
         },
         {
+            name: 'dates a vendor-IV surface from its legs instead of the Calculate click',
+            run() {
+                // TWS delivered model IV for the front expiries in the morning
+                // and for the back expiries after an afternoon selloff. Forward
+                // variance across that interval mixes two vol regimes, so the
+                // legs must never be stamped with one synthetic timestamp and
+                // published as a single coherent observation.
+                const FixedDate = fixedDateClass('2026-07-20T15:51:00.000Z');
+                const ctx = loadPageContext(null, { Date: FixedDate });
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                const MORNING = '2026-07-20T09:35:00.000Z';
+                const AFTERNOON = '2026-07-20T15:50:30.000Z';
+                const buildCard = (stamps) => {
+                    const card = testApi.createCardState({
+                        symbol: 'SPY',
+                        historyPath: 'iv_term_structure/data/SPY.json',
+                    }, { isExpanded: true });
+                    const specs = [
+                        ['20260721', 1, 1], ['20260722', 2, 1], ['20260723', 3, 1],
+                        ['20260724', 4, 1], ['20260727', 7, 0.6],
+                    ];
+                    card.catalog = {
+                        anchorDate: '2026-07-20',
+                        expiryRows: specs.map(([expiry, dte], index) => ({
+                            expiry, dte, atmStrike: 750,
+                            atmCallSubId: `iv-call-${index}`,
+                            atmPutSubId: `iv-put-${index}`,
+                            subscriptionSelected: true,
+                        })),
+                    };
+                    card.quotesBySubId = {};
+                    let totalVar = 0;
+                    specs.forEach(([, dte, units], index) => {
+                        totalVar += 8e-5 * units;
+                        const iv = Math.sqrt(totalVar * 365 / dte);
+                        const quoteAsOf = stamps[index];
+                        card.quotesBySubId[`iv-call-${index}`] = { iv, quoteAsOf };
+                        card.quotesBySubId[`iv-put-${index}`] = { iv, quoteAsOf };
+                    });
+                    return card;
+                };
+
+                const mixed = testApi.buildVendorIvLambdaSource(
+                    buildCard([MORNING, MORNING, MORNING, AFTERNOON, AFTERNOON]),
+                    FixedDate.now()
+                );
+                assert.equal(mixed.ok, true);
+                assert.equal(mixed.usableExpiryCount, 2);
+                assert.equal(mixed.skippedRows.length, 3);
+                assert.equal(mixed.skippedRows[0].callReason, 'stale_quote');
+                assert.equal(mixed.skippedRows[0].putReason, 'stale_quote');
+                // The published quote time is the oldest leg actually used,
+                // never the moment Calculate was pressed.
+                assert.equal(mixed.snapshot.quoteAsOf, AFTERNOON);
+                assert.equal(mixed.snapshot.payloadAsOf, '2026-07-20T15:51:00.000Z');
+                assert.notEqual(mixed.snapshot.quoteAsOf, mixed.snapshot.payloadAsOf);
+                assert.equal(mixed.snapshot.observedAt, '2026-07-20T15:51:00.000Z');
+
+                // With every leg stale the route reports unavailable rather
+                // than certifying a surface it cannot honestly date.
+                const staleCard = buildCard(new Array(5).fill(MORNING));
+                const stale = testApi.buildVendorIvLambdaSource(staleCard, FixedDate.now());
+                assert.equal(stale.ok, false);
+                assert.equal(stale.reason, 'insufficient_fresh_vendor_iv_pairs');
+                assert.equal(stale.snapshot, null);
+                assert.equal(stale.usableExpiryCount, 0);
+
+                const calculated = testApi.calculateImpliedLambda(staleCard, FixedDate.now());
+                assert.equal(calculated.ok, false);
+                assert.equal(calculated.status, 'not_estimable');
+                assert.equal(calculated.entry, null);
+
+                // A leg with no timestamp at all cannot be dated either.
+                const undatedCard = buildCard(new Array(5).fill(undefined));
+                const undated = testApi.buildVendorIvLambdaSource(undatedCard, FixedDate.now());
+                assert.equal(undated.ok, false);
+                assert.equal(undated.skippedRows[0].callReason, 'missing_quote_timestamp');
+            },
+        },
+        {
+            name: 'keeps a straddle curve rather than a wider vendor-IV surface',
+            run() {
+                const fixture = createCoherentPublicationFixture();
+                try {
+                    fixture.dispatch();
+                    const quoteAsOf = '2026-07-20T14:32:42.876Z';
+                    const testApi = fixture.ctx.OptionComboIvTermStructurePage._test;
+                    // Vendor IV needs only IV > 0, so it reaches expiries the
+                    // two-sided BBO straddle route cannot. Wider coverage must
+                    // not evict a curve derived from real market prices.
+                    fixture.card.quotesBySubId.__ivts__spy_call.iv = 0.18;
+                    fixture.card.quotesBySubId.__ivts__spy_put.iv = 0.18;
+                    [['20260731', 11], ['20260807', 18], ['20260814', 25]]
+                        .forEach(([expiry, dte], index) => {
+                            fixture.card.catalog.expiryRows.push({
+                                expiry, dte, atmStrike: 750,
+                                atmCallSubId: `iv-call-${index}`,
+                                atmPutSubId: `iv-put-${index}`,
+                                subscriptionSelected: true,
+                            });
+                            const iv = 0.18 + dte * 0.001;
+                            fixture.card.quotesBySubId[`iv-call-${index}`] = { iv, quoteAsOf };
+                            fixture.card.quotesBySubId[`iv-put-${index}`] = { iv, quoteAsOf };
+                        });
+                    // The vendor route is genuinely available here: what stops
+                    // it is the hierarchy, not missing evidence.
+                    assert.equal(
+                        testApi.buildVendorIvLambdaSource(fixture.card, Date.parse(quoteAsOf)).ok,
+                        true
+                    );
+
+                    fixture.ctx.OptionComboIvTermStructureCore.computeImpliedWeekendLambdas = (
+                        _rows, anchorDate, options
+                    ) => {
+                        const snapshotId = options.snapshotMetadata.snapshotId;
+                        const stamp = options.snapshotMetadata.quoteAsOf;
+                        const vendor = options.varianceSource === 'vendor_iv';
+                        const specs = vendor ? [
+                            ['2026-07-24', '20260727', ['2026-07-25', '2026-07-26'], 0.9],
+                            ['2026-07-31', '20260803', ['2026-08-01', '2026-08-02'], 0.9],
+                        ] : [
+                            ['2026-07-24', '20260727', ['2026-07-25', '2026-07-26'], 0.2],
+                        ];
+                        const intervals = specs.map(([
+                            startDate, endExpiry, nonTradingDates, rawLambda,
+                        ]) => ({
+                            startDate, endExpiry, nonTradingDates, rawLambda,
+                            lambda: rawLambda, status: 'ok',
+                            snapshotId, quoteAsOf: stamp,
+                        }));
+                        const byDate = {};
+                        intervals.forEach((interval) => interval.nonTradingDates
+                            .forEach((date) => { byDate[date] = interval.rawLambda; }));
+                        const dates = Object.keys(byDate).sort();
+                        return {
+                            anchorDate,
+                            calendarKey: 'NYSE',
+                            varianceSource: vendor ? 'vendor_iv' : 'straddle',
+                            snapshotId,
+                            quoteAsOf: stamp,
+                            methodology: { pricingModel: 'bsm-spot' },
+                            coverageStart: dates[0],
+                            coverageEnd: dates[dates.length - 1],
+                            byDate,
+                            medianLambda: vendor ? 0.9 : 0.2,
+                            okIntervalCount: intervals.length,
+                            intervals,
+                            quality: {
+                                status: 'ok', coherent: true, quoteComplete: true,
+                                snapshotId, underlyingSnapshotId: snapshotId,
+                            },
+                        };
+                    };
+
+                    const calculated = testApi.calculateImpliedLambda(fixture.card);
+                    assert.equal(calculated.ok, true);
+                    // Vendor IV covers four dates against the straddle route's
+                    // two, but covered-date count does not outrank evidence.
+                    assert.equal(calculated.calculationMode, 'strict');
+                    assert.equal(calculated.status, 'calculated');
+                    assert.equal(calculated.entry.varianceSource, 'straddle');
+                    assert.deepEqual(
+                        Object.keys(calculated.entry.byDate),
+                        ['2026-07-25', '2026-07-26']
+                    );
+                } finally {
+                    fixture.restore();
+                }
+            },
+        },
+        {
+            name: 'refuses stale BBO pairs and keeps true quote times in best-effort mode',
+            run() {
+                // The IB socket dropped at 11:00. card.quotesBySubId survives a
+                // close, so those BBOs are still sitting in the map when the
+                // user presses Calculate at 15:30.
+                const FixedDate = fixedDateClass('2026-07-20T15:30:00.000Z');
+                const ctx = loadPageContext(null, { Date: FixedDate });
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                const card = testApi.createCardState({
+                    symbol: 'SPY',
+                    historyPath: 'iv_term_structure/data/SPY.json',
+                }, { isExpanded: true });
+                card.underlyingPrice = 750;
+                card.catalog = {
+                    anchorDate: '2026-07-20',
+                    expiryRows: [
+                        {
+                            expiry: '20260721', dte: 1, atmStrike: 750,
+                            atmCallSubId: 'call-1', atmPutSubId: 'put-1',
+                            subscriptionSelected: true,
+                        },
+                        {
+                            expiry: '20260724', dte: 4, atmStrike: 750,
+                            atmCallSubId: 'call-2', atmPutSubId: 'put-2',
+                            subscriptionSelected: true,
+                        },
+                    ],
+                };
+                const setStamp = (quoteAsOf) => {
+                    card.quotesBySubId = {
+                        'call-1': { bid: 4.9, ask: 5.1, quoteAsOf },
+                        'put-1': { bid: 4.8, ask: 5.0, quoteAsOf },
+                        'call-2': { bid: 8.9, ask: 9.2, quoteAsOf },
+                        'put-2': { bid: 8.7, ask: 9.0, quoteAsOf },
+                    };
+                };
+
+                setStamp('2026-07-20T11:00:00.000Z');
+                const stale = testApi.buildBestEffortLambdaSnapshot(card, FixedDate.now());
+                assert.equal(stale.ok, false);
+                assert.equal(stale.reason, 'insufficient_complete_expiry_pairs');
+                assert.equal(stale.usableExpiryCount, 0);
+                assert.equal(stale.skippedRows[0].callReason, 'stale_quote');
+                assert.equal(stale.skippedRows[0].putReason, 'stale_quote');
+
+                setStamp(undefined);
+                assert.equal(
+                    testApi.buildBestEffortLambdaSnapshot(card, FixedDate.now())
+                        .skippedRows[0].callReason,
+                    'missing_quote_timestamp'
+                );
+
+                // A fresh set publishes, but carries the venue's own quote
+                // time so freshness checks and cross-tab ownership
+                // arbitration still see when the market was actually read.
+                const FRESH = '2026-07-20T15:29:30.000Z';
+                setStamp(FRESH);
+                const fresh = testApi.buildBestEffortLambdaSnapshot(card, FixedDate.now());
+                assert.equal(fresh.ok, true);
+                assert.equal(fresh.usableExpiryCount, 2);
+                assert.equal(fresh.snapshot.quotesBySubId['call-1'].quoteAsOf, FRESH);
+                assert.equal(
+                    fresh.snapshot.quotesBySubId['call-1'].observedAt,
+                    '2026-07-20T15:30:00.000Z'
+                );
+                assert.equal(fresh.snapshot.quoteAsOf, FRESH);
+                assert.equal(fresh.snapshot.underlyingQuote.quoteAsOf, FRESH);
+                assert.equal(fresh.snapshot.payloadAsOf, '2026-07-20T15:30:00.000Z');
+                assert.equal(fresh.snapshot.coherent, true);
+                assert.equal(fresh.snapshot.quoteComplete, true);
+
+                const inspect = testApi.inspectBestEffortOptionQuote;
+                const nowMs = FixedDate.now();
+                assert.equal(inspect({ bid: 1, ask: 2, quoteAsOf: FRESH }, '', nowMs).usable, true);
+                assert.equal(
+                    inspect({ bid: 1, ask: 2, quoteAsOf: '2026-07-20T11:00:00.000Z' }, '', nowMs).reason,
+                    'stale_quote'
+                );
+                assert.equal(
+                    inspect({ bid: 1, ask: 2, quoteAsOf: '2026-07-20T16:30:00.000Z' }, '', nowMs).reason,
+                    'future_quote_timestamp'
+                );
+                assert.equal(inspect({ bid: 1, ask: 2 }, '', nowMs).reason, 'missing_quote_timestamp');
+            },
+        },
+        {
             name: 'reports strict V2 sync failure only after an explicit calculation and sync',
             run() {
                 const fixture = createCoherentPublicationFixture({ saveResult: false });

@@ -124,6 +124,18 @@ function _renderPayoffChartQuality(card) {
     note.style.display = 'block';
 
     if (!chart || !chart.lastRenderData) {
+        // A missing curve is not automatically an evidence failure: draw()
+        // also bails for purely structural reasons (nothing included, or an
+        // inverted price range). Claiming degraded evidence there would be a
+        // warning shown when nothing is wrong, which only teaches users to
+        // ignore the actionable version of this same message.
+        const emptyReason = chart && chart.lastEmptyReason;
+        if (emptyReason) {
+            note.textContent = emptyReason === 'no-legs'
+                ? 'Best-effort mode is on. No legs are included in this chart, so there is no curve to qualify yet.'
+                : 'Best-effort mode is on. The price range is empty (min ≥ max), so there is no curve to qualify yet.';
+            return;
+        }
         note.classList.add('is-error');
         note.textContent = 'Best-effort could not complete the curve. At least one leg still lacks usable IV, timing / implied λ coverage, or its bound underlying quote.';
         return;

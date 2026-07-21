@@ -226,14 +226,18 @@
     // carry their own option-implied weight. The scalar/default remains a
     // user-entered conventional [0, 1] weight, while price-derived per-date
     // values stay signed: a negative value is the observable term-structure
-    // inversion signal and must not be silently clipped away. minWeight lets
-    // callers test cheaply whether the weighted clock differs from the
-    // calendar clock.
+    // inversion signal and must not be silently clipped away. minWeight
+    // reports the smallest applicable weight; differsFromCalendar answers the
+    // question callers actually ask — does the weighted clock differ from the
+    // calendar clock. Because per-date weights are unclamped, divergence has
+    // to be tracked in BOTH directions: an event-heavy weekend can carry a
+    // price-derived weight above 1, which minWeight alone would never see.
     function normalizeWeekendWeightSpec(value) {
         if (value !== null && typeof value === 'object') {
             const defaultWeight = _clampWeight(value.default, 1);
             const byDate = {};
             let minWeight = defaultWeight;
+            let differsFromCalendar = defaultWeight !== 1;
             const source = value.byDate && typeof value.byDate === 'object' ? value.byDate : {};
             for (const key of Object.keys(source)) {
                 const iso = normalizeDateInput(key);
@@ -245,11 +249,15 @@
                 if (weight < minWeight) {
                     minWeight = weight;
                 }
+                if (weight !== 1) {
+                    differsFromCalendar = true;
+                }
             }
             return {
                 default: defaultWeight,
                 byDate: Object.keys(byDate).length ? byDate : null,
                 minWeight,
+                differsFromCalendar,
                 strictByDate: value.strictByDate === true,
                 coverageStart: typeof value.coverageStart === 'string' ? value.coverageStart : null,
                 coverageEnd: typeof value.coverageEnd === 'string' ? value.coverageEnd : null,
@@ -260,6 +268,7 @@
             default: scalar,
             byDate: null,
             minWeight: scalar,
+            differsFromCalendar: scalar !== 1,
             strictByDate: false,
             coverageStart: null,
             coverageEnd: null,

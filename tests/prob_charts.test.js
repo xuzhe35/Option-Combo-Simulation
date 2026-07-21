@@ -92,6 +92,54 @@ function histogramLogVariance(result, anchorPrice) {
     return variance / mass;
 }
 
+// Drive updateProbCharts() far enough to reach its early-return unavailable
+// branches, with a fake in-flight Monte Carlo worker already installed. The
+// chart/badge setters all no-op when getElementById returns null, so only the
+// container has to exist.
+function loadProbChartsWithStaleWorker(state, simulationTiming) {
+    const ctx = loadBrowserScripts([
+        'js/official_exchange_calendars.generated.js',
+        'js/market_holidays.js',
+        'js/date_utils.js',
+        'js/prob_charts.js',
+    ], {
+        state,
+        Blob: class Blob { constructor() {} },
+        URL: { createObjectURL: () => 'blob:mock' },
+        document: {
+            getElementById: (id) => (id === 'probAnalysisContainer'
+                ? { style: { display: 'block' } }
+                : null),
+        },
+        OptionComboPricingContext: {
+            resolveSimulationDate: (s) => s.simulatedDate,
+            resolveQuoteDate: (s) => s.baseDate,
+            resolveSimulationTiming: () => simulationTiming,
+        },
+    });
+    const fakeWorker = {
+        terminated: false,
+        terminate() { this.terminated = true; },
+    };
+    ctx.__fakeWorker = fakeWorker;
+    new vm.Script('_activeWorker = __fakeWorker;').runInContext(ctx);
+    return { ctx, fakeWorker };
+}
+
+function staleWorkerState() {
+    return {
+        underlyingSymbol: 'SPY',
+        baseDate: '2026-07-20',
+        simulatedDate: '2026-07-20',
+        liveQuoteAsOf: '2026-07-20T14:00:00Z',
+        groups: [{
+            id: 'g1',
+            includedInGlobal: true,
+            legs: [{ type: 'call', pos: 1, strike: 100, expDate: '2026-08-21', iv: 0.2 }],
+        }],
+    };
+}
+
 module.exports = {
     name: 'prob_charts.js',
     tests: [
@@ -605,6 +653,43 @@ module.exports = {
                 assert.ok(clock.calDays > 0);
                 assert.ok(clock.effDays > 0);
                 assert.ok(clock.stepWeights.length > 0);
+            },
+        },
+        {
+            name: 'zero-horizon unavailable state terminates the in-flight Monte Carlo worker',
+            run() {
+                // User drags Days-Passed back to 0 while a 1M-path worker is
+                // running. Without the terminate, that worker's onmessage is
+                // still live and repaints the density, the Expected P&L badge
+                // and the closure-captured horizon label for the horizon the
+                // user just abandoned, burying the unavailable state.
+                const { ctx, fakeWorker } = loadProbChartsWithStaleWorker(
+                    staleWorkerState(),
+                    { available: true, targetAsOf: '2026-07-20T14:00:00Z' }
+                );
+                ctx.updateProbCharts();
+                assert.equal(
+                    fakeWorker.terminated,
+                    true,
+                    'stale worker must not survive to repaint the abandoned horizon'
+                );
+                assert.equal(new vm.Script('_activeWorker').runInContext(ctx), null);
+            },
+        },
+        {
+            name: 'timing-unavailable state terminates the in-flight Monte Carlo worker',
+            run() {
+                const { ctx, fakeWorker } = loadProbChartsWithStaleWorker(
+                    staleWorkerState(),
+                    { available: false, status: 'contract_timing_missing' }
+                );
+                ctx.updateProbCharts();
+                assert.equal(
+                    fakeWorker.terminated,
+                    true,
+                    'stale worker must not survive to overwrite the unavailable message'
+                );
+                assert.equal(new vm.Script('_activeWorker').runInContext(ctx), null);
             },
         },
     ],

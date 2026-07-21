@@ -134,8 +134,10 @@ class PnLChart {
         this.resize();
         this.ctx.clearRect(0, 0, this.width, this.height);
         this.lastProjectionQuality = null;
+        this.lastEmptyReason = null;
 
         if (!group || group.legs.length === 0 || minS >= maxS) {
+            this.lastEmptyReason = (!group || group.legs.length === 0) ? 'no-legs' : 'invalid-range';
             this.drawEmptyState();
             this.lastRenderData = null;
             return;

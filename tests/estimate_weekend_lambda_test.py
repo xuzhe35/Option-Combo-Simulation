@@ -72,10 +72,15 @@ class WeekendLambdaStraddleInversionTests(unittest.TestCase):
         )
 
     def test_summary_separates_raw_and_admissible_lambda(self):
-        summary = _summarize("test", [-0.2, 0.1, 0.3, 1.4])
-        self.assertIn("raw_med= 0.200", summary)
+        # The fixture must be ASYMMETRIC about the admissible band, otherwise
+        # the two medians coincide and the assertions below cannot tell the
+        # raw median from the admissible one. Here the two inadmissible values
+        # both sit above 1 (a real case: price-derived lambdas are unclamped),
+        # so dropping them moves the median 0.600 -> 0.200.
+        summary = _summarize("test", [0.1, 0.2, 0.6, 1.4, 1.8])
+        self.assertIn("raw_med= 0.600", summary)
         self.assertIn("valid_med= 0.200", summary)
-        self.assertIn("valid[0,1]=50.0%", summary)
+        self.assertIn("valid[0,1]=60.0%", summary)
 
 
 if __name__ == "__main__":

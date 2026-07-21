@@ -55,7 +55,9 @@
     function weekendWeightActive(weekendWeight) {
         if (weekendWeight !== null && typeof weekendWeight === 'object') {
             const spec = normalizeWeekendWeightSpec(weekendWeight);
-            return spec.minWeight < 1;
+            // Not minWeight < 1: per-date weights are unclamped, so a weekend
+            // weighted ABOVE 1 also diverges from the calendar clock.
+            return spec.differsFromCalendar;
         }
         return weekendWeightDefault(weekendWeight) < 1;
     }

@@ -144,6 +144,19 @@
                     globalState.underlyingPrice
                 )
                 : evalUnderlyingPrice;
+            // processLegData stamps the leg's live anchor, which computeSimulatedPrice
+            // compares the evaluated price against to decide whether the observable mark
+            // reproduces exactly. Feeding it the scenario price makes that comparison
+            // trivially true, so every settlement scenario returns the live mark and the
+            // amortized cash figure stops moving. chart.js keeps the same split.
+            const legAnchorUnderlyingPrice = pricingContext
+                && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
+                ? pricingContext.resolveLegCurrentUnderlyingPrice(
+                    globalState,
+                    leg,
+                    globalState.underlyingPrice
+                )
+                : globalState.underlyingPrice;
             const legInterestRate = pricingContext && typeof pricingContext.resolveLegInterestRate === 'function'
                 ? pricingContext.resolveLegInterestRate(globalState, leg, globalState.interestRate)
                 : globalState.interestRate;
@@ -154,7 +167,7 @@
                 simulationDate,
                 globalState.ivOffset,
                 quoteDate,
-                legUnderlyingPrice,
+                legAnchorUnderlyingPrice,
                 legInterestRate,
                 activeViewMode,
                 profile,

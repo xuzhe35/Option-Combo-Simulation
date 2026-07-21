@@ -1283,7 +1283,7 @@ function _resolveProbabilityHorizonClock(
             effYear,
             steps: exact.segments,
             stepWeights: exact.segments.map(segment => segment.effectiveDays),
-            isCalendarClock: weightSpec.minWeight >= 1,
+            isCalendarClock: !weightSpec.differsFromCalendar,
             usedPerDateWeight: !!weightSpec.byDate,
             defaultNonTradingWeight: defaultWeight,
         });
@@ -1372,6 +1372,7 @@ function updateProbCharts() {
         ? pricingContext.resolveSimulationTiming(state)
         : null;
     if (simulationTiming && simulationTiming.available === false) {
+        if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
         const message = `Probability simulation unavailable because target timing is ${simulationTiming.status}.`;
         _probChart && _probChart.drawEmpty(message);
         _epnlChart && _epnlChart.drawEmpty(message);
@@ -1388,6 +1389,7 @@ function updateProbCharts() {
         ? targetMs <= quoteMs
         : dateOnlyDays === 0;
     if (zeroHorizon) {
+        if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
         _probChart && _probChart.drawEmpty('Advance the simulation date to see probabilities.');
         _epnlChart && _epnlChart.drawEmpty('No future time remains before the simulation target.');
         _setExpectedPnLBadge(null);
@@ -1458,6 +1460,7 @@ function updateProbCharts() {
     // quote anchor by computePortfolioMeanSimIV().
     const portfolioIV = computePortfolioMeanSimIV();
     if (!portfolioIV || portfolioIV <= 0) {
+        if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
         _probChart && _probChart.drawEmpty('No usable option IV found to scale the distribution.');
         _epnlChart && _epnlChart.drawEmpty('');
         _setExpectedPnLBadge(null);
@@ -1469,7 +1472,10 @@ function updateProbCharts() {
 
     // Price range from global P&L chart
     const { minS, maxS } = getGlobalChartRange();
-    if (minS >= maxS) return;
+    if (minS >= maxS) {
+        if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
+        return;
+    }
     const anchorPrice = _getProbabilityAnchorPrice();
     const anchorInfo = _getProbabilityAnchorInfo();
 
@@ -1500,6 +1506,7 @@ function updateProbCharts() {
     const params = T_DIST_PARAMS_DB[distributionSymbol];
 
     if (!params) {
+        if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
         const distributionLabel = distributionSymbol === underlying
             ? distributionSymbol
             : `${distributionSymbol} (proxy for ${underlying})`;
