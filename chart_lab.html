@@ -8,7 +8,7 @@
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260711-no-confirm-checkbox">
+    <link rel="stylesheet" href="style.css?v=20260722-best-effort-payoff-v1">
     <link rel="stylesheet" href="chart_lab.css?v=20260323-prototype">
 </head>
 
@@ -190,21 +190,32 @@
                             </div>
                         </div>
 
-                        <div class="control-group">
+                        <div class="control-group" id="discountRateControlGroup">
                             <label for="interestRate">
-                                Interest Rate (%)
+                                <span id="interestRateLabelText">Discount Rate Fallback r (%)</span>
                                 <span class="value-display" id="interestRateDisplay">3.0%</span>
                             </label>
                             <input type="number" id="interestRate" class="number-input" value="3.0" step="0.1">
+                            <label class="text-muted small" style="display: flex; align-items: center; gap: 0.4rem; margin-top: 0.4rem;">
+                                <input type="checkbox" id="useMarketDiscountCurve" checked>
+                                Automatically load and use latest yield curve
+                            </label>
+                            <button type="button" class="btn btn-secondary btn-sm" id="loadLatestDiscountCurveBtn"
+                                style="width: 100%; margin-top: 0.5rem;">
+                                Reload Latest Yield Curve
+                            </button>
+                            <div class="text-muted small mt-1" id="discountCurveStatus">
+                                Waiting for the shared yield-curve snapshot; the value above is the offline fallback.
+                            </div>
                         </div>
 
                         <div class="control-group" id="forwardRatePanel" hidden>
                             <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem;">
-                                <label style="margin: 0;">Forward Carry (r-q approx)</label>
+                                <label style="margin: 0;">Forward / Carry (F, r-q)</label>
                                 <button type="button" class="btn btn-secondary btn-sm" id="addForwardRateSampleBtn">Add Sample</button>
                             </div>
                             <div class="text-muted small" id="forwardRateStatus" style="margin-bottom: 0.5rem;">
-                                Add one or more reference samples to derive market-implied daily carry.
+                                Add expiry-matched call/put samples to derive a discount-aware Forward and market-implied carry.
                             </div>
                             <div class="text-muted small" style="display: grid; grid-template-columns: 72px minmax(0, 1fr) minmax(0, 1fr); gap: 0.5rem; margin-bottom: 0.35rem; font-size: 0.72rem;">
                                 <span>Days</span>
@@ -251,7 +262,14 @@
                                 <option value="trading">Trading days (λ=0)</option>
                                 <option value="weighted" selected>Weighted weekends (λ)</option>
                             </select>
-                            <input type="number" id="simWeekendWeight" class="number-input" value="0.30" step="0.05" min="0" max="1" style="display: none;" title="Weekend/holiday variance weight λ: 0 = trading-day clock, 1 = calendar clock.">
+                            <input type="number" id="simWeekendWeight" class="number-input" value="0.30" step="0.05" min="0" max="1" style="display: none;" title="Diagnostic scalar weekend/holiday variance weight λ: 0 = trading-day clock, 1 = calendar clock. It cannot replace required IVTS per-date coverage in live projections.">
+                            <div id="simImpliedLambdaReceived" class="sim-implied-lambda-received" role="status" style="display: none;">已经从IVTS接受到</div>
+                            <div id="simImpliedLambdaLabel" style="display: none;" title="Use the fresh V2 per-date implied λ curve calculated from coherent two-sided straddle prices. Coverage is strict: every weekend and full-day exchange closure from the quote instant through each target-surviving option expiry must be present. Disabling this control or selecting a scalar/Calendar/Trading clock cannot bypass a required live projection gate. In a same-origin IVTS tab, press Calculate λ and then Sync to Simulators; use Load λ File for another machine or origin.">
+                                <label for="simUseImpliedLambda"><input type="checkbox" id="simUseImpliedLambda" checked> IVTS implied λ per weekend (required across closures)</label>
+                                <button type="button" id="simImpliedLambdaLoadBtn" class="btn btn-secondary btn-sm" title="Load an implied λ JSON file exported from the IV Term Structure page (Export λ).">Load λ File…</button>
+                                <span class="value-display" id="simImpliedLambdaStatus" role="status" aria-live="polite"></span>
+                            </div>
+                            <input type="file" id="simImpliedLambdaFileInput" accept=".json,application/json" hidden>
                         </div>
                     </div>
 
@@ -688,6 +706,7 @@
                                             style="accent-color: var(--primary-color);">
                                         <span class="small font-weight-semibold market-data-toggle-label">Market Data Feed</span>
                                     </label>
+                                    <div class="live-subscription-warning" style="display: none;"></div>
                                     <label class="small text-muted" style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
                                         <input type="checkbox" class="avg-cost-sync-toggle" style="accent-color: var(--success-color);">
                                         <span>Fill Cost From TWS Avg Cost</span>
@@ -1222,37 +1241,39 @@
     <script src="js/regime_conditional_samples.generated.js?v=20260715-v1"></script>
     <script src="js/official_exchange_calendars.generated.js?v=20260713-v2"></script>
     <script src="js/market_holidays.js?v=20260713-official-only"></script>
-    <script src="js/date_utils.js?v=20260713-product-calendar"></script>
-    <script src="js/product_registry.js?v=20260715-strike-increment"></script>
-    <script src="js/index_forward_rate.js"></script>
-    <script src="js/pricing_context.js?v=20260322-histsimdate"></script>
+    <script src="js/date_utils.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/implied_lambda_handoff.js?v=20260721-best-effort-lambda-v1"></script>
+    <script src="js/product_registry.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/market_curves.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/index_forward_rate.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/pricing_context.js?v=20260720-carry-lambda-cutoff-v3"></script>
     <script src="js/trade_trigger_logic.js"></script>
     <script src="js/group_order_builder.js?v=20260713-position-fop-fix"></script>
     <script src="js/leg_position_check.js?v=20260711-leg-exists"></script>
     <script src="js/order_safety.js?v=20260711-safe-execution"></script>
     <script src="js/order_confirmation_ui.js?v=20260711-safe-execution"></script>
     <script src="js/distribution_proxy_config.js"></script>
-    <script src="js/pricing_core.js?v=20260713-product-calendar"></script>
+    <script src="js/pricing_core.js?v=20260722-best-effort-payoff-v1"></script>
     <script src="js/bsm.js"></script>
-    <script src="js/chart.js?v=20260711-partial-close"></script>
-    <script src="js/prob_charts.js?v=20260715-regime-conditioned"></script>
-    <script src="js/chart_controls.js?v=20260713-product-calendar"></script>
-    <script src="js/amortized.js?v=20260711-partial-close"></script>
-    <script src="js/valuation.js?v=20260711-partial-close"></script>
-    <script src="js/session_logic.js?v=20260711-partial-close"></script>
-    <script src="js/session_ui.js?v=20260713-product-calendar"></script>
-    <script src="js/control_panel_ui.js?v=20260713-product-calendar"></script>
+    <script src="js/chart.js?v=20260722-best-effort-payoff-v1"></script>
+    <script src="js/prob_charts.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/chart_controls.js?v=20260722-best-effort-payoff-v1"></script>
+    <script src="js/amortized.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/valuation.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/session_logic.js?v=20260721-auto-future-v1"></script>
+    <script src="js/session_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/control_panel_ui.js?v=20260721-auto-future-v1"></script>
     <script src="js/hedge_editor_ui.js"></script>
-    <script src="js/group_editor_ui.js?v=20260715-quote-scroll"></script>
+    <script src="js/group_editor_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
     <script src="js/hedge_ui.js"></script>
     <script src="js/group_ui.js?v=20260713-reverse-butterfly"></script>
     <script src="js/global_ui.js"></script>
     <script src="js/page_capabilities.js"></script>
     <script src="js/combo_order_transport.js?v=20260711-partial-close"></script>
     <script src="js/delta_hedge_transport.js"></script>
-    <script src="js/app.js?v=20260711-time-basis"></script>
-    <script src="js/ws_client.js?v=20260713-position-fop-fix"></script>
-    <script src="js/chart_lab.js?v=20260324-global-projection"></script>
+    <script src="js/app.js?v=20260721-timeline-target-v1"></script>
+    <script src="js/ws_client.js?v=20260721-auto-future-v1"></script>
+    <script src="js/chart_lab.js?v=20260720-carry-lambda-cutoff-v3"></script>
 </body>
 
 </html>

@@ -43,17 +43,36 @@
     const CALENDAR_FINDER_STORAGE_KEY = 'optionComboIvtsCalendarFinder';
     const FUTURES_CONTRACT_MONTH_STORAGE_KEY = 'optionComboIvtsFuturesContractMonth';
     const OPTION_STREAM_LIMIT_STORAGE_KEY = 'optionComboIvtsOptionStreamLimit';
-    const DEFAULT_MAX_OPTION_STREAMS = 10;
+    // Ten expiries (20 ATM call/put streams) normally cover at least two
+    // adjacent weekends on daily-expiry products and keep the estimator from
+    // degrading into one synthetic front observation.
+    const DEFAULT_MAX_OPTION_STREAMS = 20;
     const OPTION_STREAM_LIMIT_CHOICES = Object.freeze([10, 20, 40, 0]);
     const TD_IV_LAMBDA_STORAGE_KEY = 'optionComboIvtsTdIvLambdaGlobal';
     const DEFAULT_TD_IV_LAMBDA = 0.3;
     const AUTO_SAMPLE_INTERVAL_MS = 60 * 60 * 1000;
     const AUTO_SAMPLE_MONITOR_INTERVAL_MS = 60 * 1000;
     const AUTO_SAMPLE_RETRY_DELAY_MS = 5 * 60 * 1000;
+    const DISCOUNT_CURVE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+    const IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS = 120;
+    // Widest spread between the oldest and newest quote a manually assembled
+    // surface may carry and still be called coherent. The incremental quote
+    // map is written by per-ticker packets at arbitrary times, so a surface
+    // built from it is only "one observation" if its legs were actually
+    // observed together.
+    const IMPLIED_LAMBDA_MAX_QUOTE_SKEW_SECONDS = 120;
+    const CLOCK_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
     const AUTO_HISTORY_PURPOSE = 'iv-term-structure-auto-samples';
     const IV_TERM_STRUCTURE_SNAPSHOT_TIMEOUT_MS = 90 * 1000;
+    const IV_TERM_STRUCTURE_ACK_TIMEOUT_MS = 8 * 1000;
+    const IV_TERM_STRUCTURE_PROTOCOL_VERSION = '20260719.5';
     const NYSE_OPTION_CLOSE_MINUTES = 16 * 60 + 15;
     const CARD_VIEW_STATE_SECTIONS = Object.freeze([
+        {
+            key: 'sampling',
+            detailsSelector: '.ivts-sampling-details',
+            shellSelector: '',
+        },
         {
             key: 'calendar',
             detailsSelector: '.ivts-calendar-finder',
@@ -78,11 +97,18 @@
         pendingFileSymbol: '',
         renderTimerId: null,
         autoSampleMonitorTimerId: null,
+        discountCurveRefreshTimerId: null,
         controlWs: null,
         controlWsOpenPromise: null,
         ibStatusPollTimerId: null,
         apiResetInProgress: false,
         tdIvWeekendWeight: DEFAULT_TD_IV_LAMBDA,
+        impliedLambdaRate: 0.04,
+        discountCurve: null,
+        discountCurveStatus: '',
+        discountCurveFallbackUsed: false,
+        discountCurveLastError: '',
+        pageSuspended: false,
         ibStatus: {
             connected: false,
             connecting: false,
@@ -96,6 +122,98 @@
 
     function productRegistry() {
         return globalScope.OptionComboProductRegistry;
+    }
+
+    function marketCurves() {
+        return globalScope.OptionComboMarketCurves;
+    }
+
+    function applyDiscountCurveSnapshot(payload) {
+        const data = payload && typeof payload === 'object' ? payload : {};
+        const snapshot = data.curve && typeof data.curve === 'object' ? data.curve : null;
+        if (!snapshot) {
+            runtime.discountCurveStatus = String(data.status || 'unavailable').trim();
+            runtime.discountCurveFallbackUsed = data.fallbackUsed === true;
+            runtime.discountCurveLastError = String(
+                data.error || 'No unified daily discount curve is available.'
+            ).trim();
+            return false;
+        }
+        const api = marketCurves();
+        if (!api) {
+            runtime.discountCurveLastError = 'Shared market-curves runtime is unavailable.';
+            return false;
+        }
+        const adapter = typeof api.createDiscountCurveFromSnapshot === 'function'
+            ? api.createDiscountCurveFromSnapshot
+            : api.createDiscountCurveFromTreasurySnapshot;
+        if (typeof adapter !== 'function') {
+            runtime.discountCurveLastError = 'Discount-curve snapshot adapter is unavailable.';
+            return false;
+        }
+        try {
+            runtime.discountCurve = adapter(snapshot, {
+                maxExtrapolationDays: 31,
+            });
+            runtime.discountCurveStatus = String(data.status || 'cached').trim();
+            runtime.discountCurveFallbackUsed = data.fallbackUsed === true;
+            runtime.discountCurveLastError = data.fallbackUsed === true
+                ? String(data.error || '').trim()
+                : '';
+            runtime.cardsBySymbol.forEach((card) => {
+                if (card) {
+                    card.forceBodyRefreshOnce = true;
+                    card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
+                }
+            });
+            return true;
+        } catch (error) {
+            runtime.discountCurveLastError = String(
+                error && error.message || 'Discount curve payload is invalid.'
+            ).trim();
+            return false;
+        }
+    }
+
+    function formatDiscountCurveStatus() {
+        const curve = runtime.discountCurve;
+        if (!curve) {
+            const fallbackPct = Number.isFinite(runtime.impliedLambdaRate)
+                ? (runtime.impliedLambdaRate * 100).toFixed(2)
+                : (DEFAULT_IMPLIED_LAMBDA_RATE * 100).toFixed(2);
+            return `Fallback r ${fallbackPct}%`;
+        }
+        const effectiveDate = String(curve.curveAsOf || curve.asOf || curve.effectiveDate || '').trim();
+        const hasHybridSources = !!(curve.sources && curve.sources.sofr && curve.sources.treasury);
+        const label = hasHybridSources
+            ? 'SOFR/CMT reference curve'
+            : (curve.isProxy === true ? 'Discount proxy' : 'Discount curve');
+        const cached = runtime.discountCurveFallbackUsed ? ' · cached' : '';
+        return `${label}${effectiveDate ? ` ${effectiveDate}` : ''}${cached}`;
+    }
+
+    function discountCurveStatusTitle() {
+        const curve = runtime.discountCurve;
+        if (!curve) {
+            return `Using manual continuously compounded r fallback. ${runtime.discountCurveLastError || ''}`.trim();
+        }
+        const metadata = curve.metadata && typeof curve.metadata === 'object'
+            ? curve.metadata
+            : {};
+        const source = String(metadata.source || 'USD reference curve').trim();
+        const sofrDate = String(curve.sources && curve.sources.sofr
+            && curve.sources.sofr.effectiveDate || '').trim();
+        const treasuryDate = String(curve.sources && curve.sources.treasury
+            && curve.sources.treasury.effectiveDate || '').trim();
+        const semantics = curve.sources && curve.sources.sofr && curve.sources.treasury
+            ? `Overnight SOFR flat through 30d, smooth forward blend, then SOFR-anchored Treasury CMT proxy slope. SOFR ${sofrDate || '--'}; Treasury ${treasuryDate || '--'}. SOFR averages are diagnostics only; this is not a bootstrapped OIS zero curve.`
+            : (curve.isProxy === true
+                ? 'Reference-rate proxy; not a bootstrapped zero/OIS curve.'
+                : 'Continuously compounded discount curve.');
+        const warning = runtime.discountCurveLastError
+            ? ` Last refresh warning: ${runtime.discountCurveLastError}`
+            : '';
+        return `${source}. ${semantics}${warning}`;
     }
 
     function normalizeWsPort(rawValue) {
@@ -238,13 +356,15 @@
                 if (card.pendingCatalog) {
                     const pending = card.pendingCatalog;
                     card.pendingCatalog = null;
-                    clearTimeout(pending.timeoutId);
+                    clearPendingCatalogTimers(pending);
                     pending.reject(new Error(message));
                 }
                 card.syncInProgress = false;
                 card.sampleInProgress = false;
                 card.catalog = null;
                 card.quotesBySubId = {};
+                card.lambdaSnapshot = null;
+                card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
                 card.underlyingPrice = null;
                 card.lastSyncLabel = '';
                 card.catalogPatchCount = 0;
@@ -340,11 +460,39 @@
     }
 
     function currentExchangeDate(calendarId, nowValue = new Date()) {
-        const timeZone = String(calendarId || '').toUpperCase() === 'NYSE'
+        const normalizedCalendarId = String(calendarId || '').toUpperCase();
+        const isFuturesCalendar = normalizedCalendarId.startsWith('CME:')
+            || normalizedCalendarId.startsWith('NYMEX:')
+            || normalizedCalendarId.startsWith('COMEX:');
+        const timeZone = normalizedCalendarId === 'NYSE'
             ? 'America/New_York'
             : 'America/Chicago';
         const parts = localTimestampParts(nowValue, timeZone);
-        return parts ? parts.date : new Date(nowValue).toISOString().slice(0, 10);
+        if (!parts) {
+            return new Date(nowValue).toISOString().slice(0, 10);
+        }
+
+        // Globex sessions opened at 17:00 CT belong to the following exchange
+        // trade date.  Using the Chicago civil date here would leave an IVTS
+        // page opened on Sunday night anchored to Sunday until manual resync.
+        let candidate = isFuturesCalendar && parts.minuteOfDay >= 17 * 60
+            ? dateKeyAtOffset(parts.date, 1)
+            : parts.date;
+        const dateUtils = globalScope.OptionComboDateUtils;
+        if (!dateUtils || typeof dateUtils.isTradingDay !== 'function') {
+            return candidate;
+        }
+        for (let offset = 0; offset <= 7; offset += 1) {
+            const dateKey = offset === 0 ? candidate : dateKeyAtOffset(candidate, -offset);
+            const isTrading = dateUtils.isTradingDay(dateKey, normalizedCalendarId || 'NYSE');
+            if (isTrading === true) {
+                return dateKey;
+            }
+            if (isTrading === null) {
+                return dateKey;
+            }
+        }
+        return candidate;
     }
 
     function officialSessionClosePolicy(calendarId, dateKey) {
@@ -733,6 +881,41 @@
         return Math.min(1, Math.max(0, Math.round(parsed * 100) / 100));
     }
 
+    const IMPLIED_LAMBDA_RATE_STORAGE_KEY = 'optionComboIvtsImpliedLambdaRate';
+    const DEFAULT_IMPLIED_LAMBDA_RATE = 0.04;
+
+    // Percent in the input, decimal in runtime/storage.
+    function normalizeImpliedLambdaRatePct(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return DEFAULT_IMPLIED_LAMBDA_RATE * 100;
+        }
+        return Math.min(25, Math.max(-5, Math.round(parsed * 100) / 100));
+    }
+
+    function loadSavedImpliedLambdaRate() {
+        try {
+            const raw = localStorage.getItem(IMPLIED_LAMBDA_RATE_STORAGE_KEY);
+            if (raw == null || raw === '') {
+                return null;
+            }
+            const parsed = parseFloat(raw);
+            return Number.isFinite(parsed)
+                ? normalizeImpliedLambdaRatePct(parsed * 100) / 100
+                : null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function saveImpliedLambdaRate(rateDecimal) {
+        try {
+            localStorage.setItem(IMPLIED_LAMBDA_RATE_STORAGE_KEY, String(rateDecimal));
+        } catch (_) {
+            // Runtime state still carries the rate when storage is unavailable.
+        }
+    }
+
     function loadSavedTdIvLambda() {
         try {
             const raw = localStorage.getItem(TD_IV_LAMBDA_STORAGE_KEY);
@@ -900,6 +1083,10 @@
             lastAutoSampleLabel: '',
             catalog: null,
             quotesBySubId: {},
+            // Immutable, server-declared whole-curve snapshot used only by the
+            // implied-lambda estimator. Incremental display quotes never mutate
+            // this object.
+            lambdaSnapshot: null,
             underlyingPrice: null,
             forceBodyRefreshOnce: false,
             bundledHistoryDocument: null,
@@ -915,6 +1102,16 @@
             ),
             catalogPatchCount: 0,
             catalogPatchTimeoutId: null,
+            tradeDateResyncPending: false,
+            impliedLambdaFingerprint: '',
+            impliedLambdaPublishedSnapshotId: '',
+            impliedLambdaPublicationResult: null,
+            impliedLambdaComputedResult: null,
+            impliedLambdaComputedEntry: null,
+            impliedLambdaComputedAt: '',
+            impliedLambdaNeedsRecalculation: false,
+            varianceBestEffortEnabled: false,
+            resumeAfterPageShow: false,
         };
     }
 
@@ -1056,10 +1253,14 @@
     function quoteWithServerSnapshotEvidence(quote, payload) {
         const source = quote && typeof quote === 'object' ? quote : {};
         const payloadAsOf = serverPayloadAsOf(payload);
-        const quoteAsOf = String(source.quoteAsOf || payloadAsOf || '').trim();
+        const payloadCanCertifyQuotes = payload && payload.coherent === true
+            && payload.quoteComplete === true;
+        const quoteAsOf = String(
+            source.quoteAsOf || (payloadCanCertifyQuotes ? payloadAsOf : '') || ''
+        ).trim();
         const snapshotId = String(
             source.snapshotId || source.batchId
-            || payload && (payload.snapshotId || payload.batchId)
+            || (payloadCanCertifyQuotes && payload && (payload.snapshotId || payload.batchId))
             || ''
         ).trim();
         return {
@@ -1067,6 +1268,206 @@
             ...(quoteAsOf ? { quoteAsOf } : {}),
             ...(snapshotId ? { snapshotId } : {}),
         };
+    }
+
+    function withdrawImpliedLambda(card) {
+        const handoff = typeof OptionComboImpliedLambdaHandoff !== 'undefined'
+            ? OptionComboImpliedLambdaHandoff
+            : null;
+        if (!card || !handoff || typeof handoff.removeSymbolEntry !== 'function') {
+            return false;
+        }
+        const expectedSnapshotId = String(card.impliedLambdaPublishedSnapshotId || '').trim();
+        card.impliedLambdaFingerprint = '';
+        if (!expectedSnapshotId) {
+            // No ownership proof: this key may belong to another live IVTS
+            // tab. Freshness validation will age out genuine orphan entries.
+            return false;
+        }
+        const removed = handoff.removeSymbolEntry(
+            card.symbol,
+            undefined,
+            card.futuresContractMonth || null,
+            expectedSnapshotId
+        );
+        if (removed) {
+            card.impliedLambdaPublishedSnapshotId = '';
+        }
+        return removed;
+    }
+
+    function evaluateLambdaSnapshotFreshness(snapshot, nowValue = Date.now()) {
+        if (!snapshot || typeof snapshot !== 'object') {
+            return { fresh: false, status: 'missing_snapshot', ageMs: null };
+        }
+        const nowMs = nowValue instanceof Date ? nowValue.getTime() : Number(nowValue);
+        if (!Number.isFinite(nowMs)) {
+            return { fresh: false, status: 'invalid_now', ageMs: null };
+        }
+        const quotes = [
+            snapshot.underlyingQuote,
+            ...Object.values(snapshot.quotesBySubId && typeof snapshot.quotesBySubId === 'object'
+                ? snapshot.quotesBySubId
+                : {}),
+        ];
+        const expectedOptionCount = parseInt(snapshot.expectedOptionCount, 10) || 0;
+        if (!quotes[0] || quotes.length !== expectedOptionCount + 1) {
+            return { fresh: false, status: 'incomplete_quote_set', ageMs: null };
+        }
+        const quoteTimes = quotes.map((quote) => Date.parse(String(quote && quote.quoteAsOf || '').trim()));
+        if (quoteTimes.some((value) => !Number.isFinite(value))) {
+            return { fresh: false, status: 'missing_quote_timestamp', ageMs: null };
+        }
+        const oldestQuoteMs = Math.min(...quoteTimes);
+        const ageMs = nowMs - oldestQuoteMs;
+        const configuredMaxSeconds = Number(snapshot.maxQuoteAgeSeconds);
+        const maxAgeMs = (
+            Number.isFinite(configuredMaxSeconds) && configuredMaxSeconds > 0
+                ? configuredMaxSeconds
+                : IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS
+        ) * 1000;
+        if (ageMs < -CLOCK_FUTURE_TOLERANCE_MS) {
+            return { fresh: false, status: 'future_quote_timestamp', ageMs, maxAgeMs };
+        }
+        if (ageMs > maxAgeMs) {
+            return { fresh: false, status: 'stale_quote_set', ageMs, maxAgeMs };
+        }
+        return { fresh: true, status: 'ok', ageMs, maxAgeMs };
+    }
+
+    function expireCardImpliedLambdaIfStale(card, nowValue = Date.now()) {
+        // Compatibility hook retained for tests/extensions. Calculated lambda
+        // is frozen until the user replaces or withdraws it; time alone never
+        // expires it.
+        void card;
+        void nowValue;
+        return false;
+    }
+
+    function applyCoherentQuoteSnapshot(card, payload, nowValue = new Date()) {
+        if (!card || !card.catalog || !payload || typeof payload !== 'object') {
+            return { ok: false, reason: 'missing_catalog' };
+        }
+        if (String(payload.symbol || '').trim().toUpperCase() !== card.symbol) {
+            return { ok: false, reason: 'symbol_mismatch' };
+        }
+        const reject = (details) => {
+            card.lambdaSnapshot = null;
+            card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
+            return { ok: false, ...details };
+        };
+        const snapshotId = String(payload.snapshotId || payload.batchId || '').trim();
+        const payloadAsOf = serverPayloadAsOf(payload);
+        if (payload.coherent !== true || payload.quoteComplete !== true
+            || !snapshotId || !payloadAsOf) {
+            return reject({
+                reason: 'incomplete_snapshot',
+                coherenceReason: String(payload.coherenceReason || '').trim(),
+            });
+        }
+
+        const expectedContractMonth = normalizeFuturesContractMonth(card.futuresContractMonth);
+        const snapshotContractMonth = normalizeFuturesContractMonth(payload.underlyingContractMonth);
+        if (expectedContractMonth && snapshotContractMonth !== expectedContractMonth) {
+            return reject({
+                reason: 'underlying_contract_month_mismatch',
+                expectedContractMonth,
+                snapshotContractMonth,
+            });
+        }
+
+        const profile = card.profile || resolveProfile(card.symbol);
+        const anchorDate = normalizeDateKey(payload.anchorDate || card.catalog.anchorDate);
+        const currentTradeDate = currentExchangeDate(profile.calendarId || 'NYSE', nowValue);
+        if (!anchorDate || anchorDate !== currentTradeDate) {
+            return reject({ reason: 'stale_anchor', anchorDate, currentTradeDate });
+        }
+        const underlyingSource = payload.underlyingQuote;
+        const underlyingPrice = Number(payload.underlyingPrice);
+        if (!underlyingSource || typeof underlyingSource !== 'object'
+            || !(underlyingPrice > 0)
+            || !Number.isFinite(Date.parse(String(underlyingSource.quoteAsOf || '').trim()))) {
+            return reject({ reason: 'missing_underlying_quote' });
+        }
+        const underlyingQuote = quoteWithServerSnapshotEvidence(underlyingSource, payload);
+        if (String(underlyingQuote.snapshotId || '').trim() !== snapshotId) {
+            return reject({ reason: 'underlying_snapshot_mismatch' });
+        }
+
+        const optionSources = payload.options && typeof payload.options === 'object'
+            ? payload.options
+            : {};
+        const expectedSubIds = [];
+        for (const row of (Array.isArray(card.catalog.expiryRows) ? card.catalog.expiryRows : [])) {
+            if (row && row.subscriptionSelected === false) {
+                continue;
+            }
+            for (const subId of [row && row.atmCallSubId, row && row.atmPutSubId]) {
+                const normalized = String(subId || '').trim();
+                if (normalized) {
+                    expectedSubIds.push(normalized);
+                }
+            }
+        }
+        if (!expectedSubIds.length || expectedSubIds.some((subId) => !optionSources[subId])) {
+            return reject({ reason: 'missing_option_leg' });
+        }
+
+        const quotesBySubId = {};
+        for (const subId of expectedSubIds) {
+            const source = optionSources[subId];
+            if (!source || typeof source !== 'object'
+                || !Number.isFinite(Date.parse(String(source.quoteAsOf || '').trim()))) {
+                return reject({ reason: 'missing_option_timestamp', subId });
+            }
+            const quote = quoteWithServerSnapshotEvidence(source, payload);
+            if (String(quote.snapshotId || '').trim() !== snapshotId) {
+                return reject({ reason: 'option_snapshot_mismatch', subId });
+            }
+            quotesBySubId[subId] = quote;
+        }
+
+        const expiryRows = (Array.isArray(card.catalog.expiryRows) ? card.catalog.expiryRows : [])
+            .filter((row) => row && row.subscriptionSelected !== false)
+            .map((row) => ({ ...row }));
+        const snapshot = {
+            snapshotId,
+            batchId: String(payload.batchId || snapshotId).trim(),
+            payloadAsOf,
+            anchorDate,
+            underlyingContractMonth: snapshotContractMonth || null,
+            coherent: true,
+            quoteComplete: true,
+            coherenceReason: String(payload.coherenceReason || '').trim(),
+            underlyingPrice,
+            underlyingQuote: { ...underlyingQuote },
+            expiryRows,
+            quotesBySubId: Object.fromEntries(
+                Object.entries(quotesBySubId).map(([subId, quote]) => [subId, { ...quote }])
+            ),
+            expectedOptionCount: expectedSubIds.length,
+            actualOptionCount: Object.keys(quotesBySubId).length,
+            maxQuoteAgeSeconds: Number.isFinite(Number(payload.maxQuoteAgeSeconds))
+                ? Number(payload.maxQuoteAgeSeconds)
+                : IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS,
+        };
+        card.lambdaSnapshot = snapshot;
+        card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry
+            && String(card.impliedLambdaComputedEntry.snapshotId || '').trim() !== snapshotId;
+        // A whole-curve packet is also the safest visible quote refresh. Later
+        // incremental packets may update the live table, but never this object.
+        card.quotesBySubId = { ...quotesBySubId };
+        updateUnderlyingPrice(card, underlyingPrice);
+        card.catalog = {
+            ...card.catalog,
+            payloadAsOf,
+            batchId: snapshot.batchId,
+            snapshotId,
+            coherent: true,
+            quoteComplete: true,
+            coherenceReason: snapshot.coherenceReason,
+        };
+        return { ok: true, snapshot };
     }
 
     function sortExpiryRows(rows) {
@@ -1295,6 +1696,7 @@
             : '';
         const payload = {
             action: 'subscribe_iv_term_structure',
+            clientProtocolVersion: IV_TERM_STRUCTURE_PROTOCOL_VERSION,
             underlying: {
                 secType: profile.underlyingSecType || 'STK',
                 symbol: profile.underlyingSymbol || card.symbol,
@@ -1326,6 +1728,16 @@
         }
 
         return payload;
+    }
+
+    function clearPendingCatalogTimers(pending) {
+        if (!pending) {
+            return;
+        }
+        clearTimeout(pending.timeoutId);
+        clearTimeout(pending.ackTimeoutId);
+        pending.timeoutId = null;
+        pending.ackTimeoutId = null;
     }
 
     function applyRuntimeConfig(rawConfig, sourceLabel) {
@@ -1390,6 +1802,34 @@
                 return;
             }
 
+            if (payload && payload.action === 'iv_term_structure_sync_started') {
+                if (String(payload.symbol || '').trim().toUpperCase() !== card.symbol) {
+                    return;
+                }
+                const serverProtocolVersion = String(payload.protocolVersion || '').trim();
+                const pending = card.pendingCatalog;
+                if (pending) {
+                    clearTimeout(pending.ackTimeoutId);
+                    pending.ackTimeoutId = null;
+                    pending.serverAcknowledged = true;
+                    if (serverProtocolVersion !== IV_TERM_STRUCTURE_PROTOCOL_VERSION) {
+                        card.pendingCatalog = null;
+                        clearPendingCatalogTimers(pending);
+                        pending.reject(new Error(
+                            `IVTS backend protocol mismatch (browser ${IV_TERM_STRUCTURE_PROTOCOL_VERSION}, server ${serverProtocolVersion || 'missing'}). Rebuild and restart the remote backend.`
+                        ));
+                        return;
+                    }
+                }
+                setCardStatus(
+                    card,
+                    `Remote backend acknowledged IVTS protocol ${serverProtocolVersion}. Resolving contracts...`,
+                    ''
+                );
+                render();
+                return;
+            }
+
             if (payload && payload.action === 'iv_term_structure_snapshot') {
                 if (String(payload.symbol || '').trim().toUpperCase() !== card.symbol) {
                     return;
@@ -1397,6 +1837,8 @@
                 const payloadAsOf = serverPayloadAsOf(payload);
                 card.catalog = { ...payload, payloadAsOf };
                 card.quotesBySubId = {};
+                card.lambdaSnapshot = null;
+                card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
                 if (payload.options && typeof payload.options === 'object') {
                     Object.entries(payload.options).forEach(([subId, quote]) => {
                         card.quotesBySubId[subId] = quoteWithServerSnapshotEvidence(quote, payload);
@@ -1426,8 +1868,64 @@
                 if (card.pendingCatalog) {
                     const pending = card.pendingCatalog;
                     card.pendingCatalog = null;
-                    clearTimeout(pending.timeoutId);
+                    clearPendingCatalogTimers(pending);
                     pending.resolve(payload);
+                }
+                render();
+                return;
+            }
+
+            if (payload && payload.action === 'iv_term_structure_quote_snapshot') {
+                const applied = applyCoherentQuoteSnapshot(card, payload);
+                if (!applied.ok) {
+                    updateUnderlyingPrice(card, payload && payload.underlyingPrice);
+                    if (payload.options && typeof payload.options === 'object') {
+                        Object.entries(payload.options).forEach(([subId, quote]) => {
+                            card.quotesBySubId[subId] = quoteWithServerSnapshotEvidence(quote, payload);
+                        });
+                    }
+                    if (applied.reason === 'stale_anchor' && !card.tradeDateResyncPending) {
+                        card.tradeDateResyncPending = true;
+                        setCardStatus(
+                            card,
+                            `Exchange trade date rolled from ${applied.anchorDate || '--'} to ${applied.currentTradeDate || '--'}. Resyncing the curve...`,
+                            ''
+                        );
+                        setTimeout(async () => {
+                            try {
+                                await syncCard(card);
+                            } catch (error) {
+                                setCardStatus(card, error.message || 'Trade-date resync failed.', 'error');
+                                render(true);
+                            } finally {
+                                card.tradeDateResyncPending = false;
+                            }
+                        }, 0);
+                    } else if (!card.syncInProgress && !card.impliedLambdaComputedEntry) {
+                        const fallback = buildBestEffortLambdaSnapshot(card);
+                        const message = fallback.ok
+                            ? `Strict snapshot incomplete (${applied.coherenceReason || applied.reason}); best-effort calculation is ready from ${fallback.usableExpiryCount} complete expiries.`
+                            : `Collecting usable option pairs for implied λ: ${applied.coherenceReason || applied.reason}.`;
+                        if (card.statusMessage !== message || card.statusKind !== '') {
+                            setCardStatus(card, message, '');
+                        }
+                    }
+                    // Incomplete server snapshots may repeat while TWS fills
+                    // receipt evidence. Merge their usable BBOs, but do not
+                    // force a synchronous full-card redraw for every packet.
+                    render();
+                    return;
+                }
+                card.lastSyncLabel = applied.snapshot.payloadAsOf;
+                if (!card.impliedLambdaComputedEntry
+                    && /^(?:Strict snapshot incomplete|Collecting usable option pairs)/.test(
+                        String(card.statusMessage || '')
+                    )) {
+                    setCardStatus(
+                        card,
+                        `Strict coherent quote snapshot ready (${applied.snapshot.actualOptionCount} option legs). Press Calculate λ when you want to freeze it.`,
+                        'success'
+                    );
                 }
                 render();
                 return;
@@ -1467,22 +1965,37 @@
                     return;
                 }
                 const status = buildSubscriptionStatus(payload, { complete: true });
-                setCardStatus(
-                    card,
-                    status.message,
-                    status.kind
-                );
+                const publication = card.impliedLambdaPublicationResult;
+                const currentSnapshotId = String(
+                    card.lambdaSnapshot && card.lambdaSnapshot.snapshotId || ''
+                ).trim();
+                const publicationMatches = publication
+                    && String(publication.snapshotId || '').trim() === currentSnapshotId;
+                if (publicationMatches) {
+                    const combinedMessage = status.kind === 'error'
+                        ? `${publication.message} ${status.message}`.trim()
+                        : publication.message;
+                    setCardStatus(
+                        card,
+                        combinedMessage,
+                        publication.ok === true && status.kind !== 'error' ? 'success' : 'error'
+                    );
+                } else {
+                    setCardStatus(card, status.message, status.kind);
+                }
                 render();
                 return;
             }
 
             if (payload && payload.action === 'iv_term_structure_error') {
                 if (String(payload.symbol || '').trim().toUpperCase() === card.symbol || !payload.symbol) {
+                    card.lambdaSnapshot = null;
+                    card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
                     setCardStatus(card, payload.message || 'IV term structure sync failed.', 'error');
                     if (card.pendingCatalog) {
                         const pending = card.pendingCatalog;
                         card.pendingCatalog = null;
-                        clearTimeout(pending.timeoutId);
+                        clearPendingCatalogTimers(pending);
                         pending.reject(new Error(payload.message || 'IV term structure sync failed.'));
                     }
                     render();
@@ -1496,6 +2009,7 @@
                 Object.entries(payload.options).forEach(([subId, quote]) => {
                     card.quotesBySubId[subId] = quoteWithServerSnapshotEvidence(quote, payload);
                 });
+                card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
                 // A changed-ticker packet is partial by construction. It may
                 // update individual quote evidence, but it cannot advance the
                 // catalog's coherent whole-curve payloadAsOf.
@@ -1509,12 +2023,14 @@
             }
 
             clearCatalogPatchWatchdog(card);
+            card.lambdaSnapshot = null;
+            card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
             card.ws = null;
             card.wsOpenPromise = null;
             if (card.pendingCatalog) {
                 const pending = card.pendingCatalog;
                 card.pendingCatalog = null;
-                clearTimeout(pending.timeoutId);
+                clearPendingCatalogTimers(pending);
                 pending.reject(new Error('Socket closed before the sync completed.'));
             }
             const closeNotice = String(card.closeNotice || '').trim();
@@ -1561,6 +2077,7 @@
             }
             runtime.controlWsOpenPromise = Promise.resolve(ws);
             ws.send(JSON.stringify({ action: 'request_ib_connection_status' }));
+            ws.send(JSON.stringify({ action: 'request_discount_curve' }));
         });
 
         ws.addEventListener('message', (event) => {
@@ -1575,6 +2092,9 @@
             }
             if (payload && payload.action === 'ib_connection_status') {
                 updateIbStatus(payload);
+            } else if (payload && payload.action === 'discount_curve_snapshot') {
+                applyDiscountCurveSnapshot(payload);
+                render(true);
             } else if (payload && payload.action === 'api_market_data_subscriptions_reset') {
                 handleApiMarketDataReset(payload);
             }
@@ -1591,6 +2111,7 @@
                 connecting: false,
                 message: 'Control socket disconnected.',
             };
+            runtime.discountCurveLastError = 'Control socket disconnected; retaining the last usable curve.';
             render(true);
         });
 
@@ -1603,6 +2124,7 @@
                 connecting: false,
                 message: 'Unable to reach ib_server websocket.',
             };
+            runtime.discountCurveLastError = 'Unable to refresh the unified daily discount curve.';
             render(true);
         });
     }
@@ -1636,6 +2158,20 @@
                 message: error.message || 'Unable to check IB status.',
             };
             render(true);
+        }
+    }
+
+    async function requestDiscountCurveSnapshot() {
+        try {
+            const ws = await ensureControlSocket();
+            ws.send(JSON.stringify({ action: 'request_discount_curve' }));
+            return true;
+        } catch (error) {
+            runtime.discountCurveLastError = String(
+                error && error.message || 'Unable to request the unified daily discount curve.'
+            ).trim();
+            render(true);
+            return false;
         }
     }
 
@@ -1735,12 +2271,14 @@
             if (card.pendingCatalog) {
                 const pending = card.pendingCatalog;
                 card.pendingCatalog = null;
-                clearTimeout(pending.timeoutId);
+                clearPendingCatalogTimers(pending);
                 if (typeof pending.reject === 'function') {
                     pending.reject(new Error('Socket target changed.'));
                 }
             }
             card.closeNotice = '';
+            card.lambdaSnapshot = null;
+            card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
             if (card.ws) {
                 try {
                     card.ws.close(1000, 'endpoint changed');
@@ -1809,6 +2347,8 @@
             throw new Error(`Enter the ${profile.underlyingSymbol || card.symbol} underlying futures month as YYYYMM before syncing.`);
         }
 
+        card.lambdaSnapshot = null;
+        card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
         const ws = await ensureSocket(card);
         card.syncInProgress = true;
         card.closeNotice = '';
@@ -1821,11 +2361,32 @@
 
         try {
             const catalog = await new Promise((resolve, reject) => {
-                const timeoutId = setTimeout(() => {
+                const pending = {
+                    resolve,
+                    reject,
+                    timeoutId: null,
+                    ackTimeoutId: null,
+                    serverAcknowledged: false,
+                };
+                pending.timeoutId = setTimeout(() => {
+                    if (card.pendingCatalog !== pending) {
+                        return;
+                    }
                     card.pendingCatalog = null;
+                    clearPendingCatalogTimers(pending);
                     reject(new Error('Timed out while waiting for the IV term structure snapshot.'));
                 }, IV_TERM_STRUCTURE_SNAPSHOT_TIMEOUT_MS);
-                card.pendingCatalog = { resolve, reject, timeoutId };
+                pending.ackTimeoutId = setTimeout(() => {
+                    if (card.pendingCatalog !== pending || pending.serverAcknowledged) {
+                        return;
+                    }
+                    card.pendingCatalog = null;
+                    clearPendingCatalogTimers(pending);
+                    reject(new Error(
+                        `Remote backend did not acknowledge subscribe_iv_term_structure within ${IV_TERM_STRUCTURE_ACK_TIMEOUT_MS / 1000}s. The WebSocket endpoint is running an older/different backend; rebuild and restart it, then verify the IVTS WS host and port.`
+                    ));
+                }, IV_TERM_STRUCTURE_ACK_TIMEOUT_MS);
+                card.pendingCatalog = pending;
                 ws.send(JSON.stringify(buildSubscribePayload(card)));
             });
 
@@ -1854,6 +2415,454 @@
         );
     }
 
+    function buildLambdaDetailRows(card) {
+        const snapshot = card && card.lambdaSnapshot;
+        return buildLambdaDetailRowsFromSnapshot(card, snapshot);
+    }
+
+    function buildLambdaDetailRowsFromSnapshot(card, snapshot) {
+        if (!snapshot || !Array.isArray(snapshot.expiryRows)) {
+            return [];
+        }
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
+        return core().buildExpiryDetailRows(
+            snapshot.expiryRows,
+            snapshot.quotesBySubId,
+            snapshot.anchorDate,
+            normalizeTdIvLambda(runtime.tdIvWeekendWeight),
+            profile.calendarId || 'NYSE'
+        );
+    }
+
+    // card.quotesBySubId is a live incremental map: per-ticker packets write
+    // into it at arbitrary times and it deliberately survives a socket close,
+    // so a quote found there proves nothing about when it was observed. Every
+    // manual route that reads the map must therefore establish recency from
+    // the quote's own timestamp before using it. A quote that cannot prove
+    // when it was taken is unusable, never assumed current.
+    function inspectQuoteRecency(quoteAsOfValue, nowValue, maxAgeSeconds) {
+        const nowMs = nowValue instanceof Date ? nowValue.getTime() : Number(nowValue);
+        if (!Number.isFinite(nowMs)) {
+            return { usable: false, reason: 'invalid_now', quoteAsOf: '', quoteMs: null };
+        }
+        const raw = String(quoteAsOfValue || '').trim();
+        const quoteMs = Date.parse(raw);
+        if (!raw || !Number.isFinite(quoteMs)) {
+            return { usable: false, reason: 'missing_quote_timestamp', quoteAsOf: '', quoteMs: null };
+        }
+        const ageMs = nowMs - quoteMs;
+        if (ageMs < -CLOCK_FUTURE_TOLERANCE_MS) {
+            return { usable: false, reason: 'future_quote_timestamp', quoteAsOf: raw, quoteMs, ageMs };
+        }
+        const configured = Number(maxAgeSeconds);
+        const maxAgeMs = (
+            Number.isFinite(configured) && configured > 0
+                ? configured
+                : IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS
+        ) * 1000;
+        if (ageMs > maxAgeMs) {
+            return { usable: false, reason: 'stale_quote', quoteAsOf: raw, quoteMs, ageMs, maxAgeMs };
+        }
+        return {
+            usable: true,
+            reason: '',
+            quoteAsOf: new Date(quoteMs).toISOString(),
+            quoteMs,
+            ageMs,
+            maxAgeMs,
+        };
+    }
+
+    // Measure, rather than assert, whether a set of separately observed quotes
+    // can honestly be published as one coherent observation.
+    function measureQuoteCoherence(quoteMsValues, maxSkewSeconds) {
+        const values = (Array.isArray(quoteMsValues) ? quoteMsValues : [])
+            .filter((value) => Number.isFinite(value));
+        if (!values.length) {
+            return { coherent: false, reason: 'no_quote_timestamps', skewMs: null, oldestMs: null, newestMs: null };
+        }
+        const oldestMs = Math.min(...values);
+        const newestMs = Math.max(...values);
+        const skewMs = newestMs - oldestMs;
+        const configured = Number(maxSkewSeconds);
+        const maxSkewMs = (
+            Number.isFinite(configured) && configured > 0
+                ? configured
+                : IMPLIED_LAMBDA_MAX_QUOTE_SKEW_SECONDS
+        ) * 1000;
+        if (skewMs > maxSkewMs) {
+            return { coherent: false, reason: 'quote_skew_exceeded', skewMs, maxSkewMs, oldestMs, newestMs };
+        }
+        return { coherent: true, reason: '', skewMs, maxSkewMs, oldestMs, newestMs };
+    }
+
+    function inspectBestEffortOptionQuote(
+        quote,
+        expectedContractMonth = '',
+        nowValue = Date.now(),
+        maxAgeSeconds = IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS
+    ) {
+        const source = quote && typeof quote === 'object' ? quote : null;
+        if (!source) {
+            return { usable: false, reason: 'missing_quote' };
+        }
+        const bid = Number(source.bid);
+        const ask = Number(source.ask);
+        if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid < 0) {
+            return { usable: false, reason: 'missing_bbo' };
+        }
+        if (ask < bid) {
+            return { usable: false, reason: 'crossed_market' };
+        }
+        const expectedMonth = normalizeFuturesContractMonth(expectedContractMonth);
+        const actualMonth = normalizeFuturesContractMonth(source.underlyingContractMonth);
+        if (expectedMonth && actualMonth && actualMonth !== expectedMonth) {
+            return { usable: false, reason: 'underlying_contract_month_mismatch' };
+        }
+        if (expectedMonth && source.underlyingBindingVerified === false) {
+            return { usable: false, reason: 'underlying_binding_rejected' };
+        }
+        const recency = inspectQuoteRecency(
+            source.quoteAsOf || source.payloadAsOf,
+            nowValue,
+            maxAgeSeconds
+        );
+        if (!recency.usable) {
+            return { usable: false, reason: recency.reason };
+        }
+        return {
+            usable: true,
+            bid,
+            ask,
+            mark: (bid + ask) / 2,
+            quoteAsOf: recency.quoteAsOf,
+            quoteMs: recency.quoteMs,
+        };
+    }
+
+    // TWS does not guarantee that every cached BBO arrives with a usable
+    // receipt timestamp in the same callback.  A manual Calculate action may
+    // therefore take an atomic browser-side observation of the complete pairs
+    // that are actually available, skip bad rows, and solve a clearly marked
+    // best-effort surface instead of rejecting the whole subscription set.
+    function buildBestEffortLambdaSnapshot(card, nowValue = Date.now()) {
+        const nowMs = nowValue instanceof Date ? nowValue.getTime() : Number(nowValue);
+        const catalog = card && card.catalog;
+        const rows = catalog && Array.isArray(catalog.expiryRows)
+            ? catalog.expiryRows.filter((row) => row && row.subscriptionSelected !== false)
+            : [];
+        const underlyingPrice = Number(card && card.underlyingPrice);
+        const anchorDate = normalizeDateKey(catalog && catalog.anchorDate);
+        if (!Number.isFinite(nowMs) || !rows.length || !(underlyingPrice > 0) || !anchorDate) {
+            return {
+                ok: false,
+                reason: 'catalog_or_underlying_unavailable',
+                snapshot: null,
+                usableExpiryCount: 0,
+                skippedExpiryCount: rows.length,
+            };
+        }
+
+        const observedAt = new Date(nowMs).toISOString();
+        const snapshotId = `best-effort-${String(card.symbol || 'unknown').toLowerCase()}-${nowMs}`;
+        const expectedMonth = normalizeFuturesContractMonth(card.futuresContractMonth);
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
+        const dateUtils = globalScope.OptionComboDateUtils;
+        const quotesBySubId = {};
+        const usableRows = [];
+        const skippedRows = [];
+        const acceptedQuoteMs = [];
+        for (const row of rows) {
+            const callSubId = String(row && row.atmCallSubId || '').trim();
+            const putSubId = String(row && row.atmPutSubId || '').trim();
+            const callCheck = inspectBestEffortOptionQuote(
+                callSubId && card.quotesBySubId && card.quotesBySubId[callSubId],
+                expectedMonth,
+                nowMs,
+                IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS
+            );
+            const putCheck = inspectBestEffortOptionQuote(
+                putSubId && card.quotesBySubId && card.quotesBySubId[putSubId],
+                expectedMonth,
+                nowMs,
+                IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS
+            );
+            if (!callSubId || !putSubId || !callCheck.usable || !putCheck.usable) {
+                skippedRows.push({
+                    expiry: String(row && row.expiry || '').trim(),
+                    callReason: callSubId ? callCheck.reason : 'missing_subscription_id',
+                    putReason: putSubId ? putCheck.reason : 'missing_subscription_id',
+                });
+                continue;
+            }
+            const expiryDate = normalizeDateKey(row && row.expiry);
+            const profileCutoff = expiryDate && dateUtils
+                && typeof dateUtils.resolveExpiryCutoffAsOf === 'function'
+                ? dateUtils.resolveExpiryCutoffAsOf(
+                    { expDate: expiryDate }, profile, expiryDate
+                )
+                : null;
+            const stampQuote = (source, checked) => {
+                const existingExpiry = String(source && source.expiryAsOf || '').trim();
+                const existingExpiryMs = Date.parse(existingExpiry);
+                const expiryAsOf = Number.isFinite(existingExpiryMs)
+                    ? new Date(existingExpiryMs).toISOString()
+                    : (profileCutoff && profileCutoff.cutoffAsOf || '');
+                return {
+                    ...source,
+                    bid: checked.bid,
+                    ask: checked.ask,
+                    mark: checked.mark,
+                    bidPresent: true,
+                    askPresent: true,
+                    bidAskValid: true,
+                    bidAskStatus: 'two_sided',
+                    markSource: 'bid_ask_mid',
+                    // The true time the venue stamped this quote. The manual
+                    // Calculate action is an atomic browser-side *observation*
+                    // of quotes that were taken earlier, so that observation
+                    // time is carried separately: overwriting quoteAsOf here
+                    // would erase the staleness that freshness checks and
+                    // cross-tab ownership arbitration both read.
+                    quoteAsOf: checked.quoteAsOf,
+                    observedAt,
+                    batchId: snapshotId,
+                    snapshotId,
+                    expiryAsOf,
+                    expiryTimeSource: Number.isFinite(existingExpiryMs)
+                        ? 'contract'
+                        : (profileCutoff && profileCutoff.source || 'date-only'),
+                };
+            };
+            quotesBySubId[callSubId] = stampQuote(card.quotesBySubId[callSubId], callCheck);
+            quotesBySubId[putSubId] = stampQuote(card.quotesBySubId[putSubId], putCheck);
+            acceptedQuoteMs.push(callCheck.quoteMs, putCheck.quoteMs);
+            usableRows.push({ ...row });
+        }
+
+        if (usableRows.length < 2) {
+            return {
+                ok: false,
+                reason: 'insufficient_complete_expiry_pairs',
+                snapshot: null,
+                usableExpiryCount: usableRows.length,
+                skippedExpiryCount: skippedRows.length,
+                skippedRows,
+            };
+        }
+        // Coherence is measured from the accepted quotes' own timestamps. A
+        // set assembled out of the incremental map across a wide interval is
+        // reported incoherent and rejected downstream, rather than published
+        // as one observation it never was.
+        const coherence = measureQuoteCoherence(
+            acceptedQuoteMs,
+            IMPLIED_LAMBDA_MAX_QUOTE_SKEW_SECONDS
+        );
+        const oldestQuoteAsOf = Number.isFinite(coherence.oldestMs)
+            ? new Date(coherence.oldestMs).toISOString()
+            : '';
+        // quoteComplete describes the surface actually published: every leg
+        // carried here was verified two-sided and timestamped. Expiries that
+        // failed inspection are excluded and reported through
+        // skippedExpiryCount, which is the route's labelled degradation.
+        const quoteComplete = usableRows.length > 0
+            && acceptedQuoteMs.length === usableRows.length * 2
+            && acceptedQuoteMs.every((value) => Number.isFinite(value));
+        return {
+            ok: true,
+            reason: '',
+            usableExpiryCount: usableRows.length,
+            skippedExpiryCount: skippedRows.length,
+            skippedRows,
+            quoteSkewMs: coherence.skewMs,
+            snapshot: {
+                snapshotId,
+                batchId: snapshotId,
+                payloadAsOf: observedAt,
+                observedAt,
+                // Freshness is judged on the oldest leg actually used, never
+                // on the moment the user pressed Calculate.
+                quoteAsOf: oldestQuoteAsOf,
+                quoteSkewMs: coherence.skewMs,
+                anchorDate,
+                underlyingContractMonth: expectedMonth || null,
+                coherent: coherence.coherent === true,
+                quoteComplete,
+                coherenceReason: coherence.coherent
+                    ? 'manual_best_effort_current_bbo'
+                    : coherence.reason,
+                estimationMode: 'best_effort',
+                underlyingPrice,
+                underlyingQuote: {
+                    mark: underlyingPrice,
+                    markSource: 'manual_atomic_observation',
+                    quoteAsOf: oldestQuoteAsOf,
+                    observedAt,
+                    batchId: snapshotId,
+                    snapshotId,
+                },
+                expiryRows: usableRows,
+                quotesBySubId,
+                expectedOptionCount: usableRows.length * 2,
+                actualOptionCount: Object.keys(quotesBySubId).length,
+                sourceExpectedExpiryCount: rows.length,
+                skippedRows,
+                maxQuoteAgeSeconds: IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS,
+            },
+        };
+    }
+
+    // Last-resort manual estimator for the common TWS failure mode where
+    // model IV arrives for both ATM legs but one or both real BBOs never do.
+    // This is intentionally lower quality than the straddle-price routes and
+    // is carried through V2 with explicit vendor-IV provenance.
+    function buildVendorIvLambdaSource(card, nowValue = Date.now()) {
+        const nowMs = nowValue instanceof Date ? nowValue.getTime() : Number(nowValue);
+        const catalogExpiryCount = card && card.catalog && Array.isArray(card.catalog.expiryRows)
+            ? card.catalog.expiryRows.length
+            : 0;
+        const anchorDate = normalizeDateKey(card && card.catalog && card.catalog.anchorDate);
+        const ivComplete = buildDetailRows(card).filter((row) => (
+            row && row.subscriptionSelected !== false
+            && Number.isFinite(row.callIv) && row.callIv > 0
+            && Number.isFinite(row.putIv) && row.putIv > 0
+            && Number.isFinite(row.atmIv) && row.atmIv > 0
+        ));
+        // Vendor IV is read straight out of the live incremental quote map,
+        // so a positive IV alone proves nothing about when it was published.
+        // Each leg must carry its own fresh timestamp before the row is used.
+        const detailRows = [];
+        const skippedRows = [];
+        const acceptedQuoteMs = [];
+        for (const row of ivComplete) {
+            const callRecency = inspectQuoteRecency(
+                row.callQuoteAsOf, nowMs, IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS
+            );
+            const putRecency = inspectQuoteRecency(
+                row.putQuoteAsOf, nowMs, IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS
+            );
+            if (!callRecency.usable || !putRecency.usable) {
+                skippedRows.push({
+                    expiry: String(row && row.expiry || '').trim(),
+                    callReason: callRecency.reason,
+                    putReason: putRecency.reason,
+                });
+                continue;
+            }
+            acceptedQuoteMs.push(callRecency.quoteMs, putRecency.quoteMs);
+            detailRows.push(row);
+        }
+        const skippedExpiryCount = Math.max(0, catalogExpiryCount - detailRows.length);
+        if (!Number.isFinite(nowMs) || !anchorDate || detailRows.length < 2) {
+            return {
+                ok: false,
+                reason: skippedRows.length && detailRows.length < 2
+                    ? 'insufficient_fresh_vendor_iv_pairs'
+                    : 'insufficient_complete_vendor_iv_pairs',
+                snapshot: null,
+                detailRows,
+                skippedRows,
+                usableExpiryCount: detailRows.length,
+                skippedExpiryCount,
+            };
+        }
+        const coherence = measureQuoteCoherence(
+            acceptedQuoteMs,
+            IMPLIED_LAMBDA_MAX_QUOTE_SKEW_SECONDS
+        );
+        const observedAt = new Date(nowMs).toISOString();
+        const oldestQuoteAsOf = Number.isFinite(coherence.oldestMs)
+            ? new Date(coherence.oldestMs).toISOString()
+            : '';
+        const snapshotId = `vendor-iv-${String(card.symbol || 'unknown').toLowerCase()}-${nowMs}`;
+        return {
+            ok: true,
+            reason: '',
+            detailRows,
+            skippedRows,
+            usableExpiryCount: detailRows.length,
+            skippedExpiryCount,
+            quoteSkewMs: coherence.skewMs,
+            snapshot: {
+                snapshotId,
+                batchId: snapshotId,
+                payloadAsOf: observedAt,
+                observedAt,
+                // The oldest vendor leg actually used, not the moment the
+                // user pressed Calculate. Front and back expiries routinely
+                // arrive hours apart; stamping them with one synthetic
+                // timestamp would hide exactly that.
+                quoteAsOf: oldestQuoteAsOf,
+                quoteSkewMs: coherence.skewMs,
+                anchorDate,
+                underlyingContractMonth: normalizeFuturesContractMonth(
+                    card && card.futuresContractMonth
+                ) || null,
+                coherent: coherence.coherent === true,
+                coherenceReason: coherence.coherent
+                    ? 'manual_vendor_iv_observation'
+                    : coherence.reason,
+                quoteComplete: detailRows.length > 0
+                    && acceptedQuoteMs.length === detailRows.length * 2
+                    && acceptedQuoteMs.every((value) => Number.isFinite(value)),
+                estimationMode: 'best_effort',
+                sourceQuoteEvidence: 'vendor_atm_iv_fallback',
+            },
+        };
+    }
+
+    function computeImpliedLambdaFromVendorIv(card, source) {
+        if (!card || !source || source.ok !== true || !source.snapshot) {
+            return null;
+        }
+        const profile = card.profile || resolveProfile(card.symbol);
+        const snapshot = source.snapshot;
+        const result = core().computeImpliedWeekendLambdas(
+            source.detailRows,
+            snapshot.anchorDate,
+            {
+                varianceSource: 'vendor_iv',
+                estimationMode: 'best_effort',
+                sourceQuoteEvidence: 'vendor_atm_iv_fallback',
+                calendarKey: profile.calendarId || 'NYSE',
+                pricingModel: profile.pricingModel === 'black76' ? 'black76' : 'bsm-spot',
+                underlyingQuoteIsForward: String(profile.underlyingSecType || '').toUpperCase() === 'FUT',
+                timeZone: profile.optionExpiryTimeZone,
+                tradeDateRolloverHour: /^(?:CME|NYMEX|COMEX):/.test(
+                    String(profile.calendarId || '').toUpperCase()
+                ) ? 17 : null,
+                snapshotMetadata: {
+                    snapshotId: snapshot.snapshotId,
+                    underlyingSnapshotId: snapshot.snapshotId,
+                    // Reported from what buildVendorIvLambdaSource measured.
+                    // A surface whose legs were observed too far apart fails
+                    // the downstream quality gate instead of asserting its
+                    // way past it.
+                    coherent: snapshot.coherent === true,
+                    quoteComplete: snapshot.quoteComplete === true,
+                    payloadAsOf: snapshot.payloadAsOf,
+                    quoteAsOf: snapshot.quoteAsOf || snapshot.payloadAsOf,
+                    underlyingQuoteAsOf: snapshot.quoteAsOf || snapshot.payloadAsOf,
+                },
+            }
+        );
+        result.methodology = {
+            ...(result.methodology || {}),
+            estimationMode: 'best_effort',
+            sourceQuoteEvidence: 'vendor_atm_iv_fallback',
+        };
+        result.quality = {
+            ...(result.quality || {}),
+            estimationMode: 'best_effort',
+            strictSnapshot: false,
+            sourceQuoteEvidence: 'vendor_atm_iv_fallback',
+            sourceExpectedExpiryCount: source.usableExpiryCount + source.skippedExpiryCount,
+            usableExpiryCount: source.usableExpiryCount,
+            skippedExpiryCount: source.skippedExpiryCount,
+        };
+        return result;
+    }
+
     function resolveSelectedStraddleBaselineExpiry(card, detailRows) {
         const rows = Array.isArray(detailRows) ? detailRows : [];
         const selected = normalizeExpiryKey(card && card.straddleBaselineExpiry);
@@ -1875,8 +2884,111 @@
         return best ? normalizeExpiryKey(best.expiry) : '';
     }
 
+    function computeImpliedLambdaFromCurrentSnapshot(card, options = {}) {
+        const lambdaSnapshot = options.lambdaSnapshot || (card && card.lambdaSnapshot);
+        const bestEffort = options.bestEffort === true
+            || !!(lambdaSnapshot && lambdaSnapshot.estimationMode === 'best_effort');
+        const lambdaDetailRows = buildLambdaDetailRowsFromSnapshot(card, lambdaSnapshot);
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
+        const result = typeof core().computeImpliedWeekendLambdas === 'function'
+            ? core().computeImpliedWeekendLambdas(
+                lambdaDetailRows,
+                lambdaSnapshot && lambdaSnapshot.anchorDate,
+                {
+                    calendarKey: profile.calendarId || 'NYSE',
+                    // Strict snapshots use exact ContractDetails expiry
+                    // instants. Best-effort observations retain exact clocks
+                    // when present and otherwise use the official exchange
+                    // date interval, with that downgrade preserved in the
+                    // published methodology.
+                    requireExactExpiryTimestamps: !bestEffort,
+                    requireCoherentSnapshot: true,
+                    ...(bestEffort ? {
+                        maxQuoteSkewMs: null,
+                        maxForwardDeviationPct: null,
+                        maxBidAskSpreadPct: null,
+                    } : {}),
+                    timeZone: profile.optionExpiryTimeZone,
+                    tradeDateRolloverHour: /^(?:CME|NYMEX|COMEX):/.test(
+                        String(profile.calendarId || '').toUpperCase()
+                    ) ? 17 : null,
+                    // Pure straddle-price inference: numerically invert the
+                    // straddle under the product's pricing model. No vendor
+                    // IV is consulted.
+                    underlyingPrice: lambdaSnapshot && lambdaSnapshot.underlyingPrice,
+                    pricingModel: profile.pricingModel === 'black76' ? 'black76' : 'bsm-spot',
+                    underlyingQuoteIsForward: String(profile.underlyingSecType || '').toUpperCase() === 'FUT',
+                    interestRate: Number.isFinite(runtime.impliedLambdaRate)
+                        ? runtime.impliedLambdaRate
+                        : DEFAULT_IMPLIED_LAMBDA_RATE,
+                    discountCurve: runtime.discountCurve,
+                    snapshotMetadata: lambdaSnapshot ? {
+                        snapshotId: lambdaSnapshot.snapshotId,
+                        underlyingSnapshotId: lambdaSnapshot.underlyingQuote
+                            && lambdaSnapshot.underlyingQuote.snapshotId,
+                        coherent: lambdaSnapshot.coherent === true,
+                        quoteComplete: lambdaSnapshot.quoteComplete === true,
+                        payloadAsOf: lambdaSnapshot.payloadAsOf,
+                        // Prefer the measured oldest quote time when the
+                        // snapshot carries one. Falling back to payloadAsOf
+                        // keeps strict server snapshots, whose payloadAsOf is
+                        // itself a certified coherent instant, unchanged.
+                        quoteAsOf: lambdaSnapshot.quoteAsOf || lambdaSnapshot.payloadAsOf,
+                        underlyingQuoteAsOf: lambdaSnapshot.underlyingQuote
+                            && lambdaSnapshot.underlyingQuote.quoteAsOf,
+                    } : null,
+                }
+            )
+            : null;
+        if (result && bestEffort) {
+            result.methodology = {
+                ...(result.methodology || {}),
+                estimationMode: 'best_effort',
+                sourceQuoteEvidence: 'manual_atomic_current_bbo',
+            };
+            result.quality = {
+                ...(result.quality || {}),
+                estimationMode: 'best_effort',
+                strictSnapshot: false,
+                sourceQuoteEvidence: 'manual_atomic_current_bbo',
+                sourceExpectedExpiryCount: Number(lambdaSnapshot.sourceExpectedExpiryCount) || null,
+                usableExpiryCount: Array.isArray(lambdaSnapshot.expiryRows)
+                    ? lambdaSnapshot.expiryRows.length
+                    : null,
+                skippedExpiryCount: Array.isArray(lambdaSnapshot.skippedRows)
+                    ? lambdaSnapshot.skippedRows.length
+                    : null,
+            };
+        }
+        return result;
+    }
+
     function buildComparedRows(card) {
-        const detailRows = buildDetailRows(card);
+        const rawDetailRows = buildDetailRows(card);
+        const lambdaDetailRows = buildLambdaDetailRows(card);
+        const profile = card && card.profile ? card.profile : resolveProfile(card && card.symbol);
+        // The price-derived lambda surface is intentionally a manual snapshot.
+        // Live option ticks may refresh raw IV/straddle rows, but they never
+        // re-run the estimator or replace the structured curve shown here.
+        const impliedLambda = card && card.impliedLambdaComputedResult
+            ? card.impliedLambdaComputedResult
+            : null;
+        // The TWS Call/Put IV is first collected above. Only after the frozen
+        // straddle snapshot has solved a qualified per-date lambda curve do we
+        // re-annualize the displayed TD IV. This keeps the estimator free of
+        // vendor IV while letting its price-derived clock correct the vendor
+        // pair. For this display only, the core stamps median-lambda
+        // extrapolations beyond direct coverage; the simulator's published
+        // per-date curve remains strict.
+        const detailRows = typeof core().applyImpliedLambdaClockToRows === 'function'
+            ? core().applyImpliedLambdaClockToRows(
+                rawDetailRows,
+                impliedLambda && impliedLambda.anchorDate
+                    || card.catalog && card.catalog.anchorDate,
+                impliedLambda,
+                profile.calendarId || 'NYSE'
+            )
+            : rawDetailRows;
         const baselineExpiry = resolveSelectedStraddleBaselineExpiry(card, detailRows);
         let comparedDetailRows = core().buildStraddleComparisonRows(detailRows, baselineExpiry);
         if (typeof core().annotateTdSlopeVsBaseline === 'function') {
@@ -1895,8 +3007,421 @@
             baselineExpiry,
             baselineRow,
             detailRows: comparedDetailRows,
+            lambdaDetailRows,
             bucketRows: comparedBucketRows,
+            impliedLambda,
         };
+    }
+
+    function latestQuoteAsOf(detailRows) {
+        let latest = '';
+        for (const row of (Array.isArray(detailRows) ? detailRows : [])) {
+            for (const value of [row && row.callQuoteAsOf, row && row.putQuoteAsOf]) {
+                const asOf = String(value || '').trim();
+                if (asOf && asOf > latest) {
+                    latest = asOf;
+                }
+            }
+        }
+        return latest;
+    }
+
+    function buildImpliedLambdaEntry(card, comparedRows) {
+        const impliedLambda = comparedRows && comparedRows.impliedLambda;
+        const lambdaSnapshot = comparedRows && comparedRows.lambdaSnapshot
+            || card && card.lambdaSnapshot;
+        if (!card || !lambdaSnapshot || !impliedLambda
+            || !impliedLambda.quality || impliedLambda.quality.status !== 'ok'
+            || impliedLambda.quality.coherent !== true
+            || !Object.keys(impliedLambda.byDate || {}).length) {
+            return null;
+        }
+        return {
+            symbol: card.symbol,
+            underlyingContractMonth: card.futuresContractMonth || null,
+            calendarKey: impliedLambda.calendarKey,
+            anchorDate: impliedLambda.anchorDate,
+            quoteAsOf: impliedLambda.quoteAsOf || lambdaSnapshot.payloadAsOf,
+            snapshotId: impliedLambda.snapshotId || lambdaSnapshot.snapshotId,
+            methodology: impliedLambda.methodology
+                ? { ...impliedLambda.methodology }
+                : {
+                    pricingModel: impliedLambda.pricingModel,
+                    interestRate: impliedLambda.interestRate,
+                },
+            quality: { ...impliedLambda.quality },
+            intervals: Array.isArray(impliedLambda.intervals)
+                ? impliedLambda.intervals.map((interval) => ({ ...interval }))
+                : [],
+            coverageStart: impliedLambda.coverageStart,
+            coverageEnd: impliedLambda.coverageEnd,
+            medianLambda: impliedLambda.medianLambda,
+            byDate: impliedLambda.byDate,
+            weekendCount: impliedLambda.okIntervalCount,
+            varianceSource: impliedLambda.varianceSource,
+        };
+    }
+
+    // Download the implied-lambda array as a portable JSON file so a
+    // simulator page served from another origin/machine can load it
+    // (localStorage publishing only reaches same-origin pages).
+    function buildImpliedLambdaExportFilename(doc) {
+        const data = doc && typeof doc === 'object' ? doc : {};
+        const symbol = String(data.symbol || 'UNKNOWN').trim().toUpperCase()
+            .replace(/[^A-Z0-9._-]+/g, '_');
+        const contractMonth = /^\d{6}$/.test(String(data.underlyingContractMonth || ''))
+            ? `_${data.underlyingContractMonth}`
+            : '';
+        const quoteMs = Date.parse(String(data.quoteAsOf || ''));
+        const quoteKey = Number.isFinite(quoteMs)
+            ? new Date(quoteMs).toISOString()
+                .replace(/\.\d+Z$/, 'Z')
+                .replace(/[-:]/g, '')
+            : String(data.anchorDate || 'latest').replace(/-/g, '');
+        return `implied_lambda_${symbol}${contractMonth}_${quoteKey}.json`;
+    }
+
+    function exportImpliedLambdaFile(card) {
+        const handoff = typeof OptionComboImpliedLambdaHandoff !== 'undefined'
+            ? OptionComboImpliedLambdaHandoff
+            : null;
+        const entry = card && card.impliedLambdaComputedEntry;
+        const doc = handoff && entry ? handoff.buildExportDocument(entry) : null;
+        if (!doc) {
+            setCardStatus(card, 'Calculate implied λ first, then export the frozen structured result.', 'error');
+            render(true);
+            return;
+        }
+        const payload = JSON.stringify(doc, null, 2);
+        const dataBlob = new Blob([payload], { type: 'application/json' });
+        const url = URL.createObjectURL(dataBlob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = buildImpliedLambdaExportFilename(doc);
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+        setCardStatus(card, `Implied λ exported: ${Object.keys(doc.byDate).length} dates, median ${doc.medianLambda != null ? doc.medianLambda : '--'}.`, 'success');
+        render(true);
+    }
+
+    // Publish an already calculated per-weekend array. Live quote ticks never
+    // call this path; same-origin simulators are updated only by an explicit
+    // Sync action in the IVTS UI.
+    function publishImpliedLambdaEntry(card, entry) {
+        const handoff = typeof OptionComboImpliedLambdaHandoff !== 'undefined'
+            ? OptionComboImpliedLambdaHandoff
+            : null;
+        if (!handoff) {
+            return {
+                ok: false,
+                status: 'handoff_unavailable',
+                entry: null,
+                dateCount: 0,
+                snapshotId: String(card && card.lambdaSnapshot && card.lambdaSnapshot.snapshotId || '').trim(),
+            };
+        }
+        if (!entry) {
+            // An explicit sync without a valid frozen calculation cannot keep
+            // claiming ownership of a previously synchronized surface.
+            if (card && card.lambdaSnapshot) {
+                withdrawImpliedLambda(card);
+            }
+            return {
+                ok: false,
+                status: 'not_estimable',
+                entry: null,
+                dateCount: 0,
+                snapshotId: String(card && card.lambdaSnapshot && card.lambdaSnapshot.snapshotId || '').trim(),
+            };
+        }
+        const fingerprint = JSON.stringify(entry);
+        const peekCurrentEntry = () => {
+            try {
+                return typeof handoff.peekSymbolEntry === 'function'
+                    ? handoff.peekSymbolEntry(
+                        card.symbol,
+                        undefined,
+                        Date.now(),
+                        card.futuresContractMonth || null,
+                        entry.anchorDate
+                    )
+                    : null;
+            } catch (_) {
+                return null;
+            }
+        };
+        if (card.impliedLambdaFingerprint === fingerprint) {
+            const persisted = peekCurrentEntry();
+            if (persisted
+                && String(persisted.snapshotId || '').trim() === String(entry.snapshotId || '').trim()
+                && String(persisted.quoteAsOf || '').trim() === String(entry.quoteAsOf || '').trim()) {
+                return {
+                    ok: true,
+                    status: 'unchanged',
+                    entry: persisted,
+                    dateCount: Object.keys(persisted.byDate || {}).length,
+                    snapshotId: String(entry.snapshotId || '').trim(),
+                };
+            }
+            // Storage may have been cleared or rejected after the previous
+            // write. Retry it instead of treating an in-memory fingerprint as
+            // proof that the simulator can still read this curve.
+            card.impliedLambdaFingerprint = '';
+        }
+        let saved = false;
+        try {
+            saved = handoff.saveSymbolEntry(entry) === true;
+        } catch (_) {
+            saved = false;
+        }
+        if (saved) {
+            card.impliedLambdaFingerprint = fingerprint;
+            card.impliedLambdaPublishedSnapshotId = entry.snapshotId;
+            return {
+                ok: true,
+                status: 'published',
+                entry,
+                dateCount: Object.keys(entry.byDate || {}).length,
+                snapshotId: String(entry.snapshotId || '').trim(),
+            };
+        }
+
+        const existing = peekCurrentEntry();
+        const existingQuoteMs = Date.parse(String(existing && existing.quoteAsOf || ''));
+        const incomingQuoteMs = Date.parse(String(entry.quoteAsOf || ''));
+        if (existing && Number.isFinite(existingQuoteMs) && Number.isFinite(incomingQuoteMs)
+            && existingQuoteMs >= incomingQuoteMs) {
+            // Another tab owns the same or a newer market observation. Keep
+            // that valid shared curve and relinquish this card's old ownership.
+            card.impliedLambdaFingerprint = fingerprint;
+            card.impliedLambdaPublishedSnapshotId = '';
+            return {
+                ok: true,
+                status: existing.snapshotId === entry.snapshotId
+                    ? 'unchanged'
+                    : 'newer_publication_active',
+                entry: existing,
+                dateCount: Object.keys(existing.byDate || {}).length,
+                snapshotId: String(entry.snapshotId || '').trim(),
+            };
+        }
+        withdrawImpliedLambda(card);
+        return {
+            ok: false,
+            status: 'save_failed',
+            entry,
+            dateCount: 0,
+            snapshotId: String(entry.snapshotId || '').trim(),
+        };
+    }
+
+    function publishImpliedLambda(card, comparedRows) {
+        return publishImpliedLambdaEntry(
+            card,
+            buildImpliedLambdaEntry(card, comparedRows)
+        );
+    }
+
+    function formatImpliedLambdaPublicationStatus(result, optionCount) {
+        const outcome = result && typeof result === 'object' ? result : {};
+        const dateCount = Math.max(0, parseInt(outcome.dateCount, 10) || 0);
+        const dateLabel = `${dateCount} ${dateCount === 1 ? 'date' : 'dates'}`;
+        const legCount = Math.max(0, parseInt(optionCount, 10) || 0);
+        if (outcome.ok === true) {
+            const ownershipNote = outcome.status === 'newer_publication_active'
+                ? ' A newer same-origin IVTS snapshot remains active.'
+                : '';
+            const bestEffort = outcome.entry && outcome.entry.quality
+                && outcome.entry.quality.estimationMode === 'best_effort';
+            const source = legCount > 0
+                ? ` from ${bestEffort ? 'best-effort' : 'coherent'} ${legCount}-leg snapshot`
+                : '';
+            return `Synced implied λ: ${dateLabel}${source}.${ownershipNote}`;
+        }
+        if (outcome.status === 'snapshot_missing') {
+            return 'Implied λ sync unavailable: no coherent quote snapshot is loaded.';
+        }
+        if (outcome.status === 'snapshot_stale') {
+            return 'Implied λ sync failed: the calculated quote snapshot is stale.';
+        }
+        if (outcome.status === 'handoff_unavailable') {
+            return 'Implied λ sync failed: the V2 handoff runtime is unavailable.';
+        }
+        if (outcome.status === 'not_estimable') {
+            return 'Implied λ sync failed: no quality-approved non-trading interval was calculated.';
+        }
+        if (outcome.status === 'save_failed') {
+            return 'Implied λ sync failed: browser storage or V2 identity/calendar validation rejected the curve.';
+        }
+        return 'Implied λ sync failed.';
+    }
+
+    function calculateImpliedLambda(card, nowValue = Date.now()) {
+        if (!card) {
+            return {
+                ok: false, status: 'card_missing', entry: null, dateCount: 0,
+                snapshotId: '', message: 'Cannot calculate implied λ: card state is unavailable.',
+            };
+        }
+
+        let calculationMode = 'strict';
+        let lambdaSnapshot = card.lambdaSnapshot;
+        const strictFreshness = evaluateLambdaSnapshotFreshness(lambdaSnapshot, nowValue);
+        let impliedLambda = strictFreshness.fresh
+            ? computeImpliedLambdaFromCurrentSnapshot(card, { lambdaSnapshot })
+            : null;
+        let entry = buildImpliedLambdaEntry(card, { impliedLambda, lambdaSnapshot });
+        let bestEffortSource = null;
+        let vendorIvSource = null;
+
+        // A strict full-curve snapshot is preferred, but it is no longer an
+        // all-or-nothing prerequisite.  If TWS omitted timestamps or one
+        // callback was incomplete, calculate from the usable two-sided BBO
+        // pairs currently visible in the card and skip the bad expiries.
+        const strictNeedsCoverageRecovery = !entry || !!(impliedLambda && (
+            (Array.isArray(impliedLambda.rowDiagnostics)
+                && impliedLambda.rowDiagnostics.some(row => row && row.status !== 'ok'))
+            || (Array.isArray(impliedLambda.intervals)
+                && impliedLambda.intervals.some(interval => interval && interval.status !== 'ok'))
+        ));
+        if (strictNeedsCoverageRecovery) {
+            bestEffortSource = buildBestEffortLambdaSnapshot(card, nowValue);
+            if (bestEffortSource.ok) {
+                const estimatedSnapshot = bestEffortSource.snapshot;
+                const estimatedLambda = computeImpliedLambdaFromCurrentSnapshot(card, {
+                    lambdaSnapshot: estimatedSnapshot,
+                    bestEffort: true,
+                });
+                const estimatedEntry = buildImpliedLambdaEntry(card, {
+                    impliedLambda: estimatedLambda,
+                    lambdaSnapshot: estimatedSnapshot,
+                });
+                const strictDateCount = entry ? Object.keys(entry.byDate || {}).length : 0;
+                const estimatedDateCount = estimatedEntry
+                    ? Object.keys(estimatedEntry.byDate || {}).length
+                    : 0;
+                if (estimatedEntry && (!entry || estimatedDateCount > strictDateCount)) {
+                    calculationMode = 'best_effort';
+                    lambdaSnapshot = estimatedSnapshot;
+                    impliedLambda = estimatedLambda;
+                    entry = estimatedEntry;
+                }
+            }
+        }
+        // Vendor ATM IV is the last resort, not a competitor to the price
+        // routes. It needs only IV > 0, so it will nearly always cover more
+        // expiries than a straddle surface that demands two-sided BBO --
+        // ranking by covered-date count alone therefore discarded a clean
+        // price-derived curve almost every time it was consulted. It is also
+        // circular: applyImpliedLambdaClockToRows re-annualizes displayed
+        // vendor IV with the resulting clock. So it runs only when the
+        // straddle routes produced nothing usable at all, and never replaces
+        // an entry they did produce.
+        //
+        // Per-date merging of a vendor curve into a straddle curve is
+        // deliberately not attempted: the V2 handoff requires every interval
+        // to carry the entry's single snapshotId, so a blended entry would be
+        // rejected as inconsistent identity.
+        const straddleRoutesFailed = !entry;
+        if (straddleRoutesFailed) {
+            vendorIvSource = buildVendorIvLambdaSource(card, nowValue);
+            if (vendorIvSource.ok) {
+                const vendorSnapshot = vendorIvSource.snapshot;
+                const vendorLambda = computeImpliedLambdaFromVendorIv(card, vendorIvSource);
+                const vendorEntry = buildImpliedLambdaEntry(card, {
+                    impliedLambda: vendorLambda,
+                    lambdaSnapshot: vendorSnapshot,
+                });
+                if (vendorEntry) {
+                    calculationMode = 'vendor_iv_fallback';
+                    lambdaSnapshot = vendorSnapshot;
+                    impliedLambda = vendorLambda;
+                    entry = vendorEntry;
+                }
+            }
+        }
+        if (!entry) {
+            const diagnostics = impliedLambda && Array.isArray(impliedLambda.rowDiagnostics)
+                ? impliedLambda.rowDiagnostics
+                : [];
+            const usableRows = diagnostics.filter((row) => row && row.status === 'ok').length;
+            const reasonCounts = {};
+            diagnostics.forEach((row) => {
+                const reason = String(row && row.status || 'unusable').trim();
+                if (reason !== 'ok') reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+            });
+            const reasonSummary = Object.entries(reasonCounts)
+                .map(([reason, count]) => `${reason}×${count}`)
+                .join(', ');
+            const unavailable = {
+                ok: false,
+                status: 'not_estimable',
+                entry: null,
+                dateCount: 0,
+                snapshotId: String(lambdaSnapshot && lambdaSnapshot.snapshotId || '').trim(),
+                message: `Cannot estimate implied λ yet: ${usableRows} usable expiries do not form a solvable weekend interval${reasonSummary ? ` (${reasonSummary})` : ''}.`,
+            };
+            card.impliedLambdaPublicationResult = unavailable;
+            setCardStatus(card, unavailable.message, 'error');
+            return unavailable;
+        }
+
+        card.impliedLambdaComputedResult = impliedLambda;
+        card.impliedLambdaComputedEntry = entry;
+        card.impliedLambdaComputedAt = new Date(nowValue).toISOString();
+        card.impliedLambdaNeedsRecalculation = false;
+        card.impliedLambdaPublicationResult = null;
+        const dateCount = Object.keys(entry.byDate || {}).length;
+        const result = {
+            ok: true,
+            status: calculationMode === 'strict' ? 'calculated' : 'estimated',
+            calculationMode,
+            entry,
+            dateCount,
+            snapshotId: String(entry.snapshotId || '').trim(),
+            message: calculationMode === 'vendor_iv_fallback'
+                ? `Estimated implied λ from ${vendorIvSource.usableExpiryCount} ATM Call/Put IV pairs (${vendorIvSource.skippedExpiryCount} skipped): ${dateCount} structured dates, median ${formatNumber(entry.medianLambda, 4)}. Vendor-IV fallback is frozen; choose Sync or Export.`
+                : (calculationMode === 'best_effort'
+                    ? `Estimated implied λ from ${bestEffortSource.usableExpiryCount} usable BBO expiries (${bestEffortSource.skippedExpiryCount} skipped): ${dateCount} structured dates, median ${formatNumber(entry.medianLambda, 4)}. Choose Sync or Export.`
+                    : `Calculated implied λ: ${dateCount} structured dates, median ${formatNumber(entry.medianLambda, 4)}. Choose Sync or Export.`),
+        };
+        setCardStatus(card, result.message, 'success');
+        return result;
+    }
+
+    function syncCalculatedImpliedLambda(card) {
+        const entry = card && card.impliedLambdaComputedEntry;
+        if (!entry) {
+            const missing = {
+                ok: false,
+                status: 'calculation_missing',
+                entry: null,
+                dateCount: 0,
+                snapshotId: '',
+                message: 'Calculate implied λ first, then sync the frozen result to local simulators.',
+            };
+            if (card) {
+                card.impliedLambdaPublicationResult = missing;
+                setCardStatus(card, missing.message, 'error');
+            }
+            return missing;
+        }
+
+        const result = publishImpliedLambdaEntry(card, entry);
+        result.message = result.ok === true
+            ? `Synced implied λ to same-origin simulators: ${result.dateCount} structured dates, median ${formatNumber(entry.medianLambda, 4)}.`
+            : formatImpliedLambdaPublicationStatus(result, 0);
+        card.impliedLambdaPublicationResult = result;
+        setCardStatus(card, result.message, result.ok === true ? 'success' : 'error');
+        return result;
+    }
+
+    // Backward-compatible test/integration name. It now performs calculation
+    // only and never writes browser storage.
+    function refreshImpliedLambdaPublication(card) {
+        return calculateImpliedLambda(card);
     }
 
     function hasUsableLiveSnapshot(card) {
@@ -2330,6 +3855,114 @@
             : '<span class="ivts-missing">Insufficient</span>';
     }
 
+    // Current cumulative ATM total variance. Strict mode uses only a real
+    // two-sided Call+Put BBO. The explicit best-effort mode may instead invert
+    // the displayed marks, preserving their provenance in the observation.
+    // Display W * 10,000 for short-dated readability.
+    function resolveTotalVarianceObservation(row, options = {}) {
+        const api = core();
+        if (!api || typeof api.resolveStraddleTotalVarianceObservation !== 'function') {
+            return null;
+        }
+        return api.resolveStraddleTotalVarianceObservation(row, {
+            interestRate: Number.isFinite(runtime.impliedLambdaRate)
+                ? runtime.impliedLambdaRate
+                : DEFAULT_IMPLIED_LAMBDA_RATE,
+            discountCurve: runtime.discountCurve,
+            maxQuoteSkewMs: 30 * 1000,
+            allowBestEffort: options.bestEffort === true,
+        });
+    }
+
+    function resolveForwardVarianceObservation(row, previousRow = null, options = {}) {
+        const current = resolveTotalVarianceObservation(row, options);
+        if (!current) return null;
+        const previous = resolveTotalVarianceObservation(previousRow, options);
+        if (previousRow && !previous) return null;
+        const intervalYears = previous
+            ? current.timeYears - previous.timeYears
+            : current.timeYears;
+        if (!(intervalYears > 0)) return null;
+        const forwardVariance = previous
+            ? current.totalVariance - previous.totalVariance
+            : current.totalVariance;
+        const annualizedForwardVariance = forwardVariance / intervalYears;
+        if (!Number.isFinite(annualizedForwardVariance)) return null;
+        return {
+            totalVariance: current.totalVariance,
+            previousTotalVariance: previous ? previous.totalVariance : 0,
+            intervalYears,
+            forwardVariance,
+            annualizedForwardVariance,
+            variancePoints: annualizedForwardVariance * 10000,
+            forwardVolatility: annualizedForwardVariance >= 0
+                ? Math.sqrt(annualizedForwardVariance)
+                : null,
+            isFrontInterval: !previous,
+            timeSource: current.timeSource,
+            isBestEffort: current.isBestEffort === true
+                || !!(previous && previous.isBestEffort === true),
+        };
+    }
+
+    function buildTotalVarianceCell(row, previousRow = null, options = {}) {
+        const observation = resolveTotalVarianceObservation(row, options);
+        if (!observation) {
+            return '<span class="ivts-missing">--</span>';
+        }
+        const previous = resolveTotalVarianceObservation(previousRow, options);
+        const inverted = Boolean(previous && observation.totalVariance < previous.totalVariance);
+        const intervalLabel = previous
+            ? `${String(previousRow && previousRow.expiry || 'prior expiry')}→${String(row && row.expiry || 'expiry')}`
+            : 'quote→first expiry';
+        const changeLabel = previous
+            ? `; ΔW×10,000=${((observation.totalVariance - previous.totalVariance) * 10000).toFixed(1)}`
+            : '';
+        const inversionLabel = inverted
+            ? ' Cumulative total variance fell versus the prior usable expiry: hard inversion candidate.'
+            : '';
+        const sourceLabel = observation.isBestEffort
+            ? `best-effort displayed marks (Call ${observation.callMarkSource}, Put ${observation.putMarkSource}${observation.quoteSkewExceeded ? `, quote skew ${(observation.quoteSkewMs / 1000).toFixed(1)}s` : ''})`
+            : 'real Call+Put BBO midpoint';
+        const qualityLabel = observation.isBestEffort
+            ? ' This is an estimate recovered from the visible Straddle marks, not a strict synchronized BBO observation.'
+            : ' No vendor IV, fitted λ, or TD IV is used.';
+        const title = `ATM cumulative total variance numerically inverted from ${sourceLabel} straddle ${formatMoney(observation.straddlePrice)} at K=${formatNumber(observation.strike, 2)}, parity F=${formatNumber(observation.parityForward, 4)}, displayed as W×10,000 using ${observation.timeSource}`
+            + `${changeLabel}. ${intervalLabel}.${inversionLabel}${qualityLabel}`;
+        const valueClasses = ['ivts-total-variance'];
+        if (inverted) valueClasses.push('is-inverted');
+        if (observation.isBestEffort) valueClasses.push('is-estimated');
+        const displayValue = `${observation.isBestEffort ? '≈' : ''}${observation.variancePoints.toFixed(1)}`;
+        return `<span class="${valueClasses.join(' ')}" title="${escapeHtml(title)}">${escapeHtml(displayValue)}</span>`;
+    }
+
+    function buildForwardVarianceCell(row, previousRow = null, options = {}) {
+        const observation = resolveForwardVarianceObservation(row, previousRow, options);
+        if (!observation) {
+            return '<span class="ivts-missing">--</span>';
+        }
+        const negative = observation.annualizedForwardVariance < 0;
+        const intervalLabel = observation.isFrontInterval
+            ? 'quote→first expiry'
+            : `${String(previousRow && previousRow.expiry || 'prior expiry')}→${String(row && row.expiry || 'expiry')}`;
+        const volLabel = observation.forwardVolatility === null
+            ? 'undefined because forward variance is negative'
+            : `${(observation.forwardVolatility * 100).toFixed(2)}%`;
+        const inversionLabel = negative
+            ? ' Negative adjacent-expiry forward variance: hard cumulative-variance inversion candidate.'
+            : '';
+        const qualityLabel = observation.isBestEffort
+            ? 'At least one endpoint is a best-effort estimate from displayed Straddle marks rather than a strict synchronized BBO.'
+            : 'Both W points are inverted from real Call+Put BBO midpoint straddles; no vendor IV, fitted λ, or TD IV is used.';
+        const title = `${intervalLabel}: annualized forward variance = (W₂−W₁)/(T₂−T₁), displayed as FV×10,000; forward vol ${volLabel}. `
+            + `${qualityLabel}${inversionLabel}`;
+        const valueClasses = ['ivts-forward-variance'];
+        if (negative) valueClasses.push('is-negative');
+        if (observation.isBestEffort) valueClasses.push('is-estimated');
+        const displayValue = `${observation.isBestEffort ? '≈' : ''}${observation.variancePoints.toFixed(1)}`;
+        return `<span class="${valueClasses.join(' ')}" title="${escapeHtml(title)}">${escapeHtml(displayValue)}</span>`;
+    }
+
     function buildTdSlopeCell(row, baselineExpiry) {
         if (!baselineExpiry) {
             return '<span class="ivts-missing">--</span>';
@@ -2353,10 +3986,11 @@
                 ? ' is-slope-backwardation'
                 : (row.tdSlopeVsBaseline < low ? ' is-slope-contango' : ''))
             : '';
-        const title = 'TD IV ratio of the (this expiry, baseline) pair, shorter leg on top, frozen λ=0.3. '
+        const title = 'Ratio of the displayed ATM TD IV for (this expiry, baseline), shorter leg on top. '
+            + 'The values therefore include the active structured implied λ correction shown in the TD IV column. '
             + `Zone colors (<${low.toFixed(2)} / >${high.toFixed(2)}) apply only near the calibrated ~2x DTE geometry; `
             + 'wider pairs sit naturally lower — a normal upward term structure, not deep contango. '
-            + 'Exploration only: the strategy signal above stays pinned to the ~7d front / ~2x back pair.';
+            + 'Exploration only: the separate strategy signal above stays pinned to frozen λ=0.3 on the ~7d front / ~2x back pair.';
         return `<span class="ivts-ratio${zoneClass}" title="${escapeHtml(title)}">${escapeHtml(row.tdSlopeVsBaseline.toFixed(3))}</span>`;
     }
 
@@ -2388,15 +4022,39 @@
         }
         const text = row ? formatIvPair(row.callIvTd, row.putIvTd) : '--/--';
         if (!row || (row.callIvTd == null && row.putIvTd == null)) {
-            return `<span class="ivts-missing">${escapeHtml(text)}</span>`;
+            const missingDates = row && Array.isArray(row.tdIvMissingWeightDates)
+                ? row.tdIvMissingWeightDates
+                : [];
+            const title = row && row.tdIvStatus === 'implied_lambda_incomplete'
+                ? `TD IV unavailable: structured implied λ does not cover ${missingDates.join(', ')}. Raise the Option Streams limit and sync again.`
+                : (row && row.tdIvStatus === 'calendar_unavailable'
+                    ? 'TD IV unavailable: official exchange-calendar coverage is missing.'
+                    : 'TD IV is not available for this expiry.');
+            return `<span class="ivts-missing" title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
         }
         const tradDte = Number.isFinite(row.tradDte) ? row.tradDte : null;
         const lambda = Number.isFinite(row.tdIvWeekendWeight) ? row.tdIvWeekendWeight : 0;
-        const title = 'Weighted-clock annualized IV: same total variance as the TWS quote, '
-            + `with weekends/holidays counted at λ=${lambda.toFixed(2)} of a trading day `
-            + '(0 = pure trading-day clock, 1 = calendar clock), '
-            + 'so expiries on both sides of a weekend are comparable.'
-            + (tradDte != null ? ` Trading DTE: ${tradDte}.` : '');
+        const appliedWeights = row && row.tdIvAppliedWeights
+            && typeof row.tdIvAppliedWeights === 'object'
+            ? Object.entries(row.tdIvAppliedWeights)
+            : [];
+        const extrapolatedDates = row && Array.isArray(row.tdIvExtrapolatedWeightDates)
+            ? row.tdIvExtrapolatedWeightDates
+            : [];
+        const sourceText = row && row.tdIvSource === 'implied_lambda'
+            ? `Structured implied λ clock (${appliedWeights.length
+                ? appliedWeights.map(([date, weight]) => `${date}=${Number(weight).toFixed(3)}`).join(', ')
+                : 'no non-trading date in this horizon'}); common annualization λ=${lambda.toFixed(3)}.`
+                + (extrapolatedDates.length
+                    ? ` Median λ extrapolated to: ${extrapolatedDates.join(', ')}.`
+                    : '')
+            : `Fallback scalar λ=${lambda.toFixed(2)}; a qualified structured implied-λ curve is not available yet.`;
+        const title = 'Weighted-clock annualized IV preserving the total variance of the TWS Call/Put IV. '
+            + sourceText
+            + (tradDte != null ? ` Trading DTE: ${tradDte}.` : '')
+            + (Number.isFinite(row && row.tdIvEffectiveDte)
+                ? ` Effective DTE: ${row.tdIvEffectiveDte}.`
+                : '');
         return `<span title="${escapeHtml(title)}">${escapeHtml(text)}</span>`;
     }
 
@@ -2645,7 +4303,7 @@
                                     <th>DTE</th>
                                     <th>ATM Strike</th>
                                     <th>Call/Put IV</th>
-                                    <th title="Trading-day annualized IV (weekends removed from the clock); comparable across a weekend.">TD IV</th>
+                                    <th title="TWS Call/Put IV re-annualized after the coherent straddle surface solves implied λ. Directly covered dates use their own λ; later uncovered dates use the current implied-λ median as an explicitly marked display extrapolation.">TD IV</th>
                                     <th>ATM Straddle</th>
                                     <th>Vs Base</th>
                                 </tr>
@@ -2671,40 +4329,197 @@
         `;
     }
 
-    function buildPrimaryExpiryTable(comparedRows) {
+    function buildImpliedLambdaCell(row, impliedLambda) {
+        const reasons = {
+            no_baseline: 'no pure trading-day interval nearby to act as the per-day variance baseline',
+            nonpositive_forward_variance: 'forward variance across this interval is not positive',
+            calendar_unavailable: 'holiday calendar coverage is unavailable for this range',
+            stale_mix: 'quotes were too far apart in time to form one coherent observation',
+            unverified_front: 'the first expiry has no live 0DTE point to remove the remaining current session',
+            out_of_range: 'legacy data marked this signed estimate as unpublished',
+            exact_expiry_timestamp_unavailable: 'the broker omitted the exact expiry cutoff; recalculate to use the product-profile clock fallback',
+            missing_bbo: 'one or more option legs lack a real two-sided market',
+            crossed_market: 'one or more option markets are crossed',
+            wide_market: 'one or more option bid/ask spreads are too wide',
+            mixed_snapshot: 'call/put quotes do not belong to the same coherent snapshot',
+            missing_row_snapshot: 'the option row has no coherent snapshot identity',
+            underlying_stale_mix: 'the option and underlying quotes are not contemporaneous',
+            non_market_mark: 'the option mark is not a real two-sided bid/ask midpoint',
+            incomplete_price_inputs: 'strike or contemporaneous underlying price is missing',
+            forward_mismatch: 'call-put parity forward is too far from the contemporaneous underlying forward',
+            invalid_parity_forward: 'call-put parity produced an invalid forward',
+            straddle_inversion_failed: 'the observed straddle cannot be inverted to a valid total variance',
+        };
+        const intervals = impliedLambda && Array.isArray(impliedLambda.intervals)
+            ? impliedLambda.intervals
+            : [];
+        const rowExpiry = normalizeExpiryKey(row && row.expiry);
+        const interval = intervals.find((entry) => entry && entry.endExpiry === rowExpiry) || null;
+        if (!interval) {
+            const diagnostics = impliedLambda && Array.isArray(impliedLambda.rowDiagnostics)
+                ? impliedLambda.rowDiagnostics
+                : [];
+            const diagnostic = diagnostics.find((entry) => (
+                entry && normalizeExpiryKey(entry.expiry) === rowExpiry && entry.status !== 'ok'
+            ));
+            if (diagnostic) {
+                const title = `${rowExpiry} — not estimable: ${reasons[diagnostic.status] || diagnostic.status}.`;
+                return `<span class="ivts-missing" title="${escapeHtml(title)}">--</span>`;
+            }
+            return '';
+        }
+        const dates = Array.isArray(interval.nonTradingDates) ? interval.nonTradingDates.join(', ') : '';
+        if (interval.status !== 'ok') {
+            const raw = Number.isFinite(interval.rawLambda)
+                ? ` Raw λ=${interval.rawLambda}.`
+                : '';
+            const title = `${dates || rowExpiry} — not estimable: ${reasons[interval.status] || interval.status}.${raw}`;
+            return `<span class="ivts-missing" title="${escapeHtml(title)}">--</span>`;
+        }
+        const discounting = impliedLambda && impliedLambda.methodology
+            && impliedLambda.methodology.discounting || impliedLambda && impliedLambda.discounting || null;
+        let discountLabel = `manual fallback r=${impliedLambda && Number.isFinite(impliedLambda.interestRate)
+            ? (impliedLambda.interestRate * 100).toFixed(2)
+            : '4.00'}%`;
+        if (discounting && discounting.curveRowCount > 0) {
+            const curveName = discounting.isProxy ? 'reference discount proxy r/D' : 'discount curve r/D';
+            discountLabel = `per-expiry ${curveName}${discounting.curveAsOf ? ` as of ${discounting.curveAsOf}` : ''}`;
+            if (discounting.fallbackRowCount > 0) {
+                discountLabel += `; ${discounting.fallbackRowCount} row(s) used manual fallback`;
+            }
+        }
+        const sourceLabel = impliedLambda && impliedLambda.varianceSource === 'vendor_iv'
+            ? 'vendor IV'
+            : `ATM straddle prices, parity-forward discounted inversion using ${discountLabel}`;
+        const rawLambda = Number.isFinite(interval.rawLambda)
+            ? interval.rawLambda
+            : (Number.isFinite(interval.lambda) ? interval.lambda : null);
+        if (rawLambda === null) {
+            return '<span class="ivts-missing" title="Missing raw lambda diagnostic">--</span>';
+        }
+        const inversionLabel = rawLambda < 0 ? ' Inverted term structure; signed λ is preserved.' : '';
+        const baselineLabel = interval.baselineMode === 'nearest_extrapolated'
+            ? '; nearest-baseline extrapolation'
+            : '';
+        const clockLabel = interval.profileClockFallback
+            ? '; product-profile expiry clock fallback'
+            : '';
+        const title = `Implied weight of ${dates} solved from adjacent-expiry forward variance`
+            + ` (${sourceLabel}; baseline n=${interval.baselineCount}${baselineLabel}${clockLabel}${interval.isFront ? '; verified front interval' : ''}).`
+            + ` Raw λ=${rawLambda}.`;
+        const valueClass = rawLambda < 0 ? 'ivts-ratio ivts-lambda-inverted' : 'ivts-ratio';
+        return `<span class="${valueClass}" title="${escapeHtml(title + inversionLabel)}">${escapeHtml(rawLambda.toFixed(3))}</span>`;
+    }
+
+    function buildVarianceRecoveryControl(card, comparedRows) {
+        const detailRows = getPrimaryExpiryRows(comparedRows);
+        let strictMissingCount = 0;
+        let recoverableCount = 0;
+        let estimatedCount = 0;
+        for (const row of detailRows) {
+            const strict = resolveTotalVarianceObservation(row);
+            if (strict) continue;
+            strictMissingCount += 1;
+            const estimate = resolveTotalVarianceObservation(row, { bestEffort: true });
+            if (estimate) {
+                recoverableCount += 1;
+                if (card && card.varianceBestEffortEnabled) estimatedCount += 1;
+            }
+        }
+        const enabled = !!(card && card.varianceBestEffortEnabled);
+        const buttonLabel = enabled ? 'Strict Var Only' : 'Estimate Missing Var';
+        const summary = enabled
+            ? `Best-effort on · ${estimatedCount} recovered · estimated values are marked ≈`
+            : (!detailRows.length
+                ? 'Sync expiry data first; strict BBO remains the default.'
+                : (recoverableCount
+                ? `${recoverableCount} of ${strictMissingCount} missing variance rows can be recovered from the displayed Straddle marks.`
+                : (strictMissingCount
+                    ? `${strictMissingCount} variance rows are missing, but their displayed marks are not sufficient for inversion.`
+                    : 'All visible variance rows currently have strict two-sided BBO evidence.')));
+        return `
+            <div class="ivts-variance-recovery ${enabled ? 'is-enabled' : ''}">
+                <button class="ivts-btn ivts-btn-auto ${enabled ? 'is-running' : ''}" data-action="variance-best-effort" data-symbol="${escapeHtml(card.symbol)}" type="button" ${!enabled && recoverableCount === 0 ? 'disabled' : ''}>${escapeHtml(buttonLabel)}</button>
+                <span>${escapeHtml(summary)}</span>
+            </div>
+        `;
+    }
+
+    function buildPrimaryExpiryTable(comparedRows, options = {}) {
         const detailRows = getPrimaryExpiryRows(comparedRows);
         const baselineExpiry = comparedRows.baselineExpiry;
+        const impliedLambda = comparedRows.impliedLambda;
+        const usableIntervals = impliedLambda && Array.isArray(impliedLambda.intervals)
+            ? impliedLambda.intervals.filter(interval => interval && interval.status === 'ok')
+            : [];
+        const invertedCount = usableIntervals.filter(interval => Number(interval.rawLambda) < 0).length;
+        const extrapolatedCount = usableIntervals.filter(
+            interval => interval.baselineMode === 'nearest_extrapolated'
+        ).length;
+        const profileClockCount = usableIntervals.filter(
+            interval => interval.profileClockFallback === true
+        ).length;
+        const coverageNotes = [];
+        if (impliedLambda && Number.isFinite(impliedLambda.okIntervalCount)) {
+            coverageNotes.push(`Impl λ covers ${impliedLambda.okIntervalCount} weekend${impliedLambda.okIntervalCount === 1 ? '' : 's'}`);
+        }
+        if (invertedCount) coverageNotes.push(`${invertedCount} inverted (signed)`);
+        if (extrapolatedCount) coverageNotes.push(`${extrapolatedCount} nearest-baseline estimate${extrapolatedCount === 1 ? '' : 's'}`);
+        if (profileClockCount) coverageNotes.push(`${profileClockCount} product-profile clock fallback${profileClockCount === 1 ? '' : 's'}`);
+        const impliedCoverageNote = coverageNotes.length
+            ? ` · ${coverageNotes.join(' · ')}`
+            : '';
+        const tdIvSourceNote = detailRows.some((row) => row && row.tdIvSource === 'implied_lambda')
+            ? ` · TD IV: ${impliedLambda && impliedLambda.varianceSource === 'vendor_iv'
+                ? 'vendor-IV fallback λ'
+                : 'price-derived implied λ'} (median extrapolated outside direct coverage)`
+            : ' · TD IV: fallback scalar λ';
+        const totalVarianceCells = [];
+        const forwardVarianceCells = [];
+        let previousExpiryRow = null;
+        const varianceOptions = { bestEffort: options.bestEffort === true };
+        for (const row of detailRows) {
+            totalVarianceCells.push(buildTotalVarianceCell(row, previousExpiryRow, varianceOptions));
+            forwardVarianceCells.push(buildForwardVarianceCell(row, previousExpiryRow, varianceOptions));
+            // Fwd Var is adjacent-expiry by definition. Never bridge across a
+            // missing row; best-effort mode can explicitly recover that row.
+            previousExpiryRow = row;
+        }
         return `
-            <div class="ivts-table-caption">All Expiries (${detailRows.length})</div>
+            <div class="ivts-table-caption">All Expiries (${detailRows.length})${escapeHtml(tdIvSourceNote)}${escapeHtml(impliedCoverageNote)}</div>
             <div class="ivts-table-shell ivts-details-table-shell">
                 <table class="ivts-table ivts-table-details">
                     <thead>
                         <tr>
                             <th>Expiry</th>
                             <th>DTE</th>
-                            <th>ATM Strike</th>
-                            <th>Call/Put IV</th>
-                            <th title="Trading-day annualized IV (weekends removed from the clock); comparable across a weekend.">TD IV</th>
-                            <th title="Pairwise TD slope vs the baseline expiry (shorter leg on top, frozen λ=0.3). Same convention and thresholds as the strategy signal's zones.">TD Slope</th>
                             <th>ATM Straddle</th>
+                            <th title="Cumulative ATM total variance inverted from the real two-sided Call+Put BBO midpoint straddle, displayed as W×10,000. With best-effort enabled, missing strict rows may use displayed Call/Put marks and are marked ≈. Vendor IV, fitted λ, and TD IV are never used directly.">Total Var</th>
+                            <th title="Adjacent-expiry annualized forward variance (W₂−W₁)/(T₂−T₁), displayed as FV×10,000. It never bridges a missing expiry. With best-effort enabled, any interval using an estimated endpoint is marked ≈.">Fwd Var</th>
+                            <th>Call/Put IV</th>
+                            <th title="TWS Call/Put IV re-annualized after the coherent straddle surface solves implied λ. Directly covered dates use their own λ; later uncovered dates use the current implied-λ median as an explicitly marked display extrapolation.">TD IV</th>
+                            <th title="Ratio of the displayed ATM TD IV versus the baseline expiry, shorter leg on top. This uses the same implied-λ-corrected values shown in TD IV; the separate strategy signal remains frozen at λ=0.3.">TD Slope</th>
                             <th>Vs Base</th>
+                            <th title="Option-implied weight of the non-trading days ending at this expiry (weekend/holiday), solved from adjacent-expiry forward variance against a nearby pure trading-day baseline. Published to the simulator as a per-date array.">Impl λ</th>
                         </tr>
                     </thead>
                     <tbody>
-                        ${detailRows.map((row) => `
+                        ${detailRows.map((row, rowIndex) => `
                             <tr class="${row.isStraddleBaseline ? 'is-straddle-baseline' : ''}">
                                 <td>${escapeHtml(row.expiry)}</td>
                                 <td>${escapeHtml(row.dte)}</td>
-                                <td>${row.atmStrike != null ? escapeHtml(formatNumber(row.atmStrike, 2)) : '<span class="ivts-missing">--</span>'}</td>
+                                <td>${buildStraddlePriceCell(row)}</td>
+                                <td>${totalVarianceCells[rowIndex]}</td>
+                                <td>${forwardVarianceCells[rowIndex]}</td>
                                 <td>${buildIvPairCell(row)}</td>
                                 <td>${buildIvPairTdCell(row)}</td>
                                 <td>${buildTdSlopeCell(row, baselineExpiry)}</td>
-                                <td>${buildStraddlePriceCell(row)}</td>
                                 <td>${buildStraddleRatioCell(row, baselineExpiry)}</td>
+                                <td>${buildImpliedLambdaCell(row, impliedLambda)}</td>
                             </tr>
                         `).join('') || `
                             <tr>
-                                <td colspan="8" class="ivts-missing">No expiry rows have been synced yet.</td>
+                                <td colspan="10" class="ivts-missing">No expiry rows have been synced yet.</td>
                             </tr>
                         `}
                     </tbody>
@@ -2871,6 +4686,207 @@
         `;
     }
 
+    function buildImpliedLambdaPanel(card, nowValue = Date.now()) {
+        const entry = card && card.impliedLambdaComputedEntry;
+        const snapshot = card && card.lambdaSnapshot;
+        const snapshotFreshness = evaluateLambdaSnapshotFreshness(snapshot, nowValue);
+        const bestEffortSource = buildBestEffortLambdaSnapshot(card, nowValue);
+        const vendorIvSource = buildVendorIvLambdaSource(card, nowValue);
+        const calculationReady = snapshotFreshness.fresh
+            || bestEffortSource.ok || vendorIvSource.ok;
+        const byDateEntries = entry && entry.byDate && typeof entry.byDate === 'object'
+            ? Object.entries(entry.byDate).sort(([left], [right]) => left.localeCompare(right))
+            : [];
+        const isBestEffort = !!(entry && entry.quality
+            && entry.quality.estimationMode === 'best_effort');
+        const isVendorIvFallback = !!(entry
+            && entry.varianceSource === 'vendor_iv'
+            && entry.quality
+            && entry.quality.sourceQuoteEvidence === 'vendor_atm_iv_fallback');
+        const synchronized = !!entry
+            && String(card.impliedLambdaPublishedSnapshotId || '').trim()
+                === String(entry.snapshotId || '').trim()
+            && card.impliedLambdaPublicationResult
+            && card.impliedLambdaPublicationResult.ok === true;
+        const needsRecalculation = !!entry && (
+            card.impliedLambdaNeedsRecalculation === true
+            || (!!snapshot && String(snapshot.snapshotId || '').trim()
+                !== String(entry.snapshotId || '').trim())
+        );
+        const statusClass = !entry
+            ? 'is-empty'
+            : (synchronized ? 'is-synced' : (isBestEffort ? 'is-estimated' : 'is-calculated'));
+        const statusLabel = !entry
+            ? 'Not calculated'
+            : (synchronized
+                ? `${isVendorIvFallback ? 'Vendor-IV fallback · ' : (isBestEffort ? 'Best-effort · ' : '')}${needsRecalculation ? 'Synced · newer quotes available' : 'Synced'}`
+                : `${isVendorIvFallback ? 'Vendor-IV fallback' : (isBestEffort ? 'Best-effort estimate' : 'Calculated')}${needsRecalculation ? ' · newer quotes available' : ' · not synced'}`);
+        const structureRows = byDateEntries.map(([date, lambda]) => `
+            <div class="ivts-lambda-date-row">
+                <time datetime="${escapeHtml(date)}">${escapeHtml(date)}</time>
+                <strong class="${Number(lambda) < 0 ? 'ivts-lambda-inverted' : ''}">λ ${escapeHtml(formatNumber(lambda, 4))}</strong>
+            </div>
+        `).join('');
+        const note = !entry
+            ? 'Press Calculate λ to use a strict snapshot when available, then usable two-sided BBO pairs, and finally the visible ATM Call/Put IV pairs.'
+            : (needsRecalculation
+                ? `The displayed ${isVendorIvFallback ? 'vendor-IV fallback' : (isBestEffort ? 'best-effort estimate' : 'curve')} is frozen. Newer quotes are available; recalculate only when you want to replace it.`
+                : `This ${isVendorIvFallback ? 'vendor-IV fallback' : (isBestEffort ? 'best-effort estimate' : 'structured curve')} is frozen and will not move with individual option ticks.`);
+        const sourceStatus = snapshotFreshness.fresh
+            ? 'Strict coherent source ready'
+            : (bestEffortSource.ok
+                ? `Best-effort ready · ${bestEffortSource.usableExpiryCount} expiries usable${bestEffortSource.skippedExpiryCount ? ` · ${bestEffortSource.skippedExpiryCount} skipped` : ''}`
+                : (vendorIvSource.ok
+                    ? `ATM-IV fallback ready · ${vendorIvSource.usableExpiryCount} expiries usable${vendorIvSource.skippedExpiryCount ? ` · ${vendorIvSource.skippedExpiryCount} skipped` : ''}`
+                    : 'Waiting for at least two usable Call/Put IV pairs'));
+        const invertedIntervalCount = Number(entry && entry.quality
+            && entry.quality.invertedIntervalCount) || 0;
+        const extrapolatedBaselineIntervalCount = Number(entry && entry.quality
+            && entry.quality.extrapolatedBaselineIntervalCount) || 0;
+        const profileClockFallbackIntervalCount = Number(entry && entry.quality
+            && entry.quality.profileClockFallbackIntervalCount) || 0;
+        const qualityParts = !entry ? [] : [
+            isVendorIvFallback
+                ? `${Number(entry.quality && entry.quality.usableExpiryCount) || 0} ATM-IV pairs · vendor fallback`
+                : (isBestEffort
+                ? `${Number(entry.quality && entry.quality.usableExpiryCount) || 0} used · ${Number(entry.quality && entry.quality.skippedExpiryCount) || 0} skipped`
+                : 'Strict snapshot'),
+        ];
+        if (invertedIntervalCount) qualityParts.push(`${invertedIntervalCount} inverted`);
+        if (extrapolatedBaselineIntervalCount) {
+            qualityParts.push(`${extrapolatedBaselineIntervalCount} baseline extrapolated`);
+        }
+        if (profileClockFallbackIntervalCount) {
+            qualityParts.push(`${profileClockFallbackIntervalCount} profile-clock fallback`);
+        }
+        const qualityText = qualityParts.length ? qualityParts.join(' · ') : '--';
+
+        return `
+            <section class="ivts-lambda-panel" aria-label="${escapeHtml(card.symbol)} structured implied lambda">
+                <div class="ivts-lambda-panel-head">
+                    <div>
+                        <span class="ivts-lambda-eyebrow">Manual pricing snapshot</span>
+                        <h3>Structured implied λ</h3>
+                    </div>
+                    <span class="ivts-lambda-state ${statusClass}" data-lambda-field="state">${escapeHtml(statusLabel)}</span>
+                </div>
+                <p class="ivts-lambda-note" data-lambda-field="note">${escapeHtml(note)}</p>
+                <div class="ivts-lambda-metrics">
+                    <div><span>Median λ</span><strong data-lambda-field="median">${entry ? escapeHtml(formatNumber(entry.medianLambda, 4)) : '--'}</strong></div>
+                    <div><span>Structured dates</span><strong data-lambda-field="date-count">${byDateEntries.length}</strong></div>
+                    <div><span>Coverage</span><strong data-lambda-field="coverage">${entry ? escapeHtml(`${entry.coverageStart || '--'} → ${entry.coverageEnd || '--'}`) : '--'}</strong></div>
+                    <div><span>Calculated</span><strong data-lambda-field="calculated">${entry ? escapeHtml(formatTimestamp(card.impliedLambdaComputedAt)) : '--'}</strong></div>
+                    <div><span>Market snapshot</span><strong data-lambda-field="market-snapshot">${entry ? escapeHtml(formatTimestamp(entry.quoteAsOf)) : '--'}</strong></div>
+                    <div><span>Source ID</span><strong data-lambda-field="source-id" title="${entry ? escapeHtml(entry.snapshotId || '') : ''}">${entry ? escapeHtml(String(entry.snapshotId || '').slice(0, 12)) : '--'}</strong></div>
+                    <div><span>Quote quality</span><strong data-lambda-field="quote-quality">${escapeHtml(qualityText)}</strong></div>
+                </div>
+                <div class="ivts-lambda-actions">
+                    <button class="ivts-btn ivts-btn-primary" data-action="implied-lambda-calculate" data-symbol="${escapeHtml(card.symbol)}" type="button" ${calculationReady ? '' : 'disabled'}>Calculate λ</button>
+                    <button class="ivts-btn ivts-btn-auto" data-action="implied-lambda-sync" data-symbol="${escapeHtml(card.symbol)}" type="button" ${entry ? '' : 'disabled'}>Sync to Simulators</button>
+                    <button class="ivts-btn ivts-btn-muted" data-action="implied-lambda-export" data-symbol="${escapeHtml(card.symbol)}" type="button" ${entry ? '' : 'disabled'}>Export JSON</button>
+                    <span class="ivts-lambda-source-status" data-lambda-field="source-status">${escapeHtml(sourceStatus)}</span>
+                </div>
+                <details class="ivts-details ivts-lambda-structure" ${entry ? '' : 'hidden'}>
+                    <summary data-lambda-field="structure-summary">Exact date → λ structure (${byDateEntries.length})</summary>
+                    <div class="ivts-lambda-date-grid" data-lambda-field="structure-grid">
+                        ${structureRows || '<span class="ivts-missing">No structured dates</span>'}
+                    </div>
+                </details>
+            </section>
+        `;
+    }
+
+    function updateImpliedLambdaPanelElement(currentPanel, nextPanel) {
+        if (!currentPanel || !nextPanel) {
+            return false;
+        }
+
+        currentPanel.className = nextPanel.className;
+        const ariaLabel = nextPanel.getAttribute('aria-label');
+        if (ariaLabel) {
+            currentPanel.setAttribute('aria-label', ariaLabel);
+        }
+
+        nextPanel.querySelectorAll('[data-lambda-field]').forEach((nextNode) => {
+            const field = nextNode.getAttribute('data-lambda-field');
+            const currentNode = currentPanel.querySelector(`[data-lambda-field="${field}"]`);
+            if (!currentNode) {
+                return;
+            }
+            currentNode.className = nextNode.className;
+            if (field === 'structure-grid') {
+                currentNode.innerHTML = nextNode.innerHTML;
+            } else {
+                currentNode.textContent = nextNode.textContent;
+            }
+            if (nextNode.hasAttribute('title')) {
+                currentNode.setAttribute('title', nextNode.getAttribute('title'));
+            } else {
+                currentNode.removeAttribute('title');
+            }
+        });
+
+        nextPanel.querySelectorAll('[data-action^="implied-lambda-"]').forEach((nextButton) => {
+            const action = nextButton.getAttribute('data-action');
+            const currentButton = currentPanel.querySelector(`[data-action="${action}"]`);
+            if (!currentButton) {
+                return;
+            }
+            currentButton.disabled = nextButton.disabled;
+            currentButton.hidden = nextButton.hidden;
+            currentButton.className = nextButton.className;
+            currentButton.textContent = nextButton.textContent;
+            currentButton.setAttribute('data-symbol', nextButton.getAttribute('data-symbol') || '');
+        });
+
+        const currentStructure = currentPanel.querySelector('.ivts-lambda-structure');
+        const nextStructure = nextPanel.querySelector('.ivts-lambda-structure');
+        if (currentStructure && nextStructure) {
+            currentStructure.hidden = nextStructure.hidden;
+        }
+        return true;
+    }
+
+    function replaceCardBodyMarkup(card, bodyNode) {
+        const markup = buildCardBodyMarkup(card);
+        const currentPanel = bodyNode.querySelector('.ivts-lambda-panel');
+        if (!currentPanel || !document || typeof document.createElement !== 'function') {
+            bodyNode.innerHTML = markup;
+            return false;
+        }
+
+        const template = document.createElement('template');
+        template.innerHTML = markup;
+        const nextPanel = template.content.querySelector('.ivts-lambda-panel');
+        if (!nextPanel || !updateImpliedLambdaPanelElement(currentPanel, nextPanel)) {
+            bodyNode.innerHTML = markup;
+            return false;
+        }
+
+        // Quote ticks still refresh the rest of the expanded card, but the
+        // manual lambda panel remains attached. Keeping this exact subtree
+        // preserves pointer hover/focus and prevents its button transitions
+        // from restarting every 120 ms.
+        const nextNodes = Array.from(template.content.childNodes);
+        const panelIndex = nextNodes.indexOf(nextPanel);
+        if (panelIndex < 0) {
+            bodyNode.innerHTML = markup;
+            return false;
+        }
+        Array.from(bodyNode.childNodes).forEach((node) => {
+            if (node !== currentPanel) {
+                bodyNode.removeChild(node);
+            }
+        });
+        nextNodes.slice(0, panelIndex).forEach((node) => {
+            bodyNode.insertBefore(node, currentPanel);
+        });
+        nextNodes.slice(panelIndex + 1).forEach((node) => {
+            bodyNode.appendChild(node);
+        });
+        return true;
+    }
+
     function buildCardBodyMarkup(card) {
         const historyDocument = strategyHistoryDocument(card);
         const autoHistoryDocument = normalizeAutoHistoryDocument(card.autoHistoryDocument, card.symbol);
@@ -2883,46 +4899,57 @@
                 ${escapeHtml(card.statusMessage)}
             </div>
 
+            ${buildImpliedLambdaPanel(card)}
             ${buildStrategySignalPanel(card, comparedRows, historyDocument)}
             ${buildOptionStreamLimitControl(card)}
-            ${buildFuturesContractControl(card)}
 
-            <div class="ivts-facts">
-                <div class="ivts-fact">
-                    <span class="ivts-fact-label">Underlying</span>
-                    <span class="ivts-fact-value">${card.underlyingPrice != null ? `$${formatNumber(card.underlyingPrice, 2)}` : '--'}</span>
+            <details class="ivts-details ivts-sampling-details">
+                <summary>
+                    <span>Sampling details</span>
+                    <span class="ivts-details-summary-meta">
+                        Underlying ${card.underlyingPrice != null ? `$${formatNumber(card.underlyingPrice, 2)}` : '--'}
+                        · ${historyDocument.samples.length} combined
+                        · ${autoHistoryDocument.samples.length} auto
+                    </span>
+                </summary>
+                <div class="ivts-facts">
+                    <div class="ivts-fact">
+                        <span class="ivts-fact-label">Underlying</span>
+                        <span class="ivts-fact-value">${card.underlyingPrice != null ? `$${formatNumber(card.underlyingPrice, 2)}` : '--'}</span>
+                    </div>
+                    <div class="ivts-fact">
+                        <span class="ivts-fact-label">Combined Samples</span>
+                        <span class="ivts-fact-value">${historyDocument.samples.length}</span>
+                    </div>
+                    <div class="ivts-fact">
+                        <span class="ivts-fact-label">Last Sync</span>
+                        <span class="ivts-fact-value">${escapeHtml(formatTimestamp(card.lastSyncLabel))}</span>
+                    </div>
+                    <div class="ivts-fact">
+                        <span class="ivts-fact-label">Last Sample</span>
+                        <span class="ivts-fact-value">${escapeHtml(formatTimestamp(card.lastSampleLabel))}</span>
+                    </div>
+                    <div class="ivts-fact">
+                        <span class="ivts-fact-label">Auto Samples</span>
+                        <span class="ivts-fact-value">${autoHistoryDocument.samples.length}</span>
+                    </div>
+                    <div class="ivts-fact">
+                        <span class="ivts-fact-label">Auto Sampling</span>
+                        <span class="ivts-fact-value">${escapeHtml(autoStatus)}</span>
+                        <span class="ivts-fact-note">Last: ${escapeHtml(formatTimestamp(card.lastAutoSampleLabel))}</span>
+                    </div>
+                    <div class="ivts-fact">
+                        <span class="ivts-fact-label">Append Target</span>
+                        <span class="ivts-fact-value">${escapeHtml(autoAppendTargetLabel(card))}</span>
+                        <span class="ivts-fact-note">Hourly automatic samples are written only to this file.</span>
+                    </div>
                 </div>
-                <div class="ivts-fact">
-                    <span class="ivts-fact-label">Combined Samples</span>
-                    <span class="ivts-fact-value">${historyDocument.samples.length}</span>
-                </div>
-                <div class="ivts-fact">
-                    <span class="ivts-fact-label">Last Sync</span>
-                    <span class="ivts-fact-value">${escapeHtml(formatTimestamp(card.lastSyncLabel))}</span>
-                </div>
-                <div class="ivts-fact">
-                    <span class="ivts-fact-label">Last Sample</span>
-                    <span class="ivts-fact-value">${escapeHtml(formatTimestamp(card.lastSampleLabel))}</span>
-                </div>
-                <div class="ivts-fact">
-                    <span class="ivts-fact-label">Auto Samples</span>
-                    <span class="ivts-fact-value">${autoHistoryDocument.samples.length}</span>
-                </div>
-                <div class="ivts-fact">
-                    <span class="ivts-fact-label">Auto Sampling</span>
-                    <span class="ivts-fact-value">${escapeHtml(autoStatus)}</span>
-                    <span class="ivts-fact-note">Last: ${escapeHtml(formatTimestamp(card.lastAutoSampleLabel))}</span>
-                </div>
-                <div class="ivts-fact">
-                    <span class="ivts-fact-label">Append Target</span>
-                    <span class="ivts-fact-value">${escapeHtml(autoAppendTargetLabel(card))}</span>
-                    <span class="ivts-fact-note">Hourly automatic samples are written only to this file.</span>
-                </div>
-            </div>
+            </details>
 
             ${buildBaselineControl(card, comparedRows)}
             ${buildCalendarFinderSection(card, comparedRows)}
-            ${buildPrimaryExpiryTable(comparedRows)}
+            ${buildVarianceRecoveryControl(card, comparedRows)}
+            ${buildPrimaryExpiryTable(comparedRows, { bestEffort: card.varianceBestEffortEnabled === true })}
             ${buildBucketSummaryTable(comparedRows)}
         `;
     }
@@ -2946,6 +4973,7 @@
                         ? 'Subscribe every available expiry.'
                         : `Subscribe the nearest ${selectedExpiryCount} expiries first.`}
                 </span>
+                ${buildFuturesContractControl(card)}
             </div>
         `;
     }
@@ -2959,22 +4987,20 @@
         const contractMonth = normalizeFuturesContractMonth(card && card.futuresContractMonth);
         const underlyingSymbol = profile.underlyingSymbol || card.symbol;
         return `
-            <div class="ivts-futures-control">
-                <label class="ivts-futures-field">
-                    <span>Underlying FUT Month</span>
-                    <input
-                        data-action="futures-contract-month"
-                        data-symbol="${escapeHtml(card.symbol)}"
-                        type="text"
-                        inputmode="numeric"
-                        pattern="\\d{6}"
-                        maxlength="6"
-                        placeholder="YYYYMM"
-                        value="${escapeHtml(contractMonth)}"
-                    >
-                </label>
-                <span class="ivts-futures-summary">${escapeHtml(underlyingSymbol)} ${escapeHtml(contractMonth || 'YYYYMM')}</span>
-            </div>
+            <label class="ivts-futures-field">
+                <span>Underlying FUT Month</span>
+                <input
+                    data-action="futures-contract-month"
+                    data-symbol="${escapeHtml(card.symbol)}"
+                    type="text"
+                    inputmode="numeric"
+                    pattern="\\d{6}"
+                    maxlength="6"
+                    placeholder="YYYYMM"
+                    value="${escapeHtml(contractMonth)}"
+                >
+            </label>
+            <span class="ivts-futures-summary">${escapeHtml(underlyingSymbol)} ${escapeHtml(contractMonth || 'YYYYMM')}</span>
         `;
     }
 
@@ -3142,7 +5168,7 @@
         }
 
         const viewState = captureCardViewState(cardNode.parentElement || cardNode);
-        bodyNode.innerHTML = buildCardBodyMarkup(card);
+        replaceCardBodyMarkup(card, bodyNode);
         restoreCardViewState(cardNode.parentElement || cardNode, viewState);
     }
 
@@ -3187,11 +5213,20 @@
             return;
         }
 
+        // Remove the entry under the old contract-month key before the card
+        // adopts the newly selected underlying future.
+        withdrawImpliedLambda(card);
         const normalized = normalizeFuturesContractMonth(field.value);
         card.futuresContractMonth = normalized;
         saveFuturesContractMonth(card.symbol, normalized);
         card.catalog = null;
         card.quotesBySubId = {};
+        card.lambdaSnapshot = null;
+        card.impliedLambdaPublicationResult = null;
+        card.impliedLambdaComputedResult = null;
+        card.impliedLambdaComputedEntry = null;
+        card.impliedLambdaComputedAt = '';
+        card.impliedLambdaNeedsRecalculation = false;
         card.underlyingPrice = null;
         card.lastSyncLabel = '';
         card.forceBodyRefreshOnce = true;
@@ -3216,6 +5251,8 @@
         saveOptionStreamLimit(card.symbol, maxOptionStreams);
         card.catalog = null;
         card.quotesBySubId = {};
+        card.lambdaSnapshot = null;
+        card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
         card.lastSyncLabel = '';
         card.forceBodyRefreshOnce = true;
         setCardStatus(
@@ -3229,9 +5266,10 @@
     }
 
     function applyTdIvLambdaChange(rawValue) {
-        // Display-only lens shared by every card: re-annualizes the
-        // already-subscribed quotes, so no catalog reset or resubscription
-        // is needed.
+        // Shared fallback lens: it re-annualizes already-subscribed quotes
+        // only while no qualified straddle-implied curve is available. Once
+        // implied lambda exists, strict per-date weights win. Neither path
+        // needs a catalog reset or resubscription.
         const lambda = normalizeTdIvLambda(rawValue);
         runtime.tdIvWeekendWeight = lambda;
         saveTdIvLambda(lambda);
@@ -3291,6 +5329,10 @@
         const payload = handoff.buildHandoffPayload({
             symbol: card.symbol,
             underlyingPrice: card.underlyingPrice,
+            underlyingContractMonth: card.futuresContractMonth || null,
+            underlyingQuote: card.lambdaSnapshot && card.lambdaSnapshot.underlyingQuote
+                ? card.lambdaSnapshot.underlyingQuote
+                : null,
             row,
         });
         if (!payload || !handoff.saveHandoffPayload(payload)) {
@@ -3326,13 +5368,15 @@
         if (card.pendingCatalog) {
             const pending = card.pendingCatalog;
             card.pendingCatalog = null;
-            clearTimeout(pending.timeoutId);
+            clearPendingCatalogTimers(pending);
             pending.reject(new Error('Subscription was cancelled.'));
         }
 
         card.syncInProgress = false;
         card.sampleInProgress = false;
         card.closeNotice = options.notice || 'Subscription closed. Showing the last received snapshot.';
+        card.lambdaSnapshot = null;
+        card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
 
         if (card.ws) {
             try {
@@ -3350,28 +5394,128 @@
     }
 
     function closeAllSocketsForPageExit() {
+        const firstSuspend = runtime.pageSuspended !== true;
+        runtime.pageSuspended = true;
         clearIbStatusPollTimer();
         if (runtime.autoSampleMonitorTimerId != null) {
             clearInterval(runtime.autoSampleMonitorTimerId);
             runtime.autoSampleMonitorTimerId = null;
         }
-        if (runtime.controlWs) {
+        if (runtime.discountCurveRefreshTimerId != null) {
+            clearInterval(runtime.discountCurveRefreshTimerId);
+            runtime.discountCurveRefreshTimerId = null;
+        }
+        const controlWs = runtime.controlWs;
+        runtime.controlWs = null;
+        runtime.controlWsOpenPromise = null;
+        if (controlWs) {
             try {
-                runtime.controlWs.close(1000, 'pagehide');
+                controlWs.close(1000, 'pagehide');
             } catch (_) {
                 // Ignore best-effort shutdown failures during page exit.
             }
         }
         runtime.cardsBySymbol.forEach((card) => {
-            if (!card || !card.ws) {
+            if (!card) {
                 return;
             }
-            try {
-                card.ws.close(1000, 'pagehide');
-            } catch (_) {
-                // Ignore best-effort shutdown failures during page exit.
+            if (firstSuspend) {
+                // A card only owns a data socket after it has been opened or
+                // asked to sync. Preserve that intent across a bfcache pause.
+                card.resumeAfterPageShow = !!card.ws;
             }
+            clearCatalogPatchWatchdog(card);
+            card.syncInProgress = false;
+            card.sampleInProgress = false;
+            if (card.pendingCatalog) {
+                const pending = card.pendingCatalog;
+                card.pendingCatalog = null;
+                clearPendingCatalogTimers(pending);
+                if (typeof pending.reject === 'function') {
+                    pending.reject(new Error('Page was hidden before the IVTS sync completed.'));
+                }
+            }
+            card.lambdaSnapshot = null;
+            card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
+            const ws = card.ws;
+            card.ws = null;
+            card.wsOpenPromise = null;
+            if (ws) {
+                try {
+                    ws.close(1000, 'pagehide');
+                } catch (_) {
+                    // Ignore best-effort shutdown failures during page exit.
+                }
+            }
+            card.forceBodyRefreshOnce = true;
+            setCardStatus(
+                card,
+                'Live IVTS paused while this page is hidden; the last calculated implied λ is preserved.',
+                ''
+            );
         });
+        // A bfcache page keeps its JavaScript heap and DOM. Commit the paused
+        // state now so the UI shows that its frozen calculation needs a fresh
+        // coherent source snapshot before the next calculation.
+        render(true);
+    }
+
+    async function resumePageAfterCache(event, dependencies = {}) {
+        const wasPersisted = !!(event && event.persisted === true);
+        if (runtime.pageSuspended !== true && !wasPersisted) {
+            return { resumed: false, controlRestored: false, resyncedSymbols: [] };
+        }
+
+        runtime.pageSuspended = false;
+        startAutoSampleMonitor();
+        startDiscountCurveRefreshMonitor();
+
+        const cardsToResume = [];
+        runtime.cardsBySymbol.forEach((card) => {
+            if (!card || card.resumeAfterPageShow !== true) {
+                return;
+            }
+            card.resumeAfterPageShow = false;
+            card.forceBodyRefreshOnce = true;
+            setCardStatus(card, 'Page restored. Resyncing live IVTS and implied λ...', '');
+            cardsToResume.push(card);
+        });
+        render(true);
+
+        const ensureControl = typeof dependencies.ensureControlSocket === 'function'
+            ? dependencies.ensureControlSocket
+            : ensureControlSocket;
+        let controlRestored = false;
+        try {
+            await ensureControl();
+            controlRestored = true;
+        } catch (error) {
+            runtime.ibStatus = {
+                connected: false,
+                connecting: false,
+                message: error && error.message || 'Unable to restore the control socket.',
+            };
+            runtime.discountCurveLastError = 'Unable to refresh the unified daily discount curve after page restore.';
+        }
+
+        const sync = typeof dependencies.syncCard === 'function'
+            ? dependencies.syncCard
+            : syncCard;
+        const resyncedSymbols = [];
+        await Promise.all(cardsToResume.map(async (card) => {
+            try {
+                await sync(card, { waitForQuotes: false });
+                resyncedSymbols.push(card.symbol);
+            } catch (error) {
+                setCardStatus(
+                    card,
+                    error && error.message || 'Unable to resync IVTS after page restore.',
+                    'error'
+                );
+            }
+        }));
+        render(true);
+        return { resumed: true, controlRestored, resyncedSymbols };
     }
 
     function startAutoSampleMonitor() {
@@ -3381,6 +5525,15 @@
         runtime.autoSampleMonitorTimerId = setInterval(() => {
             checkAutoSamplers('hourly');
         }, AUTO_SAMPLE_MONITOR_INTERVAL_MS);
+    }
+
+    function startDiscountCurveRefreshMonitor() {
+        if (runtime.discountCurveRefreshTimerId != null) {
+            return;
+        }
+        runtime.discountCurveRefreshTimerId = setInterval(() => {
+            requestDiscountCurveSnapshot();
+        }, DISCOUNT_CURVE_REFRESH_INTERVAL_MS);
     }
 
     function bindContainerInteractions() {
@@ -3424,6 +5577,28 @@
             }
             if (action === 'sample') {
                 sampleCard(card);
+                return;
+            }
+            if (action === 'implied-lambda-calculate') {
+                calculateImpliedLambda(card);
+                card.forceBodyRefreshOnce = true;
+                render(true);
+                return;
+            }
+            if (action === 'implied-lambda-sync') {
+                syncCalculatedImpliedLambda(card);
+                card.forceBodyRefreshOnce = true;
+                render(true);
+                return;
+            }
+            if (action === 'implied-lambda-export') {
+                exportImpliedLambdaFile(card);
+                return;
+            }
+            if (action === 'variance-best-effort') {
+                card.varianceBestEffortEnabled = !card.varianceBestEffortEnabled;
+                card.forceBodyRefreshOnce = true;
+                render(true);
                 return;
             }
             if (action === 'auto-load') {
@@ -3495,8 +5670,11 @@
     globalScope.OptionComboIvTermStructurePage = {
         _test: {
             IV_TERM_STRUCTURE_SNAPSHOT_TIMEOUT_MS,
+            IV_TERM_STRUCTURE_ACK_TIMEOUT_MS,
+            IV_TERM_STRUCTURE_PROTOCOL_VERSION,
             normalizeWsHost,
             normalizeWsPort,
+            currentExchangeDate,
             normalizeFuturesContractMonth,
             normalizeOptionStreamLimit,
             resolveDefaultExpandedSymbol,
@@ -3508,11 +5686,57 @@
             getPrimaryExpiryRows,
             resolveSelectedStraddleBaselineExpiry,
             formatIvPair,
+            resolveTotalVarianceObservation,
+            resolveForwardVarianceObservation,
+            buildTotalVarianceCell,
+            buildForwardVarianceCell,
+            buildVarianceRecoveryControl,
             buildIvPairTdCell,
+            buildImpliedLambdaCell,
+            latestQuoteAsOf,
+            applyCoherentQuoteSnapshot,
+            buildLambdaDetailRows,
+            buildBestEffortLambdaSnapshot,
+            inspectBestEffortOptionQuote,
+            inspectQuoteRecency,
+            measureQuoteCoherence,
+            buildVendorIvLambdaSource,
+            computeImpliedLambdaFromVendorIv,
+            computeImpliedLambdaFromCurrentSnapshot,
+            buildImpliedLambdaEntry,
+            buildImpliedLambdaExportFilename,
+            withdrawImpliedLambda,
+            publishImpliedLambda,
+            publishImpliedLambdaEntry,
+            calculateImpliedLambda,
+            syncCalculatedImpliedLambda,
+            refreshImpliedLambdaPublication,
+            formatImpliedLambdaPublicationStatus,
+            attachSocketHandlers,
             buildSubscribePayload,
             buildSubscriptionStatus,
             buildIbStatusAfterApiMarketDataReset,
+            applyDiscountCurveSnapshot,
+            formatDiscountCurveStatus,
+            discountCurveStatusTitle,
+            attachControlSocketHandlers,
+            applyRuntimeConfig,
+            getCard,
+            closeAllSocketsForPageExit,
+            resumePageAfterCache,
+            setControlSocketForTest: (ws) => {
+                runtime.controlWs = ws;
+            },
+            getDiscountCurveState: () => ({
+                curve: runtime.discountCurve,
+                status: runtime.discountCurveStatus,
+                fallbackUsed: runtime.discountCurveFallbackUsed,
+                error: runtime.discountCurveLastError,
+            }),
             buildOptionStreamLimitControl,
+            buildImpliedLambdaPanel,
+            updateImpliedLambdaPanelElement,
+            replaceCardBodyMarkup,
             buildPrimaryExpiryTable,
             buildCardMarkup,
             normalizeCalendarFinderConfig,
@@ -3545,6 +5769,8 @@
             autoAppendTargetLabel,
             captureCardViewState,
             restoreCardViewState,
+            evaluateLambdaSnapshotFreshness,
+            expireCardImpliedLambdaIfStale,
         },
     };
 
@@ -3565,6 +5791,11 @@
         const ibStatus = document.getElementById('ivtsIbStatus');
         if (ibStatus) {
             ibStatus.textContent = formatIbStatus();
+        }
+        const discountCurveStatus = document.getElementById('ivtsDiscountCurveStatus');
+        if (discountCurveStatus) {
+            discountCurveStatus.textContent = formatDiscountCurveStatus();
+            discountCurveStatus.title = discountCurveStatusTitle();
         }
         const ibConnectButton = document.getElementById('ivtsIbConnectButton');
         if (ibConnectButton) {
@@ -3673,15 +5904,42 @@
                     applyTdIvLambdaChange(event.target.value);
                 });
             }
+            const impliedLambdaRateInput = document.getElementById('ivtsImpliedLambdaRateInput');
+            {
+                const savedRate = loadSavedImpliedLambdaRate();
+                runtime.impliedLambdaRate = savedRate == null
+                    ? DEFAULT_IMPLIED_LAMBDA_RATE
+                    : savedRate;
+            }
+            if (impliedLambdaRateInput) {
+                impliedLambdaRateInput.value = (runtime.impliedLambdaRate * 100).toFixed(2);
+                impliedLambdaRateInput.addEventListener('change', (event) => {
+                    const ratePct = normalizeImpliedLambdaRatePct(event.target.value);
+                    runtime.impliedLambdaRate = ratePct / 100;
+                    saveImpliedLambdaRate(runtime.impliedLambdaRate);
+                    impliedLambdaRateInput.value = ratePct.toFixed(2);
+                    runtime.cardsBySymbol.forEach((card) => {
+                        card.forceBodyRefreshOnce = true;
+                        card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
+                    });
+                    render(true);
+                });
+            }
             globalScope.addEventListener('pagehide', closeAllSocketsForPageExit, { capture: true });
             globalScope.addEventListener('beforeunload', closeAllSocketsForPageExit, { capture: true });
-            globalScope.addEventListener('focus', () => checkAutoSamplers('page focus'));
+            globalScope.addEventListener('pageshow', (event) => {
+                void resumePageAfterCache(event);
+            });
+            globalScope.addEventListener('focus', () => {
+                checkAutoSamplers('page focus');
+            });
             document.addEventListener('visibilitychange', () => {
                 if (!document.hidden) {
                     checkAutoSamplers('page visible');
                 }
             });
             startAutoSampleMonitor();
+            startDiscountCurveRefreshMonitor();
             render(true);
             requestIbStatus();
         } catch (error) {

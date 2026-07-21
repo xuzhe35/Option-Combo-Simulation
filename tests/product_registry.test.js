@@ -101,17 +101,18 @@ module.exports = {
             },
         },
         {
-            name: 'resolves ES and NQ weekly FOP trading classes from expiry weekday',
+            name: 'leaves ES and NQ FOP trading classes to IB qualification',
             run() {
                 const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
                 const registry = ctx.OptionComboProductRegistry;
 
-                assert.equal(registry.resolveTradingClass('ES', '2026-03-16'), 'E3A');
-                assert.equal(registry.resolveTradingClass('ES', '2026-03-18'), 'E3C');
-                assert.equal(registry.resolveTradingClass('NQ', '2026-03-17'), 'Q3B');
-                assert.equal(registry.resolveTradingClass('NQ', '2026-03-19'), 'Q3D');
+                assert.equal(registry.resolveTradingClass('ES', '2026-03-16'), null);
+                assert.equal(registry.resolveTradingClass('ES', '2026-03-18'), null);
+                assert.equal(registry.resolveTradingClass('NQ', '2026-03-17'), null);
+                assert.equal(registry.resolveTradingClass('NQ', '2026-03-19'), null);
                 assert.equal(registry.resolveTradingClass('ES', '2026-07-17'), null);
                 assert.equal(registry.resolveOptionContractSpec('ES', '2026-07-17').tradingClass, null);
+                assert.equal(registry.resolveOptionContractSpec('ES', '2026-07-22').tradingClass, null);
             },
         },
         {
@@ -211,6 +212,48 @@ module.exports = {
             },
         },
         {
+            name: 'routes discount, Forward and carry independently by product family',
+            run() {
+                const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
+                const registry = ctx.OptionComboProductRegistry;
+
+                const es = registry.resolveForwardCarryPolicy('ES');
+                assert.equal(es.currency, 'USD');
+                assert.equal(es.discountCurveCurrency, 'USD');
+                assert.equal(es.forwardSource, 'bound-futures-quote');
+                assert.equal(es.carrySource, 'exchange-futures-curve');
+                assert.equal(es.carrySemantics, 'equity-index-net-carry');
+                assert.equal(es.carryReference.symbol, 'SPX');
+                assert.equal(es.requiresPerLegForwardBinding, true);
+                assert.equal(es.rateMaySubstituteForCarry, false);
+
+                const nq = registry.resolveForwardCarryPolicy('MNQ');
+                assert.equal(nq.carryReference.symbol, 'NDX');
+
+                const spx = registry.resolveForwardCarryPolicy('SPX');
+                assert.equal(spx.forwardSource, 'option-put-call-parity');
+                assert.equal(spx.carrySource, 'option-put-call-parity-vs-spot');
+                assert.equal(spx.rateMaySubstituteForCarry, false);
+
+                ['CL', 'HG'].forEach((symbol) => {
+                    const policy = registry.resolveForwardCarryPolicy(symbol);
+                    assert.equal(policy.carrySemantics, 'commodity-futures-curve');
+                    assert.equal(policy.carryReference, null);
+                    assert.equal(policy.rateMaySubstituteForCarry, false);
+                });
+                ['GC', 'SI'].forEach((symbol) => {
+                    const policy = registry.resolveForwardCarryPolicy(symbol);
+                    assert.equal(policy.carrySemantics, 'metal-futures-curve');
+                    assert.equal(policy.carryReference, null);
+                    assert.equal(policy.rateMaySubstituteForCarry, false);
+                });
+
+                const spy = registry.resolveForwardCarryPolicy('SPY');
+                assert.equal(spy.carrySemantics, 'bsm-q-zero-model-fallback');
+                assert.equal(spy.rateMaySubstituteForCarry, true);
+            },
+        },
+        {
             name: 'exposes per-family near-ATM strike increments with $1 generic equities',
             run() {
                 const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
@@ -232,14 +275,29 @@ module.exports = {
                 let spec = registry.resolveOptionContractSpec('SPX', '2026-06-17');
                 assert.equal(spec.symbol, 'SPX');
                 assert.equal(spec.tradingClass, 'SPX');
+                assert.equal(registry.isDeferredSettlementOption('SPX', '2026-06-17'), true);
 
                 spec = registry.resolveOptionContractSpec('SPX', '2026-06-18');
                 assert.equal(spec.symbol, 'SPXW');
                 assert.equal(spec.tradingClass, 'SPXW');
+                assert.equal(registry.isDeferredSettlementOption('SPX', '2026-06-18'), false);
 
                 spec = registry.resolveOptionContractSpec('SPX', '2026-04-16');
                 assert.equal(spec.symbol, 'SPX');
                 assert.equal(spec.tradingClass, 'SPX');
+                // Qualified identity is authoritative when it is present.
+                assert.equal(registry.isDeferredSettlementOption(
+                    'SPX', '2026-04-16', { tradingClass: 'SPXW' }
+                ), false);
+                assert.equal(registry.isDeferredSettlementOption(
+                    'ES', '2026-09-18', { tradingClass: 'ES' }
+                ), true);
+                assert.equal(registry.isDeferredSettlementOption(
+                    'ES', '2026-09-18', { tradingClass: 'EW3' }
+                ), false);
+                assert.equal(registry.isDeferredSettlementOption(
+                    'MES', '2026-09-18', { tradingClass: 'MES' }
+                ), true);
             },
         },
     ],

@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime
 
 from ib_async import Contract, Stock
 
@@ -43,21 +42,15 @@ def _resolve_weekly_fop_trading_class(self, symbol, expiry, current_trading_clas
     base_trading_class = current_trading_class or defaults.get('trading_class') or ''
     if not base_trading_class or len(base_trading_class) < 2:
         return base_trading_class
-
-    try:
-        expiry_date = datetime.strptime(expiry, '%Y%m%d')
-    except (TypeError, ValueError):
-        return base_trading_class
-
-    weekday_suffix = {
-        0: 'A',
-        1: 'B',
-        2: 'C',
-        3: 'D',
-    }.get(expiry_date.weekday())
-
-    if weekday_suffix:
-        return f"{base_trading_class[:-1]}{weekday_suffix}"
+    if self._normalize_symbol(defaults.get('option_sec_type')) == 'FOP':
+        # Let IB resolve the listing-specific daily/weekly class.  Every family
+        # default here (E3A/Q3A/ML3/S3T) names one weekday-and-week listing, so
+        # asserting it makes a valid contract fail on every other expiry.  This
+        # must stay in step with ib_server._resolve_weekly_fop_trading_class:
+        # the order path re-injects the family default even when the browser
+        # correctly sends none, so fixing only the market-data copy would still
+        # send ML3 on a CL order.
+        return ''
     return base_trading_class
 
 
@@ -197,7 +190,10 @@ async def _fallback_qualify_derivative_contract(self, contract, leg_request, qua
         except (TypeError, ValueError):
             continue
 
-        candidate_under_con_id = getattr(candidate, 'underConId', None)
+        # IB exposes the authoritative underlying futures conId on
+        # ContractDetails, not on its nested Contract. Reading the nested
+        # object silently made the FOP month discriminator ineffective.
+        candidate_under_con_id = getattr(detail, 'underConId', None)
         if requested_under_con_id and candidate_under_con_id and candidate_under_con_id != requested_under_con_id:
             continue
         if requested_multiplier and str(getattr(candidate, 'multiplier', '') or '') != requested_multiplier:

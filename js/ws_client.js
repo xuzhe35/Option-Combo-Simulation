@@ -23,21 +23,64 @@ const WS_PORT_STORAGE_KEY = 'optionComboWsPort';
 // Exponential backoff state
 const WS_BASE_DELAY = 5000;   // 5s initial
 const WS_MAX_DELAY = 60000;   // 60s cap
+const DISCOUNT_CURVE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const LIVE_PROJECTION_FEED_TIMEOUT_MS = 120 * 1000;
+const LIVE_PROJECTION_FEED_WATCHDOG_INTERVAL_MS = 5 * 1000;
+const MAX_LIVE_FUTURE_QUOTE_AGE_SECONDS = 120;
+const MAX_LIVE_FUTURE_QUOTE_SKEW_SECONDS = 120;
 let _wsReconnectDelay = WS_BASE_DELAY;
 let _wsReconnectTimer = null;
+let _discountCurveRefreshTimer = null;
+let _liveProjectionFeedWatchdogTimer = null;
 let _legacyLiveDataWarningShown = false;
 let _historicalReplayOrderCounter = 900000;
+let _futureSubscriptionGeneration = 0;
+let _lastLiveSubscriptionSignature = '';
+let _lastLiveSubscriptionSocket = null;
 const _liveQuoteRuntime = {
     underlyingQuote: null,
     optionQuotesById: new Map(),
     futureQuotesById: new Map(),
     stockQuotesBySymbol: new Map(),
+    carryReferenceQuotesById: new Map(),
     // Subscription pool: canonical subscription id -> other request ids that
     // resolve to the same option contract and share its market data line.
     optionQuoteAliasesByCanonicalId: new Map(),
+    // Exact request identity for every canonical/alias id. Live option quotes
+    // must prove that IB qualified this contract before they may update a leg.
+    optionRequestIdentityById: new Map(),
+    rejectedOptionIdentityWarnings: new Set(),
+    // Opaque futures subscription ids are generation-scoped.  Since the
+    // backend returns the id unchanged, a delayed response from an older
+    // subscribe cycle cannot update the current Futures Pool entry.
+    futureRequestIdentityByWireId: new Map(),
+    rejectedFutureIdentityWarnings: new Set(),
 };
-const _liveQuotePricingSnapshotFields = ['bid', 'ask', 'mark', 'iv'];
-const _liveQuoteSnapshotFields = ['bid', 'ask', 'mark', 'iv', 'delta'];
+const _liveQuotePricingSnapshotFields = [
+    'bid', 'ask', 'mark', 'iv', 'bidPresent', 'askPresent',
+    'bidAskValid', 'bidAskStatus', 'markSource',
+];
+const _liveQuoteSnapshotFields = [
+    'bid', 'ask', 'mark', 'iv', 'delta', 'quoteAsOf', 'snapshotId',
+    'conId', 'secType', 'symbol', 'localSymbol', 'exchange', 'currency',
+    'multiplier', 'contractMonth', 'contractMonthSource',
+    'lastTradeDate', 'markSource',
+    'tradingClass', 'right', 'strike', 'optionExpiry', 'underConId',
+    'underlyingContractMonth', 'underlyingBindingVerified',
+    'expiryAsOf', 'expiryTimingSource', 'lastTradeTime', 'timeZoneId',
+    'realExpirationDate', 'contractIdentitySource',
+    'requestIdentityVerified', 'requestGeneration', 'requestId',
+    'requestedSecType', 'requestedSymbol', 'requestedExchange',
+    'requestedCurrency', 'requestedMultiplier', 'requestedContractMonth',
+    'bidPresent', 'askPresent', 'bidAskValid', 'bidAskStatus',
+];
+const _liveQuoteEvidenceFields = [
+    'quoteAsOf', 'snapshotId', 'conId', 'localSymbol', 'tradingClass',
+    'right', 'strike', 'optionExpiry', 'underConId',
+    'underlyingContractMonth', 'underlyingBindingVerified',
+    'expiryAsOf', 'expiryTimingSource', 'lastTradeDate', 'lastTradeTime',
+    'timeZoneId', 'realExpirationDate', 'contractIdentitySource',
+];
 
 /**
  * @typedef {Object} OptionComboLiveQuoteSnapshot
@@ -138,9 +181,21 @@ function _getTradeTriggerLogicApi() {
         : null;
 }
 
+function _getGroupEditorUiApi() {
+    return window.OptionComboGroupEditorUI && typeof window.OptionComboGroupEditorUI === 'object'
+        ? window.OptionComboGroupEditorUI
+        : null;
+}
+
 function _getPricingCoreApi() {
     return window.OptionComboPricingCore && typeof window.OptionComboPricingCore === 'object'
         ? window.OptionComboPricingCore
+        : null;
+}
+
+function _getMarketCurvesApi() {
+    return window.OptionComboMarketCurves && typeof window.OptionComboMarketCurves === 'object'
+        ? window.OptionComboMarketCurves
         : null;
 }
 
@@ -160,16 +215,61 @@ function _cloneLiveQuoteSnapshot(rawQuote) {
     }
 
     const snapshot = {};
-    ['bid', 'ask', 'mark', 'iv'].forEach((field) => {
+    ['bid', 'ask', 'mark'].forEach((field) => {
         const parsed = parseFloat(rawQuote[field]);
-        if (Number.isFinite(parsed) && parsed > 0) {
+        if (Number.isFinite(parsed) && parsed >= 0) {
             snapshot[field] = parsed;
         }
     });
+    const iv = parseFloat(rawQuote.iv);
+    if (Number.isFinite(iv) && iv > 0) snapshot.iv = iv;
+    ['bidPresent', 'askPresent', 'bidAskValid'].forEach((field) => {
+        if (typeof rawQuote[field] === 'boolean') snapshot[field] = rawQuote[field];
+    });
+    if (typeof rawQuote.underlyingBindingVerified === 'boolean') {
+        snapshot.underlyingBindingVerified = rawQuote.underlyingBindingVerified;
+    }
+    if (typeof rawQuote.requestIdentityVerified === 'boolean') {
+        snapshot.requestIdentityVerified = rawQuote.requestIdentityVerified;
+    }
     const delta = parseFloat(rawQuote.delta);
     if (_areGreeksEnabled() && Number.isFinite(delta)) {
         snapshot.delta = delta;
     }
+    const quoteAsOf = String(rawQuote.quoteAsOf || '').trim();
+    if (quoteAsOf && Number.isFinite(Date.parse(quoteAsOf))) {
+        snapshot.quoteAsOf = new Date(quoteAsOf).toISOString();
+    }
+    const expiryAsOf = String(rawQuote.expiryAsOf || '').trim();
+    if (expiryAsOf && Number.isFinite(Date.parse(expiryAsOf))) {
+        snapshot.expiryAsOf = new Date(expiryAsOf).toISOString();
+    }
+    const snapshotId = String(rawQuote.snapshotId || '').trim();
+    if (snapshotId) snapshot.snapshotId = snapshotId;
+    const conId = parseInt(rawQuote.conId, 10);
+    if (Number.isFinite(conId) && conId > 0) snapshot.conId = conId;
+    const underConId = parseInt(rawQuote.underConId, 10);
+    if (Number.isFinite(underConId) && underConId > 0) snapshot.underConId = underConId;
+    const requestGeneration = parseInt(rawQuote.requestGeneration, 10);
+    if (Number.isFinite(requestGeneration) && requestGeneration > 0) {
+        snapshot.requestGeneration = requestGeneration;
+    }
+    const strike = parseFloat(rawQuote.strike);
+    if (Number.isFinite(strike) && strike >= 0) snapshot.strike = strike;
+    [
+        'secType', 'symbol', 'localSymbol', 'exchange', 'currency',
+        'multiplier', 'contractMonth', 'contractMonthSource',
+        'lastTradeDate', 'markSource', 'bidAskStatus',
+        'tradingClass', 'right', 'optionExpiry', 'underlyingContractMonth',
+        'expiryTimingSource', 'lastTradeTime', 'timeZoneId',
+        'realExpirationDate', 'contractIdentitySource',
+        'requestId', 'requestedSecType', 'requestedSymbol',
+        'requestedExchange', 'requestedCurrency', 'requestedMultiplier',
+        'requestedContractMonth',
+    ].forEach((field) => {
+        const value = String(rawQuote[field] || '').trim();
+        if (value) snapshot[field] = value;
+    });
 
     return Object.keys(snapshot).length > 0 ? snapshot : null;
 }
@@ -201,7 +301,59 @@ function _resetLiveQuoteRuntime() {
     _liveQuoteRuntime.optionQuotesById.clear();
     _liveQuoteRuntime.futureQuotesById.clear();
     _liveQuoteRuntime.stockQuotesBySymbol.clear();
+    _liveQuoteRuntime.carryReferenceQuotesById.clear();
     _liveQuoteRuntime.optionQuoteAliasesByCanonicalId.clear();
+    _liveQuoteRuntime.optionRequestIdentityById.clear();
+    _liveQuoteRuntime.rejectedOptionIdentityWarnings.clear();
+    _liveQuoteRuntime.futureRequestIdentityByWireId.clear();
+    _liveQuoteRuntime.rejectedFutureIdentityWarnings.clear();
+}
+
+function _normalizeContractMonthIdentity(value) {
+    const digits = String(value || '').replace(/\D/g, '');
+    return digits.length >= 6 ? digits.slice(0, 6) : '';
+}
+
+function _normalizeOptionExpiryIdentity(value) {
+    const digits = String(value || '').replace(/\D/g, '');
+    return digits.length >= 8 ? digits.slice(0, 8) : '';
+}
+
+function _canonicalOptionIdentitySymbol(value) {
+    const symbol = String(value || '').trim().toUpperCase();
+    return ({ SPXW: 'SPX', NDXP: 'NDX' })[symbol] || symbol;
+}
+
+function _findExpectedUnderlyingConId(contractMonth) {
+    const normalizedMonth = _normalizeContractMonthIdentity(contractMonth);
+    if (!normalizedMonth) return null;
+    const entry = (state.futuresPool || []).find(candidate => (
+        _normalizeContractMonthIdentity(candidate && candidate.contractMonth) === normalizedMonth
+    ));
+    const conId = parseInt(entry && entry.conId, 10);
+    return Number.isFinite(conId) && conId > 0 ? conId : null;
+}
+
+function _buildOptionRequestIdentity(request) {
+    const secType = String(request && request.secType || '').trim().toUpperCase();
+    const underlyingContractMonth = _normalizeContractMonthIdentity(
+        request && request.underlyingContractMonth
+    );
+    return {
+        secType,
+        symbol: String(request && request.symbol || '').trim().toUpperCase(),
+        right: String(request && request.right || '').trim().toUpperCase(),
+        strike: parseFloat(request && request.strike),
+        expDate: _normalizeOptionExpiryIdentity(
+            request && (request.expDate || request.contractMonth)
+        ),
+        tradingClass: String(request && request.tradingClass || '').trim().toUpperCase(),
+        multiplier: String(request && request.multiplier || '').trim(),
+        underlyingContractMonth,
+        underConId: secType === 'FOP'
+            ? _findExpectedUnderlyingConId(underlyingContractMonth)
+            : null,
+    };
 }
 
 function _buildOptionContractSignature(request) {
@@ -212,6 +364,7 @@ function _buildOptionContractSignature(request) {
         parseFloat(request.strike),
         request.expDate || '',
         request.contractMonth || '',
+        _normalizeContractMonthIdentity(request.underlyingContractMonth),
         request.tradingClass || '',
         request.exchange || '',
         request.currency || '',
@@ -226,10 +379,15 @@ function _dedupeOptionRequestsForSubscription(optionRequests) {
     const canonicalBySignature = new Map();
     const deduped = [];
     _liveQuoteRuntime.optionQuoteAliasesByCanonicalId.clear();
+    _liveQuoteRuntime.optionRequestIdentityById.clear();
     (Array.isArray(optionRequests) ? optionRequests : []).forEach((request) => {
         if (!request || !request.id) {
             return;
         }
+        _liveQuoteRuntime.optionRequestIdentityById.set(
+            request.id,
+            _buildOptionRequestIdentity(request)
+        );
         const signature = _buildOptionContractSignature(request);
         const canonical = canonicalBySignature.get(signature);
         if (!canonical) {
@@ -239,11 +397,6 @@ function _dedupeOptionRequestsForSubscription(optionRequests) {
         }
         if (request.id === canonical.id) {
             return;
-        }
-        // FOP qualification hint lives on leg requests only; keep it on the
-        // canonical request even when a template request claimed the slot first.
-        if (!canonical.underlyingContractMonth && request.underlyingContractMonth) {
-            canonical.underlyingContractMonth = request.underlyingContractMonth;
         }
         let aliasIds = _liveQuoteRuntime.optionQuoteAliasesByCanonicalId.get(canonical.id);
         if (!aliasIds) {
@@ -274,13 +427,156 @@ function _expandOptionQuoteAliases(options) {
     });
 }
 
+function _optionQuoteIdentityMismatchReason(subId, rawQuote) {
+    const expected = _liveQuoteRuntime.optionRequestIdentityById.get(subId);
+    // Historical replay and isolated callers do not create live subscription
+    // identities. Preserve those paths; live subscriptions below are strict.
+    if (!expected) return '';
+
+    const actual = _cloneLiveQuoteSnapshot(rawQuote);
+    if (!actual) return 'missing qualified contract identity';
+    if (!(actual.conId > 0)) return 'missing qualified option conId';
+    if (!String(actual.localSymbol || '').trim()) return 'missing qualified option localSymbol';
+
+    const actualSecType = String(actual.secType || '').trim().toUpperCase();
+    const actualSymbol = String(actual.symbol || '').trim().toUpperCase();
+    const actualRight = String(actual.right || '').trim().toUpperCase();
+    const actualExpiry = _normalizeOptionExpiryIdentity(actual.optionExpiry);
+    const actualTradingClass = String(actual.tradingClass || '').trim().toUpperCase();
+    if (!actualSecType || actualSecType !== expected.secType) return 'secType mismatch';
+    const symbolMatches = _canonicalOptionIdentitySymbol(actualSymbol)
+        === _canonicalOptionIdentitySymbol(expected.symbol);
+    if (!actualSymbol || !symbolMatches) return 'symbol mismatch';
+    if (!actualRight || actualRight !== expected.right) return 'right mismatch';
+    if (!Number.isFinite(actual.strike)
+        || !Number.isFinite(expected.strike)
+        || Math.abs(actual.strike - expected.strike) > 0.000001) {
+        return 'strike mismatch';
+    }
+    if (!actualExpiry || actualExpiry !== expected.expDate) return 'expiry mismatch';
+    if (expected.multiplier
+        && String(actual.multiplier || '').trim() !== expected.multiplier) {
+        return 'multiplier mismatch';
+    }
+    if (expected.tradingClass
+        && (!actualTradingClass || actualTradingClass !== expected.tradingClass)) {
+        return 'tradingClass mismatch';
+    }
+
+    if (expected.secType === 'FOP') {
+        const actualMonth = _normalizeContractMonthIdentity(actual.underlyingContractMonth);
+        if (!expected.underlyingContractMonth) return 'missing requested underlying futures month';
+        if (actual.underlyingBindingVerified !== true
+            || !(actual.underConId > 0)
+            || !actualMonth) {
+            return 'missing verified underlying futures binding';
+        }
+        if (actualMonth !== expected.underlyingContractMonth) {
+            return 'underlying futures month mismatch';
+        }
+        if (expected.underConId && actual.underConId !== expected.underConId) {
+            return 'underlying futures conId mismatch';
+        }
+    }
+    return '';
+}
+
+function _filterLiveOptionQuotesByRequestIdentity(options) {
+    if (!options || typeof options !== 'object') {
+        return { accepted: options, rejected: new Map() };
+    }
+    const accepted = {};
+    const rejected = new Map();
+    Object.entries(options).forEach(([subId, quote]) => {
+        const mismatchReason = _optionQuoteIdentityMismatchReason(subId, quote);
+        if (!mismatchReason) {
+            accepted[subId] = quote;
+            return;
+        }
+        rejected.set(subId, mismatchReason);
+        const warningKey = `${subId}|${mismatchReason}`;
+        if (!_liveQuoteRuntime.rejectedOptionIdentityWarnings.has(warningKey)) {
+            _liveQuoteRuntime.rejectedOptionIdentityWarnings.add(warningKey);
+            console.warn(`Ignored live option quote for ${subId}: ${mismatchReason}.`);
+        }
+    });
+    return { accepted, rejected };
+}
+
+function _invalidateRejectedLiveOptionQuote(subId, reason, changedGroupIds) {
+    const hadCachedQuote = _liveQuoteRuntime.optionQuotesById.has(subId);
+    _liveQuoteRuntime.optionQuotesById.delete(subId);
+    let changed = hadCachedQuote;
+    (state.groups || []).forEach((group) => {
+        (group.legs || []).forEach((leg) => {
+            if (!leg || leg.id !== subId) return;
+            const hadAcceptedLiveQuote = hadCachedQuote
+                || leg.currentPriceSource === 'live'
+                || leg.liveQuoteIdentityStatus === 'verified';
+            [
+                'expiryAsOf', 'expiryTimingSource', 'lastTradeDate', 'lastTradeTime',
+                'expiryTimeZoneId', 'realExpirationDate', 'qualifiedOptionConId',
+                'qualifiedOptionLocalSymbol', 'qualifiedOptionTradingClass',
+                'qualifiedOptionUnderConId', 'qualifiedOptionUnderlyingContractMonth',
+            ].forEach((key) => {
+                if (Object.prototype.hasOwnProperty.call(leg, key)) {
+                    delete leg[key];
+                    changed = true;
+                }
+            });
+            if (hadAcceptedLiveQuote) {
+                if (leg.currentPrice !== null) {
+                    leg.currentPrice = null;
+                    changed = true;
+                }
+                changed = _markOptionQuoteMissing(leg) || changed;
+            }
+            if (leg.liveQuoteIdentityStatus !== 'rejected') {
+                leg.liveQuoteIdentityStatus = 'rejected';
+                changed = true;
+            }
+            if (leg.liveQuoteIdentityReason !== reason) {
+                leg.liveQuoteIdentityReason = reason;
+                changed = true;
+            }
+            if (changed && changedGroupIds instanceof Set && group && group.id) {
+                changedGroupIds.add(group.id);
+            }
+        });
+    });
+    return changed;
+}
+
+function _applyLiveOptionContractIdentity(leg, quote) {
+    if (!leg || !quote || typeof quote !== 'object') return false;
+    const identity = _cloneLiveQuoteSnapshot(quote);
+    if (!identity) return false;
+    const next = {
+        qualifiedOptionConId: identity.conId || null,
+        qualifiedOptionLocalSymbol: String(identity.localSymbol || ''),
+        qualifiedOptionTradingClass: String(identity.tradingClass || ''),
+        qualifiedOptionUnderConId: identity.underConId || null,
+        qualifiedOptionUnderlyingContractMonth: _normalizeContractMonthIdentity(
+            identity.underlyingContractMonth
+        ),
+        liveQuoteIdentityStatus: 'verified',
+        liveQuoteIdentityReason: '',
+    };
+    let changed = false;
+    Object.entries(next).forEach(([key, value]) => {
+        if (leg[key] !== value) {
+            leg[key] = value;
+            changed = true;
+        }
+    });
+    return changed;
+}
+
 function _setUnderlyingQuoteSnapshot(rawQuote) {
     const nextSnapshot = _cloneLiveQuoteSnapshot(rawQuote);
-    if (_areLiveQuoteSnapshotsEqual(_liveQuoteRuntime.underlyingQuote, nextSnapshot)) {
-        return false;
-    }
+    const changed = !_areLiveQuoteSnapshotsEqual(_liveQuoteRuntime.underlyingQuote, nextSnapshot);
     _liveQuoteRuntime.underlyingQuote = nextSnapshot;
-    return true;
+    return changed;
 }
 
 function _setOptionQuoteSnapshot(subId, rawQuote) {
@@ -304,7 +600,10 @@ function _setOptionQuoteSnapshot(subId, rawQuote) {
         _didLiveQuoteFieldChange(previousSnapshot, snapshot, field)
     ));
     const deltaChanged = _didLiveQuoteFieldChange(previousSnapshot, snapshot, 'delta');
-    if (!pricingChanged && !deltaChanged) {
+    const evidenceChanged = _liveQuoteEvidenceFields.some((field) => (
+        _didLiveQuoteFieldChange(previousSnapshot, snapshot, field)
+    ));
+    if (!pricingChanged && !deltaChanged && !evidenceChanged) {
         return {
             changed: false,
             pricingChanged: false,
@@ -324,11 +623,9 @@ function _setFutureQuoteSnapshot(subId, rawQuote) {
     const snapshot = _cloneLiveQuoteSnapshot(rawQuote);
     if (!snapshot) return false;
     const previousSnapshot = _liveQuoteRuntime.futureQuotesById.get(subId) || null;
-    if (_areLiveQuoteSnapshotsEqual(previousSnapshot, snapshot)) {
-        return false;
-    }
+    const changed = !_areLiveQuoteSnapshotsEqual(previousSnapshot, snapshot);
     _liveQuoteRuntime.futureQuotesById.set(subId, snapshot);
-    return true;
+    return changed;
 }
 
 function _setStockQuoteSnapshot(symbol, rawQuote) {
@@ -336,11 +633,19 @@ function _setStockQuoteSnapshot(symbol, rawQuote) {
     const snapshot = _cloneLiveQuoteSnapshot(rawQuote);
     if (!snapshot) return false;
     const previousSnapshot = _liveQuoteRuntime.stockQuotesBySymbol.get(symbol) || null;
-    if (_areLiveQuoteSnapshotsEqual(previousSnapshot, snapshot)) {
-        return false;
-    }
+    const changed = !_areLiveQuoteSnapshotsEqual(previousSnapshot, snapshot);
     _liveQuoteRuntime.stockQuotesBySymbol.set(symbol, snapshot);
-    return true;
+    return changed;
+}
+
+function _setCarryReferenceQuoteSnapshot(referenceId, rawQuote) {
+    if (!referenceId) return false;
+    const snapshot = _cloneLiveQuoteSnapshot(rawQuote);
+    if (!snapshot) return false;
+    const previousSnapshot = _liveQuoteRuntime.carryReferenceQuotesById.get(referenceId) || null;
+    const changed = !_areLiveQuoteSnapshotsEqual(previousSnapshot, snapshot);
+    _liveQuoteRuntime.carryReferenceQuotesById.set(referenceId, snapshot);
+    return changed;
 }
 
 function _formatSymbolPriceInputValue(symbol, value) {
@@ -378,6 +683,41 @@ function _refreshForwardRatePanelUi() {
     }
 }
 
+function _refreshIndexForwardRateSamples() {
+    const indexForwardRateApi = _getIndexForwardRateApi();
+    if (!indexForwardRateApi
+        || typeof indexForwardRateApi.refreshForwardRateSample !== 'function') {
+        return false;
+    }
+    let changed = false;
+    const quoteSource = {
+        getOptionQuote: getLiveOptionQuote,
+        getUnderlyingQuote,
+    };
+    (state.forwardRateSamples || []).forEach((sample) => {
+        const result = indexForwardRateApi.refreshForwardRateSample(
+            sample,
+            state,
+            quoteSource
+        );
+        changed = !!(result && result.changed) || changed;
+    });
+    return changed;
+}
+
+function _invalidateIndexForwardRateSamples(reason) {
+    const indexForwardRateApi = _getIndexForwardRateApi();
+    if (!indexForwardRateApi
+        || typeof indexForwardRateApi.invalidateForwardRateSample !== 'function') {
+        return false;
+    }
+    let changed = false;
+    (state.forwardRateSamples || []).forEach((sample) => {
+        changed = indexForwardRateApi.invalidateForwardRateSample(sample, reason) || changed;
+    });
+    return changed;
+}
+
 function _refreshFuturesPoolPanelUi() {
     const controlPanelUi = _getControlPanelUiApi();
     if (!controlPanelUi) {
@@ -394,6 +734,109 @@ function _refreshFuturesPoolPanelUi() {
             controlPanelUi.refreshBoundDynamicControls();
         });
     }
+}
+
+function _isUsableDiscountCurve(curve) {
+    return !!(curve
+        && typeof curve === 'object'
+        && curve.kind === 'discount'
+        && Array.isArray(curve.points)
+        && curve.points.length > 0);
+}
+
+function _discountCurveFingerprint(curve) {
+    if (!_isUsableDiscountCurve(curve)) return '';
+    const pointFingerprint = curve.points.map((point) => [
+        Number(point && point.tenorDays),
+        Number(point && point.zeroRate),
+        Number(point && point.discountFactor),
+    ].join(':')).join('|');
+    return [
+        String(curve.id || ''),
+        String(curve.asOf || ''),
+        String(curve.effectiveDate || ''),
+        String(curve.metadata && curve.metadata.source || ''),
+        String(curve.metadata && curve.metadata.snapshotId || ''),
+        pointFingerprint,
+    ].join('::');
+}
+
+function _refreshDiscountCurveConsumers(scheduleDerivedRefresh = false) {
+    const controlPanelUi = _getControlPanelUiApi();
+    if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
+        _runUiRefreshSafely('discountCurveControls', () => {
+            controlPanelUi.refreshBoundDynamicControls();
+        });
+    } else {
+        _refreshForwardRatePanelUi();
+    }
+    if (scheduleDerivedRefresh) {
+        _scheduleDerivedValueRefresh({}, false);
+    }
+}
+
+function _createDiscountCurveFromSnapshot(snapshot, options = {}) {
+    const marketCurves = _getMarketCurvesApi();
+    if (!marketCurves) {
+        throw new Error('Market curve runtime is unavailable.');
+    }
+    const adapter = typeof marketCurves.createDiscountCurveFromSnapshot === 'function'
+        ? marketCurves.createDiscountCurveFromSnapshot
+        : marketCurves.createDiscountCurveFromTreasurySnapshot;
+    if (typeof adapter !== 'function') {
+        throw new Error('Discount-curve snapshot adapter is unavailable.');
+    }
+    return adapter(snapshot, {
+        maxExtrapolationDays: 31,
+        ...options,
+    });
+}
+
+function _handleDiscountCurveMessage(data) {
+    if (!data || typeof data !== 'object' || data.action !== 'discount_curve_snapshot') {
+        return false;
+    }
+
+    const requestWasManual = state.discountCurveRequestManual === true;
+    state.discountCurveRequestPending = false;
+    state.discountCurveRequestManual = false;
+    state.discountCurveLastResponseStatus = String(data.status || '').trim();
+    const previousCurve = _isUsableDiscountCurve(state.discountCurve)
+        ? state.discountCurve
+        : null;
+    const previousFingerprint = _discountCurveFingerprint(previousCurve);
+    let nextCurve = null;
+    let errorMessage = String(data.error || '').trim();
+
+    if (data.curve && typeof data.curve === 'object') {
+        try {
+            nextCurve = _createDiscountCurveFromSnapshot(data.curve);
+        } catch (error) {
+            errorMessage = error && error.message
+                ? `Invalid discount curve: ${error.message}`
+                : 'Invalid discount curve response.';
+        }
+    } else if (!errorMessage) {
+        errorMessage = 'No unified discount curve is available; the manual-rate fallback remains active.';
+    }
+
+    if (_isUsableDiscountCurve(nextCurve)) {
+        state.discountCurve = nextCurve;
+        state.discountCurveLastLoadedAt = new Date().toISOString();
+        state.discountCurveLastLoadWasManual = requestWasManual;
+    } else if (!previousCurve) {
+        state.discountCurve = null;
+        state.discountCurveLastLoadWasManual = false;
+    }
+    state.discountCurveLastError = errorMessage;
+
+    const nextFingerprint = _discountCurveFingerprint(state.discountCurve);
+    const curveChanged = nextFingerprint !== previousFingerprint;
+    const forwardRateChanged = curveChanged && (state.forwardRateSamples || []).length > 0
+        ? _refreshIndexForwardRateSamples()
+        : false;
+    _refreshDiscountCurveConsumers(curveChanged || forwardRateChanged);
+    return true;
 }
 
 function _normalizeLivePriceMode(group) {
@@ -452,7 +895,7 @@ function _scheduleDerivedValueRefresh(changeSet, allowIncrementalUpdate) {
     }
 
     renderScheduled = true;
-    requestAnimationFrame(() => {
+    const runRefresh = () => {
         try {
             const groupIds = Array.isArray(changeSet && changeSet.groupIds) ? changeSet.groupIds.filter(Boolean) : [];
             const hedgeIds = Array.isArray(changeSet && changeSet.hedgeIds) ? changeSet.hedgeIds.filter(Boolean) : [];
@@ -500,7 +943,17 @@ function _scheduleDerivedValueRefresh(changeSet, allowIncrementalUpdate) {
         } finally {
             renderScheduled = false;
         }
-    });
+    };
+
+    // requestAnimationFrame is present in the browser, but not in every
+    // embedded/test runtime.  Feed-health transitions still have to fail
+    // projections closed there, so perform the same refresh synchronously
+    // instead of throwing and leaving renderScheduled stuck forever.
+    if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(runRefresh);
+    } else {
+        runRefresh();
+    }
 }
 
 function getLiveOptionQuote(subId) {
@@ -524,11 +977,40 @@ function getUnderlyingQuote() {
         : null;
 }
 
+function getLiveCarryReferenceQuote(referenceId = 'spot') {
+    const snapshot = _liveQuoteRuntime.carryReferenceQuotesById.get(referenceId);
+    return snapshot ? { ...snapshot } : null;
+}
+
+function getLiveForwardCarrySnapshot() {
+    const pricingContext = _getPricingContextApi();
+    if (!pricingContext || typeof pricingContext.buildForwardCarrySnapshot !== 'function') {
+        return null;
+    }
+    const registry = _getProductRegistryApi();
+    const policy = registry && typeof registry.resolveForwardCarryPolicy === 'function'
+        ? registry.resolveForwardCarryPolicy(state && state.underlyingSymbol)
+        : null;
+    const referenceId = String(policy && policy.carryReference
+        && policy.carryReference.id || 'spot').trim() || 'spot';
+    return pricingContext.buildForwardCarrySnapshot(state, {
+        referenceQuote: getLiveCarryReferenceQuote(referenceId),
+    });
+}
+
 window.OptionComboWsLiveQuotes = {
     getOptionQuote: getLiveOptionQuote,
     getFutureQuote: getLiveFutureQuote,
     getStockQuote: getLiveStockQuote,
+    getCarryReferenceQuote: getLiveCarryReferenceQuote,
+    getForwardCarrySnapshot: getLiveForwardCarrySnapshot,
     getUnderlyingQuote,
+    isConnected: () => isWsConnected,
+    getProjectionFeedHealth: () => ({
+        connected: state && state.liveProjectionFeedConnected === true,
+        stale: !state || state.liveProjectionFeedStale !== false,
+        lastReceivedAt: String(state && state.liveProjectionLastReceivedAt || ''),
+    }),
     clear: _resetLiveQuoteRuntime,
 };
 
@@ -753,7 +1235,101 @@ function _getQuoteReferenceDate() {
     }
     return _isHistoricalMode()
         ? (_getHistoricalReplayDate() || state.baseDate || '')
-        : (state.baseDate || state.simulatedDate || '');
+        : (state.liveQuoteDate || state.baseDate || state.simulatedDate || '');
+}
+
+function _hasLiveQuotePayload(data) {
+    if (!data || typeof data !== 'object') {
+        return false;
+    }
+    if (Number.isFinite(parseFloat(data.underlyingPrice))) {
+        return true;
+    }
+    if (data.underlyingQuote && typeof data.underlyingQuote === 'object') {
+        return true;
+    }
+    return ['options', 'futures', 'stocks', 'carryReferences'].some((key) =>
+        data[key] && typeof data[key] === 'object' && Object.keys(data[key]).length > 0
+    );
+}
+
+function _resolveLivePayloadAsOf(data) {
+    const direct = String(data && data.payloadAsOf || '').trim();
+    if (direct && Number.isFinite(new Date(direct).getTime())) {
+        return direct;
+    }
+
+    const quoteCandidates = [];
+    if (data && data.underlyingQuote && typeof data.underlyingQuote === 'object') {
+        quoteCandidates.push(data.underlyingQuote);
+    }
+    ['options', 'futures', 'stocks', 'carryReferences'].forEach((key) => {
+        Object.values(data && data[key] && typeof data[key] === 'object' ? data[key] : {})
+            .forEach((quote) => quoteCandidates.push(quote));
+    });
+
+    let latest = '';
+    let latestTime = -Infinity;
+    quoteCandidates.forEach((quote) => {
+        const timestamp = String(quote && quote.quoteAsOf || '').trim();
+        const time = new Date(timestamp).getTime();
+        if (Number.isFinite(time) && time > latestTime) {
+            latest = timestamp;
+            latestTime = time;
+        }
+    });
+    return latest;
+}
+
+function _applyLiveQuoteClock(data) {
+    if (_isHistoricalMode()
+        || (data && data.historicalReplay && typeof data.historicalReplay === 'object')
+        || !_hasLiveQuotePayload(data)) {
+        return { changed: false, dateChanged: false };
+    }
+
+    const pricingContext = _getPricingContextApi();
+    if (!pricingContext || typeof pricingContext.resolveLiveQuoteDate !== 'function') {
+        return { changed: false, dateChanged: false };
+    }
+
+    const payloadAsOf = _resolveLivePayloadAsOf(data);
+    const nextAsOfTime = new Date(payloadAsOf).getTime();
+    if (!payloadAsOf || !Number.isFinite(nextAsOfTime)) {
+        return { changed: false, dateChanged: false };
+    }
+
+    const currentAsOfTime = new Date(state.liveQuoteAsOf || '').getTime();
+    if (Number.isFinite(currentAsOfTime) && nextAsOfTime <= currentAsOfTime) {
+        return { changed: false, dateChanged: false };
+    }
+
+    const nextQuoteDate = pricingContext.resolveLiveQuoteDate(state, payloadAsOf);
+    if (!nextQuoteDate || (state.liveQuoteDate && nextQuoteDate < state.liveQuoteDate)) {
+        return { changed: false, dateChanged: false };
+    }
+
+    const dateChanged = nextQuoteDate !== state.liveQuoteDate;
+    state.liveQuoteAsOf = payloadAsOf;
+    state.liveQuoteDate = nextQuoteDate;
+
+    let simulationDateChanged = false;
+    if (!state.simulatedDate || state.simulatedDate < nextQuoteDate) {
+        state.simulatedDate = nextQuoteDate;
+        simulationDateChanged = true;
+    }
+
+    if (dateChanged || simulationDateChanged) {
+        const controlPanelUi = _getControlPanelUiApi();
+        if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
+            _runUiRefreshSafely('live quote clock', () => controlPanelUi.refreshBoundDynamicControls());
+        }
+    }
+
+    return {
+        changed: dateChanged || simulationDateChanged,
+        dateChanged,
+    };
 }
 
 function _isUnderlyingLeg(legOrType) {
@@ -882,6 +1458,60 @@ function updateWsStatusUI(status, nextRetrySec) {
     }
 }
 
+function _setLiveProjectionFeedHealth({ connected, stale, receivedAt } = {}, schedule = true) {
+    if (!state || _isHistoricalMode()) return false;
+    let changed = false;
+    if (typeof connected === 'boolean'
+        && state.liveProjectionFeedConnected !== connected) {
+        state.liveProjectionFeedConnected = connected;
+        changed = true;
+    }
+    if (typeof stale === 'boolean' && state.liveProjectionFeedStale !== stale) {
+        state.liveProjectionFeedStale = stale;
+        changed = true;
+    }
+    if (typeof receivedAt === 'string'
+        && state.liveProjectionLastReceivedAt !== receivedAt) {
+        state.liveProjectionLastReceivedAt = receivedAt;
+        changed = true;
+    }
+    if (changed && schedule) {
+        _scheduleDerivedValueRefresh({}, false);
+    }
+    return changed;
+}
+
+function _recordLiveProjectionMarketReceipt(data) {
+    if (_isHistoricalMode() || !_hasLiveQuotePayload(data)) return false;
+    const wasReady = state.liveProjectionFeedConnected === true
+        && state.liveProjectionFeedStale === false;
+    _setLiveProjectionFeedHealth({
+        // Receiving a market payload is itself stronger evidence of a live
+        // transport than a possibly lagging socket lifecycle flag.
+        connected: true,
+        stale: false,
+        // Local receipt time cannot freeze merely because the server's market
+        // clock or quote payload stopped advancing.
+        receivedAt: new Date().toISOString(),
+    }, false);
+    const isReady = state.liveProjectionFeedConnected === true
+        && state.liveProjectionFeedStale === false;
+    // The local receipt timestamp advances on every payload, but that alone
+    // must not force a full repricing.  Only a readiness transition does.
+    return wasReady !== isReady;
+}
+
+function _runLiveProjectionFeedWatchdog(nowMs = Date.now()) {
+    if (!state || _isHistoricalMode()) return false;
+    const receiptMs = Date.parse(String(state.liveProjectionLastReceivedAt || '').trim());
+    const stale = state.liveProjectionFeedConnected !== true
+        || !Number.isFinite(receiptMs)
+        || !Number.isFinite(nowMs)
+        || nowMs - receiptMs > LIVE_PROJECTION_FEED_TIMEOUT_MS
+        || receiptMs - nowMs > LIVE_PROJECTION_FEED_WATCHDOG_INTERVAL_MS;
+    return _setLiveProjectionFeedHealth({ stale }, true);
+}
+
 function connectWebSocket() {
     _clearWsReconnectTimer();
 
@@ -890,9 +1520,23 @@ function connectWebSocket() {
 
     ws.onopen = () => {
         isWsConnected = true;
+        _lastLiveSubscriptionSignature = '';
+        _lastLiveSubscriptionSocket = null;
+        _setLiveProjectionFeedHealth({
+            connected: true,
+            stale: true,
+            receivedAt: '',
+        }, false);
         _wsReconnectDelay = WS_BASE_DELAY;
         console.log(`WebSocket Connected to IB Gateway Backend at ${wsUrl}`);
         updateWsStatusUI('connected');
+        // The backend handles messages from one websocket sequentially.
+        // Request the lightweight shared discount snapshot before submitting
+        // contract qualification/subscription work, otherwise a large saved
+        // portfolio can leave the UI on the manual fallback for many seconds.
+        if (!_isHistoricalMode() && state.useMarketDiscountCurve === true) {
+            requestDiscountCurveSnapshot();
+        }
         handleLiveSubscriptions();
         requestActiveHedgeOrdersSnapshot();
         requestActiveComboOrdersSnapshot();
@@ -900,6 +1544,9 @@ function connectWebSocket() {
 
     ws.onclose = () => {
         isWsConnected = false;
+        _lastLiveSubscriptionSignature = '';
+        _lastLiveSubscriptionSocket = null;
+        _setLiveProjectionFeedHealth({ connected: false, stale: true });
         state.liveComboOrderAccountsConnected = false;
         const controlPanelUi = _getControlPanelUiApi();
         if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
@@ -916,6 +1563,7 @@ function connectWebSocket() {
 
     ws.onerror = (error) => {
         console.error("WebSocket Error:", error);
+        _setLiveProjectionFeedHealth({ connected: false, stale: true });
         state.liveComboOrderAccountsConnected = false;
         const controlPanelUi = _getControlPanelUiApi();
         if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
@@ -944,10 +1592,19 @@ function connectWebSocket() {
             if (_handleComboOrderMessage(data)) {
                 return;
             }
+            if (_handleDiscountCurveMessage(data)) {
+                return;
+            }
             if (_handleHistoricalReplayMessage(data)) {
                 return;
             }
+            if (_handleOptionContractMetadataMessage(data)) {
+                return;
+            }
             if (_handleApiMarketDataSubscriptionsResetMessage(data)) {
+                return;
+            }
+            if (_handleOptionSubscriptionStatusMessage(data)) {
                 return;
             }
             processLiveMarketData(data);
@@ -955,6 +1612,50 @@ function connectWebSocket() {
             console.error("Error parsing WS message:", e);
         }
     };
+}
+
+function _handleOptionContractMetadataMessage(data) {
+    if (!data || typeof data !== 'object' || data.action !== 'option_contract_metadata') {
+        return false;
+    }
+    // ContractDetails is price-independent evidence.  Keep it out of
+    // processLiveMarketData so it cannot refresh the feed/quote clock, replace
+    // a cached BBO, or change IV/current-price state.
+    if (data.contractMetadataOnly !== true || _isHistoricalMode()) {
+        return true;
+    }
+
+    const expandedOptions = data.options && typeof data.options === 'object'
+        ? { ...data.options }
+        : {};
+    _expandOptionQuoteAliases(expandedOptions);
+    const filtered = _filterLiveOptionQuotesByRequestIdentity(expandedOptions);
+    const changedGroupIds = new Set();
+    let changed = false;
+
+    Object.entries(filtered.accepted || {}).forEach(([subId, metadata]) => {
+        // Unlike historical/isolated quote callers, this live-only metadata
+        // channel never accepts an id outside the current subscription map.
+        if (!_liveQuoteRuntime.optionRequestIdentityById.has(subId)) return;
+        (state.groups || []).forEach((group) => {
+            if (!group || group.liveData !== true) return;
+            (group.legs || []).forEach((leg) => {
+                if (!leg || leg.id !== subId) return;
+                const identityChanged = _applyLiveOptionContractIdentity(leg, metadata);
+                const timingChanged = _applyLiveOptionExpiryTiming(leg, metadata);
+                if (!identityChanged && !timingChanged) return;
+                changed = true;
+                if (group.id) changedGroupIds.add(group.id);
+            });
+        });
+    });
+
+    if (changed) {
+        _scheduleDerivedValueRefresh({
+            groupIds: Array.from(changedGroupIds),
+        }, false);
+    }
+    return true;
 }
 
 function _handleApiMarketDataSubscriptionsResetMessage(data) {
@@ -969,15 +1670,136 @@ function _handleApiMarketDataSubscriptionsResetMessage(data) {
         statusElement.className = 'ws-status ws-error';
         statusElement.title = message;
     }
-    if (data.success === true && typeof window.alert === 'function') {
-        window.alert(message);
+    if (data.success === true) {
+        _lastLiveSubscriptionSignature = '';
+        _lastLiveSubscriptionSocket = null;
+        if (typeof window.alert === 'function') {
+            window.alert(message);
+        }
     }
     return true;
+}
+
+function _describeUnresolvedOptionLeg(entry) {
+    if (!entry || typeof entry !== 'object') return '';
+    const parts = [];
+    const symbol = String(entry.symbol || '').trim();
+    if (symbol) parts.push(symbol);
+    const expDate = String(entry.expDate || '').replace(/\D/g, '').slice(0, 8);
+    if (expDate.length === 8) {
+        parts.push(`${expDate.slice(0, 4)}-${expDate.slice(4, 6)}-${expDate.slice(6, 8)}`);
+    }
+    const right = String(entry.right || '').trim().toUpperCase().slice(0, 1);
+    if (right === 'C' || right === 'P') parts.push(right);
+    const strike = Number(entry.strike);
+    if (Number.isFinite(strike)) parts.push(String(strike));
+    return parts.join(' ');
+}
+
+function _buildUnresolvedOptionReason(entry) {
+    const label = _describeUnresolvedOptionLeg(entry);
+    const subject = label ? `${label} ` : '';
+    const detail = String((entry && entry.detail) || '').trim();
+    if (entry && entry.reason === 'invalid_request') {
+        return `${subject}was rejected as a malformed contract request${detail ? `: ${detail}` : ''}.`;
+    }
+    // IBKR lists strikes per expiry, so a strike that exists on one expiry can
+    // be genuinely absent on another. Say so instead of implying a bug.
+    return `${subject}has no matching contract at IBKR. This strike is not listed for that expiry — pick a neighbouring strike or expiry.`;
+}
+
+function _handleOptionSubscriptionStatusMessage(data) {
+    if (!data || typeof data !== 'object' || data.action !== 'option_subscription_status') {
+        return false;
+    }
+    if (_isHistoricalMode()) {
+        return true;
+    }
+
+    const entriesById = new Map();
+    (Array.isArray(data.unresolved) ? data.unresolved : []).forEach((entry) => {
+        if (!entry || typeof entry !== 'object') return;
+        const subId = String(entry.id || '').trim();
+        if (!subId) return;
+        entriesById.set(subId, entry);
+    });
+
+    const unresolvedById = {};
+    entriesById.forEach((entry, subId) => {
+        unresolvedById[subId] = {
+            reason: String(entry.reason || 'contract_not_found'),
+            label: _describeUnresolvedOptionLeg(entry),
+            message: _buildUnresolvedOptionReason(entry),
+        };
+    });
+    // Identical contracts collapse to one canonical request before sending, so
+    // the backend only names that id. Propagate the verdict to the alias legs
+    // exactly as quotes are propagated, or a duplicated leg in another group
+    // stays silently unquoted -- the failure this warning exists to end.
+    _liveQuoteRuntime.optionQuoteAliasesByCanonicalId.forEach((aliasIds, canonicalId) => {
+        const record = unresolvedById[canonicalId];
+        if (!record) return;
+        aliasIds.forEach((aliasId) => {
+            if (unresolvedById[aliasId] === undefined) {
+                unresolvedById[aliasId] = record;
+            }
+        });
+    });
+    state.liveSubscriptionUnresolvedById = unresolvedById;
+
+    const changedGroupIds = new Set();
+    let changed = false;
+    (state.groups || []).forEach((group) => {
+        if (!group || group.liveData !== true) return;
+        (group.legs || []).forEach((leg) => {
+            if (!leg) return;
+            const record = unresolvedById[String(leg.id)];
+            if (!record) return;
+            let legChanged = false;
+            if (leg.currentPrice !== null) {
+                leg.currentPrice = null;
+                legChanged = true;
+            }
+            legChanged = _markOptionQuoteMissing(leg) || legChanged;
+            if (leg.liveQuoteIdentityStatus !== 'not_found') {
+                leg.liveQuoteIdentityStatus = 'not_found';
+                legChanged = true;
+            }
+            if (leg.liveQuoteIdentityReason !== record.message) {
+                leg.liveQuoteIdentityReason = record.message;
+                legChanged = true;
+            }
+            if (legChanged) {
+                changed = true;
+                if (group.id) changedGroupIds.add(group.id);
+            }
+        });
+    });
+
+    _refreshLiveSubscriptionWarnings();
+
+    if (changed) {
+        _scheduleDerivedValueRefresh({
+            groupIds: Array.from(changedGroupIds),
+        }, false);
+    }
+    return true;
+}
+
+function _refreshLiveSubscriptionWarnings() {
+    const groupEditorUi = _getGroupEditorUiApi();
+    if (!groupEditorUi || typeof groupEditorUi.applyLiveSubscriptionWarnings !== 'function') {
+        return;
+    }
+    _runUiRefreshSafely('liveSubscriptionWarnings', () => {
+        groupEditorUi.applyLiveSubscriptionWarnings(state);
+    });
 }
 
 function reconnectWebSocket() {
     _clearWsReconnectTimer();
     isWsConnected = false;
+    _setLiveProjectionFeedHealth({ connected: false, stale: true });
 
     if (ws) {
         ws.onopen = null;
@@ -1004,6 +1826,43 @@ function requestPortfolioAvgCostSnapshot() {
     ws.send(JSON.stringify({
         action: 'request_portfolio_avg_cost_snapshot',
     }));
+    return true;
+}
+
+function requestDiscountCurveSnapshot(options = {}) {
+    const requestOptions = options && typeof options === 'object' ? options : {};
+    const isManual = requestOptions.manual === true;
+    if (_isHistoricalMode() || !isWsConnected || !ws) {
+        if (isManual) {
+            state.discountCurveRequestPending = false;
+            state.discountCurveRequestManual = false;
+            state.discountCurveLastResponseStatus = 'not_sent';
+            state.discountCurveLastError = _isHistoricalMode()
+                ? 'Latest-curve loading is disabled in historical replay to prevent rate look-ahead.'
+                : 'Cannot load the latest yield curve because the WebSocket backend is disconnected.';
+            _refreshDiscountCurveConsumers(false);
+        }
+        return false;
+    }
+
+    state.discountCurveRequestPending = isManual;
+    state.discountCurveRequestManual = isManual;
+    state.discountCurveLastResponseStatus = '';
+    if (isManual) {
+        state.discountCurveLastError = '';
+    }
+    if (isManual) {
+        _refreshDiscountCurveConsumers(false);
+    }
+
+    const payload = {
+        action: 'request_discount_curve',
+    };
+    if (isManual) {
+        payload.refresh = true;
+        payload.requestedBy = 'manual_control';
+    }
+    ws.send(JSON.stringify(payload));
     return true;
 }
 
@@ -1610,6 +2469,7 @@ window.resetWsPort = resetWsPort;
 window.applyWsEndpoint = applyWsEndpoint;
 window.resetWsEndpoint = resetWsEndpoint;
 window.requestPortfolioAvgCostSnapshot = requestPortfolioAvgCostSnapshot;
+window.requestDiscountCurveSnapshot = requestDiscountCurveSnapshot;
 window.requestDeltaHedgeBrokerPreview = requestDeltaHedgeBrokerPreview;
 window.requestDeltaHedgeSubmit = requestDeltaHedgeSubmit;
 window.requestDeltaHedgeCancel = requestDeltaHedgeCancel;
@@ -1683,6 +2543,320 @@ function _buildFuturesPoolRequests(profile) {
         }));
 }
 
+function _futureIdentityMultiplierMatches(left, right) {
+    const leftText = String(left || '').trim();
+    const rightText = String(right || '').trim();
+    if (!leftText || !rightText) return false;
+    const leftNumber = Number(leftText);
+    const rightNumber = Number(rightText);
+    if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+        return Math.abs(leftNumber - rightNumber) <= 1e-9;
+    }
+    return leftText === rightText;
+}
+
+function _clearFuturesPoolEntryLiveQuote(entry, status, reason, expected = null) {
+    if (!entry || typeof entry !== 'object') return false;
+    let changed = false;
+    [
+        'bid', 'ask', 'mark', 'quoteAsOf', 'lastQuotedAt', 'lastTradeDate',
+        'localSymbol', 'symbol', 'secType', 'exchange', 'currency',
+        'multiplier', 'markSource', 'conId', 'qualifiedContractMonth',
+        'requestIdentityVerified', 'liveQuoteRequestGeneration',
+        'liveQuoteRequestId', 'requestedSecType', 'requestedSymbol',
+        'requestedExchange', 'requestedCurrency', 'requestedMultiplier',
+        'requestedContractMonth',
+    ].forEach((field) => {
+        const nextValue = ['bid', 'ask', 'mark', 'conId', 'liveQuoteRequestGeneration']
+            .includes(field) ? null : '';
+        if (entry[field] !== nextValue) {
+            entry[field] = nextValue;
+            changed = true;
+        }
+    });
+    if (entry.liveQuoteIdentityStatus !== status) {
+        entry.liveQuoteIdentityStatus = status;
+        changed = true;
+    }
+    if (entry.liveQuoteIdentityReason !== reason) {
+        entry.liveQuoteIdentityReason = reason;
+        changed = true;
+    }
+    if (expected) {
+        const pendingFields = {
+            liveQuoteRequestGeneration: expected.generation,
+            liveQuoteRequestId: expected.wireId,
+            requestedSecType: expected.secType,
+            requestedSymbol: expected.symbol,
+            requestedExchange: expected.exchange,
+            requestedCurrency: expected.currency,
+            requestedMultiplier: expected.multiplier,
+            requestedContractMonth: expected.contractMonth,
+        };
+        Object.entries(pendingFields).forEach(([field, value]) => {
+            if (entry[field] !== value) {
+                entry[field] = value;
+                changed = true;
+            }
+        });
+    }
+    return changed;
+}
+
+function _buildFutureRequestIdentity(request, generation, wireId) {
+    const logicalId = String(request && request.id || '').trim();
+    const poolEntry = (state.futuresPool || []).find(entry => entry && entry.id === logicalId) || null;
+    const contractMonth = _normalizeContractMonthIdentity(request && request.contractMonth);
+    const storedIdentityMatches = !!(poolEntry
+        && poolEntry.liveQuoteIdentityStatus === 'verified'
+        && poolEntry.requestIdentityVerified === true
+        && _normalizeContractMonthIdentity(poolEntry.qualifiedContractMonth) === contractMonth
+        && String(poolEntry.secType || '').trim().toUpperCase() === 'FUT'
+        && String(poolEntry.symbol || '').trim().toUpperCase()
+            === String(request && request.symbol || '').trim().toUpperCase()
+        && _futureIdentityMultiplierMatches(poolEntry.multiplier, request && request.multiplier));
+    const storedConId = parseInt(poolEntry && poolEntry.conId, 10);
+    return {
+        logicalId,
+        wireId,
+        generation,
+        secType: String(request && request.secType || '').trim().toUpperCase(),
+        symbol: String(request && request.symbol || '').trim().toUpperCase(),
+        exchange: String(request && request.exchange || '').trim().toUpperCase(),
+        currency: String(request && request.currency || '').trim().toUpperCase(),
+        multiplier: String(request && request.multiplier || '').trim(),
+        contractMonth,
+        conId: storedIdentityMatches && storedConId > 0 ? storedConId : null,
+    };
+}
+
+function _prepareLiveFutureRequests(futuresRequests) {
+    _futureSubscriptionGeneration += 1;
+    if (!Number.isSafeInteger(_futureSubscriptionGeneration)
+        || _futureSubscriptionGeneration <= 0) {
+        _futureSubscriptionGeneration = 1;
+    }
+    const generation = _futureSubscriptionGeneration;
+    state.liveFuturesRequestGeneration = generation;
+    _liveQuoteRuntime.futureRequestIdentityByWireId.clear();
+    _liveQuoteRuntime.rejectedFutureIdentityWarnings.clear();
+
+    const expectedByLogicalId = new Map();
+    const requests = (Array.isArray(futuresRequests) ? futuresRequests : []).map((request, index) => {
+        // Avoid the literal "future_" in this opaque id because older backend
+        // versions removed that substring globally when returning payload keys.
+        const wireId = `frqg${generation}x${index + 1}`;
+        const identity = _buildFutureRequestIdentity(request, generation, wireId);
+        _liveQuoteRuntime.futureRequestIdentityByWireId.set(wireId, identity);
+        expectedByLogicalId.set(identity.logicalId, identity);
+        return { ...request, id: wireId };
+    });
+
+    (state.futuresPool || []).forEach((entry) => {
+        const expected = expectedByLogicalId.get(String(entry && entry.id || '').trim()) || null;
+        _clearFuturesPoolEntryLiveQuote(
+            entry,
+            expected ? 'pending' : 'unavailable',
+            expected ? 'awaiting current futures request generation' : 'no valid futures request',
+            expected
+        );
+    });
+    return { generation, requests };
+}
+
+function _futureQuoteIdentityMismatchReason(expected, rawQuote, payloadAsOf) {
+    const actual = _cloneLiveQuoteSnapshot(rawQuote);
+    if (!actual) return 'missing qualified futures quote';
+    if (!(actual.conId > 0)) return 'missing qualified futures conId';
+    if (!String(actual.localSymbol || '').trim()) return 'missing qualified futures localSymbol';
+    if (String(actual.secType || '').trim().toUpperCase() !== expected.secType) {
+        return 'futures secType mismatch';
+    }
+    if (String(actual.symbol || '').trim().toUpperCase() !== expected.symbol) {
+        return 'futures symbol mismatch';
+    }
+    // A qualified future's lastTradeDate cannot stand in for its delivery month:
+    // CL Sep 2026 stops trading 2026-08-20, so deriving a month from that date
+    // rejects every correctly qualified contract whose expiry leads delivery.
+    // Only ContractDetails-sourced months are accepted as identity evidence.
+    const monthSource = String(actual.contractMonthSource || '').trim();
+    const actualMonth = _normalizeContractMonthIdentity(actual.contractMonth);
+    if (!actualMonth || monthSource !== 'ib_contract_details') {
+        return 'futures contract month unverified';
+    }
+    if (actualMonth !== expected.contractMonth) {
+        return 'futures contract month mismatch';
+    }
+    if (expected.exchange
+        && String(actual.exchange || '').trim().toUpperCase() !== expected.exchange) {
+        return 'futures exchange mismatch';
+    }
+    if (String(actual.currency || '').trim().toUpperCase() !== expected.currency) {
+        return 'futures currency mismatch';
+    }
+    if (expected.multiplier
+        && !_futureIdentityMultiplierMatches(actual.multiplier, expected.multiplier)) {
+        return 'futures multiplier mismatch';
+    }
+    if (expected.conId && actual.conId !== expected.conId) {
+        return 'futures conId mismatch';
+    }
+
+    const quoteMs = Date.parse(String(actual.quoteAsOf || '').trim());
+    const payloadMs = Date.parse(String(payloadAsOf || '').trim());
+    if (!Number.isFinite(quoteMs)) return 'futures quoteAsOf unavailable';
+    if (!Number.isFinite(payloadMs)) return 'futures payloadAsOf unavailable';
+    const ageSeconds = (payloadMs - quoteMs) / 1000;
+    if (ageSeconds > MAX_LIVE_FUTURE_QUOTE_AGE_SECONDS) return 'futures quote stale';
+    if (ageSeconds < -MAX_LIVE_FUTURE_QUOTE_SKEW_SECONDS) return 'futures quote after payload';
+    return '';
+}
+
+function _filterLiveFutureQuotesByRequestIdentity(futures, payloadAsOf) {
+    if (!futures || typeof futures !== 'object') {
+        return { accepted: futures, rejected: new Map() };
+    }
+    // Isolated unit callers and historical data do not register live request
+    // identities.  They may populate the cache, but pricing_context will not
+    // treat those unverified entries as live Black-76 inputs.
+    if (_liveQuoteRuntime.futureRequestIdentityByWireId.size === 0) {
+        return { accepted: futures, rejected: new Map() };
+    }
+
+    const accepted = {};
+    const rejected = new Map();
+    Object.entries(futures).forEach(([wireId, quote]) => {
+        const expected = _liveQuoteRuntime.futureRequestIdentityByWireId.get(wireId);
+        if (!expected) {
+            const warningKey = `${wireId}|old_or_unknown_generation`;
+            if (!_liveQuoteRuntime.rejectedFutureIdentityWarnings.has(warningKey)) {
+                _liveQuoteRuntime.rejectedFutureIdentityWarnings.add(warningKey);
+                console.warn(`Ignored live futures quote ${wireId}: old or unknown request generation.`);
+            }
+            return;
+        }
+        const reason = _futureQuoteIdentityMismatchReason(expected, quote, payloadAsOf);
+        if (reason) {
+            rejected.set(expected.logicalId, { reason, expected });
+            const warningKey = `${wireId}|${reason}`;
+            if (!_liveQuoteRuntime.rejectedFutureIdentityWarnings.has(warningKey)) {
+                _liveQuoteRuntime.rejectedFutureIdentityWarnings.add(warningKey);
+                console.warn(`Ignored live futures quote ${wireId}: ${reason}.`);
+            }
+            return;
+        }
+        accepted[expected.logicalId] = {
+            ...quote,
+            requestIdentityVerified: true,
+            requestGeneration: expected.generation,
+            requestId: expected.wireId,
+            requestedSecType: expected.secType,
+            requestedSymbol: expected.symbol,
+            requestedExchange: expected.exchange,
+            requestedCurrency: expected.currency,
+            requestedMultiplier: expected.multiplier,
+            requestedContractMonth: expected.contractMonth,
+        };
+    });
+    return { accepted, rejected };
+}
+
+function _invalidateRejectedLiveFutureQuote(logicalId, rejection, changedGroupIds) {
+    const entry = (state.futuresPool || []).find(candidate => candidate && candidate.id === logicalId);
+    _liveQuoteRuntime.futureQuotesById.delete(logicalId);
+    if (!entry) return false;
+    const changed = _clearFuturesPoolEntryLiveQuote(
+        entry,
+        'rejected',
+        String(rejection && rejection.reason || rejection || 'futures quote rejected'),
+        rejection && rejection.expected || null
+    );
+    if (changed && changedGroupIds instanceof Set) {
+        (state.groups || []).forEach((group) => {
+            let groupAffected = false;
+            (group.legs || []).forEach((leg) => {
+                if (!leg || leg.underlyingFutureId !== logicalId) return;
+                groupAffected = true;
+                if (_isUnderlyingLeg(leg) && leg.currentPriceSource === 'live') {
+                    leg.currentPrice = null;
+                    leg.currentPriceSource = '';
+                }
+            });
+            if (groupAffected && group.id) changedGroupIds.add(group.id);
+        });
+    }
+    return changed;
+}
+
+function _invalidateStaleLiveFuturesPoolQuotes(changedGroupIds) {
+    const snapshotMs = Date.parse(String(state && state.liveQuoteAsOf || '').trim());
+    if (!Number.isFinite(snapshotMs)) return false;
+    let changed = false;
+    (state.futuresPool || []).forEach((entry) => {
+        if (!entry || entry.liveQuoteIdentityStatus !== 'verified') return;
+        const quoteMs = Date.parse(String(entry.quoteAsOf || entry.lastQuotedAt || '').trim());
+        const ageSeconds = Number.isFinite(quoteMs) ? (snapshotMs - quoteMs) / 1000 : Infinity;
+        if (ageSeconds <= MAX_LIVE_FUTURE_QUOTE_AGE_SECONDS
+            && ageSeconds >= -MAX_LIVE_FUTURE_QUOTE_SKEW_SECONDS) return;
+        changed = _invalidateRejectedLiveFutureQuote(
+            entry.id,
+            { reason: ageSeconds > MAX_LIVE_FUTURE_QUOTE_AGE_SECONDS
+                ? 'futures quote stale'
+                : 'futures quote after snapshot' },
+            changedGroupIds
+        ) || changed;
+    });
+    return changed;
+}
+
+function _resolveOptionUnderlyingContractMonth(request, profile, registry, futuresRequests) {
+    if (String(profile && profile.optionSecType || '').toUpperCase() !== 'FOP') {
+        return '';
+    }
+    const selectedFuture = _resolveFuturesPoolEntryById(request && request.underlyingFutureId);
+    const explicitMonth = _normalizeContractMonthIdentity(
+        request && request.underlyingContractMonth
+        || selectedFuture && selectedFuture.contractMonth
+        || state.underlyingContractMonth
+    );
+    if (explicitMonth) return explicitMonth;
+
+    const availableMonths = Array.from(new Set(
+        (Array.isArray(futuresRequests) ? futuresRequests : [])
+            .map(candidate => _normalizeContractMonthIdentity(candidate && candidate.contractMonth))
+            .filter(Boolean)
+    ));
+    if (availableMonths.length === 1) return availableMonths[0];
+
+    return registry && typeof registry.resolveDefaultUnderlyingContractMonth === 'function'
+        ? _normalizeContractMonthIdentity(registry.resolveDefaultUnderlyingContractMonth(
+            state.underlyingSymbol,
+            _getQuoteReferenceDate()
+        ))
+        : '';
+}
+
+function _buildCarryReferenceRequests() {
+    const registry = _getProductRegistryApi();
+    if (!registry || typeof registry.resolveForwardCarryPolicy !== 'function') {
+        return [];
+    }
+    const policy = registry.resolveForwardCarryPolicy(state && state.underlyingSymbol);
+    const reference = policy && policy.carryReference;
+    if (policy.pricingInputMode !== 'FOP' || !reference || typeof reference !== 'object') {
+        return [];
+    }
+    const request = {
+        id: String(reference.id || 'spot').trim() || 'spot',
+        secType: String(reference.secType || '').trim().toUpperCase(),
+        symbol: String(reference.symbol || '').trim().toUpperCase(),
+        exchange: String(reference.exchange || '').trim(),
+        currency: String(reference.currency || policy.currency || 'USD').trim().toUpperCase(),
+        purpose: 'diagnostic_net_carry_reference',
+    };
+    return request.secType && request.symbol ? [request] : [];
+}
+
 function _buildUnderlyingRequest(profile, optionRequests, futuresRequests) {
     const registry = _getProductRegistryApi();
     const defaultUnderlyingContractMonth = profile?.underlyingSecType === 'FUT'
@@ -1730,13 +2904,52 @@ function _buildHistoricalSnapshotPayload(underlyingRequest, optionRequests, futu
     };
 }
 
-function handleLiveSubscriptions() {
-    if (!isWsConnected || !ws) return;
-    _resetLiveQuoteRuntime();
+function _clearSubscribedOptionContractMetadata() {
+    // A resolution verdict belongs to the subscription that produced it. Drop
+    // it up front so an edited strike shows "waiting" rather than the previous
+    // strike's "not found" until the backend answers.
+    state.liveSubscriptionUnresolvedById = {};
+    _refreshLiveSubscriptionWarnings();
+    // Contract timing belongs to the exact live subscription. Never carry an
+    // old conId's cutoff across an edited leg or reconnect.
+    (state.groups || []).forEach((group) => {
+        (group.legs || []).forEach((leg) => {
+            delete leg.expiryAsOf;
+            delete leg.expiryTimingSource;
+            delete leg.lastTradeDate;
+            delete leg.lastTradeTime;
+            delete leg.expiryTimeZoneId;
+            delete leg.realExpirationDate;
+            delete leg.qualifiedOptionConId;
+            delete leg.qualifiedOptionLocalSymbol;
+            delete leg.qualifiedOptionTradingClass;
+            delete leg.qualifiedOptionUnderConId;
+            delete leg.qualifiedOptionUnderlyingContractMonth;
+            delete leg.liveQuoteIdentityStatus;
+            delete leg.liveQuoteIdentityReason;
+        });
+    });
+}
+
+function handleLiveSubscriptions(options = {}) {
+    if (!isWsConnected || !ws) return false;
     const registry = _getProductRegistryApi();
     const profile = registry && typeof registry.resolveUnderlyingProfile === 'function'
         ? registry.resolveUnderlyingProfile(state.underlyingSymbol)
         : null;
+    const sessionLogic = globalThis.OptionComboSessionLogic;
+    if (profile && profile.optionSecType === 'FOP'
+        && sessionLogic && typeof sessionLogic.ensureInitialFuturesPoolEntry === 'function') {
+        sessionLogic.ensureInitialFuturesPoolEntry(
+            state,
+            null,
+            _getQuoteReferenceDate()
+        );
+    }
+    if (profile && profile.optionSecType === 'FOP'
+        && sessionLogic && typeof sessionLogic.autoBindSingleFuturesPoolEntry === 'function') {
+        sessionLogic.autoBindSingleFuturesPoolEntry(state);
+    }
     if (!_isHistoricalMode()
         && registry
         && typeof registry.supportsLegacyLiveData === 'function'
@@ -1745,7 +2958,7 @@ function handleLiveSubscriptions() {
             console.warn(`Legacy live-data subscriptions are not implemented for ${state.underlyingSymbol}. Use manual prices for now.`);
             _legacyLiveDataWarningShown = true;
         }
-        return;
+        return false;
     }
 
     const optionRequests = [];
@@ -1769,7 +2982,8 @@ function handleLiveSubscriptions() {
         underlying: null,
         options: optionRequests,
         futures: futuresRequests,
-        stocks: []
+        stocks: [],
+        carryReferences: _buildCarryReferenceRequests(),
     };
 
     if (profile?.underlyingSecType === 'IND'
@@ -1817,6 +3031,12 @@ function handleLiveSubscriptions() {
             && typeof registry.resolveOptionContractSpec === 'function'
             ? registry.resolveOptionContractSpec(state.underlyingSymbol, request.expDate)
             : null;
+        const underlyingContractMonth = _resolveOptionUnderlyingContractMonth(
+            request,
+            profile,
+            registry,
+            futuresRequests
+        );
         optionRequests.push({
             id: request.id,
             secType: profile?.optionSecType || 'OPT',
@@ -1834,6 +3054,7 @@ function handleLiveSubscriptions() {
             strike: parseFloat(request.strike),
             expDate: _toContractDateCode(request.expDate),
             contractMonth: _toContractMonth(request.expDate),
+            underlyingContractMonth: underlyingContractMonth || undefined,
         });
     });
 
@@ -1842,11 +3063,16 @@ function handleLiveSubscriptions() {
         if (group.liveData) {
             group.legs.forEach(leg => {
                 if (!_isUnderlyingLeg(leg)) {
-                    const selectedFuture = _resolveFuturesPoolEntryById(leg.underlyingFutureId);
                     const optionContractSpec = registry
                         && typeof registry.resolveOptionContractSpec === 'function'
                         ? registry.resolveOptionContractSpec(state.underlyingSymbol, leg.expDate)
                         : null;
+                    const underlyingContractMonth = _resolveOptionUnderlyingContractMonth(
+                        leg,
+                        profile,
+                        registry,
+                        futuresRequests
+                    );
                     optionRequests.push({
                         id: leg.id,
                         secType: profile?.optionSecType || 'OPT',
@@ -1864,31 +3090,12 @@ function handleLiveSubscriptions() {
                         strike: leg.strike,
                         expDate: _toContractDateCode(leg.expDate),
                         contractMonth: _toContractMonth(leg.expDate),
-                        underlyingContractMonth: selectedFuture?.contractMonth
-                            || state.underlyingContractMonth
-                            || (registry
-                                && typeof registry.resolveDefaultUnderlyingContractMonth === 'function'
-                                ? registry.resolveDefaultUnderlyingContractMonth(
-                                    state.underlyingSymbol,
-                                    _getQuoteReferenceDate()
-                                )
-                                : ''),
+                        underlyingContractMonth,
                     });
                 }
             });
         }
     });
-
-    const dedupedOptionRequests = _dedupeOptionRequestsForSubscription(optionRequests);
-    payload.options = dedupedOptionRequests;
-
-    payload.underlying = _buildUnderlyingRequest(profile || {
-        family: 'DEFAULT_EQUITY',
-        underlyingSecType: 'STK',
-        underlyingSymbol: state.underlyingSymbol,
-        underlyingExchange: 'SMART',
-        currency: 'USD',
-    }, dedupedOptionRequests, futuresRequests);
 
     // Stock hedge rows use the stock path; FUT hedge rows are in futuresRequests.
     state.hedges.forEach(hedge => {
@@ -1897,12 +3104,56 @@ function handleLiveSubscriptions() {
         }
     });
 
-    if (_isHistoricalMode()) {
-        ws.send(JSON.stringify(_buildHistoricalSnapshotPayload(payload.underlying, dedupedOptionRequests, futuresRequests)));
-        return;
+    const fallbackProfile = profile || {
+        family: 'DEFAULT_EQUITY',
+        underlyingSecType: 'STK',
+        underlyingSymbol: state.underlyingSymbol,
+        underlyingExchange: 'SMART',
+        currency: 'USD',
+    };
+    const underlyingIntent = _buildUnderlyingRequest(
+        fallbackProfile,
+        optionRequests,
+        futuresRequests
+    );
+    const subscriptionSignature = JSON.stringify({
+        greeksEnabled: payload.greeksEnabled,
+        underlying: underlyingIntent,
+        options: optionRequests,
+        futures: futuresRequests,
+        stocks: payload.stocks,
+        carryReferences: payload.carryReferences,
+    });
+    const historicalMode = _isHistoricalMode();
+    if (!historicalMode && options.force !== true
+        && _lastLiveSubscriptionSocket === ws
+        && _lastLiveSubscriptionSignature === subscriptionSignature) {
+        return false;
     }
 
+    _resetLiveQuoteRuntime();
+    _invalidateIndexForwardRateSamples('live_subscription_reset');
+    _clearSubscribedOptionContractMetadata();
+
+    const dedupedOptionRequests = _dedupeOptionRequestsForSubscription(optionRequests);
+    payload.options = dedupedOptionRequests;
+    payload.underlying = _buildUnderlyingRequest(
+        fallbackProfile,
+        dedupedOptionRequests,
+        futuresRequests
+    );
+
+    if (historicalMode) {
+        ws.send(JSON.stringify(_buildHistoricalSnapshotPayload(payload.underlying, dedupedOptionRequests, futuresRequests)));
+        return true;
+    }
+
+    const preparedFutureRequests = _prepareLiveFutureRequests(futuresRequests);
+    payload.futures = preparedFutureRequests.requests;
+    payload.futuresRequestGeneration = preparedFutureRequests.generation;
     ws.send(JSON.stringify(payload));
+    _lastLiveSubscriptionSignature = subscriptionSignature;
+    _lastLiveSubscriptionSocket = ws;
     requestPortfolioAvgCostSnapshot();
     if (state.allowLiveComboOrders === true
         || !Array.isArray(state.liveComboOrderAccounts)
@@ -1910,6 +3161,7 @@ function handleLiveSubscriptions() {
         || state.liveComboOrderAccountsConnected !== true) {
         requestManagedAccountsSnapshot();
     }
+    return true;
 }
 
 let _unsubscribeOptionsFeedbackTimer = null;
@@ -2112,7 +3364,7 @@ function _matchesPortfolioAvgCostItem(leg, item) {
 
 function _parsePositivePortfolioMarketPrice(rawValue) {
     const parsed = parseFloat(rawValue);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function _parsePortfolioPnlValue(rawValue) {
@@ -2120,7 +3372,7 @@ function _parsePortfolioPnlValue(rawValue) {
     return Number.isFinite(parsed) ? parsed : null;
 }
 
-function _applyPortfolioValuationToLeg(leg, item) {
+function _applyPortfolioValuationToLeg(leg, item, receivedAsOf = '') {
     let changed = false;
 
     const nextPortfolioMarketPrice = _parsePositivePortfolioMarketPrice(item.marketPrice);
@@ -2137,6 +3389,12 @@ function _applyPortfolioValuationToLeg(leg, item) {
         || leg.portfolioMarketPriceSource !== 'tws_portfolio') {
         leg.portfolioMarketPrice = nextPortfolioMarketPrice;
         leg.portfolioMarketPriceSource = 'tws_portfolio';
+        changed = true;
+    }
+    if (nextPortfolioMarketPrice !== null
+        && receivedAsOf
+        && leg.portfolioMarketPriceAsOf !== receivedAsOf) {
+        leg.portfolioMarketPriceAsOf = receivedAsOf;
         changed = true;
     }
 
@@ -2161,6 +3419,10 @@ function _applyPortfolioAvgCostUpdate(data) {
     }
 
     let stateChanged = false;
+    const payloadAsOf = String(data && data.payloadAsOf || '').trim();
+    const receivedAsOf = Number.isFinite(Date.parse(payloadAsOf))
+        ? new Date(payloadAsOf).toISOString()
+        : new Date().toISOString();
 
     state.groups.forEach(group => {
         (group.legs || []).forEach(leg => {
@@ -2179,7 +3441,7 @@ function _applyPortfolioAvgCostUpdate(data) {
                 return;
             }
 
-            stateChanged = _applyPortfolioValuationToLeg(leg, match) || stateChanged;
+            stateChanged = _applyPortfolioValuationToLeg(leg, match, receivedAsOf) || stateChanged;
 
             if (!_isPortfolioAvgCostSyncEnabled(group) || (leg && leg.costSource === 'execution_report')) {
                 return;
@@ -3252,6 +4514,82 @@ function _applyEstimatedOptionIvFallback(changedGroupIds) {
 // Live Market Data Processing
 // -------------------------------------------------------------
 
+function _applyHistoricalDiscountCurveMetadata(replay, effectiveDate) {
+    const previousFingerprint = _discountCurveFingerprint(state.discountCurve);
+    const previousError = String(state.discountCurveLastError || '');
+    const directSnapshot = replay && replay.discountCurve && typeof replay.discountCurve === 'object'
+        ? replay.discountCurve
+        : null;
+    const curveEffectiveDate = _normalizeHistoricalDateKey(
+        directSnapshot && (directSnapshot.curveAsOf || directSnapshot.asOf || directSnapshot.effectiveDate)
+        || replay && replay.yieldCurveEffectiveDate
+    );
+    const replayEffectiveDate = _normalizeHistoricalDateKey(effectiveDate);
+    const rawPoints = Array.isArray(directSnapshot && directSnapshot.points)
+        ? directSnapshot.points
+        : Array.isArray(replay && replay.yieldCurvePoints)
+            ? replay.yieldCurvePoints
+        : [];
+    let nextCurve = null;
+    let errorMessage = '';
+
+    if (!curveEffectiveDate || rawPoints.length === 0) {
+        errorMessage = `No yield curve is available on or before replay date ${replayEffectiveDate || '(unknown)'}.`;
+    } else if (!replayEffectiveDate || curveEffectiveDate > replayEffectiveDate) {
+        errorMessage = `Rejected future yield curve ${curveEffectiveDate} for replay date ${replayEffectiveDate || '(unknown)'}.`;
+    } else {
+        try {
+            if (directSnapshot) {
+                nextCurve = _createDiscountCurveFromSnapshot(directSnapshot, {
+                    id: `historical-usd-reference-${curveEffectiveDate}`,
+                });
+            } else {
+                const source = String(replay.yieldCurveSource || 'historical_yield_curve').trim()
+                    || 'historical_yield_curve';
+                const points = rawPoints.map((point) => {
+                    const normalizedPoint = point && typeof point === 'object'
+                        ? { ...point }
+                        : {};
+                    if (normalizedPoint.parYield === undefined
+                        && normalizedPoint.continuousRate === undefined) {
+                        normalizedPoint.parYield = normalizedPoint.rate;
+                    }
+                    return normalizedPoint;
+                });
+                nextCurve = _createDiscountCurveFromSnapshot({
+                    schemaVersion: 1,
+                    kind: 'treasury_discount_curve',
+                    effectiveDate: curveEffectiveDate,
+                    quoteAsOf: `${curveEffectiveDate}T00:00:00Z`,
+                    source,
+                    points,
+                    curveSemantics: 'cmt_par_yield',
+                    inputSemantics: 'cmt_par_yield',
+                    discountRateSemantics: 'continuous_zero_proxy_from_cmt_par_yield',
+                    quality: {
+                        status: 'degraded',
+                        flags: ['historical_snapshot', 'cmt_par_yield_proxy', 'not_bootstrapped_zero_curve'],
+                    },
+                }, {
+                    id: `historical-usd-treasury-${curveEffectiveDate}`,
+                });
+            }
+        } catch (error) {
+            errorMessage = error && error.message
+                ? `Invalid historical yield curve: ${error.message}`
+                : 'Invalid historical yield curve.';
+        }
+    }
+
+    // Historical replay must never retain a curve from a different (possibly
+    // future) replay date. Missing/invalid as-of data therefore falls back to
+    // the replay snapshot's scalar rate instead of preserving the old curve.
+    state.discountCurve = _isUsableDiscountCurve(nextCurve) ? nextCurve : null;
+    state.discountCurveLastError = errorMessage;
+    return previousFingerprint !== _discountCurveFingerprint(state.discountCurve)
+        || previousError !== errorMessage;
+}
+
 function _applyHistoricalReplayMetadata(data) {
     if (!data || !data.historicalReplay || typeof data.historicalReplay !== 'object') {
         return false;
@@ -3308,6 +4646,10 @@ function _applyHistoricalReplayMetadata(data) {
                 stateChanged = true;
             }
         }
+        stateChanged = _applyHistoricalDiscountCurveMetadata(
+            data.historicalReplay,
+            effectiveDate
+        ) || stateChanged;
         const controlPanelUi = _getControlPanelUiApi();
         if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
             _runUiRefreshSafely('boundDynamicControls', () => {
@@ -3402,6 +4744,34 @@ function _markOptionQuoteMissing(leg) {
     }
 
     return stateChanged;
+}
+
+function _applyLiveOptionExpiryTiming(leg, quote) {
+    if (!leg || !quote || typeof quote !== 'object') {
+        return false;
+    }
+    const legExpiry = String(leg.expDate || '').replace(/\D/g, '').slice(0, 8);
+    const lastTradeDate = String(quote.lastTradeDate || '').replace(/\D/g, '').slice(0, 8);
+    const expiryAsOf = String(quote.expiryAsOf || '').trim();
+    if (!legExpiry || lastTradeDate !== legExpiry || !Number.isFinite(Date.parse(expiryAsOf))) {
+        return false;
+    }
+    const next = {
+        expiryAsOf,
+        expiryTimingSource: String(quote.expiryTimingSource || 'ib_contract_details'),
+        lastTradeDate,
+        lastTradeTime: String(quote.lastTradeTime || ''),
+        expiryTimeZoneId: String(quote.timeZoneId || ''),
+        realExpirationDate: String(quote.realExpirationDate || ''),
+    };
+    let changed = false;
+    Object.entries(next).forEach(([key, value]) => {
+        if (leg[key] !== value) {
+            leg[key] = value;
+            changed = true;
+        }
+    });
+    return changed;
 }
 
 function _applyHistoricalBaseDateCosts() {
@@ -3538,8 +4908,37 @@ function _handleHistoricalReplayMessage(data) {
 let renderScheduled = false;
 
 function processLiveMarketData(data) {
-    _expandOptionQuoteAliases(data && data.options);
-    let stateChanged = _applyHistoricalReplayMetadata(data);
+    const liveMode = !_isHistoricalMode();
+    const feedHealthChanged = liveMode && _recordLiveProjectionMarketReceipt(data);
+    let rejectedOptionIdentities = new Map();
+    let rejectedFutureIdentities = new Map();
+    if (data && data.options && typeof data.options === 'object') {
+        const expandedOptions = { ...data.options };
+        _expandOptionQuoteAliases(expandedOptions);
+        const filteredOptions = liveMode
+            ? _filterLiveOptionQuotesByRequestIdentity(expandedOptions)
+            : { accepted: expandedOptions, rejected: new Map() };
+        rejectedOptionIdentities = filteredOptions.rejected;
+        data = {
+            ...data,
+            options: filteredOptions.accepted,
+        };
+    }
+    if (data && data.futures && typeof data.futures === 'object') {
+        const payloadAsOf = _resolveLivePayloadAsOf(data);
+        const filteredFutures = liveMode
+            ? _filterLiveFutureQuotesByRequestIdentity(data.futures, payloadAsOf)
+            : { accepted: data.futures, rejected: new Map() };
+        rejectedFutureIdentities = filteredFutures.rejected;
+        data = {
+            ...data,
+            futures: filteredFutures.accepted,
+        };
+    }
+    const liveClockUpdate = _applyLiveQuoteClock(data);
+    let stateChanged = feedHealthChanged
+        || liveClockUpdate.changed
+        || _applyHistoricalReplayMetadata(data);
     stateChanged = _applyHistoricalExpiryUnderlyingAnchors(data) || stateChanged;
     const quoteSourceKind = _getQuoteSourceKind(data);
     const nextUnderlyingPrice = parseFloat(data && data.underlyingPrice);
@@ -3549,11 +4948,40 @@ function processLiveMarketData(data) {
     const incrementalHedgeIds = new Set();
     const changedOptionQuoteIds = [];
     const changedOptionDeltaQuoteIds = [];
-    const liveMode = !_isHistoricalMode();
     let optionQuotesChanged = false;
+    let optionQuoteEvidenceChanged = false;
     let optionDeltaChanged = false;
     let futureQuotesChanged = false;
+    let carryReferenceQuotesChanged = false;
     let underlyingQuoteChanged = false;
+
+    if (liveMode && rejectedOptionIdentities.size > 0) {
+        rejectedOptionIdentities.forEach((reason, subId) => {
+            stateChanged = _invalidateRejectedLiveOptionQuote(
+                subId,
+                reason,
+                incrementalGroupIds
+            ) || stateChanged;
+        });
+    }
+    if (liveMode && rejectedFutureIdentities.size > 0) {
+        rejectedFutureIdentities.forEach((rejection, logicalId) => {
+            const invalidated = _invalidateRejectedLiveFutureQuote(
+                logicalId,
+                rejection,
+                incrementalGroupIds
+            );
+            futureQuotesChanged = invalidated || futureQuotesChanged;
+            stateChanged = invalidated || stateChanged;
+        });
+    }
+    if (liveMode) {
+        const invalidatedStaleFuture = _invalidateStaleLiveFuturesPoolQuotes(
+            incrementalGroupIds
+        );
+        futureQuotesChanged = invalidatedStaleFuture || futureQuotesChanged;
+        stateChanged = invalidatedStaleFuture || stateChanged;
+    }
 
     if (data.underlyingQuote && typeof data.underlyingQuote === 'object') {
         underlyingQuoteChanged = _setUnderlyingQuoteSnapshot(data.underlyingQuote);
@@ -3565,6 +4993,7 @@ function processLiveMarketData(data) {
         Object.entries(data.options).forEach(([subId, quote]) => {
             const quoteChange = _setOptionQuoteSnapshot(subId, quote);
             optionQuotesChanged = quoteChange.pricingChanged || optionQuotesChanged;
+            optionQuoteEvidenceChanged = quoteChange.changed || optionQuoteEvidenceChanged;
             optionDeltaChanged = quoteChange.deltaChanged || optionDeltaChanged;
             if (quoteChange.pricingChanged) {
                 changedOptionQuoteIds.push(subId);
@@ -3574,9 +5003,22 @@ function processLiveMarketData(data) {
             }
         });
 
-        if (optionQuotesChanged && (state.forwardRateSamples || []).length > 0) {
-            _refreshForwardRatePanelUi();
+    }
+
+    const forwardRateInputChanged = (state.forwardRateSamples || []).length > 0
+        && (optionQuoteEvidenceChanged
+            || underlyingQuoteChanged
+            || rejectedOptionIdentities.size > 0
+            || liveClockUpdate.changed);
+    if (forwardRateInputChanged) {
+        const forwardRateChanged = _refreshIndexForwardRateSamples();
+        if (forwardRateChanged) {
+            stateChanged = true;
+            if (liveMode) _addAllGroupIds(incrementalGroupIds);
         }
+        _refreshForwardRatePanelUi();
+    } else if (optionQuotesChanged && (state.forwardRateSamples || []).length > 0) {
+        _refreshForwardRatePanelUi();
     }
 
     if (data.futures) {
@@ -3588,6 +5030,13 @@ function processLiveMarketData(data) {
     if (data.stocks) {
         Object.entries(data.stocks).forEach(([symbol, quote]) => {
             _setStockQuoteSnapshot(symbol, quote);
+        });
+    }
+
+    if (data.carryReferences) {
+        Object.entries(data.carryReferences).forEach(([referenceId, quote]) => {
+            carryReferenceQuotesChanged = _setCarryReferenceQuoteSnapshot(referenceId, quote)
+                || carryReferenceQuotesChanged;
         });
     }
 
@@ -3612,9 +5061,27 @@ function processLiveMarketData(data) {
             const nextBid = quote.bid !== undefined ? quote.bid : entry.bid;
             const nextAsk = quote.ask !== undefined ? quote.ask : entry.ask;
             const nextMark = quote.mark !== undefined ? quote.mark : entry.mark;
+            const nextQuoteAsOf = String(quote.quoteAsOf || entry.quoteAsOf || entry.lastQuotedAt || '').trim();
+            const nextLastTradeDate = String(quote.lastTradeDate || entry.lastTradeDate || '').trim();
+            // Only a ContractDetails-sourced delivery month may be stored as the
+            // qualified month; a month derived from lastTradeDate is off by one
+            // for CL and every other product whose expiry leads delivery.
+            const nextQualifiedContractMonth = String(quote.contractMonthSource || '').trim()
+                === 'ib_contract_details'
+                ? _normalizeContractMonthIdentity(quote.contractMonth)
+                : '';
+            const nextRequestGeneration = parseInt(quote.requestGeneration, 10);
+            const nextRequestId = String(quote.requestId || '').trim();
             const quoteChanged = nextBid !== entry.bid
                 || nextAsk !== entry.ask
-                || nextMark !== entry.mark;
+                || nextMark !== entry.mark
+                || nextQuoteAsOf !== String(entry.quoteAsOf || entry.lastQuotedAt || '').trim()
+                || nextLastTradeDate !== String(entry.lastTradeDate || '').trim()
+                || nextQualifiedContractMonth !== String(entry.qualifiedContractMonth || '').trim()
+                || nextRequestGeneration !== parseInt(entry.liveQuoteRequestGeneration, 10)
+                || nextRequestId !== String(entry.liveQuoteRequestId || '').trim()
+                || entry.requestIdentityVerified !== true
+                || entry.liveQuoteIdentityStatus !== 'verified';
             if (!quoteChanged) {
                 return;
             }
@@ -3622,7 +5089,37 @@ function processLiveMarketData(data) {
             entry.bid = nextBid;
             entry.ask = nextAsk;
             entry.mark = nextMark;
-            entry.lastQuotedAt = new Date().toISOString();
+            entry.quoteAsOf = nextQuoteAsOf;
+            entry.lastQuotedAt = nextQuoteAsOf || null;
+            entry.lastTradeDate = nextLastTradeDate;
+            entry.localSymbol = String(quote.localSymbol || entry.localSymbol || '').trim();
+            entry.symbol = String(quote.symbol || entry.symbol || state.underlyingSymbol || '').trim().toUpperCase();
+            entry.secType = String(quote.secType || entry.secType || 'FUT').trim().toUpperCase();
+            entry.exchange = String(quote.exchange || entry.exchange || '').trim();
+            entry.currency = String(quote.currency || entry.currency || '').trim().toUpperCase();
+            entry.multiplier = String(quote.multiplier || entry.multiplier || '').trim();
+            entry.markSource = String(quote.markSource || entry.markSource || '').trim();
+            entry.conId = Number.isFinite(parseInt(quote.conId, 10))
+                ? parseInt(quote.conId, 10)
+                : (entry.conId || null);
+            entry.qualifiedContractMonth = nextQualifiedContractMonth;
+            entry.requestIdentityVerified = quote.requestIdentityVerified === true;
+            entry.liveQuoteRequestGeneration = Number.isFinite(nextRequestGeneration)
+                ? nextRequestGeneration
+                : null;
+            entry.liveQuoteRequestId = nextRequestId;
+            entry.requestedSecType = String(quote.requestedSecType || '').trim().toUpperCase();
+            entry.requestedSymbol = String(quote.requestedSymbol || '').trim().toUpperCase();
+            entry.requestedExchange = String(quote.requestedExchange || '').trim().toUpperCase();
+            entry.requestedCurrency = String(quote.requestedCurrency || '').trim().toUpperCase();
+            entry.requestedMultiplier = String(quote.requestedMultiplier || '').trim();
+            entry.requestedContractMonth = _normalizeContractMonthIdentity(
+                quote.requestedContractMonth
+            );
+            entry.liveQuoteIdentityStatus = entry.requestIdentityVerified ? 'verified' : 'unverified';
+            entry.liveQuoteIdentityReason = entry.requestIdentityVerified
+                ? ''
+                : 'live futures request identity unavailable';
         });
 
         (state.hedges || []).forEach((hedge) => {
@@ -3677,9 +5174,20 @@ function processLiveMarketData(data) {
             });
         });
 
-        if (futureQuotesChanged && (state.futuresPool || []).length > 0) {
+        if ((futureQuotesChanged || carryReferenceQuotesChanged
+            || rejectedFutureIdentities.size > 0)
+            && (state.futuresPool || []).length > 0) {
             _refreshFuturesPoolPanelUi();
         }
+    }
+
+    // A diagnostic SPX/NDX reference is delivered on its own ticker cadence.
+    // Refresh the panel even when the payload contains no futures tick; this
+    // must never trigger a portfolio revaluation because the reference is not
+    // a Black-76 pricing input.
+    if (!data.futures && carryReferenceQuotesChanged
+        && (state.futuresPool || []).length > 0) {
+        _refreshFuturesPoolPanelUi();
     }
 
     const currentUnderlyingPrice = parseFloat(state && state.underlyingPrice);
@@ -3726,6 +5234,13 @@ function processLiveMarketData(data) {
                 const replayQuote = data.options[leg.id] || {};
                 const liveMark = replayQuote.mark;
                 const liveIV = replayQuote.iv;
+                if (liveMode && _applyLiveOptionContractIdentity(leg, replayQuote)) {
+                    stateChanged = true;
+                }
+                if (liveMode && _applyLiveOptionExpiryTiming(leg, replayQuote)) {
+                    stateChanged = true;
+                    if (group && group.id) incrementalGroupIds.add(group.id);
+                }
 
                 if (replayQuote.missing === true) {
                     const legChanged = _markOptionQuoteMissing(leg);
@@ -3736,11 +5251,12 @@ function processLiveMarketData(data) {
                     return;
                 }
 
-                if (liveMark > 0) {
-                    const markChanged = Math.abs(liveMark - leg.currentPrice) > 0.001;
+                if (Number.isFinite(Number(liveMark)) && Number(liveMark) >= 0) {
+                    const normalizedLiveMark = Number(liveMark);
+                    const markChanged = Math.abs(normalizedLiveMark - leg.currentPrice) > 0.001;
                     const sourceChanged = leg.currentPriceSource !== quoteSourceKind;
                     if (markChanged || sourceChanged) {
-                        leg.currentPrice = liveMark;
+                        leg.currentPrice = normalizedLiveMark;
                         leg.currentPriceSource = quoteSourceKind;
                         stateChanged = true;
                         if (liveMode && group && group.id) {
@@ -3751,7 +5267,7 @@ function processLiveMarketData(data) {
                         if (row) {
                             const currentPriceInput = row.querySelector('.current-price-input');
                             if (currentPriceInput) {
-                                currentPriceInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, liveMark);
+                            currentPriceInput.value = _formatSymbolPriceInputValue(state.underlyingSymbol, normalizedLiveMark);
                                 flashElement(currentPriceInput);
                             }
                         }
@@ -3909,10 +5425,22 @@ function processLiveMarketData(data) {
             groupIds: Array.from(incrementalGroupIds),
             deltaGroupIds: Array.from(deltaOnlyGroupIds),
             hedgeIds: Array.from(incrementalHedgeIds),
-        }, liveMode && (hasIncrementalTargets || hasDeltaOnlyTargets));
+        }, liveMode
+            && !liveClockUpdate.changed
+            && (hasIncrementalTargets || hasDeltaOnlyTargets));
     }
 }
 
 // Connect immediately on load
 initWsPortControls();
 connectWebSocket();
+if (typeof window.setInterval === 'function') {
+    _liveProjectionFeedWatchdogTimer = window.setInterval(() => {
+        _runLiveProjectionFeedWatchdog();
+    }, LIVE_PROJECTION_FEED_WATCHDOG_INTERVAL_MS);
+    _discountCurveRefreshTimer = window.setInterval(() => {
+        if (!_isHistoricalMode() && state.useMarketDiscountCurve === true) {
+            requestDiscountCurveSnapshot();
+        }
+    }, DISCOUNT_CURVE_REFRESH_INTERVAL_MS);
+}

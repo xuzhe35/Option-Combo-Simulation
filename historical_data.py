@@ -3,10 +3,10 @@
 Option chains and underlying daily bars come from an external options-chain
 microservice over HTTP (default http://127.0.0.1:8750) instead of a bundled
 multi-GB SQLite copy. That service is swappable and this module does not care
-where it lives: see chain_service_config.py. Risk-free rates and the treasury
-yield curve are not part of that service; they live in the small local
-sqlite_spy/rates.db (extracted from the legacy DB by
-scripts/extract_rates_db.py).
+where it lives: see chain_service_config.py. Discounting comes first from the
+same dated JSON snapshots used by the live workspace. The small legacy
+sqlite_spy/rates.db remains a read-only migration fallback for replay dates
+that have not yet been backfilled into JSON.
 
 The public surface (HistoricalReplayStore method names, arguments, and return
 shapes) is unchanged from the bundled-SQLite implementation, so
@@ -20,9 +20,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 
 from chain_service_config import DEFAULT_CHAIN_SERVICE_URL
+from treasury_yield_curve import par_yield_to_continuous_proxy
+from yield_curve.builder import build_discount_curve_snapshot, resolve_snapshot_discount
+from yield_curve.repository import DEFAULT_DATA_DIR as DEFAULT_YIELD_CURVE_DATA_DIR
+from yield_curve.repository import YieldCurveRepository
 
 DEFAULT_RATES_DB = os.path.join('sqlite_spy', 'rates.db')
 _LATEST_SENTINEL_DATE = '2999-12-31'
@@ -73,11 +77,15 @@ class ChainServiceError(RuntimeError):
 
 class HistoricalReplayStore:
     def __init__(self, chain_service_url=DEFAULT_CHAIN_SERVICE_URL,
-                 rates_db_path=DEFAULT_RATES_DB, logger=None, timeout=10.0):
+                 rates_db_path=DEFAULT_RATES_DB, logger=None, timeout=10.0,
+                 yield_curve_data_dir=None):
         self.chain_service_url = str(chain_service_url or DEFAULT_CHAIN_SERVICE_URL).rstrip('/')
         self.rates_db_path = os.path.abspath(rates_db_path) if rates_db_path else ''
         self.logger = logger
         self.timeout = timeout
+        self.yield_curve_repository = YieldCurveRepository(
+            yield_curve_data_dir or DEFAULT_YIELD_CURVE_DATA_DIR
+        )
 
     # ------------------------- chain service HTTP ------------------------- #
 
@@ -335,6 +343,9 @@ class HistoricalReplayStore:
             ).fetchone()
             if row and row[0]:
                 return str(row[0])
+            # Never look into the future when the requested replay date
+            # predates the first cached rates observation.
+            return ''
 
         row = conn.execute(
             f"""
@@ -347,6 +358,23 @@ class HistoricalReplayStore:
 
     def get_risk_free_rate_snapshot(self, quote_date=''):
         requested_date = _normalize_iso_date(quote_date) if quote_date else ''
+
+        # The scalar compatibility field is derived from the canonical curve,
+        # so replay pricing cannot accidentally combine two rate sources.
+        curve = self.get_yield_curve_snapshot(requested_date)
+        if curve:
+            try:
+                quote = resolve_snapshot_discount(curve, 30)
+            except ValueError:
+                quote = None
+            if quote:
+                return {
+                    'requestedDate': requested_date,
+                    'effectiveDate': str(curve.get('effectiveDate') or ''),
+                    'rate': float(quote['continuousRate']),
+                    'source': str(curve.get('source') or ''),
+                    'snapshotId': str(curve.get('snapshotId') or ''),
+                }
 
         try:
             with closing(self._connect_rates()) as conn:
@@ -382,6 +410,14 @@ class HistoricalReplayStore:
     def get_yield_curve_snapshot(self, quote_date=''):
         requested_date = _normalize_iso_date(quote_date) if quote_date else ''
 
+        snapshot = (
+            self.yield_curve_repository.load_on_or_before(requested_date)
+            if requested_date
+            else self.yield_curve_repository.load_latest()
+        )
+        if snapshot:
+            return snapshot
+
         try:
             with closing(self._connect_rates()) as conn:
                 effective_date = self._resolve_effective_rates_date(
@@ -406,21 +442,47 @@ class HistoricalReplayStore:
         if not rows:
             return None
 
-        points = [
-            {
+        # Never mix sources that happen to share a date in the legacy table.
+        # Prefer an explicit Treasury source, otherwise choose the source with
+        # the broadest same-day tenor coverage deterministically.
+        rows_by_source = {}
+        for row in rows:
+            source = str(row['source'] or '')
+            rows_by_source.setdefault(source, []).append(row)
+        source = next(
+            (name for name in sorted(rows_by_source) if 'treasury' in name.lower()),
+            max(sorted(rows_by_source), key=lambda name: len(rows_by_source[name])),
+        )
+        selected_rows = rows_by_source[source]
+        points = []
+        for row in selected_rows:
+            if row['rate'] is None:
+                continue
+            par_yield = float(row['rate'])
+            points.append({
                 'tenorCode': str(row['tenor_code']),
                 'tenorDays': int(row['tenor_days']),
-                'rate': float(row['rate']),
-            }
-            for row in rows
-            if row['rate'] is not None
-        ]
+                'parYield': par_yield,
+                'continuousRate': par_yield_to_continuous_proxy(par_yield),
+                'inputSemantics': 'cmt_par_yield',
+            })
         if not points:
             return None
-
-        return {
-            'requestedDate': requested_date,
-            'effectiveDate': str(rows[0]['date']),
-            'source': str(rows[0]['source'] or ''),
-            'points': points,
-        }
+        effective_date = str(selected_rows[0]['date'])
+        curve_as_of = requested_date or effective_date
+        available_as_of = datetime.fromisoformat(
+            '{}T23:59:00+00:00'.format(effective_date)
+        ).astimezone(timezone.utc)
+        snapshot = build_discount_curve_snapshot(
+            curve_as_of,
+            None,
+            {
+                'source': source or 'legacy_rates_db:treasury_curve',
+                'effectiveDate': effective_date,
+                'points': points,
+            },
+            generated_at=available_as_of,
+        )
+        snapshot['quality']['flags'].append('legacy_rates_db_adapter')
+        snapshot['quality']['flags'] = sorted(set(snapshot['quality']['flags']))
+        return snapshot

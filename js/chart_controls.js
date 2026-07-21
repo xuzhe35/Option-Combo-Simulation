@@ -83,6 +83,88 @@ function _refreshChartAnchorNotes(card) {
     );
 }
 
+function _getPayoffChartState(card) {
+    if (!card || card.bestEffortProjectionEnabled !== true) return state;
+
+    // This shallow copy is deliberately local to PnLChart.draw().  Never
+    // mutate the workspace convergence mode: valuation, probability, session,
+    // and execution surfaces must keep their existing safety semantics.
+    return {
+        ...state,
+        projectionConvergenceMode: 'best-effort-input-iv',
+    };
+}
+
+function _formatBestEffortLegLabel(leg) {
+    const type = String(leg && leg.type || 'option');
+    const displayType = type.charAt(0).toUpperCase() + type.slice(1);
+    const expiry = String(leg && leg.expDate || '').replace(/-/g, '/');
+    return expiry ? `${displayType} ${expiry}` : displayType;
+}
+
+function _renderPayoffChartQuality(card) {
+    if (!card || typeof card.querySelector !== 'function') return;
+    const note = card.querySelector('.payoff-chart-quality-note');
+    if (!note) return;
+
+    const enabled = card.bestEffortProjectionEnabled === true;
+    if (!enabled) {
+        note.textContent = '';
+        note.style.display = 'none';
+        note.classList.remove('is-success', 'is-warning', 'is-error');
+        return;
+    }
+
+    const chart = card.chartInstance;
+    const quality = chart && chart.lastProjectionQuality;
+    const fallbackLegs = quality && Array.isArray(quality.fallbackLegs)
+        ? quality.fallbackLegs
+        : [];
+    note.classList.remove('is-success', 'is-warning', 'is-error');
+    note.style.display = 'block';
+
+    if (!chart || !chart.lastRenderData) {
+        note.classList.add('is-error');
+        note.textContent = 'Best-effort could not complete the curve. At least one leg still lacks usable IV, timing / implied λ coverage, or its bound underlying quote.';
+        return;
+    }
+
+    if (fallbackLegs.length === 0) {
+        note.classList.add('is-success');
+        note.textContent = 'Best-effort mode is on, but no IV fallback was needed for this curve.';
+        return;
+    }
+
+    const labels = fallbackLegs.map(_formatBestEffortLegLabel).join(', ');
+    const plural = fallbackLegs.length === 1 ? 'leg uses' : 'legs use';
+    const pronoun = fallbackLegs.length === 1 ? 'its' : 'their';
+    note.classList.add('is-warning');
+    note.textContent = `Estimated curve: ${fallbackLegs.length} ${plural} ${pronoun} current input / TWS IV because strict local BBO inversion was unavailable (${labels}). This is not a strict-BBO valuation.`;
+}
+
+function toggleBestEffortPayoffChart(btn) {
+    if (!btn) return;
+    const card = typeof btn.closest === 'function'
+        ? (btn.closest('.group-card') || btn.closest('.global-chart-card'))
+        : null;
+    if (!card) return;
+
+    card.bestEffortProjectionEnabled = card.bestEffortProjectionEnabled !== true;
+    btn.classList.toggle('active', card.bestEffortProjectionEnabled);
+    btn.setAttribute('aria-pressed', card.bestEffortProjectionEnabled ? 'true' : 'false');
+    btn.textContent = card.bestEffortProjectionEnabled
+        ? 'Use Strict BBO'
+        : 'Draw Best Effort';
+
+    if (card.id === 'globalChartCard') {
+        drawGlobalChart(card);
+        return;
+    }
+    const groupId = card.dataset.groupId;
+    const group = state.groups.find(g => g.id === groupId);
+    drawGroupChart(card, group);
+}
+
 function toggleChart(btn) {
     const card = btn.closest('.group-card');
     const chartContainer = card.querySelector('.chart-container');
@@ -171,7 +253,8 @@ function drawGroupChart(card, group) {
     }
 
     _refreshChartAnchorNotes(card);
-    card.chartInstance.draw(group, state, minS, maxS);
+    card.chartInstance.draw(group, _getPayoffChartState(card), minS, maxS);
+    _renderPayoffChartQuality(card);
 }
 
 // -------------------------------------------------------------
@@ -378,12 +461,14 @@ function drawGlobalChart(card) {
             .filter(_isGroupIncludedInGlobal)
             .flatMap(g => g.legs.map(leg => ({
             ...leg,
-            _viewMode: g.viewMode || 'active'
+            _viewMode: g.viewMode || 'active',
+            _livePriceMode: g.livePriceMode || 'midpoint'
         })))
     };
 
     _refreshChartAnchorNotes(card);
-    card.chartInstance.draw(virtualGroup, state, minS, maxS);
+    card.chartInstance.draw(virtualGroup, _getPayoffChartState(card), minS, maxS);
+    _renderPayoffChartQuality(card);
 }
 
 function _getGlobalAmortizedVirtualGroup() {
@@ -393,7 +478,8 @@ function _getGlobalAmortizedVirtualGroup() {
         viewMode: 'amortized',
         legs: amortizedGroups.flatMap(g => g.legs.map(leg => ({
             ...leg,
-            _viewMode: 'amortized'
+            _viewMode: 'amortized',
+            _livePriceMode: g.livePriceMode || 'midpoint'
         })))
     };
 }
@@ -522,11 +608,12 @@ window.addEventListener('resize', () => {
 // Probability Analysis Helpers (called from prob_charts.js)
 // -------------------------------------------------------------
 
-// Return the mean IV used to scale probability distributions.
-// Important: this must use each leg's usable quoted/manual IV (+ global offset),
-// not the expiry-clipped simIV from processLegData(). On expiry-day scenarios
-// simIV becomes 0 for pricing purposes, but probability analysis still needs a
-// forward-looking volatility input from today's market.
+// Return the mean IV used to scale probability distributions. Each leg is
+// processed at the quote anchor (not the future simulation date), so a near leg
+// that expires on the target date still contributes its current IV. The result
+// is the leg's weighted-clock IV, preserving anchor total variance while making
+// the terminal MC distribution use the same scalar/by-date lambda clock as the
+// option repricing path.
 function computePortfolioMeanSimIV() {
     const productRegistry = _getProductRegistryApi();
     const underlyingProfile = productRegistry
@@ -538,9 +625,6 @@ function computePortfolioMeanSimIV() {
         ? productRegistry.isOptionLeg
         : (leg => ['call', 'put'].includes(String(leg && leg.type || '').toLowerCase()));
     const pricingContext = _getPricingContextApi();
-    const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
-        ? pricingContext.resolveSimulationDate(state)
-        : state.simulatedDate;
     const quoteDate = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
         ? pricingContext.resolveQuoteDate(state)
         : state.baseDate;
@@ -560,20 +644,64 @@ function computePortfolioMeanSimIV() {
                 .forEach(leg => {
                     sawAnyOptionLeg = true;
 
+                    const legCurrentUnderlying = pricingContext
+                        && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
+                        ? pricingContext.resolveLegCurrentUnderlyingPrice(state, leg, anchorPrice)
+                        : anchorPrice;
+                    const legInterestRate = pricingContext
+                        && typeof pricingContext.resolveLegInterestRate === 'function'
+                        ? pricingContext.resolveLegInterestRate(state, leg, state.interestRate)
+                        : state.interestRate;
+                    const observable = pricingContext
+                        && typeof pricingContext.resolveObservableLegPrice === 'function'
+                        ? pricingContext.resolveObservableLegPrice(state, group, leg)
+                        : null;
+                    const quotePricingInputs = pricingContext
+                        && typeof pricingContext.resolveLegQuotePricingInputs === 'function'
+                        ? pricingContext.resolveLegQuotePricingInputs(state, leg, {
+                            underlyingPrice: anchorPrice,
+                            interestRate: state.interestRate,
+                        })
+                        : null;
+
                     const processedLeg = processLegData(
                         leg,
-                        simulationDate,
+                        quoteDate,
                         state.ivOffset,
                         quoteDate,
-                        anchorPrice,
-                        state.interestRate,
+                        legCurrentUnderlying,
+                        legInterestRate,
                         activeViewMode,
                         underlyingProfile,
-                        state.marketDataMode
+                        state.marketDataMode,
+                        {
+                            quoteAsOf: state.liveQuoteAsOf,
+                            allowLegacyQuoteCutoff: !state.marketDataMode,
+                            targetAsOf: state.liveQuoteAsOf,
+                            targetSource: 'quote-anchor',
+                            observablePrice: observable && observable.available
+                                ? observable.price
+                                : null,
+                            observablePriceSource: observable && observable.source || null,
+                            observablePriceAsOf: observable && observable.quoteAsOf || null,
+                            observablePriceFresh: observable && observable.fresh === true,
+                            quotePricingInputsAvailable: quotePricingInputs
+                                && quotePricingInputs.available === true,
+                            quotePricingInputStatus: quotePricingInputs
+                                && quotePricingInputs.status || null,
+                            quoteUnderlyingPrice: quotePricingInputs
+                                && quotePricingInputs.underlyingPrice,
+                            quoteUnderlyingAsOf: quotePricingInputs
+                                && quotePricingInputs.underlyingAsOf,
+                            quoteInterestRate: quotePricingInputs
+                                && quotePricingInputs.interestRate,
+                        }
                     );
 
-                    if (typeof hasUsableLegIv === 'function' && hasUsableLegIv(leg)) {
-                        totalIv += Math.max(0.001, leg.iv + state.ivOffset);
+                    if (!processedLeg.isExpired
+                        && Number.isFinite(processedLeg.simIV)
+                        && processedLeg.simIV > 0) {
+                        totalIv += processedLeg.simIV;
                         ivCount += 1;
                         return;
                     }

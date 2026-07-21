@@ -4,6 +4,7 @@
  */
 
 (function attachIvTermStructureCore(globalScope) {
+    const MS_PER_DAY = 24 * 60 * 60 * 1000;
     const DEFAULT_BUCKET_DEFINITIONS = Object.freeze([
         { label: '1D', targetDays: 1 },
         { label: '3D', targetDays: 3 },
@@ -63,7 +64,16 @@
         if (!start || !end || start > end) {
             return null;
         }
-        if (start < end && typeof globalScope.isOfficialExchangeCalendarAvailable === 'function') {
+        // Implied-lambda identification must use the project's official
+        // exchange-calendar snapshot.  A caller-provided holiday hook (or a
+        // weekday-only fallback) is not sufficient evidence: without official
+        // coverage we fail closed instead of guessing that every weekday was
+        // a trading session.
+        if (start < end) {
+            if (typeof globalScope.isOfficialExchangeCalendarAvailable !== 'function'
+                || typeof globalScope.isMarketHoliday !== 'function') {
+                return null;
+            }
             const lastIncluded = new Date(end);
             lastIncluded.setUTCDate(lastIncluded.getUTCDate() - 1);
             if (!globalScope.isOfficialExchangeCalendarAvailable(
@@ -80,9 +90,9 @@
         while (current < end) {
             const dayOfWeek = current.getUTCDay();
             const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-            const isHoliday = typeof globalScope.isMarketHoliday === 'function'
-                ? globalScope.isMarketHoliday(current.toISOString().slice(0, 10), calendarKey)
-                : null;
+            const isHoliday = globalScope.isMarketHoliday(
+                current.toISOString().slice(0, 10), calendarKey
+            );
             if (!isWeekend && isHoliday === null) {
                 return null;
             }
@@ -121,6 +131,128 @@
         return _roundNumber(iv * Math.sqrt((calDte / 365) / (effDte / effYear)), 6);
     }
 
+    function _convertCalendarIvToWeightedClock(iv, calDte, effectiveDte, annualizationWeight) {
+        if (!Number.isFinite(iv) || iv <= 0
+            || !Number.isFinite(calDte) || calDte <= 0
+            || !Number.isFinite(effectiveDte) || effectiveDte <= 0) {
+            return null;
+        }
+        const lambda = parseFloat(annualizationWeight);
+        if (!Number.isFinite(lambda)) {
+            return null;
+        }
+        const effYear = 252 + lambda * (365 - 252);
+        if (!(effYear > 0)) {
+            return null;
+        }
+        return _roundNumber(iv * Math.sqrt((calDte / 365) / (effectiveDte / effYear)), 6);
+    }
+
+    // Once the coherent straddle surface has identified per-date implied
+    // lambdas, feed that curve back into the displayed TD IV. Call/Put IV
+    // remains the vendor/TWS observation; only its annualization clock is
+    // changed. The curve median defines one common annualization unit across
+    // all expiries, while each directly covered closure contributes its own
+    // lambda to that expiry's effective horizon. For the display-only TD-IV
+    // lens, later uncovered closures use the current curve median and are
+    // explicitly stamped as extrapolated. The simulator's published byDate
+    // curve remains strict and does not receive these display extrapolations.
+    function applyImpliedLambdaClockToRows(detailRows, anchorDate, impliedLambda, calendarKey = 'NYSE') {
+        const sourceRows = Array.isArray(detailRows) ? detailRows : [];
+        const quality = impliedLambda && impliedLambda.quality;
+        const byDate = impliedLambda && impliedLambda.byDate
+            && typeof impliedLambda.byDate === 'object'
+            ? impliedLambda.byDate
+            : null;
+        const annualizationWeight = parseFloat(impliedLambda && impliedLambda.medianLambda);
+        const vendorIvFallback = !!(impliedLambda
+            && impliedLambda.varianceSource === 'vendor_iv'
+            && quality && quality.estimationMode === 'best_effort'
+            && quality.sourceQuoteEvidence === 'vendor_atm_iv_fallback');
+        const qualified = !!(impliedLambda
+            && (impliedLambda.varianceSource === 'straddle' || vendorIvFallback)
+            && quality && quality.status === 'ok'
+            && quality.coherent === true
+            && quality.quoteComplete === true
+            && byDate && Object.keys(byDate).length
+            && Number.isFinite(annualizationWeight));
+
+        if (!qualified) {
+            return sourceRows.map((row) => ({
+                ...(row && typeof row === 'object' ? row : {}),
+                tdIvSource: 'fallback_scalar',
+                tdIvStatus: row && (row.callIvTd != null || row.putIvTd != null)
+                    ? 'ok'
+                    : 'unavailable',
+            }));
+        }
+
+        return sourceRows.map((row) => {
+            const expiry = _getRowExpiry(row);
+            const calendar = _classifyNonTradingDates(anchorDate, expiry, calendarKey);
+            const tradDte = Number.isFinite(row && row.tradDte)
+                ? row.tradDte
+                : countTradingDays(anchorDate, expiry, calendarKey);
+            const calDte = Number.isFinite(row && row.dte) ? row.dte : null;
+            const base = {
+                ...(row && typeof row === 'object' ? row : {}),
+                tdIvSource: 'implied_lambda',
+                tdIvWeekendWeight: annualizationWeight,
+                tdIvAnnualizationWeight: annualizationWeight,
+                tdIvEffectiveDte: null,
+                tdIvAppliedWeights: {},
+                tdIvMissingWeightDates: [],
+                tdIvExtrapolatedWeightDates: [],
+            };
+            if (!calendar || !Number.isFinite(tradDte) || !Number.isFinite(calDte)
+                || calDte <= 0 || tradDte <= 0) {
+                return {
+                    ...base,
+                    callIvTd: null,
+                    putIvTd: null,
+                    atmIvTd: null,
+                    tdIvStatus: calendar ? 'unavailable' : 'calendar_unavailable',
+                };
+            }
+
+            const appliedWeights = {};
+            const extrapolatedWeightDates = [];
+            let nonTradingWeight = 0;
+            for (const iso of calendar.dates) {
+                const directWeight = Object.prototype.hasOwnProperty.call(byDate, iso)
+                    ? parseFloat(byDate[iso])
+                    : null;
+                const hasDirectWeight = Number.isFinite(directWeight);
+                const weight = hasDirectWeight ? directWeight : annualizationWeight;
+                if (!hasDirectWeight) {
+                    extrapolatedWeightDates.push(iso);
+                }
+                appliedWeights[iso] = weight;
+                nonTradingWeight += weight;
+            }
+
+            const effectiveDte = tradDte + nonTradingWeight;
+            const callIvTd = _convertCalendarIvToWeightedClock(
+                row && row.callIv, calDte, effectiveDte, annualizationWeight
+            );
+            const putIvTd = _convertCalendarIvToWeightedClock(
+                row && row.putIv, calDte, effectiveDte, annualizationWeight
+            );
+            return {
+                ...base,
+                callIvTd,
+                putIvTd,
+                atmIvTd: _computeAverageIv(callIvTd, putIvTd),
+                tdIvStatus: callIvTd != null || putIvTd != null
+                    ? (extrapolatedWeightDates.length ? 'ok_extrapolated' : 'ok')
+                    : 'unavailable',
+                tdIvEffectiveDte: _roundNumber(effectiveDte, 6),
+                tdIvAppliedWeights: appliedWeights,
+                tdIvExtrapolatedWeightDates: extrapolatedWeightDates,
+            };
+        });
+    }
+
     function _normalizeExpiryKey(value) {
         const normalized = String(value || '').trim().replace(/-/g, '');
         return /^\d{8}$/.test(normalized) ? normalized : '';
@@ -128,6 +260,23 @@
 
     function _getRowExpiry(row) {
         return _normalizeExpiryKey(row && (row.expiry || row.matchedExpiry));
+    }
+
+    function _quotePairTimeYears(callQuote, putQuote) {
+        const callExpiryAsOf = String(callQuote && callQuote.expiryAsOf || '').trim();
+        const putExpiryAsOf = String(putQuote && putQuote.expiryAsOf || '').trim();
+        if (!callExpiryAsOf || callExpiryAsOf !== putExpiryAsOf) {
+            return null;
+        }
+        const expiryMs = Date.parse(callExpiryAsOf);
+        const callQuoteMs = Date.parse(String(callQuote && callQuote.quoteAsOf || '').trim());
+        const putQuoteMs = Date.parse(String(putQuote && putQuote.quoteAsOf || '').trim());
+        const quoteMs = Math.max(callQuoteMs, putQuoteMs);
+        if (!Number.isFinite(expiryMs) || !Number.isFinite(callQuoteMs)
+            || !Number.isFinite(putQuoteMs) || expiryMs <= quoteMs) {
+            return null;
+        }
+        return (expiryMs - quoteMs) / (365 * 24 * 60 * 60 * 1000);
     }
 
     function _findBaselineRow(rows, baselineExpiry) {
@@ -153,8 +302,14 @@
                 const atmIv = _computeAverageIv(callIv, putIv);
                 const callMark = _coercePositiveNumber(callQuote && callQuote.mark);
                 const putMark = _coercePositiveNumber(putQuote && putQuote.mark);
+                const callBid = _coercePositiveNumber(callQuote && callQuote.bid);
+                const callAsk = _coercePositiveNumber(callQuote && callQuote.ask);
+                const putBid = _coercePositiveNumber(putQuote && putQuote.bid);
+                const putAsk = _coercePositiveNumber(putQuote && putQuote.ask);
                 const atmStraddleMark = _computeStraddleMark(callMark, putMark);
                 const dte = Math.max(0, parseInt(entry && entry.dte, 10) || 0);
+                const timeYears = _quotePairTimeYears(callQuote, putQuote)
+                    || _coercePositiveNumber(entry && entry.timeYears);
                 const tradDte = countTradingDays(anchorDate, entry && entry.expiry, calendarKey);
                 const callIvTd = computeTradingDayAnnualizedIv(callIv, dte, tradDte, lambda);
                 const putIvTd = computeTradingDayAnnualizedIv(putIv, dte, tradDte, lambda);
@@ -162,6 +317,7 @@
                 return {
                     expiry: String(entry && entry.expiry || '').trim(),
                     dte,
+                    timeYears,
                     tradDte,
                     atmStrike: _coercePositiveNumber(entry && entry.atmStrike),
                     callIv,
@@ -174,6 +330,10 @@
                     calendarKey,
                     callMark,
                     putMark,
+                    callBid,
+                    callAsk,
+                    putBid,
+                    putAsk,
                     atmStraddleMark,
                     subscriptionSelected: !(entry && entry.subscriptionSelected === false),
                     hasCompletePair: Number.isFinite(callIv) && Number.isFinite(putIv),
@@ -184,6 +344,12 @@
                     putSnapshotId: String(putQuote && (putQuote.snapshotId || putQuote.batchId) || '').trim(),
                     callQuoteAsOf: String(callQuote && (callQuote.quoteAsOf || callQuote.payloadAsOf) || '').trim(),
                     putQuoteAsOf: String(putQuote && (putQuote.quoteAsOf || putQuote.payloadAsOf) || '').trim(),
+                    callExpiryAsOf: String(callQuote && callQuote.expiryAsOf || '').trim(),
+                    putExpiryAsOf: String(putQuote && putQuote.expiryAsOf || '').trim(),
+                    callExpiryTimeSource: String(callQuote && callQuote.expiryTimeSource || '').trim(),
+                    putExpiryTimeSource: String(putQuote && putQuote.expiryTimeSource || '').trim(),
+                    callMarkSource: String(callQuote && callQuote.markSource || '').trim(),
+                    putMarkSource: String(putQuote && putQuote.markSource || '').trim(),
                 };
             })
             .filter((entry) => entry.expiry)
@@ -237,6 +403,22 @@
                 putIvTd: match && Number.isFinite(match.putIvTd) ? match.putIvTd : null,
                 atmIvTd: match && Number.isFinite(match.atmIvTd) ? match.atmIvTd : null,
                 tdIvWeekendWeight: match && Number.isFinite(match.tdIvWeekendWeight) ? match.tdIvWeekendWeight : 0,
+                tdIvAnnualizationWeight: match && Number.isFinite(match.tdIvAnnualizationWeight)
+                    ? match.tdIvAnnualizationWeight : null,
+                tdIvEffectiveDte: match && Number.isFinite(match.tdIvEffectiveDte)
+                    ? match.tdIvEffectiveDte : null,
+                tdIvSource: match && match.tdIvSource || null,
+                tdIvStatus: match && match.tdIvStatus || null,
+                tdIvAppliedWeights: match && match.tdIvAppliedWeights
+                    && typeof match.tdIvAppliedWeights === 'object'
+                    ? { ...match.tdIvAppliedWeights }
+                    : {},
+                tdIvMissingWeightDates: match && Array.isArray(match.tdIvMissingWeightDates)
+                    ? match.tdIvMissingWeightDates.slice()
+                    : [],
+                tdIvExtrapolatedWeightDates: match && Array.isArray(match.tdIvExtrapolatedWeightDates)
+                    ? match.tdIvExtrapolatedWeightDates.slice()
+                    : [],
                 callMark: match && Number.isFinite(match.callMark) ? match.callMark : null,
                 putMark: match && Number.isFinite(match.putMark) ? match.putMark : null,
                 atmStraddleMark: match && Number.isFinite(match.atmStraddleMark) ? match.atmStraddleMark : null,
@@ -267,6 +449,1236 @@
                 isStraddleBaseline: !!(normalizedBaselineExpiry && rowExpiry === normalizedBaselineExpiry),
             };
         });
+    }
+
+    const IMPLIED_LAMBDA_DEFAULTS = Object.freeze({
+        maxIntervalCalendarDays: 7,
+        // Keep the per-day variance baseline local to the weekend being
+        // solved: a wide window lets scheduled-event days (FOMC, CPI, month
+        // end) a week away inflate the "normal day" and crush the lambda.
+        baselineWindowDays: 7,
+        minBaselines: 2,
+        // A live 0DTE straddle is valuable: subtracting its observed total
+        // variance from the next expiry removes the remaining Friday session
+        // instead of pretending the session has already ended.
+        minDte: 0,
+        // Discounting/forward rate for the straddle price inversion.
+        interestRate: 0.04,
+        // A retained live discount curve must be reasonably close to the
+        // option-surface trade date. Future-dated curves are always rejected.
+        maxDiscountCurveAgeDays: 10,
+        // Rows and adjacent-expiry pairs whose quote timestamps disagree by
+        // more than this are rejected: the surface must be one coherent
+        // snapshot, not an asynchronous patchwork. Null disables the check.
+        maxQuoteSkewMs: 120000,
+        // A date-only anchor cannot say how much variance remains in today's
+        // session.  The synthetic anchor -> first-expiry interval is therefore
+        // diagnostic-only unless the caller explicitly certifies that the
+        // anchor is an official completed-session snapshot.
+        frontIntervalVerified: false,
+        // Live straddle inversion must be based on one complete server
+        // snapshot, including the underlying used for the parity check.
+        // Research callers can explicitly disable this gate; production code
+        // should not.
+        requireCoherentSnapshot: true,
+        // The production exporter also requires ContractDetails expiry
+        // instants for every row.  Direct research callers retain the old
+        // date-only compatibility path unless they opt into this gate.
+        requireExactExpiryTimestamps: false,
+        // Maximum relative distance between the forward inferred from
+        // call-put parity and the contemporaneous underlying-derived forward.
+        maxForwardDeviationPct: 0.005,
+        // Relative BBO width (ask-bid)/mid. A midpoint from a crossed or very
+        // wide market is not a trustworthy executable price observation.
+        maxBidAskSpreadPct: 0.35,
+    });
+
+    function _normalCdf(x) {
+        const sign = x < 0 ? -1 : 1;
+        const absX = Math.abs(x) / Math.sqrt(2.0);
+        const t = 1.0 / (1.0 + 0.3275911 * absX);
+        const y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-absX * absX);
+        return 0.5 * (1.0 + sign * y);
+    }
+
+    // European straddle price with total volatility s = sigma*sqrt(T) as the
+    // free variable. Black-76 (futures options) takes the futures price as
+    // the forward directly; the legacy standalone BSM helper builds the
+    // no-dividend forward S*e^{rT}. Production straddle inversion below does
+    // not use that q=0 shortcut: it first obtains F from call-put parity. Both
+    // collapse to discount * [F*(2N(d1)-1) - K*(2N(d2)-1)], which decays to
+    // discount*|F-K| as s -> 0 and is strictly increasing in s.
+    // American early-exercise premium and discrete dividends are not modeled;
+    // at the 1-60 DTE tenors this estimator targets, both are small next to
+    // quote noise, but they are assumptions - not TWS's, ours.
+    function priceStraddleFromTotalVol(pricingModel, underlyingPrice, strike, timeYears, rate, totalVol) {
+        if (!(underlyingPrice > 0) || !(strike > 0) || !(timeYears > 0) || !(totalVol >= 0)) {
+            return null;
+        }
+        const discount = Math.exp(-(Number.isFinite(rate) ? rate : 0) * timeYears);
+        const forward = pricingModel === 'black76'
+            ? underlyingPrice
+            : underlyingPrice * Math.exp((Number.isFinite(rate) ? rate : 0) * timeYears);
+        if (totalVol === 0) {
+            return discount * Math.abs(forward - strike);
+        }
+        const d1 = Math.log(forward / strike) / totalVol + totalVol / 2;
+        const d2 = d1 - totalVol;
+        return discount * (
+            forward * (2 * _normalCdf(d1) - 1)
+            - strike * (2 * _normalCdf(d2) - 1)
+        );
+    }
+
+    // Numerically invert the straddle price for the total implied variance
+    // sigma^2*T. Uses only the observed price plus (F/S, K, T, r) and the
+    // product's pricing model - no vendor IV. Returns null when the price
+    // sits at or below the deterministic floor discount*|F-K| or beyond the
+    // search bracket.
+    function invertStraddleTotalVariance(pricingModel, underlyingPrice, strike, timeYears, rate, straddlePrice) {
+        if (!(straddlePrice > 0)) {
+            return null;
+        }
+        const floor = priceStraddleFromTotalVol(pricingModel, underlyingPrice, strike, timeYears, rate, 0);
+        if (floor === null || straddlePrice <= floor * (1 + 1e-12) + 1e-12) {
+            return null;
+        }
+        let lo = 0;
+        let hi = 6; // 600% * sqrt(1y): far above any 1-60 DTE straddle
+        if (priceStraddleFromTotalVol(pricingModel, underlyingPrice, strike, timeYears, rate, hi) < straddlePrice) {
+            return null;
+        }
+        for (let i = 0; i < 80; i += 1) {
+            const mid = (lo + hi) / 2;
+            const price = priceStraddleFromTotalVol(pricingModel, underlyingPrice, strike, timeYears, rate, mid);
+            if (price < straddlePrice) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        const totalVol = (lo + hi) / 2;
+        return totalVol * totalVol;
+    }
+
+    // Resolve one visible expiry's cumulative total variance from the actual
+    // two-sided ATM Call+Put market. This is deliberately independent of TWS
+    // vendor IV and of the fitted lambda clock. Call-put parity supplies the
+    // expiry-specific forward before the observed straddle midpoint is
+    // inverted, so a displayed BBO price and displayed variance cannot come
+    // from two different sources.
+    function resolveStraddleTotalVarianceObservation(row, options) {
+        const opts = options && typeof options === 'object' ? options : {};
+        if (!row || row.subscriptionSelected === false) return null;
+        const allowBestEffort = opts.allowBestEffort === true;
+        const callBid = Number(row.callBid);
+        const callAsk = Number(row.callAsk);
+        const putBid = Number(row.putBid);
+        const putAsk = Number(row.putAsk);
+        const hasStrictBbo = row.callMarkSource === 'bid_ask_mid'
+            && row.putMarkSource === 'bid_ask_mid'
+            && [callBid, callAsk, putBid, putAsk].every(Number.isFinite)
+            && callBid >= 0 && putBid >= 0 && callAsk > 0 && putAsk > 0
+            && callAsk >= callBid && putAsk >= putBid;
+        if (!hasStrictBbo && !allowBestEffort) {
+            return null;
+        }
+        const fallbackCallMark = row.callMark === null || row.callMark === undefined || row.callMark === ''
+            ? NaN
+            : Number(row.callMark);
+        const fallbackPutMark = row.putMark === null || row.putMark === undefined || row.putMark === ''
+            ? NaN
+            : Number(row.putMark);
+        const callMark = hasStrictBbo ? (callBid + callAsk) / 2 : fallbackCallMark;
+        const putMark = hasStrictBbo ? (putBid + putAsk) / 2 : fallbackPutMark;
+        if (![callMark, putMark].every(Number.isFinite)
+            || callMark < 0 || putMark < 0 || !(callMark + putMark > 0)) {
+            return null;
+        }
+        const straddlePrice = callMark + putMark;
+        const strike = _coercePositiveNumber(row.atmStrike);
+        if (!(straddlePrice > 0) || strike === null) return null;
+
+        const callAsOfMs = _quoteAsOfMs(row.callQuoteAsOf);
+        const putAsOfMs = _quoteAsOfMs(row.putQuoteAsOf);
+        const maxQuoteSkewMs = opts.maxQuoteSkewMs === null
+            ? null
+            : (Number.isFinite(Number(opts.maxQuoteSkewMs))
+                ? Math.max(0, Number(opts.maxQuoteSkewMs))
+                : 30 * 1000);
+        const quoteSkewMs = callAsOfMs !== null && putAsOfMs !== null
+            ? Math.abs(callAsOfMs - putAsOfMs)
+            : null;
+        const quoteSkewExceeded = maxQuoteSkewMs !== null && quoteSkewMs !== null
+            && quoteSkewMs > maxQuoteSkewMs;
+        if (quoteSkewExceeded && !allowBestEffort) {
+            return null;
+        }
+        const isBestEffort = !hasStrictBbo || quoteSkewExceeded;
+
+        const expiryAsOfMs = _rowExpiryAsOfMs(row);
+        const rowQuoteAsOfMs = callAsOfMs !== null && putAsOfMs !== null
+            ? Math.max(callAsOfMs, putAsOfMs)
+            : null;
+        const exactTimeYears = expiryAsOfMs !== null && rowQuoteAsOfMs !== null
+            && expiryAsOfMs > rowQuoteAsOfMs
+            ? (expiryAsOfMs - rowQuoteAsOfMs) / (365 * MS_PER_DAY)
+            : null;
+        const suppliedTimeYears = Number(row.timeYears);
+        const dte = Number(row.dte);
+        const timeYears = exactTimeYears !== null
+            ? exactTimeYears
+            : (Number.isFinite(suppliedTimeYears) && suppliedTimeYears > 0
+                ? suppliedTimeYears
+                : (Number.isFinite(dte) && dte > 0 ? dte / 365 : null));
+        if (!(timeYears > 0)) return null;
+
+        const interestRate = Number.isFinite(Number(opts.interestRate))
+            ? Number(opts.interestRate)
+            : 0;
+        const discountObservation = _resolveDiscountObservation(
+            opts.discountCurve && typeof opts.discountCurve === 'object'
+                ? opts.discountCurve
+                : null,
+            timeYears,
+            interestRate,
+            'curve_unavailable'
+        );
+        const parityForward = strike
+            + (callMark - putMark) / discountObservation.discountFactor;
+        if (!(parityForward > 0)) return null;
+        const totalVariance = invertStraddleTotalVariance(
+            'black76',
+            parityForward,
+            strike,
+            timeYears,
+            discountObservation.zeroRate,
+            straddlePrice
+        );
+        if (!(totalVariance >= 0)) return null;
+        return {
+            totalVariance,
+            variancePoints: totalVariance * 10000,
+            timeYears,
+            timeSource: exactTimeYears !== null
+                ? 'exact quote-to-expiry time'
+                : (Number.isFinite(suppliedTimeYears) && suppliedTimeYears > 0
+                    ? 'quote-pair time horizon'
+                    : 'calendar DTE / 365'),
+            straddlePrice,
+            callMark,
+            putMark,
+            strike,
+            parityForward,
+            quoteAsOfMs: rowQuoteAsOfMs,
+            expiryAsOfMs,
+            discountObservation,
+            varianceSource: isBestEffort
+                ? 'straddle_display_mark_inversion'
+                : 'straddle_bbo_inversion',
+            isBestEffort,
+            quoteSkewMs,
+            quoteSkewExceeded,
+            callMarkSource: String(row.callMarkSource || 'display_mark').trim() || 'display_mark',
+            putMarkSource: String(row.putMarkSource || 'display_mark').trim() || 'display_mark',
+        };
+    }
+
+    function _quoteAsOfMs(value) {
+        const parsed = Date.parse(String(value || '').trim());
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function _rowExpiryAsOfMs(row) {
+        const callExpiryAsOf = String(row && row.callExpiryAsOf || '').trim();
+        const putExpiryAsOf = String(row && row.putExpiryAsOf || '').trim();
+        if (!callExpiryAsOf || callExpiryAsOf !== putExpiryAsOf) return null;
+        return _quoteAsOfMs(callExpiryAsOf);
+    }
+
+    function _marketCurvesApi() {
+        const api = globalScope.OptionComboMarketCurves;
+        return api && typeof api.resolveDiscount === 'function' ? api : null;
+    }
+
+    function _manualDiscountObservation(timeYears, interestRate, reason = '') {
+        return {
+            zeroRate: interestRate,
+            discountFactor: Math.exp(-interestRate * timeYears),
+            source: 'manual_discount_rate_fallback',
+            curveAsOf: null,
+            curveId: null,
+            isProxy: false,
+            fallbackUsed: true,
+            fallbackReason: String(reason || '').trim() || null,
+            resolutionMethod: 'manual_fallback',
+        };
+    }
+
+    // Resolve discounting independently for every expiry. Hybrid SOFR/CMT and
+    // legacy Treasury inputs remain explicitly labelled as proxies;
+    // degraded/proxy quality is usable, while stale or invalid observations
+    // fall back to the visible manual continuous rate.
+    function _resolveDiscountObservation(
+        discountCurve,
+        timeYears,
+        interestRate,
+        unavailableReason = 'curve_unavailable'
+    ) {
+        const api = _marketCurvesApi();
+        if (!discountCurve) {
+            return _manualDiscountObservation(timeYears, interestRate, unavailableReason);
+        }
+        if (!api) {
+            return _manualDiscountObservation(timeYears, interestRate, 'curve_api_unavailable');
+        }
+        try {
+            const resolved = api.resolveDiscount(
+                discountCurve,
+                { tenorDays: timeYears * 365 },
+                { maxExtrapolationDays: 31 }
+            );
+            if (!resolved || resolved.usable === false
+                || !(resolved.discountFactor > 0) || !Number.isFinite(resolved.zeroRate)) {
+                return _manualDiscountObservation(timeYears, interestRate, 'curve_unusable_at_expiry');
+            }
+            const metadata = resolved.metadata && typeof resolved.metadata === 'object'
+                ? resolved.metadata
+                : {};
+            return {
+                zeroRate: resolved.zeroRate,
+                discountFactor: resolved.discountFactor,
+                source: String(metadata.source || discountCurve.metadata
+                    && discountCurve.metadata.source || 'discount_curve'),
+                curveAsOf: String(resolved.asOf || discountCurve.asOf || '').trim() || null,
+                curveId: String(resolved.curveId || discountCurve.id || '').trim() || null,
+                isProxy: discountCurve.isProxy === true
+                    || discountCurve.discountSemantics === 'continuous_zero_proxy_from_cmt_par_yield'
+                    || !!(metadata.quality && Array.isArray(metadata.quality.flags)
+                        && (metadata.quality.flags.includes('cmt_par_yield_proxy')
+                            || metadata.quality.flags.includes('reference_curve_is_proxy'))),
+                fallbackUsed: false,
+                fallbackReason: null,
+                resolutionMethod: String(resolved.resolution
+                    && resolved.resolution.method || '').trim() || null,
+            };
+        } catch (error) {
+            return _manualDiscountObservation(
+                timeYears,
+                interestRate,
+                error && error.message ? error.message : 'curve_resolution_failed'
+            );
+        }
+    }
+
+    function _discountCurveEligibility(discountCurve, anchorIso, maxAgeDays) {
+        if (!discountCurve) {
+            return { curve: null, usable: false, reason: 'curve_unavailable', ageDays: null };
+        }
+        const anchor = _parseUtcDate(anchorIso);
+        const curveAsOf = _parseUtcDate(
+            discountCurve.effectiveDate || discountCurve.asOf
+        );
+        if (!anchor) {
+            return { curve: null, usable: false, reason: 'anchor_date_unavailable', ageDays: null };
+        }
+        if (!curveAsOf) {
+            return { curve: null, usable: false, reason: 'curve_asof_unavailable', ageDays: null };
+        }
+        const ageDays = (anchor.getTime() - curveAsOf.getTime()) / MS_PER_DAY;
+        if (ageDays < 0) {
+            return { curve: null, usable: false, reason: 'curve_from_future', ageDays };
+        }
+        if (Number.isFinite(maxAgeDays) && ageDays > maxAgeDays) {
+            return { curve: null, usable: false, reason: 'curve_stale', ageDays };
+        }
+        return { curve: discountCurve, usable: true, reason: null, ageDays };
+    }
+
+    function _resolveIndependentReferenceForward(
+        opts,
+        pricingModel,
+        underlyingQuoteIsForward,
+        spot,
+        timeYears
+    ) {
+        const api = _marketCurvesApi();
+        const tenorTarget = { tenorDays: timeYears * 365 };
+        if (api && opts.forwardCurve && typeof api.resolveForward === 'function') {
+            try {
+                const resolved = api.resolveForward(opts.forwardCurve, tenorTarget, {
+                    maxExtrapolationDays: 31,
+                });
+                if (resolved && resolved.usable !== false && resolved.forward > 0) {
+                    return { forward: resolved.forward, source: 'forward_curve' };
+                }
+            } catch (_) {
+                // Continue to the next independent source.
+            }
+        }
+        if (api && opts.carryCurve && spot !== null
+            && typeof api.resolveCarry === 'function'
+            && typeof api.forwardFromSpotCarry === 'function') {
+            try {
+                const resolved = api.resolveCarry(opts.carryCurve, tenorTarget, {
+                    maxExtrapolationDays: 31,
+                });
+                if (resolved && resolved.usable !== false && Number.isFinite(resolved.carryRate)) {
+                    return {
+                        forward: api.forwardFromSpotCarry({
+                            spot,
+                            carry: resolved,
+                            timeYears,
+                        }),
+                        source: 'carry_curve',
+                    };
+                }
+            } catch (_) {
+                // Continue to the product-specific observation below.
+            }
+        }
+        // A futures quote is already a forward observation. For spot/BSM
+        // products there is no independent forward unless a Forward/Carry
+        // curve was supplied; S*exp(rT) would silently assume q=0 and is not
+        // a valid carry check for dividend-paying ETFs or cash indexes.
+        if (underlyingQuoteIsForward && spot !== null) {
+            return { forward: spot, source: 'underlying_future' };
+        }
+        return { forward: null, source: null };
+    }
+
+    function _median(values) {
+        const ordered = values.slice().sort((left, right) => left - right);
+        if (!ordered.length) {
+            return null;
+        }
+        const mid = Math.floor(ordered.length / 2);
+        return ordered.length % 2
+            ? ordered[mid]
+            : (ordered[mid - 1] + ordered[mid]) / 2;
+    }
+
+    function _madFilter(values, scale = 5) {
+        if (values.length < 5) {
+            return values;
+        }
+        const center = _median(values);
+        const mad = _median(values.map((value) => Math.abs(value - center)));
+        if (!(mad > 0)) {
+            return values;
+        }
+        const limit = scale * 1.4826 * mad;
+        return values.filter((value) => Math.abs(value - center) <= limit);
+    }
+
+    // Classify non-trading dates in [start, end).  Weekends and official
+    // exchange closures receive the same lambda in the variance equation, but
+    // keeping their kinds separate makes the exported evidence auditable.
+    // Null means the official calendar is missing, stale, or out of coverage.
+    function _classifyNonTradingDates(startDateStr, endDateStr, calendarKey) {
+        const start = _parseUtcDate(startDateStr);
+        const end = _parseUtcDate(endDateStr);
+        if (!start || !end || start > end) {
+            return null;
+        }
+        if (start < end) {
+            if (typeof globalScope.isOfficialExchangeCalendarAvailable !== 'function'
+                || typeof globalScope.isMarketHoliday !== 'function') {
+                return null;
+            }
+            const lastIncluded = new Date(end);
+            lastIncluded.setUTCDate(lastIncluded.getUTCDate() - 1);
+            if (!globalScope.isOfficialExchangeCalendarAvailable(
+                calendarKey,
+                start.toISOString().slice(0, 10),
+                lastIncluded.toISOString().slice(0, 10)
+            )) {
+                return null;
+            }
+        }
+        const dates = [];
+        const weekendDates = [];
+        const holidayDates = [];
+        const kinds = {};
+        const current = new Date(start);
+        while (current < end) {
+            const iso = current.toISOString().slice(0, 10);
+            const dayOfWeek = current.getUTCDay();
+            const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+            const isHoliday = globalScope.isMarketHoliday(iso, calendarKey);
+            if (!isWeekend && isHoliday === null) {
+                return null;
+            }
+            if (isWeekend || isHoliday) {
+                dates.push(iso);
+                if (isHoliday) {
+                    holidayDates.push(iso);
+                    kinds[iso] = 'exchange_holiday';
+                } else {
+                    weekendDates.push(iso);
+                    kinds[iso] = 'weekend';
+                }
+            }
+            current.setUTCDate(current.getUTCDate() + 1);
+        }
+        return { dates, weekendDates, holidayDates, kinds };
+    }
+
+    // Solve the option-implied weight of a non-trading day (implied lambda)
+    // from the sampled term structure itself. Adjacent-expiry forward variance
+    // over pure trading-day intervals gives a local per-trading-day variance
+    // baseline; an interval containing non-trading days then satisfies
+    //   forwardVariance = baseline
+    //     * (varianceTradingDays + lambda * varianceNonTradingDays).
+    // Public integer day-count fields remain for export compatibility; the
+    // variance* fields use the exact expiry-to-expiry timestamp segments.
+    //
+    // The production route exactly inverts each observed call+put midpoint.
+    // Its per-expiry forward is inferred from call-put parity rather than
+    // borrowing one global future/spot for every tenor. A futures quote (or an
+    // explicitly supplied Forward/Carry curve) remains an independent quality
+    // control observation. Cash spot alone is not: turning it into a forward
+    // with S*exp(rT) would silently assert q=0. Vendor IV is retained only as
+    // an explicit research cross-check.
+    //
+    // Identification still depends on a locally stable per-trading-day
+    // baseline. Robust medians limit (but cannot eliminate) contamination by
+    // scheduled event variance such as CPI or FOMC.
+    function computeImpliedWeekendLambdas(detailRows, anchorDate, options) {
+        const opts = {
+            ...IMPLIED_LAMBDA_DEFAULTS,
+            ...(options && typeof options === 'object' ? options : {}),
+        };
+        const calendarKey = String(opts.calendarKey || 'NYSE');
+        const varianceSource = opts.varianceSource === 'vendor_iv' ? 'vendor_iv' : 'straddle';
+        const pricingModel = opts.pricingModel === 'black76' ? 'black76' : 'bsm-spot';
+        // Legacy direct callers inferred this from Black-76. Production pages
+        // pass it explicitly because cash index options may use discounted-
+        // forward pricing even though the subscribed underlying is spot.
+        const underlyingQuoteIsForward = opts.underlyingQuoteIsForward === true
+            || (opts.underlyingQuoteIsForward === undefined && pricingModel === 'black76');
+        const interestRate = Number.isFinite(parseFloat(opts.interestRate))
+            ? parseFloat(opts.interestRate)
+            : IMPLIED_LAMBDA_DEFAULTS.interestRate;
+        const discountCurve = opts.discountCurve && typeof opts.discountCurve === 'object'
+            ? opts.discountCurve
+            : null;
+        const maxQuoteSkewMs = opts.maxQuoteSkewMs === null
+            ? null
+            : (Number.isFinite(parseFloat(opts.maxQuoteSkewMs))
+                ? parseFloat(opts.maxQuoteSkewMs)
+                : IMPLIED_LAMBDA_DEFAULTS.maxQuoteSkewMs);
+        const maxForwardDeviationPct = opts.maxForwardDeviationPct === null
+            ? null
+            : (Number.isFinite(parseFloat(opts.maxForwardDeviationPct))
+                && parseFloat(opts.maxForwardDeviationPct) >= 0
+                ? parseFloat(opts.maxForwardDeviationPct)
+                : IMPLIED_LAMBDA_DEFAULTS.maxForwardDeviationPct);
+        const maxBidAskSpreadPct = opts.maxBidAskSpreadPct === null
+            ? null
+            : (Number.isFinite(parseFloat(opts.maxBidAskSpreadPct))
+                && parseFloat(opts.maxBidAskSpreadPct) >= 0
+                ? parseFloat(opts.maxBidAskSpreadPct)
+                : IMPLIED_LAMBDA_DEFAULTS.maxBidAskSpreadPct);
+        const frontIntervalVerified = opts.frontIntervalVerified === true;
+        const requireExactExpiryTimestamps = varianceSource === 'straddle'
+            && opts.requireExactExpiryTimestamps === true;
+        const normalizedCalendarKey = calendarKey.trim().toUpperCase() || 'NYSE';
+        const isFuturesCalendar = /^(?:CME|NYMEX|COMEX):/.test(normalizedCalendarKey);
+        const intervalTimeZone = String(opts.timeZone || (
+            isFuturesCalendar ? 'America/Chicago' : 'America/New_York'
+        )).trim();
+        const parsedRolloverHour = parseInt(opts.tradeDateRolloverHour, 10);
+        const intervalTradeDateRolloverHour = Number.isFinite(parsedRolloverHour)
+            ? Math.min(23, Math.max(0, parsedRolloverHour))
+            : (isFuturesCalendar ? 17 : null);
+        const requireCoherentSnapshot = varianceSource === 'straddle'
+            && opts.requireCoherentSnapshot !== false;
+        const spot = _coercePositiveNumber(opts.underlyingPrice);
+        const anchorIso = (() => {
+            const parsed = _parseUtcDate(anchorDate);
+            return parsed ? parsed.toISOString().slice(0, 10) : null;
+        })();
+        const maxDiscountCurveAgeDays = opts.maxDiscountCurveAgeDays === null
+            ? Number.POSITIVE_INFINITY
+            : (Number.isFinite(parseFloat(opts.maxDiscountCurveAgeDays))
+                && parseFloat(opts.maxDiscountCurveAgeDays) >= 0
+                ? parseFloat(opts.maxDiscountCurveAgeDays)
+                : IMPLIED_LAMBDA_DEFAULTS.maxDiscountCurveAgeDays);
+        const discountCurveEligibility = _discountCurveEligibility(
+            discountCurve,
+            anchorIso,
+            maxDiscountCurveAgeDays
+        );
+        const activeDiscountCurve = discountCurveEligibility.curve;
+
+        const snapshotMetadata = opts.snapshotMetadata && typeof opts.snapshotMetadata === 'object'
+            ? opts.snapshotMetadata
+            : null;
+        const snapshotId = String(snapshotMetadata
+            && (snapshotMetadata.snapshotId || snapshotMetadata.batchId) || '').trim();
+        const underlyingSnapshotId = String(snapshotMetadata
+            && snapshotMetadata.underlyingSnapshotId || '').trim();
+        const snapshotAsOfMs = _quoteAsOfMs(snapshotMetadata
+            && (snapshotMetadata.quoteAsOf || snapshotMetadata.payloadAsOf));
+        const underlyingAsOfMs = _quoteAsOfMs(snapshotMetadata
+            && (snapshotMetadata.underlyingQuoteAsOf || snapshotMetadata.quoteAsOf || snapshotMetadata.payloadAsOf));
+        const snapshotGate = (() => {
+            if (!requireCoherentSnapshot) {
+                return { ok: true, status: 'ok' };
+            }
+            if (!snapshotMetadata) {
+                return { ok: false, status: 'missing_snapshot_metadata' };
+            }
+            if (snapshotMetadata.coherent !== true) {
+                return { ok: false, status: 'incoherent_snapshot' };
+            }
+            if (snapshotMetadata.quoteComplete !== true) {
+                return { ok: false, status: 'incomplete_snapshot' };
+            }
+            if (!snapshotId) {
+                return { ok: false, status: 'missing_snapshot_id' };
+            }
+            if (!underlyingSnapshotId) {
+                return { ok: false, status: 'missing_underlying_snapshot' };
+            }
+            if (underlyingSnapshotId !== snapshotId) {
+                return { ok: false, status: 'underlying_snapshot_mismatch' };
+            }
+            if (maxQuoteSkewMs !== null) {
+                if (snapshotAsOfMs === null || underlyingAsOfMs === null) {
+                    return { ok: false, status: 'missing_snapshot_timestamp' };
+                }
+                if (Math.abs(snapshotAsOfMs - underlyingAsOfMs) > maxQuoteSkewMs) {
+                    return { ok: false, status: 'underlying_stale_mix' };
+                }
+            }
+            return { ok: true, status: 'ok' };
+        })();
+
+        // Straddle route eligibility is strict by design: both mids must come
+        // from real two-sided markets (the backend falls back to TWS model
+        // prices when bid/ask are missing - exactly what this route must not
+        // consume), and the call, put and underlying must belong to one
+        // complete server snapshot.
+        const rowStraddlePoint = (row) => {
+            if (!snapshotGate.ok) {
+                return { status: snapshotGate.status };
+            }
+            if (row.callMarkSource !== 'bid_ask_mid' || row.putMarkSource !== 'bid_ask_mid') {
+                return { status: 'non_market_mark' };
+            }
+            const callBid = _coercePositiveNumber(row.callBid);
+            const callAsk = _coercePositiveNumber(row.callAsk);
+            const putBid = _coercePositiveNumber(row.putBid);
+            const putAsk = _coercePositiveNumber(row.putAsk);
+            const strike = _coercePositiveNumber(row.atmStrike);
+            if (callBid === null || callAsk === null || putBid === null || putAsk === null) {
+                return { status: 'missing_bbo' };
+            }
+            if (callAsk < callBid || putAsk < putBid) {
+                return { status: 'crossed_market' };
+            }
+            const callMark = (callBid + callAsk) / 2;
+            const putMark = (putBid + putAsk) / 2;
+            const callSpreadPct = (callAsk - callBid) / callMark;
+            const putSpreadPct = (putAsk - putBid) / putMark;
+            if (maxBidAskSpreadPct !== null
+                && (callSpreadPct > maxBidAskSpreadPct || putSpreadPct > maxBidAskSpreadPct)) {
+                return { status: 'wide_market', callSpreadPct, putSpreadPct };
+            }
+            if (strike === null || (underlyingQuoteIsForward && spot === null)) {
+                return { status: 'incomplete_price_inputs' };
+            }
+            const rowCallSnapshotId = String(row.callSnapshotId || '').trim();
+            const rowPutSnapshotId = String(row.putSnapshotId || '').trim();
+            if (requireCoherentSnapshot) {
+                if (!rowCallSnapshotId || !rowPutSnapshotId) {
+                    return { status: 'missing_row_snapshot' };
+                }
+                if (rowCallSnapshotId !== snapshotId || rowPutSnapshotId !== snapshotId) {
+                    return { status: 'mixed_snapshot' };
+                }
+            }
+            const callAsOfMs = _quoteAsOfMs(row.callQuoteAsOf);
+            const putAsOfMs = _quoteAsOfMs(row.putQuoteAsOf);
+            const expiryAsOfMs = _rowExpiryAsOfMs(row);
+            const rowQuoteAsOfMs = callAsOfMs !== null && putAsOfMs !== null
+                ? Math.max(callAsOfMs, putAsOfMs)
+                : null;
+            if (requireExactExpiryTimestamps
+                && (expiryAsOfMs === null || rowQuoteAsOfMs === null
+                    || expiryAsOfMs <= rowQuoteAsOfMs)) {
+                return { status: 'exact_expiry_timestamp_unavailable' };
+            }
+            if (maxQuoteSkewMs !== null) {
+                if (callAsOfMs === null || putAsOfMs === null
+                    || Math.abs(callAsOfMs - putAsOfMs) > maxQuoteSkewMs) {
+                    return { status: 'stale_mix' };
+                }
+                if (requireCoherentSnapshot && (
+                    Math.abs(callAsOfMs - underlyingAsOfMs) > maxQuoteSkewMs
+                    || Math.abs(putAsOfMs - underlyingAsOfMs) > maxQuoteSkewMs
+                )) {
+                    return { status: 'underlying_stale_mix' };
+                }
+            }
+            const suppliedTimeYears = parseFloat(row.timeYears);
+            const oneMinuteYears = 1 / (365 * 24 * 60);
+            const exactTimeYears = expiryAsOfMs !== null && rowQuoteAsOfMs !== null
+                && expiryAsOfMs > rowQuoteAsOfMs
+                ? (expiryAsOfMs - rowQuoteAsOfMs) / (365 * MS_PER_DAY)
+                : null;
+            const timeYears = exactTimeYears !== null
+                ? exactTimeYears
+                : (Number.isFinite(suppliedTimeYears) && suppliedTimeYears > 0
+                    ? suppliedTimeYears
+                    : Math.max(row.dte / 365, oneMinuteYears));
+            const discountObservation = _resolveDiscountObservation(
+                activeDiscountCurve,
+                timeYears,
+                interestRate,
+                discountCurveEligibility.reason || 'curve_unavailable'
+            );
+            const parityForward = strike
+                + (callMark - putMark) / discountObservation.discountFactor;
+            if (!(parityForward > 0)) {
+                return {
+                    status: 'invalid_parity_forward',
+                    discountObservation,
+                };
+            }
+            const referenceObservation = _resolveIndependentReferenceForward(
+                opts,
+                pricingModel,
+                underlyingQuoteIsForward,
+                spot,
+                timeYears
+            );
+            const referenceForward = referenceObservation.forward;
+            const forwardDeviationPct = referenceForward > 0
+                ? Math.abs(parityForward - referenceForward) / referenceForward
+                : null;
+            if (maxForwardDeviationPct !== null && Number.isFinite(forwardDeviationPct)
+                && forwardDeviationPct > maxForwardDeviationPct) {
+                return {
+                    status: 'forward_mismatch',
+                    parityForward,
+                    referenceForward,
+                    referenceForwardSource: referenceObservation.source,
+                    forwardDeviationPct,
+                    discountObservation,
+                };
+            }
+
+            // Once parity has supplied F, the discounted-forward form is the
+            // exact European inversion for both Black-76 and BSM. This also
+            // avoids applying one global ES futures price to every expiry.
+            const totalVariance = invertStraddleTotalVariance(
+                'black76', parityForward, strike, timeYears,
+                discountObservation.zeroRate, callMark + putMark
+            );
+            if (totalVariance === null) {
+                return {
+                    status: 'straddle_inversion_failed',
+                    parityForward,
+                    referenceForward,
+                    referenceForwardSource: referenceObservation.source,
+                    forwardDeviationPct,
+                    discountObservation,
+                };
+            }
+            return {
+                status: 'ok',
+                totalVariance,
+                asOfMs: rowQuoteAsOfMs,
+                expiryAsOfMs,
+                expiryAsOf: expiryAsOfMs === null
+                    ? null
+                    : new Date(expiryAsOfMs).toISOString(),
+                expiryTimeSource: row.callExpiryTimeSource
+                    && row.callExpiryTimeSource === row.putExpiryTimeSource
+                    ? row.callExpiryTimeSource
+                    : 'contract',
+                timeYears,
+                snapshotId: rowCallSnapshotId || rowPutSnapshotId || null,
+                parityForward,
+                referenceForward,
+                referenceForwardSource: referenceObservation.source,
+                forwardDeviationPct,
+                callSpreadPct,
+                putSpreadPct,
+                discountObservation,
+            };
+        };
+
+        const rowPoint = (row) => {
+            if (varianceSource === 'vendor_iv') {
+                return Number.isFinite(row.atmIv) && row.atmIv > 0
+                    ? {
+                        status: 'ok',
+                        totalVariance: row.atmIv * row.atmIv * (row.dte / 365),
+                        asOfMs: snapshotAsOfMs,
+                        snapshotId: snapshotId || null,
+                    }
+                    : { status: 'missing_vendor_iv' };
+            }
+            return rowStraddlePoint(row);
+        };
+
+        const eligibleRows = (Array.isArray(detailRows) ? detailRows : [])
+            .filter((row) => row
+                && Number.isFinite(row.dte) && row.dte >= opts.minDte
+                && _getRowExpiry(row))
+            .sort((left, right) => left.dte - right.dte);
+        const rowDiagnostics = [];
+        const points = [];
+        for (const row of eligibleRows) {
+            const evaluated = rowPoint(row);
+            const status = evaluated && evaluated.status || 'unusable_row';
+            rowDiagnostics.push({
+                expiry: _getRowExpiry(row),
+                dte: row.dte,
+                status,
+                expiryAsOf: evaluated && evaluated.expiryAsOf || null,
+                expiryTimeSource: evaluated && evaluated.expiryTimeSource || null,
+                timeYears: _roundNumber(evaluated && evaluated.timeYears, 12),
+                snapshotId: evaluated && evaluated.snapshotId || null,
+                parityForward: _roundNumber(evaluated && evaluated.parityForward, 6),
+                referenceForward: _roundNumber(evaluated && evaluated.referenceForward, 6),
+                referenceForwardSource: evaluated && evaluated.referenceForwardSource || null,
+                forwardDeviationPct: _roundNumber(evaluated && evaluated.forwardDeviationPct, 8),
+                callSpreadPct: _roundNumber(evaluated && evaluated.callSpreadPct, 8),
+                putSpreadPct: _roundNumber(evaluated && evaluated.putSpreadPct, 8),
+                discountRate: _roundNumber(evaluated && evaluated.discountObservation
+                    && evaluated.discountObservation.zeroRate, 10),
+                discountFactor: _roundNumber(evaluated && evaluated.discountObservation
+                    && evaluated.discountObservation.discountFactor, 12),
+                discountSource: evaluated && evaluated.discountObservation
+                    && evaluated.discountObservation.source || null,
+                discountCurveAsOf: evaluated && evaluated.discountObservation
+                    && evaluated.discountObservation.curveAsOf || null,
+                discountIsProxy: evaluated && evaluated.discountObservation
+                    && evaluated.discountObservation.isProxy === true,
+                discountFallbackUsed: evaluated && evaluated.discountObservation
+                    && evaluated.discountObservation.fallbackUsed === true,
+                discountFallbackReason: evaluated && evaluated.discountObservation
+                    && evaluated.discountObservation.fallbackReason || null,
+            });
+            if (status !== 'ok' || !Number.isFinite(evaluated.totalVariance)
+                || !(evaluated.totalVariance > 0)) {
+                continue;
+            }
+            points.push({
+                expiry: _getRowExpiry(row),
+                dte: row.dte,
+                totalVariance: evaluated.totalVariance,
+                asOfMs: evaluated.asOfMs,
+                expiryAsOfMs: evaluated.expiryAsOfMs,
+                expiryAsOf: evaluated.expiryAsOf || null,
+                expiryTimeSource: evaluated.expiryTimeSource || null,
+                timeYears: evaluated.timeYears,
+                horizonCalendarDays: Number.isFinite(evaluated.timeYears)
+                    ? evaluated.timeYears * 365
+                    : row.dte,
+                snapshotId: evaluated.snapshotId || null,
+                parityForward: evaluated.parityForward,
+                referenceForward: evaluated.referenceForward,
+                referenceForwardSource: evaluated.referenceForwardSource || null,
+                forwardDeviationPct: evaluated.forwardDeviationPct,
+                discountRate: evaluated.discountObservation
+                    ? evaluated.discountObservation.zeroRate : null,
+                discountFactor: evaluated.discountObservation
+                    ? evaluated.discountObservation.discountFactor : null,
+                discountSource: evaluated.discountObservation
+                    ? evaluated.discountObservation.source : null,
+                discountCurveAsOf: evaluated.discountObservation
+                    ? evaluated.discountObservation.curveAsOf : null,
+                discountIsProxy: evaluated.discountObservation
+                    ? evaluated.discountObservation.isProxy === true : false,
+                discountFallbackUsed: evaluated.discountObservation
+                    ? evaluated.discountObservation.fallbackUsed === true : false,
+            });
+        }
+
+        const intervals = [];
+        const pushInterval = (startDateStr, endDateStr, front, back, isFront) => {
+            const exactStartMs = isFront
+                ? back.asOfMs
+                : front.expiryAsOfMs;
+            const exactEndMs = back.expiryAsOfMs;
+            const exactTimestampInterval = Number.isFinite(exactStartMs)
+                && Number.isFinite(exactEndMs)
+                && exactEndMs > exactStartMs;
+            const varianceCalendarDays = exactTimestampInterval
+                ? (exactEndMs - exactStartMs) / MS_PER_DAY
+                : back.dte - front.dte;
+            const calendarDays = back.dte - front.dte;
+            if (varianceCalendarDays <= 0
+                || varianceCalendarDays > opts.maxIntervalCalendarDays) {
+                return;
+            }
+            const dateUtils = globalScope.OptionComboDateUtils;
+            const exactClock = exactTimestampInterval
+                && dateUtils && typeof dateUtils.resolveWeightedTime === 'function'
+                ? dateUtils.resolveWeightedTime(
+                    exactStartMs,
+                    exactEndMs,
+                    0,
+                    normalizedCalendarKey,
+                    null,
+                    intervalTimeZone,
+                    intervalTradeDateRolloverHour
+                )
+                : null;
+            const exactClockAvailable = !!(exactClock && exactClock.available === true);
+            const fallbackAllowed = !requireExactExpiryTimestamps;
+            // Preserve the original date-count evidence in the public fields
+            // for existing exports/UI.  The variance* fields below are the
+            // exact fractional clock used by the lambda equation.
+            const dateTradingDays = countTradingDays(
+                startDateStr, endDateStr, calendarKey
+            );
+            const fallbackNonTradingCalendar = _classifyNonTradingDates(
+                startDateStr, endDateStr, calendarKey
+            );
+            const nonTradingDates = exactClockAvailable
+                ? exactClock.nonTradingDates.slice()
+                : (fallbackNonTradingCalendar ? fallbackNonTradingCalendar.dates : null);
+            const nonTradingDateKinds = {};
+            if (exactClockAvailable) {
+                exactClock.segments.forEach((segment) => {
+                    if (segment.kind !== 'trading') {
+                        nonTradingDateKinds[segment.date] = segment.kind;
+                    }
+                });
+            } else if (fallbackNonTradingCalendar) {
+                Object.assign(nonTradingDateKinds, fallbackNonTradingCalendar.kinds);
+            }
+            const weekendDates = nonTradingDates === null
+                ? null
+                : nonTradingDates.filter(date => nonTradingDateKinds[date] === 'weekend');
+            const holidayDates = nonTradingDates === null
+                ? null
+                : nonTradingDates.filter(date => nonTradingDateKinds[date] === 'exchange_holiday');
+            const varianceTradingDays = exactClockAvailable
+                ? exactClock.tradingDays
+                : (fallbackAllowed ? dateTradingDays : null);
+            const varianceNonTradingDays = exactClockAvailable
+                ? exactClock.nonTradingDays
+                : (fallbackAllowed && dateTradingDays !== null
+                    ? calendarDays - dateTradingDays
+                    : null);
+            const intervalQuoteAsOfMs = [front.asOfMs, back.asOfMs]
+                .filter(Number.isFinite)
+                .reduce((latest, value) => latest === null || value > latest ? value : latest, null);
+            intervals.push({
+                startDate: startDateStr,
+                startExpiry: isFront ? null : front.expiry,
+                endExpiry: back.expiry,
+                startAsOf: exactTimestampInterval
+                    ? new Date(exactStartMs).toISOString()
+                    : null,
+                endAsOf: exactTimestampInterval
+                    ? new Date(exactEndMs).toISOString()
+                    : null,
+                exactTimestampClock: exactClockAvailable,
+                profileClockFallback: exactClockAvailable && (
+                    back.expiryTimeSource === 'product-profile'
+                    || (!isFront && front.expiryTimeSource === 'product-profile')
+                ),
+                clockStatus: exactClockAvailable
+                    ? 'ok'
+                    : (exactClock && exactClock.status || (
+                        exactTimestampInterval ? 'exact_clock_unavailable' : 'date_only_compatibility'
+                    )),
+                calendarDays,
+                tradingDays: dateTradingDays,
+                nonTradingDays: dateTradingDays === null
+                    ? null
+                    : calendarDays - dateTradingDays,
+                varianceCalendarDays,
+                varianceTradingDays,
+                varianceNonTradingDays,
+                nonTradingDates,
+                weekendDates,
+                holidayDates,
+                nonTradingDateKinds: nonTradingDates === null ? null : nonTradingDateKinds,
+                forwardVariance: back.totalVariance - front.totalVariance,
+                midDte: (
+                    (Number.isFinite(front.horizonCalendarDays)
+                        ? front.horizonCalendarDays : front.dte)
+                    + (Number.isFinite(back.horizonCalendarDays)
+                        ? back.horizonCalendarDays : back.dte)
+                ) / 2,
+                quoteSkewMs: Number.isFinite(front.asOfMs) && Number.isFinite(back.asOfMs)
+                    ? Math.abs(back.asOfMs - front.asOfMs)
+                    : null,
+                quoteAsOf: Number.isFinite(intervalQuoteAsOfMs)
+                    ? new Date(intervalQuoteAsOfMs).toISOString()
+                    : null,
+                snapshotId: back.snapshotId || front.snapshotId || snapshotId || null,
+                isFront,
+                frontIntervalVerified: !isFront || frontIntervalVerified,
+            });
+        };
+
+        if (anchorIso && points.length) {
+            pushInterval(
+                anchorIso, points[0].expiry,
+                { dte: 0, totalVariance: 0, asOfMs: null }, points[0], true
+            );
+        }
+        for (let i = 0; i + 1 < points.length; i += 1) {
+            pushInterval(points[i].expiry, points[i + 1].expiry, points[i], points[i + 1], false);
+        }
+
+        const intervalIsCoherent = (interval) => maxQuoteSkewMs === null
+            || interval.quoteSkewMs === null
+            || interval.quoteSkewMs <= maxQuoteSkewMs;
+
+        const pure = intervals.filter((interval) => interval.varianceTradingDays !== null
+            && interval.varianceNonTradingDays === 0
+            && interval.varianceTradingDays > 0
+            && interval.forwardVariance > 0
+            && (!interval.isFront || frontIntervalVerified)
+            && intervalIsCoherent(interval));
+
+        const weekendIntervals = intervals
+            .filter((interval) => interval.varianceNonTradingDays === null
+                || interval.varianceNonTradingDays > 0)
+            .map((interval) => {
+                const result = {
+                    ...interval,
+                    baselineVariance: null,
+                    baselineCount: 0,
+                    baselineMode: null,
+                    rawLambda: null,
+                    lambda: null,
+                    lambdaClamped: null,
+                    status: 'ok',
+                };
+                if (interval.isFront && !frontIntervalVerified) {
+                    result.status = 'unverified_front';
+                    return result;
+                }
+                if (interval.varianceTradingDays === null
+                    || interval.varianceNonTradingDays === null
+                    || interval.nonTradingDates === null) {
+                    result.status = 'calendar_unavailable';
+                    return result;
+                }
+                if (!intervalIsCoherent(interval)) {
+                    result.status = 'stale_mix';
+                    return result;
+                }
+                if (!(interval.forwardVariance > 0)) {
+                    result.status = 'nonpositive_forward_variance';
+                    return result;
+                }
+                let candidates = _madFilter(pure
+                    .filter((candidate) => Math.abs(candidate.midDte - interval.midDte) <= opts.baselineWindowDays)
+                    .map((candidate) => (
+                        candidate.forwardVariance / candidate.varianceTradingDays
+                    )));
+                let baselineMode = 'local';
+                if (candidates.length < opts.minBaselines) {
+                    // Once the listed chain switches from daily to weekly
+                    // expiries there may be no pure-trading interval near a
+                    // later weekend. Use the nearest observed pure intervals
+                    // as an explicitly flagged extrapolated baseline instead
+                    // of deleting every later weekend from the curve.
+                    candidates = _madFilter(pure
+                        .slice()
+                        .sort((left, right) => (
+                            Math.abs(left.midDte - interval.midDte)
+                            - Math.abs(right.midDte - interval.midDte)
+                        ))
+                        .slice(0, Math.max(opts.minBaselines, 3))
+                        .map((candidate) => (
+                            candidate.forwardVariance / candidate.varianceTradingDays
+                        )));
+                    baselineMode = 'nearest_extrapolated';
+                    if (!candidates.length) {
+                        result.status = 'no_baseline';
+                        return result;
+                    }
+                }
+                const baseline = _median(candidates);
+                if (!(baseline > 0)) {
+                    result.status = 'no_baseline';
+                    return result;
+                }
+                const lambda = (
+                    interval.forwardVariance / baseline - interval.varianceTradingDays
+                ) / interval.varianceNonTradingDays;
+                result.baselineVariance = baseline;
+                result.baselineCount = candidates.length;
+                result.baselineMode = baselineMode;
+                result.rawLambda = _roundNumber(lambda, 6);
+                result.lambda = _roundNumber(lambda, 4);
+                result.lambdaClamped = _roundNumber(Math.min(1, Math.max(0, lambda)), 4);
+                result.conventionalRange = lambda < -1e-8
+                    ? 'inverted'
+                    : (lambda > 1 + 1e-8 ? 'above_calendar' : 'inside');
+                result.isInverted = lambda < -1e-8;
+                return result;
+            });
+
+        const coherenceFailureStatuses = new Set([
+            'missing_row_snapshot',
+            'mixed_snapshot',
+            'stale_mix',
+            'underlying_stale_mix',
+        ]);
+        const rowCoherenceFailure = varianceSource === 'straddle'
+            ? rowDiagnostics.find((row) => coherenceFailureStatuses.has(row.status)) || null
+            : null;
+        const exactExpiryEvidenceFailure = requireExactExpiryTimestamps && !points.length
+            ? rowDiagnostics.find(
+                row => row.status === 'exact_expiry_timestamp_unavailable'
+            ) || null
+            : null;
+        const byDate = {};
+        if (!rowCoherenceFailure) {
+            for (const interval of weekendIntervals) {
+                if (interval.status !== 'ok' || !Array.isArray(interval.nonTradingDates)) {
+                    continue;
+                }
+                for (const iso of interval.nonTradingDates) {
+                    byDate[iso] = interval.lambda;
+                }
+            }
+        }
+        const okLambdas = rowCoherenceFailure
+            ? []
+            : weekendIntervals
+                .filter((interval) => interval.status === 'ok')
+                .map((interval) => interval.lambda);
+        const coveredDates = Object.keys(byDate).sort();
+        const quoteAsOfMs = points
+            .map((point) => point.asOfMs)
+            .filter(Number.isFinite)
+            .reduce((latest, value) => latest === null || value > latest ? value : latest, null);
+        let qualityStatus = 'ok';
+        if (varianceSource === 'straddle' && !snapshotGate.ok) {
+            qualityStatus = snapshotGate.status;
+        } else if (rowCoherenceFailure) {
+            qualityStatus = rowCoherenceFailure.status;
+        } else if (exactExpiryEvidenceFailure) {
+            qualityStatus = exactExpiryEvidenceFailure.status;
+        } else if (!points.length) {
+            qualityStatus = 'no_usable_rows';
+        } else if (!okLambdas.length) {
+            qualityStatus = 'no_usable_intervals';
+        }
+
+        const discountedRows = rowDiagnostics.filter((row) => Number.isFinite(row.discountRate));
+        const fallbackDiscountRows = discountedRows.filter((row) => row.discountFallbackUsed === true);
+        const curveDiscountRows = discountedRows.filter((row) => row.discountFallbackUsed !== true);
+        const discountSources = [...new Set(
+            curveDiscountRows.map((row) => row.discountSource).filter(Boolean)
+        )];
+        const curveMetadata = discountCurve && discountCurve.metadata
+            && typeof discountCurve.metadata === 'object'
+            ? discountCurve.metadata
+            : {};
+        const discounting = {
+            convention: 'continuous_annualized',
+            fallbackRate: interestRate,
+            curveConfigured: !!discountCurve,
+            curveUsable: discountCurveEligibility.usable,
+            curveFallbackReason: discountCurveEligibility.reason,
+            curveAgeDays: Number.isFinite(discountCurveEligibility.ageDays)
+                ? discountCurveEligibility.ageDays
+                : null,
+            maxCurveAgeDays: Number.isFinite(maxDiscountCurveAgeDays)
+                ? maxDiscountCurveAgeDays
+                : null,
+            curveId: discountCurve ? String(discountCurve.id || '').trim() || null : null,
+            curveAsOf: discountCurve
+                ? String(discountCurve.effectiveDate || discountCurve.asOf || '').trim() || null
+                : null,
+            curveQuoteAsOf: discountCurve
+                ? String(curveMetadata.quoteAsOf || '').trim() || null
+                : null,
+            source: discountSources.length === 1
+                ? discountSources[0]
+                : (discountSources.length > 1 ? 'mixed' : 'manual_discount_rate_fallback'),
+            isProxy: curveDiscountRows.some((row) => row.discountIsProxy === true),
+            curveRowCount: curveDiscountRows.length,
+            fallbackRowCount: fallbackDiscountRows.length,
+            fallbackUsed: fallbackDiscountRows.length > 0,
+        };
+
+        return {
+            anchorDate: anchorIso,
+            calendarKey,
+            varianceSource,
+            pricingModel,
+            interestRate,
+            discounting,
+            methodology: {
+                pricingModel,
+                estimationMode: opts.estimationMode === 'best_effort'
+                    ? 'best_effort'
+                    : 'strict',
+                sourceQuoteEvidence: String(opts.sourceQuoteEvidence || '').trim() || null,
+                underlyingQuoteIsForward,
+                // Compatibility scalar: this is the manual fallback, not an
+                // assertion that one rate discounted every expiry.
+                interestRate,
+                discounting,
+                baselineWindowDays: opts.baselineWindowDays,
+                minBaselines: opts.minBaselines,
+                maxIntervalCalendarDays: opts.maxIntervalCalendarDays,
+                minDte: opts.minDte,
+                maxDiscountCurveAgeDays: Number.isFinite(maxDiscountCurveAgeDays)
+                    ? maxDiscountCurveAgeDays
+                    : null,
+                maxQuoteSkewMs,
+                maxForwardDeviationPct,
+                maxBidAskSpreadPct,
+                requireExactExpiryTimestamps,
+                intervalClock: requireExactExpiryTimestamps
+                    ? 'contract-expiry-fractional-seconds'
+                    : 'exact-when-available-date-compatibility',
+                intervalTimeZone,
+                intervalTradeDateRolloverHour,
+            },
+            snapshotId: snapshotId || null,
+            underlyingSnapshotId: underlyingSnapshotId || null,
+            quoteAsOf: Number.isFinite(quoteAsOfMs)
+                ? new Date(quoteAsOfMs).toISOString()
+                : (Number.isFinite(snapshotAsOfMs) ? new Date(snapshotAsOfMs).toISOString() : null),
+            intervals: weekendIntervals,
+            rowDiagnostics,
+            pureIntervalCount: pure.length,
+            okIntervalCount: okLambdas.length,
+            byDate,
+            medianLambda: okLambdas.length ? _roundNumber(_median(okLambdas), 4) : null,
+            coverageStart: coveredDates.length ? coveredDates[0] : null,
+            coverageEnd: coveredDates.length ? coveredDates[coveredDates.length - 1] : null,
+            quality: {
+                status: qualityStatus,
+                coherent: varianceSource === 'straddle'
+                    ? snapshotGate.ok && !rowCoherenceFailure
+                    : !!(snapshotMetadata && snapshotMetadata.coherent === true
+                        && snapshotId && underlyingSnapshotId === snapshotId),
+                quoteComplete: !!(snapshotMetadata
+                    && snapshotMetadata.quoteComplete === true),
+                estimationMode: opts.estimationMode === 'best_effort'
+                    ? 'best_effort'
+                    : 'strict',
+                strictSnapshot: varianceSource === 'straddle'
+                    && opts.estimationMode !== 'best_effort',
+                sourceQuoteEvidence: String(opts.sourceQuoteEvidence || '').trim() || null,
+                snapshotId: snapshotId || null,
+                underlyingSnapshotId: underlyingSnapshotId || null,
+                usablePointCount: points.length,
+                rejectedRowCount: rowDiagnostics.filter((row) => row.status !== 'ok').length,
+            },
+        };
     }
 
     function _normalizeCalendarFinderOptions(options) {
@@ -531,21 +1943,21 @@
         return Number.isFinite(value) && value > 0 ? value : null;
     }
 
-    // Pairwise TD slope of every row against a baseline expiry, playbook
-    // convention: shorter-DTE leg on top, so >1 reads as backwardation for
-    // that pair no matter which side of the baseline the row sits. Uses the
-    // FROZEN signal lambda — exploration data; the regime signal itself
-    // stays pinned to ~7d front / ~2x back.
-    function annotateTdSlopeVsBaseline(rows, baselineExpiry, options) {
-        const opts = _signalOptions(options);
+    // Pairwise slope of the DISPLAYED ATM TD IV against a baseline expiry.
+    // The shorter-DTE leg stays on top, so >1 reads as backwardation no matter
+    // which side is selected as the baseline. This column intentionally uses
+    // row.atmIvTd after straddle-implied-lambda correction. The separately
+    // backtested regime signal below remains frozen at lambda=0.3.
+    function annotateTdSlopeVsBaseline(rows, baselineExpiry) {
         const sourceRows = Array.isArray(rows) ? rows : [];
         const normalizedBaseline = _normalizeExpiryKey(baselineExpiry);
         const baselineRow = normalizedBaseline
             ? sourceRows.find((row) => row && row.hasCompletePair !== false
                 && _getRowExpiry(row) === normalizedBaseline) || null
             : null;
-        const baselineTd = baselineRow
-            ? _signalTdIvRaw(baselineRow.atmIv, baselineRow.dte, baselineRow.tradDte, opts.signalLambda)
+        const baselineTd = baselineRow && Number.isFinite(baselineRow.atmIvTd)
+            && baselineRow.atmIvTd > 0
+            ? baselineRow.atmIvTd
             : null;
 
         return sourceRows.map((row) => {
@@ -553,7 +1965,9 @@
             let pairRatio = null;
             if (baselineTd != null && row && row.hasCompletePair !== false
                 && _getRowExpiry(row) !== normalizedBaseline) {
-                const rowTd = _signalTdIvRaw(row.atmIv, row.dte, row.tradDte, opts.signalLambda);
+                const rowTd = Number.isFinite(row.atmIvTd) && row.atmIvTd > 0
+                    ? row.atmIvTd
+                    : null;
                 if (rowTd != null) {
                     slope = row.dte >= baselineRow.dte ? baselineTd / rowTd : rowTd / baselineTd;
                     pairRatio = Math.max(row.dte, baselineRow.dte) / Math.min(row.dte, baselineRow.dte);
@@ -562,6 +1976,7 @@
             return {
                 ...(row && typeof row === 'object' ? row : {}),
                 tdSlopeVsBaseline: slope != null ? _roundNumber(slope, 4) : null,
+                tdSlopeSource: 'display_atm_td_iv',
                 // DTE ratio of the pair. The 0.95/1.05 thresholds are only
                 // meaningful near the calibrated ~2x geometry: wider pairs sit
                 // naturally lower (SPY 14/90 median ~0.91, <0.95 is the
@@ -1241,9 +2656,14 @@
         cloneBucketDefinitions,
         countTradingDays,
         computeTradingDayAnnualizedIv,
+        applyImpliedLambdaClockToRows,
         buildExpiryDetailRows,
         buildBucketRows,
         buildStraddleComparisonRows,
+        priceStraddleFromTotalVol,
+        invertStraddleTotalVariance,
+        resolveStraddleTotalVarianceObservation,
+        computeImpliedWeekendLambdas,
         buildCalendarFinderRows,
         pickCalendarFinderSecondaryCandidate,
         buildCalendarFinderStats,

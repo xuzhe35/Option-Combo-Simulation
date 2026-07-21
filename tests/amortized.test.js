@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 
-const { loadAmortizedContext } = require('./helpers/load-browser-scripts');
+const { loadAmortizedContext, loadBrowserScripts } = require('./helpers/load-browser-scripts');
 
 function almostEqual(actual, expected, tolerance = 1e-6) {
     assert.ok(
@@ -170,6 +170,49 @@ module.exports = {
 
                 assert.equal(result.isSupported, false);
                 assert.match(result.reason, /Amortized mode/i);
+            },
+        },
+        {
+            name: 'does not coerce a missing scenario underlying into an amortized value',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/official_exchange_calendars.generated.js',
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                ], {
+                    OptionComboPricingContext: {
+                        resolveSimulationDate: state => state.simulatedDate,
+                        resolveQuoteDate: state => state.baseDate,
+                        resolveLegInterestRate: state => state.interestRate,
+                        resolveLegScenarioUnderlyingPrice: () => null,
+                        resolveAnchorUnderlyingPrice: state => state.underlyingPrice,
+                    },
+                });
+                const result = ctx.OptionComboAmortized.calculateAmortizedCost({
+                    viewMode: 'amortized',
+                    legs: [{
+                        type: 'call',
+                        pos: 1,
+                        strike: 100,
+                        expDate: '2026-04-20',
+                        iv: 0.2,
+                        cost: 2,
+                        closePrice: null,
+                    }],
+                }, 100, {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 100,
+                    baseDate: '2026-03-14',
+                    simulatedDate: '2026-03-20',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                });
+
+                assert.equal(result.isSupported, false);
+                assert.match(result.reason, /pricing underlying quote is missing/i);
             },
         },
     ],

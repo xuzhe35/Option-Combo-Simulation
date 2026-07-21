@@ -218,59 +218,304 @@ body {
     margin-bottom: 0.5rem;
 }
 
-.control-panel-card {
-    padding: 1.2rem;
+.simulation-controls-launcher {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.85rem;
+    align-items: center;
+    padding: 1rem;
+    background: linear-gradient(145deg, #ffffff, #f5f7ff);
+    border-color: rgba(var(--primary-rgb), 0.2);
 }
 
-.control-panel-section-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 0.75rem;
-    margin-bottom: 1rem;
+.simulation-controls-launcher-icon {
+    display: grid;
+    place-items: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 0.75rem;
+    color: var(--primary-color);
+    background: rgba(var(--primary-rgb), 0.1);
 }
 
-.control-panel-section-title {
-    margin: 0;
+.simulation-controls-launcher-copy {
+    min-width: 0;
+}
+
+.simulation-controls-launcher-copy h2 {
+    margin: 0 0 0.15rem;
     font-size: 1rem;
 }
 
-.control-panel-section-subtitle {
-    margin-top: 0.25rem;
-    max-width: 220px;
+.simulation-controls-launcher-copy p {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    line-height: 1.4;
 }
 
-.control-panel-section-toggle {
-    flex: 0 0 auto;
-}
-
-.control-panel-section-chevron {
-    transition: transform 0.2s ease;
-}
-
-.control-panel-collapsible-body {
-    display: block;
-}
-
-.control-panel-card.is-collapsed {
-    padding-bottom: 1.2rem;
-}
-
-.control-panel-card.is-collapsed .control-panel-section-header {
+.simulation-controls-open-btn {
+    grid-column: 1 / -1;
+    display: flex;
     align-items: center;
+    justify-content: space-between;
+    width: 100%;
+}
+
+body.simulation-controls-dialog-open {
+    overflow: hidden;
+}
+
+.simulation-controls-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 10030;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: rgba(15, 23, 42, 0.64);
+    backdrop-filter: blur(4px);
+}
+
+.simulation-controls-dialog[hidden] {
+    display: none;
+}
+
+.simulation-controls-dialog-panel {
+    display: flex;
+    flex-direction: column;
+    width: min(1180px, calc(100vw - 2rem));
+    max-height: calc(100vh - 2rem);
+    max-height: calc(100dvh - 2rem);
+    overflow: hidden;
+    border: 1px solid rgba(148, 163, 184, 0.42);
+    border-radius: 1rem;
+    background: #f8fafc;
+    box-shadow: 0 30px 90px rgba(15, 23, 42, 0.36);
+}
+
+.simulation-controls-dialog-panel:focus {
+    outline: none;
+}
+
+.simulation-controls-dialog-header,
+.simulation-controls-dialog-footer {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 1.25rem;
+    background: #fff;
+}
+
+.simulation-controls-dialog-header {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.simulation-controls-dialog-header h2 {
+    margin: 0;
+    font-size: 1.3rem;
+    line-height: 1.25;
+}
+
+.simulation-controls-dialog-header p {
+    max-width: 720px;
+    margin-top: 0.2rem;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+}
+
+.simulation-controls-dialog-eyebrow {
+    margin-bottom: 0.18rem;
+    color: var(--primary-color);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+}
+
+.simulation-controls-close-btn {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 2.4rem;
+    height: 2.4rem;
+    padding: 0;
+    border-radius: 999px;
+    color: var(--text-muted);
+}
+
+.simulation-controls-close-btn:hover {
+    color: var(--text-main);
+    background: #f1f5f9;
+}
+
+.simulation-controls-dialog-body {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 1rem 1.25rem 1.25rem;
+}
+
+.simulation-controls-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+    align-items: start;
+}
+
+.simulation-control-section {
+    min-width: 0;
+    padding: 1rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.85rem;
+    background: #fff;
+    box-shadow: var(--shadow-sm);
+}
+
+.simulation-control-section-wide {
+    grid-column: 1 / -1;
+}
+
+.simulation-control-section-heading {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.65rem;
+    margin-bottom: 0.9rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid #eef2f7;
+}
+
+.simulation-control-section-index {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 1.7rem;
+    height: 1.7rem;
+    border-radius: 0.5rem;
+    color: var(--primary-color);
+    background: rgba(var(--primary-rgb), 0.09);
+    font-size: 0.68rem;
+    font-weight: 700;
+}
+
+.simulation-control-section-heading h3 {
+    margin: 0;
+    font-size: 0.93rem;
+    line-height: 1.3;
+}
+
+.simulation-control-section-heading p {
+    margin-top: 0.12rem;
+    color: var(--text-muted);
+    font-size: 0.74rem;
+    line-height: 1.4;
+}
+
+.simulation-control-section-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.9rem 1rem;
+    align-items: start;
+}
+
+.simulation-control-pricing-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.simulation-controls-dialog .control-group {
+    min-width: 0;
     margin-bottom: 0;
 }
 
-.control-panel-card.is-collapsed .control-panel-section-subtitle {
-    display: none;
+.simulation-assumption-control {
+    order: 1;
 }
 
-.control-panel-card.is-collapsed .control-panel-section-chevron {
-    transform: rotate(-90deg);
+.simulation-control-item-wide {
+    grid-column: 1 / -1;
+    order: 2;
 }
 
-.control-panel-card.is-collapsed .control-panel-collapsible-body {
-    display: none;
+.simulation-product-panel {
+    padding: 0.85rem;
+    border: 1px solid #dbe3ef;
+    border-radius: 0.7rem;
+    background: #f8fafc;
+}
+
+.simulation-controls-dialog-footer {
+    border-top: 1px solid var(--border-color);
+}
+
+.simulation-controls-dialog-footer span {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+}
+
+@media (max-width: 1000px) {
+    .simulation-controls-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .simulation-control-section-wide {
+        grid-column: auto;
+    }
+
+    .simulation-control-pricing-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 680px) {
+    .simulation-controls-dialog {
+        align-items: stretch;
+        padding: 0;
+    }
+
+    .simulation-controls-dialog-panel {
+        width: 100%;
+        max-height: 100vh;
+        max-height: 100dvh;
+        border: 0;
+        border-radius: 0;
+    }
+
+    .simulation-controls-dialog-header,
+    .simulation-controls-dialog-footer {
+        padding: 0.85rem 1rem;
+    }
+
+    .simulation-controls-dialog-header p {
+        display: none;
+    }
+
+    .simulation-controls-dialog-body {
+        padding: 0.75rem;
+    }
+
+    .simulation-control-section,
+    .simulation-product-panel {
+        padding: 0.8rem;
+    }
+
+    .simulation-control-section-grid,
+    .simulation-control-pricing-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .simulation-control-item-wide {
+        grid-column: auto;
+    }
+
+    .simulation-controls-dialog-footer span {
+        display: none;
+    }
+
+    .simulation-controls-dialog-footer .btn {
+        width: 100%;
+    }
 }
 
 .section-desc {
@@ -342,6 +587,20 @@ body {
     text-align: right;
     margin-top: 0.25rem;
     white-space: nowrap;
+}
+
+.sim-implied-lambda-received {
+    width: 100%;
+    min-height: 2.35rem;
+    display: flex;
+    align-items: center;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid rgba(21, 128, 61, 0.3);
+    border-radius: var(--radius-md);
+    background: rgba(22, 163, 74, 0.08);
+    color: #15803d;
+    font-size: 0.875rem;
+    font-weight: 650;
 }
 
 .leg-dte-iv-grid {
@@ -507,6 +766,48 @@ input[type=range]:focus {
 .btn-sm {
     padding: 0.25rem 0.6rem;
     font-size: 0.75rem;
+}
+
+.chart-controls {
+    flex-wrap: wrap;
+    align-items: flex-end;
+}
+
+.best-effort-payoff-btn.active {
+    color: #fff;
+    border-color: #b45309;
+    background: #b45309;
+}
+
+.best-effort-payoff-btn.active:hover {
+    border-color: #92400e;
+    background: #92400e;
+}
+
+.payoff-chart-quality-note {
+    margin: -0.25rem 0 0.75rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid transparent;
+    border-radius: 0.55rem;
+    line-height: 1.45;
+}
+
+.payoff-chart-quality-note.is-success {
+    color: #166534;
+    border-color: #bbf7d0;
+    background: #f0fdf4;
+}
+
+.payoff-chart-quality-note.is-warning {
+    color: #92400e;
+    border-color: #fcd34d;
+    background: #fffbeb;
+}
+
+.payoff-chart-quality-note.is-error {
+    color: #991b1b;
+    border-color: #fecaca;
+    background: #fef2f2;
 }
 
 .icon-btn {
@@ -735,6 +1036,23 @@ input[type=range]:focus {
 
 .group-card {
     border-top: 4px solid var(--primary-color);
+}
+
+/* Surfaces option legs the backend could not qualify. Without it a strike that
+   IBKR does not list for the chosen expiry leaves the feed toggle silently
+   stuck with no quote and no explanation. */
+.live-subscription-warning {
+    max-width: 260px;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--danger-color);
+    border-radius: var(--radius-md);
+    background-color: var(--danger-bg);
+    color: var(--danger-text);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.35;
+    text-align: right;
+    cursor: help;
 }
 
 .group-header {

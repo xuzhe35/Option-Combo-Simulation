@@ -12,10 +12,17 @@
     const DEFAULT_PROFILE = Object.freeze({
         family: 'DEFAULT_EQUITY',
         displayName: 'Equity / ETF option',
-        // Exchange holiday calendar the instrument settles/trades on. Only
-        // NYSE is implemented (js/market_holidays.js); other ids mark that
-        // the NYSE clock is a proxy until a real calendar is wired.
+        // Product-specific official exchange holiday calendar.  The generated
+        // snapshot currently covers NYSE plus the configured CME/NYMEX/COMEX
+        // product families; unknown, stale, or out-of-range calendars fail
+        // closed rather than borrowing the NYSE clock or guessing rules.
         calendarId: 'NYSE',
+        // Intraday fallback used only when a live quote is already on the
+        // option's expiration trade date. A contract-specific expiryAsOf on
+        // the leg overrides this profile cutoff.
+        optionExpiryTimeZone: 'America/New_York',
+        optionExpiryHour: 16,
+        optionExpiryMinute: 0,
         // Near-the-money strike spacing for the front months. Product families
         // below pin their real listed grid when it is coarser or fractional,
         // and callers treat those as authoritative. This generic $1 value is
@@ -37,6 +44,18 @@
         settlementUnitsPerContract: 100,
         settlementKind: 'equity-deliverable',
         pricingModel: 'bsm-spot',
+        // Discounting, outright Forward and carry are different market
+        // quantities.  Every USD product resolves discounting from the shared
+        // USD curve; these fields describe only where the pricing input and
+        // optional carry diagnostics come from.
+        discountCurveCurrency: 'USD',
+        discountCurvePolicy: 'usd-reference-curve',
+        forwardSource: 'spot-bsm',
+        carrySource: 'discount-rate-q-zero-model-fallback',
+        carrySemantics: 'bsm-q-zero-model-fallback',
+        carryReference: null,
+        requiresPerLegForwardBinding: false,
+        rateMaySubstituteForCarry: true,
         priceDisplayDecimals: 2,
         comboPriceIncrement: 0.01,
         supportsAmortizedMode: true,
@@ -53,6 +72,9 @@
             family: 'ES',
             strikeIncrement: 5,
             calendarId: 'CME:ES',
+            optionExpiryTimeZone: 'America/Chicago',
+            optionExpiryHour: 15,
+            optionExpiryMinute: 0,
             displayName: 'E-mini S&P 500 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -64,6 +86,17 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            forwardSource: 'bound-futures-quote',
+            carrySource: 'exchange-futures-curve',
+            carrySemantics: 'equity-index-net-carry',
+            carryReference: Object.freeze({
+                id: 'spot',
+                secType: 'IND',
+                symbol: 'SPX',
+                exchange: 'CBOE',
+                currency: 'USD',
+            }),
+            requiresPerLegForwardBinding: true,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -74,6 +107,9 @@
             family: 'NQ',
             strikeIncrement: 10,
             calendarId: 'CME:NQ',
+            optionExpiryTimeZone: 'America/Chicago',
+            optionExpiryHour: 15,
+            optionExpiryMinute: 0,
             displayName: 'E-mini Nasdaq-100 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -85,6 +121,17 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            forwardSource: 'bound-futures-quote',
+            carrySource: 'exchange-futures-curve',
+            carrySemantics: 'equity-index-net-carry',
+            carryReference: Object.freeze({
+                id: 'spot',
+                secType: 'IND',
+                symbol: 'NDX',
+                exchange: 'NASDAQ',
+                currency: 'USD',
+            }),
+            requiresPerLegForwardBinding: true,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -95,6 +142,9 @@
             family: 'MES',
             strikeIncrement: 5,
             calendarId: 'CME:MES',
+            optionExpiryTimeZone: 'America/Chicago',
+            optionExpiryHour: 15,
+            optionExpiryMinute: 0,
             displayName: 'Micro E-mini S&P 500 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -105,6 +155,17 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            forwardSource: 'bound-futures-quote',
+            carrySource: 'exchange-futures-curve',
+            carrySemantics: 'equity-index-net-carry',
+            carryReference: Object.freeze({
+                id: 'spot',
+                secType: 'IND',
+                symbol: 'SPX',
+                exchange: 'CBOE',
+                currency: 'USD',
+            }),
+            requiresPerLegForwardBinding: true,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -115,6 +176,9 @@
             family: 'MNQ',
             strikeIncrement: 10,
             calendarId: 'CME:MNQ',
+            optionExpiryTimeZone: 'America/Chicago',
+            optionExpiryHour: 15,
+            optionExpiryMinute: 0,
             displayName: 'Micro E-mini Nasdaq-100 futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -125,6 +189,17 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            forwardSource: 'bound-futures-quote',
+            carrySource: 'exchange-futures-curve',
+            carrySemantics: 'equity-index-net-carry',
+            carryReference: Object.freeze({
+                id: 'spot',
+                secType: 'IND',
+                symbol: 'NDX',
+                exchange: 'NASDAQ',
+                currency: 'USD',
+            }),
+            requiresPerLegForwardBinding: true,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -135,6 +210,9 @@
             family: 'CL',
             strikeIncrement: 0.5,
             calendarId: 'NYMEX:CL',
+            optionExpiryTimeZone: 'America/Chicago',
+            optionExpiryHour: 13,
+            optionExpiryMinute: 30,
             displayName: 'Light Sweet Crude Oil futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -146,6 +224,10 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            forwardSource: 'bound-futures-quote',
+            carrySource: 'exchange-futures-curve',
+            carrySemantics: 'commodity-futures-curve',
+            requiresPerLegForwardBinding: true,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -156,6 +238,9 @@
             family: 'GC',
             strikeIncrement: 5,
             calendarId: 'COMEX:GC',
+            optionExpiryTimeZone: 'America/Chicago',
+            optionExpiryHour: 12,
+            optionExpiryMinute: 30,
             displayName: 'Gold futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -167,6 +252,10 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            forwardSource: 'bound-futures-quote',
+            carrySource: 'exchange-futures-curve',
+            carrySemantics: 'metal-futures-curve',
+            requiresPerLegForwardBinding: true,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: true,
@@ -177,6 +266,9 @@
             family: 'SI',
             strikeIncrement: 0.25,
             calendarId: 'COMEX:SI',
+            optionExpiryTimeZone: 'America/Chicago',
+            optionExpiryHour: 12,
+            optionExpiryMinute: 30,
             displayName: 'Silver futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -188,6 +280,10 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            forwardSource: 'bound-futures-quote',
+            carrySource: 'exchange-futures-curve',
+            carrySemantics: 'metal-futures-curve',
+            requiresPerLegForwardBinding: true,
             priceDisplayDecimals: 3,
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
@@ -199,6 +295,9 @@
             family: 'HG',
             strikeIncrement: 0.05,
             calendarId: 'COMEX:HG',
+            optionExpiryTimeZone: 'America/Chicago',
+            optionExpiryHour: 12,
+            optionExpiryMinute: 30,
             displayName: 'Copper futures option',
             optionSecType: 'FOP',
             underlyingSecType: 'FUT',
@@ -210,6 +309,10 @@
             settlementUnitsPerContract: 1,
             settlementKind: 'futures-deliverable',
             pricingModel: 'black76',
+            forwardSource: 'bound-futures-quote',
+            carrySource: 'exchange-futures-curve',
+            carrySemantics: 'commodity-futures-curve',
+            requiresPerLegForwardBinding: true,
             priceDisplayDecimals: 5,
             comboPriceIncrement: 0.0005,
             supportsAmortizedMode: false,
@@ -233,6 +336,9 @@
             settlementUnitsPerContract: 0,
             settlementKind: 'cash-settled',
             pricingModel: 'black76',
+            forwardSource: 'option-put-call-parity',
+            carrySource: 'option-put-call-parity-vs-spot',
+            carrySemantics: 'equity-index-net-carry',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: false,
@@ -256,6 +362,9 @@
             settlementUnitsPerContract: 0,
             settlementKind: 'cash-settled',
             pricingModel: 'black76',
+            forwardSource: 'option-put-call-parity',
+            carrySource: 'option-put-call-parity-vs-spot',
+            carrySemantics: 'equity-index-net-carry',
             supportsAmortizedMode: false,
             supportsLegacyLiveData: true,
             supportsUnderlyingLegs: false,
@@ -269,13 +378,6 @@
     const ALIASES = Object.freeze({
         SPXW: 'SPX',
         NDXP: 'NDX',
-    });
-
-    const WEEKLY_FOP_TRADING_CLASS_SUFFIXES = Object.freeze({
-        1: 'A',
-        2: 'B',
-        3: 'C',
-        4: 'D',
     });
 
     function normalizeSymbol(symbol) {
@@ -461,12 +563,6 @@
         return _shiftContractMonth(parts.year, parts.month, 1);
     }
 
-    function _getIsoWeekday(dateText) {
-        const parts = _parseIsoDateParts(dateText);
-        if (!parts) return null;
-        return new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay();
-    }
-
     function resolveTradingClass(symbol, expDate) {
         const profile = resolveUnderlyingProfile(symbol);
         const defaultTradingClass = profile.tradingClass;
@@ -475,17 +571,16 @@
             return defaultTradingClass;
         }
 
-        if (profile.family === 'ES' || profile.family === 'NQ') {
-            const weekday = _getIsoWeekday(expDate);
-            const suffix = WEEKLY_FOP_TRADING_CLASS_SUFFIXES[weekday];
-            if (suffix && defaultTradingClass.length >= 2) {
-                return `${defaultTradingClass.slice(0, -1)}${suffix}`;
-            }
-            // Friday weekly/monthly class names are week-specific in TWS
-            // (for example ES EW3) and cannot be derived from weekday alone.
-            // Leave the class unspecified so IB qualifies by the complete
-            // FOP contract instead of first rejecting a fabricated E3A/Q3A.
-            if (weekday === 5) return null;
+        if (profile.optionSecType === 'FOP') {
+            // Every exchange's weekly futures-option trading classes are
+            // listing-specific, not a stable weekday suffix.  The per-family
+            // defaults here (E3A, Q3A, ML3, G3T, S3T, H3T) each name one
+            // particular weekday-and-week listing, so they are wrong for most
+            // expiries: ML3 is a Monday week-3 crude class and rejects a Tuesday
+            // 2026-08-04 CL option that IB qualified perfectly well.  Omit the
+            // hint and let the qualified IB contract be authoritative.  Index
+            // options (SPXW/NDXP) keep theirs — those are real, stable classes.
+            return null;
         }
 
         if (profile.family === 'SPX') {
@@ -519,6 +614,32 @@
         };
     }
 
+    /**
+     * AM-settled index contracts can stop trading before their special
+     * opening quotation is known. Their payoff is therefore not a
+     * deterministic function of the screen underlier at the last-trade
+     * cutoff. Keep this contract-family fact separate from the generic expiry
+     * clock so projection callers can fail closed instead of drawing a false
+     * intrinsic-value line.
+     *
+     * Qualified tradingClass is required for the futures-option cases:
+     * weekly/EOM/quarterly-PM classes intentionally remain eligible.
+     */
+    function isDeferredSettlementOption(symbol, expDate, contract = null) {
+        const profile = resolveUnderlyingProfile(symbol);
+        const explicitTradingClass = String(contract && (
+            contract.qualifiedOptionTradingClass || contract.tradingClass
+        ) || '').trim().toUpperCase();
+        const tradingClass = explicitTradingClass || String(resolveTradingClass(symbol, expDate) || '').toUpperCase();
+        if (profile.family === 'SPX') return tradingClass === 'SPX';
+        return {
+            ES: 'ES',
+            NQ: 'NQ',
+            MES: 'MES',
+            MNQ: 'MNQ',
+        }[profile.family] === tradingClass;
+    }
+
     function supportsAmortizedMode(symbol) {
         return resolveUnderlyingProfile(symbol).supportsAmortizedMode !== false;
     }
@@ -548,6 +669,32 @@
 
     function usesFuturesPool(symbol) {
         return resolvePricingInputMode(symbol) === 'FOP';
+    }
+
+    function resolveForwardCarryPolicy(symbol) {
+        const profile = resolveUnderlyingProfile(symbol);
+        const reference = profile.carryReference && typeof profile.carryReference === 'object'
+            ? { ...profile.carryReference }
+            : null;
+        return {
+            family: profile.family,
+            currency: profile.currency,
+            pricingInputMode: resolvePricingInputMode(symbol),
+            pricingModel: profile.pricingModel,
+            discountCurveCurrency: profile.discountCurveCurrency || profile.currency,
+            discountCurvePolicy: profile.discountCurvePolicy || 'usd-reference-curve',
+            forwardSource: profile.forwardSource || 'spot-bsm',
+            carrySource: profile.carrySource || 'not-observed',
+            carrySemantics: profile.carrySemantics || 'unknown',
+            carryReference: reference,
+            requiresPerLegForwardBinding: profile.requiresPerLegForwardBinding === true,
+            // Generic stock/ETF BSM retains its explicit q=0 compatibility
+            // fallback until an equity parity curve is supplied. INDEX and
+            // every FOP family always return false here: their observed
+            // Forward/carry must never be replaced by the USD discount rate.
+            rateMaySubstituteForCarry: resolvePricingInputMode(symbol) === 'STK'
+                && profile.rateMaySubstituteForCarry === true,
+        };
     }
 
     function getUnderlyingLegLabel(symbol) {
@@ -636,6 +783,7 @@
         resolveOptionSymbol,
         resolveOptionContractSpec,
         resolveTradingClass,
+        isDeferredSettlementOption,
         resolveDefaultUnderlyingContractMonth,
         normalizeLegType,
         isUnderlyingLeg,
@@ -649,6 +797,7 @@
         resolvePricingInputMode,
         usesForwardRateSamples,
         usesFuturesPool,
+        resolveForwardCarryPolicy,
         getUnderlyingLegLabel,
         getUnderlyingLegPriceTitle,
         getPriceDisplayDecimals,

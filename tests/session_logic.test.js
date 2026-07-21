@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 
-const { loadSessionLogicContext } = require('./helpers/load-browser-scripts');
+const { loadBrowserScripts, loadSessionLogicContext } = require('./helpers/load-browser-scripts');
 
 module.exports = {
     name: 'session_logic.js',
@@ -216,6 +216,8 @@ module.exports = {
                 assert.equal(result.liveComboOrderAccountsConnected, false);
                 assert.equal(result.selectedLiveComboOrderAccount, 'F7654321');
                 assert.equal(result.allowLiveHedgeOrders, false);
+                assert.equal(result.requireExactContractTiming, true);
+                assert.equal(result.projectionConvergenceMode, 'strict-bbo');
                 assert.equal(result.hedges[1].id, 'id_3');
             },
         },
@@ -244,6 +246,10 @@ module.exports = {
                         simulatedDate: '2026-03-20',
                         marketDataMode: 'live',
                         historicalQuoteDate: '',
+                        liveQuoteDate: '2026-03-19',
+                        liveQuoteAsOf: '2026-03-19T20:00:00Z',
+                        projectionConvergenceMode: 'legacy-input-iv',
+                        requireExactContractTiming: false,
                         selectedLiveComboOrderAccount: 'DU12345',
                         groups: [
                             {
@@ -286,7 +292,12 @@ module.exports = {
                                     lastError: 'stale close error',
                                 },
                                 legs: [
-                                    { id: 'legacy_leg', type: 'put', strike: 210, expDate: '2026-04-17', iv: 0.24, cost: 3.1 },
+                                    {
+                                        id: 'legacy_leg', type: 'put', strike: 210,
+                                        expDate: '2026-04-17', iv: 0.24, cost: 3.1,
+                                        portfolioMarketPrice: 0,
+                                        portfolioMarketPriceSource: 'tws_portfolio',
+                                    },
                                 ],
                             },
                         ],
@@ -298,6 +309,10 @@ module.exports = {
 
                 assert.equal(result.underlyingSymbol, 'IWM');
                 assert.equal(result.simulatedDate, '2026-03-20');
+                assert.equal(result.liveQuoteDate, '');
+                assert.equal(result.liveQuoteAsOf, '');
+                assert.equal(result.requireExactContractTiming, true);
+                assert.equal(result.projectionConvergenceMode, 'legacy-input-iv');
                 assert.equal(result.selectedLiveComboOrderAccount, 'DU12345');
                 assert.equal(result.groups.length, 1);
                 assert.equal(result.groups[0].id, 'gid_1');
@@ -306,6 +321,8 @@ module.exports = {
                 assert.equal(result.groups[0].livePriceMode, 'midpoint');
                 assert.equal(result.groups[0].historicalAutoCloseAtExpiry, false);
                 assert.equal(result.groups[0].syncAvgCostFromPortfolio, false);
+                assert.equal(result.groups[0].legs[0].portfolioMarketPrice, 0);
+                assert.equal(result.groups[0].legs[0].portfolioMarketPriceSource, 'tws_portfolio');
                 assert.equal(result.groups[0].viewMode, 'settlement');
                 assert.equal(result.groups[0].settleUnderlyingPrice, 205);
                 assert.equal(result.groups[0].tradeTrigger.enabled, false);
@@ -484,6 +501,8 @@ module.exports = {
                 const ctx = loadSessionLogicContext();
                 const original = {
                     underlyingSymbol: 'SPY',
+                    liveQuoteDate: '2026-03-19',
+                    liveQuoteAsOf: '2026-03-19T20:00:00Z',
                     greeksEnabled: true,
                     allowLiveHedgeOrders: true,
                     deltaHedge: {
@@ -533,6 +552,19 @@ module.exports = {
                             id: 'leg_1',
                             type: 'call',
                             underlyingFutureId: 'future_1',
+                            expiryAsOf: '2026-03-20T20:00:00.000Z',
+                            expiryTimingSource: 'ib_contract_details',
+                            lastTradeDate: '20260320',
+                            lastTradeTime: '16:00:00',
+                            expiryTimeZoneId: 'US/Eastern',
+                            realExpirationDate: '20260320',
+                            qualifiedOptionConId: 12345,
+                            qualifiedOptionLocalSymbol: 'ES TEST',
+                            qualifiedOptionTradingClass: 'EW3',
+                            qualifiedOptionUnderConId: 67890,
+                            qualifiedOptionUnderlyingContractMonth: '202606',
+                            liveQuoteIdentityStatus: 'verified',
+                            liveQuoteIdentityReason: '',
                         }],
                         tradeTrigger: {
                             enabled: true,
@@ -574,6 +606,14 @@ module.exports = {
 
                 assert.equal(original.groups[0].name, 'Test');
                 assert.equal(snapshot.groups[0].name, 'Changed');
+                assert.equal('liveQuoteDate' in snapshot, false);
+                assert.equal('liveQuoteAsOf' in snapshot, false);
+                assert.equal('expiryAsOf' in snapshot.groups[0].legs[0], false);
+                assert.equal('expiryTimingSource' in snapshot.groups[0].legs[0], false);
+                assert.equal('lastTradeTime' in snapshot.groups[0].legs[0], false);
+                assert.equal('qualifiedOptionConId' in snapshot.groups[0].legs[0], false);
+                assert.equal('qualifiedOptionTradingClass' in snapshot.groups[0].legs[0], false);
+                assert.equal('liveQuoteIdentityStatus' in snapshot.groups[0].legs[0], false);
                 assert.equal(snapshot.greeksEnabled, true);
                 assert.equal(snapshot.allowLiveHedgeOrders, false);
                 assert.equal(snapshot.groups[0].tradeTrigger.enabled, false);
@@ -618,6 +658,171 @@ module.exports = {
                 assert.equal(snapshot.futuresPool[0].bid, null);
                 assert.equal(snapshot.futuresPool[0].ask, null);
                 assert.equal(snapshot.futuresPool[0].mark, null);
+            },
+        },
+        {
+            name: 'creates the initial front-month Futures Pool entry once and preserves an existing quote',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/session_logic.js',
+                ]);
+                const logic = ctx.OptionComboSessionLogic;
+                const state = {
+                    underlyingSymbol: 'ES',
+                    underlyingContractMonth: '',
+                    simulatedDate: '2026-07-20',
+                    futuresPool: [],
+                    groups: [{
+                        legs: [{ id: 'call', type: 'call', underlyingFutureId: '' }],
+                    }],
+                };
+
+                const first = logic.ensureInitialFuturesPoolEntry(state, () => 'future_sep');
+                assert.equal(first.created, true);
+                assert.equal(state.underlyingContractMonth, '202609');
+                assert.equal(state.futuresPool.length, 1);
+                assert.equal(state.futuresPool[0].contractMonth, '202609');
+                assert.equal(state.groups[0].legs[0].underlyingFutureId, 'future_sep');
+
+                state.futuresPool[0].mark = 7493.5;
+                state.futuresPool[0].quoteAsOf = '2026-07-20T08:00:00Z';
+                const second = logic.ensureInitialFuturesPoolEntry(state, () => 'should_not_run');
+                assert.equal(second.created, false);
+                assert.equal(second.entry, first.entry);
+                assert.equal(state.futuresPool.length, 1);
+                assert.equal(state.futuresPool[0].mark, 7493.5);
+                assert.equal(state.futuresPool[0].quoteAsOf, '2026-07-20T08:00:00Z');
+            },
+        },
+        {
+            name: 'auto-binds unbound option legs when the Futures Pool has exactly one entry',
+            run() {
+                const ctx = loadSessionLogicContext();
+                const logic = ctx.OptionComboSessionLogic;
+                const state = {
+                    underlyingSymbol: 'ES',
+                    futuresPool: [{ id: 'future_sep', contractMonth: '202609' }],
+                    groups: [{
+                        legs: [
+                            { id: 'call', type: 'call', underlyingFutureId: '' },
+                            { id: 'put', type: 'put', underlyingFutureId: 'missing_future' },
+                            { id: 'future_leg', type: 'stock', underlyingFutureId: '' },
+                        ],
+                    }],
+                };
+
+                assert.equal(logic.autoBindSingleFuturesPoolEntry(state), true);
+                assert.equal(state.groups[0].legs[0].underlyingFutureId, 'future_sep');
+                assert.equal(state.groups[0].legs[1].underlyingFutureId, 'future_sep');
+                assert.equal(state.groups[0].legs[2].underlyingFutureId, '');
+                assert.equal(logic.autoBindSingleFuturesPoolEntry(state), false);
+
+                state.futuresPool.push({ id: 'future_dec', contractMonth: '202612' });
+                state.groups[0].legs[0].underlyingFutureId = '';
+                assert.equal(logic.autoBindSingleFuturesPoolEntry(state), false);
+                assert.equal(state.groups[0].legs[0].underlyingFutureId, '');
+            },
+        },
+        {
+            name: 'resolves the weekend-weight spec from the IVTS implied-lambda entry',
+            run() {
+                const ctx = loadSessionLogicContext();
+                const logic = ctx.OptionComboSessionLogic;
+                const entry = {
+                    schemaVersion: 2,
+                    symbol: 'ES',
+                    varianceSource: 'straddle',
+                    quality: { status: 'ok', coherent: true, quoteComplete: true },
+                    medianLambda: 0.12,
+                    byDate: { '2026-07-18': 0.13, '2026-07-19': 0.13 },
+                    coverageStart: '2026-07-18',
+                    coverageEnd: '2026-07-19',
+                };
+
+                // Disabled or non-weighted basis is an explicit scalar mode.
+                assert.equal(logic.resolveSimWeekendWeightSpec('weighted', 0.3, false, entry), 0.3);
+                assert.equal(logic.resolveSimWeekendWeightSpec('calendar', 0.3, true, entry), 1);
+                assert.equal(logic.resolveSimWeekendWeightSpec('trading', 0.3, true, entry), 0);
+                // Once implied mode is enabled, missing or unqualified data
+                // remains strict and cannot silently fall back to scalar.
+                const missing = logic.resolveSimWeekendWeightSpec('weighted', 0.3, true, null);
+                assert.equal(missing.strictByDate, true);
+                assert.equal(missing.byDate, null);
+                assert.equal(missing.default, 0.3);
+                assert.equal(logic.resolveSimWeekendWeightSpec(
+                    'weighted', 0.3, true, { ...entry, schemaVersion: 1 }
+                ).strictByDate, true);
+                assert.equal(logic.resolveSimWeekendWeightSpec(
+                    'weighted', 0.3, true, { ...entry, varianceSource: 'vendor_iv' }
+                ).byDate, null);
+                const auditedVendor = {
+                    ...entry,
+                    varianceSource: 'vendor_iv',
+                    quality: {
+                        ...entry.quality,
+                        estimationMode: 'best_effort',
+                        sourceQuoteEvidence: 'vendor_atm_iv_fallback',
+                    },
+                };
+                assert.equal(logic.resolveSimWeekendWeightSpec(
+                    'weighted', 0.3, true, auditedVendor
+                ).byDate['2026-07-18'], 0.13);
+
+                // Enabled with dates: every required non-trading date must be
+                // present. The scalar is metadata only, never a hole filler.
+                const spec = logic.resolveSimWeekendWeightSpec('weighted', 0.3, true, entry);
+                assert.equal(spec.default, 0.3);
+                assert.equal(spec.byDate['2026-07-18'], 0.13);
+                assert.equal(spec.strictByDate, true);
+                assert.equal(spec.coverageStart, '2026-07-18');
+                assert.equal(spec.coverageEnd, '2026-07-19');
+                assert.equal(spec.fallbackSource, null);
+
+                // Median is descriptive and never changes the fallback.
+                const noMedian = logic.resolveSimWeekendWeightSpec(
+                    'weighted', 0.25, true, { ...entry, medianLambda: null }
+                );
+                assert.equal(noMedian.default, 0.25);
+                const misleadingMedian = logic.resolveSimWeekendWeightSpec(
+                    'weighted', 0.25, true, { ...entry, medianLambda: 0.99 }
+                );
+                assert.equal(misleadingMedian.default, 0.25);
+
+                // New and pre-implied-λ sessions default to the strict mode;
+                // only an explicit false selects the scalar alternative.
+                assert.equal(logic.normalizeSimUseImpliedLambda(undefined), true);
+                assert.equal(logic.normalizeSimUseImpliedLambda(null), true);
+                assert.equal(logic.normalizeSimUseImpliedLambda(true), true);
+                assert.equal(logic.normalizeSimUseImpliedLambda(false), false);
+
+                assert.equal(logic.normalizeProjectionConvergenceMode(undefined), 'strict-bbo');
+                assert.equal(logic.normalizeProjectionConvergenceMode('strict-bbo'), 'strict-bbo');
+                assert.equal(
+                    logic.normalizeProjectionConvergenceMode('legacy-input-iv'),
+                    'legacy-input-iv'
+                );
+                assert.equal(logic.normalizeProjectionConvergenceMode('loose'), 'strict-bbo');
+
+                // The runtime cache never reaches an exported session snapshot.
+                const snapshot = logic.buildExportState({
+                    simUseImpliedLambda: true,
+                    simImpliedLambdaEntry: entry,
+                    simImpliedLambdaFileEntry: entry,
+                    liveProjectionFeedConnected: true,
+                    liveProjectionFeedStale: false,
+                    liveProjectionLastReceivedAt: '2026-07-20T20:00:00Z',
+                    groups: [],
+                    hedges: [],
+                    deltaHedge: logic.createDefaultDeltaHedgeConfig(),
+                });
+                assert.equal(snapshot.simUseImpliedLambda, true);
+                assert.equal(snapshot.projectionConvergenceMode, 'strict-bbo');
+                assert.equal('simImpliedLambdaEntry' in snapshot, false);
+                assert.equal('simImpliedLambdaFileEntry' in snapshot, false);
+                assert.equal('liveProjectionFeedConnected' in snapshot, false);
+                assert.equal('liveProjectionFeedStale' in snapshot, false);
+                assert.equal('liveProjectionLastReceivedAt' in snapshot, false);
             },
         },
     ],

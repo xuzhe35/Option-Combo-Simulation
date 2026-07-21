@@ -429,6 +429,42 @@ module.exports = {
             },
         },
         {
+            name: 'preserves a real zero option bid in the execution quote evidence',
+            run() {
+                const ctx = loadBrowserScripts(
+                    ['js/product_registry.js', 'js/group_order_builder.js'],
+                    {
+                        OptionComboWsLiveQuotes: {
+                            getOptionQuote() {
+                                return {
+                                    bid: 0,
+                                    ask: 0.02,
+                                    mark: 0.01,
+                                    markSource: 'bid_ask_mid',
+                                    bidPresent: true,
+                                    askPresent: true,
+                                    bidAskValid: true,
+                                };
+                            },
+                        },
+                    }
+                );
+
+                const payload = ctx.OptionComboGroupOrderBuilder.buildGroupOrderRequestPayload(
+                    {
+                        id: 'zero_bid_group',
+                        legs: [{ id: 'zero_bid_call', type: 'call', pos: 1, strike: 800, expDate: '2026-07-17' }],
+                    },
+                    { underlyingSymbol: 'SPY', underlyingPrice: 730, simulatedDate: '2026-07-10' },
+                    { executionMode: 'preview', intent: 'close' }
+                );
+
+                assert.equal(payload.legs[0].observedBid, 0);
+                assert.equal(payload.legs[0].observedAsk, 0.02);
+                assert.equal(payload.legs[0].observedMark, 0.01);
+            },
+        },
+        {
             name: 'builds a one-unit partial close while preserving strategy leg ratios',
             run() {
                 const ctx = loadBrowserScripts(['js/product_registry.js', 'js/group_order_builder.js']);

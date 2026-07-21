@@ -697,8 +697,14 @@
                 const dteDisplay = tr.querySelector('.simulated-dte-display');
                 const ivDisplay = tr.querySelector('.simulated-iv-display');
                 const ivInput = tr.querySelector('.iv-input');
-                if (dteDisplay) dteDisplay.textContent = legResult.dteText;
-                if (ivDisplay) ivDisplay.textContent = legResult.ivText;
+                if (dteDisplay) {
+                    dteDisplay.textContent = legResult.dteText;
+                    dteDisplay.title = legResult.dteTitle || '';
+                }
+                if (ivDisplay) {
+                    ivDisplay.textContent = legResult.ivText;
+                    ivDisplay.title = legResult.ivTitle || '';
+                }
                 const pricingCore = _getPricingCoreApi();
                 if (ivInput
                     && document.activeElement !== ivInput

@@ -7,7 +7,7 @@
     <title>IV Term Structure</title>
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="stylesheet" href="iv_term_structure.css?v=20260714-slope-column">
+    <link rel="stylesheet" href="iv_term_structure.css?v=20260721-best-effort-variance-v1">
 </head>
 
 <body>
@@ -45,10 +45,15 @@
                             <span>Port</span>
                             <input id="ivtsWsPortInput" class="ivts-socket-input" type="number" min="1" max="65535" step="1" value="8765">
                         </label>
-                        <label class="ivts-socket-field ivts-socket-port-field" for="ivtsTdIvLambdaInput" title="Weekend/holiday variance weight for every TD IV column: 0 = pure trading-day clock, 1 = calendar clock (matches TWS). Raise it when weekends carry event risk.">
-                            <span>TD IV λ</span>
+                        <label class="ivts-socket-field ivts-socket-port-field" for="ivtsTdIvLambdaInput" title="Fallback weekend/holiday weight used for TD IV until you explicitly calculate implied λ. A complete coherent snapshot is preferred; when TWS evidence is incomplete, Calculate λ uses the valid two-sided BBO subset and labels the result best-effort. The calculated structure stays frozen until the button is pressed again.">
+                            <span>TD IV fallback λ</span>
                             <input id="ivtsTdIvLambdaInput" class="ivts-socket-input" type="number" min="0" max="1" step="0.05" value="0.30" inputmode="decimal">
                         </label>
+                        <label class="ivts-socket-field ivts-socket-port-field" for="ivtsImpliedLambdaRateInput" title="Continuously compounded discount-rate fallback used only when the unified daily curve is unavailable. Carry r-q is inferred separately from each expiry's parity forward.">
+                            <span>Fallback r%</span>
+                            <input id="ivtsImpliedLambdaRateInput" class="ivts-socket-input" type="number" min="-5" max="25" step="0.25" value="4.00" inputmode="decimal">
+                        </label>
+                        <span id="ivtsDiscountCurveStatus" class="ivts-label" title="Daily SOFR short-end / Treasury CMT long-end reference discount proxy">USD curve: loading</span>
                         <div class="ivts-socket-actions">
                             <button id="ivtsWsApplyButton" class="ivts-btn ivts-btn-primary ivts-socket-btn" type="button">Apply</button>
                             <button id="ivtsWsResetButton" class="ivts-btn ivts-btn-muted ivts-socket-btn" type="button">Reset</button>
@@ -69,10 +74,13 @@
 
     <script src="js/official_exchange_calendars.generated.js?v=20260713-v2"></script>
     <script src="js/market_holidays.js?v=20260713-official-only"></script>
-    <script src="js/product_registry.js?v=20260715-strike-increment"></script>
-    <script src="js/calendar_handoff.js?v=20260612c"></script>
-    <script src="js/iv_term_structure_core.js?v=20260714-pair-ratio"></script>
-    <script src="js/iv_term_structure.js?v=20260717-remote-catalog-timeout"></script>
+    <script src="js/date_utils.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/product_registry.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/calendar_handoff.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/market_curves.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/implied_lambda_handoff.js?v=20260721-best-effort-lambda-v1"></script>
+    <script src="js/iv_term_structure_core.js?v=20260721-best-effort-variance-v1"></script>
+    <script src="js/iv_term_structure.js?v=20260721-best-effort-variance-v1"></script>
 </body>
 
 </html>

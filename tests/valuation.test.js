@@ -134,6 +134,58 @@ module.exports = {
             },
         },
         {
+            name: 'blocks portfolio valuation when exact short-dated contract timing is missing',
+            run() {
+                const ctx = loadValuationContext();
+                const group = {
+                    id: 'timing-gate',
+                    viewMode: 'active',
+                    settleUnderlyingPrice: null,
+                    legs: [{
+                        id: 'short-call', type: 'call', pos: 1, strike: 100,
+                        expDate: '2026-07-16', iv: 0.25, cost: 1,
+                        currentPrice: 2, currentPriceSource: 'live', closePrice: null,
+                    }],
+                };
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 100,
+                    baseDate: '2026-07-01',
+                    liveQuoteDate: '2026-07-10',
+                    liveQuoteAsOf: '2026-07-10T19:00:00Z',
+                    simulatedDate: '2026-07-10',
+                    marketDataMode: 'live',
+                    projectionConvergenceMode: 'legacy-input-iv',
+                    requireExactContractTiming: true,
+                    simulationTiming: {
+                        available: true,
+                        status: 'ok',
+                        simulationDate: '2026-07-10',
+                        targetAsOf: '2026-07-10T19:00:00Z',
+                    },
+                    interestRate: 0.03,
+                    useMarketDiscountCurve: false,
+                    ivOffset: 0,
+                    groups: [group],
+                    hedges: [],
+                };
+
+                const blocked = ctx.OptionComboValuation.computeGroupDerivedData(group, state);
+                assert.equal(blocked.groupSimulationAvailable, false);
+                assert.equal(blocked.groupSimValue, null);
+                assert.equal(blocked.legResults[0].simulationAvailable, false);
+                assert.equal(
+                    blocked.legResults[0].simulationTimingStatus,
+                    'exact_contract_timing_missing'
+                );
+
+                group.legs[0].expiryAsOf = '2026-07-16T20:00:00Z';
+                const complete = ctx.OptionComboValuation.computeGroupDerivedData(group, state);
+                assert.equal(complete.groupSimulationAvailable, true);
+                assert.ok(Number.isFinite(complete.groupSimValue));
+            },
+        },
+        {
             name: 'computes portfolio global totals and combined amortized result',
             run() {
                 const ctx = loadValuationContext();
@@ -420,6 +472,7 @@ module.exports = {
             run() {
                 const ctx = loadValuationContext();
                 const globalState = {
+                    marketDataMode: 'historical',
                     underlyingSymbol: 'ES',
                     underlyingPrice: 6000,
                     baseDate: '2026-03-14',
@@ -460,6 +513,7 @@ module.exports = {
             run() {
                 const ctx = loadValuationContext();
                 const globalState = {
+                    marketDataMode: 'historical',
                     underlyingSymbol: 'CL',
                     underlyingPrice: 72.5,
                     baseDate: '2026-03-14',
@@ -500,6 +554,77 @@ module.exports = {
                 assert.equal(result.groupSimValue, 74200);
                 assert.equal(result.groupPnL, 1200);
                 assert.equal(result.legResults[0].currentPriceDisplay.placeholder, '74.20');
+            },
+        },
+        {
+            name: 'marks an FOP option projection unavailable instead of using the wrong future',
+            run() {
+                const ctx = loadValuationContext();
+                const globalState = {
+                    underlyingSymbol: 'CL',
+                    underlyingContractMonth: '202604',
+                    underlyingPrice: 70,
+                    baseDate: '2026-03-14',
+                    liveQuoteDate: '2026-03-14',
+                    simulatedDate: '2026-03-20',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    futuresPool: [
+                        { id: 'future_apr', contractMonth: '202604', mark: 70 },
+                        { id: 'future_jul', contractMonth: '202607', mark: null },
+                    ],
+                    groups: [],
+                    hedges: [],
+                };
+                const group = {
+                    id: 'g_cl_missing_forward',
+                    viewMode: 'active',
+                    settleUnderlyingPrice: null,
+                    legs: [{
+                        id: 'cl_call',
+                        type: 'call',
+                        pos: 1,
+                        strike: 75,
+                        expDate: '2026-04-20',
+                        iv: 0.3,
+                        ivSource: 'manual',
+                        cost: 1.2,
+                        currentPrice: 1.1,
+                        currentPriceSource: 'live',
+                        closePrice: null,
+                        underlyingFutureId: 'future_jul',
+                    }],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+                assert.equal(result.legResults[0].simulationAvailable, false);
+                assert.equal(result.legResults[0].simPricePerShare, null);
+                assert.equal(result.legResults[0].pnl, null);
+            },
+        },
+        {
+            name: 'marks an INDEX option projection unavailable instead of assuming zero carry',
+            run() {
+                const ctx = loadValuationContext();
+                const result = ctx.OptionComboValuation.computeGroupDerivedData({
+                    id: 'g_spx_missing_parity',
+                    viewMode: 'active',
+                    settleUnderlyingPrice: null,
+                    legs: [{
+                        id: 'spx_call', type: 'call', pos: 1, strike: 5800,
+                        expDate: '2026-04-16', iv: 0.2, cost: 50,
+                        currentPrice: 49, currentPriceSource: 'live', closePrice: null,
+                    }],
+                }, {
+                    underlyingSymbol: 'SPX', underlyingPrice: 5800,
+                    baseDate: '2026-03-17', simulatedDate: '2026-03-17',
+                    interestRate: 0.03, ivOffset: 0, forwardRateSamples: [],
+                    groups: [], hedges: [],
+                });
+
+                assert.equal(result.legResults[0].simulationAvailable, false);
+                assert.equal(result.legResults[0].simPricePerShare, null);
+                assert.equal(result.legResults[0].pnl, null);
             },
         },
         {
@@ -1254,7 +1379,7 @@ module.exports = {
             },
         },
         {
-            name: 'uses index forward-rate samples when pricing Black-76 index options',
+            name: 'uses index carry for the forward but the discount rate for Black-76 pricing',
             run() {
                 const ctx = loadValuationContext();
                 const globalState = {
@@ -1296,7 +1421,7 @@ module.exports = {
 
                 const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
                 const expectedForward = 5800 * Math.exp(0.0003 * 30);
-                const expectedRate = 0.0003 * 365;
+                const expectedRate = 0.03;
                 const expectedPrice = ctx.calculateBlack76Price('call', expectedForward, 5800, 30 / 365, expectedRate, 0.2);
 
                 almostEqual(result.legResults[0].simPricePerShare, expectedPrice, 1e-6);
@@ -1321,6 +1446,149 @@ module.exports = {
 
                 assert.equal(result.groupPnL, 240);
                 assert.equal(result.groupLivePnL, 240);
+            },
+        },
+        {
+            name: 'keeps fallback observable pricing zero-safe without fabricating a midpoint',
+            run() {
+                let quote = {
+                    bid: 0,
+                    ask: 0.20,
+                    mark: 0.10,
+                    markSource: 'bid_ask_mid',
+                    bidPresent: true,
+                    askPresent: true,
+                    bidAskValid: true,
+                };
+                const ctx = loadBrowserScripts([
+                    'js/official_exchange_calendars.generated.js',
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote() { return quote; },
+                    },
+                });
+                const leg = {
+                    id: 'fallback-zero', type: 'call', currentPrice: 0.04,
+                    currentPriceSource: 'live', portfolioMarketPrice: 0,
+                };
+
+                const midpoint = ctx.OptionComboValuation.resolveLegSelectedLivePrice(
+                    { livePriceMode: 'midpoint' }, leg, null
+                );
+                assert.equal(midpoint.price, 0.10);
+                assert.equal(midpoint.source, 'live_midpoint');
+
+                quote = {
+                    bid: null,
+                    ask: 0.20,
+                    mark: 0.04,
+                    markSource: 'model',
+                    bidPresent: false,
+                    askPresent: true,
+                    bidAskValid: false,
+                };
+                leg.portfolioMarketPrice = null;
+                const oneSided = ctx.OptionComboValuation.resolveLegSelectedLivePrice(
+                    { livePriceMode: 'midpoint' }, leg, null
+                );
+                assert.equal(oneSided.price, 0.04);
+                assert.equal(oneSided.source, 'live');
+
+                leg.portfolioMarketPrice = 0;
+                const portfolio = ctx.OptionComboValuation.resolveLegSelectedLivePrice(
+                    { livePriceMode: 'mark' }, leg, null
+                );
+                assert.equal(portfolio.price, 0);
+                assert.equal(portfolio.source, 'tws_portfolio');
+            },
+        },
+        {
+            name: 'uses the same observable mark for exact-now payoff and Live PnL',
+            run() {
+                const quote = {
+                    bid: 0,
+                    ask: 0.20,
+                    mark: 0.10,
+                    markSource: 'bid_ask_mid',
+                    bidPresent: true,
+                    askPresent: true,
+                    bidAskValid: true,
+                    quoteAsOf: '2026-07-20T19:59:59Z',
+                };
+                const ctx = loadValuationContext({
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote() { return quote; },
+                        getUnderlyingQuote() {
+                            return {
+                                mark: 100,
+                                quoteAsOf: '2026-07-20T19:59:59Z',
+                            };
+                        },
+                    },
+                });
+                const globalState = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 100,
+                    baseDate: '2026-07-01',
+                    liveQuoteDate: '2026-07-20',
+                    liveQuoteAsOf: '2026-07-20T20:00:00Z',
+                    simulatedDate: '2026-07-20',
+                    marketDataMode: 'live',
+                    interestRate: 0.03,
+                    useMarketDiscountCurve: false,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+                const group = {
+                    id: 'exact-now',
+                    viewMode: 'active',
+                    liveData: true,
+                    livePriceMode: 'midpoint',
+                    legs: [{
+                        id: 'zero-bid-call',
+                        type: 'call',
+                        pos: 1,
+                        strike: 110,
+                        expDate: '2026-07-24',
+                        iv: 0.25,
+                        ivSource: 'live',
+                        cost: 0.15,
+                        currentPrice: 0.04,
+                        currentPriceSource: 'live',
+                        closePrice: null,
+                        portfolioMarketPrice: 0.12,
+                        portfolioMarketPriceAsOf: '2026-07-20T19:59:59Z',
+                    }],
+                };
+                globalState.groups = [group];
+
+                const midpoint = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+                almostEqual(midpoint.legResults[0].simPricePerShare, 0.10);
+                almostEqual(midpoint.legResults[0].liveLegPnL, -5);
+                almostEqual(midpoint.legResults[0].pnl, -5);
+                assert.match(midpoint.legResults[0].dteText, /96\.0 h/);
+                assert.match(midpoint.legResults[0].dteTitle, /product-profile fallback/i);
+                assert.match(midpoint.legResults[0].ivText, /Local BBO/i);
+                assert.match(midpoint.legResults[0].ivTitle, /re-inverted/i);
+
+                group.livePriceMode = 'mark';
+                const mark = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+                assert.equal(mark.legResults[0].simPricePerShare, null);
+                assert.equal(mark.legResults[0].simulationAvailable, false);
+                assert.equal(
+                    mark.legResults[0].simulationUnavailableReason,
+                    'strict_convergence_bbo_unavailable'
+                );
+                assert.match(mark.legResults[0].ivText, /strict live BBO required/i);
+                almostEqual(mark.legResults[0].liveLegPnL, -3);
+                assert.equal(mark.legResults[0].pnl, null);
             },
         },
     ],

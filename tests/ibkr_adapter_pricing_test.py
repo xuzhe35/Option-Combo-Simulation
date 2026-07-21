@@ -296,6 +296,55 @@ class IbkrAdapterPricingTests(unittest.TestCase):
             self.assertEqual(getattr(contract, 'multiplier', ''), multiplier)
             self.assertEqual(getattr(contract, 'tradingClass', ''), '')
 
+    def test_order_path_never_reinjects_a_guessed_weekly_fop_class(self):
+        """The order path must agree with the market-data path on FOP classes.
+
+        ``_build_contract_from_request`` re-injects the family default even when
+        the browser correctly sends no trading class, so these two copies of
+        ``_resolve_weekly_fop_trading_class`` drifting apart would put ML3 on a
+        real CL order while the priced quote used the IB-qualified class.
+        """
+        adapter = IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families=ib_server.SUPPORTED_LIVE_FAMILIES,
+            index_exchange_fallbacks={},
+        )
+
+        for symbol, exchange, multiplier in (
+            ('CL', 'NYMEX', '1000'),
+            ('SI', 'COMEX', '5000'),
+            ('ES', 'CME', '50'),
+        ):
+            with self.subTest(symbol=symbol):
+                leg_request = ComboLegRequest.from_payload({
+                    'id': f'leg_{symbol.lower()}',
+                    'type': 'call',
+                    'pos': 1,
+                    'secType': 'FOP',
+                    'symbol': symbol,
+                    'underlyingSymbol': symbol,
+                    'exchange': exchange,
+                    'underlyingExchange': exchange,
+                    'currency': 'USD',
+                    'multiplier': multiplier,
+                    'underlyingMultiplier': multiplier,
+                    'right': 'C',
+                    'strike': '85',
+                    # A Tuesday: ML3/S3T/E3A each name a different weekday.
+                    'expDate': '20260804',
+                    'contractMonth': '202609',
+                    'underlyingContractMonth': '202609',
+                })
+
+                contract = adapter._build_contract_from_request(leg_request)
+                self.assertEqual(getattr(contract, 'tradingClass', ''), '')
+                self.assertEqual(
+                    ib_server._resolve_weekly_fop_trading_class(symbol, '20260804', ''),
+                    getattr(contract, 'tradingClass', ''),
+                )
+
     def test_ambiguous_spy_option_qualification_prefers_canonical_trading_class(self):
         class _AmbiguousSpyIb(_DummyIb):
             def __init__(self):
@@ -371,6 +420,73 @@ class IbkrAdapterPricingTests(unittest.TestCase):
         self.assertEqual(qualified.tradingClass, 'SPY')
         self.assertEqual(len(ib.contract_detail_probes), 1)
         self.assertEqual(getattr(ib.contract_detail_probes[0], 'tradingClass', ''), '')
+
+    def test_execution_fop_fallback_filters_on_contract_details_under_con_id(self):
+        wrong_contract = SimpleNamespace(
+            conId=90001,
+            secType='FOP',
+            symbol='ES',
+            lastTradeDateOrContractMonth='20260717',
+            strike=7500.0,
+            right='C',
+            multiplier='50',
+            exchange='CME',
+            currency='USD',
+            localSymbol='WRONG MONTH',
+            tradingClass='EW3',
+        )
+        right_contract = SimpleNamespace(
+            conId=90002,
+            secType='FOP',
+            symbol='ES',
+            lastTradeDateOrContractMonth='20260717',
+            strike=7500.0,
+            right='C',
+            multiplier='50',
+            exchange='CME',
+            currency='USD',
+            localSymbol='RIGHT MONTH',
+            tradingClass='EW3',
+        )
+
+        class _AmbiguousFopIb(_DummyIb):
+            async def reqContractDetailsAsync(self, _contract):
+                return [
+                    SimpleNamespace(contract=wrong_contract, underConId=60901),
+                    SimpleNamespace(contract=right_contract, underConId=60701),
+                ]
+
+        adapter = IbkrExecutionAdapter(
+            ib=_AmbiguousFopIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families=ib_server.SUPPORTED_LIVE_FAMILIES,
+            index_exchange_fallbacks={},
+        )
+        leg_request = ComboLegRequest.from_payload({
+            'id': 'es_call',
+            'type': 'call',
+            'pos': 1,
+            'secType': 'FOP',
+            'symbol': 'ES',
+            'underlyingSymbol': 'ES',
+            'exchange': 'CME',
+            'underlyingExchange': 'CME',
+            'currency': 'USD',
+            'multiplier': '50',
+            'underlyingMultiplier': '50',
+            'right': 'C',
+            'strike': 7500,
+            'expDate': '20260717',
+            'underlyingContractMonth': '202607',
+        })
+        selected = asyncio.run(adapter._fallback_qualify_derivative_contract(
+            adapter._build_contract_from_request(leg_request),
+            leg_request,
+            qualified_underlying=SimpleNamespace(conId=60701),
+        ))
+
+        self.assertIs(selected, right_contract)
 
     def test_quantize_limit_price_respects_explicit_quarter_point_increment(self):
         quantized = self.adapter._quantize_limit_price(3.18, 'BUY', 0.25)
@@ -1043,6 +1159,71 @@ class IbServerMicroFamilyDefaultsTests(unittest.TestCase):
         self.assertEqual(contract.lastTradeDateOrContractMonth, '20260717')
         self.assertEqual(contract.tradingClass, '')
 
+    def test_wednesday_es_fop_request_does_not_fabricate_e3c(self):
+        contract = ib_server._build_contract_from_request({
+            'secType': 'FOP',
+            'symbol': 'ES',
+            'exchange': 'CME',
+            'currency': 'USD',
+            'multiplier': '50',
+            'tradingClass': 'E3A',
+            'right': 'C',
+            'strike': 7520,
+            'expDate': '20260722',
+        })
+
+        self.assertEqual(contract.lastTradeDateOrContractMonth, '20260722')
+        self.assertEqual(contract.tradingClass, '')
+
+    def test_tuesday_cl_fop_request_does_not_force_the_ml3_monday_class(self):
+        # ML3 names one Monday week-3 crude listing.  2026-08-04 is a Tuesday,
+        # so asserting that class rejected an option IB qualified correctly.
+        contract = ib_server._build_contract_from_request({
+            'secType': 'FOP',
+            'symbol': 'CL',
+            'exchange': 'NYMEX',
+            'currency': 'USD',
+            'multiplier': '1000',
+            'tradingClass': 'ML3',
+            'right': 'C',
+            'strike': 85,
+            'expDate': '20260804',
+        })
+
+        self.assertEqual(contract.lastTradeDateOrContractMonth, '20260804')
+        self.assertEqual(contract.tradingClass, '')
+
+    def test_silver_fop_requests_also_drop_their_guessed_weekly_class(self):
+        contract = ib_server._build_contract_from_request({
+            'secType': 'FOP',
+            'symbol': 'SI',
+            'exchange': 'COMEX',
+            'currency': 'USD',
+            'multiplier': '5000',
+            'tradingClass': 'S3T',
+            'right': 'P',
+            'strike': 30,
+            'expDate': '20260804',
+        })
+
+        self.assertEqual(contract.tradingClass, '')
+
+    def test_index_option_requests_keep_their_real_trading_class(self):
+        # SPXW/NDXP are stable class names, not weekday guesses.
+        contract = ib_server._build_contract_from_request({
+            'secType': 'OPT',
+            'symbol': 'SPX',
+            'exchange': 'CBOE',
+            'currency': 'USD',
+            'multiplier': '100',
+            'tradingClass': 'SPXW',
+            'right': 'C',
+            'strike': 7000,
+            'expDate': '20260804',
+        })
+
+        self.assertEqual(contract.tradingClass, 'SPXW')
+
     def test_supported_live_families_include_micro_equity_index_futures_options(self):
         self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MES']['underlying_sec_type'], 'FUT')
         self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['MES']['option_sec_type'], 'FOP')
@@ -1090,6 +1271,514 @@ class IbServerMicroFamilyDefaultsTests(unittest.TestCase):
         self.assertEqual(si_request['exchange'], 'COMEX')
         self.assertEqual(si_request['multiplier'], '5000')
         self.assertEqual(si_request['contractMonth'], '202605')
+
+
+class IbServerFopContractIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self._original_ib = ib_server.ib
+        self._original_timing = dict(ib_server.option_contract_timing_by_con_id)
+        self._original_underlying_months = dict(ib_server.underlying_contract_month_by_con_id)
+        self._original_qualified_underlyings = dict(ib_server.qualified_underlyings)
+        ib_server.option_contract_timing_by_con_id.clear()
+        ib_server.underlying_contract_month_by_con_id.clear()
+        ib_server.qualified_underlyings.clear()
+
+    def tearDown(self):
+        ib_server.ib = self._original_ib
+        ib_server.option_contract_timing_by_con_id.clear()
+        ib_server.option_contract_timing_by_con_id.update(self._original_timing)
+        ib_server.underlying_contract_month_by_con_id.clear()
+        ib_server.underlying_contract_month_by_con_id.update(self._original_underlying_months)
+        ib_server.qualified_underlyings.clear()
+        ib_server.qualified_underlyings.update(self._original_qualified_underlyings)
+
+    def test_futures_month_lookup_does_not_share_the_option_timing_semaphore(self):
+        """A FOP timing resolution awaits the futures month while holding a permit.
+
+        Sharing one semaphore is re-entrant: once capacity-many FOP resolutions
+        are in flight with an unresolvable underlying month, every permit is held
+        by a task waiting on a nested task that can never acquire one, and the
+        semaphore stays drained for the life of the process.
+        """
+        self.assertIsNot(
+            ib_server.futures_contract_month_semaphore,
+            ib_server.option_contract_timing_semaphore,
+        )
+
+    def test_concurrent_fop_timing_resolutions_do_not_deadlock(self):
+        capacity = ib_server.option_contract_timing_semaphore._value
+        option_details = {}
+        for con_id in range(9001, 9001 + capacity):
+            option_details[con_id] = SimpleNamespace(
+                contract=SimpleNamespace(
+                    conId=con_id, secType='FOP', symbol='ES',
+                    localSymbol=f'ES {con_id}', lastTradeDateOrContractMonth='20260717',
+                    strike=7500.0, right='C', multiplier='50', exchange='CME',
+                    tradingClass='EW3',
+                ),
+                underConId=70001,
+                lastTradeTime='15:00:00', timeZoneId='US/Central',
+                realExpirationDate='20260717',
+            )
+
+        class _NoUnderlyingMonthIb:
+            """IB never supplies contractMonth, so the month is never cached."""
+
+            async def reqContractDetailsAsync(self, contract):
+                con_id = getattr(contract, 'conId', None)
+                await asyncio.sleep(0)
+                if con_id in option_details:
+                    return [option_details[con_id]]
+                if con_id == 70001:
+                    return [SimpleNamespace(contract=SimpleNamespace(
+                        conId=70001, secType='FUT', symbol='ES',
+                        lastTradeDateOrContractMonth='20260918',
+                    ))]
+                return []
+
+        ib_server.ib = _NoUnderlyingMonthIb()
+
+        async def drive():
+            return await asyncio.wait_for(
+                asyncio.gather(*(
+                    ib_server._resolve_option_contract_timing(details.contract)
+                    for details in option_details.values()
+                )),
+                timeout=10,
+            )
+
+        results = asyncio.run(drive())
+
+        self.assertEqual(len(results), capacity)
+        # The permit pool must be fully returned, not drained.
+        self.assertEqual(
+            ib_server.option_contract_timing_semaphore._value, capacity
+        )
+
+    def test_energy_future_delivery_month_survives_an_earlier_expiry(self):
+        # CLU6 delivers in Sep 2026 but stops trading 2026-08-20, so the month
+        # must come from ContractDetails.contractMonth, never from that date.
+        future_contract = SimpleNamespace(
+            conId=70102,
+            secType='FUT',
+            symbol='CL',
+            localSymbol='CLU6',
+            lastTradeDateOrContractMonth='20260820',
+        )
+
+        class _ContractDetailsIb:
+            def __init__(self):
+                self.calls = []
+
+            async def reqContractDetailsAsync(self, contract):
+                self.calls.append(getattr(contract, 'conId', None))
+                return [SimpleNamespace(
+                    contract=future_contract, contractMonth='202609'
+                )]
+
+        fake_ib = _ContractDetailsIb()
+        ib_server.ib = fake_ib
+
+        month = asyncio.run(ib_server._resolve_verified_futures_contract_month(70102))
+
+        self.assertEqual(month, '202609')
+        self.assertEqual(ib_server.underlying_contract_month_by_con_id[70102], '202609')
+
+        cached = asyncio.run(ib_server._resolve_verified_futures_contract_month(70102))
+        self.assertEqual(cached, '202609')
+        self.assertEqual(fake_ib.calls, [70102])
+
+    def test_future_month_stays_unresolved_without_contract_details_evidence(self):
+        future_contract = SimpleNamespace(
+            conId=70103,
+            secType='FUT',
+            symbol='CL',
+            localSymbol='CLV6',
+            lastTradeDateOrContractMonth='20260921',
+        )
+
+        class _MonthlessDetailsIb:
+            async def reqContractDetailsAsync(self, contract):
+                return [SimpleNamespace(contract=future_contract)]
+
+        ib_server.ib = _MonthlessDetailsIb()
+
+        month = asyncio.run(ib_server._resolve_verified_futures_contract_month(70103))
+
+        # A date-derived guess (202609) would be wrong for an Oct 2026 contract.
+        self.assertEqual(month, '')
+        self.assertNotIn(70103, ib_server.underlying_contract_month_by_con_id)
+
+    def test_derivative_fallback_filters_on_contract_details_under_con_id(self):
+        def detail(con_id, under_con_id):
+            return SimpleNamespace(
+                contract=SimpleNamespace(
+                    conId=con_id,
+                    secType='FOP',
+                    symbol='ES',
+                    lastTradeDateOrContractMonth='20260717',
+                    strike=7500.0,
+                    right='C',
+                    multiplier='50',
+                    exchange='CME',
+                    tradingClass='EW3',
+                ),
+                underConId=under_con_id,
+            )
+
+        selected = ib_server._filter_derivative_contract_candidates(
+            [detail(501, 70001), detail(502, 70002)],
+            {
+                'secType': 'FOP',
+                'symbol': 'ES',
+                'expDate': '20260717',
+                'strike': 7500.0,
+                'right': 'C',
+                'multiplier': '50',
+                'exchange': 'CME',
+            },
+            qualified_underlying=SimpleNamespace(conId=70002),
+        )
+
+        self.assertEqual([candidate.conId for candidate in selected], [502])
+
+    def test_derivative_fallback_rejects_details_without_under_con_id(self):
+        candidate = SimpleNamespace(
+            conId=503,
+            secType='FOP',
+            symbol='ES',
+            lastTradeDateOrContractMonth='20260717',
+            strike=7500.0,
+            right='C',
+            multiplier='50',
+            exchange='CME',
+            tradingClass='EW3',
+        )
+
+        selected = ib_server._filter_derivative_contract_candidates(
+            [SimpleNamespace(contract=candidate)],
+            {
+                'secType': 'FOP',
+                'symbol': 'ES',
+                'expDate': '20260717',
+                'strike': 7500.0,
+                'right': 'C',
+                'multiplier': '50',
+                'exchange': 'CME',
+            },
+            qualified_underlying=SimpleNamespace(conId=70002),
+        )
+
+        self.assertEqual(selected, [])
+
+    def test_option_details_under_con_id_resolves_actual_futures_month(self):
+        option_contract = SimpleNamespace(
+            conId=501,
+            secType='FOP',
+            symbol='ES',
+            localSymbol='ES   260717C07500000',
+            lastTradeDateOrContractMonth='20260717',
+            strike=7500.0,
+            right='C',
+            multiplier='50',
+            exchange='CME',
+            currency='USD',
+            tradingClass='EW3',
+            # Deliberately wrong local hints: neither may become payload truth.
+            underConId=99999,
+            underlyingContractMonth='202612',
+        )
+        option_details = SimpleNamespace(
+            contract=option_contract,
+            underConId=70001,
+            lastTradeTime='15:00:00',
+            timeZoneId='US/Central',
+            realExpirationDate='20260717',
+        )
+        future_contract = SimpleNamespace(
+            conId=70001,
+            secType='FUT',
+            symbol='ES',
+            lastTradeDateOrContractMonth='20260918',
+        )
+
+        class _ContractDetailsIb:
+            def __init__(self):
+                self.calls = []
+
+            async def reqContractDetailsAsync(self, contract):
+                con_id = getattr(contract, 'conId', None)
+                self.calls.append(con_id)
+                if con_id == 501:
+                    return [option_details]
+                if con_id == 70001:
+                    return [SimpleNamespace(
+                        contract=future_contract, contractMonth='202609'
+                    )]
+                return []
+
+        fake_ib = _ContractDetailsIb()
+        ib_server.ib = fake_ib
+
+        identity = asyncio.run(ib_server._resolve_option_contract_timing(option_contract))
+
+        self.assertEqual(identity['conId'], 501)
+        self.assertEqual(identity['localSymbol'], 'ES   260717C07500000')
+        self.assertEqual(identity['tradingClass'], 'EW3')
+        self.assertEqual(identity['right'], 'C')
+        self.assertEqual(identity['strike'], 7500.0)
+        self.assertEqual(identity['optionExpiry'], '20260717')
+        self.assertEqual(identity['underConId'], 70001)
+        self.assertEqual(identity['underlyingContractMonth'], '202609')
+        self.assertIs(identity['underlyingBindingVerified'], True)
+        self.assertEqual(identity['underlyingBindingSource'], 'ib_contract_details_under_con_id')
+        self.assertEqual(fake_ib.calls, [501, 70001])
+
+        cached = asyncio.run(ib_server._resolve_option_contract_timing(option_contract))
+        self.assertEqual(cached['underlyingContractMonth'], '202609')
+        self.assertEqual(fake_ib.calls, [501, 70001])
+
+    def test_incomplete_option_contract_timing_is_retried_on_next_resolution(self):
+        option_contract = SimpleNamespace(
+            conId=601,
+            secType='OPT',
+            symbol='SPY',
+            localSymbol='SPY   260724P00750000',
+            lastTradeDateOrContractMonth='20260724',
+            strike=750.0,
+            right='P',
+            multiplier='100',
+            exchange='SMART',
+            currency='USD',
+            tradingClass='SPY',
+        )
+        incomplete_details = SimpleNamespace(
+            contract=option_contract,
+            lastTradeTime='',
+            timeZoneId='US/Eastern',
+            realExpirationDate='20260724',
+        )
+        complete_details = SimpleNamespace(
+            contract=option_contract,
+            lastTradeTime='16:00:00',
+            timeZoneId='US/Eastern',
+            realExpirationDate='20260724',
+        )
+
+        class _RecoveringContractDetailsIb:
+            def __init__(self):
+                self.calls = []
+
+            async def reqContractDetailsAsync(self, contract):
+                self.calls.append(getattr(contract, 'conId', None))
+                details = incomplete_details if len(self.calls) == 1 else complete_details
+                return [details]
+
+        fake_ib = _RecoveringContractDetailsIb()
+        ib_server.ib = fake_ib
+
+        first = asyncio.run(ib_server._resolve_option_contract_timing(option_contract))
+        self.assertNotIn('expiryAsOf', first)
+
+        recovered = asyncio.run(ib_server._resolve_option_contract_timing(option_contract))
+        self.assertEqual(recovered['expiryAsOf'], '2026-07-24T20:00:00.000Z')
+        self.assertEqual(fake_ib.calls, [601, 601])
+
+        cached = asyncio.run(ib_server._resolve_option_contract_timing(option_contract))
+        self.assertEqual(cached['expiryAsOf'], '2026-07-24T20:00:00.000Z')
+        self.assertEqual(fake_ib.calls, [601, 601])
+
+    def test_concurrent_option_timing_callers_share_one_contract_details_lookup(self):
+        option_contract = SimpleNamespace(
+            conId=606,
+            secType='OPT',
+            symbol='SPY',
+            localSymbol='SPY   260724C00750000',
+            lastTradeDateOrContractMonth='20260724',
+            strike=750.0,
+            right='C',
+            multiplier='100',
+            exchange='SMART',
+            currency='USD',
+            tradingClass='SPY',
+        )
+        complete_details = SimpleNamespace(
+            contract=option_contract,
+            lastTradeTime='16:00:00',
+            timeZoneId='US/Eastern',
+            realExpirationDate='20260724',
+        )
+
+        class _LatchedContractDetailsIb:
+            def __init__(self):
+                self.calls = 0
+                self.lookup_started = None
+                self.release_lookup = None
+
+            async def reqContractDetailsAsync(self, _contract):
+                self.calls += 1
+                self.lookup_started.set()
+                await self.release_lookup.wait()
+                return [complete_details]
+
+        fake_ib = _LatchedContractDetailsIb()
+        ib_server.ib = fake_ib
+
+        async def resolve_concurrently():
+            fake_ib.lookup_started = asyncio.Event()
+            fake_ib.release_lookup = asyncio.Event()
+            first_task = asyncio.create_task(
+                ib_server._resolve_option_contract_timing(option_contract)
+            )
+            await fake_ib.lookup_started.wait()
+            second_task = asyncio.create_task(
+                ib_server._resolve_option_contract_timing(option_contract)
+            )
+            # Give the second caller a scheduling turn while the first caller
+            # still owns the resolver semaphore and ContractDetails is pending.
+            await asyncio.sleep(0)
+            fake_ib.release_lookup.set()
+            return await asyncio.gather(first_task, second_task)
+
+        first, second = asyncio.run(resolve_concurrently())
+
+        self.assertEqual(fake_ib.calls, 1)
+        self.assertEqual(first, second)
+        self.assertEqual(first['expiryAsOf'], '2026-07-24T20:00:00.000Z')
+        self.assertEqual(first['conId'], 606)
+
+    def test_fop_verified_binding_without_expiry_timing_is_still_retried(self):
+        option_contract = SimpleNamespace(
+            conId=611,
+            secType='FOP',
+            symbol='ES',
+            localSymbol='ES   260724P07500000',
+            lastTradeDateOrContractMonth='20260724',
+            strike=7500.0,
+            right='P',
+            multiplier='50',
+            exchange='CME',
+            currency='USD',
+            tradingClass='EW4',
+        )
+        incomplete_details = SimpleNamespace(
+            contract=option_contract,
+            underConId=71001,
+            lastTradeTime='',
+            timeZoneId='US/Central',
+            realExpirationDate='20260724',
+        )
+        complete_details = SimpleNamespace(
+            contract=option_contract,
+            underConId=71001,
+            lastTradeTime='15:00:00',
+            timeZoneId='US/Central',
+            realExpirationDate='20260724',
+        )
+        future_contract = SimpleNamespace(
+            conId=71001,
+            secType='FUT',
+            symbol='ES',
+            lastTradeDateOrContractMonth='20260918',
+        )
+
+        class _RecoveringFopTimingIb:
+            def __init__(self):
+                self.calls = []
+                self.option_calls = 0
+
+            async def reqContractDetailsAsync(self, contract):
+                con_id = getattr(contract, 'conId', None)
+                self.calls.append(con_id)
+                if con_id == 611:
+                    self.option_calls += 1
+                    details = (
+                        incomplete_details
+                        if self.option_calls == 1
+                        else complete_details
+                    )
+                    return [details]
+                if con_id == 71001:
+                    return [SimpleNamespace(
+                        contract=future_contract, contractMonth='202609'
+                    )]
+                return []
+
+        fake_ib = _RecoveringFopTimingIb()
+        ib_server.ib = fake_ib
+
+        first = asyncio.run(ib_server._resolve_option_contract_timing(option_contract))
+        self.assertIs(first['underlyingBindingVerified'], True)
+        self.assertEqual(first['underlyingContractMonth'], '202609')
+        self.assertNotIn('expiryAsOf', first)
+
+        recovered = asyncio.run(ib_server._resolve_option_contract_timing(option_contract))
+        self.assertEqual(recovered['expiryAsOf'], '2026-07-24T20:00:00.000Z')
+        self.assertIs(recovered['underlyingBindingVerified'], True)
+        self.assertEqual(fake_ib.calls, [611, 71001, 611])
+
+    def test_fop_expiry_timing_without_verified_binding_is_still_retried(self):
+        option_contract = SimpleNamespace(
+            conId=621,
+            secType='FOP',
+            symbol='ES',
+            localSymbol='ES   260724C07500000',
+            lastTradeDateOrContractMonth='20260724',
+            strike=7500.0,
+            right='C',
+            multiplier='50',
+            exchange='CME',
+            currency='USD',
+            tradingClass='EW4',
+        )
+        unbound_details = SimpleNamespace(
+            contract=option_contract,
+            lastTradeTime='15:00:00',
+            timeZoneId='US/Central',
+            realExpirationDate='20260724',
+        )
+        bound_details = SimpleNamespace(
+            contract=option_contract,
+            underConId=72001,
+            lastTradeTime='15:00:00',
+            timeZoneId='US/Central',
+            realExpirationDate='20260724',
+        )
+        future_contract = SimpleNamespace(
+            conId=72001,
+            secType='FUT',
+            symbol='ES',
+            lastTradeDateOrContractMonth='20260918',
+        )
+
+        class _RecoveringFopBindingIb:
+            def __init__(self):
+                self.option_calls = 0
+
+            async def reqContractDetailsAsync(self, contract):
+                con_id = getattr(contract, 'conId', None)
+                if con_id == 621:
+                    self.option_calls += 1
+                    details = unbound_details if self.option_calls == 1 else bound_details
+                    return [details]
+                if con_id == 72001:
+                    return [SimpleNamespace(
+                        contract=future_contract, contractMonth='202609'
+                    )]
+                return []
+
+        fake_ib = _RecoveringFopBindingIb()
+        ib_server.ib = fake_ib
+
+        first = asyncio.run(ib_server._resolve_option_contract_timing(option_contract))
+        self.assertEqual(first['expiryAsOf'], '2026-07-24T20:00:00.000Z')
+        self.assertIs(first['underlyingBindingVerified'], False)
+
+        recovered = asyncio.run(ib_server._resolve_option_contract_timing(option_contract))
+        self.assertEqual(recovered['expiryAsOf'], '2026-07-24T20:00:00.000Z')
+        self.assertIs(recovered['underlyingBindingVerified'], True)
+        self.assertEqual(recovered['underlyingContractMonth'], '202609')
+        self.assertEqual(fake_ib.option_calls, 2)
 
 
 class IbServerPortfolioPositionSnapshotTests(unittest.TestCase):

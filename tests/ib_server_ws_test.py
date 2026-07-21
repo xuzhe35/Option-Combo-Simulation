@@ -17,7 +17,13 @@ from ib_server_ws import (
     purge_combo_order_tracking_for_websocket,
     purge_hedge_order_tracking_for_websocket,
 )
-from ib_server_market_data import cancel_all_api_market_data_subscriptions
+from ib_server_market_data import (
+    cancel_all_api_market_data_subscriptions,
+    extract_market_reference_contract_metadata,
+    extract_option_mark_with_source,
+    extract_quote_snapshot,
+    ticker_quote_fingerprint,
+)
 
 
 class _FakeWebSocket:
@@ -114,6 +120,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
         active_hedge_snapshot_calls = []
         iv_subscription_calls = []
         historical_bar_calls = []
+        discount_curve_calls = []
         historical_replay_service = _FakeHistoricalReplayService()
         fake_ib = _FakeIB()
 
@@ -202,11 +209,27 @@ class IbServerWsHandlerTests(unittest.TestCase):
                 'bars': [{'time': '2026-05-01', 'open': 1.0, 'high': 2.0, 'low': 0.5, 'close': 1.5, 'volume': 100}],
             }
 
+        async def get_discount_curve_snapshot(data):
+            discount_curve_calls.append(dict(data))
+            return {
+                'action': 'discount_curve_snapshot',
+                'status': 'cached',
+                'fallbackUsed': False,
+                'refreshAttempted': False,
+                'error': '',
+                'curve': {
+                    'kind': 'treasury_discount_curve',
+                    'effectiveDate': '2026-05-01',
+                    'points': [{'tenorCode': '1m', 'tenorDays': 30, 'parYield': 0.04}],
+                },
+            }
+
         env = {
             'connected_clients': set(),
             'client_subscriptions': {},
             'client_subscription_settings': {},
             'historical_replay_service': historical_replay_service,
+            'get_discount_curve_snapshot': get_discount_curve_snapshot,
             'execution_engine': _ExecutionEngineStub(),
             'send_portfolio_avg_cost_snapshot': lambda websocket: snapshot_calls.append(websocket),
             'send_portfolio_positions_snapshot': lambda websocket: position_snapshot_calls.append(websocket),
@@ -273,6 +296,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
                 'active_combo_snapshot_calls': active_combo_snapshot_calls,
                 'iv_subscription_calls': iv_subscription_calls,
                 'historical_bar_calls': historical_bar_calls,
+                'discount_curve_calls': discount_curve_calls,
             },
         }
         return (
@@ -384,6 +408,41 @@ class IbServerWsHandlerTests(unittest.TestCase):
             'message': None,
         })
 
+    def test_handle_ws_client_routes_discount_curve_snapshot_action(self):
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket(messages=[json.dumps({
+            'action': 'request_discount_curve',
+            'requestedDate': '2026-05-02',
+            'refresh': False,
+        })])
+        handler = build_ws_client_handler(env)
+
+        asyncio.run(handler(websocket))
+
+        self.assertEqual(env['_captures']['discount_curve_calls'], [{
+            'action': 'request_discount_curve',
+            'requestedDate': '2026-05-02',
+            'refresh': False,
+        }])
+        self.assertEqual(sent_messages[0][1]['action'], 'discount_curve_snapshot')
+        self.assertEqual(sent_messages[0][1]['status'], 'cached')
+        self.assertEqual(sent_messages[0][1]['curve']['effectiveDate'], '2026-05-01')
+
+    def test_discount_curve_action_fails_closed_when_backend_has_no_provider(self):
+        env, sent_messages, *_ = self._build_env()
+        env.pop('get_discount_curve_snapshot')
+        websocket = _FakeWebSocket()
+
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {'action': 'request_discount_curve'},
+        ))
+
+        self.assertEqual(sent_messages[0][1]['action'], 'discount_curve_snapshot')
+        self.assertEqual(sent_messages[0][1]['status'], 'unavailable')
+        self.assertIsNone(sent_messages[0][1]['curve'])
+
     def test_handle_ws_client_routes_connect_ib_action(self):
         (
             env,
@@ -471,6 +530,179 @@ class IbServerWsHandlerTests(unittest.TestCase):
 
         self.assertEqual(env['ib'].req_mkt_data_calls, [])
         self.assertEqual(env['client_subscriptions'][websocket], {})
+
+    def test_reset_during_option_timing_lookup_cannot_attach_or_send_stale_metadata(self):
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        env['client_subscriptions'][websocket] = {}
+        env['client_subscription_settings'][websocket] = {'greeks_enabled': False}
+        generation = [11]
+        env['get_api_market_data_generation'] = lambda: generation[0]
+        env['api_market_data_reset_in_progress'] = lambda: False
+        env['option_contract_timing_by_con_id'] = {}
+
+        async def qualify_contract(contract, request=None):
+            request_data = request if isinstance(request, dict) else {}
+            sec_type = str(
+                request_data.get('secType')
+                or getattr(contract, 'secType', '')
+                or 'STK'
+            ).upper()
+            return type('QualifiedContract', (), {
+                'conId': 901 if sec_type == 'OPT' else 900,
+                'secType': sec_type,
+                'symbol': 'SPY',
+            })()
+
+        async def resolve_timing_after_reset(_qualified_option):
+            await asyncio.sleep(0)
+            generation[0] += 1
+            return {
+                'conId': 901,
+                'secType': 'OPT',
+                'symbol': 'SPY',
+                'localSymbol': 'SPY   260724P00750000',
+                'right': 'P',
+                'strike': 750.0,
+                'optionExpiry': '20260724',
+                'expiryAsOf': '2026-07-24T20:00:00.000Z',
+                'expiryTimingSource': 'ib_contract_details',
+                'lastTradeDate': '20260724',
+            }
+
+        env['qualify_one'] = qualify_contract
+        env['resolve_option_contract_timing'] = resolve_timing_after_reset
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {
+                'action': 'subscribe',
+                'underlying': {'secType': 'STK', 'symbol': 'SPY'},
+                'options': [{
+                    'id': 'late_leg',
+                    'secType': 'OPT',
+                    'symbol': 'SPY',
+                    'expDate': '20260724',
+                    'strike': 750,
+                    'right': 'P',
+                }],
+                'futures': [],
+                'stocks': [],
+            },
+        ))
+
+        self.assertNotIn('late_leg', env['client_subscriptions'][websocket])
+        self.assertFalse(any(
+            socket is websocket
+            and payload.get('action') == 'option_contract_metadata'
+            and 'late_leg' in (payload.get('options') or {})
+            for socket, payload in sent_messages
+        ))
+        option_market_data_calls = [
+            call for call in env['ib'].req_mkt_data_calls
+            if getattr(call[0], 'secType', '') == 'OPT'
+        ]
+        self.assertEqual(option_market_data_calls, [])
+
+    def test_unqualified_option_leg_is_reported_to_the_client(self):
+        # A strike IBKR does not list for the chosen expiry used to vanish from
+        # every payload with no client-visible trace, so the feed toggle looked
+        # like it was still loading forever.
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        env['client_subscriptions'][websocket] = {}
+        env['client_subscription_settings'][websocket] = {'greeks_enabled': False}
+
+        async def qualify_missing_strike(contract, request=None):
+            request_data = request if isinstance(request, dict) else {}
+            if float(request_data.get('strike') or 0) == 585.0:
+                return None
+            sec_type = str(request_data.get('secType') or getattr(contract, 'secType', '') or 'STK').upper()
+            return type('QualifiedContract', (), {
+                'conId': 2001 if sec_type == 'OPT' else 1001,
+                'secType': sec_type,
+                'symbol': 'QQQ',
+            })()
+
+        env['qualify_one'] = qualify_missing_strike
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {
+                'action': 'subscribe',
+                'underlying': {'secType': 'STK', 'symbol': 'QQQ'},
+                'options': [
+                    {
+                        'id': 'leg_missing',
+                        'secType': 'OPT',
+                        'symbol': 'QQQ',
+                        'expDate': '20260821',
+                        'strike': 585,
+                        'right': 'C',
+                    },
+                    {
+                        'id': 'leg_ok',
+                        'secType': 'OPT',
+                        'symbol': 'QQQ',
+                        'expDate': '20260821',
+                        'strike': 570,
+                        'right': 'P',
+                    },
+                ],
+                'futures': [],
+                'stocks': [],
+            },
+        ))
+
+        status_payloads = [
+            payload for socket, payload in sent_messages
+            if socket is websocket and payload.get('action') == 'option_subscription_status'
+        ]
+        self.assertEqual(len(status_payloads), 1)
+        unresolved = status_payloads[0]['unresolved']
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0]['id'], 'leg_missing')
+        self.assertEqual(unresolved[0]['reason'], 'contract_not_found')
+        self.assertEqual(unresolved[0]['strike'], 585)
+        self.assertEqual(unresolved[0]['right'], 'C')
+        self.assertEqual(unresolved[0]['expDate'], '20260821')
+
+        # The unresolved leg must not subscribe; its sibling still must.
+        self.assertNotIn('leg_missing', env['client_subscriptions'][websocket])
+        self.assertIn('leg_ok', env['client_subscriptions'][websocket])
+
+    def test_fully_qualified_subscription_reports_an_empty_unresolved_list(self):
+        # The all-clear lets the client retire a previous "not found" warning.
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        env['client_subscriptions'][websocket] = {}
+        env['client_subscription_settings'][websocket] = {'greeks_enabled': False}
+
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {
+                'action': 'subscribe',
+                'underlying': {'secType': 'STK', 'symbol': 'QQQ'},
+                'options': [{
+                    'id': 'leg_ok',
+                    'secType': 'OPT',
+                    'symbol': 'QQQ',
+                    'expDate': '20260821',
+                    'strike': 570,
+                    'right': 'P',
+                }],
+                'futures': [],
+                'stocks': [],
+            },
+        ))
+
+        status_payloads = [
+            payload for socket, payload in sent_messages
+            if socket is websocket and payload.get('action') == 'option_subscription_status'
+        ]
+        self.assertEqual(len(status_payloads), 1)
+        self.assertEqual(status_payloads[0]['unresolved'], [])
 
     def test_subscription_arriving_during_global_reset_is_rejected(self):
         env, *_ = self._build_env()
@@ -670,6 +902,60 @@ class IbServerWsHandlerTests(unittest.TestCase):
         self.assertGreaterEqual(cancel_iv_calls.count(websocket), 2)
         self.assertGreaterEqual(unsubscribe_calls.count(websocket), 2)
 
+    def test_optional_carry_reference_is_subscribed_separately(self):
+        env, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        env['client_subscriptions'][websocket] = {}
+
+        asyncio.run(dispatch_client_message(env, websocket, {
+            'action': 'subscribe',
+            'underlying': {'secType': 'FUT', 'symbol': 'ES'},
+            'options': [{'id': 'leg', 'secType': 'FOP', 'symbol': 'ES'}],
+            'futures': [{'id': 'esu6', 'secType': 'FUT', 'symbol': 'ES'}],
+            'carryReferences': [
+                {'id': 'spot', 'secType': 'IND', 'symbol': 'SPX', 'exchange': 'CBOE'},
+            ],
+            'stocks': [],
+        }))
+
+        subscriptions = env['client_subscriptions'][websocket]
+        self.assertIn('leg', subscriptions)
+        self.assertIn('future_esu6', subscriptions)
+        self.assertIn('carry_reference_spot', subscriptions)
+        self.assertEqual(subscriptions['carry_reference_spot'].contract.symbol, 'SPX')
+
+    def test_optional_carry_reference_failure_does_not_block_fop_or_stock_subscriptions(self):
+        env, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        env['client_subscriptions'][websocket] = {}
+        original_qualify = env['qualify_one']
+
+        async def qualify_except_reference(contract, request=None):
+            if isinstance(request, dict) and request.get('purpose') == 'diagnostic_net_carry_reference':
+                raise RuntimeError('reference permission unavailable')
+            return await original_qualify(contract, request)
+
+        env['qualify_one'] = qualify_except_reference
+        asyncio.run(dispatch_client_message(env, websocket, {
+            'action': 'subscribe',
+            'underlying': {'secType': 'FUT', 'symbol': 'ES'},
+            'options': [{'id': 'leg', 'secType': 'FOP', 'symbol': 'ES'}],
+            'futures': [{'id': 'esu6', 'secType': 'FUT', 'symbol': 'ES'}],
+            'carryReferences': [{
+                'id': 'spot',
+                'secType': 'IND',
+                'symbol': 'SPX',
+                'purpose': 'diagnostic_net_carry_reference',
+            }],
+            'stocks': ['SPY'],
+        }))
+
+        subscriptions = env['client_subscriptions'][websocket]
+        self.assertIn('leg', subscriptions)
+        self.assertIn('future_esu6', subscriptions)
+        self.assertIn('stock_SPY', subscriptions)
+        self.assertNotIn('carry_reference_spot', subscriptions)
+
     def test_handle_subscribe_pools_market_data_lines_per_contract(self):
         (
             env,
@@ -744,6 +1030,218 @@ class IbServerWsHandlerTests(unittest.TestCase):
         option_calls = [call for call in env['ib'].req_mkt_data_calls if call[0].secType == 'FOP']
         self.assertEqual(len(option_calls), 2)
         self.assertIs(env['client_subscriptions'][second_socket]['other_leg'], first_subs['leg_a'])
+
+    def test_pooled_option_subscription_pushes_timing_without_waiting_for_a_quote(self):
+        env, sent_messages, *_ = self._build_env()
+        env['extract_quote_snapshot'] = lambda _ticker, _sec_type='': None
+        env['option_contract_timing_by_con_id'] = {}
+
+        async def qualify_spy_contract(contract, request=None):
+            request_data = request if isinstance(request, dict) else {}
+            sec_type = str(
+                request_data.get('secType')
+                or getattr(contract, 'secType', '')
+                or 'STK'
+            ).upper()
+            if sec_type != 'OPT':
+                return type('QualifiedUnderlying', (), {
+                    'conId': 700,
+                    'secType': 'STK',
+                    'symbol': 'SPY',
+                })()
+            return type('QualifiedOption', (), {
+                'conId': 701,
+                'secType': 'OPT',
+                'symbol': 'SPY',
+                'localSymbol': 'SPY   260724P00750000',
+                'lastTradeDateOrContractMonth': '20260724',
+                'strike': 750.0,
+                'right': 'P',
+                'multiplier': '100',
+                'exchange': 'SMART',
+                'currency': 'USD',
+                'tradingClass': 'SPY',
+            })()
+
+        async def resolve_timing(_qualified_option):
+            return {
+                'conId': 701,
+                'secType': 'OPT',
+                'symbol': 'SPY',
+                'localSymbol': 'SPY   260724P00750000',
+                'exchange': 'SMART',
+                'currency': 'USD',
+                'multiplier': '100',
+                'tradingClass': 'SPY',
+                'right': 'P',
+                'strike': 750.0,
+                'optionExpiry': '20260724',
+                'contractIdentitySource': 'ib_contract_details',
+                'expiryAsOf': '2026-07-24T20:00:00.000Z',
+                'expiryTimingSource': 'ib_contract_details',
+                'lastTradeDate': '20260724',
+                'lastTradeTime': '16:00:00',
+                'timeZoneId': 'US/Eastern',
+                'realExpirationDate': '20260724',
+            }
+
+        env['qualify_one'] = qualify_spy_contract
+        env['resolve_option_contract_timing'] = resolve_timing
+
+        first_socket = _FakeWebSocket()
+        second_socket = _FakeWebSocket()
+        for socket in (first_socket, second_socket):
+            env['client_subscriptions'][socket] = {}
+            env['client_subscription_settings'][socket] = {'greeks_enabled': False}
+
+        subscribe_data = {
+            'action': 'subscribe',
+            'underlying': {'secType': 'STK', 'symbol': 'SPY'},
+            'options': [{
+                'id': 'first_leg',
+                'secType': 'OPT',
+                'symbol': 'SPY',
+                'expDate': '20260724',
+                'strike': 750,
+                'right': 'P',
+            }],
+            'futures': [],
+            'stocks': [],
+        }
+        asyncio.run(dispatch_client_message(env, first_socket, subscribe_data))
+        first_ticker = env['client_subscriptions'][first_socket]['first_leg']
+        self.assertIsNone(env['extract_quote_snapshot'](first_ticker, 'OPT'))
+
+        sent_messages.clear()
+        second_data = dict(subscribe_data)
+        second_data['options'] = [dict(subscribe_data['options'][0], id='second_leg')]
+        asyncio.run(dispatch_client_message(env, second_socket, second_data))
+
+        second_ticker = env['client_subscriptions'][second_socket]['second_leg']
+        self.assertIs(second_ticker, first_ticker)
+        metadata_payloads = [
+            payload
+            for socket, payload in sent_messages
+            if socket is second_socket
+            and payload.get('action') == 'option_contract_metadata'
+            and payload.get('contractMetadataOnly') is True
+            and 'second_leg' in (payload.get('options') or {})
+        ]
+        self.assertTrue(metadata_payloads)
+        timing = metadata_payloads[-1]['options']['second_leg']
+        self.assertEqual(timing['expiryAsOf'], '2026-07-24T20:00:00.000Z')
+        for price_field in ('bid', 'ask', 'mark', 'iv', 'delta', 'quoteAsOf'):
+            self.assertNotIn(price_field, timing)
+
+    def test_single_expiry_spy_subscription_pushes_timing_for_every_leg(self):
+        env, sent_messages, *_ = self._build_env()
+        env['extract_quote_snapshot'] = lambda _ticker, _sec_type='': None
+        env['option_contract_timing_by_con_id'] = {}
+        option_identity_by_con_id = {}
+
+        async def qualify_spy_leg(contract, request=None):
+            request_data = request if isinstance(request, dict) else {}
+            sec_type = str(
+                request_data.get('secType')
+                or getattr(contract, 'secType', '')
+                or 'STK'
+            ).upper()
+            if sec_type != 'OPT':
+                return type('QualifiedUnderlying', (), {
+                    'conId': 800,
+                    'secType': 'STK',
+                    'symbol': 'SPY',
+                })()
+            strike = float(request_data['strike'])
+            right = str(request_data['right']).upper()
+            con_id = 810 + len(option_identity_by_con_id)
+            qualified = type('QualifiedOption', (), {
+                'conId': con_id,
+                'secType': 'OPT',
+                'symbol': 'SPY',
+                'localSymbol': f'SPY 260724{right}{int(strike * 1000):08d}',
+                'lastTradeDateOrContractMonth': '20260724',
+                'strike': strike,
+                'right': right,
+                'multiplier': '100',
+                'exchange': 'SMART',
+                'currency': 'USD',
+                'tradingClass': 'SPY',
+            })()
+            option_identity_by_con_id[con_id] = qualified
+            return qualified
+
+        async def resolve_timing(qualified_option):
+            return {
+                'conId': qualified_option.conId,
+                'secType': 'OPT',
+                'symbol': 'SPY',
+                'localSymbol': qualified_option.localSymbol,
+                'exchange': 'SMART',
+                'currency': 'USD',
+                'multiplier': '100',
+                'tradingClass': 'SPY',
+                'right': qualified_option.right,
+                'strike': qualified_option.strike,
+                'optionExpiry': '20260724',
+                'contractIdentitySource': 'ib_contract_details',
+                'expiryAsOf': '2026-07-24T20:00:00.000Z',
+                'expiryTimingSource': 'ib_contract_details',
+                'lastTradeDate': '20260724',
+                'lastTradeTime': '16:00:00',
+                'timeZoneId': 'US/Eastern',
+                'realExpirationDate': '20260724',
+            }
+
+        env['qualify_one'] = qualify_spy_leg
+        env['resolve_option_contract_timing'] = resolve_timing
+        websocket = _FakeWebSocket()
+        env['client_subscriptions'][websocket] = {}
+        env['client_subscription_settings'][websocket] = {'greeks_enabled': False}
+        requested_ids = ('spy_735_put', 'spy_750_put', 'spy_765_put')
+
+        asyncio.run(dispatch_client_message(env, websocket, {
+            'action': 'subscribe',
+            'underlying': {'secType': 'STK', 'symbol': 'SPY'},
+            'options': [
+                {
+                    'id': leg_id,
+                    'secType': 'OPT',
+                    'symbol': 'SPY',
+                    'expDate': '20260724',
+                    'strike': strike,
+                    'right': 'P',
+                }
+                for leg_id, strike in zip(requested_ids, (735, 750, 765))
+            ],
+            'futures': [],
+            'stocks': [],
+        }))
+
+        delivered = {}
+        for socket, payload in sent_messages:
+            if (socket is not websocket
+                    or payload.get('action') != 'option_contract_metadata'
+                    or payload.get('contractMetadataOnly') is not True):
+                continue
+            delivered.update(payload.get('options') or {})
+
+        self.assertEqual(set(delivered), set(requested_ids))
+        self.assertEqual(
+            {quote.get('expiryAsOf') for quote in delivered.values()},
+            {'2026-07-24T20:00:00.000Z'},
+        )
+        self.assertEqual(
+            {quote.get('lastTradeDate') for quote in delivered.values()},
+            {'20260724'},
+        )
+        self.assertEqual(
+            {quote.get('conId') for quote in delivered.values()},
+            {810, 811, 812},
+        )
+        for quote in delivered.values():
+            for price_field in ('bid', 'ask', 'mark', 'iv', 'delta', 'quoteAsOf'):
+                self.assertNotIn(price_field, quote)
 
     def test_handle_subscribe_upgrades_pooled_line_when_greeks_requested(self):
         (
@@ -884,6 +1382,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
         websocket = _FakeWebSocket(messages=[json.dumps({
             'action': 'subscribe_iv_term_structure',
             'underlying': {'secType': 'IND', 'symbol': 'SPX'},
+            'clientProtocolVersion': '20260719.5',
         })])
         handler = build_ws_client_handler(env)
 
@@ -892,8 +1391,42 @@ class IbServerWsHandlerTests(unittest.TestCase):
         self.assertEqual(env['_captures']['iv_subscription_calls'], [(
             websocket,
             '127.0.0.1',
-            {'action': 'subscribe_iv_term_structure', 'underlying': {'secType': 'IND', 'symbol': 'SPX'}},
+            {
+                'action': 'subscribe_iv_term_structure',
+                'underlying': {'secType': 'IND', 'symbol': 'SPX'},
+                'clientProtocolVersion': '20260719.5',
+            },
         )])
+        started_payloads = [
+            payload for _websocket, payload in env['_captures']['sent_messages']
+            if payload.get('action') == 'iv_term_structure_sync_started'
+        ]
+        self.assertEqual(len(started_payloads), 1)
+        self.assertEqual(started_payloads[0]['symbol'], 'SPX')
+        self.assertEqual(started_payloads[0]['protocolVersion'], '20260719.5')
+        self.assertIs(started_payloads[0]['accepted'], True)
+
+    def test_iv_term_structure_protocol_mismatch_is_rejected_before_subscription(self):
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {
+                'action': 'subscribe_iv_term_structure',
+                'underlying': {'secType': 'IND', 'symbol': 'SPX'},
+                'clientProtocolVersion': 'old-browser',
+            },
+        ))
+
+        self.assertEqual(env['_captures']['iv_subscription_calls'], [])
+        self.assertEqual(len(sent_messages), 1)
+        payload = sent_messages[0][1]
+        self.assertEqual(payload['action'], 'iv_term_structure_sync_started')
+        self.assertIs(payload['accepted'], False)
+        self.assertEqual(payload['protocolVersion'], '20260719.5')
+        self.assertIn('protocol mismatch', payload['message'])
 
     def test_iv_term_structure_catalog_timeout_returns_explicit_error(self):
         env, sent_messages, *_ = self._build_env()
@@ -916,12 +1449,14 @@ class IbServerWsHandlerTests(unittest.TestCase):
                 'action': 'subscribe_iv_term_structure',
                 'underlying': {'secType': 'FUT', 'symbol': 'CL'},
                 'optionTemplate': {'symbol': 'CL'},
+                'clientProtocolVersion': '20260719.5',
             },
             client_ip='10.0.0.8',
         ))
 
-        self.assertEqual(len(sent_messages), 1)
-        payload = sent_messages[0][1]
+        self.assertEqual(len(sent_messages), 2)
+        self.assertEqual(sent_messages[0][1]['action'], 'iv_term_structure_sync_started')
+        payload = sent_messages[1][1]
         self.assertEqual(payload['action'], 'iv_term_structure_error')
         self.assertEqual(payload['symbol'], 'CL')
         self.assertIn('timed out', payload['message'])
@@ -1042,6 +1577,200 @@ class IbServerWsHandlerTests(unittest.TestCase):
         self.assertEqual(by_order_id, {2: live_tracking})
         self.assertEqual(by_perm_id, {22: live_tracking})
         self.assertIsNone(live_tracking['websocket'])
+
+
+class _FakeMarkGreeks:
+    def __init__(self, opt_price):
+        self.optPrice = opt_price
+
+
+class _FakeMarkTicker:
+    def __init__(self, bid=float('nan'), ask=float('nan'), model_price=None,
+                 last=float('nan'), close=float('nan')):
+        self.bid = bid
+        self.ask = ask
+        self.last = last
+        self.close = close
+        self.modelGreeks = _FakeMarkGreeks(model_price) if model_price is not None else None
+
+    def marketPrice(self):
+        return float('nan')
+
+
+class OptionMarkSourceTests(unittest.TestCase):
+    """The implied-lambda estimator only accepts real two-sided mids, so the
+    server must label where every option mark came from."""
+
+    def test_two_sided_market_is_labeled_bid_ask_mid(self):
+        mark, source = extract_option_mark_with_source(_FakeMarkTicker(bid=1.0, ask=1.2))
+        self.assertEqual(mark, 1.1)
+        self.assertEqual(source, 'bid_ask_mid')
+
+    def test_zero_bid_is_a_real_two_sided_option_market(self):
+        ticker = _FakeMarkTicker(bid=0, ask=0.2, model_price=0.04)
+        ticker.contract = type('Contract', (), {'secType': 'OPT'})()
+
+        mark, source = extract_option_mark_with_source(ticker)
+        snapshot = extract_quote_snapshot(ticker, 'OPT')
+
+        self.assertEqual(mark, 0.1)
+        self.assertEqual(source, 'bid_ask_mid')
+        self.assertEqual(snapshot['bid'], 0.0)
+        self.assertEqual(snapshot['ask'], 0.2)
+        self.assertEqual(snapshot['mark'], 0.1)
+        self.assertEqual(snapshot['markSource'], 'bid_ask_mid')
+        self.assertIs(snapshot['bidPresent'], True)
+        self.assertIs(snapshot['askPresent'], True)
+        self.assertIs(snapshot['bidAskValid'], True)
+        self.assertEqual(snapshot['bidAskStatus'], 'two_sided')
+        self.assertEqual(ticker_quote_fingerprint(ticker), ('bbo', 0.0, 0.2))
+
+    def test_model_price_fallback_is_labeled_model(self):
+        mark, source = extract_option_mark_with_source(_FakeMarkTicker(model_price=1.05))
+        self.assertEqual(mark, 1.05)
+        self.assertEqual(source, 'model')
+
+    def test_last_close_fallback_is_labeled_last_close(self):
+        mark, source = extract_option_mark_with_source(_FakeMarkTicker(last=0.95))
+        self.assertEqual(mark, 0.95)
+        self.assertEqual(source, 'last_close')
+
+    def test_one_sided_book_falls_through_to_model(self):
+        # A bid without an ask is not a two-sided market.
+        mark, source = extract_option_mark_with_source(
+            _FakeMarkTicker(bid=1.0, model_price=1.02)
+        )
+        self.assertEqual(mark, 1.02)
+        self.assertEqual(source, 'model')
+
+    def test_crossed_book_is_not_labeled_as_a_real_two_sided_mid(self):
+        mark, source = extract_option_mark_with_source(
+            _FakeMarkTicker(bid=1.2, ask=1.0, model_price=1.08)
+        )
+        self.assertEqual(mark, 1.08)
+        self.assertEqual(source, 'model')
+
+    def test_quote_snapshot_carries_mark_source_for_options(self):
+        snapshot = extract_quote_snapshot(_FakeMarkTicker(model_price=2.5), 'FOP')
+        self.assertEqual(snapshot['mark'], 2.5)
+        self.assertEqual(snapshot['markSource'], 'model')
+        self.assertIsNone(snapshot['bid'])
+        self.assertIsNone(snapshot['ask'])
+        self.assertIs(snapshot['bidPresent'], False)
+        self.assertIs(snapshot['askPresent'], False)
+        self.assertIs(snapshot['bidAskValid'], False)
+        self.assertEqual(snapshot['bidAskStatus'], 'missing')
+
+        two_sided = extract_quote_snapshot(_FakeMarkTicker(bid=2.4, ask=2.6), 'OPT')
+        self.assertEqual(two_sided['markSource'], 'bid_ask_mid')
+
+    def test_one_sided_option_keeps_only_the_real_side(self):
+        snapshot = extract_quote_snapshot(
+            _FakeMarkTicker(bid=1.0, model_price=1.02),
+            'OPT',
+        )
+
+        self.assertEqual(snapshot['bid'], 1.0)
+        self.assertIsNone(snapshot['ask'])
+        self.assertEqual(snapshot['mark'], 1.02)
+        self.assertEqual(snapshot['markSource'], 'model')
+        self.assertIs(snapshot['bidPresent'], True)
+        self.assertIs(snapshot['askPresent'], False)
+        self.assertIs(snapshot['bidAskValid'], False)
+        self.assertEqual(snapshot['bidAskStatus'], 'one_sided_bid')
+
+    def test_crossed_option_keeps_sides_but_does_not_claim_valid_bbo(self):
+        snapshot = extract_quote_snapshot(
+            _FakeMarkTicker(bid=1.2, ask=1.0, model_price=1.08),
+            'FOP',
+        )
+
+        self.assertEqual(snapshot['bid'], 1.2)
+        self.assertEqual(snapshot['ask'], 1.0)
+        self.assertEqual(snapshot['mark'], 1.08)
+        self.assertEqual(snapshot['markSource'], 'model')
+        self.assertIs(snapshot['bidPresent'], True)
+        self.assertIs(snapshot['askPresent'], True)
+        self.assertIs(snapshot['bidAskValid'], False)
+        self.assertEqual(snapshot['bidAskStatus'], 'crossed')
+
+    def test_completely_missing_option_quote_returns_none(self):
+        self.assertIsNone(extract_quote_snapshot(_FakeMarkTicker(), 'OPT'))
+
+
+class MarketReferenceContractMetadataTests(unittest.TestCase):
+    def test_exact_futures_expiry_preserves_identity_and_enables_tenor(self):
+        contract = type('Contract', (), {
+            'conId': 12345,
+            'secType': 'FUT',
+            'symbol': 'ES',
+            'localSymbol': 'ESU6',
+            'exchange': 'CME',
+            'currency': 'USD',
+            'multiplier': '50',
+            'lastTradeDateOrContractMonth': '20260918',
+        })()
+
+        metadata = extract_market_reference_contract_metadata(_FakeTicker(contract))
+
+        self.assertEqual(metadata['conId'], 12345)
+        self.assertEqual(metadata['symbol'], 'ES')
+        self.assertEqual(metadata['localSymbol'], 'ESU6')
+        self.assertEqual(metadata['currency'], 'USD')
+        self.assertEqual(metadata['contractMonth'], '202609')
+        self.assertEqual(metadata['lastTradeDate'], '20260918')
+
+    def test_month_only_futures_label_does_not_invent_an_expiry_date(self):
+        contract = type('Contract', (), {
+            'secType': 'FUT',
+            'symbol': 'CL',
+            'lastTradeDateOrContractMonth': '202609',
+        })()
+
+        metadata = extract_market_reference_contract_metadata(_FakeTicker(contract))
+
+        self.assertEqual(metadata['contractMonth'], '202609')
+        self.assertEqual(metadata['contractMonthSource'], 'last_trade_date')
+        self.assertNotIn('lastTradeDate', metadata)
+
+    def test_energy_delivery_month_comes_from_contract_details_not_the_expiry(self):
+        # CL Sep 2026 stops trading 2026-08-20.  Truncating that date reports
+        # 202608 and made the browser reject every correctly qualified CL quote.
+        contract = type('Contract', (), {
+            'conId': 70102,
+            'secType': 'FUT',
+            'symbol': 'CL',
+            'localSymbol': 'CLU6',
+            'exchange': 'NYMEX',
+            'currency': 'USD',
+            'multiplier': '1000',
+            'lastTradeDateOrContractMonth': '20260820',
+        })()
+
+        metadata = extract_market_reference_contract_metadata(
+            _FakeTicker(contract), {70102: '202609'}
+        )
+
+        self.assertEqual(metadata['contractMonth'], '202609')
+        self.assertEqual(metadata['contractMonthSource'], 'ib_contract_details')
+        self.assertEqual(metadata['lastTradeDate'], '20260820')
+
+    def test_unresolved_delivery_month_is_labelled_as_date_derived(self):
+        contract = type('Contract', (), {
+            'conId': 70102,
+            'secType': 'FUT',
+            'symbol': 'CL',
+            'localSymbol': 'CLU6',
+            'exchange': 'NYMEX',
+            'currency': 'USD',
+            'multiplier': '1000',
+            'lastTradeDateOrContractMonth': '20260820',
+        })()
+
+        metadata = extract_market_reference_contract_metadata(_FakeTicker(contract), {})
+
+        self.assertEqual(metadata['contractMonthSource'], 'last_trade_date')
+        self.assertEqual(metadata['contractMonth'], '202608')
 
 
 if __name__ == '__main__':

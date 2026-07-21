@@ -8,16 +8,24 @@ from ib_async import Stock
 from websockets.exceptions import ConnectionClosed
 
 from ib_server_iv_term_structure import build_iv_term_structure_payload_evidence
-from ib_server_market_data import cancel_mkt_data_if_unused, req_mkt_data_pooled
+from ib_server_market_data import (
+    cancel_mkt_data_if_unused,
+    extract_option_contract_identity,
+    option_contract_timing_is_publishable,
+    req_mkt_data_pooled,
+)
 from runtime_contracts import (
     ApiMarketDataResetPayload,
     HistoricalBarsResponsePayload,
     HistoricalReplayErrorPayload,
     IvTermStructureErrorPayload,
+    IvTermStructureSyncStartedPayload,
     ManualUnderlyingSyncPayload,
+    OptionContractMetadataPayload,
 )
 
 IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_DEFAULT = 75.0
+IV_TERM_STRUCTURE_PROTOCOL_VERSION = '20260719.5'
 # Floors a misconfigured 0/negative timeout so catalog resolution always gets a
 # usable window. Tests that stall the handler must outlast this, not undercut it.
 IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_FLOOR = 1.0
@@ -167,6 +175,70 @@ def _api_market_data_generation_is_current(env, captured_generation):
     return captured_generation is None or not callable(getter) or getter() == captured_generation
 
 
+def _option_contract_metadata_is_publishable(qualified_option, timing):
+    if not option_contract_timing_is_publishable(timing):
+        return False
+    timing_sec_type = str((timing or {}).get('secType') or '').strip().upper()
+    qualified_sec_type = str(getattr(qualified_option, 'secType', '') or '').strip().upper()
+    return not timing_sec_type or not qualified_sec_type or timing_sec_type == qualified_sec_type
+
+
+async def _send_option_contract_metadata(env, websocket, leg_id, qualified_option, timing):
+    """Handoff ContractDetails without pretending it is a market quote.
+
+    A pooled ticker may already belong to IVTS or another browser tab and may
+    not emit a new price event after this websocket attaches.  Exact expiry
+    timing therefore travels on its own channel at subscribe time.  The
+    browser must not use this message to refresh BBO/feed timestamps.
+    """
+    if not _option_contract_metadata_is_publishable(qualified_option, timing):
+        return False
+    metadata = extract_option_contract_identity(qualified_option)
+    metadata.update(dict(timing or {}))
+    payload: OptionContractMetadataPayload = {
+        'action': 'option_contract_metadata',
+        'contractMetadataOnly': True,
+        'options': {str(leg_id): metadata},
+    }
+    return await env['send_message_safe'](websocket, json.dumps(payload))
+
+
+def _describe_unresolved_option(opt, reason, detail=''):
+    """Build the client-facing record for an option leg that never subscribed.
+
+    The frontend renders the wording; this only carries the identity the user
+    typed (strike/right/expiry) plus a machine-readable reason so a missing
+    strike is distinguishable from a malformed request.
+    """
+    record = {
+        'id': opt.get('id'),
+        'reason': reason,
+        'symbol': str(opt.get('symbol') or opt.get('underlyingSymbol') or ''),
+        'right': str(opt.get('right') or ''),
+        'strike': opt.get('strike'),
+        'expDate': str(opt.get('expDate') or ''),
+    }
+    detail_text = str(detail or '').strip()
+    if detail_text:
+        record['detail'] = detail_text
+    return record
+
+
+async def _send_option_subscription_status(env, websocket, unresolved):
+    """Tell the client which requested option legs produced no subscription.
+
+    Without this the leg id is simply absent from every market-data payload,
+    which the frontend cannot distinguish from "quote has not arrived yet" --
+    the toggle appears to hang forever.  Sent unconditionally so a previously
+    unresolved leg that now qualifies clears its warning.
+    """
+    payload = {
+        'action': 'option_subscription_status',
+        'unresolved': unresolved,
+    }
+    return await env['send_message_safe'](websocket, json.dumps(payload))
+
+
 async def _handle_subscribe(env, websocket, data, client_ip):
     subscription_generation = _capture_api_market_data_generation(env)
     if not _api_market_data_generation_is_current(env, subscription_generation):
@@ -175,6 +247,7 @@ async def _handle_subscribe(env, websocket, data, client_ip):
     options_data = data.get('options', [])
     futures_data = data.get('futures', [])
     stocks_data = data.get('stocks', [])
+    carry_references_data = data.get('carryReferences', [])
     greeks_enabled = env['normalize_bool'](data.get('greeksEnabled'), False)
     underlying_request = env['build_underlying_request'](raw_underlying, options_data)
     env['get_client_subscription_settings'](websocket)['greeks_enabled'] = greeks_enabled
@@ -182,7 +255,8 @@ async def _handle_subscribe(env, websocket, data, client_ip):
     logging.info(
         f"Received subscription request from {client_ip} "
         f"for underlying {env['describe_contract_request'](underlying_request)}, "
-        f"{len(options_data)} options, {len(futures_data)} futures, and {len(stocks_data)} stocks "
+        f"{len(options_data)} options, {len(futures_data)} futures, {len(stocks_data)} stocks, "
+        f"and {len(carry_references_data)} optional carry references "
         f"(greeks={'on' if greeks_enabled else 'off'})"
     )
 
@@ -207,12 +281,14 @@ async def _handle_subscribe(env, websocket, data, client_ip):
         ticker = _req_mkt_data_pooled(env, qualified_underlying)
         env['client_subscriptions'][websocket]['underlying'] = ticker
 
+    unresolved_options = []
     for opt in options_data:
         leg_id = opt['id']
         try:
             opt_contract = env['build_contract_from_request'](opt)
         except Exception as exc:
             logging.error(f"Invalid option request for leg {leg_id}: {opt!r} ({exc})")
+            unresolved_options.append(_describe_unresolved_option(opt, 'invalid_request', exc))
             continue
 
         qualified_option = await env['qualify_one'](opt_contract, opt)
@@ -220,11 +296,50 @@ async def _handle_subscribe(env, websocket, data, client_ip):
             return
         if qualified_option is None:
             logging.error(f"Failed to qualify option leg {leg_id}: {env['describe_contract_request'](opt)}")
+            unresolved_options.append(_describe_unresolved_option(opt, 'contract_not_found'))
             continue
 
+        timing = {}
+        timing_resolver = env.get('resolve_option_contract_timing')
+        if callable(timing_resolver):
+            try:
+                timing = await timing_resolver(qualified_option)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.warning(
+                    'Option timing resolution failed for leg %s: %s; '
+                    'exact contract timing remains unavailable.',
+                    leg_id,
+                    exc,
+                )
+
+        if not _api_market_data_generation_is_current(env, subscription_generation):
+            return
         generic_ticks = '106' if greeks_enabled else ''
         opt_ticker = _req_mkt_data_pooled(env, qualified_option, generic_ticks)
         env['client_subscriptions'][websocket][leg_id] = opt_ticker
+        await _send_option_contract_metadata(
+            env,
+            websocket,
+            leg_id,
+            qualified_option,
+            timing,
+        )
+        if not _api_market_data_generation_is_current(env, subscription_generation):
+            return
+
+    # Report before the futures/stock legs so a missing strike surfaces even if
+    # a later qualification stalls on a slow reqContractDetails round trip.
+    if options_data:
+        if unresolved_options:
+            logging.warning(
+                '%d of %d requested option legs could not be subscribed for %s; notifying client',
+                len(unresolved_options),
+                len(options_data),
+                client_ip,
+            )
+        await _send_option_subscription_status(env, websocket, unresolved_options)
 
     for future_req in futures_data:
         future_id = future_req.get('id')
@@ -249,6 +364,52 @@ async def _handle_subscribe(env, websocket, data, client_ip):
 
         future_ticker = _req_mkt_data_pooled(env, qualified_future)
         env['client_subscriptions'][websocket][f'future_{future_id}'] = future_ticker
+
+    # These references are diagnostics only (for example SPX against ES).
+    # Failure must never block FOP subscriptions or alter the futures price
+    # passed to Black-76.
+    for reference_req in carry_references_data:
+        reference_id = str(reference_req.get('id') or '').strip()
+        if not reference_id:
+            continue
+        try:
+            reference_contract = env['build_contract_from_request'](reference_req)
+        except Exception as exc:
+            logging.warning(
+                'Invalid optional carry reference %r (%s); continuing without it',
+                reference_req,
+                exc,
+            )
+            continue
+        try:
+            qualified_reference = await env['qualify_one'](reference_contract, reference_req)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logging.warning(
+                'Optional carry reference %s qualification failed (%s); continuing without it',
+                env['describe_contract_request'](reference_req),
+                exc,
+            )
+            continue
+        if not _api_market_data_generation_is_current(env, subscription_generation):
+            return
+        if qualified_reference is None:
+            logging.warning(
+                'Optional carry reference %s could not be qualified; continuing without it',
+                env['describe_contract_request'](reference_req),
+            )
+            continue
+        try:
+            reference_ticker = _req_mkt_data_pooled(env, qualified_reference)
+        except Exception as exc:
+            logging.warning(
+                'Optional carry reference %s subscription failed (%s); continuing without it',
+                env['describe_contract_request'](reference_req),
+                exc,
+            )
+            continue
+        env['client_subscriptions'][websocket][f'carry_reference_{reference_id}'] = reference_ticker
 
     for stock_sym in stocks_data:
         stock_contract = Stock(stock_sym, 'SMART', 'USD')
@@ -397,19 +558,47 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
             )
         except (TypeError, ValueError):
             timeout_seconds = IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_DEFAULT
+        underlying = data.get('underlying') if isinstance(data.get('underlying'), dict) else {}
+        option_template = data.get('optionTemplate') if isinstance(data.get('optionTemplate'), dict) else {}
+        symbol = str(
+            option_template.get('symbol')
+            or underlying.get('symbol')
+            or ''
+        ).strip().upper()
+        client_protocol_version = str(data.get('clientProtocolVersion') or '').strip()
+        protocol_matches = client_protocol_version == IV_TERM_STRUCTURE_PROTOCOL_VERSION
+        started_payload: IvTermStructureSyncStartedPayload = {
+            **build_iv_term_structure_payload_evidence('catalog_request_accepted_no_quote_snapshot'),
+            'action': 'iv_term_structure_sync_started',
+            'symbol': symbol,
+            'protocolVersion': IV_TERM_STRUCTURE_PROTOCOL_VERSION,
+            'clientProtocolVersion': client_protocol_version,
+            'catalogTimeoutSeconds': timeout_seconds,
+            'accepted': protocol_matches,
+            'message': (
+                'IV term structure request accepted; resolving the underlying and option expiry catalog.'
+                if protocol_matches else
+                f'IV term structure protocol mismatch: client {client_protocol_version or "missing"}, '
+                f'server {IV_TERM_STRUCTURE_PROTOCOL_VERSION}. Refresh the page and restart the backend.'
+            ),
+        }
+        logging.info(
+            "%s IV term structure request from %s for %s clientProtocol=%s serverProtocol=%s",
+            'Accepted' if protocol_matches else 'Rejected',
+            client_ip,
+            symbol or '<missing>',
+            client_protocol_version or '<missing>',
+            IV_TERM_STRUCTURE_PROTOCOL_VERSION,
+        )
+        await env['send_message_safe'](websocket, json.dumps(started_payload))
+        if not protocol_matches:
+            return
         try:
             await asyncio.wait_for(
                 env['handle_iv_term_structure_subscription'](websocket, client_ip, data),
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
-            underlying = data.get('underlying') if isinstance(data.get('underlying'), dict) else {}
-            option_template = data.get('optionTemplate') if isinstance(data.get('optionTemplate'), dict) else {}
-            symbol = str(
-                option_template.get('symbol')
-                or underlying.get('symbol')
-                or ''
-            ).strip().upper()
             logging.warning(
                 "IV term structure catalog resolution timed out for %s after %.1fs",
                 symbol or '<missing>',
@@ -467,6 +656,18 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
         await _handle_sync_underlying(env, websocket, data, client_ip)
     elif action == 'request_historical_bars':
         await _handle_request_historical_bars(env, websocket, data, client_ip)
+    elif action == 'request_discount_curve':
+        resolver = env.get('get_discount_curve_snapshot')
+        if not callable(resolver):
+            await env['send_message_safe'](websocket, json.dumps({
+                'action': 'discount_curve_snapshot',
+                'status': 'unavailable',
+                'error': 'This backend does not provide a discount curve.',
+                'curve': None,
+            }))
+        else:
+            payload = await resolver(data)
+            await env['send_message_safe'](websocket, json.dumps(payload))
     elif action == 'request_portfolio_avg_cost_snapshot':
         logging.info(f"Received portfolio avg cost snapshot request from {client_ip}")
         env['send_portfolio_avg_cost_snapshot'](websocket)

@@ -294,7 +294,21 @@
             expDate: '',
             strike: null,
             dailyCarry: null,
+            carryRate: null,
             impliedRate: null,
+            forwardPrice: null,
+            spotPrice: null,
+            discountRate: null,
+            discountFactor: null,
+            discountSource: '',
+            quoteAsOf: '',
+            expiryAsOf: '',
+            quoteSkewMs: null,
+            tenorSeconds: null,
+            tenorDays: null,
+            timeYears: null,
+            unavailableReason: '',
+            quality: null,
             lastComputedAt: null,
             isStale: false,
         };
@@ -315,12 +329,30 @@
 
         next.strike = _toFiniteNumberOrNull(next.strike);
         next.dailyCarry = _toFiniteNumberOrNull(next.dailyCarry);
+        next.carryRate = _toFiniteNumberOrNull(next.carryRate)
+            ?? _toFiniteNumberOrNull(next.impliedRate)
+            ?? (next.dailyCarry !== null ? next.dailyCarry * 365 : null);
         next.impliedRate = _toFiniteNumberOrNull(next.impliedRate);
+        next.forwardPrice = _toFiniteNumberOrNull(next.forwardPrice);
+        next.spotPrice = _toFiniteNumberOrNull(next.spotPrice);
+        next.discountRate = _toFiniteNumberOrNull(next.discountRate);
+        next.discountFactor = _toFiniteNumberOrNull(next.discountFactor);
+        next.discountSource = typeof next.discountSource === 'string' ? next.discountSource : '';
+        next.quoteAsOf = typeof next.quoteAsOf === 'string' ? next.quoteAsOf : '';
+        next.expiryAsOf = typeof next.expiryAsOf === 'string' ? next.expiryAsOf : '';
+        next.quoteSkewMs = _toFiniteNumberOrNull(next.quoteSkewMs);
+        next.tenorSeconds = _toFiniteNumberOrNull(next.tenorSeconds);
+        next.tenorDays = _toFiniteNumberOrNull(next.tenorDays);
+        next.timeYears = _toFiniteNumberOrNull(next.timeYears);
+        next.unavailableReason = typeof next.unavailableReason === 'string'
+            ? next.unavailableReason
+            : '';
+        next.quality = next.quality && typeof next.quality === 'object' ? { ...next.quality } : null;
         next.lastComputedAt = typeof next.lastComputedAt === 'string' && next.lastComputedAt
             ? next.lastComputedAt
             : null;
 
-        const hasComputedValue = next.dailyCarry !== null || next.impliedRate !== null;
+        const hasComputedValue = next.dailyCarry !== null || next.carryRate !== null || next.impliedRate !== null;
         next.isStale = markStale
             ? hasComputedValue
             : next.isStale === true;
@@ -340,7 +372,25 @@
             expDate: typeof normalized.expDate === 'string' ? normalized.expDate : '',
             strike: _toFiniteNumberOrNull(normalized.strike),
             dailyCarry: _toFiniteNumberOrNull(normalized.dailyCarry),
+            carryRate: _toFiniteNumberOrNull(normalized.carryRate),
             impliedRate: _toFiniteNumberOrNull(normalized.impliedRate),
+            forwardPrice: _toFiniteNumberOrNull(normalized.forwardPrice),
+            spotPrice: _toFiniteNumberOrNull(normalized.spotPrice),
+            discountRate: _toFiniteNumberOrNull(normalized.discountRate),
+            discountFactor: _toFiniteNumberOrNull(normalized.discountFactor),
+            discountSource: typeof normalized.discountSource === 'string' ? normalized.discountSource : '',
+            quoteAsOf: typeof normalized.quoteAsOf === 'string' ? normalized.quoteAsOf : '',
+            expiryAsOf: typeof normalized.expiryAsOf === 'string' ? normalized.expiryAsOf : '',
+            quoteSkewMs: _toFiniteNumberOrNull(normalized.quoteSkewMs),
+            tenorSeconds: _toFiniteNumberOrNull(normalized.tenorSeconds),
+            tenorDays: _toFiniteNumberOrNull(normalized.tenorDays),
+            timeYears: _toFiniteNumberOrNull(normalized.timeYears),
+            unavailableReason: typeof normalized.unavailableReason === 'string'
+                ? normalized.unavailableReason
+                : '',
+            quality: normalized.quality && typeof normalized.quality === 'object'
+                ? { ...normalized.quality }
+                : null,
             lastComputedAt: typeof normalized.lastComputedAt === 'string' && normalized.lastComputedAt
                 ? normalized.lastComputedAt
                 : null,
@@ -493,6 +543,198 @@
         return normalizeSimWeekendWeight(simWeekendWeight);
     }
 
+    function normalizeSimUseImpliedLambda(value) {
+        // Sessions written before structured implied-λ existed have no field.
+        // Migrate those sessions into the safe mode: required non-trading
+        // dates must be covered by IVTS data. A literal false may still select
+        // the visible scalar for research/display, but the shared live
+        // projection preflight will not let it bypass required closures.
+        return value !== false;
+    }
+
+    function autoBindSingleFuturesPoolEntry(state) {
+        const pool = state && Array.isArray(state.futuresPool) ? state.futuresPool : [];
+        if (pool.length !== 1 || !pool[0] || !String(pool[0].id || '').trim()) {
+            return false;
+        }
+        const registry = globalScope.OptionComboProductRegistry;
+        if (registry && typeof registry.usesFuturesPool === 'function'
+            && !registry.usesFuturesPool(state && state.underlyingSymbol)) {
+            return false;
+        }
+        const onlyFutureId = String(pool[0].id).trim();
+        const validIds = new Set(pool.map(entry => String(entry && entry.id || '').trim()).filter(Boolean));
+        let changed = false;
+        (state && Array.isArray(state.groups) ? state.groups : []).forEach((group) => {
+            (group && Array.isArray(group.legs) ? group.legs : []).forEach((leg) => {
+                const isOption = registry && typeof registry.isOptionLeg === 'function'
+                    ? registry.isOptionLeg(leg)
+                    : ['call', 'put'].includes(String(leg && leg.type || '').toLowerCase());
+                if (!isOption) return;
+                const selectedId = String(leg && leg.underlyingFutureId || '').trim();
+                if (selectedId && validIds.has(selectedId)) return;
+                leg.underlyingFutureId = onlyFutureId;
+                changed = true;
+            });
+        });
+        return changed;
+    }
+
+    function ensureInitialFuturesPoolEntry(state, generateId, referenceDate) {
+        if (!state || typeof state !== 'object') {
+            return null;
+        }
+        const registry = globalScope.OptionComboProductRegistry;
+        if (!registry || typeof registry.usesFuturesPool !== 'function'
+            || !registry.usesFuturesPool(state.underlyingSymbol)) {
+            return null;
+        }
+
+        const normalizeMonth = value => String(value || '').replace(/\D/g, '').slice(0, 6);
+        if (!Array.isArray(state.futuresPool)) {
+            state.futuresPool = [];
+        }
+        let contractMonth = normalizeMonth(state.underlyingContractMonth);
+        if (!/^\d{6}$/.test(contractMonth)) {
+            const configuredMonths = Array.from(new Set(
+                state.futuresPool
+                    .map(entry => normalizeMonth(entry && entry.contractMonth))
+                    .filter(month => /^\d{6}$/.test(month))
+            ));
+            if (configuredMonths.length === 1) {
+                contractMonth = configuredMonths[0];
+            }
+        }
+        if (!/^\d{6}$/.test(contractMonth)
+            && typeof registry.resolveDefaultUnderlyingContractMonth === 'function') {
+            contractMonth = normalizeMonth(registry.resolveDefaultUnderlyingContractMonth(
+                state.underlyingSymbol,
+                referenceDate || state.liveQuoteDate || state.historicalQuoteDate
+                    || state.simulatedDate || state.baseDate
+            ));
+        }
+        if (!/^\d{6}$/.test(contractMonth)) {
+            return null;
+        }
+        state.underlyingContractMonth = contractMonth;
+
+        const matchingEntry = state.futuresPool.find(entry => (
+            normalizeMonth(entry && entry.contractMonth) === contractMonth
+        ));
+        if (matchingEntry) {
+            return { entry: matchingEntry, created: false };
+        }
+
+        // Supply the implicit front month only while the pool is unconfigured.
+        // Explicit pool months belong to the user's multi-expiry setup.
+        const configuredEntries = state.futuresPool.filter(entry => (
+            /^\d{6}$/.test(normalizeMonth(entry && entry.contractMonth))
+        ));
+        if (configuredEntries.length > 0 || state.futuresPool.length > 1) {
+            return null;
+        }
+
+        let entry = state.futuresPool[0] || null;
+        if (!entry) {
+            let id = '';
+            if (typeof generateId === 'function') {
+                try {
+                    id = String(generateId() || '').trim();
+                } catch (_) {
+                    id = '';
+                }
+            }
+            if (!id) {
+                const symbol = String(state.underlyingSymbol || 'FUT')
+                    .trim().toUpperCase().replace(/[^A-Z0-9]/g, '') || 'FUT';
+                id = `auto_future_${symbol}_${contractMonth}`;
+            }
+            entry = {
+                id,
+                contractMonth,
+                bid: null,
+                ask: null,
+                mark: null,
+                lastQuotedAt: null,
+            };
+            state.futuresPool.push(entry);
+        } else {
+            entry.contractMonth = contractMonth;
+            if (!String(entry.id || '').trim()) {
+                entry.id = `auto_future_${String(state.underlyingSymbol || 'FUT')
+                    .trim().toUpperCase().replace(/[^A-Z0-9]/g, '') || 'FUT'}_${contractMonth}`;
+            }
+        }
+
+        autoBindSingleFuturesPoolEntry(state);
+        return { entry, created: true };
+    }
+
+    function normalizeProjectionConvergenceMode(value) {
+        // Missing/unknown live-session fields migrate to the accuracy-first
+        // policy.  The prior input-IV projection path survives only when a
+        // session explicitly records this compatibility value.
+        return String(value || '').trim().toLowerCase() === 'legacy-input-iv'
+            ? 'legacy-input-iv'
+            : 'strict-bbo';
+    }
+
+    // Weekend weight actually handed to the pricing clock. Once the user asks
+    // for IVTS implied lambda, every non-trading date must have an explicit V2
+    // observation. Missing/invalid entries remain strict with an empty byDate
+    // map so pricing fails closed instead of silently substituting the scalar.
+    // The scalar remains available when implied-lambda mode is disabled, but
+    // live projections that cross closures are blocked by the shared coverage
+    // preflight; only `not_required` intervals may continue without V2 data.
+    function resolveSimWeekendWeightSpec(simTimeBasis, simWeekendWeight, useImpliedLambda, impliedEntry) {
+        const scalar = resolveSimWeekendWeight(simTimeBasis, simWeekendWeight);
+        if (normalizeSimTimeBasis(simTimeBasis) !== 'weighted'
+            || normalizeSimUseImpliedLambda(useImpliedLambda) !== true) {
+            return scalar;
+        }
+        const strictSpec = {
+            default: scalar,
+            byDate: null,
+            strictByDate: true,
+            coverageStart: null,
+            coverageEnd: null,
+            fallbackSource: null,
+        };
+        const quality = impliedEntry && impliedEntry.quality;
+        const acceptedVarianceSource = impliedEntry && (
+            impliedEntry.varianceSource === 'straddle'
+            || (impliedEntry.varianceSource === 'vendor_iv'
+                && quality && quality.estimationMode === 'best_effort'
+                && quality.sourceQuoteEvidence === 'vendor_atm_iv_fallback')
+        );
+        const isQualifiedV2 = impliedEntry && impliedEntry.schemaVersion === 2
+            && acceptedVarianceSource
+            && quality && quality.status === 'ok'
+            && quality.coherent === true
+            && quality.quoteComplete === true;
+        if (!isQualifiedV2) {
+            return strictSpec;
+        }
+        const byDate = impliedEntry && impliedEntry.byDate && typeof impliedEntry.byDate === 'object'
+            ? impliedEntry.byDate
+            : null;
+        if (!byDate || !Object.keys(byDate).length) {
+            return strictSpec;
+        }
+        return {
+            default: scalar,
+            byDate,
+            strictByDate: true,
+            coverageStart: typeof impliedEntry.coverageStart === 'string'
+                ? impliedEntry.coverageStart
+                : null,
+            coverageEnd: typeof impliedEntry.coverageEnd === 'string'
+                ? impliedEntry.coverageEnd
+                : null,
+            fallbackSource: null,
+        };
+    }
+
     function groupHasDeterministicCost(group) {
         return (group.legs || []).some(leg => Math.abs(parseFloat(leg.cost) || 0) > 0);
     }
@@ -522,6 +764,9 @@
 
     function buildExportState(state) {
         const snapshot = JSON.parse(JSON.stringify(state));
+        snapshot.projectionConvergenceMode = normalizeProjectionConvergenceMode(
+            snapshot.projectionConvergenceMode
+        );
         snapshot.liveComboOrderAccounts = [];
         snapshot.liveComboOrderAccountsConnected = false;
         snapshot.allowLiveHedgeOrders = false;
@@ -530,12 +775,42 @@
             ...group,
             tradeTrigger: _buildArchivableTradeTrigger(group.tradeTrigger),
             closeExecution: _buildArchivableCloseExecution(group.closeExecution),
+            legs: (group.legs || []).map((leg) => {
+                const archived = { ...leg };
+                delete archived.expiryAsOf;
+                delete archived.expiryTimingSource;
+                delete archived.lastTradeDate;
+                delete archived.lastTradeTime;
+                delete archived.expiryTimeZoneId;
+                delete archived.realExpirationDate;
+                delete archived.qualifiedOptionConId;
+                delete archived.qualifiedOptionLocalSymbol;
+                delete archived.qualifiedOptionTradingClass;
+                delete archived.qualifiedOptionUnderConId;
+                delete archived.qualifiedOptionUnderlyingContractMonth;
+                delete archived.liveQuoteIdentityStatus;
+                delete archived.liveQuoteIdentityReason;
+                return archived;
+            }),
         }));
         snapshot.forwardRateSamples = (snapshot.forwardRateSamples || [])
             .map(sample => _buildArchivableForwardRateSample(sample));
         snapshot.futuresPool = (snapshot.futuresPool || [])
             .map(entry => _buildArchivableFuturesPoolEntry(entry));
         delete snapshot.comboTemplateQuoteRequests;
+        // Belongs to one live subscription attempt, never to the saved book.
+        delete snapshot.liveSubscriptionUnresolvedById;
+        delete snapshot.liveQuoteDate;
+        delete snapshot.liveQuoteAsOf;
+        delete snapshot.discountCurveLastError;
+        delete snapshot.simImpliedLambdaEntry;
+        delete snapshot.simImpliedLambdaFileEntry;
+        delete snapshot.simImpliedLambdaCoverage;
+        delete snapshot.simulationTiming;
+        delete snapshot.simulationTargetAsOf;
+        delete snapshot.liveProjectionFeedConnected;
+        delete snapshot.liveProjectionFeedStale;
+        delete snapshot.liveProjectionLastReceivedAt;
         return snapshot;
     }
 
@@ -556,10 +831,30 @@
                     : ''),
             historicalAvailableStartDate: '',
             historicalAvailableEndDate: '',
+            liveQuoteDate: '',
+            liveQuoteAsOf: '',
             interestRate: importedState.interestRate !== undefined ? importedState.interestRate : 0.03,
+            useMarketDiscountCurve: importedState.useMarketDiscountCurve !== false,
+            discountCurve: importedState.discountCurve && typeof importedState.discountCurve === 'object'
+                ? JSON.parse(JSON.stringify(importedState.discountCurve))
+                : null,
+            discountCurveLastError: '',
             ivOffset: importedState.ivOffset || 0,
             simTimeBasis: normalizeSimTimeBasis(importedState.simTimeBasis),
             simWeekendWeight: normalizeSimWeekendWeight(importedState.simWeekendWeight),
+            simUseImpliedLambda: normalizeSimUseImpliedLambda(importedState.simUseImpliedLambda),
+            simImpliedLambdaEntry: null,
+            simImpliedLambdaFileEntry: null,
+            projectionConvergenceMode: normalizeProjectionConvergenceMode(
+                importedState.projectionConvergenceMode
+            ),
+            liveProjectionFeedConnected: false,
+            liveProjectionFeedStale: true,
+            liveProjectionLastReceivedAt: '',
+            // Contract cutoffs are transient IB evidence, not a portable
+            // session preference. Never let an older/imported false flag
+            // disable the live hour-level safety gate.
+            requireExactContractTiming: true,
             greeksEnabled: normalizeGreeksEnabled(importedState.greeksEnabled),
             deltaHedge: _normalizeDeltaHedgeConfig(importedState.deltaHedge),
             primaryControlPanelCollapsed: importedState.primaryControlPanelCollapsed === true,
@@ -590,6 +885,19 @@
         function migrateLegs(legsArr) {
             return legsArr.map(leg => {
                 const newLeg = { ...leg, id: generateId() };
+                delete newLeg.expiryAsOf;
+                delete newLeg.expiryTimingSource;
+                delete newLeg.lastTradeDate;
+                delete newLeg.lastTradeTime;
+                delete newLeg.expiryTimeZoneId;
+                delete newLeg.realExpirationDate;
+                delete newLeg.qualifiedOptionConId;
+                delete newLeg.qualifiedOptionLocalSymbol;
+                delete newLeg.qualifiedOptionTradingClass;
+                delete newLeg.qualifiedOptionUnderConId;
+                delete newLeg.qualifiedOptionUnderlyingContractMonth;
+                delete newLeg.liveQuoteIdentityStatus;
+                delete newLeg.liveQuoteIdentityReason;
                 if (newLeg.dte !== undefined && newLeg.expDate === undefined) {
                     newLeg.expDate = addDays(nextState.baseDate, newLeg.dte);
                     delete newLeg.dte;
@@ -600,7 +908,7 @@
                 if (typeof newLeg.currentPriceSource !== 'string') {
                     newLeg.currentPriceSource = '';
                 }
-                if (!Number.isFinite(parseFloat(newLeg.portfolioMarketPrice)) || parseFloat(newLeg.portfolioMarketPrice) <= 0) {
+                if (!Number.isFinite(parseFloat(newLeg.portfolioMarketPrice)) || parseFloat(newLeg.portfolioMarketPrice) < 0) {
                     newLeg.portfolioMarketPrice = null;
                 } else {
                     newLeg.portfolioMarketPrice = parseFloat(newLeg.portfolioMarketPrice);
@@ -708,6 +1016,8 @@
 
         nextState.groups.push(...importedGroups);
 
+        autoBindSingleFuturesPoolEntry(nextState);
+
         if (importedState.hedges && Array.isArray(importedState.hedges)) {
             nextState.hedges.push(...importedState.hedges.map(h => ({
                 ...h,
@@ -729,6 +1039,11 @@
         normalizeSimTimeBasis,
         normalizeSimWeekendWeight,
         resolveSimWeekendWeight,
+        normalizeSimUseImpliedLambda,
+        normalizeProjectionConvergenceMode,
+        resolveSimWeekendWeightSpec,
+        ensureInitialFuturesPoolEntry,
+        autoBindSingleFuturesPoolEntry,
         groupHasDeterministicCost,
         resolveGroupViewModeChange,
         getRenderableGroupViewMode,

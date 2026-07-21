@@ -13,6 +13,7 @@ from historical_replay_service import (
     describe_contract_request,
     normalize_replay_date,
 )
+from yield_curve.backend_adapter import YieldCurveBackendAdapter
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,6 +27,21 @@ WS_PORT = config.getint('server', 'ws_port', fallback=8765)
 CHAIN_SERVICE_URL = resolve_chain_service_url(config)
 RATES_SQLITE_DB = os.path.abspath(
     config.get('historical', 'rates_sqlite_db_path', fallback=os.path.join('sqlite_spy', 'rates.db'))
+)
+YIELD_CURVE_DATA_DIR = os.path.abspath(
+    config.get('yield_curve', 'data_dir', fallback=os.path.join('yield_curve', 'data'))
+)
+YIELD_CURVE_AUTO_UPDATE_IF_MISSING = config.getboolean(
+    'yield_curve', 'auto_update_if_missing', fallback=True
+)
+YIELD_CURVE_AUTO_UPDATE_IF_STALE = config.getboolean(
+    'yield_curve', 'auto_update_if_stale', fallback=True
+)
+YIELD_CURVE_SOURCE_TIMEOUT_SECONDS = max(
+    1.0, config.getfloat('yield_curve', 'source_timeout_seconds', fallback=20.0)
+)
+YIELD_CURVE_PROCESS_TIMEOUT_SECONDS = max(
+    5.0, config.getfloat('yield_curve', 'process_timeout_seconds', fallback=60.0)
 )
 
 if CONFIGURED_WS_HOST not in ('127.0.0.1', 'localhost'):
@@ -43,7 +59,20 @@ historical_replay_service = HistoricalReplayService(
     CHAIN_SERVICE_URL,
     RATES_SQLITE_DB,
     logger=logging.getLogger('historical_replay.chain_service'),
+    yield_curve_data_dir=YIELD_CURVE_DATA_DIR,
 )
+yield_curve_backend = YieldCurveBackendAdapter(
+    YIELD_CURVE_DATA_DIR,
+    auto_update_if_missing=YIELD_CURVE_AUTO_UPDATE_IF_MISSING,
+    auto_update_if_stale=YIELD_CURVE_AUTO_UPDATE_IF_STALE,
+    source_timeout_seconds=YIELD_CURVE_SOURCE_TIMEOUT_SECONDS,
+    process_timeout_seconds=YIELD_CURVE_PROCESS_TIMEOUT_SECONDS,
+    logger=logging.getLogger('yield_curve.backend'),
+)
+
+
+async def build_discount_curve_payload(data):
+    return await yield_curve_backend.build_payload(data)
 
 try:
     health = historical_replay_service.store.check_service()
@@ -118,6 +147,12 @@ async def handle_ws_client(websocket):
                     continue
 
                 await send_message_safe(websocket, json.dumps(payload))
+                continue
+
+            if action == 'request_discount_curve':
+                await send_message_safe(websocket, json.dumps(
+                    await build_discount_curve_payload(data)
+                ))
                 continue
 
             if action == 'request_portfolio_avg_cost_snapshot':

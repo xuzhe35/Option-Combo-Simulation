@@ -17,6 +17,9 @@
         computeSimulatedPrice,
         getMultiplier,
         getUnderlyingLegMultiplier,
+        assessProjectionConvergence,
+        formatProjectionConvergenceFailure,
+        formatProjectionTimingFailure,
     } = pricingCore;
     const { calculateAmortizedCost, calculateCombinedAmortizedCost } = amortized;
 
@@ -101,10 +104,28 @@
     function resolveSnapshotMidpoint(snapshot) {
         const bid = parseFloat(snapshot && snapshot.bid);
         const ask = parseFloat(snapshot && snapshot.ask);
-        if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) {
+        if (!Number.isFinite(bid) || bid < 0
+            || !Number.isFinite(ask) || ask < 0
+            || ask < bid) {
             return null;
         }
-        return (bid + ask) / 2;
+        const markSource = String(snapshot && snapshot.markSource || '').trim();
+        const hasValidityFlag = snapshot && typeof snapshot.bidAskValid === 'boolean';
+        const hasPresenceFlags = snapshot
+            && (Object.prototype.hasOwnProperty.call(snapshot, 'bidPresent')
+                || Object.prototype.hasOwnProperty.call(snapshot, 'askPresent'));
+        let realTwoSided = false;
+        if (hasValidityFlag) {
+            realTwoSided = snapshot.bidAskValid === true;
+        } else if (hasPresenceFlags || markSource) {
+            realTwoSided = markSource === 'bid_ask_mid';
+        } else if (snapshot) {
+            realTwoSided = bid > 0 && ask > 0;
+        }
+        realTwoSided = realTwoSided
+            && snapshot.bidPresent !== false
+            && snapshot.askPresent !== false;
+        return realTwoSided ? (bid + ask) / 2 : null;
     }
 
     function isClosedLeg(leg) {
@@ -122,6 +143,38 @@
     function normalizeFiniteNumber(value, fallback = 0) {
         const parsed = parseFloat(value);
         return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function buildLegDteDisplay(processedLeg) {
+        if (!processedLeg || processedLeg.isUnderlyingLeg) {
+            return { text: '', title: '' };
+        }
+        if (processedLeg.timingAvailable === false
+            || !Number.isFinite(processedLeg.calDTE)
+            || !Number.isFinite(processedLeg.tradDTE)) {
+            return {
+                text: `Sim DTE: N/A (${processedLeg.timingStatus || 'timing unavailable'})`,
+                title: 'The exact quote, target, expiry, calendar or implied-λ clock is unavailable.',
+            };
+        }
+
+        const calendarDays = Math.max(0, processedLeg.calDTE);
+        const tradingDays = Math.max(0, processedLeg.tradDTE);
+        const calendarText = calendarDays <= 7
+            ? `${(calendarDays * 24).toFixed(calendarDays * 24 < 10 ? 2 : 1)} h`
+            : `${calendarDays.toFixed(2)} cd`;
+        const tradingText = tradingDays.toFixed(tradingDays < 10 ? 3 : 2)
+            .replace(/\.0+$/, '')
+            .replace(/(\.\d*?[1-9])0+$/, '$1');
+        const source = processedLeg.intradayTimeSource === 'contract'
+            ? 'IB ContractDetails'
+            : 'product-profile fallback';
+        return {
+            text: `Sim DTE: ${tradingText} td / ${calendarText}`,
+            title: processedLeg.expiryCutoffAsOf
+                ? `Expiry cutoff ${processedLeg.expiryCutoffAsOf} (${source}). All legs use the same portfolio target instant.`
+                : `Expiry cutoff source: ${source}.`,
+        };
     }
 
     function createEmptyOptionLegRedundancyBucket() {
@@ -292,10 +345,13 @@
         return buildGroupDeltaSummary(group, globalState, deltaLegResults);
     }
 
-    function resolveLegSelectedLivePrice(group, leg) {
+    function resolveLegSelectedLivePrice(group, leg, globalState = null) {
+        if (pricingContext && typeof pricingContext.resolveObservableLegPrice === 'function') {
+            return pricingContext.resolveObservableLegPrice(globalState, group, leg);
+        }
         const currentPrice = parseFloat(leg && leg.currentPrice);
         const currentPriceSource = String(leg && leg.currentPriceSource || '').trim();
-        if (currentPriceSource === 'manual' && Number.isFinite(currentPrice) && currentPrice > 0) {
+        if (currentPriceSource === 'manual' && Number.isFinite(currentPrice) && currentPrice >= 0) {
             return {
                 available: true,
                 price: currentPrice,
@@ -307,7 +363,7 @@
         const midpointPrice = resolveSnapshotMidpoint(resolveLiveQuoteSnapshotForLeg(leg));
         const portfolioMarketPrice = parseFloat(leg && leg.portfolioMarketPrice);
 
-        if (livePriceMode === 'mark' && Number.isFinite(portfolioMarketPrice) && portfolioMarketPrice > 0) {
+        if (livePriceMode === 'mark' && Number.isFinite(portfolioMarketPrice) && portfolioMarketPrice >= 0) {
             return {
                 available: true,
                 price: portfolioMarketPrice,
@@ -315,7 +371,7 @@
             };
         }
 
-        if (Number.isFinite(midpointPrice) && midpointPrice > 0) {
+        if (Number.isFinite(midpointPrice) && midpointPrice >= 0) {
             return {
                 available: true,
                 price: midpointPrice,
@@ -323,7 +379,7 @@
             };
         }
 
-        if (Number.isFinite(portfolioMarketPrice) && portfolioMarketPrice > 0) {
+        if (Number.isFinite(portfolioMarketPrice) && portfolioMarketPrice >= 0) {
             return {
                 available: true,
                 price: portfolioMarketPrice,
@@ -331,7 +387,10 @@
             };
         }
 
-        if (leg && currentPriceSource !== 'missing' && Number.isFinite(currentPrice) && currentPrice > 0) {
+        if (leg && currentPriceSource !== 'missing'
+            && Number.isFinite(currentPrice)
+            && currentPrice >= 0
+            && (currentPrice > 0 || !!currentPriceSource)) {
             return {
                 available: true,
                 price: currentPrice,
@@ -351,10 +410,22 @@
         const zeroText = formatPriceInputValue(displaySymbol, 0);
 
         if ((!selectedLivePrice || !selectedLivePrice.available) && leg && leg.currentPriceSource === 'missing') {
+            const identityStatus = leg.liveQuoteIdentityStatus;
+            const identityReason = String(leg.liveQuoteIdentityReason || '').trim();
+            if (identityStatus === 'not_found') {
+                return {
+                    value: '',
+                    placeholder: 'No contract',
+                    title: identityReason
+                        || 'IBKR has no contract for this strike and expiry, so no quote can be subscribed.',
+                };
+            }
             return {
                 value: '',
                 placeholder: 'N/A',
-                title: 'Historical quote unavailable for the selected replay date',
+                title: identityStatus === 'rejected'
+                    ? `Live quote rejected because qualified contract identity did not match${identityReason ? `: ${identityReason}` : ''}. Resubscribe after checking the option and underlying futures month.`
+                    : 'Quote unavailable for the selected market snapshot',
             };
         }
 
@@ -481,6 +552,40 @@
         const legInterestRate = pricingContext && typeof pricingContext.resolveLegInterestRate === 'function'
             ? pricingContext.resolveLegInterestRate(globalState, leg, globalState.interestRate)
             : globalState.interestRate;
+        const livePnlQuote = resolveLegSelectedLivePrice(group, leg, globalState);
+        const quotePricingInputs = pricingContext
+            && typeof pricingContext.resolveLegQuotePricingInputs === 'function'
+            ? pricingContext.resolveLegQuotePricingInputs(globalState, leg, {
+                underlyingPrice: anchorUnderlyingPrice,
+                interestRate: globalState.interestRate,
+            })
+            : null;
+        const simulationTiming = pricingContext
+            && typeof pricingContext.resolveSimulationTiming === 'function'
+            ? pricingContext.resolveSimulationTiming(globalState)
+            : (globalState && globalState.simulationTiming || null);
+        const timingContext = {
+            quoteAsOf: globalState.liveQuoteAsOf,
+            allowLegacyQuoteCutoff: !globalState.marketDataMode,
+            targetAsOf: simulationTiming && simulationTiming.available
+                ? simulationTiming.targetAsOf
+                : null,
+            targetSource: simulationTiming && simulationTiming.source || null,
+            timingStatus: simulationTiming && simulationTiming.status || null,
+            observablePrice: livePnlQuote && livePnlQuote.available
+                ? livePnlQuote.price
+                : null,
+            observablePriceSource: livePnlQuote && livePnlQuote.source || null,
+            observablePriceAsOf: livePnlQuote && livePnlQuote.quoteAsOf || null,
+            observablePriceFresh: livePnlQuote && livePnlQuote.fresh === true,
+            quotePricingInputsAvailable: quotePricingInputs && quotePricingInputs.available === true,
+            quotePricingInputStatus: quotePricingInputs && quotePricingInputs.status || null,
+            quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
+            quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
+            quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+        };
+        const simulationTimingAvailable = !simulationTiming
+            || simulationTiming.available !== false;
         const processedLeg = processLegData(
             leg,
             simulationDate,
@@ -490,27 +595,44 @@
             legInterestRate,
             activeViewMode,
             underlyingProfile,
-            globalState.marketDataMode
+            globalState.marketDataMode,
+            timingContext
         );
 
-        const simPricePerShare = computeSimulatedPrice(
-            processedLeg,
-            leg,
-            legUnderlyingPrice,
-            legInterestRate,
-            activeViewMode,
-            simulationDate,
-            quoteDate,
-            globalState.ivOffset
-        );
+        const pricingInputAvailable = Number.isFinite(legUnderlyingPrice)
+            && (processedLeg.isUnderlyingLeg || legUnderlyingPrice > 0);
+        const convergence = typeof assessProjectionConvergence === 'function'
+            ? assessProjectionConvergence(globalState, [leg], [processedLeg])
+            : { ready: true };
+        const convergenceAvailable = convergence.ready !== false;
+        const simPricePerShare = simulationTimingAvailable && pricingInputAvailable
+            && convergenceAvailable
+            ? computeSimulatedPrice(
+                processedLeg,
+                leg,
+                legUnderlyingPrice,
+                legInterestRate,
+                activeViewMode,
+                simulationDate,
+                quoteDate,
+                globalState.ivOffset,
+                timingContext
+            )
+            : null;
         const simulationAvailable = Number.isFinite(simPricePerShare);
+        const simulationUnavailableReason = processedLeg.timingStatus === 'implied_lambda_incomplete'
+            ? 'implied_lambda_incomplete'
+            : (!simulationTimingAvailable
+            ? (simulationTiming && simulationTiming.status || 'simulation_timing_unavailable')
+            : (!convergenceAvailable
+                ? convergence.status
+                : (!pricingInputAvailable ? 'pricing_underlying_unavailable' : null)));
         const simValue = simulationAvailable ? processedLeg.posMultiplier * simPricePerShare : null;
         const partialCloseRealizedPnl = Number.isFinite(parseFloat(leg.partialCloseRealizedPnl))
             ? parseFloat(leg.partialCloseRealizedPnl)
             : 0;
         const pnl = simulationAvailable ? (simValue - processedLeg.costBasis + partialCloseRealizedPnl) : null;
         const isClosed = isClosedLeg(leg);
-        const livePnlQuote = resolveLegSelectedLivePrice(group, leg);
         const liveDelta = resolveLegLiveDelta(leg, underlyingProfile, greeksEnabled);
         const hasLivePnl = activeViewMode === 'active'
             && ((livePnlQuote.available && (leg.cost !== 0 || livePnlQuote.price !== 0 || isClosed))
@@ -519,11 +641,41 @@
             ? (livePnlQuote.price - leg.cost) * processedLeg.posMultiplier + partialCloseRealizedPnl
             : partialCloseRealizedPnl;
         const effectiveLivePnL = isClosed ? pnl : liveLegPnL;
-        const ivText = processedLeg.isUnderlyingLeg
-            ? ''
-            : (processedLeg.simIVAvailable
-                ? `Sim IV: ${(processedLeg.simIV * 100).toFixed(2)}%${processedLeg.simIVSource === 'estimated' ? ' (Estimated)' : ''}`
-                : 'Sim IV: N/A (TWS unavailable)');
+        const lambdaTimingFailure = processedLeg.timingStatus === 'implied_lambda_incomplete';
+        let ivText = '';
+        if (!processedLeg.isUnderlyingLeg) {
+            if (lambdaTimingFailure) {
+                ivText = 'Sim IV: N/A (implied λ coverage missing)';
+            } else if (!convergenceAvailable) {
+                ivText = 'Sim IV: N/A (strict live BBO required)';
+            } else if (processedLeg.simIVAvailable) {
+                const sourceSuffix = processedLeg.simIVSource === 'estimated'
+                    ? ' (Estimated)'
+                    : (processedLeg.simIVSource === 'local-bbo-implied' ? ' (Local BBO)' : '');
+                ivText = `Sim IV: ${(processedLeg.simIV * 100).toFixed(2)}%${sourceSuffix}`;
+            } else if (processedLeg.localIvAnchorAttempted) {
+                ivText = `Sim IV: N/A (Local BBO: ${processedLeg.localIvAnchorStatus})`;
+            } else {
+                ivText = 'Sim IV: N/A (TWS unavailable)';
+            }
+        }
+        const dteDisplay = buildLegDteDisplay(processedLeg);
+        let ivTitle;
+        if (lambdaTimingFailure && typeof formatProjectionTimingFailure === 'function') {
+            ivTitle = formatProjectionTimingFailure(
+                processedLeg.timingStatus,
+                'Valuation',
+                processedLeg
+            );
+        } else if (!convergenceAvailable && typeof formatProjectionConvergenceFailure === 'function') {
+            ivTitle = formatProjectionConvergenceFailure(convergence, 'Valuation');
+        } else if (processedLeg.localIvAnchorAvailable) {
+            ivTitle = `Fresh two-sided BBO re-inverted with the local ${processedLeg.pricingModel === 'black76' ? 'Black-76' : 'BSM'} model at ${processedLeg.quoteAsOf || 'the quote instant'}; future repricing holds this local IV constant.`;
+        } else if (processedLeg.localIvAnchorAttempted) {
+            ivTitle = `Local BBO calibration failed closed: ${processedLeg.localIvAnchorStatus}.`;
+        } else {
+            ivTitle = 'No qualifying fresh two-sided BBO anchor; the displayed input IV path is used.';
+        }
 
         return {
             id: leg.id,
@@ -533,6 +685,9 @@
             simValue,
             pnl,
             simulationAvailable,
+            simulationUnavailableReason,
+            projectionConvergence: convergence,
+            simulationTimingStatus: simulationTiming && simulationTiming.status || null,
             isClosed,
             hasLivePnl,
             liveLegPnL,
@@ -543,8 +698,10 @@
             liveDelta: liveDelta.value,
             liveDeltaAvailable: liveDelta.available,
             liveDeltaSource: liveDelta.source,
-            dteText: `Sim DTE: ${processedLeg.tradDTE} td / ${processedLeg.calDTE} cd`,
+            dteText: dteDisplay.text,
+            dteTitle: dteDisplay.title,
             ivText,
+            ivTitle,
             currentPriceDisplay: buildCurrentPriceDisplayState(
                 leg,
                 activeViewMode,
@@ -729,6 +886,7 @@
         computeHedgeDerivedData,
         computeLegDerivedData,
         computeOptionLegRedundancy,
+        resolveLegSelectedLivePrice,
         computeGroupDeltaSummary,
         computeGroupDerivedData,
         buildPortfolioDeltaSummary,

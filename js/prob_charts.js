@@ -36,6 +36,12 @@ function _getProbabilityProductRegistryApi() {
         : null;
 }
 
+function _getProbabilityPricingCoreApi() {
+    return typeof OptionComboPricingCore !== 'undefined' && OptionComboPricingCore
+        ? OptionComboPricingCore
+        : null;
+}
+
 function _getDistributionProxyConfigApi() {
     return typeof OptionComboDistributionProxyConfig !== 'undefined' && OptionComboDistributionProxyConfig
         ? OptionComboDistributionProxyConfig
@@ -109,32 +115,133 @@ function normalCDF(x) {
  * Main Worker message handler.
  *
  * Receives:
- *   { df, loc, newScale, nDays, nPaths, currentPrice, minS, maxS, bins, legs }
+ *   { df, loc, newScale, stepWeights, nPaths, currentPrice,
+ *     minS, maxS, bins, legs }
  *
  * Posts back (with transferable buffers):
  *   { tDensity, binCenters, binWidth, exactExpectedPnL }
  */
 self.onmessage = function(e) {
-    const { df, loc, newScale, nDays, nPaths, currentPrice, minS, maxS, bins, legs } = e.data;
+    const { df, loc, newScale, stepWeights, nPaths, currentPrice,
+            minS, maxS, bins, legs } = e.data;
+    const postError = (code, legId = '', field = '') => {
+        self.postMessage({ error: { code, legId, field } });
+    };
+
+    if (!Array.isArray(stepWeights) || stepWeights.length === 0
+        || stepWeights.some(weight => !Number.isFinite(weight) || weight < 0)) {
+        postError('simulation_clock_invalid', '', 'stepWeights');
+        return;
+    }
+    if (!Number.isFinite(df) || df <= 2
+        || !Number.isFinite(loc)
+        || !Number.isFinite(newScale) || newScale < 0
+        || !Number.isFinite(currentPrice) || currentPrice <= 0
+        || !Number.isFinite(minS) || !Number.isFinite(maxS) || maxS <= minS
+        || !Number.isInteger(bins) || bins <= 0
+        || !Number.isInteger(nPaths) || nPaths <= 0
+        || (legs !== undefined && !Array.isArray(legs))) {
+        postError('simulation_input_invalid');
+        return;
+    }
 
     const binWidth = (maxS - minS) / bins;
+    if (!Number.isFinite(binWidth) || binWidth <= 0) {
+        postError('simulation_input_invalid', '', 'priceRange');
+        return;
+    }
     const counts   = new Float64Array(bins);   // raw path counts per bin
 
     // --- Precompute Leg Constants for speed ---
     if (legs) {
         for (let l = 0; l < legs.length; l++) {
             const leg = legs[l];
+            if (!leg || typeof leg !== 'object' || Array.isArray(leg)) {
+                postError('pricing_input_invalid', '', 'leg');
+                return;
+            }
+            const legId = String(leg.id || '');
+            const hasFixedPrice = Object.prototype.hasOwnProperty.call(leg, 'fixedPrice');
+            leg.hasFixedPrice = hasFixedPrice;
+            if (hasFixedPrice) {
+                if (!Number.isFinite(leg.fixedPrice) || leg.fixedPrice < 0) {
+                    postError('pricing_input_invalid', legId, 'fixedPrice');
+                    return;
+                }
+            }
+            if (!Number.isFinite(leg.posMultiplier) || !Number.isFinite(leg.costBasis)) {
+                postError('pricing_input_invalid', legId, 'position');
+                return;
+            }
+            if (leg.hasFixedPrice) continue;
+
+            const hasExpiryUnderlying = Object.prototype.hasOwnProperty.call(
+                leg, 'expiryUnderlyingPrice'
+            );
+            if (hasExpiryUnderlying
+                && (!Number.isFinite(leg.expiryUnderlyingPrice)
+                    || leg.expiryUnderlyingPrice <= 0)) {
+                postError('pricing_input_invalid', legId, 'expiryUnderlyingPrice');
+                return;
+            }
+            const hasFrozenExpiryUnderlying = leg.isExpired === true
+                && hasExpiryUnderlying;
+            leg.hasFrozenExpiryUnderlying = hasFrozenExpiryUnderlying;
+            if (!hasFrozenExpiryUnderlying
+                && (!Number.isFinite(leg.underlyingScale) || leg.underlyingScale <= 0)) {
+                postError('pricing_underlying_unavailable', legId, 'underlyingScale');
+                return;
+            }
             if (leg.isUnderlyingLeg) {
                 continue;  // No BSM constants needed for delta-one underlying legs
             }
-            leg.isExpired = (leg.T <= 0);
-            if (!leg.isExpired) {
-                let v = leg.v <= 0 ? 0.0001 : leg.v;
-                leg.v_sqrt_T = v * Math.sqrt(leg.T);
-                leg.inv_v_sqrt_T = 1.0 / leg.v_sqrt_T;
-                // Pre-log standard component log(1/K)
-                leg.d1_const = (-Math.log(leg.K) + (leg.r + 0.5 * v * v) * leg.T) / leg.v_sqrt_T;
-                leg.K_exp_rT = leg.K * Math.exp(-leg.r * leg.T);
+            if (typeof leg.isExpired !== 'boolean') {
+                postError('pricing_input_invalid', legId, 'isExpired');
+                return;
+            }
+            if (!['call', 'put'].includes(leg.type)) {
+                postError('pricing_input_invalid', legId, 'type');
+                return;
+            }
+            if (!Number.isFinite(leg.strike) || leg.strike <= 0) {
+                postError('pricing_input_invalid', legId, 'strike');
+                return;
+            }
+            if (leg.isExpired) continue;
+
+            if (!['bsm-spot', 'black76'].includes(leg.pricingModel)) {
+                postError('pricing_model_unavailable', legId, 'pricingModel');
+                return;
+            }
+            if (!Number.isFinite(leg.rate)
+                || !Number.isFinite(leg.varianceT) || leg.varianceT <= 0
+                || !Number.isFinite(leg.discountT) || leg.discountT < 0
+                || !Number.isFinite(leg.volatility) || leg.volatility <= 0) {
+                postError('pricing_input_invalid', legId, 'modelInputs');
+                return;
+            }
+
+            const sqrtVarianceT = Math.sqrt(leg.varianceT);
+            leg.v_sqrt_T = leg.volatility * sqrtVarianceT;
+            leg.inv_v_sqrt_T = 1.0 / leg.v_sqrt_T;
+            const discount = Math.exp(-leg.rate * leg.discountT);
+            const carryTerm = leg.pricingModel === 'black76'
+                ? 0
+                : leg.rate * leg.discountT;
+            leg.d1_const = (
+                -Math.log(leg.strike)
+                + carryTerm
+                + 0.5 * leg.volatility * leg.volatility * leg.varianceT
+            ) / leg.v_sqrt_T;
+            leg.underlyingDiscount = leg.pricingModel === 'black76' ? discount : 1;
+            leg.discountedStrike = leg.strike * discount;
+            if (!Number.isFinite(leg.v_sqrt_T) || leg.v_sqrt_T <= 0
+                || !Number.isFinite(leg.inv_v_sqrt_T)
+                || !Number.isFinite(discount)
+                || !Number.isFinite(leg.d1_const)
+                || !Number.isFinite(leg.discountedStrike)) {
+                postError('simulation_numeric_overflow', legId, 'modelConstants');
+                return;
             }
         }
     }
@@ -143,13 +250,25 @@ self.onmessage = function(e) {
     let pathsInRange = 0;
 
     for (let i = 0; i < nPaths; i++) {
-        // Accumulate nDays daily log-returns
+        // Each calendar interval carries its own variance weight. Trading
+        // dates use 1; weekends/full holidays use the scalar fallback or that
+        // exact date's implied lambda. Zero-weight steps consume no RNG draw.
         let logRet = 0.0;
-        for (let d = 0; d < nDays; d++) {
-            logRet += tSample(df, loc, newScale);
+        for (let d = 0; d < stepWeights.length; d++) {
+            const weight = stepWeights[d];
+            if (weight <= 0) continue;
+            logRet += tSample(df, loc * weight, newScale * Math.sqrt(weight));
+        }
+        if (!Number.isFinite(logRet)) {
+            postError('simulation_numeric_overflow', '', 'logReturn');
+            return;
         }
         // Final price
         const finalPrice = currentPrice * Math.exp(logRet);
+        if (!Number.isFinite(finalPrice) || finalPrice <= 0) {
+            postError('simulation_numeric_overflow', '', 'terminalPrice');
+            return;
+        }
         const binIdx = Math.floor((finalPrice - minS) / binWidth);
         const inRange = (binIdx >= 0 && binIdx < bins);
 
@@ -163,30 +282,48 @@ self.onmessage = function(e) {
 
             for (let l = 0; l < legs.length; l++) {
                 const leg = legs[l];
-                const legPrice = finalPrice * (leg.underlyingScale || 1);
+                if (leg.hasFixedPrice) {
+                    pathPnL += leg.posMultiplier * leg.fixedPrice - leg.costBasis;
+                    continue;
+                }
+                const legPrice = leg.hasFrozenExpiryUnderlying
+                    ? leg.expiryUnderlyingPrice
+                    : finalPrice * leg.underlyingScale;
                 const safeLegPrice = legPrice > 0 ? legPrice : 0.0001;
                 const log_S = Math.log(safeLegPrice);
                 let v_opt = 0;
-                if (leg.fixedPrice !== undefined) {
-                    v_opt = leg.fixedPrice;
-                } else if (leg.isUnderlyingLeg) {
+                if (leg.isUnderlyingLeg) {
                     // Underlying leg: price IS the simulated underlying price, no BSM
                     v_opt = legPrice;
                 } else if (leg.isExpired) {
-                    if (leg.type === 'call') v_opt = Math.max(0, legPrice - leg.K);
-                    else                     v_opt = Math.max(0, leg.K - legPrice);
+                    if (leg.type === 'call') v_opt = Math.max(0, legPrice - leg.strike);
+                    else                     v_opt = Math.max(0, leg.strike - legPrice);
                 } else {
                     const d1 = log_S * leg.inv_v_sqrt_T + leg.d1_const;
                     const d2 = d1 - leg.v_sqrt_T;
                     if (leg.type === 'call') {
-                        v_opt = legPrice * normalCDF(d1) - leg.K_exp_rT * normalCDF(d2);
+                        v_opt = leg.underlyingDiscount * legPrice * normalCDF(d1)
+                            - leg.discountedStrike * normalCDF(d2);
                     } else {
-                        v_opt = leg.K_exp_rT * normalCDF(-d2) - legPrice * normalCDF(-d1);
+                        v_opt = leg.discountedStrike * normalCDF(-d2)
+                            - leg.underlyingDiscount * legPrice * normalCDF(-d1);
                     }
                 }
+                if (!Number.isFinite(v_opt)) {
+                    postError('simulation_numeric_overflow', String(leg.id || ''), 'legValue');
+                    return;
+                }
                 pathPnL += leg.posMultiplier * v_opt - leg.costBasis;
+                if (!Number.isFinite(pathPnL)) {
+                    postError('simulation_numeric_overflow', String(leg.id || ''), 'pathPnL');
+                    return;
+                }
             }
             exactPnLSum += pathPnL;
+            if (!Number.isFinite(exactPnLSum)) {
+                postError('simulation_numeric_overflow', '', 'expectedPnL');
+                return;
+            }
         }
     }
 
@@ -220,15 +357,16 @@ let _activeWorker = null;   // currently running Worker (or null)
 // -----------------------------------------------------------------------
 
 /**
- * Recalibrate the t-distribution scale so that its std equals IV/sqrt(365).
- * We keep df (tail shape) and loc (drift) from the historical SPX fit.
+ * Recalibrate the t-distribution scale so that its std equals the supplied
+ * weighted-clock IV divided by sqrt(daysPerYear). We keep df (tail shape)
+ * and loc (drift) from the historical fit.
  *
  *   t-dist daily std = scale * sqrt(df / (df - 2))  for df > 2
- *   → new_scale = (IV / sqrt(365)) / sqrt(df / (df - 2))
+ *   → new_scale = (IV / sqrt(daysPerYear)) / sqrt(df / (df - 2))
  */
-function _calibrateScale(df, portfolioIV) {
-    const targetDailyVol = portfolioIV / Math.sqrt(365);
-    if (df <= 2.001) return targetDailyVol;  // variance undefined; safe fallback
+function _calibrateScale(df, portfolioIV, daysPerYear = 365) {
+    const targetDailyVol = portfolioIV / Math.sqrt(daysPerYear);
+    if (df <= 2) return targetDailyVol;  // Worker rejects undefined-variance fits.
     return targetDailyVol / Math.sqrt(df / (df - 2));
 }
 
@@ -237,13 +375,13 @@ function _calibrateScale(df, portfolioIV) {
  * simulation date, using the same drift as the t-model (historical loc).
  *
  *   log(S_T / S0) ~ Normal(mu_total, sigma_total^2)
- *   mu_total    = loc * nDays
- *   sigma_total = (portfolioIV / sqrt(365)) * sqrt(nDays)
+ *   mu_total    = loc * effectiveDays
+ *   sigma_total = (portfolioIV / sqrt(daysPerYear)) * sqrt(effectiveDays)
  */
-function _lognormalDensity(s, S0, portfolioIV, loc, nDays) {
-    if (s <= 0 || S0 <= 0 || nDays <= 0) return 0;
-    const sigma = (portfolioIV / Math.sqrt(365)) * Math.sqrt(nDays);
-    const mu = loc * nDays;
+function _lognormalDensity(s, S0, portfolioIV, loc, effectiveDays, daysPerYear = 365) {
+    if (s <= 0 || S0 <= 0 || effectiveDays <= 0) return 0;
+    const sigma = (portfolioIV / Math.sqrt(daysPerYear)) * Math.sqrt(effectiveDays);
+    const mu = loc * effectiveDays;
     if (sigma <= 0) return 0;
     const z = (Math.log(s / S0) - mu) / sigma;
     return (1.0 / (s * sigma * Math.sqrt(2 * Math.PI))) * Math.exp(-0.5 * z * z);
@@ -276,6 +414,40 @@ function _getProbabilityAnchorInfo() {
     };
 }
 
+function _hasFixedProjectionPrice(leg) {
+    if (!leg || leg.closePrice === null || leg.closePrice === '' || leg.closePrice === undefined) {
+        return false;
+    }
+    const price = parseFloat(leg.closePrice);
+    return Number.isFinite(price) && price >= 0;
+}
+
+function _resolvePortfolioProjectionAvailability(portfolioState, groups, anchorPrice) {
+    const pricingContext = _getProbabilityPricingContextApi();
+    if (!pricingContext) return { available: true };
+
+    for (const group of (Array.isArray(groups) ? groups : [])) {
+        for (const leg of (Array.isArray(group && group.legs) ? group.legs : [])) {
+            if (_hasFixedProjectionPrice(leg)) continue;
+            const currentUnderlying = typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
+                ? pricingContext.resolveLegCurrentUnderlyingPrice(portfolioState, leg, anchorPrice)
+                : anchorPrice;
+            const scenarioUnderlying = typeof pricingContext.resolveLegScenarioUnderlyingPrice === 'function'
+                ? pricingContext.resolveLegScenarioUnderlyingPrice(portfolioState, leg, anchorPrice, anchorPrice)
+                : anchorPrice;
+            if (!Number.isFinite(currentUnderlying) || currentUnderlying <= 0
+                || !Number.isFinite(scenarioUnderlying) || scenarioUnderlying <= 0) {
+                return {
+                    available: false,
+                    legId: String(leg && leg.id || ''),
+                    reason: 'bound_futures_quote_unavailable',
+                };
+            }
+        }
+    }
+    return { available: true };
+}
+
 /**
  * Compute the portfolio's P&L at a given underlying price using the
  * BSM model with the current simulation date and IV settings.
@@ -294,14 +466,18 @@ function _computePortfolioPnLAtPrice(price) {
     const quoteDate = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
         ? pricingContext.resolveQuoteDate(state)
         : state.baseDate;
+    const simulationTiming = pricingContext && typeof pricingContext.resolveSimulationTiming === 'function'
+        ? pricingContext.resolveSimulationTiming(state)
+        : null;
+    if (simulationTiming && simulationTiming.available === false) return null;
     const productRegistry = _getProbabilityProductRegistryApi();
     const underlyingProfile = productRegistry && typeof productRegistry.resolveUnderlyingProfile === 'function'
         ? productRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
         : null;
 
-    state.groups.filter(_isGroupIncludedInGlobal).forEach(group => {
+    for (const group of state.groups.filter(_isGroupIncludedInGlobal)) {
         const activeViewMode = group.viewMode || 'active';
-        group.legs.forEach(leg => {
+        for (const leg of group.legs) {
             const legCurrentUnderlying = pricingContext
                 && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
                 ? pricingContext.resolveLegCurrentUnderlyingPrice(state, leg, anchorPrice)
@@ -310,22 +486,65 @@ function _computePortfolioPnLAtPrice(price) {
                 && typeof pricingContext.resolveLegInterestRate === 'function'
                 ? pricingContext.resolveLegInterestRate(state, leg, state.interestRate)
                 : state.interestRate;
+            const observable = pricingContext
+                && typeof pricingContext.resolveObservableLegPrice === 'function'
+                ? pricingContext.resolveObservableLegPrice(state, group, leg)
+                : null;
+            const quotePricingInputs = pricingContext
+                && typeof pricingContext.resolveLegQuotePricingInputs === 'function'
+                ? pricingContext.resolveLegQuotePricingInputs(state, leg, {
+                    underlyingPrice: anchorPrice,
+                    interestRate: state.interestRate,
+                })
+                : null;
+            const timingContext = {
+                quoteAsOf: state.liveQuoteAsOf,
+                allowLegacyQuoteCutoff: !state.marketDataMode,
+                targetAsOf: simulationTiming && simulationTiming.available
+                    ? simulationTiming.targetAsOf
+                    : null,
+                targetSource: simulationTiming && simulationTiming.source || null,
+                timingStatus: simulationTiming && simulationTiming.status || null,
+                observablePrice: observable && observable.available ? observable.price : null,
+                observablePriceSource: observable && observable.source || null,
+                observablePriceAsOf: observable && observable.quoteAsOf || null,
+                observablePriceFresh: observable && observable.fresh === true,
+                quotePricingInputsAvailable: quotePricingInputs && quotePricingInputs.available === true,
+                quotePricingInputStatus: quotePricingInputs && quotePricingInputs.status || null,
+                quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
+                quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
+                quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+            };
             // Use processLegData to handle unified BSM formatting (Exp, Implied Vol offset, T)
-            const pLeg = processLegData(leg, simulationDate, state.ivOffset, quoteDate, legCurrentUnderlying, legInterestRate, activeViewMode, underlyingProfile, state.marketDataMode);
+            const pLeg = processLegData(leg, simulationDate, state.ivOffset, quoteDate, legCurrentUnderlying, legInterestRate, activeViewMode, underlyingProfile, state.marketDataMode, timingContext);
+            const pricingCore = _getProbabilityPricingCoreApi();
+            const convergence = pricingCore
+                && typeof pricingCore.assessProjectionConvergence === 'function'
+                ? pricingCore.assessProjectionConvergence(state, [leg], [pLeg])
+                : { ready: true };
+            if (convergence.ready === false) return null;
             const legScenarioUnderlying = pricingContext
                 && typeof pricingContext.resolveLegScenarioUnderlyingPrice === 'function'
                 ? pricingContext.resolveLegScenarioUnderlyingPrice(state, leg, price, anchorPrice)
                 : price;
+            if (!_hasFixedProjectionPrice(leg)
+                && (!Number.isFinite(legCurrentUnderlying) || legCurrentUnderlying <= 0
+                    || !Number.isFinite(legScenarioUnderlying) || legScenarioUnderlying <= 0)) {
+                return null;
+            }
             // Use unified simulation price (includes Zero-Delta bypass at current price)
             const pps = computeSimulatedPrice(
                 pLeg, leg, legScenarioUnderlying, legInterestRate,
-                activeViewMode, simulationDate, quoteDate, state.ivOffset
+                activeViewMode, simulationDate, quoteDate, state.ivOffset,
+                timingContext
             );
+
+            if (!Number.isFinite(pps)) return null;
 
             totalValue += pLeg.posMultiplier * pps;
             totalCost += pLeg.costBasis;
-        });
-    });
+        }
+    }
 
     return totalValue - totalCost;
 }
@@ -382,7 +601,9 @@ function _buildConditionalOverlay(zSamples, anchorPrice, em, binCenters, pnlAt) 
     for (let i = 0; i < n; i++) {
         prices[i] = anchorPrice + zSamples[i] * em;
         mean += prices[i];
-        evSum += pnlAt(prices[i]);
+        const pnl = pnlAt(prices[i]);
+        if (!Number.isFinite(pnl)) return null;
+        evSum += pnl;
     }
     mean /= n;
     let variance = 0;
@@ -890,9 +1111,234 @@ function _ensureCharts() {
     if (c3 && !_epnlChart) _epnlChart = new ExpectedPnLDensityChart(c3);
 }
 
+// A signed IVTS lambda is an interval residual, not an independently
+// simulatable negative-variance day. Preserve its effect on the total horizon
+// while folding negative closure weights into the nearest positive trading
+// segments before the Monte Carlo worker takes square roots. This keeps the
+// fitted cross-week variance clock intact without clipping the inversion
+// signal or asking the diffusion to consume negative variance.
+function _coalesceSignedVarianceWeights(values) {
+    if (!Array.isArray(values) || values.length === 0) {
+        return { available: false, status: 'simulation_clock_invalid' };
+    }
+    const rawStepWeights = values.map(value => Number(value));
+    if (rawStepWeights.some(value => !Number.isFinite(value))) {
+        return { available: false, status: 'simulation_clock_invalid' };
+    }
+    const totalWeight = rawStepWeights.reduce((sum, value) => sum + value, 0);
+    if (!(totalWeight > 0)) {
+        return {
+            available: false,
+            status: 'simulation_clock_nonpositive',
+            totalWeight,
+            rawStepWeights,
+        };
+    }
+
+    const stepWeights = rawStepWeights.map(value => Math.max(0, value));
+    const negativeIndices = [];
+    for (let index = 0; index < rawStepWeights.length; index += 1) {
+        if (rawStepWeights[index] < 0) negativeIndices.push(index);
+    }
+
+    for (const index of negativeIndices) {
+        let debt = -rawStepWeights[index];
+        // Prefer the immediately preceding trading variance because an IVTS
+        // closure residual is identified against its surrounding interval.
+        for (let left = index - 1; left >= 0 && debt > 1e-12; left -= 1) {
+            const absorbed = Math.min(stepWeights[left], debt);
+            stepWeights[left] -= absorbed;
+            debt -= absorbed;
+        }
+        // A quote/target boundary can start inside the closure. In that case
+        // carry any remaining residual into the following positive segment.
+        for (let right = index + 1; right < stepWeights.length && debt > 1e-12; right += 1) {
+            const absorbed = Math.min(stepWeights[right], debt);
+            stepWeights[right] -= absorbed;
+            debt -= absorbed;
+        }
+        if (debt > 1e-9) {
+            return {
+                available: false,
+                status: 'simulation_clock_nonpositive',
+                totalWeight,
+                rawStepWeights,
+            };
+        }
+    }
+
+    const coalescedTotal = stepWeights.reduce((sum, value) => sum + value, 0);
+    const drift = totalWeight - coalescedTotal;
+    if (Math.abs(drift) > 1e-12) {
+        const targetIndex = stepWeights.findIndex(value => value > 0);
+        if (targetIndex < 0 || stepWeights[targetIndex] + drift < 0) {
+            return { available: false, status: 'simulation_clock_nonpositive' };
+        }
+        stepWeights[targetIndex] += drift;
+    }
+
+    return {
+        available: true,
+        status: 'ok',
+        totalWeight,
+        rawStepWeights,
+        stepWeights,
+        negativeStepCount: negativeIndices.length,
+        signedWeightsCoalesced: negativeIndices.length > 0,
+    };
+}
+
+function _prepareProbabilityClock(clock) {
+    if (!clock || clock.available !== true) return clock;
+    const prepared = _coalesceSignedVarianceWeights(clock.stepWeights);
+    if (!prepared.available) {
+        return {
+            ...clock,
+            available: false,
+            status: prepared.status,
+            rawStepWeights: prepared.rawStepWeights || clock.stepWeights,
+        };
+    }
+    return {
+        ...clock,
+        effDays: prepared.totalWeight,
+        rawStepWeights: prepared.rawStepWeights,
+        stepWeights: prepared.stepWeights,
+        negativeStepCount: prepared.negativeStepCount,
+        signedWeightsCoalesced: prepared.signedWeightsCoalesced,
+    };
+}
+
+function _resolveProbabilityHorizonClock(
+    pricingContext,
+    underlyingProfile,
+    quoteDate,
+    simulationDate,
+    simulationTiming
+) {
+    const dateUtils = typeof OptionComboDateUtils !== 'undefined'
+        ? OptionComboDateUtils
+        : null;
+    const pricingCore = typeof OptionComboPricingCore !== 'undefined'
+        ? OptionComboPricingCore
+        : null;
+    const calendarKey = String(
+        underlyingProfile && underlyingProfile.calendarId || 'NYSE'
+    ).trim().toUpperCase();
+    const quoteAsOf = String(state && state.liveQuoteAsOf || '').trim();
+    const targetAsOf = String(simulationTiming && simulationTiming.targetAsOf || '').trim();
+    const quoteMs = Date.parse(quoteAsOf);
+    const targetMs = Date.parse(targetAsOf);
+
+    if (state.marketDataMode !== 'historical'
+        && Number.isFinite(quoteMs)
+        && Number.isFinite(targetMs)
+        && dateUtils
+        && typeof dateUtils.resolveWeightedTime === 'function') {
+        const weekendWeight = pricingCore
+            && typeof pricingCore.getSimTimeBasisWeekendWeight === 'function'
+            ? pricingCore.getSimTimeBasisWeekendWeight()
+            : state.simWeekendWeight;
+        const timeZone = String(
+            underlyingProfile && underlyingProfile.optionExpiryTimeZone
+            || (calendarKey.startsWith('CME:') || calendarKey.startsWith('NYMEX:')
+                || calendarKey.startsWith('COMEX:')
+                ? 'America/Chicago'
+                : 'America/New_York')
+        );
+        const futuresCalendar = calendarKey.startsWith('CME:')
+            || calendarKey.startsWith('NYMEX:')
+            || calendarKey.startsWith('COMEX:');
+        const exact = dateUtils.resolveWeightedTime(
+            quoteAsOf,
+            targetAsOf,
+            weekendWeight,
+            calendarKey,
+            null,
+            timeZone,
+            futuresCalendar ? 17 : null
+        );
+        if (!exact.available) {
+            return {
+                available: false,
+                status: exact.status,
+                missingWeightDates: exact.missingWeightDates || [],
+                calendarKey,
+            };
+        }
+        const weightSpec = dateUtils.normalizeWeekendWeightSpec(weekendWeight);
+        const defaultWeight = weightSpec.default;
+        const effYear = typeof weightedDaysPerYear === 'function'
+            ? weightedDaysPerYear(weekendWeight)
+            : 252 + 113 * defaultWeight;
+        return _prepareProbabilityClock({
+            available: true,
+            status: 'ok',
+            precision: 'instant',
+            calendarKey,
+            calDays: exact.calendarDays,
+            tradingDays: exact.tradingDays,
+            nonTradingDays: exact.nonTradingDays,
+            effDays: exact.effectiveDays,
+            effYear,
+            steps: exact.segments,
+            stepWeights: exact.segments.map(segment => segment.effectiveDays),
+            isCalendarClock: weightSpec.minWeight >= 1,
+            usedPerDateWeight: !!weightSpec.byDate,
+            defaultNonTradingWeight: defaultWeight,
+        });
+    }
+
+    return typeof resolveSimHorizonClock === 'function'
+        ? _prepareProbabilityClock(resolveSimHorizonClock(
+            quoteDate,
+            simulationDate,
+            calendarKey,
+            state.marketDataMode
+        ))
+        : { available: false, status: 'simulation_clock_unavailable', calendarKey };
+}
+
 // -----------------------------------------------------------------------
 // 7.  updateProbCharts()  — main orchestrator called from app.js
 // -----------------------------------------------------------------------
+
+function _resolveProbabilityProjectionFailure(globalState, includedGroups) {
+    const valuation = typeof OptionComboValuation !== 'undefined' && OptionComboValuation
+        ? OptionComboValuation
+        : null;
+    if (!valuation || typeof valuation.computeGroupDerivedData !== 'function') {
+        return '';
+    }
+
+    const pricingCore = _getProbabilityPricingCoreApi();
+    for (const group of (includedGroups || [])) {
+        const groupResult = valuation.computeGroupDerivedData(group, globalState);
+        for (const legResult of (groupResult && groupResult.legResults || [])) {
+            const processedLeg = legResult && legResult.processedLeg;
+            if (processedLeg && processedLeg.timingStatus === 'implied_lambda_incomplete') {
+                return pricingCore && typeof pricingCore.formatProjectionTimingFailure === 'function'
+                    ? pricingCore.formatProjectionTimingFailure(
+                        processedLeg.timingStatus,
+                        'Probability simulation',
+                        processedLeg
+                    )
+                    : 'Probability simulation unavailable: required weekend/holiday implied λ data is missing.';
+            }
+
+            const convergence = legResult && legResult.projectionConvergence;
+            if (convergence && convergence.ready === false) {
+                return pricingCore && typeof pricingCore.formatProjectionConvergenceFailure === 'function'
+                    ? pricingCore.formatProjectionConvergenceFailure(
+                        convergence,
+                        'Probability simulation'
+                    )
+                    : 'Probability simulation unavailable: strict live BBO convergence inputs are missing.';
+            }
+        }
+    }
+    return '';
+}
 
 function updateProbCharts() {
     const container = document.getElementById('probAnalysisContainer');
@@ -913,7 +1359,8 @@ function updateProbCharts() {
         return;
     }
 
-    // Guard: need at least 1 calendar day of horizon
+    // Resolve one portfolio-global target instant. A same-date target can
+    // still have a positive intraday horizon; date equality alone is not zero.
     const pricingContext = _getProbabilityPricingContextApi();
     const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
         ? pricingContext.resolveSimulationDate(state)
@@ -921,18 +1368,94 @@ function updateProbCharts() {
     const quoteDate = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
         ? pricingContext.resolveQuoteDate(state)
         : state.baseDate;
-    const nCalDays = diffDays(quoteDate, simulationDate);
-    if (nCalDays === 0) {
-        _probChart && _probChart.drawEmpty('Advance the simulation date to see probabilities.');
-        _epnlChart && _epnlChart.drawEmpty('No future days to simulate (simulation date = today).');
+    const simulationTiming = pricingContext && typeof pricingContext.resolveSimulationTiming === 'function'
+        ? pricingContext.resolveSimulationTiming(state)
+        : null;
+    if (simulationTiming && simulationTiming.available === false) {
+        const message = `Probability simulation unavailable because target timing is ${simulationTiming.status}.`;
+        _probChart && _probChart.drawEmpty(message);
+        _epnlChart && _epnlChart.drawEmpty(message);
         _setExpectedPnLBadge(null);
         _setCondExpectedPnLBadge('off', null);
         _setAnchorInfoText(null);
-        _setInfoText('Simulation date = today  (0 days).');
+        _setInfoText(message);
+        return;
+    }
+    const quoteMs = Date.parse(String(state.liveQuoteAsOf || '').trim());
+    const targetMs = Date.parse(String(simulationTiming && simulationTiming.targetAsOf || '').trim());
+    const dateOnlyDays = diffDays(quoteDate, simulationDate);
+    const zeroHorizon = Number.isFinite(quoteMs) && Number.isFinite(targetMs)
+        ? targetMs <= quoteMs
+        : dateOnlyDays === 0;
+    if (zeroHorizon) {
+        _probChart && _probChart.drawEmpty('Advance the simulation date to see probabilities.');
+        _epnlChart && _epnlChart.drawEmpty('No future time remains before the simulation target.');
+        _setExpectedPnLBadge(null);
+        _setCondExpectedPnLBadge('off', null);
+        _setAnchorInfoText(null);
+        _setInfoText('Simulation target equals the current quote time (0 hours).');
         return;
     }
 
-    // Portfolio mean simulated IV
+    const productRegistry = _getProbabilityProductRegistryApi();
+    const underlyingProfile = productRegistry && typeof productRegistry.resolveUnderlyingProfile === 'function'
+        ? productRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
+        : null;
+    const horizonClock = _resolveProbabilityHorizonClock(
+        pricingContext,
+        underlyingProfile,
+        quoteDate,
+        simulationDate,
+        simulationTiming
+    );
+    if (!horizonClock || horizonClock.available !== true) {
+        if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
+        const missingDates = horizonClock && Array.isArray(horizonClock.missingWeightDates)
+            ? horizonClock.missingWeightDates
+            : [];
+        const reason = horizonClock && horizonClock.status === 'calendar_unavailable'
+            ? 'the official exchange calendar does not cover the simulation horizon'
+            : (horizonClock && horizonClock.status === 'implied_lambda_incomplete'
+                ? `the structured implied λ curve is missing ${missingDates.join(', ') || 'one or more required weekend/holiday dates'}; export a fresh curve from IV Term Structure or load the matching λ file`
+                : 'the simulation clock is unavailable');
+        const message = `Probability simulation unavailable because ${reason}.`;
+        _probChart && _probChart.drawEmpty(message);
+        _epnlChart && _epnlChart.drawEmpty(message);
+        _setExpectedPnLBadge(null);
+        _setCondExpectedPnLBadge('off', null);
+        _setAnchorInfoText(null);
+        _setInfoText(message);
+        return;
+    }
+    const lambdaLabel = horizonClock.usedPerDateWeight
+        ? 'λ curve'
+        : `λ=${Number(horizonClock.defaultNonTradingWeight).toFixed(2)}`;
+    const nCalDays = horizonClock.calDays;
+    const calendarHorizonLabel = nCalDays < 1
+        ? `${(nCalDays * 24).toFixed(2)} h`
+        : `${nCalDays.toFixed(nCalDays % 1 === 0 ? 0 : 2)} cd`;
+    const horizonLabel = horizonClock.isCalendarClock
+        ? calendarHorizonLabel
+        : `${calendarHorizonLabel} (eff ${horizonClock.effDays.toFixed(3)}d, ${lambdaLabel})`;
+
+    // Run the same per-leg gate as valuation before asking for a portfolio
+    // mean IV.  Otherwise a failed strict BBO inversion can be misreported as
+    // the generic "No usable option IV" condition and hide the actionable
+    // feed/BBO or implied-λ reason from the user.
+    const projectionFailure = _resolveProbabilityProjectionFailure(state, includedGroups);
+    if (projectionFailure) {
+        if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
+        _probChart && _probChart.drawEmpty(projectionFailure);
+        _epnlChart && _epnlChart.drawEmpty(projectionFailure);
+        _setExpectedPnLBadge(null);
+        _setCondExpectedPnLBadge('off', null);
+        _setAnchorInfoText(null);
+        _setInfoText(projectionFailure);
+        return;
+    }
+
+    // Portfolio mean IV is already converted to this weighted clock at the
+    // quote anchor by computePortfolioMeanSimIV().
     const portfolioIV = computePortfolioMeanSimIV();
     if (!portfolioIV || portfolioIV <= 0) {
         _probChart && _probChart.drawEmpty('No usable option IV found to scale the distribution.');
@@ -950,10 +1473,22 @@ function updateProbCharts() {
     const anchorPrice = _getProbabilityAnchorPrice();
     const anchorInfo = _getProbabilityAnchorInfo();
 
-    const productRegistry = _getProbabilityProductRegistryApi();
-    const underlyingProfile = productRegistry && typeof productRegistry.resolveUnderlyingProfile === 'function'
-        ? productRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
-        : null;
+    const projectionAvailability = _resolvePortfolioProjectionAvailability(
+        state,
+        includedGroups,
+        anchorPrice
+    );
+    if (!projectionAvailability.available) {
+        if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
+        const message = 'Probability simulation unavailable because a bound futures quote is missing.';
+        _probChart && _probChart.drawEmpty(message);
+        _epnlChart && _epnlChart.drawEmpty(message);
+        _setExpectedPnLBadge(null);
+        _setCondExpectedPnLBadge('off', null);
+        _setAnchorInfoText(anchorInfo);
+        _setInfoText(message);
+        return;
+    }
 
     // t-distribution parameters lookup
     const underlying = state.underlyingSymbol || 'SPY';
@@ -980,7 +1515,7 @@ function updateProbCharts() {
     const { df, loc: rawLoc } = params;
     const useRandomWalk = document.getElementById('randomWalkToggle')?.checked || false;
     const loc = useRandomWalk ? 0 : rawLoc;
-    const newScale = _calibrateScale(df, portfolioIV);
+    const newScale = _calibrateScale(df, portfolioIV, horizonClock.effYear);
     const nPaths = 1_000_000;
     const bins = 500;
 
@@ -990,7 +1525,7 @@ function updateProbCharts() {
     _setAnchorInfoText(anchorInfo);
     const driftLabel = useRandomWalk ? ', Random Walk' : '';
     const proxyInfoText = distributionSymbol === underlying ? '' : ` | Dist Proxy: ${distributionSymbol}`;
-    _setInfoText(`Simulating 1M paths × ${nCalDays} cd  (IV ${(portfolioIV * 100).toFixed(1)}%${driftLabel})${proxyInfoText}…`);
+    _setInfoText(`Simulating 1M paths × ${horizonLabel}  (IV ${(portfolioIV * 100).toFixed(1)}%${driftLabel})${proxyInfoText}…`);
     _setExpectedPnLBadge(null);
     _setCondExpectedPnLBadge('off', null);
 
@@ -998,20 +1533,96 @@ function updateProbCharts() {
     if (_activeWorker) { _activeWorker.terminate(); _activeWorker = null; }
 
     // Assemble legs for exact MC Pricing
-    const simDateObj = new Date(simulationDate + 'T00:00:00Z');
     const workerLegs = [];
-        includedGroups.forEach(group => {
-            group.legs.forEach(leg => {
-                const activeViewMode = group.viewMode || 'active';
-                const legCurrentUnderlying = pricingContext
-                    && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
-                    ? pricingContext.resolveLegCurrentUnderlyingPrice(state, leg, anchorPrice)
-                    : state.underlyingPrice;
-                const legInterestRate = pricingContext
-                    && typeof pricingContext.resolveLegInterestRate === 'function'
-                    ? pricingContext.resolveLegInterestRate(state, leg, state.interestRate)
-                    : state.interestRate;
-            const pLeg = processLegData(leg, simulationDate, state.ivOffset, quoteDate, legCurrentUnderlying, legInterestRate, activeViewMode, underlyingProfile, state.marketDataMode);
+    let workerPricingFailure = null;
+    const pricingCore = _getProbabilityPricingCoreApi();
+    includedGroups.forEach(group => {
+        group.legs.forEach(leg => {
+            if (workerPricingFailure) return;
+            const activeViewMode = group.viewMode || 'active';
+            const legCurrentUnderlying = pricingContext
+                && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
+                ? pricingContext.resolveLegCurrentUnderlyingPrice(state, leg, anchorPrice)
+                : state.underlyingPrice;
+            const legInterestRate = pricingContext
+                && typeof pricingContext.resolveLegInterestRate === 'function'
+                ? pricingContext.resolveLegInterestRate(state, leg, state.interestRate)
+                : state.interestRate;
+            const observable = pricingContext
+                && typeof pricingContext.resolveObservableLegPrice === 'function'
+                ? pricingContext.resolveObservableLegPrice(state, group, leg)
+                : null;
+            const quotePricingInputs = pricingContext
+                && typeof pricingContext.resolveLegQuotePricingInputs === 'function'
+                ? pricingContext.resolveLegQuotePricingInputs(state, leg, {
+                    underlyingPrice: anchorPrice,
+                    interestRate: state.interestRate,
+                })
+                : null;
+            const timingContext = {
+                quoteAsOf: state.liveQuoteAsOf,
+                allowLegacyQuoteCutoff: !state.marketDataMode,
+                targetAsOf: simulationTiming && simulationTiming.available
+                    ? simulationTiming.targetAsOf
+                    : null,
+                targetSource: simulationTiming && simulationTiming.source || null,
+                timingStatus: simulationTiming && simulationTiming.status || null,
+                observablePrice: observable && observable.available ? observable.price : null,
+                observablePriceSource: observable && observable.source || null,
+                observablePriceAsOf: observable && observable.quoteAsOf || null,
+                observablePriceFresh: observable && observable.fresh === true,
+                quotePricingInputsAvailable: quotePricingInputs && quotePricingInputs.available === true,
+                quotePricingInputStatus: quotePricingInputs && quotePricingInputs.status || null,
+                quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
+                quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
+                quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+            };
+            const pLeg = processLegData(
+                leg,
+                simulationDate,
+                state.ivOffset,
+                quoteDate,
+                legCurrentUnderlying,
+                legInterestRate,
+                activeViewMode,
+                underlyingProfile,
+                state.marketDataMode,
+                timingContext
+            );
+            if (pLeg.timingStatus === 'implied_lambda_incomplete') {
+                workerPricingFailure = pricingCore
+                    && typeof pricingCore.formatProjectionTimingFailure === 'function'
+                    ? pricingCore.formatProjectionTimingFailure(
+                        pLeg.timingStatus,
+                        'Probability simulation',
+                        pLeg
+                    )
+                    : 'Probability simulation unavailable: required weekend/holiday implied λ data is missing.';
+                return;
+            }
+            const convergence = pricingCore
+                && typeof pricingCore.assessProjectionConvergence === 'function'
+                ? pricingCore.assessProjectionConvergence(state, [leg], [pLeg])
+                : { ready: true };
+            if (convergence.ready === false) {
+                workerPricingFailure = pricingCore
+                    && typeof pricingCore.formatProjectionConvergenceFailure === 'function'
+                    ? pricingCore.formatProjectionConvergenceFailure(
+                        convergence,
+                        'Probability simulation'
+                    )
+                    : 'Probability simulation unavailable: strict live BBO convergence inputs are missing.';
+                return;
+            }
+            if (!pLeg.isUnderlyingLeg && !pLeg.isExpired
+                && (!Number.isFinite(pLeg.T) || pLeg.T <= 0
+                    || !Number.isFinite(pLeg.rateT) || pLeg.rateT < 0
+                    || !Number.isFinite(pLeg.simIV) || pLeg.simIV <= 0)) {
+                workerPricingFailure = pLeg.timeStatus
+                    || pLeg.timingStatus
+                    || 'pricing_input_unavailable';
+                return;
+            }
 
             let fixedPrice = undefined;
             if (leg.closePrice !== null && leg.closePrice !== '') {
@@ -1021,26 +1632,52 @@ function updateProbCharts() {
                 }
             }
 
-            workerLegs.push({
+            const underlyingScale = Number.isFinite(anchorPrice) && anchorPrice > 0
+                && Number.isFinite(legCurrentUnderlying) && legCurrentUnderlying > 0
+                ? legCurrentUnderlying / anchorPrice
+                : null;
+            const workerLeg = {
+                id: String(leg.id || ''),
                 type: pLeg.type,
                 isUnderlyingLeg: !!pLeg.isUnderlyingLeg,
-                K: pLeg.strike,
-                r: legInterestRate,
-                T: pLeg.T,
-                v: pLeg.simIV,
+                isExpired: !!pLeg.isExpired,
+                pricingModel: pLeg.pricingModel,
+                strike: pLeg.strike,
+                rate: legInterestRate,
+                varianceT: pLeg.T,
+                discountT: pLeg.rateT,
+                volatility: pLeg.simIV,
                 posMultiplier: pLeg.posMultiplier,
                 costBasis: pLeg.costBasis,
-                underlyingScale: anchorPrice > 0 ? (legCurrentUnderlying / anchorPrice) : 1,
-                fixedPrice: fixedPrice
-            });
+                underlyingScale,
+            };
+            if (Number.isFinite(pLeg.expiryUnderlyingPrice)) {
+                workerLeg.expiryUnderlyingPrice = pLeg.expiryUnderlyingPrice;
+            }
+            if (fixedPrice !== undefined) {
+                workerLeg.fixedPrice = fixedPrice;
+            }
+            workerLegs.push(workerLeg);
         });
     });
+
+    if (workerPricingFailure) {
+        const message = String(workerPricingFailure).startsWith('Probability simulation unavailable')
+            ? String(workerPricingFailure)
+            : `Probability simulation unavailable (${workerPricingFailure}).`;
+        _probChart && _probChart.drawEmpty(message);
+        _epnlChart && _epnlChart.drawEmpty(message);
+        _setExpectedPnLBadge(null);
+        _setCondExpectedPnLBadge('off', null);
+        _setInfoText(message);
+        return;
+    }
 
     // Launch Worker
     _activeWorker = new Worker(_MC_WORKER_URL);
     _activeWorker.postMessage({
         df, loc, newScale,
-        nDays: nCalDays,
+        stepWeights: horizonClock.stepWeights,
         nPaths,
         currentPrice: anchorPrice,
         minS, maxS, bins,
@@ -1048,7 +1685,9 @@ function updateProbCharts() {
     });
 
     // Capture closure values for the callback
-    const _nCalDays = nCalDays;
+    const _horizonEffDays = horizonClock.effDays;
+    const _horizonEffYear = horizonClock.effYear;
+    const _horizonLabel = horizonLabel;
     const _portfolioIV = portfolioIV;
     const _currentPrice = anchorPrice;
     const _loc = loc;
@@ -1059,20 +1698,45 @@ function updateProbCharts() {
 
     _activeWorker.onmessage = (e) => {
         _activeWorker = null;
+        if (e.data && e.data.error) {
+            const message = 'Probability simulation unavailable because a pricing input is missing.';
+            _probChart && _probChart.drawEmpty(message);
+            _epnlChart && _epnlChart.drawEmpty(message);
+            _setExpectedPnLBadge(null);
+            _setCondExpectedPnLBadge('off', null);
+            _setInfoText(message);
+            return;
+        }
         const { tDensity, binCenters, binWidth, exactExpectedPnL } = e.data;
 
         // --- Normal / lognormal comparison (analytical, no sampling) ---
         const normalDensity = new Float64Array(bins);
         for (let i = 0; i < bins; i++) {
             normalDensity[i] = _lognormalDensity(
-                binCenters[i], _currentPrice, _portfolioIV, _loc, _nCalDays
+                binCenters[i], _currentPrice, _portfolioIV, _loc,
+                _horizonEffDays, _horizonEffYear
             );
         }
 
         // --- P&L curve at each bin centre ---
         const pnlValues = new Float64Array(bins);
+        let pnlUnavailable = false;
         for (let i = 0; i < bins; i++) {
-            pnlValues[i] = _computePortfolioPnLAtPrice(binCenters[i]);
+            const pnl = _computePortfolioPnLAtPrice(binCenters[i]);
+            if (!Number.isFinite(pnl)) {
+                pnlUnavailable = true;
+                break;
+            }
+            pnlValues[i] = pnl;
+        }
+        if (pnlUnavailable) {
+            const message = 'Probability simulation unavailable because a pricing input is missing.';
+            _probChart && _probChart.drawEmpty(message);
+            _epnlChart && _epnlChart.drawEmpty(message);
+            _setExpectedPnLBadge(null);
+            _setCondExpectedPnLBadge('off', null);
+            _setInfoText(message);
+            return;
         }
 
         // --- Regime-conditioned overlay (historical zone outcomes replayed
@@ -1080,7 +1744,8 @@ function updateProbCharts() {
         let condOverlay = null;
         if (_regimeZone !== 'off') {
             const zs = _getRegimeConditionalZs(_distributionSymbol, _regimeZone);
-            const em = 0.7979 * _currentPrice * _portfolioIV * Math.sqrt(_nCalDays / 365);
+            const em = 0.7979 * _currentPrice * _portfolioIV
+                * Math.sqrt(_horizonEffDays / _horizonEffYear);
             const built = zs
                 ? _buildConditionalOverlay(zs, _currentPrice, em, binCenters, _computePortfolioPnLAtPrice)
                 : null;
@@ -1103,7 +1768,7 @@ function updateProbCharts() {
         // --- Update badges ---
         _setExpectedPnLBadge(exactExpectedPnL);
         _setInfoText(
-            `1M paths | ${_nCalDays} cd | ` +
+            `1M paths | ${_horizonLabel} | ` +
             `Mean IV: ${(_portfolioIV * 100).toFixed(1)}%` +
             (_useRandomWalk ? ' | Random Walk' : '') +
             (_distributionSymbol !== _underlying ? ` | Dist Proxy: ${_distributionSymbol}` : '')
@@ -1114,6 +1779,8 @@ function updateProbCharts() {
         console.error('Monte Carlo Worker error:', err);
         _probChart && _probChart.drawEmpty('Simulation error — see console.');
         _epnlChart && _epnlChart.drawEmpty('');
+        _setExpectedPnLBadge(null);
+        _setCondExpectedPnLBadge('off', null);
         _setInfoText('Error during Monte Carlo simulation.');
         _activeWorker = null;
     };

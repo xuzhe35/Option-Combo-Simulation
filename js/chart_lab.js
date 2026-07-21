@@ -104,6 +104,26 @@
         return state.simulatedDate || state.baseDate || '';
     }
 
+    function buildProjectionPricingState(mainState, chartOnlyPrice) {
+        // Chart Lab owns a second socket for daily bars and its latest-price
+        // overlay.  That stream is not atomic with the portfolio websocket, so
+        // it must never replace the price while retaining mainState's quote
+        // timestamp/carry/futures observations.  Keep the argument explicit at
+        // this boundary to make accidental cross-stream blending testable.
+        void chartOnlyPrice;
+        return mainState && typeof mainState === 'object'
+            ? { ...mainState }
+            : mainState;
+    }
+
+    function hasFixedProjectionPrice(leg) {
+        if (!leg || leg.closePrice === null || leg.closePrice === '' || leg.closePrice === undefined) {
+            return false;
+        }
+        const price = parseFloat(leg.closePrice);
+        return Number.isFinite(price) && price >= 0;
+    }
+
     function populateGroupSelect() {
         const state = appState();
         const select = document.getElementById('chartLabGroupSelect');
@@ -156,6 +176,17 @@
         const quoteDate = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
             ? pricingContext.resolveQuoteDate(workingState)
             : workingState.baseDate;
+        const simulationTiming = pricingContext && typeof pricingContext.resolveSimulationTiming === 'function'
+            ? pricingContext.resolveSimulationTiming(workingState)
+            : null;
+        if (simulationTiming && simulationTiming.available === false) {
+            return {
+                points: [],
+                breakEvens: [],
+                projectionDate,
+                error: `Projection timing unavailable (${simulationTiming.status}).`,
+            };
+        }
         const anchor = pricingContext && typeof pricingContext.resolveAnchorUnderlyingPrice === 'function'
             ? pricingContext.resolveAnchorUnderlyingPrice(workingState, workingState.underlyingPrice)
             : workingState.underlyingPrice;
@@ -163,13 +194,49 @@
             ? registry.resolveUnderlyingProfile(state.underlyingSymbol)
             : null;
         const viewMode = group.viewMode || 'active';
+        const currentUnderlyingByLeg = [];
+        const timingContexts = [];
         const processed = group.legs.map((leg) => {
             const legCurrentUnderlying = pricingContext && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
                 ? pricingContext.resolveLegCurrentUnderlyingPrice(workingState, leg, anchor)
                 : workingState.underlyingPrice;
+            currentUnderlyingByLeg.push(legCurrentUnderlying);
             const legInterestRate = pricingContext && typeof pricingContext.resolveLegInterestRate === 'function'
                 ? pricingContext.resolveLegInterestRate(workingState, leg, workingState.interestRate)
                 : workingState.interestRate;
+            const observableGroup = leg._livePriceMode
+                ? { ...group, livePriceMode: leg._livePriceMode }
+                : group;
+            const observable = pricingContext
+                && typeof pricingContext.resolveObservableLegPrice === 'function'
+                ? pricingContext.resolveObservableLegPrice(workingState, observableGroup, leg)
+                : null;
+            const quotePricingInputs = pricingContext
+                && typeof pricingContext.resolveLegQuotePricingInputs === 'function'
+                ? pricingContext.resolveLegQuotePricingInputs(workingState, leg, {
+                    underlyingPrice: anchor,
+                    interestRate: workingState.interestRate,
+                })
+                : null;
+            const timingContext = {
+                quoteAsOf: workingState.liveQuoteAsOf,
+                allowLegacyQuoteCutoff: !workingState.marketDataMode,
+                targetAsOf: simulationTiming && simulationTiming.available
+                    ? simulationTiming.targetAsOf
+                    : null,
+                targetSource: simulationTiming && simulationTiming.source || null,
+                timingStatus: simulationTiming && simulationTiming.status || null,
+                observablePrice: observable && observable.available ? observable.price : null,
+                observablePriceSource: observable && observable.source || null,
+                observablePriceAsOf: observable && observable.quoteAsOf || null,
+                observablePriceFresh: observable && observable.fresh === true,
+                quotePricingInputsAvailable: quotePricingInputs && quotePricingInputs.available === true,
+                quotePricingInputStatus: quotePricingInputs && quotePricingInputs.status || null,
+                quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
+                quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
+                quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+            };
+            timingContexts.push(timingContext);
             return processLegData(
                 leg,
                 simulationDate,
@@ -179,11 +246,50 @@
                 legInterestRate,
                 leg._viewMode || viewMode,
                 profile,
-                workingState.marketDataMode
+                workingState.marketDataMode,
+                timingContext
             );
         });
+        const pricingCore = globalScope.OptionComboPricingCore;
+        const lambdaTimingFailure = processed.find(leg =>
+            leg && leg.timingStatus === 'implied_lambda_incomplete'
+        );
+        if (lambdaTimingFailure) {
+            const error = pricingCore
+                && typeof pricingCore.formatProjectionTimingFailure === 'function'
+                ? pricingCore.formatProjectionTimingFailure(
+                    lambdaTimingFailure.timingStatus,
+                    'Chart Lab projection',
+                    lambdaTimingFailure
+                )
+                : 'Chart Lab projection unavailable: required weekend/holiday implied λ data is missing.';
+            return { points: [], breakEvens: [], projectionDate, error };
+        }
+        const convergence = pricingCore
+            && typeof pricingCore.assessProjectionConvergence === 'function'
+            ? pricingCore.assessProjectionConvergence(workingState, group.legs, processed)
+            : { ready: true };
+        if (convergence.ready === false) {
+            const error = pricingCore
+                && typeof pricingCore.formatProjectionConvergenceFailure === 'function'
+                ? pricingCore.formatProjectionConvergenceFailure(
+                    convergence,
+                    'Chart Lab projection'
+                )
+                : 'Chart Lab projection unavailable: strict live BBO convergence inputs are missing.';
+            return { points: [], breakEvens: [], projectionDate, error };
+        }
         if (processed.some((leg) => !leg.isUnderlyingLeg && !leg.isExpired && !Number.isFinite(leg.simIV))) {
             return { points: [], breakEvens: [], projectionDate, error: 'Missing IV on one or more option legs.' };
+        }
+        if (group.legs.some((leg, index) => !hasFixedProjectionPrice(leg)
+            && (!Number.isFinite(currentUnderlyingByLeg[index]) || currentUnderlyingByLeg[index] <= 0))) {
+            return {
+                points: [],
+                breakEvens: [],
+                projectionDate,
+                error: 'Projection unavailable: bound futures quote is missing.',
+            };
         }
 
         const steps = 220;
@@ -192,13 +298,18 @@
         const breakEvens = [];
         let maxAbsPnl = 1;
         for (let i = 0; i < steps; i++) evals.push(minS + ((maxS - minS) * i / Math.max(1, steps - 1)));
+        if (Number.isFinite(anchor) && anchor >= minS && anchor <= maxS) {
+            evals.push(anchor);
+        }
         processed.forEach((leg) => {
             if (Number.isFinite(leg.strike) && leg.strike >= minS && leg.strike <= maxS) evals.push(leg.strike, leg.strike - 0.01, leg.strike + 0.01);
         });
-        [...new Set(evals)].sort((a, b) => a - b).forEach((price) => {
+        const sortedEvals = [...new Set(evals)].sort((a, b) => a - b);
+        for (const price of sortedEvals) {
             let simValue = 0;
             let costBasis = 0;
-            processed.forEach((processedLeg, index) => {
+            for (let index = 0; index < processed.length; index++) {
+                const processedLeg = processed[index];
                 const rawLeg = group.legs[index];
                 const scenarioUnderlying = pricingContext && typeof pricingContext.resolveLegScenarioUnderlyingPrice === 'function'
                     ? pricingContext.resolveLegScenarioUnderlyingPrice(workingState, rawLeg, price, anchor)
@@ -206,8 +317,17 @@
                 const legInterestRate = pricingContext && typeof pricingContext.resolveLegInterestRate === 'function'
                     ? pricingContext.resolveLegInterestRate(workingState, rawLeg, workingState.interestRate)
                     : workingState.interestRate;
+                if (!hasFixedProjectionPrice(rawLeg)
+                    && (!Number.isFinite(scenarioUnderlying) || scenarioUnderlying <= 0)) {
+                    return {
+                        points: [],
+                        breakEvens: [],
+                        projectionDate,
+                        error: 'Projection unavailable: pricing underlying is missing.',
+                    };
+                }
                 costBasis += processedLeg.costBasis;
-                simValue += processedLeg.posMultiplier * computeSimulatedPrice(
+                const simulatedPrice = computeSimulatedPrice(
                     processedLeg,
                     rawLeg,
                     scenarioUnderlying,
@@ -215,13 +335,23 @@
                     rawLeg._viewMode || viewMode,
                     simulationDate,
                     quoteDate,
-                    workingState.ivOffset
+                    workingState.ivOffset,
+                    timingContexts[index]
                 );
-            });
+                if (!Number.isFinite(simulatedPrice)) {
+                    return {
+                        points: [],
+                        breakEvens: [],
+                        projectionDate,
+                        error: 'Projection unavailable: a pricing input is missing.',
+                    };
+                }
+                simValue += processedLeg.posMultiplier * simulatedPrice;
+            }
             const pnl = simValue - costBasis;
             points.push({ price, pnl });
             maxAbsPnl = Math.max(maxAbsPnl, Math.abs(pnl));
-        });
+        }
         for (let i = 1; i < points.length; i++) {
             const left = points[i - 1];
             const right = points[i];
@@ -366,10 +496,7 @@
             return;
         }
 
-        const projectionState = {
-            ...state,
-            underlyingPrice: Number.isFinite(lab.currentPrice) ? lab.currentPrice : Number(state.underlyingPrice),
-        };
+        const projectionState = buildProjectionPricingState(state, lab.currentPrice);
         const group = activeGroup(projectionState);
         document.getElementById('chartLabSymbol').textContent = String(state.underlyingSymbol || 'SPY').trim().toUpperCase();
         document.getElementById('chartLabBarsSource').textContent = lab.barsSource;
@@ -714,6 +841,13 @@
         openSocket();
         draw();
     }
+
+    globalScope.OptionComboChartLab = Object.freeze({
+        _test: Object.freeze({
+            buildProjectionPricingState,
+            projectionCurve,
+        }),
+    });
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);

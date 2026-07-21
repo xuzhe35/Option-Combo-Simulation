@@ -5,6 +5,7 @@
 (function attachControlPanelUI(globalScope) {
     let _boundState = null;
     let _boundDeps = null;
+    let _primaryControlPanelDialogOpen = false;
 
     function _getRegistry() {
         return typeof globalScope.OptionComboProductRegistry === 'undefined'
@@ -21,6 +22,18 @@
     function _getDateUtils() {
         return globalScope.OptionComboDateUtils && typeof globalScope.OptionComboDateUtils === 'object'
             ? globalScope.OptionComboDateUtils
+            : null;
+    }
+
+    function _getPricingContext() {
+        return globalScope.OptionComboPricingContext && typeof globalScope.OptionComboPricingContext === 'object'
+            ? globalScope.OptionComboPricingContext
+            : null;
+    }
+
+    function _getMarketCurves() {
+        return globalScope.OptionComboMarketCurves && typeof globalScope.OptionComboMarketCurves === 'object'
+            ? globalScope.OptionComboMarketCurves
             : null;
     }
 
@@ -253,7 +266,15 @@
         if (_isHistoricalMode(state)) {
             return _resolveHistoricalReplayDate(state) || _normalizeDateStr(state && state.baseDate) || '';
         }
-        return _normalizeDateStr(state && state.baseDate) || _normalizeDateStr(state && state.simulatedDate) || '';
+        const pricingContext = _getPricingContext();
+        const resolved = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
+            ? _normalizeDateStr(pricingContext.resolveQuoteDate(state))
+            : '';
+        return resolved
+            || _normalizeDateStr(state && state.liveQuoteDate)
+            || _normalizeDateStr(state && state.baseDate)
+            || _normalizeDateStr(state && state.simulatedDate)
+            || '';
     }
 
     function _clearContainer(element) {
@@ -326,9 +347,11 @@
     function _hasComputedForwardRate(sample) {
         return sample
             && sample.isStale !== true
-            && sample.dailyCarry !== null
-            && sample.dailyCarry !== undefined
-            && Number.isFinite(parseFloat(sample.dailyCarry));
+            && Number.isFinite(parseFloat(
+                sample.carryRate !== null && sample.carryRate !== undefined
+                    ? sample.carryRate
+                    : sample.impliedRate
+            ));
     }
 
     function _describeForwardRateSampleState(sample, sampleRuntime) {
@@ -357,7 +380,7 @@
 
         const samples = Array.isArray(state.forwardRateSamples) ? state.forwardRateSamples : [];
         if (samples.length === 0) {
-            status.textContent = 'Add one or more reference samples to derive market-implied daily carry.';
+            status.textContent = 'Add one or more reference samples (expiry-matched call/put) to derive market-implied carry; index option projections remain unavailable without one.';
             return;
         }
 
@@ -382,7 +405,7 @@
             return;
         }
 
-        status.textContent = `Waiting for live call/put quotes to compute Forward Carry for ${samples.length} sample${samples.length === 1 ? '' : 's'}.`;
+        status.textContent = `Waiting for live call/put quotes to compute Forward Carry for ${samples.length} sample${samples.length === 1 ? '' : 's'}; affected index option projections remain unavailable.`;
     }
 
     function _syncForwardRatePanelCollapseUi(state, showPanel) {
@@ -431,38 +454,123 @@
         }
     }
 
-    function _syncPrimaryControlPanelCollapseUi(state) {
+    function _syncPrimaryControlPanelDialogUi(state) {
         const card = _getElement('primaryControlPanelCard');
-        const body = _getElement('primaryControlPanelBody');
+        const dialog = _getElement('simulationControlsDialog');
         const toggleBtn = _getElement('togglePrimaryControlPanelBtn');
         const toggleLabel = toggleBtn ? toggleBtn.querySelector('.control-panel-toggle-label') : null;
-        const collapsed = !!(state && state.primaryControlPanelCollapsed === true);
+        const isOpen = !!(_primaryControlPanelDialogOpen && dialog);
 
-        if (card) {
-            card.classList.toggle('is-collapsed', collapsed);
+        if (card && card.classList && typeof card.classList.toggle === 'function') {
+            card.classList.toggle('is-dialog-open', isOpen);
         }
 
-        _setHidden(body, collapsed);
+        _setHidden(dialog, !isOpen);
 
         if (toggleBtn) {
-            toggleBtn.title = collapsed
-                ? 'Expand Simulation Controls'
-                : 'Collapse Simulation Controls';
-            toggleBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+            toggleBtn.title = isOpen
+                ? 'Simulation Controls are open'
+                : 'Open Simulation Controls';
+            if (typeof toggleBtn.setAttribute === 'function') {
+                toggleBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+            }
         }
 
         if (toggleLabel) {
-            toggleLabel.textContent = collapsed ? 'Expand' : 'Collapse';
+            toggleLabel.textContent = isOpen ? 'Controls Open' : 'Open Controls';
         }
+
+        const doc = globalScope.document;
+        if (doc && doc.body && doc.body.classList
+            && typeof doc.body.classList.toggle === 'function') {
+            doc.body.classList.toggle('simulation-controls-dialog-open', isOpen);
+        }
+    }
+
+    function _resolveForwardCarrySnapshot() {
+        const liveQuotes = _getWsLiveQuotesApi();
+        if (!liveQuotes || typeof liveQuotes.getForwardCarrySnapshot !== 'function') {
+            return null;
+        }
+        try {
+            return liveQuotes.getForwardCarrySnapshot();
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    function _describeFuturesPoolPolicy(state, snapshot = null) {
+        const registry = _getRegistry();
+        const policy = registry && typeof registry.resolveForwardCarryPolicy === 'function'
+            ? registry.resolveForwardCarryPolicy(state && state.underlyingSymbol)
+            : null;
+        if (!policy || policy.pricingInputMode !== 'FOP') return '';
+        if (policy.carryReference) {
+            const referenceSymbol = String(policy.carryReference.symbol || 'cash index').toUpperCase();
+            const diagnosticReady = snapshot && snapshot.reference
+                && Number(snapshot.reference.price) > 0
+                && Array.isArray(snapshot.points)
+                && snapshot.points.some(point => point && point.carryRate !== null
+                    && point.carryRate !== undefined && Number.isFinite(Number(point.carryRate)));
+            return `Each option leg prices from its bound future; ${referenceSymbol} is diagnostics only${diagnosticReady ? ' (net carry ready)' : ' (net carry unavailable)'}; USD r only discounts.`;
+        }
+        return 'Exchange futures quotes are the Forward/curve; USD r only discounts and never generates Carry.';
+    }
+
+    function _formatFuturesPoolQuoteLine(entry, state, snapshot = null) {
+        const base = `Bid ${_formatQuoteValue(entry.bid, state.underlyingSymbol)} / Ask ${_formatQuoteValue(entry.ask, state.underlyingSymbol)} / Mark ${_formatQuoteValue(entry.mark, state.underlyingSymbol)}`;
+        const annotations = [];
+        const identityStatus = String(entry && entry.liveQuoteIdentityStatus || '').trim();
+        const identityReason = String(entry && entry.liveQuoteIdentityReason || '').trim();
+        if (identityStatus === 'pending') {
+            annotations.push(`Live quote pending${identityReason ? `: ${identityReason}` : ''}`);
+        } else if (identityStatus === 'rejected') {
+            annotations.push(`Live quote rejected${identityReason ? `: ${identityReason}` : ''}`);
+        } else if (identityStatus === 'unavailable') {
+            annotations.push(`Live quote unavailable${identityReason ? `: ${identityReason}` : ''}`);
+        }
+
+        if (snapshot && Array.isArray(snapshot.points)) {
+            const point = snapshot.points.find(candidate =>
+                String(candidate && candidate.futuresPoolEntryId || '') === String(entry && entry.id || '')
+            ) || snapshot.points.find(candidate =>
+                String(candidate && candidate.contractMonth || '') === String(entry && entry.contractMonth || '')
+            );
+            if (point && point.carryRate !== null && point.carryRate !== undefined
+                && Number.isFinite(Number(point.carryRate))) {
+                const referenceSymbol = String(snapshot.reference && snapshot.reference.symbol || 'spot').toUpperCase();
+                annotations.push(`Net carry vs ${referenceSymbol} ${(Number(point.carryRate) * 100).toFixed(2)}%`);
+            } else if (point && point.carryQuality && point.carryQuality.usable === false) {
+                annotations.push('Net carry unavailable');
+            }
+            if (point && point.annualizedRollSlope !== null && point.annualizedRollSlope !== undefined
+                && Number.isFinite(Number(point.annualizedRollSlope))) {
+                annotations.push(`Roll ann. ${(Number(point.annualizedRollSlope) * 100).toFixed(2)}%`);
+            } else if (point && annotations.length === 0
+                && point.relativeLogPriceToAnchor !== null && point.relativeLogPriceToAnchor !== undefined
+                && Number.isFinite(Number(point.relativeLogPriceToAnchor))) {
+                const relativeMove = Math.expm1(Number(point.relativeLogPriceToAnchor)) * 100;
+                if (Math.abs(relativeMove) > 0.0001) {
+                    annotations.push(`Curve vs anchor ${relativeMove >= 0 ? '+' : ''}${relativeMove.toFixed(2)}%`);
+                }
+            }
+        }
+        return annotations.length > 0 ? `${base} / ${annotations.join(' / ')}` : base;
     }
 
     function _renderFuturesPoolStatus(state) {
         const status = _getElement('futuresPoolStatus');
         if (!status) return;
 
+        const snapshot = _resolveForwardCarrySnapshot();
+        const policyText = _describeFuturesPoolPolicy(state, snapshot);
+        const setStatus = (message) => {
+            status.textContent = policyText ? `${message} ${policyText}` : message;
+        };
+
         const entries = Array.isArray(state.futuresPool) ? state.futuresPool : [];
         if (entries.length === 0) {
-            status.textContent = 'Add one or more futures contracts. Each FOP leg will be required to pick one.';
+            setStatus('Add one or more futures contracts. Each FOP leg will be required to pick one.');
             return;
         }
 
@@ -478,11 +586,33 @@
 
         const contractLabel = `futures contract${entries.length === 1 ? '' : 's'}`;
         if (configuredEntries === 0) {
-            status.textContent = `Enter YYYYMM contract months to configure ${entries.length} ${contractLabel}.`;
+            setStatus(`Enter YYYYMM contract months to configure ${entries.length} ${contractLabel}.`);
             return;
         }
 
-        status.textContent = `${configuredEntries}/${entries.length} ${contractLabel} configured; ${quotedEntries}/${configuredEntries} quoted.`;
+        let identityText = '';
+        if (state && state.marketDataMode === 'live') {
+            const verifiedEntries = entries.filter(entry =>
+                entry && entry.liveQuoteIdentityStatus === 'verified'
+                && entry.requestIdentityVerified === true
+            ).length;
+            const rejectedEntries = entries.filter(entry =>
+                entry && entry.liveQuoteIdentityStatus === 'rejected'
+            );
+            const pendingEntries = entries.filter(entry =>
+                entry && entry.liveQuoteIdentityStatus === 'pending'
+            ).length;
+            identityText = `; ${verifiedEntries}/${configuredEntries} current-generation identities verified`;
+            if (pendingEntries > 0) identityText += `; ${pendingEntries} pending`;
+            if (rejectedEntries.length > 0) {
+                const reasons = Array.from(new Set(
+                    rejectedEntries.map(entry => String(entry.liveQuoteIdentityReason || '').trim())
+                        .filter(Boolean)
+                ));
+                identityText += `; ${rejectedEntries.length} rejected${reasons.length ? ` (${reasons.join('; ')})` : ''}`;
+            }
+        }
+        setStatus(`${configuredEntries}/${entries.length} ${contractLabel} configured; ${quotedEntries}/${configuredEntries} quoted${identityText}.`);
     }
 
     function _renderForwardRateSamples(state, deps) {
@@ -491,6 +621,16 @@
         const addBtn = _getElement('addForwardRateSampleBtn');
         const toggleBtn = _getElement('toggleForwardRatePanelBtn');
         const showPanel = _getPricingInputMode(state.underlyingSymbol) === 'INDEX';
+        const quoteReferenceDate = _getQuoteReferenceDate(state);
+
+        (state.forwardRateSamples || []).forEach((sample) => {
+            if (sample && sample.expDate && quoteReferenceDate
+                && sample.daysToExpiryAsOf !== quoteReferenceDate
+                && typeof deps.diffDays === 'function') {
+                sample.daysToExpiry = Math.max(0, deps.diffDays(quoteReferenceDate, sample.expDate));
+                sample.daysToExpiryAsOf = quoteReferenceDate;
+            }
+        });
 
         if (typeof state.forwardRatePanelCollapsed !== 'boolean') {
             state.forwardRatePanelCollapsed = false;
@@ -510,10 +650,16 @@
                 state.forwardRateSamples.push({
                     id: typeof deps.generateId === 'function' ? deps.generateId() : _createLocalId('forward'),
                     daysToExpiry: 30,
-                    expDate: typeof deps.addDays === 'function' ? deps.addDays(state.baseDate, 30) : '',
+                    expDate: typeof deps.addDays === 'function' ? deps.addDays(_getQuoteReferenceDate(state), 30) : '',
+                    daysToExpiryAsOf: _getQuoteReferenceDate(state),
                     strike: state.underlyingPrice,
                     dailyCarry: null,
+                    carryRate: null,
                     impliedRate: null,
+                    forwardPrice: null,
+                    discountRate: null,
+                    discountFactor: null,
+                    quoteAsOf: '',
                     lastComputedAt: null,
                     isStale: false,
                 });
@@ -567,8 +713,9 @@
             daysInput.addEventListener('change', (e) => {
                 const parsed = Math.max(0, parseInt(e.target.value, 10) || 0);
                 sample.daysToExpiry = parsed;
+                sample.daysToExpiryAsOf = _getQuoteReferenceDate(state);
                 if (typeof deps.addDays === 'function') {
-                    sample.expDate = parsed > 0 ? deps.addDays(state.baseDate, parsed) : '';
+                    sample.expDate = parsed > 0 ? deps.addDays(_getQuoteReferenceDate(state), parsed) : '';
                 }
                 sample.isStale = sample.dailyCarry !== null || sample.impliedRate !== null;
                 _renderForwardRateSamples(state, deps);
@@ -589,8 +736,9 @@
             expiryInput.title = 'Reference option expiry used for the carry sample.';
             expiryInput.addEventListener('change', (e) => {
                 sample.expDate = e.target.value;
+                sample.daysToExpiryAsOf = _getQuoteReferenceDate(state);
                 if (typeof deps.diffDays === 'function' && sample.expDate) {
-                    sample.daysToExpiry = Math.max(0, deps.diffDays(state.baseDate, sample.expDate));
+                    sample.daysToExpiry = Math.max(0, deps.diffDays(_getQuoteReferenceDate(state), sample.expDate));
                 }
                 sample.isStale = sample.dailyCarry !== null || sample.impliedRate !== null;
                 _renderForwardRateSamples(state, deps);
@@ -639,23 +787,26 @@
                 : null;
             const snapshot = sampleRuntime && sampleRuntime.snapshot;
             const statusLabel = _describeForwardRateSampleState(sample, sampleRuntime);
-            const carryText = sample.dailyCarry !== null && sample.dailyCarry !== undefined
-                ? `daily=${Number(sample.dailyCarry).toFixed(6)}`
-                : 'daily=--';
-            const impliedRateText = sample.impliedRate !== null && sample.impliedRate !== undefined
-                ? `annual=${(Number(sample.impliedRate) * 100).toFixed(2)}%`
+            const carryRate = Number.isFinite(Number(sample.carryRate))
+                ? Number(sample.carryRate)
+                : Number(sample.impliedRate);
+            const carryText = Number.isFinite(carryRate)
+                ? `r-q=${(carryRate * 100).toFixed(2)}%`
+                : 'r-q=--';
+            const discountText = Number.isFinite(Number(sample.discountRate))
+                ? `r=${(Number(sample.discountRate) * 100).toFixed(2)}%`
                 : '';
             const timestampText = _formatForwardRateTimestamp(sample.lastComputedAt);
             const summarySegments = [carryText];
-            if (impliedRateText) {
-                summarySegments.push(impliedRateText);
+            if (discountText) {
+                summarySegments.push(discountText);
             }
             if (timestampText) {
                 summarySegments.push(`@ ${timestampText}`);
             }
             const metaSegments = [statusLabel];
             if (snapshot) {
-                metaSegments.push(`C=${snapshot.callMid.toFixed(2)} P=${snapshot.putMid.toFixed(2)} F~${snapshot.syntheticForward.toFixed(2)}`);
+                metaSegments.push(`C=${snapshot.callMid.toFixed(2)} P=${snapshot.putMid.toFixed(2)} F=${snapshot.syntheticForward.toFixed(2)}`);
             }
             metaSegments.push(summarySegments.join(' '));
             meta.textContent = metaSegments.join(' | ');
@@ -694,6 +845,14 @@
         const addBtn = _getElement('addFutureContractBtn');
         const toggleBtn = _getElement('toggleFuturesPoolPanelBtn');
         const showPanel = _getPricingInputMode(state.underlyingSymbol) === 'FOP';
+        const sessionLogic = globalScope.OptionComboSessionLogic;
+        const autoBindSingleFuture = () => !!(sessionLogic
+            && typeof sessionLogic.autoBindSingleFuturesPoolEntry === 'function'
+            && sessionLogic.autoBindSingleFuturesPoolEntry(state));
+
+        if (showPanel) {
+            autoBindSingleFuture();
+        }
 
         if (typeof state.futuresPoolPanelCollapsed !== 'boolean') {
             state.futuresPoolPanelCollapsed = false;
@@ -718,7 +877,13 @@
                     mark: null,
                     lastQuotedAt: null,
                 });
+                const bindingChanged = autoBindSingleFuture();
                 _renderFuturesPool(state, deps);
+                if (bindingChanged && typeof deps.renderGroups === 'function') {
+                    deps.renderGroups();
+                } else if (bindingChanged && typeof deps.updateDerivedValues === 'function') {
+                    deps.updateDerivedValues();
+                }
                 if (typeof deps.handleLiveSubscriptions === 'function') {
                     deps.handleLiveSubscriptions();
                 }
@@ -742,6 +907,7 @@
         }
 
         const entries = Array.isArray(state.futuresPool) ? state.futuresPool : [];
+        const carrySnapshot = _resolveForwardCarrySnapshot();
         const structureKey = entries.map(entry => String(entry && entry.id || '')).join('|');
         const canPatchInPlace = list.__futuresPoolStructureKey === structureKey
             && Array.isArray(list.children)
@@ -760,7 +926,7 @@
                     contractMonthInput.value = entry.contractMonth || '';
                 }
                 if (quoteDisplay) {
-                    quoteDisplay.textContent = `Bid ${_formatQuoteValue(entry.bid, state.underlyingSymbol)} / Ask ${_formatQuoteValue(entry.ask, state.underlyingSymbol)} / Mark ${_formatQuoteValue(entry.mark, state.underlyingSymbol)}`;
+                    quoteDisplay.textContent = _formatFuturesPoolQuoteLine(entry, state, carrySnapshot);
                 }
             });
             return;
@@ -788,6 +954,7 @@
             contractMonthInput.addEventListener('change', (e) => {
                 entry.contractMonth = String(e.target.value || '').replace(/\D/g, '').slice(0, 6);
                 contractMonthInput.value = entry.contractMonth;
+                autoBindSingleFuture();
                 _renderFuturesPool(state, deps);
                 if (typeof deps.handleLiveSubscriptions === 'function') {
                     deps.handleLiveSubscriptions();
@@ -802,7 +969,7 @@
             const quoteDisplay = document.createElement('div');
             quoteDisplay.className = 'text-muted small';
             quoteDisplay.style.lineHeight = '1.25';
-            quoteDisplay.textContent = `Bid ${_formatQuoteValue(entry.bid, state.underlyingSymbol)} / Ask ${_formatQuoteValue(entry.ask, state.underlyingSymbol)} / Mark ${_formatQuoteValue(entry.mark, state.underlyingSymbol)}`;
+            quoteDisplay.textContent = _formatFuturesPoolQuoteLine(entry, state, carrySnapshot);
             row.__quoteDisplay = quoteDisplay;
 
             const removeBtn = document.createElement('button');
@@ -893,6 +1060,16 @@
             state.underlyingContractMonth = defaultContractMonth;
         }
 
+        const sessionLogic = globalScope.OptionComboSessionLogic;
+        if (sessionLogic
+            && typeof sessionLogic.ensureInitialFuturesPoolEntry === 'function') {
+            sessionLogic.ensureInitialFuturesPoolEntry(
+                state,
+                _boundDeps && _boundDeps.generateId,
+                _getQuoteReferenceDate(state)
+            );
+        }
+
         const isEditingThisInput = typeof document !== 'undefined'
             && document.activeElement === underlyingContractMonthInput;
 
@@ -907,32 +1084,127 @@
         }
     }
 
+    function _resolveDiscountFallbackSummary(state) {
+        const pricingContext = _getPricingContext();
+        if (!pricingContext || typeof pricingContext.summarizeDiscountFallback !== 'function') {
+            return null;
+        }
+        return _runUiRefreshSafely('discountFallbackSummary', () =>
+            pricingContext.summarizeDiscountFallback(state, state && state.interestRate)) || null;
+    }
+
+    function _resolveLoadedCurveReference(curve) {
+        const marketCurves = _getMarketCurves();
+        if (!curve || curve.kind !== 'discount' || !marketCurves
+            || typeof marketCurves.resolveDiscount !== 'function') {
+            return null;
+        }
+        try {
+            const observation = marketCurves.resolveDiscount(curve, 1, {
+                maxExtrapolationDays: Math.max(31, Number(curve.maxExtrapolationDays) || 0),
+            });
+            return observation && observation.usable !== false
+                && Number.isFinite(Number(observation.zeroRate))
+                ? observation
+                : null;
+        } catch (_error) {
+            return null;
+        }
+    }
+
     function _syncInterestRateUI(state) {
         const irInput = _getElement('interestRate');
         const irDisplay = _getElement('interestRateDisplay');
+        const irLabelText = _getElement('interestRateLabelText');
+        const curveToggle = _getElement('useMarketDiscountCurve');
+        const loadLatestCurveBtn = _getElement('loadLatestDiscountCurveBtn');
+        const curveStatus = _getElement('discountCurveStatus');
         if (!irInput) return;
 
         const parsedRate = parseFloat(state && state.interestRate);
         const pct = Number.isFinite(parsedRate) ? parsedRate * 100 : 0;
-        irInput.value = pct.toFixed(2);
+        const useCurve = state && state.useMarketDiscountCurve !== false;
+        const curve = state && state.discountCurve && typeof state.discountCurve === 'object'
+            ? state.discountCurve
+            : null;
+        const curveReference = useCurve ? _resolveLoadedCurveReference(curve) : null;
+        const curveReferenceRate = curveReference
+            ? Number(curveReference.zeroRate)
+            : Number.NaN;
+        const curveReferenceReady = Number.isFinite(curveReferenceRate);
+        const displayedPct = curveReferenceReady ? curveReferenceRate * 100 : pct;
+        irInput.value = displayedPct.toFixed(2);
+        irInput.disabled = curveReferenceReady;
+        irInput.title = curveReferenceReady
+            ? 'Read-only 1-day reference from the loaded curve. Pricing resolves maturity-specific r(T) independently for every option leg.'
+            : (useCurve
+                ? 'Continuously compounded fallback used only when the market discount curve is unavailable or unusable.'
+                : 'Continuously compounded discount rate used for every option leg while the market curve is disabled.');
+        if (irLabelText) {
+            irLabelText.textContent = curveReferenceReady
+                ? 'Loaded Curve Short Rate r(1d) (%)'
+                : 'Discount Rate Fallback r (%)';
+        }
         if (irDisplay) {
-            irDisplay.textContent = `${pct.toFixed(2)}%`;
+            irDisplay.textContent = `${displayedPct.toFixed(2)}%`;
         }
-
-        const mode = _getPricingInputMode(state.underlyingSymbol);
-        const controlGroup = typeof irInput.closest === 'function' ? irInput.closest('.control-group') : null;
-
-        irInput.disabled = mode !== 'STK';
-        if (controlGroup && controlGroup.style) {
-            controlGroup.style.opacity = mode === 'STK' ? '' : '0.45';
+        if (curveToggle) {
+            curveToggle.checked = useCurve;
         }
-
-        if (mode === 'INDEX') {
-            irInput.title = 'INDEX pricing will come from Forward Carry samples. Manual rate entry is disabled for this family.';
-        } else if (mode === 'FOP') {
-            irInput.title = 'FOP pricing will come from the selected underlying futures. Manual rate entry is disabled for this family.';
-        } else {
-            irInput.title = '';
+        const curveRequestPending = state && state.discountCurveRequestPending === true;
+        const historicalMode = _isHistoricalMode(state);
+        if (loadLatestCurveBtn) {
+            loadLatestCurveBtn.disabled = historicalMode || curveRequestPending;
+            loadLatestCurveBtn.textContent = curveRequestPending
+                ? 'Loading Latest Yield Curve…'
+                : 'Reload Latest Yield Curve';
+            loadLatestCurveBtn.title = historicalMode
+                ? 'Historical replay uses a strict as-of curve and cannot load the latest live curve.'
+                : 'Reload the newest cached SOFR / Treasury curve from the WebSocket backend; refresh official sources if the backend considers it stale.';
+        }
+        if (curveStatus) {
+            const source = String(curve && curve.metadata && curve.metadata.source || '').trim();
+            const asOf = String(curve && curve.asOf || '').trim();
+            const sofrDate = String(curve && curve.sources && curve.sources.sofr
+                && curve.sources.sofr.effectiveDate || '').trim();
+            const treasuryDate = String(curve && curve.sources && curve.sources.treasury
+                && curve.sources.treasury.effectiveDate || '').trim();
+            const approximate = !!(curve && (
+                curve.isProxy === true
+                || (curve.metadata && curve.metadata.approximate === true)
+            ));
+            const error = String(state && state.discountCurveLastError || '').trim();
+            const responseStatus = String(state && state.discountCurveLastResponseStatus || '').trim();
+            if (curveRequestPending) {
+                curveStatus.textContent = 'Loading the latest yield curve from the WebSocket backend…';
+                curveStatus.title = '';
+            } else if (!useCurve) {
+                curveStatus.textContent = `Manual continuous discount rate active: ${pct.toFixed(2)}%.`;
+            } else if (curve && curve.kind === 'discount' && Array.isArray(curve.points) && curve.points.length > 0) {
+                const sourceLabel = source.includes('nyfed:sofr') && source.includes('treasury')
+                    ? 'SOFR <=30d / Treasury CMT long-end'
+                    : (source.includes('treasury') ? 'U.S. Treasury CMT' : (source || 'market'));
+                const fallbackSummary = _resolveDiscountFallbackSummary(state);
+                const fallbackWarning = fallbackSummary && fallbackSummary.fallbackCount > 0
+                    ? ` ⚠ ${fallbackSummary.fallbackCount} of ${fallbackSummary.legCount} open legs are discounting at the manual ${pct.toFixed(2)}% fallback (${fallbackSummary.reasons.map(entry => `${entry.reason}×${entry.count}`).join(', ')}).`
+                    : '';
+                const refreshWarning = error
+                    ? ` Refresh failed (${error}); keeping this curve until it becomes unusable, then ${pct.toFixed(2)}% fallback applies.`
+                    : (fallbackWarning ? '' : ' Manual value is fallback only.');
+                const loadConfirmation = state && state.discountCurveLastLoadWasManual === true
+                    ? `Latest yield curve loaded successfully${responseStatus ? ` (${responseStatus})` : ''}: `
+                    : '';
+                const referenceExplanation = curveReferenceReady
+                    ? ` Displayed short rate r(1d)=${displayedPct.toFixed(2)}%; each option leg is discounted with its maturity-specific r(T).`
+                    : '';
+                curveStatus.textContent = `${loadConfirmation}${sourceLabel} curve ${asOf || '(date unavailable)'}${approximate ? ' · discount proxy' : ''}.${referenceExplanation}${fallbackWarning}${refreshWarning}`;
+                curveStatus.title = sofrDate || treasuryDate
+                    ? `Snapshot ${curve.snapshotId || curve.metadata && curve.metadata.snapshotId || '--'}; SOFR effective ${sofrDate || '--'}; Treasury effective ${treasuryDate || '--'}. SOFR Averages are backward-looking diagnostics only.`
+                    : '';
+            } else {
+                curveStatus.textContent = `Unified discount curve unavailable${error ? `: ${error}` : ''}; using ${pct.toFixed(2)}% fallback.`;
+                curveStatus.title = '';
+            }
         }
 
         if (irDisplay) {
@@ -1181,6 +1453,7 @@
     function _syncSimTimeBasisUi(state, options = {}) {
         const basisSelect = _getElement('simTimeBasis');
         const weightInput = _getElement('simWeekendWeight');
+        const impliedReceived = _getElement('simImpliedLambdaReceived');
         const display = _getElement('simTimeBasisDisplay');
         if (!basisSelect) {
             return;
@@ -1190,16 +1463,200 @@
         const basis = sessionLogic.normalizeSimTimeBasis(state && state.simTimeBasis);
         const weight = sessionLogic.normalizeSimWeekendWeight(state && state.simWeekendWeight);
         const effectiveWeight = sessionLogic.resolveSimWeekendWeight(basis, weight);
+        const useImplied = state && state.simUseImpliedLambda === true;
+        const impliedEntry = state && state.simImpliedLambdaEntry ? state.simImpliedLambdaEntry : null;
+        const impliedCoverage = state && state.simImpliedLambdaCoverage
+            && typeof state.simImpliedLambdaCoverage === 'object'
+            ? state.simImpliedLambdaCoverage
+            : null;
+        const coverageStatus = String(impliedCoverage && impliedCoverage.status || '').trim();
+        const requiredDates = Array.isArray(impliedCoverage && impliedCoverage.requiredDates)
+            ? impliedCoverage.requiredDates.filter(Boolean)
+            : [];
+        const missingDates = Array.isArray(impliedCoverage && impliedCoverage.missingDates)
+            ? impliedCoverage.missingDates.filter(Boolean)
+            : [];
+        const affectedLegIds = Array.isArray(impliedCoverage && impliedCoverage.affectedLegIds)
+            ? impliedCoverage.affectedLegIds.filter(Boolean)
+            : [];
+        const coverageComplete = impliedCoverage
+            && (impliedCoverage.usable === true || impliedCoverage.ready === true)
+            && (coverageStatus === 'complete' || coverageStatus === 'ok');
+        const coverageNotRequired = coverageStatus === 'not_required';
+        const contractTimingUnavailable = coverageStatus === 'exact_contract_timing_missing';
+        const acceptedImpliedSource = impliedEntry && (
+            impliedEntry.varianceSource === 'straddle'
+            || (impliedEntry.varianceSource === 'vendor_iv'
+                && impliedEntry.quality
+                && impliedEntry.quality.estimationMode === 'best_effort'
+                && impliedEntry.quality.sourceQuoteEvidence === 'vendor_atm_iv_fallback')
+        );
+        const impliedActive = basis === 'weighted' && useImplied && coverageComplete && impliedEntry
+            && acceptedImpliedSource
+            && impliedEntry.quality && impliedEntry.quality.status === 'ok'
+            && impliedEntry.byDate && Object.keys(impliedEntry.byDate).length > 0;
+        const hasAcceptedImpliedEntry = useImplied && impliedEntry
+            && acceptedImpliedSource
+            && impliedEntry.quality && impliedEntry.quality.status === 'ok'
+            && impliedEntry.byDate && Object.keys(impliedEntry.byDate).length > 0;
+        const showReceivedIndicator = basis === 'weighted' && hasAcceptedImpliedEntry;
 
         basisSelect.value = basis;
         if (weightInput) {
-            weightInput.style.display = basis === 'weighted' ? '' : 'none';
+            // Scalar lambda remains available as a research/display lens, but
+            // it is never an accuracy-gate substitute for required V2 dates.
+            weightInput.style.display = basis === 'weighted' && !showReceivedIndicator ? '' : 'none';
+            weightInput.disabled = basis === 'weighted' && useImplied;
+            weightInput.title = useImplied
+                ? 'IVTS implied λ is enabled. Uncheck only for scalar research; live projections across closures will remain blocked.'
+                : 'Diagnostic weekend/holiday variance weight λ: 0 = trading-day clock, 1 = calendar clock. It cannot bypass required structured coverage.';
             if (options.keepWeightInputValue !== true) {
                 weightInput.value = weight.toFixed(2);
             }
         }
+        if (impliedReceived) {
+            impliedReceived.style.display = showReceivedIndicator ? 'flex' : 'none';
+            impliedReceived.textContent = '已经从IVTS接受到';
+            impliedReceived.title = showReceivedIndicator
+                ? '当前页面已经接收到并通过校验的 IVTS 结构化 implied λ；0.30 标量不参与当前计算。'
+                : '';
+        }
         if (display) {
-            display.textContent = `λ=${effectiveWeight.toFixed(2)}`;
+            if (basis === 'weighted' && useImplied) {
+                if (impliedActive) {
+                    display.textContent = `λ=IVTS·${requiredDates.length}d covered`;
+                } else if (coverageNotRequired) {
+                    display.textContent = 'λ not required';
+                } else if (contractTimingUnavailable) {
+                    display.textContent = 'λ pending contract timing';
+                } else {
+                    display.textContent = 'λ=IVTS unavailable';
+                }
+            } else {
+                display.textContent = impliedCoverage && impliedCoverage.required === true
+                    && impliedCoverage.ready !== true
+                    ? `λ=${effectiveWeight.toFixed(2)} diagnostic · projection blocked`
+                    : `λ=${effectiveWeight.toFixed(2)}`;
+            }
+        }
+
+        const impliedLabel = _getElement('simImpliedLambdaLabel');
+        const impliedCheckbox = _getElement('simUseImpliedLambda');
+        const impliedStatus = _getElement('simImpliedLambdaStatus');
+        if (impliedLabel) {
+            impliedLabel.style.display = basis === 'weighted' ? '' : 'none';
+        }
+        if (impliedCheckbox) {
+            impliedCheckbox.checked = useImplied;
+        }
+        if (impliedStatus) {
+            impliedStatus.style.color = '';
+            impliedStatus.style.fontWeight = '';
+            if (basis !== 'weighted') {
+                impliedStatus.textContent = useImplied
+                    ? `IVTS V2 is paused while ${basis} time is selected`
+                    : '';
+            } else if (!useImplied) {
+                impliedStatus.textContent = `Scalar λ=${weight.toFixed(2)} is explicitly selected.`;
+            } else if (coverageNotRequired) {
+                impliedStatus.style.color = '#4b5563';
+                impliedStatus.textContent = 'No implied λ is required: no open option leg crosses a weekend or full-day exchange closure from the quote date to expiry.';
+            } else if (contractTimingUnavailable) {
+                const identity = state && state.underlyingContractMonth
+                    ? `${state.underlyingSymbol} ${state.underlyingContractMonth}`
+                    : ((state && state.underlyingSymbol) || '--');
+                const legsText = affectedLegIds.length
+                    ? ` Affected open legs: ${affectedLegIds.join(', ')}.`
+                    : '';
+                impliedStatus.style.color = '#b45309';
+                impliedStatus.style.fontWeight = '600';
+                impliedStatus.textContent = `Exact IB contract timing is unavailable for ${identity}.${legsText} This timing gate is independent of weekend/holiday λ; closure coverage has not been evaluated yet.`;
+            } else if (impliedActive) {
+                const median = Number.isFinite(impliedEntry.medianLambda)
+                    ? impliedEntry.medianLambda.toFixed(2)
+                    : '--';
+                const asOf = impliedEntry.quoteAsOf || impliedEntry.anchorDate || '';
+                const identity = impliedEntry.underlyingContractMonth
+                    ? `${impliedEntry.symbol} ${impliedEntry.underlyingContractMonth}`
+                    : impliedEntry.symbol;
+                const coverage = Number.isFinite(impliedEntry.weekendCount)
+                    ? `${impliedEntry.weekendCount} weekend${impliedEntry.weekendCount === 1 ? '' : 's'} (${Object.keys(impliedEntry.byDate).length} dates)`
+                    : `${Object.keys(impliedEntry.byDate).length} dates`;
+                const range = impliedEntry.coverageStart && impliedEntry.coverageEnd
+                    ? `${impliedEntry.coverageStart}→${impliedEntry.coverageEnd}`
+                    : 'covered dates only';
+                const methodology = impliedEntry.methodology && typeof impliedEntry.methodology === 'object'
+                    ? impliedEntry.methodology
+                    : {};
+                const model = methodology.pricingModel === 'black76'
+                    ? 'Black-76'
+                    : (methodology.pricingModel === 'bsm-spot' ? 'BSM' : 'model unknown');
+                const bestEffort = impliedEntry.quality
+                    && impliedEntry.quality.estimationMode === 'best_effort';
+                const estimateLabel = bestEffort
+                    ? `best-effort current-BBO estimate${Number.isFinite(impliedEntry.quality.usableExpiryCount)
+                        ? ` from ${impliedEntry.quality.usableExpiryCount} usable expiries`
+                        : ''}${Number.isFinite(impliedEntry.quality.skippedExpiryCount)
+                        ? ` (${impliedEntry.quality.skippedExpiryCount} skipped)`
+                        : ''}`
+                    : 'strict coherent snapshot';
+                const discounting = methodology.discounting
+                    && typeof methodology.discounting === 'object'
+                    ? methodology.discounting
+                    : {};
+                let rate = Number.isFinite(methodology.interestRate)
+                    ? `, fallback r=${(methodology.interestRate * 100).toFixed(2)}%`
+                    : '';
+                if (Number(discounting.curveRowCount) > 0) {
+                    rate = `, ${discounting.isProxy ? 'reference discount proxy' : 'discount curve'} r(T)`
+                        + `${discounting.curveAsOf ? ` ${discounting.curveAsOf}` : ''}`
+                        + `${Number(discounting.fallbackRowCount) > 0
+                            ? ` + ${discounting.fallbackRowCount} fallback row(s)`
+                            : ''}`;
+                }
+                impliedStatus.style.color = '#15803d';
+                impliedStatus.textContent = `${identity}: coverage complete for ${requiredDates.length} required non-trading date${requiredDates.length === 1 ? '' : 's'} · anchor ${impliedEntry.anchorDate || '--'}, ${coverage}, ${range}, median ${median}${asOf ? ` @ ${asOf}` : ''} · V2 straddle ${estimateLabel} (${model}${rate})`;
+            } else {
+                const identity = state && state.underlyingContractMonth
+                    ? `${state.underlyingSymbol} ${state.underlyingContractMonth}`
+                    : ((state && state.underlyingSymbol) || '--');
+                const datesToList = missingDates.length ? missingDates : requiredDates;
+                const datesText = datesToList.length
+                    ? ` Missing non-trading dates: ${datesToList.join(', ')}.`
+                    : '';
+                const legsText = affectedLegIds.length
+                    ? ` Affected open legs: ${affectedLegIds.join(', ')}.`
+                    : '';
+                const reasonByStatus = {
+                    incomplete_coverage: 'coverage is incomplete',
+                    incomplete: 'coverage is incomplete',
+                    identity_mismatch: 'the symbol or quote-date identity does not match the portfolio',
+                    calendar_mismatch: 'the curve uses a different exchange calendar',
+                    pricing_model_mismatch: 'the curve uses a different pricing model',
+                    futures_month_mismatch: 'the curve was solved on a different underlying futures month',
+                    multiple_futures_months: 'open FOP legs span multiple futures months; one λ curve cannot cover them',
+                    calendar_unavailable: 'the required exchange calendar cannot be verified',
+                    weighted_basis_required: 'live closure-crossing projections require Weighted weekends (λ)',
+                    implied_lambda_disabled: 'structured IVTS implied λ is disabled but is required across closures',
+                    missing_entry: 'no fresh matching V2 curve is loaded',
+                    missing: 'no fresh matching V2 curve is loaded',
+                    quote_timing_unavailable: 'the live quote timestamp is unavailable',
+                    simulation_timing_unavailable: 'the simulation target timestamp is unavailable',
+                    ambiguous_near_leg_cutoff: 'near legs have different expiry cutoffs',
+                    deferred_settlement_fixing_unsupported: 'the target leg settles from a later special fixing, not the last-trade spot value',
+                    timing_runtime_unavailable: 'the exact-time pricing runtime is unavailable',
+                };
+                const reason = reasonByStatus[coverageStatus] || 'coverage has not been validated';
+                const closureCoverageRequired = requiredDates.length > 0
+                    || missingDates.length > 0
+                    || (impliedCoverage && impliedCoverage.required === true);
+                const closureTail = closureCoverageRequired
+                    ? ` Live projections that cross a weekend or full holiday require complete structured coverage; scalar λ=${weight.toFixed(2)} is diagnostic only and cannot bypass this gate.`
+                    : '';
+                impliedStatus.style.color = '#dc2626';
+                impliedStatus.style.fontWeight = '600';
+                impliedStatus.textContent = `Implied λ unavailable for ${identity}: ${reason}.${datesText}${legsText}${closureTail}`;
+            }
         }
     }
 
@@ -1264,6 +1721,7 @@
         const simDateInput = _getElement('simulatedDate');
         const dpSlider = _getElement('daysPassedSlider');
         const dpDisplay = _getElement('daysPassedDisplay');
+        const simulatedDateHint = _getElement('simulatedDateHint');
 
         if (!simDateInput || !dpSlider || !dpDisplay) {
             return;
@@ -1286,22 +1744,30 @@
             return;
         }
 
-        simDateInput.min = state.baseDate || '';
+        const quoteReferenceDate = _getQuoteReferenceDate(state);
+        let effectiveSimulationDate = _normalizeDateStr(state && state.simulatedDate) || quoteReferenceDate;
+        if (quoteReferenceDate && effectiveSimulationDate
+            && _compareDates(effectiveSimulationDate, quoteReferenceDate) < 0) {
+            effectiveSimulationDate = quoteReferenceDate;
+            state.simulatedDate = effectiveSimulationDate;
+        }
+
+        simDateInput.min = quoteReferenceDate;
         simDateInput.max = '';
         const dateUtils = _getDateUtils();
         const days = dateUtils
             && typeof dateUtils.diffDays === 'function'
-            ? dateUtils.diffDays(state.baseDate, state.simulatedDate)
+            ? dateUtils.diffDays(quoteReferenceDate, effectiveSimulationDate)
             : 0;
         const calendarContext = _resolveCalendarContext(state);
         const tradDays = dateUtils
             && typeof dateUtils.calendarToTradingDays === 'function'
             ? dateUtils.calendarToTradingDays(
-                state.baseDate, state.simulatedDate,
+                quoteReferenceDate, effectiveSimulationDate,
                 calendarContext.calendarKey, calendarContext.observedTradingDates
             )
             : null;
-        simDateInput.value = state.simulatedDate || state.baseDate || '';
+        simDateInput.value = effectiveSimulationDate || quoteReferenceDate;
         dpSlider.min = '0';
         if (!dpSlider.max || parseInt(dpSlider.max, 10) < days) {
             dpSlider.max = String(Math.max(days, 365));
@@ -1310,11 +1776,82 @@
         dpDisplay.textContent = tradDays === null
             ? `calendar unavailable / +${days} cd`
             : `+${tradDays} td / +${days} cd`;
+
+        // A civil date is not a sufficiently precise valuation target for a
+        // front-leg expiry. Surface the actual portfolio-global instant that
+        // pricing uses so a product-profile fallback cannot look as precise as
+        // an IB ContractDetails cutoff.
+        if (simulatedDateHint) {
+            const timing = state && state.simulationTiming;
+            simulatedDateHint.style.color = '';
+            simulatedDateHint.style.fontWeight = '';
+            simulatedDateHint.title = '';
+            if (!timing || typeof timing !== 'object') {
+                simulatedDateHint.hidden = true;
+                simulatedDateHint.textContent = '';
+            } else if (timing.available !== true || !timing.targetAsOf) {
+                const missingIds = Array.isArray(timing.missingContractTimingLegIds)
+                    ? timing.missingContractTimingLegIds.filter(Boolean)
+                    : [];
+                const deferredIds = Array.isArray(timing.deferredSettlementLegIds)
+                    ? timing.deferredSettlementLegIds.filter(Boolean)
+                    : [];
+                const missingText = missingIds.length
+                    ? ` Missing contract timing for leg${missingIds.length === 1 ? '' : 's'}: ${missingIds.join(', ')}.`
+                    : '';
+                const settlementText = timing.status === 'deferred_settlement_fixing_unsupported'
+                    ? ` The payoff${deferredIds.length ? ` for ${deferredIds.join(', ')}` : ''} is not known at the last-trade cutoff because settlement uses a later special fixing.`
+                    : '';
+                simulatedDateHint.hidden = false;
+                simulatedDateHint.style.color = '#dc2626';
+                simulatedDateHint.style.fontWeight = '600';
+                simulatedDateHint.textContent = `Exact simulation instant unavailable (${timing.status || 'unknown'}); projection fails closed.${missingText}${settlementText}`;
+                simulatedDateHint.title = missingIds.length
+                    ? 'Keep TWS connected and resubscribe until qualified ContractDetails is returned for every listed leg.'
+                    : 'The projection is intentionally unavailable rather than using an unsafe time or settlement fallback.';
+            } else {
+                const targetMs = Date.parse(timing.targetAsOf);
+                const quoteMs = Date.parse(String(state && state.liveQuoteAsOf || ''));
+                const hours = Number.isFinite(targetMs) && Number.isFinite(quoteMs)
+                    ? Math.max(0, (targetMs - quoteMs) / 3600000)
+                    : null;
+                const hoursText = Number.isFinite(hours)
+                    ? ` · ${hours.toFixed(hours < 10 ? 2 : 1)} calendar hours from quote`
+                    : '';
+                const source = String(timing.source || 'exact').trim();
+                // Only a near-leg profile cutoff is a degraded stand-in: a leg
+                // really does expire on the target date and IB simply has not
+                // supplied its last-trade instant yet, so waiting helps.  A plain
+                // product-profile cutoff means no open leg expires that day at
+                // all, so there is no contract-level cutoff to wait for and the
+                // product close *is* the definition of the instant.
+                const profileFallback = source === 'near-leg-profile-cutoff';
+                const sourceText = source === 'near-leg-contract-cutoff'
+                    ? 'IB near-leg cutoff'
+                    : (source === 'live-quote'
+                        ? 'live quote instant'
+                        : (source === 'explicit'
+                            ? 'explicit instant'
+                            : 'product-profile cutoff'));
+                simulatedDateHint.hidden = false;
+                simulatedDateHint.style.color = profileFallback ? '#b45309' : '#4b5563';
+                simulatedDateHint.textContent = `Pricing target: ${timing.targetAsOf} (${sourceText})${hoursText}.`
+                    + (profileFallback
+                        ? ' Exact IB last-trade time is not yet available; the product fallback is in use.'
+                        : '');
+                simulatedDateHint.title = profileFallback
+                    ? 'Keep TWS connected until ContractDetails supplies the contract-specific last-trade cutoff.'
+                    : (source === 'product-profile-cutoff'
+                        ? 'No open leg expires on this date, so the product close defines the instant. '
+                            + 'All live legs are valued there.'
+                        : 'All live legs are valued at this same instant.');
+            }
+        }
     }
 
     function refreshBoundDynamicControls() {
         if (!_boundState) return;
-        _syncPrimaryControlPanelCollapseUi(_boundState);
+        _syncPrimaryControlPanelDialogUi(_boundState);
         _syncMarketDataModeUI(_boundState);
         _syncGreeksUi(_boundState);
         _syncSimTimeBasisUi(_boundState);
@@ -1371,6 +1908,7 @@
             addDays,
             diffDays,
             calendarToTradingDays,
+            requestDiscountCurveSnapshot,
         } = deps;
 
         _boundState = state;
@@ -1383,6 +1921,7 @@
             generateId,
             addDays,
             diffDays,
+            requestDiscountCurveSnapshot,
         };
 
         const symInput = _getElement('underlyingSymbol');
@@ -1404,6 +1943,8 @@
                     ? 'historical'
                     : 'live';
                 state.marketDataMode = nextMode;
+                state.liveQuoteDate = '';
+                state.liveQuoteAsOf = '';
                 if (nextMode === 'historical') {
                     state.historicalQuoteDate = state.historicalQuoteDate || state.baseDate || state.simulatedDate || '';
                     state.simulatedDate = _coerceHistoricalSimulationDate(
@@ -1482,6 +2023,12 @@
             }
 
             const symbolChanged = normalizedSymbol !== state.underlyingSymbol;
+            if (symbolChanged) {
+                state.liveQuoteDate = '';
+                state.liveQuoteAsOf = '';
+                state.simImpliedLambdaEntry = null;
+                state.simImpliedLambdaFileEntry = null;
+            }
             state.underlyingSymbol = normalizedSymbol;
             symInput.value = state.underlyingSymbol;
             _syncUnderlyingContractMonthUI(state, symbolChanged);
@@ -1531,13 +2078,22 @@
         if (underlyingContractMonthInput) {
             underlyingContractMonthInput.addEventListener('input', (e) => {
                 const cleaned = String(e.target.value || '').replace(/\D/g, '').slice(0, 6);
+                if (cleaned !== state.underlyingContractMonth) {
+                    state.simImpliedLambdaEntry = null;
+                    state.simImpliedLambdaFileEntry = null;
+                }
                 state.underlyingContractMonth = cleaned;
                 underlyingContractMonthInput.value = cleaned;
             });
             underlyingContractMonthInput.addEventListener('change', (e) => {
                 const cleaned = String(e.target.value || '').replace(/\D/g, '').slice(0, 6);
+                const contractMonthChanged = cleaned !== state.underlyingContractMonth;
                 state.underlyingContractMonth = cleaned;
                 underlyingContractMonthInput.value = cleaned;
+                if (contractMonthChanged) {
+                    state.simImpliedLambdaEntry = null;
+                    state.simImpliedLambdaFileEntry = null;
+                }
                 updateDerivedValues();
                 handleLiveSubscriptions();
             });
@@ -1575,7 +2131,7 @@
         const settleAllBtn = _getElement('historicalSettleAllBtn');
 
         simDateInput.value = state.simulatedDate;
-        simDateInput.min = state.baseDate;
+        simDateInput.min = _getQuoteReferenceDate(state);
 
         function updateReplayDate(newDateStr) {
             if (_isHistoricalMode(state)) {
@@ -1591,15 +2147,16 @@
                 return;
             }
 
-            if (new Date(newDateStr) < new Date(state.baseDate)) {
-                newDateStr = state.baseDate;
-                simDateInput.value = state.baseDate;
+            const quoteReferenceDate = _getQuoteReferenceDate(state);
+            if (_compareDates(newDateStr, quoteReferenceDate) < 0) {
+                newDateStr = quoteReferenceDate;
+                simDateInput.value = quoteReferenceDate;
             }
             state.simulatedDate = newDateStr;
-            const days = diffDays(state.baseDate, state.simulatedDate);
+            const days = diffDays(quoteReferenceDate, state.simulatedDate);
             const calendarContext = _resolveCalendarContext(state);
             const tradDays = calendarToTradingDays(
-                state.baseDate, state.simulatedDate,
+                quoteReferenceDate, state.simulatedDate,
                 calendarContext.calendarKey, calendarContext.observedTradingDates
             );
             dpSlider.value = days;
@@ -1634,11 +2191,12 @@
             }
 
             const dNum = parseInt(e.target.value, 10);
-            state.simulatedDate = addDays(state.baseDate, dNum);
+            const quoteReferenceDate = _getQuoteReferenceDate(state);
+            state.simulatedDate = addDays(quoteReferenceDate, dNum);
             simDateInput.value = state.simulatedDate;
             const calendarContext = _resolveCalendarContext(state);
             const tradDays = calendarToTradingDays(
-                state.baseDate, state.simulatedDate,
+                quoteReferenceDate, state.simulatedDate,
                 calendarContext.calendarKey, calendarContext.observedTradingDates
             );
             const dpDisplay = _getElement('daysPassedDisplay');
@@ -1689,34 +2247,136 @@
 
         const irInput = _getElement('interestRate');
         const irDisplay = _getElement('interestRateDisplay');
-        irInput.addEventListener('input', (e) => {
-            const pct = parseFloat(e.target.value);
-            state.interestRate = pct / 100.0;
-            irDisplay.textContent = `${pct.toFixed(2)}%`;
-            updateDerivedValues();
-        });
+        const useMarketDiscountCurveInput = _getElement('useMarketDiscountCurve');
+        const loadLatestDiscountCurveBtn = _getElement('loadLatestDiscountCurveBtn');
+        if (irInput) {
+            irInput.addEventListener('input', (e) => {
+                const pct = parseFloat(e.target.value);
+                if (!Number.isFinite(pct)) return;
+                state.interestRate = pct / 100.0;
+                if (irDisplay) irDisplay.textContent = `${pct.toFixed(2)}%`;
+                _syncInterestRateUI(state);
+                updateDerivedValues();
+            });
+        }
+        if (useMarketDiscountCurveInput) {
+            useMarketDiscountCurveInput.addEventListener('change', (e) => {
+                state.useMarketDiscountCurve = e.target.checked === true;
+                _syncInterestRateUI(state);
+                if (state.useMarketDiscountCurve
+                    && _boundDeps
+                    && typeof _boundDeps.requestDiscountCurveSnapshot === 'function') {
+                    _boundDeps.requestDiscountCurveSnapshot();
+                }
+                updateDerivedValues();
+            });
+        }
+        if (loadLatestDiscountCurveBtn) {
+            loadLatestDiscountCurveBtn.addEventListener('click', () => {
+                state.useMarketDiscountCurve = true;
+                if (useMarketDiscountCurveInput) {
+                    useMarketDiscountCurveInput.checked = true;
+                }
+                const requested = !!(_boundDeps
+                    && typeof _boundDeps.requestDiscountCurveSnapshot === 'function'
+                    && _boundDeps.requestDiscountCurveSnapshot({
+                        manual: true,
+                        refresh: true,
+                    }));
+                if (!requested && !String(state.discountCurveLastError || '').trim()) {
+                    state.discountCurveLastError = 'The latest yield curve request could not be sent.';
+                }
+                _syncInterestRateUI(state);
+                updateDerivedValues();
+            });
+        }
 
         const ivInput = _getElement('ivOffset');
         const ivSlider = _getElement('ivOffsetSlider');
         const ivDisplay = _getElement('ivOffsetDisplay');
         const toggleGreeksBtn = _getElement('toggleGreeksBtn');
         const togglePrimaryControlPanelBtn = _getElement('togglePrimaryControlPanelBtn');
+        const simulationControlsDialog = _getElement('simulationControlsDialog');
         const allowLiveComboOrdersInput = _getElement('allowLiveComboOrders');
         const liveComboOrderAccountSelect = _getElement('liveComboOrderAccountSelect');
 
-        if (typeof state.primaryControlPanelCollapsed !== 'boolean') {
+        const doc = globalScope.document;
+        if (simulationControlsDialog && doc && doc.body
+            && simulationControlsDialog.parentNode !== doc.body
+            && typeof doc.body.appendChild === 'function') {
+            doc.body.appendChild(simulationControlsDialog);
+        }
+
+        if (simulationControlsDialog) {
+            // A persisted sidebar-collapse preference must never reopen a modal
+            // during bootstrap or JSON import. The dialog always starts closed.
+            state.primaryControlPanelCollapsed = true;
+            _primaryControlPanelDialogOpen = false;
+        } else if (typeof state.primaryControlPanelCollapsed !== 'boolean') {
             state.primaryControlPanelCollapsed = false;
         }
-        _syncPrimaryControlPanelCollapseUi(state);
+        _syncPrimaryControlPanelDialogUi(state);
+
+        const closeSimulationControlsDialog = (restoreFocus = true) => {
+            if (!simulationControlsDialog) return;
+            state.primaryControlPanelCollapsed = true;
+            _primaryControlPanelDialogOpen = false;
+            _syncPrimaryControlPanelDialogUi(state);
+            const returnFocus = simulationControlsDialog.__simulationControlsReturnFocus;
+            simulationControlsDialog.__simulationControlsReturnFocus = null;
+            if (restoreFocus && returnFocus && typeof returnFocus.focus === 'function') {
+                returnFocus.focus();
+            }
+        };
+
+        const openSimulationControlsDialog = () => {
+            if (!simulationControlsDialog) return;
+            simulationControlsDialog.__simulationControlsReturnFocus = doc && doc.activeElement
+                ? doc.activeElement
+                : togglePrimaryControlPanelBtn;
+            state.primaryControlPanelCollapsed = true;
+            _primaryControlPanelDialogOpen = true;
+            _syncPrimaryControlPanelDialogUi(state);
+            const panel = typeof simulationControlsDialog.querySelector === 'function'
+                ? simulationControlsDialog.querySelector('.simulation-controls-dialog-panel')
+                : null;
+            if (panel && typeof panel.focus === 'function') {
+                panel.focus();
+            }
+        };
 
         if (togglePrimaryControlPanelBtn
             && typeof togglePrimaryControlPanelBtn.addEventListener === 'function'
             && togglePrimaryControlPanelBtn.__primaryControlPanelBound !== true) {
             togglePrimaryControlPanelBtn.__primaryControlPanelBound = true;
-            togglePrimaryControlPanelBtn.addEventListener('click', () => {
-                state.primaryControlPanelCollapsed = !state.primaryControlPanelCollapsed;
-                _syncPrimaryControlPanelCollapseUi(state);
-            });
+            togglePrimaryControlPanelBtn.addEventListener('click', openSimulationControlsDialog);
+        }
+
+        if (simulationControlsDialog
+            && simulationControlsDialog.__simulationControlsDialogBound !== true) {
+            simulationControlsDialog.__simulationControlsDialogBound = true;
+            if (typeof simulationControlsDialog.querySelectorAll === 'function') {
+                simulationControlsDialog.querySelectorAll('.simulationControlsDialogCloseBtn').forEach((button) => {
+                    button.addEventListener('click', () => closeSimulationControlsDialog(true));
+                });
+            }
+            if (typeof simulationControlsDialog.addEventListener === 'function') {
+                simulationControlsDialog.addEventListener('click', (event) => {
+                    if (event && event.target === simulationControlsDialog) {
+                        closeSimulationControlsDialog(true);
+                    }
+                });
+            }
+            if (doc && typeof doc.addEventListener === 'function'
+                && doc.__simulationControlsEscapeBound !== true) {
+                doc.__simulationControlsEscapeBound = true;
+                doc.addEventListener('keydown', (event) => {
+                    if (event && event.key === 'Escape'
+                        && _primaryControlPanelDialogOpen) {
+                        closeSimulationControlsDialog(true);
+                    }
+                });
+            }
         }
 
         function updateIv(val) {
@@ -1744,14 +2404,104 @@
             _syncSimTimeBasisUi(state);
             timeBasisSelect.addEventListener('change', (e) => {
                 state.simTimeBasis = sessionLogic.normalizeSimTimeBasis(e.target.value);
-                _syncSimTimeBasisUi(state);
+                // Derive before syncing so the implied-lambda status reflects
+                // the entry peeked under the new basis.
                 updateDerivedValues();
+                _syncSimTimeBasisUi(state);
             });
             if (weekendWeightInput) {
                 weekendWeightInput.addEventListener('input', (e) => {
                     state.simWeekendWeight = sessionLogic.normalizeSimWeekendWeight(e.target.value);
                     _syncSimTimeBasisUi(state, { keepWeightInputValue: true });
                     updateDerivedValues();
+                });
+            }
+            const useImpliedLambdaInput = _getElement('simUseImpliedLambda');
+            if (useImpliedLambdaInput) {
+                useImpliedLambdaInput.addEventListener('change', (e) => {
+                    state.simUseImpliedLambda = e.target.checked === true;
+                    // Derive first so state.simImpliedLambdaEntry reflects the
+                    // freshly peeked handoff before the status line renders.
+                    updateDerivedValues();
+                    _syncSimTimeBasisUi(state);
+                });
+            }
+            const impliedLambdaLoadBtn = _getElement('simImpliedLambdaLoadBtn');
+            const impliedLambdaFileInput = _getElement('simImpliedLambdaFileInput');
+            if (impliedLambdaLoadBtn && impliedLambdaFileInput) {
+                impliedLambdaLoadBtn.addEventListener('click', () => {
+                    impliedLambdaFileInput.click();
+                });
+                impliedLambdaFileInput.addEventListener('change', async (e) => {
+                    const file = e.target.files && e.target.files[0];
+                    e.target.value = '';
+                    if (!file) {
+                        return;
+                    }
+                    const handoff = globalScope.OptionComboImpliedLambdaHandoff;
+                    let entry = null;
+                    let importMessage = '';
+                    try {
+                        const fileText = await file.text();
+                        if (handoff && typeof handoff.parseImportDocumentDetailed === 'function') {
+                            const parsed = handoff.parseImportDocumentDetailed(fileText);
+                            entry = parsed && parsed.entry;
+                            importMessage = parsed && parsed.message || '';
+                        } else {
+                            entry = handoff && typeof handoff.parseImportDocument === 'function'
+                                ? handoff.parseImportDocument(fileText)
+                                : null;
+                        }
+                    } catch (_) {
+                        entry = null;
+                    }
+                    const status = _getElement('simImpliedLambdaStatus');
+                    if (!entry) {
+                        if (status) {
+                            status.textContent = `implied-λ file rejected${importMessage ? `: ${importMessage}` : ''}`;
+                        }
+                        return;
+                    }
+                    // File selection is an explicit user override. It may
+                    // intentionally replace a newer automatically synchronized
+                    // curve for the same product/date.
+                    const savedToStorage = handoff.saveSymbolEntry(
+                        entry, undefined, undefined, { allowOlder: true }
+                    );
+                    const expectedKey = handoff.entryStorageKey(
+                        state.underlyingSymbol,
+                        state.underlyingContractMonth
+                    );
+                    const loadedKey = handoff.entryStorageKey(
+                        entry.symbol,
+                        entry.underlyingContractMonth
+                    );
+                    const expectedAnchor = String(state.liveQuoteDate || '').trim();
+                    const identityMatches = expectedKey === loadedKey;
+                    // A live quote date is mandatory V2 identity, not an
+                    // optional filter. A file selected before the first live
+                    // quote may be saved, but cannot become active yet.
+                    const anchorMatches = !!expectedAnchor && entry.anchorDate === expectedAnchor;
+                    // Keep a matching in-tab copy so an explicit file load
+                    // works when localStorage is blocked.  A mismatched file
+                    // may be stored for its own product, but is never active.
+                    state.simImpliedLambdaFileEntry = identityMatches && anchorMatches ? entry : null;
+                    state.simImpliedLambdaEntry = state.simImpliedLambdaFileEntry;
+                    if (identityMatches && anchorMatches) {
+                        state.simUseImpliedLambda = true;
+                    }
+                    updateDerivedValues();
+                    _syncSimTimeBasisUi(state);
+                    if (status && identityMatches && anchorMatches && !savedToStorage) {
+                        status.textContent += ' — loaded for this tab (browser storage unavailable)';
+                    }
+                    if (status && !identityMatches) {
+                        status.textContent = `V2 file is for ${loadedKey}, current product is ${expectedKey}; saved but not activated`;
+                    } else if (status && !anchorMatches) {
+                        status.textContent = expectedAnchor
+                            ? `V2 file is anchored to ${entry.anchorDate}, current live quote date is ${expectedAnchor}; saved but not activated`
+                            : `V2 file saved but not activated; wait for the first live quote to establish the exchange trade date`;
+                    }
                 });
             }
         }
@@ -1791,6 +2541,26 @@
         }
     }
 
+    // Lightweight public refresh for derived Time Basis state. The app calls
+    // this after repricing so explicit cross-tab implied-λ syncs, initial
+    // bootstrap, and freshness expiry cannot leave the status text one state
+    // behind the pricing engine.
+    function refreshSimTimeBasisUi(state = _boundState) {
+        const targetState = state || _boundState;
+        if (!targetState) return;
+        _syncSimTimeBasisUi(targetState);
+    }
+
+    // Keep the visible valuation instant in the same derived-state
+    // transaction as pricing. Date inputs and the date slider both update
+    // state before the app recomputes simulationTiming; the app calls this
+    // lightweight hook immediately after that recomputation completes.
+    function refreshSimulationDateUi(state = _boundState) {
+        const targetState = state || _boundState;
+        if (!targetState) return;
+        _syncSimulationDateUi(targetState);
+    }
+
     function toggleSidebar() {
         const layoutGrid = document.querySelector('.layout-grid');
         if (layoutGrid) {
@@ -1801,10 +2571,13 @@
     globalScope.OptionComboControlPanelUI = {
         bindControlPanelEvents,
         refreshBoundDynamicControls,
+        refreshSimTimeBasisUi,
+        refreshSimulationDateUi,
         refreshForwardRatePanel,
         refreshFuturesPoolPanel,
         resolvePricingInputMode: _getPricingInputMode,
         toggleSidebar,
-        syncPrimaryControlPanelCollapseUi: _syncPrimaryControlPanelCollapseUi,
+        // Retain the legacy public key for callers that refresh saved sidebar UI.
+        syncPrimaryControlPanelCollapseUi: _syncPrimaryControlPanelDialogUi,
     };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

@@ -2,10 +2,10 @@ const assert = require('node:assert/strict');
 
 const { loadBrowserScripts } = require('./helpers/load-browser-scripts');
 
-function loadHandoffApi() {
-    const ctx = loadBrowserScripts([
-        'js/calendar_handoff.js',
-    ]);
+function loadHandoffApi(withRegistry = false) {
+    const ctx = loadBrowserScripts(withRegistry
+        ? ['js/product_registry.js', 'js/calendar_handoff.js']
+        : ['js/calendar_handoff.js']);
     return ctx.OptionComboCalendarHandoff;
 }
 
@@ -55,7 +55,7 @@ module.exports = {
                     row: sampleRow(),
                 });
 
-                assert.equal(payload.version, 1);
+                assert.equal(payload.version, 2);
                 assert.equal(payload.symbol, 'SPY');
                 assert.equal(payload.underlyingPrice, 602.5);
                 assert.equal(payload.shortExpiry, '20260630');
@@ -77,6 +77,42 @@ module.exports = {
                 assert.equal(api.buildHandoffPayload({ symbol: 'SPY', row: missingStrike }), null);
                 assert.equal(api.buildHandoffPayload({ symbol: 'SPY', row: badExpiry }), null);
                 assert.equal(api.buildHandoffPayload({ symbol: '', row: sampleRow() }), null);
+            },
+        },
+        {
+            name: 'requires and preserves the exact FOP futures month',
+            run() {
+                const api = loadHandoffApi(true);
+                assert.equal(api.buildHandoffPayload({
+                    symbol: 'ES',
+                    underlyingPrice: 6010.25,
+                    row: sampleRow(),
+                }), null);
+
+                const payload = api.buildHandoffPayload({
+                    symbol: 'ES',
+                    underlyingPrice: 6010.25,
+                    underlyingContractMonth: '202609',
+                    underlyingQuote: {
+                        contractMonth: '202609',
+                        conId: 12345,
+                        localSymbol: 'ESU6',
+                        exchange: 'CME',
+                        quoteAsOf: '2026-07-20T15:00:00Z',
+                        mark: 6010.25,
+                    },
+                    row: sampleRow(),
+                });
+                assert.equal(payload.version, 2);
+                assert.equal(payload.underlyingContractMonth, '202609');
+                assert.equal(payload.underlyingFuture.conId, 12345);
+                assert.equal(payload.underlyingFuture.localSymbol, 'ESU6');
+
+                const legs = api.buildCalendarLegs(payload, () => 'leg', 'future_202609');
+                assert.deepEqual(
+                    Array.from(legs, leg => leg.underlyingFutureId),
+                    ['future_202609', 'future_202609', 'future_202609', 'future_202609']
+                );
             },
         },
         {

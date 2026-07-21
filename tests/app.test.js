@@ -68,6 +68,8 @@ module.exports = {
                 assert.equal(state.marketDataMode, 'historical');
                 assert.equal(state.workspaceVariant, 'historical');
                 assert.equal(state.marketDataModeLocked, true);
+                assert.equal(state.requireExactContractTiming, true);
+                assert.equal(state.projectionConvergenceMode, 'strict-bbo');
             },
         },
         {
@@ -86,8 +88,61 @@ module.exports = {
                 assert.equal(harness.callLog.renderHedges.length, 1);
                 assert.equal(harness.callLog.computePortfolioDerivedData.length, 1);
                 assert.equal(harness.callLog.syncWorkspaceChrome.length, 1);
+                assert.equal(harness.callLog.refreshSimTimeBasisUi.length, 1);
+                assert.equal(harness.callLog.refreshSimulationDateUi.length, 1);
                 assert.equal(harness.callLog.bindDeltaHedgePanel.length, 1);
                 assert.deepEqual(harness.callLog.setInterval.map(item => item.delay), [5000]);
+            },
+        },
+        {
+            name: 'refreshes the visible pricing target after simulation timing is recomputed',
+            run() {
+                let boundDeps = null;
+                const timelineRefreshes = [];
+                const harness = loadAppContext({
+                    overrides: {
+                        OptionComboPricingContext: {
+                            resolveSimulationTiming(state) {
+                                return {
+                                    available: true,
+                                    status: 'ok',
+                                    targetAsOf: `${state.simulatedDate}T20:00:00.000Z`,
+                                    source: 'product-profile-cutoff',
+                                };
+                            },
+                            assessProjectionLambdaCoverage() {
+                                return null;
+                            },
+                        },
+                        OptionComboPricingCore: {
+                            configureSimTimeBasis() {},
+                        },
+                        OptionComboControlPanelUI: {
+                            bindControlPanelEvents(_state, _formatter, deps) {
+                                boundDeps = deps;
+                            },
+                            refreshSimTimeBasisUi() {},
+                            refreshSimulationDateUi(state) {
+                                timelineRefreshes.push({
+                                    simulatedDate: state.simulatedDate,
+                                    targetAsOf: state.simulationTiming
+                                        && state.simulationTiming.targetAsOf,
+                                });
+                            },
+                            toggleSidebar() {},
+                        },
+                    },
+                });
+
+                harness.triggerDomReady();
+                const state = harness.context.__optionComboApp.getState();
+                state.simulatedDate = '2026-07-27';
+                boundDeps.updateDerivedValues();
+
+                assert.deepEqual(timelineRefreshes.at(-1), {
+                    simulatedDate: '2026-07-27',
+                    targetAsOf: '2026-07-27T20:00:00.000Z',
+                });
             },
         },
         {
@@ -308,9 +363,194 @@ module.exports = {
             },
         },
         {
+            name: 'requests implied lambda for the exact futures month and live quote anchor',
+            run() {
+                const peekCalls = [];
+                const configured = [];
+                const matchedEntry = {
+                    symbol: 'ES',
+                    underlyingContractMonth: '202606',
+                    anchorDate: '2026-05-06',
+                    varianceSource: 'straddle',
+                    quality: { status: 'ok' },
+                    byDate: { '2026-05-09': 0.2 },
+                };
+                const harness = loadAppContext({
+                    overrides: {
+                        OptionComboPricingCore: {
+                            configureSimTimeBasis(config) {
+                                configured.push(config);
+                            },
+                        },
+                        OptionComboImpliedLambdaHandoff: {
+                            peekSymbolEntry(...args) {
+                                peekCalls.push(args);
+                                return matchedEntry;
+                            },
+                            entryStorageKey(symbol, month) {
+                                return month ? `${symbol}#${month}` : symbol;
+                            },
+                            normalizeSymbolEntry() {
+                                return null;
+                            },
+                        },
+                    },
+                });
+                const state = harness.context.__optionComboApp.getState();
+                state.underlyingSymbol = 'ES';
+                state.underlyingContractMonth = '202606';
+                state.liveQuoteDate = '2026-05-06';
+                state.simUseImpliedLambda = true;
+
+                harness.context.__optionComboApp.updateLiveQuoteDerivedValues();
+                assert.equal(peekCalls.length, 1);
+                assert.equal(peekCalls[0][0], 'ES');
+                assert.equal(peekCalls[0][3], '202606');
+                assert.equal(peekCalls[0][4], '2026-05-06');
+                assert.equal(state.simImpliedLambdaEntry, matchedEntry);
+                assert.equal(configured.length, 1);
+            },
+        },
+        {
+            name: 'fails closed on implied lambda until the first live quote establishes an anchor date',
+            run() {
+                let peekCount = 0;
+                const harness = loadAppContext({
+                    overrides: {
+                        OptionComboPricingCore: { configureSimTimeBasis() {} },
+                        OptionComboImpliedLambdaHandoff: {
+                            peekSymbolEntry() {
+                                peekCount += 1;
+                                return { symbol: 'SPY', anchorDate: '2026-05-06' };
+                            },
+                        },
+                    },
+                });
+                const state = harness.context.__optionComboApp.getState();
+                state.underlyingSymbol = 'SPY';
+                state.liveQuoteDate = '';
+                state.simUseImpliedLambda = true;
+                state.simImpliedLambdaFileEntry = {
+                    symbol: 'SPY', anchorDate: '2026-05-06', byDate: { '2026-05-09': 0.2 },
+                };
+
+                harness.context.__optionComboApp.updateLiveQuoteDerivedValues();
+                assert.equal(peekCount, 0);
+                assert.equal(state.simImpliedLambdaEntry, null);
+            },
+        },
+        {
+            name: 'does not poll frozen implied-lambda entries for wall-clock expiry',
+            run() {
+                let storedEntry = {
+                    symbol: 'SPY', anchorDate: '2026-05-06', snapshotId: 'fresh-1',
+                    varianceSource: 'straddle', quality: { status: 'ok' },
+                    byDate: { '2026-05-09': 0.2 },
+                };
+                const harness = loadAppContext({
+                    overrides: {
+                        OptionComboPricingCore: {
+                            configureSimTimeBasis() {},
+                        },
+                        OptionComboImpliedLambdaHandoff: {
+                            STORAGE_KEY: 'optionComboImpliedLambdaV2',
+                            peekSymbolEntry() {
+                                return storedEntry;
+                            },
+                            normalizeSymbolEntry(input) {
+                                return input || null;
+                            },
+                            entryStorageKey(symbol, month) {
+                                return month ? `${symbol}#${month}` : symbol;
+                            },
+                        },
+                    },
+                });
+                const state = harness.context.__optionComboApp.getState();
+                state.underlyingSymbol = 'SPY';
+                state.liveQuoteDate = '2026-05-06';
+                state.simTimeBasis = 'weighted';
+                state.simUseImpliedLambda = true;
+
+                harness.context.__optionComboApp.updateLiveQuoteDerivedValues();
+                assert.equal(state.simImpliedLambdaEntry, storedEntry);
+                assert.equal(state.simImpliedLambdaFileEntry, null);
+                harness.triggerDomReady();
+
+                const freshnessTimer = harness.callLog.setInterval.find((item) => item.delay === 15000);
+                assert.equal(freshnessTimer, undefined);
+                assert.equal(state.simImpliedLambdaEntry, storedEntry);
+            },
+        },
+        {
+            name: 'coalesces same-origin implied lambda syncs and defers hidden-tab valuation',
+            run() {
+                const windowListeners = {};
+                const rafCallbacks = [];
+                const entry = {
+                    symbol: 'SPY', anchorDate: '2026-05-06', snapshotId: 'manual-1',
+                    varianceSource: 'straddle', quality: { status: 'ok' },
+                    byDate: { '2026-05-09': 0.2 },
+                };
+                const harness = loadAppContext({
+                    overrides: {
+                        addEventListener(type, handler) {
+                            windowListeners[type] = handler;
+                        },
+                        requestAnimationFrame(callback) {
+                            rafCallbacks.push(callback);
+                            return rafCallbacks.length;
+                        },
+                        OptionComboPricingCore: { configureSimTimeBasis() {} },
+                        OptionComboImpliedLambdaHandoff: {
+                            STORAGE_KEY: 'optionComboImpliedLambdaV2',
+                            peekSymbolEntry() {
+                                return entry;
+                            },
+                            entryStorageKey(symbol) {
+                                return symbol;
+                            },
+                            normalizeSymbolEntry() {
+                                return null;
+                            },
+                        },
+                    },
+                });
+                const state = harness.context.__optionComboApp.getState();
+                state.underlyingSymbol = 'SPY';
+                state.liveQuoteDate = '2026-05-06';
+                state.simTimeBasis = 'weighted';
+                state.simUseImpliedLambda = true;
+
+                assert.equal(typeof windowListeners.storage, 'function');
+                const before = harness.callLog.computePortfolioDerivedData.length;
+                windowListeners.storage({ key: 'optionComboImpliedLambdaV2' });
+                windowListeners.storage({ key: 'optionComboImpliedLambdaV2' });
+                assert.equal(rafCallbacks.length, 1);
+                assert.equal(harness.callLog.computePortfolioDerivedData.length, before);
+                rafCallbacks.shift()();
+                assert.equal(harness.callLog.computePortfolioDerivedData.length, before + 1);
+
+                harness.dom.document.hidden = true;
+                windowListeners.storage({ key: 'optionComboImpliedLambdaV2' });
+                assert.equal(rafCallbacks.length, 0);
+                assert.equal(harness.callLog.computePortfolioDerivedData.length, before + 1);
+
+                harness.dom.document.hidden = false;
+                harness.dom.trigger('visibilitychange');
+                assert.equal(rafCallbacks.length, 1);
+                rafCallbacks.shift()();
+                assert.equal(harness.callLog.computePortfolioDerivedData.length, before + 2);
+            },
+        },
+        {
             name: 'applyImportedState fills missing futures contract month from product registry',
             run() {
                 const { context } = loadAppContext();
+                context.__optionComboApp.getState().simImpliedLambdaEntry = {
+                    symbol: 'SPY',
+                    byDate: { '2026-05-02': 0.2 },
+                };
 
                 context.applyImportedState({
                     underlyingSymbol: 'ES',
@@ -320,8 +560,13 @@ module.exports = {
                     simulatedDate: '2026-05-07',
                     marketDataMode: 'live',
                     historicalQuoteDate: '',
+                    liveQuoteDate: '2026-05-06',
+                    liveQuoteAsOf: '2026-05-06T20:00:00Z',
                     interestRate: 0.03,
                     ivOffset: 0,
+                    simTimeBasis: 'weighted',
+                    simWeekendWeight: 0.3,
+                    simUseImpliedLambda: true,
                     greeksEnabled: false,
                     deltaHedge: {},
                     primaryControlPanelCollapsed: false,
@@ -340,6 +585,30 @@ module.exports = {
                 assert.equal(state.underlyingSymbol, 'ES');
                 assert.equal(state.underlyingContractMonth, '202606');
                 assert.equal(state.underlyingPrice, 5300);
+                assert.equal(state.liveQuoteDate, '');
+                assert.equal(state.liveQuoteAsOf, '');
+                assert.equal(state.simUseImpliedLambda, true);
+                assert.equal(state.simImpliedLambdaEntry, null);
+                assert.equal(state.requireExactContractTiming, true);
+                assert.equal(state.projectionConvergenceMode, 'strict-bbo');
+            },
+        },
+        {
+            name: 'does not import a contract-timing safety opt-out',
+            run() {
+                const { context } = loadAppContext();
+                context.applyImportedState(createImportedSession({
+                    requireExactContractTiming: false,
+                    projectionConvergenceMode: 'legacy-input-iv',
+                }));
+                assert.equal(
+                    context.__optionComboApp.getState().requireExactContractTiming,
+                    true
+                );
+                assert.equal(
+                    context.__optionComboApp.getState().projectionConvergenceMode,
+                    'legacy-input-iv'
+                );
             },
         },
         {
@@ -443,6 +712,16 @@ module.exports = {
                                     version: 1,
                                     symbol: 'ES',
                                     underlyingPrice: 6010.25,
+                                    underlyingContractMonth: '202609',
+                                    underlyingFuture: {
+                                        contractMonth: '202609',
+                                        conId: 12345,
+                                        localSymbol: 'ESU6',
+                                        exchange: 'CME',
+                                        currency: 'USD',
+                                        quoteAsOf: '2026-06-12T15:00:00Z',
+                                        mark: 6010.25,
+                                    },
                                     shortExpiry: '20260630',
                                     longExpiry: '20260720',
                                     shortStrike: 6010,
@@ -452,12 +731,12 @@ module.exports = {
                             buildGroupName(payload) {
                                 return `${payload.symbol} Calendar ${payload.shortExpiry}/${payload.longExpiry}`;
                             },
-                            buildCalendarLegs(payload, generateId) {
+                            buildCalendarLegs(payload, generateId, underlyingFutureId) {
                                 return [
-                                    { id: generateId(), pos: -1, type: 'call' },
-                                    { id: generateId(), pos: -1, type: 'put' },
-                                    { id: generateId(), pos: 1, type: 'call' },
-                                    { id: generateId(), pos: 1, type: 'put' },
+                                    { id: generateId(), pos: -1, type: 'call', underlyingFutureId },
+                                    { id: generateId(), pos: -1, type: 'put', underlyingFutureId },
+                                    { id: generateId(), pos: 1, type: 'call', underlyingFutureId },
+                                    { id: generateId(), pos: 1, type: 'put', underlyingFutureId },
                                 ];
                             },
                         },
@@ -485,10 +764,15 @@ module.exports = {
                 const state = harness.context.__optionComboApp.getState();
                 assert.equal(state.underlyingSymbol, 'ES');
                 assert.equal(state.underlyingPrice, 6010.25);
-                assert.equal(state.underlyingContractMonth, '202606');
+                assert.equal(state.underlyingContractMonth, '202609');
+                assert.equal(state.futuresPool.length, 1);
+                assert.equal(state.futuresPool[0].contractMonth, '202609');
+                assert.equal(state.futuresPool[0].conId, 12345);
                 assert.equal(state.groups.length, 1);
                 assert.equal(state.groups[0].name, 'ES Calendar 20260630/20260720');
                 assert.equal(state.groups[0].legs.length, 4);
+                assert.equal(state.groups[0].liveData, true);
+                assert.equal(state.groups[0].legs[0].underlyingFutureId, state.futuresPool[0].id);
                 assert.deepEqual(Array.from(state.groups[0].legs, (leg) => leg.pos), [-1, -1, 1, 1]);
             },
         },
