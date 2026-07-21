@@ -952,7 +952,19 @@
             contractMonthInput.value = entry.contractMonth || '';
             contractMonthInput.title = 'Underlying futures contract month.';
             contractMonthInput.addEventListener('change', (e) => {
-                entry.contractMonth = String(e.target.value || '').replace(/\D/g, '').slice(0, 6);
+                const nextContractMonth = String(e.target.value || '')
+                    .replace(/\D/g, '').slice(0, 6);
+                if (nextContractMonth !== entry.contractMonth) {
+                    // The entry no longer describes the contract IB qualified,
+                    // so its conId and identity evidence are stale. Drop them
+                    // rather than let a rolled month keep the old conId.
+                    entry.conId = null;
+                    entry.qualifiedContractMonth = '';
+                    entry.requestIdentityVerified = false;
+                    entry.liveQuoteIdentityStatus = 'pending';
+                    entry.liveQuoteIdentityReason = 'contract month changed';
+                }
+                entry.contractMonth = nextContractMonth;
                 contractMonthInput.value = entry.contractMonth;
                 autoBindSingleFuture();
                 _renderFuturesPool(state, deps);

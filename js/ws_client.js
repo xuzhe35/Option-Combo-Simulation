@@ -327,8 +327,20 @@ function _canonicalOptionIdentitySymbol(value) {
 function _findExpectedUnderlyingConId(contractMonth) {
     const normalizedMonth = _normalizeContractMonthIdentity(contractMonth);
     if (!normalizedMonth) return null;
+    // Matching on the requested contractMonth alone would assert a conId IB
+    // never confirmed for that month.  Editing a pool entry's month leaves the
+    // previous month's conId in place, so the old value would be handed to the
+    // option gate as the expected underConId and reject every leg in the book.
+    // Reuse the same evidence _buildFutureRequestIdentity requires; without it
+    // return null so the gate simply does not assert a conId (the
+    // underlyingContractMonth and underlyingBindingVerified checks still run).
     const entry = (state.futuresPool || []).find(candidate => (
-        _normalizeContractMonthIdentity(candidate && candidate.contractMonth) === normalizedMonth
+        candidate
+        && candidate.liveQuoteIdentityStatus === 'verified'
+        && candidate.requestIdentityVerified === true
+        && String(candidate.secType || '').trim().toUpperCase() === 'FUT'
+        && _normalizeContractMonthIdentity(candidate.qualifiedContractMonth) === normalizedMonth
+        && _normalizeContractMonthIdentity(candidate.contractMonth) === normalizedMonth
     ));
     const conId = parseInt(entry && entry.conId, 10);
     return Number.isFinite(conId) && conId > 0 ? conId : null;

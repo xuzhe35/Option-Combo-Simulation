@@ -1075,6 +1075,99 @@ module.exports = {
             },
         },
         {
+            name: 'accepts FOP quotes after a futures roll instead of asserting the old month conId',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'ES',
+                    underlyingContractMonth: '202612',
+                    underlyingPrice: 7516.25,
+                    simulatedDate: '2026-07-22',
+                    baseDate: '2026-07-22',
+                    greeksEnabled: false,
+                    // Rolled from 202609 to 202612: the entry still carries the
+                    // conId and qualified month IB confirmed for September.
+                    futuresPool: [{
+                        id: 'future_front',
+                        contractMonth: '202612',
+                        conId: 495512563,
+                        secType: 'FUT',
+                        symbol: 'ES',
+                        qualifiedContractMonth: '202609',
+                        requestIdentityVerified: true,
+                        liveQuoteIdentityStatus: 'verified',
+                    }],
+                    comboTemplateQuoteRequests: [],
+                    groups: [{
+                        id: 'group_es',
+                        liveData: true,
+                        legs: [{
+                            id: 'leg_dec', type: 'call', pos: 1, currentPrice: 20,
+                            strike: 7520, expDate: '2026-08-21',
+                            underlyingFutureId: 'future_front',
+                        }],
+                    }],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() { this.sent = []; MockWebSocket.instance = this; }
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    ['js/session_logic.js', 'js/product_registry.js', 'js/ws_client.js'],
+                    {
+                        state,
+                        renderGroups() {}, updateDerivedValues() {}, flashElement() {},
+                        requestAnimationFrame(callback) { callback(); },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                            querySelectorAll() { return []; },
+                        },
+                        localStorage: { getItem() { return null; }, setItem() {} },
+                        location: { protocol: 'file:', hostname: '' },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+
+                // IB qualifies the December FOP and returns the December
+                // underlying conId, which is the correct answer.
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-22T17:00:00.000Z',
+                    options: {
+                        leg_dec: {
+                            bid: 19.5, ask: 20.5, mark: 20,
+                            quoteAsOf: '2026-07-22T17:00:00.000Z',
+                            conId: 7227520,
+                            secType: 'FOP', symbol: 'ES',
+                            localSymbol: 'ES qualified dec call',
+                            right: 'C', strike: 7520,
+                            optionExpiry: '20260821', multiplier: '50',
+                            underConId: 511223344,
+                            underlyingContractMonth: '202612',
+                            underlyingBindingVerified: true,
+                            expiryAsOf: '2026-08-21T20:00:00.000Z',
+                            expiryTimingSource: 'ib_contract_details',
+                            lastTradeDate: '20260821',
+                            lastTradeTime: '15:00:00',
+                            timeZoneId: 'US/Central',
+                        },
+                    },
+                });
+
+                const leg = state.groups[0].legs[0];
+                assert.equal(leg.liveQuoteIdentityStatus, 'verified');
+                assert.equal(leg.currentPrice, 20);
+                assert.equal(leg.expiryAsOf, '2026-08-21T20:00:00.000Z');
+            },
+        },
+        {
             name: 'keeps otherwise identical FOPs on different futures months separate and rejects mismatched identity',
             run() {
                 const state = {
