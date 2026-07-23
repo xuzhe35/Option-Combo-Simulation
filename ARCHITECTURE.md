@@ -26,7 +26,8 @@ Runtime surfaces:
    - `option_combo_starter/supervisor.py` runs as PID 1
    - the HTTP server and `ib_server.py` are critical child processes
    - the backend remains the sole owner of IB reconnect attempts
-   - yield-curve refresh is a separately scheduled maintenance job
+   - yield-curve refresh is a separately scheduled, non-critical maintenance
+     job that cannot restart the container
 
 ## 2. Frontend Entry Surfaces
 
@@ -520,9 +521,11 @@ Responsibilities:
 `python -m yield_curve update` is the only current-data writer. It downloads
 official overnight SOFR and Treasury CMT, constructs one schema-v2 discount
 snapshot, and atomically replaces a real (non-symlink) `latest.json` while also
-writing a dated history file. The backends are read-only consumers; a missing
-or stale live file can trigger the independent CLI once via `sys.executable`.
-There is no server-owned downloader or periodic Treasury task.
+writing a dated history file. The backends are read-only consumers. In a
+non-Docker launch, a missing or stale live file can trigger the independent CLI
+once via `sys.executable`. The Docker config overlay disables those backend
+auto-update paths so the PID-1 scheduler is its sole automatic writer. There is
+no server-owned downloader or periodic Treasury task.
 
 The builder uses SOFR through 30 calendar days, transitions in instantaneous-
 forward space to the first later CMT node, then preserves the CMT proxy forward
@@ -563,10 +566,16 @@ Responsibilities:
 `ib_server.py` reconnects in-process. A critical HTTP/backend process exit
 causes PID 1 to stop its peer and exit non-zero for Docker restart policy.
 Yield maintenance uses the same configured data directory as both backends and
-persists it in `/app/state/yield_curve`. Startup/hourly checks use
-`--if-needed`; one weekday post-publication run after 18:00 New York time is
-forced so earlier same-date source observations cannot suppress the completed
-official release.
+persists it in `/app/state/yield_curve`. PID 1 makes one automatic attempt at
+09:30 America/New_York on each weekday and persists the attempted New York
+date across container replacement. It never retries that day after a failed,
+partial, timed-out, or cache-fallback result; the previous successful snapshot
+remains active. The maintenance task is optional and cannot stop a critical
+child or restart the container. Its settings are
+`OPTION_COMBO_YIELD_DAILY_HOUR_NY` (default `9`),
+`OPTION_COMBO_YIELD_DAILY_MINUTE_NY` (default `30`),
+`OPTION_COMBO_YIELD_PROCESS_TIMEOUT_SECONDS` (default `120`), and
+`YIELD_CURVE_DATA_DIR` (default `/app/state/yield_curve`).
 
 ## 5. Shared State Model
 

@@ -93,6 +93,19 @@ def _is_snapshot(payload: object) -> bool:
     return True
 
 
+def _same_snapshot(
+    left: Optional[Mapping[str, object]],
+    right: Optional[Mapping[str, object]],
+) -> bool:
+    if not left or not right:
+        return False
+    left_id = str(left.get("snapshotId") or "")
+    right_id = str(right.get("snapshotId") or "")
+    if left_id and right_id:
+        return left_id == right_id
+    return dict(left) == dict(right)
+
+
 class UpdateFileLock:
     """Portable best-effort interprocess lock for the small daily updater."""
 
@@ -127,7 +140,10 @@ class UpdateFileLock:
         if self.acquired:
             try:
                 self.path.unlink()
-            except FileNotFoundError:
+            except OSError:
+                # Cleanup must not replace a completed updater result with an
+                # unrelated lock-file exception. A surviving lock remains
+                # fail-closed until its normal stale-lock handling succeeds.
                 pass
         self.acquired = False
 
@@ -190,10 +206,52 @@ class YieldCurveRepository:
             payload.get("curveAsOf") or payload.get("asOf") or payload.get("effectiveDate")
         )
         history_path = self.snapshots_dir / curve_date[:4] / "{}.json".format(curve_date)
-        _atomic_json_write(history_path, payload)
-        # latest.json is a real file, not a symlink, for Windows portability.
-        _atomic_json_write(self.latest_path, payload)
-        return {"historyPath": str(history_path), "latestPath": str(self.latest_path)}
+        warnings = []
+
+        # latest.json is the commit point and remains a real file, not a
+        # symlink, for Windows portability. Publishing it first prevents an
+        # uncommitted dated-history file from becoming visible when the commit
+        # fails.
+        try:
+            _atomic_json_write(self.latest_path, payload)
+        except OSError as exc:
+            # Directory fsync can report an error after os.replace completed.
+            # Reconcile against the active file before deciding whether the
+            # publication failed.
+            active = _read_json(self.latest_path)
+            if not _same_snapshot(active, payload):
+                raise
+            warnings.append(
+                "latest snapshot was published, but durability confirmation "
+                "raised {}".format(type(exc).__name__)
+            )
+
+        history_committed = False
+        try:
+            _atomic_json_write(history_path, payload)
+            history_committed = True
+        except OSError as exc:
+            # The active snapshot is already committed. A missing archive is
+            # non-fatal for live readers and must not be misreported as a
+            # fallback to the previous snapshot.
+            archived = _read_json(history_path)
+            history_committed = _same_snapshot(archived, payload)
+            warnings.append(
+                "dated history archive {} ({})".format(
+                    "was written but durability confirmation failed"
+                    if history_committed
+                    else "could not be written",
+                    type(exc).__name__,
+                )
+            )
+
+        paths = {
+            "historyPath": str(history_path) if history_committed else "",
+            "latestPath": str(self.latest_path),
+        }
+        if warnings:
+            paths["warning"] = "; ".join(warnings)
+        return paths
 
     def write_raw_source(self, source_name: str, effective_date: object, payload: Mapping[str, object]) -> str:
         safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(source_name))

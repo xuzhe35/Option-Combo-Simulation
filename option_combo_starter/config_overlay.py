@@ -19,6 +19,16 @@ OVERLAY_KEYS = (
     ("server", "ws_host", "WS_HOST"),
     ("server", "ws_port", "WS_PORT"),
     ("yield_curve", "data_dir", "YIELD_CURVE_DATA_DIR"),
+    (
+        "yield_curve",
+        "auto_update_if_missing",
+        None,
+    ),
+    (
+        "yield_curve",
+        "auto_update_if_stale",
+        None,
+    ),
 )
 
 
@@ -91,7 +101,7 @@ def overlay_config(
     defaults_path: str | os.PathLike[str],
     environ: Mapping[str, str] | None = None,
 ) -> None:
-    """Atomically merge the six starter-owned keys into ``target_path``."""
+    """Atomically merge the starter-owned keys into ``target_path``."""
 
     target = Path(target_path)
     defaults_file = Path(defaults_path)
@@ -101,7 +111,11 @@ def overlay_config(
 
     selected_values: list[tuple[str, str, str]] = []
     for section, option, environment_name in OVERLAY_KEYS:
-        environment_value = environment.get(environment_name)
+        environment_value = (
+            environment.get(environment_name)
+            if environment_name is not None
+            else None
+        )
         value = (
             environment_value
             if environment_value is not None and environment_value != ""

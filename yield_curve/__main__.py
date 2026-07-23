@@ -77,6 +77,8 @@ def main(argv=None) -> int:
         )
         if result.get("error"):
             print("Warning: {}".format(result["error"]), file=sys.stderr)
+        if result.get("warning"):
+            print("Warning: {}".format(result["warning"]), file=sys.stderr)
         paths = result.get("paths") or {}
         if paths.get("latestPath"):
             print("Latest file: {}".format(paths["latestPath"]))

@@ -44,6 +44,8 @@ class OptionComboEntrypointTests(unittest.TestCase):
             "[tws]\nhost = starter\nport = 7496\nclient_id = 999\n"
             "[server]\nws_host = 0.0.0.0\nws_port = 8765\n"
             "[yield_curve]\ndata_dir = /app/state/yield_curve\n"
+            "auto_update_if_missing = false\n"
+            "auto_update_if_stale = false\n"
             "[starter_only]\nignored = yes\n",
             encoding="utf-8",
         )
@@ -348,6 +350,12 @@ fi
         self.assertEqual(
             config.get("yield_curve", "data_dir"),
             "/persistent/yield-curve",
+        )
+        self.assertFalse(
+            config.getboolean("yield_curve", "auto_update_if_missing"),
+        )
+        self.assertFalse(
+            config.getboolean("yield_curve", "auto_update_if_stale"),
         )
         self.assertEqual(config.get("tws", "team_setting"), "preserved")
         self.assertEqual(config.get("new_team_feature", "enabled"), "yes")

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ import signal
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
@@ -41,10 +42,11 @@ DEFAULT_IB_STATUS_POLL_SECONDS = 30.0
 DEFAULT_WS_RETRY_SECONDS = 5.0
 DEFAULT_WS_RESPONSE_TIMEOUT_SECONDS = 10.0
 DEFAULT_YIELD_CURVE_DATA_DIR = Path("/app/state/yield_curve")
-DEFAULT_YIELD_CHECK_SECONDS = 3600.0
-DEFAULT_YIELD_RETRY_SECONDS = 600.0
 DEFAULT_YIELD_PROCESS_TIMEOUT_SECONDS = 120.0
-DEFAULT_YIELD_POST_PUBLICATION_HOUR_NY = 18
+DEFAULT_YIELD_DAILY_HOUR_NY = 9
+DEFAULT_YIELD_DAILY_MINUTE_NY = 30
+YIELD_ATTEMPT_MARKER_FILENAME = ".option_combo_last_yield_attempt_ny"
+YIELD_ATTEMPT_LOCK_FILENAME = ".option_combo_yield_attempt_claim.lock"
 NEW_YORK_TIMEZONE = ZoneInfo("America/New_York")
 # Docker's default stop timeout is ten seconds.  Keep the internal grace below
 # that boundary so PID 1 still has time to escalate and reap before Docker
@@ -97,6 +99,21 @@ def _hour_from_env(name: str, default: int) -> int:
         return default
     if not 0 <= value <= 23:
         LOGGER.warning("Ignoring out-of-range hour setting %s.", name)
+        return default
+    return value
+
+
+def _minute_from_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        LOGGER.warning("Ignoring invalid minute setting %s.", name)
+        return default
+    if not 0 <= value <= 59:
+        LOGGER.warning("Ignoring out-of-range minute setting %s.", name)
         return default
     return value
 
@@ -180,10 +197,9 @@ class SupervisorConfig:
     ws_retry_seconds: float = DEFAULT_WS_RETRY_SECONDS
     ws_response_timeout_seconds: float = DEFAULT_WS_RESPONSE_TIMEOUT_SECONDS
     yield_curve_data_dir: Path = DEFAULT_YIELD_CURVE_DATA_DIR
-    yield_check_seconds: float = DEFAULT_YIELD_CHECK_SECONDS
-    yield_retry_seconds: float = DEFAULT_YIELD_RETRY_SECONDS
     yield_process_timeout_seconds: float = DEFAULT_YIELD_PROCESS_TIMEOUT_SECONDS
-    yield_post_publication_hour_ny: int = DEFAULT_YIELD_POST_PUBLICATION_HOUR_NY
+    yield_daily_hour_ny: int = DEFAULT_YIELD_DAILY_HOUR_NY
+    yield_daily_minute_ny: int = DEFAULT_YIELD_DAILY_MINUTE_NY
     shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
 
     @classmethod
@@ -212,24 +228,18 @@ class SupervisorConfig:
                     str(DEFAULT_YIELD_CURVE_DATA_DIR),
                 )
             ),
-            yield_check_seconds=_positive_float_from_env(
-                "OPTION_COMBO_YIELD_CHECK_SECONDS",
-                DEFAULT_YIELD_CHECK_SECONDS,
-                minimum=1.0,
-            ),
-            yield_retry_seconds=_positive_float_from_env(
-                "OPTION_COMBO_YIELD_RETRY_SECONDS",
-                DEFAULT_YIELD_RETRY_SECONDS,
-                minimum=1.0,
-            ),
             yield_process_timeout_seconds=_positive_float_from_env(
                 "OPTION_COMBO_YIELD_PROCESS_TIMEOUT_SECONDS",
                 DEFAULT_YIELD_PROCESS_TIMEOUT_SECONDS,
                 minimum=1.0,
             ),
-            yield_post_publication_hour_ny=_hour_from_env(
-                "OPTION_COMBO_YIELD_POST_PUBLICATION_HOUR_NY",
-                DEFAULT_YIELD_POST_PUBLICATION_HOUR_NY,
+            yield_daily_hour_ny=_hour_from_env(
+                "OPTION_COMBO_YIELD_DAILY_HOUR_NY",
+                DEFAULT_YIELD_DAILY_HOUR_NY,
+            ),
+            yield_daily_minute_ny=_minute_from_env(
+                "OPTION_COMBO_YIELD_DAILY_MINUTE_NY",
+                DEFAULT_YIELD_DAILY_MINUTE_NY,
             ),
             shutdown_grace_seconds=_positive_float_from_env(
                 "OPTION_COMBO_SHUTDOWN_GRACE_SECONDS",
@@ -243,10 +253,10 @@ class SupervisorConfig:
 class YieldUpdateOutcome:
     status: str
     returncode: int
-    retry_soon: bool
-    force_refresh_on_retry: bool
+    unsuccessful: bool
     curve_as_of: str = ""
     error: str = ""
+    warning: str = ""
 
 
 def parse_yield_update_result(
@@ -256,7 +266,8 @@ def parse_yield_update_result(
     """Interpret ``yield_curve update --json`` output.
 
     ``cache_fallback`` intentionally exits zero because a cached snapshot is
-    still usable.  It is nevertheless a failed refresh and must be retried.
+    still usable. The outcome remains unsuccessful for logging, but the daily
+    scheduler does not retry it on the same New York date.
     """
 
     text = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else str(stdout)
@@ -266,15 +277,13 @@ def parse_yield_update_result(
         return YieldUpdateOutcome(
             status="invalid_output",
             returncode=int(returncode),
-            retry_soon=True,
-            force_refresh_on_retry=False,
+            unsuccessful=True,
         )
     if not isinstance(payload, Mapping):
         return YieldUpdateOutcome(
             status="invalid_output",
             returncode=int(returncode),
-            retry_soon=True,
-            force_refresh_on_retry=False,
+            unsuccessful=True,
         )
 
     status = str(payload.get("status") or "unknown").strip().lower()
@@ -283,23 +292,27 @@ def parse_yield_update_result(
     if isinstance(snapshot, Mapping):
         curve_as_of = str(snapshot.get("curveAsOf") or "")
     error = str(payload.get("error") or "").strip()
+    warning = str(payload.get("warning") or "").strip()
 
     complete_status = status in {"updated", "not_due"}
     complete_snapshot = isinstance(snapshot, Mapping)
-    retry_soon = int(returncode) != 0 or not complete_status or not complete_snapshot
-    force_refresh = status in {"cache_fallback", "updated_partial"}
+    unsuccessful = (
+        int(returncode) != 0
+        or not complete_status
+        or not complete_snapshot
+    )
     return YieldUpdateOutcome(
         status=status,
         returncode=int(returncode),
-        retry_soon=retry_soon,
-        force_refresh_on_retry=force_refresh,
+        unsuccessful=unsuccessful,
         curve_as_of=curve_as_of,
         error=error,
+        warning=warning,
     )
 
 
 class YieldCurveScheduler:
-    """Run the standalone updater now and periodically thereafter."""
+    """Run at most one persistent updater attempt per New York weekday."""
 
     def __init__(
         self,
@@ -316,7 +329,12 @@ class YieldCurveScheduler:
         self._process_signaler = process_signaler
         self._now = now
         self._active_process: Optional[Any] = None
-        self._last_post_publication_refresh_date: Optional[str] = None
+        self._attempt_marker_path = (
+            self.config.yield_curve_data_dir / YIELD_ATTEMPT_MARKER_FILENAME
+        )
+        self._attempt_lock_path = (
+            self.config.yield_curve_data_dir / YIELD_ATTEMPT_LOCK_FILENAME
+        )
 
     def _new_york_now(self) -> datetime:
         instant = self._now()
@@ -324,41 +342,247 @@ class YieldCurveScheduler:
             instant = instant.replace(tzinfo=timezone.utc)
         return instant.astimezone(NEW_YORK_TIMEZONE)
 
-    def _post_publication_refresh_due_date(self) -> Optional[str]:
-        local_now = self._new_york_now()
-        if local_now.weekday() >= 5:
-            return None
-        if local_now.hour < self.config.yield_post_publication_hour_ny:
-            return None
-        local_date = local_now.date().isoformat()
-        if self._last_post_publication_refresh_date == local_date:
-            return None
-        return local_date
-
-    def _seconds_until_next_post_publication_refresh(self) -> float:
-        if self._post_publication_refresh_due_date() is not None:
-            return 0.0
-        local_now = self._new_york_now()
-        candidate_date = local_now.date()
-        candidate = datetime(
-            candidate_date.year,
-            candidate_date.month,
-            candidate_date.day,
-            self.config.yield_post_publication_hour_ny,
+    def _scheduled_time(self, local_date: date) -> datetime:
+        return datetime(
+            local_date.year,
+            local_date.month,
+            local_date.day,
+            self.config.yield_daily_hour_ny,
+            self.config.yield_daily_minute_ny,
             tzinfo=NEW_YORK_TIMEZONE,
         )
-        if local_now >= candidate or candidate_date.weekday() >= 5:
+
+    def _next_scheduled_attempt(
+        self,
+        local_now: datetime,
+        last_attempt_date: Optional[date],
+    ) -> datetime:
+        local_now = local_now.astimezone(NEW_YORK_TIMEZONE)
+        candidate_date = local_now.date()
+        attempted_today = (
+            last_attempt_date is not None
+            and last_attempt_date >= candidate_date
+        )
+        candidate = self._scheduled_time(candidate_date)
+        if candidate_date.weekday() < 5 and not attempted_today:
+            if local_now >= candidate:
+                return local_now
+            return candidate
+
+        candidate_date += timedelta(days=1)
+        while candidate_date.weekday() >= 5:
             candidate_date += timedelta(days=1)
-            while candidate_date.weekday() >= 5:
-                candidate_date += timedelta(days=1)
-            candidate = datetime(
-                candidate_date.year,
-                candidate_date.month,
-                candidate_date.day,
-                self.config.yield_post_publication_hour_ny,
-                tzinfo=NEW_YORK_TIMEZONE,
+        return self._scheduled_time(candidate_date)
+
+    def _marker_modified_date(self, reference_date: date) -> Optional[date]:
+        try:
+            modified = self._attempt_marker_path.stat().st_mtime
+        except OSError:
+            return None
+        modified_date = datetime.fromtimestamp(
+            modified,
+            tz=timezone.utc,
+        ).astimezone(NEW_YORK_TIMEZONE).date()
+        return min(modified_date, reference_date)
+
+    def _read_attempt_date(
+        self,
+        reference_date: date,
+    ) -> tuple[Optional[date], bool, bool]:
+        """Return date, readability, and whether fail-closed repair is needed."""
+
+        try:
+            raw = self._attempt_marker_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return None, True, False
+        except UnicodeError:
+            raw = ""
+        except OSError as exc:
+            LOGGER.error(
+                "Cannot read yield-curve attempt marker %s (%s); "
+                "skipping today's optional attempt.",
+                self._attempt_marker_path,
+                type(exc).__name__,
             )
-        return max((candidate - local_now).total_seconds(), 0.0)
+            return None, False, False
+        try:
+            persisted_date = date.fromisoformat(raw)
+        except ValueError:
+            persisted_date = None
+
+        if persisted_date is not None and persisted_date <= reference_date:
+            return persisted_date, True, False
+
+        fallback_date = self._marker_modified_date(reference_date)
+        if fallback_date is None:
+            LOGGER.error(
+                "Cannot establish a safe date for invalid yield-curve "
+                "attempt marker %s; skipping today's optional attempt.",
+                self._attempt_marker_path,
+            )
+            return None, False, False
+        if persisted_date is None:
+            LOGGER.warning(
+                "Invalid yield-curve attempt marker %s is treated as an "
+                "attempt on its modified New York date %s.",
+                self._attempt_marker_path,
+                fallback_date,
+            )
+        else:
+            LOGGER.warning(
+                "Future yield-curve attempt marker date %s is clamped to %s.",
+                persisted_date,
+                fallback_date,
+            )
+        return fallback_date, True, True
+
+    def _write_attempt_date(self, attempt_date: date) -> bool:
+        """Atomically persist a date before any updater network work begins."""
+
+        temporary_path = self._attempt_marker_path.with_name(
+            ".{}.{}.tmp".format(
+                self._attempt_marker_path.name,
+                uuid.uuid4().hex,
+            )
+        )
+        try:
+            self.config.yield_curve_data_dir.mkdir(parents=True, exist_ok=True)
+            with temporary_path.open("x", encoding="utf-8", newline="\n") as marker:
+                marker.write(attempt_date.isoformat() + "\n")
+                marker.flush()
+                os.fsync(marker.fileno())
+            os.replace(temporary_path, self._attempt_marker_path)
+            if hasattr(os, "O_DIRECTORY"):
+                directory_fd = os.open(
+                    str(self.config.yield_curve_data_dir),
+                    os.O_RDONLY | os.O_DIRECTORY,
+                )
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            return True
+        except OSError as exc:
+            LOGGER.error(
+                "Cannot persist yield-curve attempt marker %s (%s); "
+                "skipping this optional attempt.",
+                self._attempt_marker_path,
+                type(exc).__name__,
+            )
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                LOGGER.warning(
+                    "Could not remove temporary yield-curve marker %s.",
+                    temporary_path,
+                )
+            return False
+
+    def _acquire_attempt_lock(self) -> Optional[int]:
+        try:
+            self.config.yield_curve_data_dir.mkdir(parents=True, exist_ok=True)
+            lock_fd = os.open(
+                str(self._attempt_lock_path),
+                os.O_CREAT | os.O_RDWR,
+                0o600,
+            )
+        except OSError as exc:
+            LOGGER.error(
+                "Cannot open yield-curve attempt lock %s (%s); "
+                "skipping this optional maintenance operation.",
+                self._attempt_lock_path,
+                type(exc).__name__,
+            )
+            return None
+
+        try:
+            fcntl.flock(
+                lock_fd,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+            return lock_fd
+        except BlockingIOError:
+            LOGGER.warning(
+                "Another supervisor owns the optional yield-curve attempt "
+                "lock; this supervisor will skip the operation."
+            )
+        except OSError as exc:
+            LOGGER.error(
+                "Cannot acquire yield-curve attempt lock %s (%s); "
+                "skipping this optional maintenance operation.",
+                self._attempt_lock_path,
+                type(exc).__name__,
+            )
+        try:
+            os.close(lock_fd)
+        except OSError:
+            LOGGER.warning(
+                "Could not close unclaimed yield-curve attempt lock %s.",
+                self._attempt_lock_path,
+            )
+        return None
+
+    def _release_attempt_lock(self, lock_fd: int) -> None:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except OSError:
+            LOGGER.warning(
+                "Could not explicitly release yield-curve attempt lock %s.",
+                self._attempt_lock_path,
+            )
+        try:
+            os.close(lock_fd)
+        except OSError:
+            LOGGER.warning(
+                "Could not close yield-curve attempt lock %s.",
+                self._attempt_lock_path,
+            )
+
+    def _load_attempt_date(
+        self,
+        reference_date: date,
+    ) -> tuple[Optional[date], bool]:
+        """Read and repair marker anomalies under the interprocess lock."""
+
+        lock_fd = self._acquire_attempt_lock()
+        if lock_fd is None:
+            return reference_date, False
+        try:
+            persisted_date, marker_readable, repair_needed = (
+                self._read_attempt_date(reference_date)
+            )
+            if (
+                marker_readable
+                and repair_needed
+                and persisted_date is not None
+                and not self._write_attempt_date(persisted_date)
+            ):
+                return reference_date, False
+            return persisted_date, marker_readable
+        finally:
+            self._release_attempt_lock(lock_fd)
+
+    def _claim_attempt_date(self, attempt_date: date) -> bool:
+        """Serialize the read/write claim across supervisors sharing a volume."""
+
+        lock_fd = self._acquire_attempt_lock()
+        if lock_fd is None:
+            return False
+        try:
+            persisted_date, marker_readable, repair_needed = (
+                self._read_attempt_date(attempt_date)
+            )
+            if not marker_readable:
+                return False
+            if persisted_date is not None and persisted_date >= attempt_date:
+                if repair_needed:
+                    self._write_attempt_date(persisted_date)
+                return False
+            return self._write_attempt_date(attempt_date)
+        finally:
+            self._release_attempt_lock(lock_fd)
 
     def _command(self, *, if_needed: bool) -> list[str]:
         command = [
@@ -393,8 +617,7 @@ class YieldCurveScheduler:
             return YieldUpdateOutcome(
                 status="spawn_error",
                 returncode=1,
-                retry_soon=True,
-                force_refresh_on_retry=False,
+                unsuccessful=True,
             )
 
         self._active_process = process
@@ -413,8 +636,7 @@ class YieldCurveScheduler:
             return YieldUpdateOutcome(
                 status="timeout",
                 returncode=1,
-                retry_soon=True,
-                force_refresh_on_retry=False,
+                unsuccessful=True,
             )
         except asyncio.CancelledError:
             await terminate_process(
@@ -427,9 +649,10 @@ class YieldCurveScheduler:
             self._active_process = None
 
         outcome = parse_yield_update_result(process.returncode or 0, stdout)
-        log = LOGGER.warning if outcome.retry_soon else LOGGER.info
-        diagnostic = outcome.error
-        if not diagnostic and outcome.retry_soon:
+        log = LOGGER.warning if outcome.unsuccessful or outcome.warning else LOGGER.info
+        diagnostic = outcome.error or outcome.warning
+        diagnostic_name = "error" if outcome.error or outcome.unsuccessful else "warning"
+        if not diagnostic and outcome.unsuccessful:
             diagnostic = (
                 stderr.decode("utf-8", errors="replace")
                 if isinstance(stderr, bytes)
@@ -438,9 +661,10 @@ class YieldCurveScheduler:
         diagnostic = " ".join(diagnostic.split())[:1000]
         if diagnostic:
             log(
-                "Yield-curve updater status=%s curveAsOf=%s error=%s.",
+                "Yield-curve updater status=%s curveAsOf=%s %s=%s.",
                 outcome.status,
                 outcome.curve_as_of or "<none>",
+                diagnostic_name,
                 diagnostic,
             )
         else:
@@ -452,44 +676,54 @@ class YieldCurveScheduler:
         return outcome
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        repair_force_refresh = False
-        startup_check_pending = True
+        local_today = self._new_york_now().date()
+        last_attempt_date, marker_readable = self._load_attempt_date(local_today)
+        if not marker_readable:
+            # Fail closed: an unreadable marker must not turn a restart into a
+            # second network attempt for the same New York date.
+            last_attempt_date = self._new_york_now().date()
+
         while not stop_event.is_set():
-            post_publication_date = (
-                None
-                if startup_check_pending
-                else self._post_publication_refresh_due_date()
+            local_now = self._new_york_now()
+            next_attempt = self._next_scheduled_attempt(
+                local_now,
+                last_attempt_date,
             )
-            scheduled_force_refresh = post_publication_date is not None
-            if scheduled_force_refresh:
+            delay = max(
+                (
+                    next_attempt.astimezone(timezone.utc)
+                    - local_now.astimezone(timezone.utc)
+                ).total_seconds(),
+                0.0,
+            )
+            if delay > 0:
                 LOGGER.info(
-                    "Running the forced post-publication yield-curve refresh for %s.",
-                    post_publication_date,
+                    "Next optional yield-curve attempt is %s "
+                    "(in %.0fs).",
+                    next_attempt.isoformat(),
+                    delay,
                 )
-            outcome = await self.run_once(
-                if_needed=not (repair_force_refresh or scheduled_force_refresh)
+                if await self._wait_for_stop(stop_event, delay):
+                    return
+                continue
+
+            attempt_date = local_now.date()
+            last_attempt_date = attempt_date
+            if not self._claim_attempt_date(attempt_date):
+                continue
+
+            LOGGER.info(
+                "Running the daily optional yield-curve attempt for %s.",
+                attempt_date.isoformat(),
             )
-            startup_check_pending = False
-
-            if scheduled_force_refresh and not outcome.retry_soon:
-                self._last_post_publication_refresh_date = post_publication_date
-            if outcome.force_refresh_on_retry:
-                # A partial snapshot has today's curveAsOf, so --if-needed
-                # would otherwise suppress the repair attempt.
-                repair_force_refresh = True
-            elif not outcome.retry_soon:
-                repair_force_refresh = False
-
-            if outcome.retry_soon:
-                delay = self.config.yield_retry_seconds
-            else:
-                delay = min(
-                    self.config.yield_check_seconds,
-                    self._seconds_until_next_post_publication_refresh(),
+            outcome = await self.run_once(if_needed=True)
+            if outcome.unsuccessful:
+                LOGGER.warning(
+                    "Yield-curve attempt for %s was not successful; "
+                    "retaining the previous snapshot and waiting until the "
+                    "next New York weekday.",
+                    attempt_date.isoformat(),
                 )
-            LOGGER.info("Next yield-curve check in %.0fs.", delay)
-            if await self._wait_for_stop(stop_event, delay):
-                return
 
 
 def websocket_connector(uri: str, **kwargs: Any) -> Any:
@@ -623,7 +857,7 @@ class IBStatusMonitor:
 
 
 class ApplicationSupervisor:
-    """Own critical children and the two non-critical maintenance loops."""
+    """Own critical children plus required and optional background loops."""
 
     def __init__(
         self,
@@ -736,6 +970,25 @@ class ApplicationSupervisor:
             return 128 + abs(returncode)
         return 1
 
+    async def _run_optional_yield_scheduler(self) -> None:
+        try:
+            await self.yield_scheduler.run(self._stop_event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception(
+                "Optional yield-curve scheduler failed; "
+                "the container will continue without it."
+            )
+        else:
+            if not self._stop_event.is_set():
+                LOGGER.error(
+                    "Optional yield-curve scheduler stopped unexpectedly; "
+                    "the container will continue without it."
+                )
+        if not self._stop_event.is_set():
+            await self._stop_event.wait()
+
     async def run(self) -> int:
         self._install_signal_handlers()
         critical_waiters: Dict[asyncio.Task[Any], str] = {}
@@ -750,7 +1003,7 @@ class ApplicationSupervisor:
 
             background_tasks = {
                 asyncio.create_task(self.monitor.run(self._stop_event)): "ib_status_monitor",
-                asyncio.create_task(self.yield_scheduler.run(self._stop_event)): "yield_curve_scheduler",
+                asyncio.create_task(self._run_optional_yield_scheduler()): "yield_curve_scheduler",
             }
             stop_waiter = asyncio.create_task(self._stop_event.wait())
             watched = set(critical_waiters) | set(background_tasks) | {stop_waiter}

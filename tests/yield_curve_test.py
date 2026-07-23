@@ -1,5 +1,7 @@
 """Tests for the standalone unified SOFR/Treasury yield curve."""
 
+import contextlib
+import io
 import json
 import math
 import sys
@@ -17,7 +19,9 @@ from yield_curve.builder import (  # noqa: E402
     resolve_snapshot_discount,
     sofr_act360_to_continuous_act365f,
 )
+from yield_curve import __main__ as yield_curve_cli  # noqa: E402
 from yield_curve.backend_adapter import YieldCurveBackendAdapter  # noqa: E402
+import yield_curve.repository as repository_module  # noqa: E402
 from yield_curve.repository import YieldCurveRepository  # noqa: E402
 from yield_curve.sources.new_york_fed import parse_sofr_payload  # noqa: E402
 from yield_curve.updater import (  # noqa: E402
@@ -187,6 +191,179 @@ class RepositoryAndUpdaterTest(unittest.TestCase):
         self.assertEqual(failing["status"], "cache_fallback")
         self.assertEqual(self.repository.load_latest()["snapshotId"], first_id)
 
+    def test_empty_source_result_does_not_overwrite_last_complete_snapshot(self):
+        previous = build_sample("2026-07-17")
+        self.repository.write_snapshot(previous)
+
+        for missing_source in ("sofr", "treasury"):
+            with self.subTest(missing_source=missing_source):
+                updater = YieldCurveUpdater(
+                    repository=self.repository,
+                    sofr_loader=lambda _target: {} if missing_source == "sofr" else SOFR,
+                    treasury_loader=lambda _target: {} if missing_source == "treasury" else TREASURY,
+                    now=lambda: datetime(2026, 7, 20, 12, tzinfo=timezone.utc),
+                )
+                result = updater.update()
+
+                self.assertEqual(result["status"], "cache_fallback")
+                self.assertEqual(
+                    self.repository.load_latest()["snapshotId"],
+                    previous["snapshotId"],
+                )
+
+    def test_raw_source_write_failure_does_not_publish_new_snapshot(self):
+        previous = build_sample("2026-07-17")
+        self.repository.write_snapshot(previous)
+        updater = YieldCurveUpdater(
+            repository=self.repository,
+            sofr_loader=lambda _target: SOFR,
+            treasury_loader=lambda _target: TREASURY,
+            now=lambda: datetime(2026, 7, 20, 12, tzinfo=timezone.utc),
+        )
+
+        with mock.patch.object(
+            self.repository,
+            "write_raw_source",
+            side_effect=OSError("synthetic raw write failure"),
+        ):
+            result = updater.update()
+
+        self.assertEqual(result["status"], "cache_fallback")
+        self.assertEqual(
+            self.repository.load_latest()["snapshotId"],
+            previous["snapshotId"],
+        )
+
+    def test_failed_latest_publication_does_not_leak_new_history_snapshot(self):
+        previous = build_sample("2026-07-17")
+        self.repository.write_snapshot(previous)
+        updater = YieldCurveUpdater(
+            repository=self.repository,
+            sofr_loader=lambda _target: SOFR,
+            treasury_loader=lambda _target: TREASURY,
+            now=lambda: datetime(2026, 7, 20, 12, tzinfo=timezone.utc),
+        )
+        real_write = repository_module._atomic_json_write
+
+        def fail_latest(path, payload):
+            if Path(path) == self.repository.latest_path:
+                raise OSError("synthetic latest publication failure")
+            return real_write(path, payload)
+
+        with mock.patch.object(
+            repository_module,
+            "_atomic_json_write",
+            side_effect=fail_latest,
+        ):
+            result = updater.update()
+
+        self.assertEqual(result["status"], "cache_fallback")
+        self.assertEqual(
+            self.repository.load_latest()["snapshotId"],
+            previous["snapshotId"],
+        )
+        self.assertEqual(
+            self.repository.load_on_or_before("2026-07-20")["snapshotId"],
+            previous["snapshotId"],
+        )
+
+    def test_post_replace_error_reports_the_new_active_snapshot_as_updated(self):
+        previous = build_sample("2026-07-17")
+        self.repository.write_snapshot(previous)
+        updater = YieldCurveUpdater(
+            repository=self.repository,
+            sofr_loader=lambda _target: SOFR,
+            treasury_loader=lambda _target: TREASURY,
+            now=lambda: datetime(2026, 7, 20, 12, tzinfo=timezone.utc),
+        )
+        real_write = repository_module._atomic_json_write
+
+        def replace_then_raise(path, payload):
+            real_write(path, payload)
+            if Path(path) == self.repository.latest_path:
+                raise OSError("synthetic post-replace fsync failure")
+
+        with mock.patch.object(
+            repository_module,
+            "_atomic_json_write",
+            side_effect=replace_then_raise,
+        ):
+            result = updater.update()
+
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(
+            self.repository.load_latest()["snapshotId"],
+            result["snapshot"]["snapshotId"],
+        )
+        self.assertNotEqual(result["snapshot"]["snapshotId"], previous["snapshotId"])
+
+    def test_history_archive_failure_keeps_successful_latest_publication(self):
+        previous = build_sample("2026-07-17")
+        self.repository.write_snapshot(previous)
+        updater = YieldCurveUpdater(
+            repository=self.repository,
+            sofr_loader=lambda _target: SOFR,
+            treasury_loader=lambda _target: TREASURY,
+            now=lambda: datetime(2026, 7, 20, 12, tzinfo=timezone.utc),
+        )
+        real_write = repository_module._atomic_json_write
+
+        def fail_new_history(path, payload):
+            candidate = Path(path)
+            if (
+                self.repository.snapshots_dir in candidate.parents
+                and candidate.name == "2026-07-20.json"
+            ):
+                raise OSError("synthetic history archive failure")
+            return real_write(path, payload)
+
+        with mock.patch.object(
+            repository_module,
+            "_atomic_json_write",
+            side_effect=fail_new_history,
+        ):
+            result = updater.update()
+
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(
+            self.repository.load_latest()["snapshotId"],
+            result["snapshot"]["snapshotId"],
+        )
+        self.assertTrue(result["paths"].get("warning"))
+        self.assertEqual(result["warning"], result["paths"]["warning"])
+
+    def test_lock_cleanup_failure_does_not_override_cache_fallback(self):
+        previous = build_sample("2026-07-17")
+        self.repository.write_snapshot(previous)
+        updater = YieldCurveUpdater(
+            repository=self.repository,
+            sofr_loader=lambda _target: (_ for _ in ()).throw(
+                RuntimeError("SOFR offline")
+            ),
+            treasury_loader=lambda _target: TREASURY,
+            now=lambda: datetime(2026, 7, 20, 12, tzinfo=timezone.utc),
+        )
+        real_unlink = Path.unlink
+
+        def fail_lock_cleanup(path, *args, **kwargs):
+            if path == self.repository.lock_path:
+                raise PermissionError("synthetic lock cleanup failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(
+            Path,
+            "unlink",
+            autospec=True,
+            side_effect=fail_lock_cleanup,
+        ):
+            result = updater.update()
+
+        self.assertEqual(result["status"], "cache_fallback")
+        self.assertEqual(
+            self.repository.load_latest()["snapshotId"],
+            previous["snapshotId"],
+        )
+
     def test_weekend_update_stamps_the_friday_business_date(self):
         updater = YieldCurveUpdater(
             repository=self.repository,
@@ -215,6 +392,40 @@ class RepositoryAndUpdaterTest(unittest.TestCase):
         for path in [result["paths"]["latestPath"], *result["rawPaths"].values()]:
             with Path(path).open("r", encoding="utf-8") as handle:
                 self.assertIsInstance(json.load(handle), dict)
+
+
+class YieldCurveCliTest(unittest.TestCase):
+    def test_nonfatal_publication_warning_is_visible_on_stderr(self):
+        result = {
+            "status": "updated",
+            "snapshot": {
+                "curveAsOf": "2026-07-20",
+                "effectiveDate": "2026-07-17",
+                "snapshotId": "synthetic-snapshot",
+            },
+            "warning": "dated history archive could not be written",
+            "paths": {"latestPath": "/synthetic/latest.json"},
+        }
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    yield_curve_cli.YieldCurveUpdater,
+                    "update",
+                    return_value=result,
+                ),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                exit_code = yield_curve_cli.main(
+                    ["update", "--data-dir", data_dir],
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Yield curve updated", stdout.getvalue())
+        self.assertIn(result["warning"], stderr.getvalue())
 
 
 class BackendAdapterTest(unittest.IsolatedAsyncioTestCase):

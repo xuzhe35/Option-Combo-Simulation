@@ -20,7 +20,8 @@ not IB market-data state:
 - The Docker supervisor observes IB status over the local WebSocket for
   operational logging only. It never sends a competing connect request.
 - Yield-curve maintenance is independent of IB connectivity and runs in a
-  separate scheduled task.
+  separate optional scheduled task. A yield update failure is logged but can
+  never stop a critical child or make PID 1 restart the container.
 
 The runtime image contains `config.ini`, `config_overlay.py`, `entrypoint.sh`,
 and `supervisor.py`. The build-only `Dockerfile` is intentionally not copied
@@ -74,38 +75,48 @@ the supervisor does not cancel or replace the broker's still-live order.
 
 ## Yield-curve scheduling
 
-PID 1 runs:
+PID 1 runs one automatic update at **09:30 America/New_York on each weekday**:
 
 ```text
 python -m yield_curve update --if-needed --data-dir /app/state/yield_curve --json
 ```
 
-at startup and once per hour. In addition, the first scheduler cycle at or
-after 18:00 America/New_York on each weekday runs one forced refresh without
-`--if-needed`. This post-publication pass prevents an early same-date snapshot
-from suppressing the official observations published later that day.
+The scheduler persists the attempted New York date in the shared state
+directory, so replacing or restarting the container later that day does not
+repeat the automatic request. Weekends are skipped. There is no same-day retry
+after a failed, partial, timed-out, or cache-fallback attempt; the next
+automatic request is the next New York weekday's scheduled attempt.
 
-A failed, partial, timed-out, or cache-fallback refresh is retried after 600
-seconds. A partial/cache-fallback result and a failed post-publication pass both
-retry as real refreshes instead of treating the same-date cache as complete.
+The updater publishes only a complete new snapshot. If either official source
+or the updater process fails, the last successful snapshot remains in the
+persistent volume. Yield data is optional: scheduler failure is isolated from
+the HTTP server, `ib_server.py`, IB reconnect handling, and container
+lifecycle.
+
+For this Docker deployment, the config overlay forces
+`yield_curve.auto_update_if_missing = false` and
+`yield_curve.auto_update_if_stale = false`. The PID-1 scheduler is therefore
+the sole **automatic** yield-curve writer; manual updater commands remain
+available for operator maintenance.
 
 The timing can be adjusted with:
 
 | Environment variable | Default |
 |---|---:|
-| `OPTION_COMBO_YIELD_CHECK_SECONDS` | `3600` |
-| `OPTION_COMBO_YIELD_RETRY_SECONDS` | `600` |
+| `OPTION_COMBO_YIELD_DAILY_HOUR_NY` | `9` |
+| `OPTION_COMBO_YIELD_DAILY_MINUTE_NY` | `30` |
 | `OPTION_COMBO_YIELD_PROCESS_TIMEOUT_SECONDS` | `120` |
-| `OPTION_COMBO_YIELD_POST_PUBLICATION_HOUR_NY` | `18` |
 | `YIELD_CURVE_DATA_DIR` | `/app/state/yield_curve` |
 
 ## Configuration
 
 The freshly cloned repository's `config.ini` remains the base configuration.
 This preserves team-maintained sections and settings added by upstream. The
-starter atomically overlays only the six keys below; each nonempty environment
-value takes precedence over the corresponding bundled `config.ini` default.
-Other keys in the bundled config are not copied into the repository config.
+starter atomically overlays only the six environment-backed keys below; each
+nonempty environment value takes precedence over the corresponding bundled
+`config.ini` default. It also disables the two backend yield auto-update flags
+described above so there is only one automatic writer. Other keys in the
+bundled config are not copied into the repository config.
 
 | Environment variable | Config key | Default |
 |---|---|---|

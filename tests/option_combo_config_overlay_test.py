@@ -41,7 +41,8 @@ class OptionComboConfigOverlayTests(unittest.TestCase):
             "\n"
             "[yield_curve]\n"
             "data_dir = upstream-data\n"
-            "auto_update_if_stale = false\n"
+            "auto_update_if_missing = true\n"
+            "auto_update_if_stale = true\n"
             "\n"
             "[new_team_feature]\n"
             "enabled = yes\n",
@@ -61,7 +62,8 @@ class OptionComboConfigOverlayTests(unittest.TestCase):
             "\n"
             "[yield_curve]\n"
             "data_dir = /app/state/yield_curve\n"
-            "auto_update_if_stale = true\n"
+            "auto_update_if_missing = false\n"
+            "auto_update_if_stale = false\n"
             "\n"
             "[execution]\n"
             "starter_only_setting = must-not-be-copied\n",
@@ -80,6 +82,8 @@ class OptionComboConfigOverlayTests(unittest.TestCase):
                 "TWS_HOST": "environment-host",
                 "TWS_PORT": "",
                 "WS_PORT": "8877",
+                "YIELD_CURVE_AUTO_UPDATE_IF_MISSING": "true",
+                "YIELD_CURVE_AUTO_UPDATE_IF_STALE": "true",
             },
         )
 
@@ -97,6 +101,10 @@ class OptionComboConfigOverlayTests(unittest.TestCase):
         self.assertEqual(
             merged.get("server", "team_server_setting"),
             "keep-server",
+        )
+        self.assertEqual(
+            merged.get("yield_curve", "auto_update_if_missing"),
+            "false",
         )
         self.assertEqual(
             merged.get("yield_curve", "auto_update_if_stale"),

@@ -1,7 +1,9 @@
 import asyncio
+import fcntl
 import json
 import os
 import signal
+import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,10 +27,9 @@ def _config(**overrides):
         "ws_retry_seconds": 5.0,
         "ws_response_timeout_seconds": 1.0,
         "yield_curve_data_dir": Path("/synthetic/state/yield_curve"),
-        "yield_check_seconds": 3600.0,
-        "yield_retry_seconds": 600.0,
         "yield_process_timeout_seconds": 1.0,
-        "yield_post_publication_hour_ny": 18,
+        "yield_daily_hour_ny": 9,
+        "yield_daily_minute_ny": 30,
         "shutdown_grace_seconds": 1.0,
     }
     values.update(overrides)
@@ -36,7 +37,7 @@ def _config(**overrides):
 
 
 class YieldUpdateResultTest(unittest.TestCase):
-    def test_cache_fallback_is_retryable_even_with_zero_exit_code(self):
+    def test_cache_fallback_is_unsuccessful_even_with_zero_exit_code(self):
         outcome = parse_yield_update_result(
             0,
             json.dumps(
@@ -50,8 +51,7 @@ class YieldUpdateResultTest(unittest.TestCase):
         )
 
         self.assertEqual(outcome.status, "cache_fallback")
-        self.assertTrue(outcome.retry_soon)
-        self.assertTrue(outcome.force_refresh_on_retry)
+        self.assertTrue(outcome.unsuccessful)
         self.assertEqual(outcome.curve_as_of, "2026-07-22")
         self.assertEqual(outcome.error, "source unavailable")
 
@@ -66,8 +66,25 @@ class YieldUpdateResultTest(unittest.TestCase):
             ),
         )
 
-        self.assertFalse(outcome.retry_soon)
-        self.assertFalse(outcome.force_refresh_on_retry)
+        self.assertFalse(outcome.unsuccessful)
+
+    def test_complete_updated_result_preserves_nonfatal_warning(self):
+        outcome = parse_yield_update_result(
+            0,
+            json.dumps(
+                {
+                    "status": "updated",
+                    "snapshot": {"curveAsOf": "2026-07-23"},
+                    "warning": "dated history archive could not be written",
+                }
+            ),
+        )
+
+        self.assertFalse(outcome.unsuccessful)
+        self.assertEqual(
+            outcome.warning,
+            "dated history archive could not be written",
+        )
 
     def test_invalid_json_and_success_without_snapshot_are_retryable(self):
         invalid = parse_yield_update_result(0, "not-json")
@@ -77,8 +94,8 @@ class YieldUpdateResultTest(unittest.TestCase):
         )
 
         self.assertEqual(invalid.status, "invalid_output")
-        self.assertTrue(invalid.retry_soon)
-        self.assertTrue(missing_snapshot.retry_soon)
+        self.assertTrue(invalid.unsuccessful)
+        self.assertTrue(missing_snapshot.unsuccessful)
 
 
 class SupervisorConfigTest(unittest.TestCase):
@@ -101,18 +118,23 @@ class SupervisorConfigTest(unittest.TestCase):
             Path("/synthetic/alternate-yield-state"),
         )
 
-    def test_post_publication_hour_defaults_to_18_ny_and_is_overridable(self):
+    def test_daily_time_defaults_to_0930_ny_and_is_overridable(self):
         with patch.dict(os.environ, {}, clear=True):
             default_config = SupervisorConfig.from_environment(Path("/synthetic/repo"))
         with patch.dict(
             os.environ,
-            {"OPTION_COMBO_YIELD_POST_PUBLICATION_HOUR_NY": "20"},
+            {
+                "OPTION_COMBO_YIELD_DAILY_HOUR_NY": "10",
+                "OPTION_COMBO_YIELD_DAILY_MINUTE_NY": "15",
+            },
             clear=True,
         ):
             overridden_config = SupervisorConfig.from_environment(Path("/synthetic/repo"))
 
-        self.assertEqual(default_config.yield_post_publication_hour_ny, 18)
-        self.assertEqual(overridden_config.yield_post_publication_hour_ny, 20)
+        self.assertEqual(default_config.yield_daily_hour_ny, 9)
+        self.assertEqual(default_config.yield_daily_minute_ny, 30)
+        self.assertEqual(overridden_config.yield_daily_hour_ny, 10)
+        self.assertEqual(overridden_config.yield_daily_minute_ny, 15)
 
     def test_status_monitor_uses_backend_bind_host_without_dialing_a_wildcard(self):
         with patch.dict(os.environ, {"WS_HOST": "0.0.0.0"}, clear=True):
@@ -145,176 +167,311 @@ class _UpdaterProcess:
 
 
 class YieldCurveSchedulerTest(unittest.IsolatedAsyncioTestCase):
-    async def test_cache_fallback_retries_without_if_needed_gate(self):
+    async def test_waits_until_0930_ny_then_runs_once_with_if_needed(self):
         spawned_commands = []
-        processes = [
-            _UpdaterProcess(
-                {
-                    "status": "cache_fallback",
-                    "fallbackUsed": True,
-                    "snapshot": {"curveAsOf": "2026-07-22"},
-                }
-            ),
-            _UpdaterProcess(
-                {
-                    "status": "updated",
-                    "fallbackUsed": False,
-                    "snapshot": {"curveAsOf": "2026-07-23"},
-                }
-            ),
-        ]
+        process = _UpdaterProcess({
+                "status": "updated",
+                "snapshot": {"curveAsOf": "2026-07-23"},
+        })
+        clock = {
+            "now": datetime(2026, 7, 23, 9, 29, tzinfo=ZoneInfo("America/New_York")),
+        }
 
-        async def spawn_exec(*command, **_kwargs):
-            spawned_commands.append(command)
-            return processes.pop(0)
+        with tempfile.TemporaryDirectory() as data_dir:
+            async def spawn_exec(*command, **_kwargs):
+                marker = Path(data_dir) / ".option_combo_last_yield_attempt_ny"
+                self.assertEqual(marker.read_text(encoding="utf-8").strip(), "2026-07-23")
+                spawned_commands.append(command)
+                return process
 
-        delays = []
+            delays = []
 
-        async def fake_wait_for_stop(stop_event, delay):
-            delays.append(delay)
-            if len(delays) == 2:
-                stop_event.set()
-                return True
-            return False
+            async def fake_wait_for_stop(stop_event, delay):
+                delays.append(delay)
+                if spawned_commands:
+                    stop_event.set()
+                    return True
+                clock["now"] += timedelta(seconds=delay)
+                return False
 
-        scheduler = YieldCurveScheduler(
-            _config(),
-            spawn_exec=spawn_exec,
-            wait_for_stop_fn=fake_wait_for_stop,
-            now=lambda: datetime(
-                2026,
-                7,
-                23,
-                10,
-                0,
-                tzinfo=ZoneInfo("America/New_York"),
-            ),
-        )
-        await scheduler.run(asyncio.Event())
+            scheduler = YieldCurveScheduler(
+                _config(yield_curve_data_dir=Path(data_dir)),
+                spawn_exec=spawn_exec,
+                wait_for_stop_fn=fake_wait_for_stop,
+                now=lambda: clock["now"],
+            )
+            await scheduler.run(asyncio.Event())
 
+        self.assertEqual(len(spawned_commands), 1)
         self.assertIn("--if-needed", spawned_commands[0])
-        self.assertNotIn("--if-needed", spawned_commands[1])
         self.assertIn("--json", spawned_commands[0])
         data_dir_index = spawned_commands[0].index("--data-dir")
-        self.assertEqual(
-            spawned_commands[0][data_dir_index + 1],
-            "/synthetic/state/yield_curve",
-        )
-        self.assertEqual(
-            spawned_commands[1][spawned_commands[1].index("--data-dir") + 1],
-            "/synthetic/state/yield_curve",
-        )
-        self.assertEqual(delays, [600.0, 3600.0])
-
-    async def test_forces_once_after_ny_publication_hour_then_returns_to_if_needed(self):
-        spawned_commands = []
-        processes = [
-            _UpdaterProcess({
-                "status": "not_due",
-                "snapshot": {"curveAsOf": "2026-07-23"},
-            }),
-            _UpdaterProcess({
-                "status": "updated",
-                "snapshot": {"curveAsOf": "2026-07-23"},
-            }),
-            _UpdaterProcess({
-                "status": "not_due",
-                "snapshot": {"curveAsOf": "2026-07-23"},
-            }),
-        ]
-
-        async def spawn_exec(*command, **_kwargs):
-            spawned_commands.append(command)
-            return processes.pop(0)
-
-        clock = {
-            "now": datetime(
-                2026,
-                7,
-                23,
-                17,
-                59,
-                tzinfo=ZoneInfo("America/New_York"),
-            ),
-        }
-        delays = []
-
-        async def fake_wait_for_stop(stop_event, delay):
-            delays.append(delay)
-            if len(delays) == 3:
-                stop_event.set()
-                return True
-            clock["now"] += timedelta(seconds=delay)
-            return False
-
-        scheduler = YieldCurveScheduler(
-            _config(),
-            spawn_exec=spawn_exec,
-            wait_for_stop_fn=fake_wait_for_stop,
-            now=lambda: clock["now"],
-        )
-        await scheduler.run(asyncio.Event())
-
-        self.assertIn("--if-needed", spawned_commands[0])
-        self.assertNotIn("--if-needed", spawned_commands[1])
-        self.assertIn("--if-needed", spawned_commands[2])
+        self.assertEqual(spawned_commands[0][data_dir_index + 1], data_dir)
         self.assertAlmostEqual(delays[0], 60.0, delta=0.01)
-        self.assertEqual(delays[1:], [3600.0, 3600.0])
+        self.assertAlmostEqual(delays[1], 24 * 60 * 60, delta=0.01)
 
-    async def test_failed_post_publication_refresh_retries_forced_after_ten_minutes(self):
+    async def test_failed_attempt_is_not_retried_and_marker_survives_restart(self):
         spawned_commands = []
-        processes = [
-            _UpdaterProcess({
-                "status": "not_due",
-                "snapshot": {"curveAsOf": "2026-07-23"},
-            }),
-            _UpdaterProcess({
-                "status": "cache_fallback",
-                "snapshot": {"curveAsOf": "2026-07-23"},
-            }),
-            _UpdaterProcess({
-                "status": "updated",
-                "snapshot": {"curveAsOf": "2026-07-23"},
-            }),
-        ]
+        clock = {
+            "now": datetime(2026, 7, 23, 10, 0, tzinfo=ZoneInfo("America/New_York")),
+        }
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            async def spawn_exec(*command, **_kwargs):
+                spawned_commands.append(command)
+                return _UpdaterProcess({
+                    "status": "cache_fallback",
+                    "snapshot": {"curveAsOf": "2026-07-22"},
+                })
+
+            first_delays = []
+
+            async def stop_after_first_attempt(stop_event, delay):
+                first_delays.append(delay)
+                stop_event.set()
+                return True
+
+            first = YieldCurveScheduler(
+                _config(yield_curve_data_dir=Path(data_dir)),
+                spawn_exec=spawn_exec,
+                wait_for_stop_fn=stop_after_first_attempt,
+                now=lambda: clock["now"],
+            )
+            await first.run(asyncio.Event())
+
+            second_delays = []
+
+            async def stop_without_attempt(stop_event, delay):
+                second_delays.append(delay)
+                stop_event.set()
+                return True
+
+            second = YieldCurveScheduler(
+                _config(yield_curve_data_dir=Path(data_dir)),
+                spawn_exec=spawn_exec,
+                wait_for_stop_fn=stop_without_attempt,
+                now=lambda: clock["now"] + timedelta(minutes=5),
+            )
+            await second.run(asyncio.Event())
+
+        self.assertEqual(len(spawned_commands), 1)
+        self.assertEqual(len(first_delays), 1)
+        self.assertEqual(len(second_delays), 1)
+        self.assertAlmostEqual(first_delays[0], 23.5 * 60 * 60, delta=0.01)
+        self.assertAlmostEqual(
+            second_delays[0],
+            23.5 * 60 * 60 - 5 * 60,
+            delta=0.01,
+        )
+
+    async def test_marker_write_failure_does_not_launch_untracked_attempt(self):
+        spawned_commands = []
 
         async def spawn_exec(*command, **_kwargs):
             spawned_commands.append(command)
-            return processes.pop(0)
+            return _UpdaterProcess({
+                "status": "updated",
+                "snapshot": {"curveAsOf": "2026-07-23"},
+            })
 
-        clock = {
-            "now": datetime(
+        async def stop_after_skip(stop_event, _delay):
+            stop_event.set()
+            return True
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            scheduler = YieldCurveScheduler(
+                _config(yield_curve_data_dir=Path(data_dir)),
+                spawn_exec=spawn_exec,
+                wait_for_stop_fn=stop_after_skip,
+                now=lambda: datetime(
+                    2026,
+                    7,
+                    23,
+                    10,
+                    0,
+                    tzinfo=ZoneInfo("America/New_York"),
+                ),
+            )
+            with patch.object(
+                scheduler,
+                "_claim_attempt_date",
+                return_value=False,
+            ):
+                await scheduler.run(asyncio.Event())
+
+        self.assertEqual(spawned_commands, [])
+
+    def test_attempt_claim_rechecks_persisted_date_across_supervisors(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            config = _config(yield_curve_data_dir=Path(data_dir))
+            first = YieldCurveScheduler(config)
+            second = YieldCurveScheduler(config)
+            attempt_date = datetime(2026, 7, 23).date()
+
+            self.assertTrue(first._claim_attempt_date(attempt_date))
+            self.assertFalse(second._claim_attempt_date(attempt_date))
+
+    def test_busy_attempt_claim_lock_is_nonblocking_and_fails_closed(self):
+        operations = []
+
+        def busy_lock(_descriptor, operation):
+            operations.append(operation)
+            if operation & fcntl.LOCK_NB:
+                raise BlockingIOError
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            scheduler = YieldCurveScheduler(
+                _config(yield_curve_data_dir=Path(data_dir)),
+            )
+            with patch(
+                "option_combo_starter.supervisor.fcntl.flock",
+                side_effect=busy_lock,
+            ):
+                claimed = scheduler._claim_attempt_date(
+                    datetime(2026, 7, 23).date(),
+                )
+
+        self.assertFalse(claimed)
+        self.assertTrue(operations[0] & fcntl.LOCK_NB)
+
+    async def test_malformed_marker_fails_closed_for_its_modified_ny_date(self):
+        spawned_commands = []
+
+        async def spawn_exec(*command, **_kwargs):
+            spawned_commands.append(command)
+            return _UpdaterProcess({
+                "status": "updated",
+                "snapshot": {"curveAsOf": "2026-07-23"},
+            })
+
+        async def stop_after_skip(stop_event, _delay):
+            stop_event.set()
+            return True
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            marker = Path(data_dir) / ".option_combo_last_yield_attempt_ny"
+            marker.write_text("not-a-date\n", encoding="utf-8")
+            modified = datetime(
                 2026,
                 7,
                 23,
-                18,
-                5,
+                9,
+                30,
+                tzinfo=ZoneInfo("America/New_York"),
+            ).timestamp()
+            os.utime(marker, (modified, modified))
+            scheduler = YieldCurveScheduler(
+                _config(yield_curve_data_dir=Path(data_dir)),
+                spawn_exec=spawn_exec,
+                wait_for_stop_fn=stop_after_skip,
+                now=lambda: datetime(
+                    2026,
+                    7,
+                    23,
+                    10,
+                    0,
+                    tzinfo=ZoneInfo("America/New_York"),
+                ),
+            )
+            await scheduler.run(asyncio.Event())
+
+        self.assertEqual(spawned_commands, [])
+
+    def test_future_and_non_utf8_markers_are_repaired_fail_closed(self):
+        reference_date = datetime(2026, 7, 23).date()
+        modified = datetime(
+            2026,
+            7,
+            23,
+            9,
+            30,
+            tzinfo=ZoneInfo("America/New_York"),
+        ).timestamp()
+
+        for marker_bytes in (b"2099-01-01\n", b"\xff\xfe"):
+            with self.subTest(marker_bytes=marker_bytes):
+                with tempfile.TemporaryDirectory() as data_dir:
+                    scheduler = YieldCurveScheduler(
+                        _config(yield_curve_data_dir=Path(data_dir)),
+                    )
+                    marker = Path(data_dir) / ".option_combo_last_yield_attempt_ny"
+                    marker.write_bytes(marker_bytes)
+                    os.utime(marker, (modified, modified))
+
+                    persisted, readable = scheduler._load_attempt_date(
+                        reference_date,
+                    )
+
+                    self.assertTrue(readable)
+                    self.assertEqual(persisted, reference_date)
+                    self.assertEqual(
+                        marker.read_text(encoding="utf-8").strip(),
+                        reference_date.isoformat(),
+                    )
+
+    def test_reading_invalid_marker_is_side_effect_free_until_locked_repair(self):
+        reference_date = datetime(2026, 7, 23).date()
+        marker_bytes = b"not-a-date\n"
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            scheduler = YieldCurveScheduler(
+                _config(yield_curve_data_dir=Path(data_dir)),
+            )
+            marker = Path(data_dir) / ".option_combo_last_yield_attempt_ny"
+            marker.write_bytes(marker_bytes)
+
+            persisted, readable, repair_needed = scheduler._read_attempt_date(
+                reference_date,
+            )
+
+            self.assertTrue(readable)
+            self.assertTrue(repair_needed)
+            self.assertIsNotNone(persisted)
+            self.assertEqual(marker.read_bytes(), marker_bytes)
+
+    def test_friday_attempt_schedules_monday_0930_across_dst(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            scheduler = YieldCurveScheduler(
+                _config(yield_curve_data_dir=Path(data_dir)),
+                now=lambda: datetime(
+                    2026,
+                    10,
+                    30,
+                    10,
+                    0,
+                    tzinfo=ZoneInfo("America/New_York"),
+                ),
+            )
+            next_attempt = scheduler._next_scheduled_attempt(
+                scheduler._new_york_now(),
+                datetime(2026, 10, 30).date(),
+            )
+
+        self.assertEqual(
+            next_attempt,
+            datetime(
+                2026,
+                11,
+                2,
+                9,
+                30,
                 tzinfo=ZoneInfo("America/New_York"),
             ),
-        }
-        delays = []
-
-        async def fake_wait_for_stop(stop_event, delay):
-            delays.append(delay)
-            if len(delays) == 3:
-                stop_event.set()
-                return True
-            clock["now"] += timedelta(seconds=delay)
-            return False
-
-        scheduler = YieldCurveScheduler(
-            _config(),
-            spawn_exec=spawn_exec,
-            wait_for_stop_fn=fake_wait_for_stop,
-            now=lambda: clock["now"],
         )
-        await scheduler.run(asyncio.Event())
-
-        self.assertIn("--if-needed", spawned_commands[0])
-        self.assertNotIn("--if-needed", spawned_commands[1])
-        self.assertNotIn("--if-needed", spawned_commands[2])
-        self.assertAlmostEqual(delays[0], 0.0, delta=0.01)
-        self.assertEqual(delays[1], 600.0)
+        self.assertEqual(
+            (
+                next_attempt.astimezone(ZoneInfo("UTC"))
+                - datetime(
+                    2026,
+                    10,
+                    30,
+                    10,
+                    0,
+                    tzinfo=ZoneInfo("America/New_York"),
+                ).astimezone(ZoneInfo("UTC"))
+            ).total_seconds(),
+            72.5 * 60 * 60,
+        )
 
 
 class _FakeWebSocket:
@@ -430,6 +587,11 @@ class _PassiveBackgroundService:
         await stop_event.wait()
 
 
+class _ExplodingBackgroundService:
+    async def run(self, _stop_event):
+        raise RuntimeError("synthetic optional service failure")
+
+
 class ApplicationSupervisorTest(unittest.IsolatedAsyncioTestCase):
     async def _wait_for_children(self, spawned):
         for _ in range(20):
@@ -511,6 +673,34 @@ class ApplicationSupervisorTest(unittest.IsolatedAsyncioTestCase):
                 (spawned[1][2], signal.SIGTERM),
             ],
         )
+
+    async def test_optional_yield_scheduler_failure_does_not_restart_container(self):
+        spawned = []
+
+        async def spawn_exec(*command, **kwargs):
+            process = _CriticalProcess()
+            spawned.append((command, kwargs, process))
+            return process
+
+        def process_signaler(process, signum):
+            process.finish(-signum)
+
+        supervisor = ApplicationSupervisor(
+            _config(),
+            _PassiveBackgroundService(),
+            _ExplodingBackgroundService(),
+            spawn_exec=spawn_exec,
+            process_signaler=process_signaler,
+            install_signal_handlers=False,
+        )
+        run_task = asyncio.create_task(supervisor.run())
+        await self._wait_for_children(spawned)
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        self.assertFalse(run_task.done())
+        supervisor.request_shutdown(signal.SIGTERM)
+        self.assertEqual(await asyncio.wait_for(run_task, timeout=1.0), 0)
 
 
 if __name__ == "__main__":

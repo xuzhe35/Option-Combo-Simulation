@@ -509,9 +509,11 @@ as-of, snapshot, staleness, and quality metadata.
 downloads official New York Fed SOFR and official Treasury CMT inputs, builds
 one canonical `D(T)` snapshot, and atomically writes dated JSON plus
 `yield_curve/data/latest.json`. Neither Python backend contains source download
-logic or an hourly rate-refresh loop. If the file is missing or older than the
-current New York market date, a backend may start the independent updater once;
-network failure retains the prior complete file.
+logic or a periodic rate-refresh loop. Outside the Docker deployment, if the
+file is missing or older than the current New York market date, a backend may
+start the independent updater once; network failure retains the prior complete
+file. Docker disables those backend auto-update flags so its PID-1 scheduler is
+the sole automatic writer.
 
 Curve policy:
 
@@ -598,11 +600,19 @@ Daily maintenance and inspection:
 - Linux: run `./update_yield_curve.sh`.
 
 For the long-running Docker deployment, `option_combo_starter/supervisor.py`
-runs the same updater at startup and checks hourly. It also forces one refresh
-after 18:00 New York time on each weekday, so an early same-date snapshot
-cannot suppress observations published later that day. Failed, partial,
-timed-out, or cache-fallback refreshes retry after ten minutes. The shared
-snapshot is stored in the persistent `/app/state/yield_curve` volume.
+runs the same updater once at 09:30 America/New_York on each weekday. The
+attempted New York date is persisted, so a later container restart does not
+repeat that day's automatic attempt. A failed, partial, timed-out, or
+cache-fallback attempt is not retried that day; the previous successful
+snapshot remains available in the persistent `/app/state/yield_curve` volume.
+Yield maintenance is optional and cannot terminate a critical child or restart
+the container. The Docker config overlay sets
+`auto_update_if_missing = false` and `auto_update_if_stale = false`, leaving
+this scheduler as the sole automatic writer. Its supported settings are
+`OPTION_COMBO_YIELD_DAILY_HOUR_NY` (default `9`),
+`OPTION_COMBO_YIELD_DAILY_MINUTE_NY` (default `30`),
+`OPTION_COMBO_YIELD_PROCESS_TIMEOUT_SECONDS` (default `120`), and
+`YIELD_CURVE_DATA_DIR` (default `/app/state/yield_curve`).
 
 All launchers resolve the same configured/project virtual-environment Python
 used by the application, perform one update from the official sources, then

@@ -70,6 +70,24 @@ class YieldCurveUpdater:
             return self._treasury_loader(target)
         return load_treasury_observation(target, timeout=self.timeout)
 
+    @staticmethod
+    def _failure_result(
+        existing: Optional[Mapping[str, object]],
+        source_errors: Mapping[str, str],
+    ) -> Dict[str, object]:
+        cached = dict(existing) if existing else None
+        return {
+            "status": "cache_fallback" if cached else "unavailable",
+            "refreshAttempted": True,
+            "fallbackUsed": cached is not None,
+            "snapshot": cached,
+            "error": "; ".join(
+                "{}: {}".format(key, value)
+                for key, value in source_errors.items()
+            ),
+            "sourceErrors": dict(source_errors),
+        }
+
     def update(self, requested_date: Optional[object] = None, if_needed: bool = False) -> Dict[str, object]:
         instant = self._now()
         if requested_date:
@@ -127,49 +145,60 @@ class YieldCurveUpdater:
             except Exception as exc:
                 source_errors["treasury"] = str(exc)
 
-            # A previously complete snapshot is safer than overwriting it with
-            # a newly partial one during a temporary source outage.
-            if source_errors and existing:
-                return {
-                    "status": "cache_fallback",
-                    "refreshAttempted": True,
-                    "fallbackUsed": True,
-                    "snapshot": existing,
-                    "error": "; ".join("{}: {}".format(key, value) for key, value in source_errors.items()),
-                    "sourceErrors": source_errors,
-                }
-            if not sofr and not treasury:
-                return {
-                    "status": "unavailable",
-                    "refreshAttempted": True,
-                    "fallbackUsed": False,
-                    "snapshot": None,
-                    "error": "; ".join("{}: {}".format(key, value) for key, value in source_errors.items()),
-                    "sourceErrors": source_errors,
-                }
+            if not sofr:
+                source_errors.setdefault(
+                    "sofr",
+                    "Source returned no usable SOFR observation.",
+                )
+            if not treasury:
+                source_errors.setdefault(
+                    "treasury",
+                    "Source returned no usable Treasury observation.",
+                )
+            if source_errors:
+                return self._failure_result(existing, source_errors)
 
-            snapshot = build_discount_curve_snapshot(
-                target,
-                sofr,
-                treasury,
-                generated_at=instant,
-            )
-            paths = self.repository.write_snapshot(snapshot)
+            try:
+                snapshot = build_discount_curve_snapshot(
+                    target,
+                    sofr,
+                    treasury,
+                    generated_at=instant,
+                )
+            except Exception as exc:
+                source_errors["curve"] = "Could not build complete curve: {}".format(exc)
+                return self._failure_result(existing, source_errors)
+            if snapshot.get("kind") != "hybrid_discount_curve":
+                source_errors["curve"] = (
+                    "Builder did not produce a complete hybrid discount curve."
+                )
+                return self._failure_result(existing, source_errors)
+
             raw_paths = {}
-            if sofr:
+            try:
                 raw_paths["sofr"] = self.repository.write_raw_source(
                     "sofr", sofr["effectiveDate"], sofr
                 )
-            if treasury:
                 raw_paths["treasury"] = self.repository.write_raw_source(
                     "treasury", treasury["effectiveDate"], treasury
                 )
+                # Publish the canonical snapshot last. If auxiliary
+                # persistence fails, readers continue seeing the previous
+                # successfully completed snapshot.
+                paths = self.repository.write_snapshot(snapshot)
+            except Exception as exc:
+                source_errors["persistence"] = (
+                    "Could not persist complete curve: {}".format(exc)
+                )
+                return self._failure_result(existing, source_errors)
+
             return {
-                "status": "updated" if not source_errors else "updated_partial",
+                "status": "updated",
                 "refreshAttempted": True,
                 "fallbackUsed": False,
                 "snapshot": snapshot,
-                "error": "; ".join("{}: {}".format(key, value) for key, value in source_errors.items()),
+                "error": "",
+                "warning": str(paths.get("warning") or ""),
                 "sourceErrors": source_errors,
                 "paths": paths,
                 "rawPaths": raw_paths,

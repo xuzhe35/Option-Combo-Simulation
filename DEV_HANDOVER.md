@@ -78,14 +78,20 @@ Current surfaces:
   uses a smooth instantaneous-forward transition; later nodes preserve the CMT
   proxy slope. SOFR Averages are diagnostics only and CMT remains explicitly
   non-zero/OIS proxy input.
-- Both backends are read-only curve consumers. Missing/stale live data may
-  start `sys.executable -m yield_curve update --if-needed` once; there is no
-  rate provider or hourly refresh loop inside either server.
-- The optional Docker PID-1 layer owns the periodic loop instead:
-  `option_combo_starter/supervisor.py` checks on startup and hourly, retries
-  incomplete refreshes after ten minutes, forces one post-publication weekday
-  refresh after 18:00 New York time, and writes the same configured persistent
-  data directory consumed by the backends.
+- Both backends are read-only curve consumers. Outside Docker, missing/stale
+  live data may start `sys.executable -m yield_curve update --if-needed` once;
+  there is no rate provider or periodic refresh loop inside either server. The
+  Docker config overlay disables both backend auto-update flags.
+- The optional Docker PID-1 layer is the sole automatic writer in that
+  deployment. `option_combo_starter/supervisor.py` makes one persistent attempt
+  per New York weekday at 09:30, with no same-day retry after failure, partial
+  output, timeout, or cache fallback. The previous successful snapshot remains
+  active. This optional task cannot stop the HTTP/backend children or restart
+  the container. Configuration is limited to
+  `OPTION_COMBO_YIELD_DAILY_HOUR_NY` (default `9`),
+  `OPTION_COMBO_YIELD_DAILY_MINUTE_NY` (default `30`),
+  `OPTION_COMBO_YIELD_PROCESS_TIMEOUT_SECONDS` (default `120`), and
+  `YIELD_CURVE_DATA_DIR` (default `/app/state/yield_curve`).
 - User-facing daily maintenance is double-clickable via
   `update_yield_curve.bat` on Windows and `update_yield_curve_mac.command` on
   macOS, or runnable as `./update_yield_curve.sh` on Linux. All resolve the
