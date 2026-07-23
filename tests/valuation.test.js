@@ -41,6 +41,142 @@ module.exports = {
             },
         },
         {
+            name: 'allows only one side of a same-strike Call and Put pair to deliver',
+            run() {
+                const ctx = loadValuationContext();
+                const buildState = underlyingPrice => ({
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice,
+                    baseDate: '2026-07-23',
+                    simulatedDate: '2026-07-24',
+                    groups: [{
+                        id: 'short-straddle',
+                        legs: [
+                            { id: 'short-call', type: 'call', pos: -1, strike: 100, expDate: '2026-07-24', closePrice: null },
+                            { id: 'short-put', type: 'put', pos: -1, strike: 100, expDate: '2026-07-24', closePrice: null },
+                        ],
+                    }],
+                });
+
+                const belowStrike = ctx.OptionComboValuation.computeProjectedOptionDelivery(buildState(95));
+                assert.equal(belowStrike.callContracts, 0);
+                assert.equal(belowStrike.putContracts, -1);
+                assert.equal(belowStrike.netDeliverables, 100);
+
+                const aboveStrike = ctx.OptionComboValuation.computeProjectedOptionDelivery(buildState(105));
+                assert.equal(aboveStrike.callContracts, -1);
+                assert.equal(aboveStrike.putContracts, 0);
+                assert.equal(aboveStrike.netDeliverables, -100);
+
+                const atStrike = ctx.OptionComboValuation.computeProjectedOptionDelivery(buildState(100));
+                assert.equal(atStrike.callContracts, 0);
+                assert.equal(atStrike.putContracts, 0);
+                assert.equal(atStrike.netDeliverables, 0);
+            },
+        },
+        {
+            name: 'projects included-group SPY delivery from current price through the simulation date',
+            run() {
+                const ctx = loadValuationContext();
+                const result = ctx.OptionComboValuation.computeProjectedOptionDelivery({
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 749.15,
+                    baseDate: '2026-07-23',
+                    simulatedDate: '2026-07-24',
+                    groups: [
+                        {
+                            id: 'included',
+                            includedInGlobal: true,
+                            legs: [
+                                { id: 'short-calls', type: 'call', pos: -20, strike: 747, expDate: '2026-07-24', closePrice: null },
+                                { id: 'otm-put', type: 'put', pos: -4, strike: 740, expDate: '2026-07-24', closePrice: null },
+                                { id: 'later-call', type: 'call', pos: 3, strike: 700, expDate: '2026-07-25', closePrice: null },
+                            ],
+                        },
+                        {
+                            id: 'excluded-does-not-count',
+                            includedInGlobal: false,
+                            legs: [
+                                { id: 'excluded-itm-call', type: 'call', pos: -7, strike: 700, expDate: '2026-07-24', closePrice: null },
+                                { id: 'closed-call', type: 'call', pos: 5, strike: 700, expDate: '2026-07-24', closePrice: 50 },
+                            ],
+                        },
+                    ],
+                });
+
+                assert.equal(result.available, true);
+                assert.equal(result.status, 'ok');
+                assert.equal(result.callContracts, -20);
+                assert.equal(result.putContracts, 0);
+                assert.equal(result.netDeliverables, -2000);
+                assert.equal(result.eligibleLegCount, 2);
+                assert.equal(result.itmLegCount, 1);
+            },
+        },
+        {
+            name: 'uses the opposite delivery sign for in-the-money puts',
+            run() {
+                const ctx = loadValuationContext();
+                const result = ctx.OptionComboValuation.computeProjectedOptionDelivery({
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 95,
+                    baseDate: '2026-07-23',
+                    simulatedDate: '2026-07-24',
+                    groups: [{
+                        id: 'puts',
+                        legs: [
+                            { id: 'long-put', type: 'put', pos: 2, strike: 100, expDate: '2026-07-24', closePrice: null },
+                            { id: 'short-put', type: 'put', pos: -1, strike: 105, expDate: '2026-07-24', closePrice: null },
+                        ],
+                    }],
+                });
+
+                assert.equal(result.putContracts, 1);
+                assert.equal(result.netDeliverables, -100);
+            },
+        },
+        {
+            name: 'computes group net option cash flow from short proceeds minus long costs',
+            run() {
+                const ctx = loadValuationContext();
+                const globalState = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 100,
+                    baseDate: '2026-03-14',
+                    simulatedDate: '2026-03-14',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+                const group = {
+                    id: 'cash-flow-group',
+                    viewMode: 'active',
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'short-calls', type: 'call', pos: -2, strike: 105,
+                            expDate: '2026-04-13', iv: 0.25, cost: 3.25,
+                            currentPrice: 3, closePrice: null,
+                        },
+                        {
+                            id: 'long-put', type: 'put', pos: 1, strike: 95,
+                            expDate: '2026-04-13', iv: 0.25, cost: 1.40,
+                            currentPrice: 1.25, closePrice: null,
+                        },
+                        {
+                            id: 'stock', type: 'stock', pos: 10, cost: 99,
+                            currentPrice: 100, closePrice: null,
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                assert.equal(result.groupNetCashFlow, 510);
+            },
+        },
+        {
             name: 'computes all-groups option leg redundancy from open call and put positions',
             run() {
                 const ctx = loadValuationContext();
@@ -308,6 +444,7 @@ module.exports = {
                 assert.equal(rebuiltResult.groupResults.length, fullResult.groupResults.length);
                 assert.equal(rebuiltResult.hedgeResults.length, fullResult.hedgeResults.length);
                 almostEqual(rebuiltResult.globalTotalCost, fullResult.globalTotalCost);
+                almostEqual(rebuiltResult.allGroupsNetCashFlow, fullResult.allGroupsNetCashFlow);
                 almostEqual(rebuiltResult.globalSimulatedValue, fullResult.globalSimulatedValue);
                 almostEqual(rebuiltResult.globalPnL, fullResult.globalPnL);
                 almostEqual(rebuiltResult.globalLivePnL, fullResult.globalLivePnL);
@@ -460,6 +597,7 @@ module.exports = {
                 const result = ctx.OptionComboValuation.computePortfolioDerivedData(globalState);
 
                 assert.equal(result.groupResults.length, 2);
+                assert.equal(result.allGroupsNetCashFlow, 250);
                 assert.equal(result.globalTotalCost, 900);
                 assert.equal(result.globalSimulatedValue, 1000);
                 assert.equal(result.globalPnL, 100);

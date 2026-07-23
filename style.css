@@ -720,6 +720,28 @@ input[type=range]:focus {
     overflow-wrap: anywhere;
 }
 
+.option-redundancy-values {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.65rem;
+    min-width: 0;
+}
+
+.option-redundancy-values .option-redundancy-value {
+    flex: 0 0 auto;
+    width: max-content;
+    white-space: nowrap;
+}
+
+.projected-delivery-value {
+    flex: 0 0 auto;
+    font-size: 0.78rem;
+    line-height: 1.35;
+    text-align: right;
+    white-space: nowrap;
+}
+
 /* Buttons */
 .btn {
     display: inline-flex;
@@ -920,6 +942,40 @@ input[type=range]:focus {
 .portfolio-header-global h2 {
     font-size: 1.5rem;
     font-weight: 700;
+    white-space: nowrap;
+}
+
+.portfolio-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-width: 0;
+}
+
+.global-net-cash-flow {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: 0 0 auto;
+    padding: 0.35rem 0.75rem;
+    border: 1px dashed var(--border-color);
+    border-radius: 999px;
+    background: var(--card-bg);
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    white-space: nowrap;
+}
+
+@media (max-width: 1180px) {
+    .global-net-cash-flow-label {
+        display: none;
+    }
+
+    .portfolio-header-actions .btn {
+        flex: 0 0 auto;
+        padding-inline: 0.75rem;
+        white-space: nowrap;
+    }
 }
 
 .greeks-action-row {
@@ -1114,6 +1170,7 @@ input[type=range]:focus {
 }
 
 .group-header-delta-item,
+.group-header-net-cash-flow-item,
 .group-header-live-pnl-item {
     display: inline-flex;
     align-items: center;
@@ -1134,6 +1191,7 @@ input[type=range]:focus {
 }
 
 .group-header-delta-item .label,
+.group-header-net-cash-flow-item .label,
 .group-header-live-pnl-item .label {
     color: var(--text-muted);
 }
@@ -1209,6 +1267,7 @@ input[type=range]:focus {
 
 .group-card .group-order-controls,
 .group-card .group-header-delta-item,
+.group-card .group-header-net-cash-flow-item,
 .group-card .group-header-live-pnl-item,
 .group-card .group-actions {
     flex: 0 0 auto;
@@ -1445,6 +1504,7 @@ input[type=range]:focus {
     }
 
     .group-header-delta-item,
+    .group-header-net-cash-flow-item,
     .group-header-live-pnl-item {
         margin-left: 0.25rem;
         padding: 0.3rem 0.55rem;
@@ -1491,6 +1551,7 @@ input[type=range]:focus {
     }
 
     .group-header-delta-item,
+    .group-header-net-cash-flow-item,
     .group-header-live-pnl-item {
         margin-left: 0;
     }
