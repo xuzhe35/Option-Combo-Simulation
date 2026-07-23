@@ -20,6 +20,14 @@ def _parse_optional_float(value: Any) -> Optional[float]:
         return None
 
 
+def _payload_alias_value(payload: dict[str, Any], primary: str, alias: str) -> Any:
+    """Return the first explicitly supplied non-empty alias, preserving zero."""
+    primary_value = payload.get(primary)
+    if primary_value not in (None, ""):
+        return primary_value
+    return payload.get(alias)
+
+
 def _normalize_upper(value: Any, default: str = "") -> str:
     normalized = str(value or default or "").strip().upper()
     return normalized
@@ -244,9 +252,15 @@ class ComboLegRequest:
             exp_date=str(payload.get("expDate") or payload.get("expiry") or ""),
             contract_month=str(payload.get("contractMonth") or ""),
             underlying_contract_month=str(payload.get("underlyingContractMonth") or ""),
-            observed_bid=_parse_optional_float(payload.get("observedBid") or payload.get("observed_bid")),
-            observed_ask=_parse_optional_float(payload.get("observedAsk") or payload.get("observed_ask")),
-            observed_mark=_parse_optional_float(payload.get("observedMark") or payload.get("observed_mark")),
+            observed_bid=_parse_optional_float(
+                _payload_alias_value(payload, "observedBid", "observed_bid")
+            ),
+            observed_ask=_parse_optional_float(
+                _payload_alias_value(payload, "observedAsk", "observed_ask")
+            ),
+            observed_mark=_parse_optional_float(
+                _payload_alias_value(payload, "observedMark", "observed_mark")
+            ),
             source_position=(
                 _parse_int(payload.get("sourcePosition") or payload.get("source_position"))
                 if payload.get("sourcePosition") is not None or payload.get("source_position") is not None

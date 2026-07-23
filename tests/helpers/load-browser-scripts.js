@@ -13,7 +13,8 @@ function loadBrowserScripts(relativePaths, overrides = {}) {
             scriptQueue.push('js/official_exchange_calendars.generated.js');
             seenPaths.add('js/official_exchange_calendars.generated.js');
         }
-        if (relativePath === 'js/iv_term_structure_core.js'
+        if ((relativePath === 'js/iv_term_structure_core.js'
+            || relativePath === 'js/implied_lambda_handoff.js')
             && !seenPaths.has('js/market_holidays.js')) {
             if (!Object.prototype.hasOwnProperty.call(overrides, 'OptionComboOfficialExchangeCalendars')
                 && !seenPaths.has('js/official_exchange_calendars.generated.js')) {
@@ -22,6 +23,12 @@ function loadBrowserScripts(relativePaths, overrides = {}) {
             }
             scriptQueue.push('js/market_holidays.js');
             seenPaths.add('js/market_holidays.js');
+        }
+        if (['js/index_forward_rate.js', 'js/pricing_context.js', 'js/ws_client.js'].includes(relativePath)
+            && !Object.prototype.hasOwnProperty.call(overrides, 'OptionComboMarketCurves')
+            && !seenPaths.has('js/market_curves.js')) {
+            scriptQueue.push('js/market_curves.js');
+            seenPaths.add('js/market_curves.js');
         }
         if (relativePath === 'js/ws_client.js' && !seenPaths.has('js/combo_order_transport.js')) {
             scriptQueue.push('js/combo_order_transport.js');
@@ -66,6 +73,7 @@ function loadPricingContext() {
         'js/market_holidays.js',
         'js/date_utils.js',
         'js/product_registry.js',
+        'js/market_curves.js',
         'js/index_forward_rate.js',
         'js/pricing_context.js',
         'js/pricing_core.js',
@@ -79,6 +87,7 @@ function loadAmortizedContext() {
         'js/market_holidays.js',
         'js/date_utils.js',
         'js/product_registry.js',
+        'js/market_curves.js',
         'js/index_forward_rate.js',
         'js/pricing_context.js',
         'js/pricing_core.js',
@@ -86,18 +95,19 @@ function loadAmortizedContext() {
     ]);
 }
 
-function loadValuationContext() {
+function loadValuationContext(overrides = {}) {
     return loadBrowserScripts([
         'js/official_exchange_calendars.generated.js',
         'js/market_holidays.js',
         'js/date_utils.js',
         'js/product_registry.js',
+        'js/market_curves.js',
         'js/index_forward_rate.js',
         'js/pricing_context.js',
         'js/pricing_core.js',
         'js/amortized.js',
         'js/valuation.js',
-    ]);
+    ], overrides);
 }
 
 function loadSessionLogicContext() {
@@ -175,6 +185,8 @@ function loadAppContext(options = {}) {
         renderHedges: [],
         computePortfolioDerivedData: [],
         syncWorkspaceChrome: [],
+        refreshSimTimeBasisUi: [],
+        refreshSimulationDateUi: [],
         setInterval: [],
     };
 
@@ -246,6 +258,14 @@ function loadAppContext(options = {}) {
             normalizeSimWeekendWeight(value) {
                 const parsed = parseFloat(value);
                 return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0.3;
+            },
+            normalizeSimUseImpliedLambda(value) {
+                return value !== false;
+            },
+            normalizeProjectionConvergenceMode(value) {
+                return String(value || '').trim().toLowerCase() === 'legacy-input-iv'
+                    ? 'legacy-input-iv'
+                    : 'strict-bbo';
             },
             resolveSimWeekendWeight(basis, weight) {
                 if (basis === 'trading') return 0;
@@ -320,6 +340,12 @@ function loadAppContext(options = {}) {
         OptionComboControlPanelUI: {
             bindControlPanelEvents(state, formatter, deps) {
                 callLog.bindControlPanelEvents.push({ state, formatter, deps });
+            },
+            refreshSimTimeBasisUi(state) {
+                callLog.refreshSimTimeBasisUi.push(state);
+            },
+            refreshSimulationDateUi(state) {
+                callLog.refreshSimulationDateUi.push(state);
             },
             toggleSidebar() {},
         },

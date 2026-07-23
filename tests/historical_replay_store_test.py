@@ -8,6 +8,7 @@ Run:  python3 tests/historical_replay_store_test.py
 """
 
 import json
+import math
 import sqlite3
 import sys
 import tempfile
@@ -145,7 +146,8 @@ class HistoricalReplayStoreTest(unittest.TestCase):
         build_rates_db(cls.rates_db)
 
         cls.store = HistoricalReplayStore(
-            f"http://127.0.0.1:{cls.port}", cls.rates_db
+            f"http://127.0.0.1:{cls.port}", cls.rates_db,
+            yield_curve_data_dir=Path(cls.tmpdir.name) / "yield_curve",
         )
 
     @classmethod
@@ -230,17 +232,22 @@ class HistoricalReplayStoreTest(unittest.TestCase):
     def test_risk_free_rate_from_local_db(self):
         snapshot = self.store.get_risk_free_rate_snapshot("2022-01-04")
         self.assertEqual(snapshot["effectiveDate"], "2022-01-03")
-        self.assertEqual(snapshot["rate"], 0.0006)
-        self.assertEqual(snapshot["source"], "yfinance:^IRX")
+        self.assertAlmostEqual(snapshot["rate"], 2 * math.log1p(0.0005 / 2))
+        self.assertEqual(snapshot["source"], "treasury")
+        self.assertTrue(snapshot["snapshotId"].startswith("usd-reference:"))
 
     def test_yield_curve_from_local_db(self):
         snapshot = self.store.get_yield_curve_snapshot("2022-01-04")
         self.assertEqual(snapshot["effectiveDate"], "2022-01-03")
-        self.assertEqual(
-            snapshot["points"],
-            [{"tenorCode": "1M", "tenorDays": 30, "rate": 0.0005},
-             {"tenorCode": "10Y", "tenorDays": 3650, "rate": 0.0163}],
-        )
+        self.assertEqual(snapshot["schemaVersion"], 2)
+        self.assertEqual(snapshot["kind"], "treasury_discount_curve")
+        self.assertEqual([point["tenorDays"] for point in snapshot["points"]], [30, 3650])
+        self.assertAlmostEqual(snapshot["points"][0]["inputParYield"], 0.0005)
+        self.assertIn("legacy_rates_db_adapter", snapshot["quality"]["flags"])
+
+    def test_rates_never_look_ahead_before_first_cached_observation(self):
+        self.assertIsNone(self.store.get_risk_free_rate_snapshot("2022-01-02"))
+        self.assertIsNone(self.store.get_yield_curve_snapshot("2022-01-02"))
 
     def test_unreachable_service_raises_chain_service_error(self):
         dead_store = HistoricalReplayStore(
@@ -273,7 +280,8 @@ class SnapshotPayloadIntegrationTest(unittest.TestCase):
         from historical_replay_service import HistoricalReplayService
 
         service = HistoricalReplayService(
-            f"http://127.0.0.1:{self.port}", self.rates_db
+            f"http://127.0.0.1:{self.port}", self.rates_db,
+            yield_curve_data_dir=Path(self.tmpdir.name) / "yield_curve",
         )
         payload = service.build_snapshot_payload(
             "2022-01-03",
@@ -286,12 +294,17 @@ class SnapshotPayloadIntegrationTest(unittest.TestCase):
             ],
         )
         self.assertEqual(payload["underlyingPrice"], 477.0)
-        self.assertEqual(payload["riskFreeRate"], 0.0006)
+        self.assertAlmostEqual(payload["riskFreeRate"], 2 * math.log1p(0.0005 / 2))
         self.assertEqual(payload["historicalReplay"]["effectiveDate"], "2022-01-03")
         self.assertEqual(
             payload["historicalReplay"]["availableStartDate"], "2008-01-02"
         )
         self.assertEqual(len(payload["historicalReplay"]["yieldCurvePoints"]), 2)
+        self.assertEqual(payload["historicalReplay"]["discountCurve"]["schemaVersion"], 2)
+        self.assertEqual(
+            payload["historicalReplay"]["riskFreeRateSource"],
+            payload["historicalReplay"]["yieldCurveSource"],
+        )
         self.assertEqual(
             payload["historicalReplay"]["observedTradingDates"],
             ["2022-01-03", "2022-01-04"],

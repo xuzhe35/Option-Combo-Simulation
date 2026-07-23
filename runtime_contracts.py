@@ -7,6 +7,8 @@ from typing import Any, TypedDict
 
 class QuoteTimeEvidence(TypedDict, total=False):
     quoteAsOf: str
+    batchId: str
+    snapshotId: str
 
 
 class PayloadTimeEvidence(TypedDict, total=False):
@@ -17,23 +19,91 @@ class PayloadTimeEvidence(TypedDict, total=False):
     coherenceReason: str
 
 
-class QuoteSnapshot(QuoteTimeEvidence):
-    bid: float
-    ask: float
+class QuoteSnapshot(QuoteTimeEvidence, total=False):
+    bid: float | None
+    ask: float | None
     mark: float
+    bidPresent: bool
+    askPresent: bool
+    bidAskValid: bool
+    # 'two_sided' | 'one_sided_bid' | 'one_sided_ask' | 'crossed' | 'missing'
+    bidAskStatus: str
+    # 'bid_ask_mid' | 'model' | 'last_close' — set for option quotes so
+    # consumers can tell a real two-sided market from a TWS-model fallback.
+    # Missing sides remain null in JSON and are never backfilled from mark.
+    markSource: str
 
 
 class OptionQuoteSnapshot(QuoteSnapshot, total=False):
+    # Exact option identity returned by IB qualification / ContractDetails.
+    # Consumers should validate these fields against the requested leg before
+    # accepting a quote, especially for futures options that can share an
+    # expiry/strike/right across more than one underlying futures month.
+    conId: int
+    secType: str
+    symbol: str
+    localSymbol: str
+    exchange: str
+    currency: str
+    multiplier: str
+    tradingClass: str
+    right: str
+    strike: float
+    optionExpiry: str
+    contractIdentitySource: str
+    underConId: int
+    underlyingContractMonth: str
+    underlyingBindingVerified: bool
+    underlyingBindingSource: str
+    underlyingBindingStatus: str
     iv: float
     delta: float
+    expiryAsOf: str
+    expiryTimingSource: str
+    lastTradeDate: str
+    lastTradeTime: str
+    timeZoneId: str
+    realExpirationDate: str
+
+
+class OptionContractMetadataPayload(TypedDict):
+    """Price-independent qualified option identity and expiry timing.
+
+    This payload deliberately does not inherit ``PayloadTimeEvidence``.  A
+    ContractDetails handoff is not a market quote and must not refresh the
+    browser's live quote/feed clock.
+    """
+
+    action: str
+    contractMetadataOnly: bool
+    options: dict[str, OptionQuoteSnapshot]
+
+
+class MarketReferenceQuoteSnapshot(QuoteSnapshot, total=False):
+    conId: int
+    secType: str
+    symbol: str
+    localSymbol: str
+    exchange: str
+    currency: str
+    multiplier: str
+    contractMonth: str
+    # 'ib_contract_details' (authoritative delivery month) or 'last_trade_date'
+    # (derived, and wrong whenever expiry leads delivery as it does for CL).
+    contractMonthSource: str
+    lastTradeDate: str
 
 
 class LiveMarketDataPayload(PayloadTimeEvidence):
     underlyingPrice: float | None
     underlyingQuote: QuoteSnapshot | None
     options: dict[str, OptionQuoteSnapshot]
-    futures: dict[str, QuoteSnapshot]
+    futures: dict[str, MarketReferenceQuoteSnapshot]
     stocks: dict[str, QuoteSnapshot]
+    # Optional diagnostics such as SPX for ES/MES or NDX for NQ/MNQ.
+    # FOP pricing never depends on these references; its Forward remains the
+    # leg-bound futures quote.
+    carryReferences: dict[str, MarketReferenceQuoteSnapshot]
 
 
 class ManualUnderlyingSyncPayload(TypedDict):
@@ -55,6 +125,64 @@ class HistoricalBarsResponsePayload(TypedDict, total=False):
     dataSource: str
     fallbackReason: str
     requestId: str
+
+
+class DiscountCurvePointPayload(TypedDict, total=False):
+    tenorCode: str
+    tenorDays: int
+    discountFactor: float
+    zeroRate: float
+    parYield: float
+    rate: float
+    continuousRate: float
+    continuousRateIsProxy: bool
+    proxy: bool
+    source: str
+    sourceEffectiveDate: str
+    quoteAsOf: str
+    inputSemantics: str
+    inputRate: float
+    inputParYield: float
+    quality: dict[str, Any]
+
+
+class DiscountCurveDataPayload(TypedDict, total=False):
+    schemaVersion: int
+    kind: str
+    curveId: str
+    currency: str
+    snapshotId: str
+    requestedDate: str
+    curveAsOf: str
+    asOf: str
+    effectiveDate: str
+    availableAsOf: str
+    quoteAsOf: str
+    quoteAsOfPrecision: str
+    source: str
+    sourceUrl: str
+    points: list[DiscountCurvePointPayload]
+    curveSemantics: dict[str, Any]
+    inputSemantics: str
+    discountRateSemantics: str
+    quality: dict[str, Any]
+    policy: dict[str, Any]
+    sources: dict[str, Any]
+    syncMetadata: dict[str, Any] | None
+
+
+class DiscountCurveSnapshotPayload(TypedDict, total=False):
+    action: str
+    status: str
+    fallbackUsed: bool
+    refreshAttempted: bool
+    error: str
+    curve: DiscountCurveDataPayload | None
+
+
+# Compatibility names for code importing the first-generation contracts.
+TreasuryCurvePointPayload = DiscountCurvePointPayload
+TreasuryCurveSnapshotPayload = DiscountCurveDataPayload
 
 
 class ApiMarketDataResetPayload(TypedDict, total=False):
@@ -87,6 +215,16 @@ class IvTermStructureOptionDescriptor(TypedDict):
     strike: float
     right: str
     isAtm: bool
+
+
+class IvTermStructureSyncStartedPayload(PayloadTimeEvidence, total=False):
+    action: str
+    symbol: str
+    protocolVersion: str
+    clientProtocolVersion: str
+    catalogTimeoutSeconds: float
+    accepted: bool
+    message: str
 
 
 class IvTermStructureSnapshotPayload(PayloadTimeEvidence, total=False):
@@ -142,6 +280,32 @@ class IvTermStructureSyncCompletePayload(PayloadTimeEvidence, total=False):
     timedOutOptionCount: int
     subscriptionErrorMessage: str
     sharedAtmProbeTimedOut: bool
+
+
+class IvTermStructureQuoteSnapshotPayload(PayloadTimeEvidence, total=False):
+    action: str
+    symbol: str
+    snapshotId: str
+    subscriptionComplete: bool
+    expectedOptionCount: int
+    subscribedOptionCount: int
+    attemptedOptionCount: int
+    failedOptionCount: int
+    timedOutOptionCount: int
+    snapshotOptionCount: int
+    missingSubscriptionOptionIds: list[str]
+    missingQuoteOptionIds: list[str]
+    missingQuoteEvidenceOptionIds: list[str]
+    invalidQuoteOptionIds: list[str]
+    invalidContractIdentityOptionIds: list[str]
+    staleQuoteOptionIds: list[str]
+    underlyingPrice: float | None
+    underlyingQuote: QuoteSnapshot | None
+    options: dict[str, OptionQuoteSnapshot]
+    underlyingContractMonth: str
+    quoteSkewSeconds: float
+    maxQuoteAgeSeconds: float
+    maxQuoteSkewSeconds: float
 
 
 class IvTermStructureErrorPayload(PayloadTimeEvidence):

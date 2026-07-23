@@ -48,7 +48,7 @@ module.exports = {
     tests: [
         {
             name: 'binds control panel events and updates session state',
-            run() {
+            async run() {
                 const elements = {
                     marketDataMode: createElement({ value: 'live' }),
                     marketDataModeHint: createElement({ textContent: '' }),
@@ -94,6 +94,15 @@ module.exports = {
                     ivOffset: createElement({ value: '0' }),
                     ivOffsetSlider: createElement({ value: '0' }),
                     ivOffsetDisplay: createElement({ textContent: '0.00%' }),
+                    simTimeBasis: createElement({ value: 'weighted' }),
+                    simWeekendWeight: createElement({ value: '0.30' }),
+                    simImpliedLambdaReceived: createElement({ textContent: '', style: {} }),
+                    simTimeBasisDisplay: createElement({ textContent: 'λ=0.30' }),
+                    simImpliedLambdaLabel: createElement({ style: {} }),
+                    simUseImpliedLambda: createElement({ checked: false }),
+                    simImpliedLambdaStatus: createElement({ textContent: '' }),
+                    simImpliedLambdaLoadBtn: createElement(),
+                    simImpliedLambdaFileInput: createElement({ value: '' }),
                     toggleGreeksBtn: createElement({ textContent: '' }),
                     greeksStatusText: createElement({ textContent: '' }),
                     allowLiveComboOrders: createElement({ checked: false }),
@@ -108,7 +117,13 @@ module.exports = {
                 let settleAllCalls = 0;
                 let managedAccountSnapshotCalls = 0;
 
-                const ctx = loadBrowserScripts(['js/date_utils.js', 'js/product_registry.js', 'js/control_panel_ui.js'], {
+                const ctx = loadBrowserScripts([
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/implied_lambda_handoff.js',
+                    'js/session_logic.js',
+                    'js/control_panel_ui.js',
+                ], {
                     document: {
                         getElementById(id) {
                             return elements[id];
@@ -134,6 +149,8 @@ module.exports = {
                     underlyingPrice: 100,
                     baseDate: '2026-03-16',
                     simulatedDate: '2026-03-16',
+                    liveQuoteDate: '',
+                    liveQuoteAsOf: '',
                     marketDataMode: 'live',
                     workspaceVariant: '',
                     marketDataModeLocked: false,
@@ -142,6 +159,11 @@ module.exports = {
                     historicalAvailableEndDate: '',
                     interestRate: 0.03,
                     ivOffset: 0,
+                    simTimeBasis: 'weighted',
+                    simWeekendWeight: 0.3,
+                    simUseImpliedLambda: false,
+                    simImpliedLambdaEntry: null,
+                    simImpliedLambdaCoverage: null,
                     greeksEnabled: false,
                     allowLiveComboOrders: false,
                     liveComboOrderAccounts: ['DU111111', 'F222222'],
@@ -152,6 +174,7 @@ module.exports = {
                     groups: [],
                 };
 
+                let lastAddDaysBase = '';
                 ctx.OptionComboControlPanelUI.bindControlPanelEvents(state, currencyFormatter, {
                     updateDerivedValues() {
                         updateCalls += 1;
@@ -168,7 +191,8 @@ module.exports = {
                     settleHistoricalReplayGroups() {
                         settleAllCalls += 1;
                     },
-                    addDays(_baseDate, days) {
+                    addDays(baseDate, days) {
+                        lastAddDaysBase = baseDate;
                         return `2026-03-${String(16 + days).padStart(2, '0')}`;
                     },
                     diffDays() {
@@ -211,7 +235,9 @@ module.exports = {
                 assert.equal(state.underlyingSymbol, 'ES');
                 assert.equal(state.underlyingContractMonth, '202603');
                 assert.equal(elements.underlyingContractMonth.value, '202603');
-                assert.equal(elements.interestRate.disabled, true);
+                assert.equal(state.futuresPool.length, 1);
+                assert.equal(state.futuresPool[0].contractMonth, '202603');
+                assert.equal(elements.interestRate.disabled, false);
                 assert.equal(elements.forwardRatePanel.hidden, true);
                 assert.equal(elements.futuresPoolPanel.hidden, false);
 
@@ -266,19 +292,93 @@ module.exports = {
                 assert.equal(settleAllCalls, 1);
 
                 state.marketDataMode = 'live';
+                state.baseDate = '2026-03-01';
+                state.liveQuoteDate = '2026-03-16';
+                state.simulatedDate = '2026-03-16';
                 ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.equal(elements.simulatedDate.min, '2026-03-16');
+                state.liveQuoteAsOf = '2026-03-16T19:00:00.000Z';
+                state.simulationTiming = {
+                    available: true,
+                    status: 'ok',
+                    targetAsOf: '2026-03-20T19:30:00.000Z',
+                    source: 'near-leg-contract-cutoff',
+                };
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.equal(elements.simulatedDateHint.hidden, false);
+                assert.match(elements.simulatedDateHint.textContent, /IB near-leg cutoff/i);
+                assert.match(elements.simulatedDateHint.textContent, /96\.5 calendar hours/i);
 
-                elements.addFutureContractBtn.listeners.click();
+                state.simulationTiming = {
+                    available: true,
+                    status: 'ok',
+                    targetAsOf: '2026-03-20T20:00:00.000Z',
+                    source: 'near-leg-profile-cutoff',
+                };
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.simulatedDateHint.textContent, /product fallback is in use/i);
+                assert.equal(elements.simulatedDateHint.style.color, '#b45309');
+
+                // No open leg expires on the target date, so the product close
+                // *is* the instant, not a stand-in for a contract cutoff that
+                // will never arrive.  Warning here trains the user to ignore the
+                // near-leg case above, which is genuinely actionable.
+                state.simulationTiming = {
+                    available: true,
+                    status: 'ok',
+                    targetAsOf: '2026-03-20T20:00:00.000Z',
+                    source: 'product-profile-cutoff',
+                };
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.simulatedDateHint.textContent, /product-profile cutoff/i);
+                assert.doesNotMatch(
+                    elements.simulatedDateHint.textContent,
+                    /product fallback is in use/i
+                );
+                assert.equal(elements.simulatedDateHint.style.color, '#4b5563');
+                assert.match(elements.simulatedDateHint.title, /No open leg expires on this date/i);
+
+                state.simulationTiming = {
+                    available: false,
+                    status: 'exact_contract_timing_missing',
+                    missingContractTimingLegIds: ['near-call', 'far-call'],
+                };
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.simulatedDateHint.textContent, /projection fails closed/i);
+                assert.match(elements.simulatedDateHint.textContent, /near-call, far-call/i);
+                assert.match(elements.simulatedDateHint.title, /ContractDetails/i);
+
+                state.simulationTiming = {
+                    available: false,
+                    status: 'deferred_settlement_fixing_unsupported',
+                    targetAsOf: '2026-03-20T21:00:00.000Z',
+                    deferredSettlementLegIds: ['spx-am-call'],
+                };
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.simulatedDateHint.textContent, /spx-am-call/i);
+                assert.match(elements.simulatedDateHint.textContent, /later special fixing/i);
+                elements.simulatedDate.listeners.change({ target: { value: '2026-03-10' } });
+                assert.equal(state.simulatedDate, '2026-03-16');
+                assert.equal(elements.simulatedDate.value, '2026-03-16');
+
                 assert.equal(state.futuresPool.length, 1);
-                assert.match(elements.futuresPoolStatus.textContent, /enter yyyymm contract months/i);
-
-                state.futuresPool[0].contractMonth = '202603';
                 ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
                 assert.match(elements.futuresPoolStatus.textContent, /1\/1 futures contract configured; 0\/1 quoted/i);
 
                 state.futuresPool[0].mark = 6123.5;
                 ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
                 assert.match(elements.futuresPoolStatus.textContent, /1\/1 futures contract configured; 1\/1 quoted/i);
+                assert.match(elements.futuresPoolStatus.textContent, /0\/1 current-generation identities verified/i);
+
+                state.futuresPool[0].mark = null;
+                state.futuresPool[0].liveQuoteIdentityStatus = 'rejected';
+                state.futuresPool[0].liveQuoteIdentityReason = 'futures contract month mismatch';
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.futuresPoolStatus.textContent, /1 rejected \(futures contract month mismatch\)/i);
+                assert.match(
+                    elements.futuresPoolList.children[0].__quoteDisplay.textContent,
+                    /live quote rejected: futures contract month mismatch/i
+                );
 
                 ctx.adjustUnderlying(0.01);
                 assert.equal(state.underlyingPrice, 101);
@@ -286,6 +386,7 @@ module.exports = {
 
                 elements.daysPassedSlider.listeners.input({ target: { value: '5' } });
                 assert.equal(state.simulatedDate, '2026-03-21');
+                assert.equal(lastAddDaysBase, '2026-03-16');
                 assert.equal(elements.daysPassedDisplay.textContent, '+0 td / +5 cd');
                 assert.equal(throttledCalls, 1);
 
@@ -321,7 +422,7 @@ module.exports = {
 
                 elements.underlyingSymbol.listeners.change({ target: { value: 'spx' } });
                 assert.equal(state.underlyingSymbol, 'SPX');
-                assert.equal(elements.interestRate.disabled, true);
+                assert.equal(elements.interestRate.disabled, false);
                 assert.equal(elements.forwardRatePanel.hidden, false);
                 assert.equal(elements.futuresPoolPanel.hidden, true);
                 assert.match(elements.forwardRateStatus.textContent, /add one or more reference samples/i);
@@ -330,14 +431,169 @@ module.exports = {
                 assert.equal(state.forwardRateSamples.length, 1);
                 assert.equal(state.forwardRateSamples[0].daysToExpiry, 30);
                 assert.match(elements.forwardRateStatus.textContent, /waiting for live call\/put quotes/i);
-                assert.equal(subscriptionCalls, 13);
+                assert.equal(subscriptionCalls, 12);
 
                 state.forwardRateSamples[0].dailyCarry = 0.00021;
                 state.forwardRateSamples[0].impliedRate = 0.07665;
                 state.forwardRateSamples[0].isStale = false;
                 ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
                 assert.match(elements.forwardRateStatus.textContent, /ready for 1\/1 sample/i);
+
+                const quoteNow = Date.now();
+                const frozenQuoteNow = quoteNow - 10 * 60_000;
+                const currentAnchor = new Date(quoteNow).toISOString().slice(0, 10);
+                const anchorUtc = new Date(`${currentAnchor}T00:00:00Z`);
+                const daysUntilNextSaturday = ((6 - anchorUtc.getUTCDay() + 7) % 7) || 7;
+                const intervalStart = new Date(anchorUtc);
+                intervalStart.setUTCDate(intervalStart.getUTCDate() + daysUntilNextSaturday - 1);
+                const saturday = new Date(intervalStart);
+                saturday.setUTCDate(saturday.getUTCDate() + 1);
+                const sunday = new Date(saturday);
+                sunday.setUTCDate(sunday.getUTCDate() + 1);
+                const intervalEnd = new Date(sunday);
+                intervalEnd.setUTCDate(intervalEnd.getUTCDate() + 1);
+                const coveredDate1 = saturday.toISOString().slice(0, 10);
+                const coveredDate2 = sunday.toISOString().slice(0, 10);
+                state.liveQuoteDate = currentAnchor;
+                const lambdaFile = {
+                    format: ctx.OptionComboImpliedLambdaHandoff.EXPORT_FORMAT,
+                    version: 2,
+                    exportedAt: frozenQuoteNow,
+                    symbol: 'SPX',
+                    calendarKey: 'NYSE',
+                    anchorDate: currentAnchor,
+                    quoteAsOf: new Date(frozenQuoteNow).toISOString(),
+                    snapshotId: 'spx-snapshot',
+                    varianceSource: 'straddle',
+                    quality: {
+                        status: 'ok', coherent: true, quoteComplete: true,
+                        snapshotId: 'spx-snapshot', underlyingSnapshotId: 'spx-snapshot',
+                    },
+                    intervals: [{
+                        startDate: intervalStart.toISOString().slice(0, 10),
+                        endExpiry: intervalEnd.toISOString().slice(0, 10),
+                        status: 'ok',
+                        rawLambda: 0.11,
+                        lambda: 0.11,
+                        nonTradingDates: [coveredDate1, coveredDate2],
+                        snapshotId: 'spx-snapshot',
+                        quoteAsOf: new Date(frozenQuoteNow).toISOString(),
+                    }],
+                };
+                await elements.simImpliedLambdaFileInput.listeners.change({
+                    target: {
+                        value: 'implied_lambda_SPX.json',
+                        files: [{ text: async () => JSON.stringify(lambdaFile) }],
+                    },
+                });
+                assert.equal(state.simUseImpliedLambda, true);
+                assert.equal(state.simImpliedLambdaEntry.symbol, 'SPX');
+                assert.equal(state.simImpliedLambdaEntry.byDate[coveredDate1], 0.11);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /loaded for this tab/i);
                 assert.ok(updateCalls >= 3);
+                const loadedLambdaEntry = state.simImpliedLambdaEntry;
+
+                // Legacy files fail closed with an actionable explanation;
+                // selecting one never restamps it into V2.
+                await elements.simImpliedLambdaFileInput.listeners.change({
+                    target: {
+                        value: 'legacy_lambda.json',
+                        files: [{ text: async () => JSON.stringify({ ...lambdaFile, version: 1 }) }],
+                    },
+                });
+                assert.match(elements.simImpliedLambdaStatus.textContent, /only V2 straddle exports/i);
+
+                // Strict coverage status is the UI source of truth. An entry
+                // with a missing required date is not shown as active and does
+                // not silently advertise the scalar as a fallback.
+                state.simImpliedLambdaCoverage = {
+                    status: 'incomplete_coverage',
+                    usable: false,
+                    requiredDates: [coveredDate1, coveredDate2],
+                    missingDates: [coveredDate2],
+                    affectedLegIds: ['near-leg', 'far-leg'],
+                };
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.simImpliedLambdaStatus.textContent, /coverage is incomplete/i);
+                assert.match(elements.simImpliedLambdaStatus.textContent, new RegExp(coveredDate2));
+                assert.match(elements.simImpliedLambdaStatus.textContent, /near-leg, far-leg/i);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /scalar λ=.*diagnostic only/i);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /cannot bypass/i);
+                assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /automatic fallback/i);
+                assert.equal(elements.simImpliedLambdaStatus.style.color, '#dc2626');
+                assert.equal(elements.simImpliedLambdaStatus.style.fontWeight, '600');
+                assert.equal(elements.simTimeBasisDisplay.textContent, 'λ=IVTS unavailable');
+                assert.equal(elements.simWeekendWeight.disabled, true);
+                assert.equal(elements.simWeekendWeight.style.display, 'none');
+                assert.equal(elements.simImpliedLambdaReceived.style.display, 'flex');
+                assert.equal(elements.simImpliedLambdaReceived.textContent, '已经从IVTS接受到');
+
+                state.simImpliedLambdaEntry = null;
+                state.simImpliedLambdaCoverage = {
+                    status: 'missing_entry',
+                    usable: false,
+                    requiredDates: [coveredDate1],
+                    missingDates: [coveredDate1],
+                    affectedLegIds: ['far-leg'],
+                };
+                ctx.OptionComboControlPanelUI.refreshSimTimeBasisUi(state);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /no fresh matching V2 curve is loaded/i);
+                assert.match(elements.simImpliedLambdaStatus.textContent, new RegExp(coveredDate1));
+                assert.equal(elements.simImpliedLambdaStatus.style.color, '#dc2626');
+
+                state.simImpliedLambdaCoverage = {
+                    status: 'not_required',
+                    usable: true,
+                    requiredDates: [],
+                    missingDates: [],
+                    affectedLegIds: [],
+                };
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.simImpliedLambdaStatus.textContent, /no implied λ is required/i);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /no open option leg crosses/i);
+                assert.equal(elements.simImpliedLambdaStatus.style.color, '#4b5563');
+                assert.equal(elements.simTimeBasisDisplay.textContent, 'λ not required');
+
+                state.simImpliedLambdaCoverage = {
+                    status: 'exact_contract_timing_missing',
+                    usable: false,
+                    requiredDates: [],
+                    missingDates: [],
+                    affectedLegIds: ['es-jul22-call'],
+                };
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.simImpliedLambdaStatus.textContent, /exact IB contract timing/i);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /independent of weekend\/holiday λ/i);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /es-jul22-call/i);
+                assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /Implied λ unavailable/i);
+                assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /cross a weekend/i);
+                assert.equal(elements.simImpliedLambdaStatus.style.color, '#b45309');
+                assert.equal(elements.simTimeBasisDisplay.textContent, 'λ pending contract timing');
+
+                state.simImpliedLambdaEntry = loadedLambdaEntry;
+                state.simImpliedLambdaCoverage = {
+                    status: 'complete',
+                    usable: true,
+                    requiredDates: [coveredDate1, coveredDate2],
+                    missingDates: [],
+                    affectedLegIds: [],
+                };
+                ctx.OptionComboControlPanelUI.refreshSimTimeBasisUi(state);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /coverage complete for 2 required non-trading dates/i);
+                assert.equal(elements.simImpliedLambdaStatus.style.color, '#15803d');
+                assert.equal(elements.simTimeBasisDisplay.textContent, 'λ=IVTS·2d covered');
+                assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /outside|unsampled|fallback/i);
+                assert.equal(elements.simWeekendWeight.style.display, 'none');
+                assert.equal(elements.simImpliedLambdaReceived.style.display, 'flex');
+                assert.equal(elements.simImpliedLambdaReceived.textContent, '已经从IVTS接受到');
+
+                state.simUseImpliedLambda = false;
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.simImpliedLambdaStatus.textContent, /scalar λ=0\.30 is explicitly selected/i);
+                assert.equal(elements.simWeekendWeight.disabled, false);
+                assert.equal(elements.simWeekendWeight.style.display, '');
+                assert.equal(elements.simImpliedLambdaReceived.style.display, 'none');
+                assert.equal(elements.simTimeBasisDisplay.textContent, 'λ=0.30');
             },
         },
         {
@@ -458,6 +714,196 @@ module.exports = {
                     assert.equal(elements.liveComboOrderAccountSelect.children[index], option);
                 });
                 assert.equal(elements.liveComboOrderAccountSelect.value, 'F222222');
+            },
+        },
+        {
+            name: 'surfaces per-leg discount fallback reasons on the curve status line',
+            run() {
+                const elements = {
+                    marketDataMode: createElement({ value: 'live' }),
+                    marketDataModeHint: createElement({ textContent: '' }),
+                    historicalQuoteDateGroup: createElement({ hidden: true, style: {} }),
+                    historicalQuoteDateLabel: createElement({ textContent: '' }),
+                    historicalQuoteDate: createElement({ value: '' }),
+                    historicalQuoteDateHint: createElement({ textContent: '' }),
+                    historicalReplayDateGroup: createElement({ hidden: true, style: {} }),
+                    historicalReplayDateLabel: createElement({ textContent: '' }),
+                    historicalReplayDate: createElement({ value: '' }),
+                    historicalReplayStartLabel: createElement({ textContent: '' }),
+                    historicalReplayDaysDisplay: createElement({ textContent: '' }),
+                    historicalReplaySlider: createElement({ value: '0', min: '0', max: '0' }),
+                    historicalTimelineControls: createElement({ hidden: true, style: {} }),
+                    historicalTimelineHint: createElement({ textContent: '' }),
+                    historicalNextDayBtn: createElement({ disabled: true }),
+                    historicalSettleAllBtn: createElement({ disabled: true }),
+                    underlyingSymbol: createElement({ value: 'SPY' }),
+                    underlyingContractMonth: createElement({ value: '' }),
+                    underlyingContractMonthHint: createElement({ textContent: '' }),
+                    underlyingPrice: createElement({ value: '100' }),
+                    underlyingPriceSlider: createElement({ value: '100' }),
+                    underlyingPriceDisplay: createElement({ textContent: '$100.00' }),
+                    simulatedDateLabel: createElement({ textContent: 'Simulated Date' }),
+                    simulatedDateStartLabel: createElement({ textContent: 'Today' }),
+                    simulatedDateHint: createElement({ textContent: '', hidden: true }),
+                    simulatedDateOffsetGroup: createElement({ hidden: false, style: {} }),
+                    simulatedDate: createElement({ value: '2026-07-17', min: '2026-07-17' }),
+                    daysPassedSlider: createElement({ value: '0' }),
+                    daysPassedDisplay: createElement({ textContent: '+0 td / +0 cd' }),
+                    interestRate: createElement({ value: '3.00' }),
+                    interestRateDisplay: createElement({ textContent: '3.00%' }),
+                    interestRateLabelText: createElement({ textContent: 'Discount Rate Fallback r (%)' }),
+                    useMarketDiscountCurve: createElement({ checked: true }),
+                    loadLatestDiscountCurveBtn: createElement({ textContent: '' }),
+                    discountCurveStatus: createElement({ textContent: '' }),
+                    forwardRatePanel: createElement({ hidden: true, style: {} }),
+                    addForwardRateSampleBtn: createElement(),
+                    toggleForwardRatePanelBtn: createElement(),
+                    forwardRateStatus: createElement({ textContent: '' }),
+                    forwardRateSamplesHeader: createElement({ hidden: false, style: {} }),
+                    forwardRateSamplesList: createElement(),
+                    futuresPoolPanel: createElement({ hidden: true, style: {} }),
+                    addFutureContractBtn: createElement(),
+                    futuresPoolStatus: createElement({ textContent: '' }),
+                    futuresPoolHeader: createElement({ hidden: true, style: {} }),
+                    futuresPoolList: createElement(),
+                    ivOffset: createElement({ value: '0' }),
+                    ivOffsetSlider: createElement({ value: '0' }),
+                    ivOffsetDisplay: createElement({ textContent: '0.00%' }),
+                    allowLiveComboOrders: createElement({ checked: false }),
+                    liveComboOrderAccountControls: createElement({ hidden: true, style: {} }),
+                    liveComboOrderAccountSelect: createElement({ value: '', disabled: true }),
+                    liveComboOrderAccountHint: createElement({ textContent: '' }),
+                };
+
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/market_curves.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/control_panel_ui.js',
+                ], {
+                    document: {
+                        getElementById(id) {
+                            return elements[id];
+                        },
+                        querySelector() {
+                            return null;
+                        },
+                        createElement() {
+                            return createElement();
+                        },
+                        activeElement: null,
+                    },
+                });
+
+                const rate = 0.04;
+                // Weekend updater run: asOf is Sunday, data is Thursday's.
+                const curve = ctx.OptionComboMarketCurves.createDiscountCurveFromSnapshot({
+                    schemaVersion: 2,
+                    kind: 'hybrid_discount_curve',
+                    snapshotId: 'usd-reference:status-test',
+                    curveAsOf: '2026-07-19',
+                    effectiveDate: '2026-07-16',
+                    availableAsOf: '2026-07-19T12:00:00Z',
+                    source: 'nyfed:sofr+treasury:test',
+                    curveSemantics: { discountingIsApproximate: true },
+                    points: [
+                        {
+                            tenorDays: 1,
+                            zeroRate: rate,
+                            discountFactor: Math.exp(-rate / 365),
+                            proxy: true,
+                        },
+                        {
+                            tenorDays: 365,
+                            zeroRate: rate,
+                            discountFactor: Math.exp(-rate),
+                            proxy: true,
+                        },
+                    ],
+                });
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingContractMonth: '',
+                    underlyingPrice: 100,
+                    baseDate: '2026-07-17',
+                    simulatedDate: '2026-07-17',
+                    liveQuoteDate: '2026-07-17',
+                    marketDataMode: 'live',
+                    workspaceVariant: '',
+                    marketDataModeLocked: false,
+                    historicalQuoteDate: '',
+                    historicalAvailableStartDate: '',
+                    historicalAvailableEndDate: '',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    allowLiveComboOrders: false,
+                    liveComboOrderAccounts: [],
+                    liveComboOrderAccountsConnected: false,
+                    selectedLiveComboOrderAccount: '',
+                    useMarketDiscountCurve: true,
+                    discountCurve: curve,
+                    discountCurveLastError: '',
+                    forwardRateSamples: [],
+                    futuresPool: [],
+                    groups: [
+                        {
+                            legs: [
+                                { type: 'call', expDate: '2026-09-18', pos: 1 },
+                                { type: 'put', expDate: '2026-09-18', pos: -1 },
+                            ],
+                        },
+                    ],
+                };
+
+                let manualCurveRequest = null;
+                ctx.OptionComboControlPanelUI.bindControlPanelEvents(state, new Intl.NumberFormat('en-US', {
+                    style: 'currency',
+                    currency: 'USD',
+                    minimumFractionDigits: 2,
+                }), {
+                    updateDerivedValues() {},
+                    throttledUpdate() {},
+                    handleLiveSubscriptions() {},
+                    requestManagedAccountsSnapshot() {},
+                    settleHistoricalReplayGroups() {},
+                    addDays() { return '2026-07-17'; },
+                    diffDays() { return 0; },
+                    calendarToTradingDays() { return 0; },
+                    requestDiscountCurveSnapshot(options) {
+                        manualCurveRequest = options;
+                        return true;
+                    },
+                });
+
+                elements.loadLatestDiscountCurveBtn.listeners.click();
+                assert.equal(manualCurveRequest.manual, true);
+                assert.equal(manualCurveRequest.refresh, true);
+                assert.equal(state.useMarketDiscountCurve, true);
+
+                // Weekend-stamped asOf with a Friday quote date stays active:
+                // no silent fallback, no warning.
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.discountCurveStatus.textContent, /curve 2026-07-19/);
+                assert.match(elements.discountCurveStatus.textContent, /Displayed short rate r\(1d\)=4\.00%/);
+                assert.doesNotMatch(elements.discountCurveStatus.textContent, /⚠/);
+                assert.equal(elements.interestRate.value, '4.00');
+                assert.equal(elements.interestRateDisplay.textContent, '4.00%');
+                assert.equal(elements.interestRateLabelText.textContent, 'Loaded Curve Short Rate r(1d) (%)');
+                assert.equal(elements.interestRate.disabled, true);
+
+                // Once the quote date runs past the staleness bound the legs
+                // silently discount at the manual rate: the status line now
+                // names the reason instead of still reporting "active".
+                state.liveQuoteDate = '2026-08-20';
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(
+                    elements.discountCurveStatus.textContent,
+                    /⚠ 2 of 2 open legs are discounting at the manual 3\.00% fallback/
+                );
+                assert.match(elements.discountCurveStatus.textContent, /market_curve_stale×2/);
             },
         },
         {
@@ -1071,6 +1517,8 @@ module.exports = {
                 assert.equal(elements.toggleFuturesPoolPanelBtn.textContent, 'Hide');
                 assert.equal(elements.futuresPoolHeader.hidden, false);
                 assert.equal(elements.futuresPoolList.hidden, false);
+                assert.match(elements.futuresPoolStatus.textContent, /exchange futures quotes are the forward\/curve/i);
+                assert.match(elements.futuresPoolStatus.textContent, /usd r only discounts/i);
 
                 elements.toggleFuturesPoolPanelBtn.listeners.click();
 
@@ -1082,7 +1530,7 @@ module.exports = {
             },
         },
         {
-            name: 'does not rebuild futures-pool rows when only quotes change',
+            name: 'does not rebuild futures-pool rows and renders policy, net carry, and roll diagnostics',
             run() {
                 const elements = {
                     marketDataMode: createElement({ value: 'live' }),
@@ -1101,12 +1549,12 @@ module.exports = {
                     historicalTimelineHint: createElement({ textContent: '' }),
                     historicalNextDayBtn: createElement({ disabled: true }),
                     historicalSettleAllBtn: createElement({ disabled: true }),
-                    underlyingSymbol: createElement({ value: 'CL' }),
-                    underlyingContractMonth: createElement({ value: '202605' }),
+                    underlyingSymbol: createElement({ value: 'ES' }),
+                    underlyingContractMonth: createElement({ value: '202609' }),
                     underlyingContractMonthHint: createElement({ textContent: '' }),
-                    underlyingPrice: createElement({ value: '65.00' }),
-                    underlyingPriceSlider: createElement({ value: '65.00' }),
-                    underlyingPriceDisplay: createElement({ textContent: '$65.00' }),
+                    underlyingPrice: createElement({ value: '6300.00' }),
+                    underlyingPriceSlider: createElement({ value: '6300.00' }),
+                    underlyingPriceDisplay: createElement({ textContent: '$6,300.00' }),
                     simulatedDateLabel: createElement({ textContent: 'Simulated Date' }),
                     simulatedDateStartLabel: createElement({ textContent: 'Today' }),
                     simulatedDateHint: createElement({ textContent: '', hidden: true }),
@@ -1145,12 +1593,26 @@ module.exports = {
                         },
                         activeElement: null,
                     },
+                    OptionComboWsLiveQuotes: {
+                        getForwardCarrySnapshot() {
+                            return {
+                                family: 'ES',
+                                reference: { symbol: 'SPX', price: 6280 },
+                                points: [{
+                                    futuresPoolEntryId: 'future_1',
+                                    contractMonth: '202609',
+                                    carryRate: 0.0123,
+                                    annualizedRollSlope: 0.0456,
+                                }],
+                            };
+                        },
+                    },
                 });
 
                 const state = {
-                    underlyingSymbol: 'CL',
-                    underlyingContractMonth: '202605',
-                    underlyingPrice: 65,
+                    underlyingSymbol: 'ES',
+                    underlyingContractMonth: '202609',
+                    underlyingPrice: 6300,
                     baseDate: '2026-03-23',
                     simulatedDate: '2026-03-23',
                     marketDataMode: 'live',
@@ -1165,10 +1627,10 @@ module.exports = {
                     forwardRateSamples: [],
                     futuresPool: [{
                         id: 'future_1',
-                        contractMonth: '202605',
-                        bid: 88.95,
-                        ask: 88.97,
-                        mark: 88.95,
+                        contractMonth: '202609',
+                        bid: 6299,
+                        ask: 6301,
+                        mark: 6300,
                     }],
                     groups: [],
                 };
@@ -1193,10 +1655,13 @@ module.exports = {
                 const originalRemoveButton = originalRow.children[2];
                 assert.ok(originalRow);
                 assert.ok(originalRemoveButton);
+                assert.match(elements.futuresPoolStatus.textContent, /spx is diagnostics only \(net carry ready\)/i);
+                assert.match(originalRow.children[1].textContent, /net carry vs spx 1\.23%/i);
+                assert.match(originalRow.children[1].textContent, /roll ann\. 4\.56%/i);
 
-                state.futuresPool[0].bid = 89.10;
-                state.futuresPool[0].ask = 89.12;
-                state.futuresPool[0].mark = 89.11;
+                state.futuresPool[0].bid = 6309;
+                state.futuresPool[0].ask = 6311;
+                state.futuresPool[0].mark = 6310;
                 ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
 
                 assert.equal(elements.futuresPoolList.children[0], originalRow);

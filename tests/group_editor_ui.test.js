@@ -689,6 +689,64 @@ module.exports = {
             },
         },
         {
+            name: 'uses zero-bid BBO and zero Portfolio Mark without treating model as midpoint',
+            run() {
+                let quote = {
+                    bid: 0,
+                    ask: 0.20,
+                    mark: 0.10,
+                    markSource: 'bid_ask_mid',
+                    bidPresent: true,
+                    askPresent: true,
+                    bidAskValid: true,
+                };
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js'], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote() { return quote; },
+                    },
+                });
+                const testApi = ctx.OptionComboGroupEditorUI._test;
+                const leg = {
+                    id: 'zero_bid', type: 'call', currentPrice: 0.04,
+                    currentPriceSource: 'live', portfolioMarketPrice: null,
+                };
+
+                const midpoint = testApi.resolveSimulatedOpenPrice(
+                    { livePriceMode: 'midpoint' },
+                    leg,
+                    { marketDataMode: 'live' }
+                );
+                assert.equal(midpoint.price, 0.10);
+                assert.equal(midpoint.source, 'live_midpoint');
+
+                quote = {
+                    bid: null,
+                    ask: 0.20,
+                    mark: 0.04,
+                    markSource: 'model',
+                    bidPresent: false,
+                    askPresent: true,
+                    bidAskValid: false,
+                };
+                const model = testApi.resolveSimulatedOpenPrice(
+                    { livePriceMode: 'midpoint' },
+                    leg,
+                    { marketDataMode: 'live' }
+                );
+                assert.equal(model.price, 0.04);
+                assert.equal(model.source, 'tws_model');
+
+                leg.portfolioMarketPrice = 0;
+                const portfolio = testApi.resolveSimulatedOpenPrice(
+                    { livePriceMode: 'mark' },
+                    leg,
+                    { marketDataMode: 'live' }
+                );
+                assert.equal(portfolio.price, 0);
+                assert.equal(portfolio.source, 'tws_portfolio');
+            },
+        },
+        {
             name: 'does not partially simulate an open when any open leg lacks a quote',
             run() {
                 const ctx = loadBrowserScripts(['js/group_editor_ui.js']);
@@ -1403,6 +1461,81 @@ module.exports = {
 
                 assert.equal(display.value, '14.6702%');
                 assert.equal(display.title, 'Manual IV');
+            },
+        },
+        {
+            name: 'warns on the group card when a requested strike has no IBKR contract',
+            run() {
+                const makeWarningEl = () => ({
+                    textContent: '',
+                    title: '',
+                    style: { display: 'none' },
+                    removeAttribute(name) { this[name] = ''; },
+                });
+
+                const liveWarning = makeWarningEl();
+                const offlineWarning = makeWarningEl();
+                const cards = [
+                    {
+                        dataset: { groupId: 'group_live' },
+                        querySelector(selector) {
+                            return selector === '.live-subscription-warning' ? liveWarning : null;
+                        },
+                    },
+                    {
+                        dataset: { groupId: 'group_offline' },
+                        querySelector(selector) {
+                            return selector === '.live-subscription-warning' ? offlineWarning : null;
+                        },
+                    },
+                ];
+
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js'], {
+                    document: {
+                        querySelectorAll(selector) {
+                            return selector === '.group-card' ? cards : [];
+                        },
+                    },
+                });
+
+                const state = {
+                    marketDataMode: 'live',
+                    liveSubscriptionUnresolvedById: {
+                        leg_missing: {
+                            reason: 'contract_not_found',
+                            label: 'QQQ 2026-08-21 C 585',
+                            message: 'QQQ 2026-08-21 C 585 has no matching contract at IBKR.',
+                        },
+                    },
+                    groups: [
+                        {
+                            id: 'group_live',
+                            liveData: true,
+                            legs: [{ id: 'leg_missing' }, { id: 'leg_ok' }],
+                        },
+                        {
+                            // Same unresolved id, but the feed is off: stay quiet.
+                            id: 'group_offline',
+                            liveData: false,
+                            legs: [{ id: 'leg_missing' }],
+                        },
+                    ],
+                };
+
+                ctx.OptionComboGroupEditorUI.applyLiveSubscriptionWarnings(state);
+
+                assert.equal(liveWarning.style.display, 'block');
+                assert.match(liveWarning.textContent, /No contract found: QQQ 2026-08-21 C 585/);
+                assert.match(liveWarning.title, /no matching contract at IBKR/);
+
+                assert.equal(offlineWarning.style.display, 'none');
+                assert.equal(offlineWarning.textContent, '');
+
+                // Resolving the strike must clear the banner.
+                state.liveSubscriptionUnresolvedById = {};
+                ctx.OptionComboGroupEditorUI.applyLiveSubscriptionWarnings(state);
+                assert.equal(liveWarning.style.display, 'none');
+                assert.equal(liveWarning.textContent, '');
             },
         },
     ],

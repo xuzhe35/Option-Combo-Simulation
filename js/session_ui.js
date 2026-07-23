@@ -15,6 +15,20 @@
             : null;
     }
 
+    function getPricingContext() {
+        return globalScope.OptionComboPricingContext && typeof globalScope.OptionComboPricingContext === 'object'
+            ? globalScope.OptionComboPricingContext
+            : null;
+    }
+
+    function resolveLiveQuoteReferenceDate(state) {
+        const pricingContext = getPricingContext();
+        const resolved = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
+            ? pricingContext.resolveQuoteDate(state)
+            : '';
+        return resolved || state.liveQuoteDate || state.baseDate || state.simulatedDate || '';
+    }
+
     function formatUnderlyingPriceInputValue(symbol, value) {
         const registry = getProductRegistry();
         if (registry && typeof registry.formatPriceInputValue === 'function') {
@@ -192,15 +206,29 @@
         const replayDate = marketDataMode === 'historical'
             ? (state.historicalQuoteDate || state.baseDate || '')
             : '';
+        const liveQuoteReferenceDate = marketDataMode === 'live'
+            ? resolveLiveQuoteReferenceDate(state)
+            : '';
+        const pricingContext = getPricingContext();
         const simulationDate = marketDataMode === 'historical'
             ? (state.simulatedDate && (!replayDate || state.simulatedDate >= replayDate)
                 ? state.simulatedDate
                 : (replayDate || state.baseDate || ''))
-            : state.simulatedDate;
-        const days = dateHelpers.diffDays(state.baseDate, simulationDate);
+            : (pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
+                ? pricingContext.resolveSimulationDate(state)
+                : (state.simulatedDate && (!liveQuoteReferenceDate || state.simulatedDate >= liveQuoteReferenceDate)
+                    ? state.simulatedDate
+                    : liveQuoteReferenceDate));
+        if (marketDataMode === 'live' && simulationDate && state.simulatedDate !== simulationDate) {
+            state.simulatedDate = simulationDate;
+        }
+        const simulationStartDate = marketDataMode === 'historical'
+            ? state.baseDate
+            : liveQuoteReferenceDate;
+        const days = dateHelpers.diffDays(simulationStartDate, simulationDate);
         const calendarContext = resolveCalendarContext(state);
         const tradingDays = dateHelpers.calendarToTradingDays(
-            state.baseDate, simulationDate,
+            simulationStartDate, simulationDate,
             calendarContext.calendarKey, calendarContext.observedTradingDates
         );
         const replayDays = marketDataMode === 'historical'
@@ -327,7 +355,7 @@
                     state.underlyingSymbol,
                     marketDataMode === 'historical'
                         ? (replayDate || state.baseDate)
-                        : (simulationDate || state.baseDate)
+                        : (liveQuoteReferenceDate || state.baseDate)
                 );
 
             underlyingContractMonthInput.disabled = !expectsFutureUnderlying;
@@ -346,7 +374,7 @@
         const simulatedDateInput = document.getElementById('simulatedDate');
         simulatedDateInput.min = marketDataMode === 'historical'
             ? (replayDate || state.baseDate)
-            : state.baseDate;
+            : liveQuoteReferenceDate;
         simulatedDateInput.max = '';
         simulatedDateInput.value = simulationDate;
 

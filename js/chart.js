@@ -15,6 +15,12 @@ function _getChartProductRegistryApi() {
         : null;
 }
 
+function _getChartPricingCoreApi() {
+    return typeof OptionComboPricingCore !== 'undefined' && OptionComboPricingCore
+        ? OptionComboPricingCore
+        : null;
+}
+
 class PnLChart {
     /**
      * @param {HTMLCanvasElement} canvas 
@@ -127,8 +133,11 @@ class PnLChart {
     draw(group, globalState, minS, maxS) {
         this.resize();
         this.ctx.clearRect(0, 0, this.width, this.height);
+        this.lastProjectionQuality = null;
+        this.lastEmptyReason = null;
 
         if (!group || group.legs.length === 0 || minS >= maxS) {
+            this.lastEmptyReason = (!group || group.legs.length === 0) ? 'no-legs' : 'invalid-range';
             this.drawEmptyState();
             this.lastRenderData = null;
             return;
@@ -145,6 +154,14 @@ class PnLChart {
         // Use per-leg _viewMode (injected by Global Chart flattener) if available, else group-level
         const activeViewMode = group.viewMode || 'active';
         const pricingContext = _getChartPricingContextApi();
+        const pricingCore = _getChartPricingCoreApi();
+        const convergenceMode = pricingCore
+            && typeof pricingCore.normalizeProjectionConvergenceMode === 'function'
+            ? pricingCore.normalizeProjectionConvergenceMode(
+                globalState && globalState.projectionConvergenceMode
+            )
+            : 'strict-bbo';
+        const allowProjectionIvFallback = convergenceMode === 'best-effort-input-iv';
         const productRegistry = _getChartProductRegistryApi();
         const underlyingProfile = productRegistry && typeof productRegistry.resolveUnderlyingProfile === 'function'
             ? productRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol)
@@ -157,6 +174,15 @@ class PnLChart {
             && typeof pricingContext.resolveQuoteDate === 'function'
             ? pricingContext.resolveQuoteDate(globalState)
             : globalState.baseDate;
+        const simulationTiming = pricingContext
+            && typeof pricingContext.resolveSimulationTiming === 'function'
+            ? pricingContext.resolveSimulationTiming(globalState)
+            : (globalState && globalState.simulationTiming || null);
+        if (simulationTiming && simulationTiming.available === false) {
+            this.drawEmptyState(`Simulation timing unavailable (${simulationTiming.status}).`);
+            this.lastRenderData = null;
+            return;
+        }
         const anchorInfo = pricingContext
             && typeof pricingContext.resolveAnchorDisplayInfo === 'function'
             ? pricingContext.resolveAnchorDisplayInfo(globalState, globalState.underlyingPrice)
@@ -165,16 +191,53 @@ class PnLChart {
             && typeof pricingContext.resolveAnchorUnderlyingPrice === 'function'
             ? pricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
             : globalState.underlyingPrice;
+        const legCurrentUnderlyings = [];
+        const legTimingContexts = [];
         const processedLegs = group.legs.map(leg => {
             const legViewMode = leg._viewMode || activeViewMode;
             const legCurrentUnderlying = pricingContext
                 && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
                 ? pricingContext.resolveLegCurrentUnderlyingPrice(globalState, leg, currentAnchorUnderlying)
                 : globalState.underlyingPrice;
+            legCurrentUnderlyings.push(legCurrentUnderlying);
             const legInterestRate = pricingContext
                 && typeof pricingContext.resolveLegInterestRate === 'function'
                 ? pricingContext.resolveLegInterestRate(globalState, leg, globalState.interestRate)
                 : globalState.interestRate;
+            const observableGroup = leg._livePriceMode
+                ? { ...group, livePriceMode: leg._livePriceMode }
+                : group;
+            const observable = pricingContext
+                && typeof pricingContext.resolveObservableLegPrice === 'function'
+                ? pricingContext.resolveObservableLegPrice(globalState, observableGroup, leg)
+                : null;
+            const quotePricingInputs = pricingContext
+                && typeof pricingContext.resolveLegQuotePricingInputs === 'function'
+                ? pricingContext.resolveLegQuotePricingInputs(globalState, leg, {
+                    underlyingPrice: currentAnchorUnderlying,
+                    interestRate: globalState.interestRate,
+                })
+                : null;
+            const timingContext = {
+                quoteAsOf: globalState.liveQuoteAsOf,
+                allowLegacyQuoteCutoff: !globalState.marketDataMode,
+                targetAsOf: simulationTiming && simulationTiming.available
+                    ? simulationTiming.targetAsOf
+                    : null,
+                targetSource: simulationTiming && simulationTiming.source || null,
+                timingStatus: simulationTiming && simulationTiming.status || null,
+                observablePrice: observable && observable.available ? observable.price : null,
+                observablePriceSource: observable && observable.source || null,
+                observablePriceAsOf: observable && observable.quoteAsOf || null,
+                observablePriceFresh: observable && observable.fresh === true,
+                quotePricingInputsAvailable: quotePricingInputs && quotePricingInputs.available === true,
+                quotePricingInputStatus: quotePricingInputs && quotePricingInputs.status || null,
+                quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
+                quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
+                quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+                allowProjectionIvFallback,
+            };
+            legTimingContexts.push(timingContext);
             return processLegData(
                 leg,
                 simulationDate,
@@ -184,7 +247,8 @@ class PnLChart {
                 legInterestRate,
                 legViewMode,
                 underlyingProfile,
-                globalState.marketDataMode
+                globalState.marketDataMode,
+                timingContext
             );
         });
         const partialCloseRealizedPnl = group.legs.reduce((sum, leg) => {
@@ -194,8 +258,67 @@ class PnLChart {
         const hasUnavailableSimulation = processedLegs.some(leg =>
             !leg.isUnderlyingLeg && !leg.isExpired && !Number.isFinite(leg.simIV)
         );
+        const fallbackLegs = processedLegs.flatMap((processedLeg, index) => {
+            if (!processedLeg || processedLeg.simIVSource !== 'best-effort-input-iv') return [];
+            const rawLeg = group.legs[index] || {};
+            return [{
+                id: String(rawLeg.id || `leg-${index + 1}`),
+                type: String(rawLeg.type || 'option').toLowerCase(),
+                expDate: String(rawLeg.expDate || ''),
+                source: String(processedLeg.simIVFallbackSource || rawLeg.ivSource || 'manual'),
+                iv: Number.isFinite(processedLeg.simIV) ? processedLeg.simIV : null,
+                localIvStatus: processedLeg.localIvAnchorStatus || null,
+            }];
+        });
+        this.lastProjectionQuality = {
+            mode: convergenceMode,
+            bestEffort: allowProjectionIvFallback,
+            fallbackLegs,
+            fallbackCount: fallbackLegs.length,
+        };
+        const lambdaTimingFailure = processedLegs.find(leg =>
+            leg && leg.timingStatus === 'implied_lambda_incomplete'
+        );
+        if (lambdaTimingFailure) {
+            const message = pricingCore
+                && typeof pricingCore.formatProjectionTimingFailure === 'function'
+                ? pricingCore.formatProjectionTimingFailure(
+                    lambdaTimingFailure.timingStatus,
+                    'Simulation',
+                    lambdaTimingFailure
+                )
+                : 'Simulation unavailable: required weekend/holiday implied λ data is missing.';
+            this.drawEmptyState(message);
+            this.lastRenderData = null;
+            return;
+        }
+        const convergence = pricingCore
+            && typeof pricingCore.assessProjectionConvergence === 'function'
+            ? pricingCore.assessProjectionConvergence(globalState, group.legs, processedLegs)
+            : { ready: true };
+        if (convergence.ready === false) {
+            const message = pricingCore
+                && typeof pricingCore.formatProjectionConvergenceFailure === 'function'
+                ? pricingCore.formatProjectionConvergenceFailure(convergence, 'Simulation')
+                : 'Simulation unavailable: strict live BBO convergence inputs are missing.';
+            this.drawEmptyState(message);
+            this.lastRenderData = null;
+            return;
+        }
         if (hasUnavailableSimulation) {
             this.drawEmptyState('Simulation unavailable because IV is missing for one or more option legs.');
+            this.lastRenderData = null;
+            return;
+        }
+        const hasUnavailablePricingUnderlying = group.legs.some((leg, index) => {
+            const closePrice = parseFloat(leg && leg.closePrice);
+            const hasFixedClosePrice = leg && leg.closePrice !== null && leg.closePrice !== ''
+                && Number.isFinite(closePrice) && closePrice >= 0;
+            return !hasFixedClosePrice
+                && (!Number.isFinite(legCurrentUnderlyings[index]) || legCurrentUnderlyings[index] <= 0);
+        });
+        if (hasUnavailablePricingUnderlying) {
+            this.drawEmptyState('Simulation unavailable because a bound futures quote is missing.');
             this.lastRenderData = null;
             return;
         }
@@ -204,6 +327,14 @@ class PnLChart {
         let evalPoints = [];
         for (let i = 0; i < this.pointsCount; i++) {
             evalPoints.push(minS + (i * step));
+        }
+        // The current-underlier point is a live observable boundary: on the
+        // live quote date with no IV shock it must be evaluated directly,
+        // not inferred by interpolating two neighboring model points.
+        if (Number.isFinite(currentAnchorUnderlying)
+            && currentAnchorUnderlying >= minS
+            && currentAnchorUnderlying <= maxS) {
+            evalPoints.push(currentAnchorUnderlying);
         }
         // Force evaluation exactly at strike prices to catch absolute peaks/troughs of 0-DTE legs
         processedLegs.forEach(l => {
@@ -223,6 +354,7 @@ class PnLChart {
             let simValue = 0;
             let totalCostBasis = 0;
 
+            let pointUnavailable = false;
             for (let j = 0; j < processedLegs.length; j++) {
                 const l = processedLegs[j];
                 const rawLeg = group.legs[j];
@@ -235,14 +367,33 @@ class PnLChart {
                     && typeof pricingContext.resolveLegInterestRate === 'function'
                     ? pricingContext.resolveLegInterestRate(globalState, rawLeg, globalState.interestRate)
                     : globalState.interestRate;
+                const closePrice = parseFloat(rawLeg && rawLeg.closePrice);
+                const hasFixedClosePrice = rawLeg && rawLeg.closePrice !== null && rawLeg.closePrice !== ''
+                    && Number.isFinite(closePrice) && closePrice >= 0;
+                if (!hasFixedClosePrice
+                    && (!Number.isFinite(legScenarioUnderlying) || legScenarioUnderlying <= 0)) {
+                    pointUnavailable = true;
+                    break;
+                }
                 
                 totalCostBasis += l.costBasis;
 
                 const pricePerShare = computeSimulatedPrice(
                     l, rawLeg, legScenarioUnderlying, legInterestRate,
-                    legViewMode, simulationDate, quoteDate, globalState.ivOffset
+                    legViewMode, simulationDate, quoteDate, globalState.ivOffset,
+                    legTimingContexts[j]
                 );
+                if (!Number.isFinite(pricePerShare)) {
+                    pointUnavailable = true;
+                    break;
+                }
                 simValue += l.posMultiplier * pricePerShare;
+            }
+
+            if (pointUnavailable) {
+                this.drawEmptyState('Simulation unavailable because a pricing input is missing.');
+                this.lastRenderData = null;
+                return;
             }
 
             const pnl = simValue - totalCostBasis + partialCloseRealizedPnl;
@@ -458,7 +609,8 @@ class PnLChart {
 
         // Cache parameters for tooltips
         this.lastRenderData = {
-            data, minS, maxS, minPnL, maxPnL, drawW, drawH, padding: this.padding, mapX, mapY, globalState
+            data, minS, maxS, minPnL, maxPnL, drawW, drawH, padding: this.padding,
+            mapX, mapY, globalState, projectionQuality: this.lastProjectionQuality
         };
 
         // Cache the drawn canvas pixels to offscreen image

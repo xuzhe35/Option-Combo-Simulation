@@ -13,6 +13,7 @@ import websockets
 
 from chain_service_config import resolve_chain_service_url
 from historical_replay_service import HistoricalReplayService, normalize_replay_date
+from yield_curve.backend_adapter import YieldCurveBackendAdapter
 from ib_server_order_tracking import (
     build_active_combo_orders_snapshot as build_active_combo_orders_snapshot_via_module,
     build_active_hedge_orders_snapshot as build_active_hedge_orders_snapshot_via_module,
@@ -56,6 +57,7 @@ from ib_server_iv_term_structure import (
     fetch_iv_term_structure_contract_rows_for_expiry as fetch_iv_term_structure_contract_rows_for_expiry,
 )
 from ib_server_market_data import (
+    build_option_contract_timing,
     build_pending_tickers_handler,
     cancel_all_api_market_data_subscriptions,
     coerce_positive_int,
@@ -66,6 +68,8 @@ from ib_server_market_data import (
     get_client_subscription_settings,
     log_option_iv_debug_if_needed,
     normalize_bool,
+    option_contract_timing_is_publishable,
+    positive_contract_id as _positive_contract_id,
     request_ib_historical_bars,
     unsubscribe_client_safely as unsubscribe_client_safely_via_market_data,
 )
@@ -105,9 +109,30 @@ IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS = config.getfloat(
     'catalog_timeout_seconds',
     fallback=IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_DEFAULT,
 )
+OPTION_CONTRACT_TIMING_TIMEOUT_SECONDS = max(
+    0.5,
+    config.getfloat('server', 'option_contract_timing_timeout_seconds', fallback=5.0),
+)
 CHAIN_SERVICE_URL = resolve_chain_service_url(config)
 RATES_SQLITE_DB = os.path.abspath(
     config.get('historical', 'rates_sqlite_db_path', fallback=os.path.join('sqlite_spy', 'rates.db'))
+)
+YIELD_CURVE_DATA_DIR = os.path.abspath(
+    config.get('yield_curve', 'data_dir', fallback=os.path.join('yield_curve', 'data'))
+)
+YIELD_CURVE_AUTO_UPDATE_IF_MISSING = config.getboolean(
+    'yield_curve', 'auto_update_if_missing', fallback=True
+)
+YIELD_CURVE_AUTO_UPDATE_IF_STALE = config.getboolean(
+    'yield_curve', 'auto_update_if_stale', fallback=True
+)
+YIELD_CURVE_SOURCE_TIMEOUT_SECONDS = max(
+    1.0,
+    config.getfloat('yield_curve', 'source_timeout_seconds', fallback=20.0),
+)
+YIELD_CURVE_PROCESS_TIMEOUT_SECONDS = max(
+    5.0,
+    config.getfloat('yield_curve', 'process_timeout_seconds', fallback=60.0),
 )
 
 def _parse_ws_hosts(raw_value):
@@ -135,6 +160,23 @@ connected_clients = set()
 client_subscriptions = {}
 # Map conId -> set of generic tick tokens the shared market data line was opened with
 market_data_generic_ticks_by_con_id = {}
+# Per-contract receipt times used by IVTS whole-curve snapshots.  Keeping this
+# separate from ticker values prevents a cached leg from being relabeled as a
+# fresh quote whenever another contract changes.
+market_data_quote_as_of_by_ticker_key = {}
+# Price/BBO fingerprints keep generic-tick-only option events from refreshing
+# the IVTS quote clock when the cached bid/ask did not actually update.
+market_data_quote_fingerprint_by_ticker_key = {}
+# Complete contract timing facts are stable and shared by every websocket
+# using the same conId.  Incomplete ContractDetails responses are deliberately
+# not positive-cache hits so a later subscription can recover without a
+# backend restart.
+option_contract_timing_by_con_id = {}
+option_contract_timing_semaphore = asyncio.Semaphore(4)
+# Concurrent pages can request the same conId (notably IVTS plus the portfolio).
+# They share one ContractDetails lookup; after an incomplete result the task is
+# removed so a later, independent subscription can retry.
+option_contract_timing_inflight_by_con_id = {}
 # Map websocket -> per-client live-data preferences
 client_subscription_settings = {}
 ib_connect_task = None
@@ -144,6 +186,19 @@ iv_term_structure_option_subscription_semaphore = asyncio.Semaphore(4)
 api_market_data_reset_lock = asyncio.Lock()
 api_market_data_generation = 0
 qualified_underlyings = {}
+# Verified futures delivery month keyed by the actual IB underlying conId.
+# Populated only from ContractDetails.contractMonth, never by copying the
+# browser's requested month nor by truncating a qualified last-trade date.
+underlying_contract_month_by_con_id = {}
+# Concurrent subscriptions of the same FUT share one ContractDetails lookup.
+futures_contract_month_inflight_by_con_id = {}
+# Deliberately NOT option_contract_timing_semaphore.  A FOP timing resolution
+# holds that permit for its whole critical section and awaits the underlying
+# futures month from inside it, so reusing the same semaphore here is re-entrant:
+# once `option_contract_timing_semaphore` permits worth of FOP resolutions are
+# in flight with an unresolved underlying month, they all block on a nested task
+# that can never acquire a permit, and the semaphore is left permanently drained.
+futures_contract_month_semaphore = asyncio.Semaphore(4)
 portfolio_avg_cost_cache = {}
 portfolio_position_cache = {}
 portfolio_positions_snapshot_ready = False
@@ -157,7 +212,20 @@ historical_replay_service = HistoricalReplayService(
     CHAIN_SERVICE_URL,
     RATES_SQLITE_DB,
     logger=logging.getLogger('historical_replay.chain_service'),
+    yield_curve_data_dir=YIELD_CURVE_DATA_DIR,
 )
+yield_curve_backend = YieldCurveBackendAdapter(
+    YIELD_CURVE_DATA_DIR,
+    auto_update_if_missing=YIELD_CURVE_AUTO_UPDATE_IF_MISSING,
+    auto_update_if_stale=YIELD_CURVE_AUTO_UPDATE_IF_STALE,
+    source_timeout_seconds=YIELD_CURVE_SOURCE_TIMEOUT_SECONDS,
+    process_timeout_seconds=YIELD_CURVE_PROCESS_TIMEOUT_SECONDS,
+    logger=logging.getLogger('yield_curve.backend'),
+)
+
+
+async def _get_discount_curve_snapshot(request):
+    return await yield_curve_backend.build_payload(request)
 
 SUPPORTED_LIVE_FAMILIES = {
     'ES': {
@@ -976,6 +1044,8 @@ async def _reset_all_api_market_data_subscriptions(requested_by='Unknown'):
             client_subscriptions=client_subscriptions,
             generic_ticks_by_con_id=market_data_generic_ticks_by_con_id,
         )
+        market_data_quote_as_of_by_ticker_key.clear()
+        market_data_quote_fingerprint_by_ticker_key.clear()
 
         connection_was_connected = bool(ib.isConnected())
         connection_reset = False
@@ -1087,34 +1157,13 @@ def _resolve_weekly_fop_trading_class(symbol, expiry, current_trading_class):
     base_trading_class = current_trading_class or defaults.get('trading_class') or ''
     if not base_trading_class or len(base_trading_class) < 2:
         return base_trading_class
-
-    try:
-        expiry_date = datetime.strptime(expiry, '%Y%m%d')
-    except (TypeError, ValueError):
-        return base_trading_class
-
-    normalized_symbol = _normalize_symbol(symbol)
-    configured_trading_class = str(defaults.get('trading_class') or '').strip().upper()
-    requested_trading_class = str(current_trading_class or '').strip().upper()
-    if (
-        normalized_symbol in {'ES', 'NQ'}
-        and expiry_date.weekday() == 4
-        and requested_trading_class in {'', configured_trading_class}
-    ):
-        # Friday FOP trading classes are week-specific (for example EW3), so
-        # the Mon-Thu E3A/Q3A seed is actively misleading. Qualify the exact
-        # expiry/right/strike without a trading class and let IB resolve it.
+    if _normalize_symbol(defaults.get('option_sec_type')) == 'FOP':
+        # Weekly futures-option classes are listing-specific on every exchange.
+        # The per-family defaults (E3A/Q3A/ML3/G3T/S3T/H3T) each name one
+        # weekday-and-week listing, so they are wrong for most expiries and have
+        # produced valid-expiry IB 200 errors.  Always qualify FOPs from their
+        # exact contract fields and let IB name the class.
         return ''
-
-    weekday_suffix = {
-        0: 'A',  # Monday
-        1: 'B',  # Tuesday
-        2: 'C',  # Wednesday
-        3: 'D',  # Thursday
-    }.get(expiry_date.weekday())
-
-    if weekday_suffix:
-        return f"{base_trading_class[:-1]}{weekday_suffix}"
     return base_trading_class
 
 def _extract_contract_expiry(contract):
@@ -1151,8 +1200,10 @@ def _filter_derivative_contract_candidates(contract_details_list, contract_reque
         if requested_strike is not None and candidate_strike is not None and abs(candidate_strike - requested_strike) > 0.000001:
             continue
 
-        candidate_under_con_id = getattr(candidate, 'underConId', None)
-        if requested_under_con_id and candidate_under_con_id and candidate_under_con_id != requested_under_con_id:
+        # underConId belongs to ContractDetails, not Contract.  Reading it
+        # from ``candidate`` silently disabled the intended FOP month filter.
+        candidate_under_con_id = getattr(detail, 'underConId', None)
+        if requested_under_con_id and candidate_under_con_id != requested_under_con_id:
             continue
 
         score = 0
@@ -1237,6 +1288,123 @@ async def _fallback_qualify_derivative_contract(contract, contract_request=None,
 
     return None
 
+def _futures_identity_con_id(contract):
+    """Return a positive conId for a qualified FUT, else None."""
+    if contract is None:
+        return None
+    if _normalize_symbol(getattr(contract, 'secType', '')) != 'FUT':
+        return None
+    con_id = _positive_contract_id(getattr(contract, 'conId', None))
+    return con_id
+
+
+def _remember_verified_underlying_contract_month(contract, details=None):
+    """Cache a FUT delivery month from authoritative ContractDetails evidence.
+
+    Once IB qualifies a future, ``lastTradeDateOrContractMonth`` is rewritten to
+    the exact YYYYMMDD last trade date, and for every product whose expiry leads
+    delivery that date falls in the *previous* month: CL Sep 2026 stops trading
+    in Aug 2026, so truncating the date to six digits reports 202608 for a
+    202609 contract.  ``ContractDetails.contractMonth`` is the delivery month IB
+    itself publishes, so it is the only accepted evidence here; callers without
+    ContractDetails get '' and must resolve it via
+    ``_resolve_verified_futures_contract_month``.
+    """
+    con_id = _futures_identity_con_id(contract)
+    if con_id is None:
+        return ''
+    contract_month = _to_contract_month(getattr(details, 'contractMonth', ''))
+    if contract_month:
+        underlying_contract_month_by_con_id[con_id] = contract_month
+        return contract_month
+    return underlying_contract_month_by_con_id.get(con_id, '')
+
+
+async def _resolve_verified_futures_contract_month(con_id):
+    """Resolve a FUT delivery month from IB ContractDetails for one conId.
+
+    Cached per conId because a delivery month is immutable.  Failures return ''
+    rather than a date-derived guess; the browser then reports the month as
+    unverified instead of silently comparing against the wrong month.
+    """
+    normalized_con_id = _positive_contract_id(con_id)
+    if normalized_con_id is None:
+        return ''
+    cached_month = _to_contract_month(
+        underlying_contract_month_by_con_id.get(normalized_con_id)
+    )
+    if cached_month:
+        return cached_month
+
+    async def resolve_once():
+        # The semaphore bounds distinct-contract traffic; same-conId callers are
+        # deduplicated by futures_contract_month_inflight_by_con_id below.  It is
+        # a dedicated semaphore because a FOP timing resolution awaits this
+        # function while holding option_contract_timing_semaphore.
+        async with futures_contract_month_semaphore:
+            cached = _to_contract_month(
+                underlying_contract_month_by_con_id.get(normalized_con_id)
+            )
+            if cached:
+                return cached
+            try:
+                details_list = await asyncio.wait_for(
+                    ib.reqContractDetailsAsync(Contract(conId=normalized_con_id)),
+                    timeout=OPTION_CONTRACT_TIMING_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logging.warning(
+                    'Timed out resolving futures delivery month for conId=%s after %.1fs; '
+                    'the browser will treat that month as unverified.',
+                    normalized_con_id,
+                    OPTION_CONTRACT_TIMING_TIMEOUT_SECONDS,
+                )
+                return ''
+            except Exception as exc:
+                logging.warning(
+                    'Unable to resolve futures delivery month for conId=%s: %s; '
+                    'the browser will treat that month as unverified.',
+                    normalized_con_id,
+                    exc,
+                )
+                return ''
+            selected = next((
+                details for details in (details_list or [])
+                if _futures_identity_con_id(getattr(details, 'contract', None))
+                == normalized_con_id
+            ), None)
+            if selected is None:
+                return ''
+            return _remember_verified_underlying_contract_month(
+                getattr(selected, 'contract', None), selected
+            )
+
+    task = futures_contract_month_inflight_by_con_id.get(normalized_con_id)
+    if task is None:
+        task = asyncio.create_task(resolve_once())
+        futures_contract_month_inflight_by_con_id[normalized_con_id] = task
+
+        def clear_inflight(completed_task):
+            if (futures_contract_month_inflight_by_con_id.get(normalized_con_id)
+                    is completed_task):
+                futures_contract_month_inflight_by_con_id.pop(normalized_con_id, None)
+
+        task.add_done_callback(clear_inflight)
+
+    # A browser disconnect must not cancel a lookup shared with IVTS or another tab.
+    return await asyncio.shield(task) or ''
+
+
+async def _resolve_verified_underlying_contract_month(under_con_id):
+    """Resolve an actual FOP underlying month from its IB conId.
+
+    ContractDetails.underConId is the authoritative link from a futures option
+    to its FUT.  The browser's requested month is intentionally not accepted as
+    evidence here.
+    """
+    return await _resolve_verified_futures_contract_month(under_con_id)
+
+
 async def _qualify_underlying_future(symbol, contract_month, exchange, currency, multiplier):
     cache_key = (
         _normalize_symbol(symbol),
@@ -1261,6 +1429,9 @@ async def _qualify_underlying_future(symbol, contract_month, exchange, currency,
         return None
 
     qualified_underlyings[cache_key] = results[0]
+    await _resolve_verified_futures_contract_month(
+        _futures_identity_con_id(results[0])
+    )
     return results[0]
 
 def _build_contract_from_request(contract_data):
@@ -1312,7 +1483,7 @@ def _build_contract_from_request(contract_data):
     raise ValueError(f"Unsupported secType in request: {sec_type!r}")
 
 async def _qualify_one(contract, contract_request=None):
-    sec_type = ''
+    sec_type = _normalize_symbol(getattr(contract, 'secType', ''))
     underlying_contract_month = ''
     qualified_underlying = None
     if isinstance(contract_request, dict):
@@ -1394,7 +1565,115 @@ async def _qualify_one(contract, contract_request=None):
             return fallback_contract
     if not results or results[0] is None:
         return None
-    return results[0]
+    qualified_contract = results[0]
+    if sec_type == 'FUT':
+        # Resolve the delivery month before the first quote is published so the
+        # browser's identity gate has authoritative evidence to compare against.
+        await _resolve_verified_futures_contract_month(
+            _futures_identity_con_id(qualified_contract)
+        )
+    return qualified_contract
+
+
+async def _resolve_option_contract_timing(qualified_option):
+    con_id = getattr(qualified_option, 'conId', None)
+    if not con_id:
+        return {}
+    sec_type = _normalize_symbol(getattr(qualified_option, 'secType', ''))
+    qualified_expiry = _normalize_contract_date(
+        getattr(qualified_option, 'lastTradeDateOrContractMonth', '') or ''
+    )
+    def cache_is_usable(candidate):
+        return (
+            option_contract_timing_is_publishable(candidate)
+            and (
+                not qualified_expiry
+                or _normalize_contract_date(candidate.get('lastTradeDate') or '')
+                == qualified_expiry
+            )
+        )
+
+    async def resolve_once():
+        # The semaphore bounds distinct-contract traffic.  Same-conId callers
+        # are deduplicated by option_contract_timing_inflight_by_con_id below.
+        async with option_contract_timing_semaphore:
+            cached_timing = option_contract_timing_by_con_id.get(con_id)
+            if cache_is_usable(cached_timing):
+                return dict(cached_timing)
+            timing = {}
+            try:
+                details_list = await asyncio.wait_for(
+                    ib.reqContractDetailsAsync(qualified_option),
+                    timeout=OPTION_CONTRACT_TIMING_TIMEOUT_SECONDS,
+                )
+                selected = next((
+                    details for details in (details_list or [])
+                    if getattr(getattr(details, 'contract', None), 'conId', None) == con_id
+                ), None)
+                if selected is not None:
+                    timing = build_option_contract_timing(qualified_option, selected)
+                    resolved_sec_type = _normalize_symbol(timing.get('secType') or sec_type)
+                    if resolved_sec_type == 'FOP':
+                        actual_under_con_id = timing.get('underConId')
+                        actual_underlying_month = await _resolve_verified_underlying_contract_month(
+                            actual_under_con_id
+                        )
+                        if actual_underlying_month:
+                            timing['underlyingContractMonth'] = actual_underlying_month
+                            timing['underlyingBindingVerified'] = True
+                            timing['underlyingBindingSource'] = 'ib_contract_details_under_con_id'
+                            timing['underlyingBindingStatus'] = 'verified'
+                        else:
+                            timing['underlyingBindingVerified'] = False
+                            timing['underlyingBindingStatus'] = (
+                                'underlying_month_unresolved'
+                                if actual_under_con_id
+                                else 'under_con_id_missing'
+                            )
+            except asyncio.TimeoutError:
+                logging.warning(
+                    'Timed out resolving option last-trade timing for conId=%s after %.1fs; '
+                    'exact timing remains unavailable.',
+                    con_id,
+                    OPTION_CONTRACT_TIMING_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logging.warning(
+                    'Unable to resolve option last-trade timing for conId=%s: %s; '
+                    'exact timing remains unavailable.',
+                    con_id,
+                    exc,
+                )
+            # Raw ContractDetails fields without an exact expiryAsOf are useful
+            # diagnostics, not stable pricing evidence.  Do not let them become
+            # a process-lifetime positive cache entry; a later subscription must
+            # be able to retry.  FOP timing additionally needs a verified
+            # underlying futures binding before it becomes reusable.
+            if cache_is_usable(timing):
+                option_contract_timing_by_con_id[con_id] = dict(timing)
+            else:
+                option_contract_timing_by_con_id.pop(con_id, None)
+            return dict(timing)
+
+    cached_timing = option_contract_timing_by_con_id.get(con_id)
+    if cache_is_usable(cached_timing):
+        return dict(cached_timing)
+
+    task = option_contract_timing_inflight_by_con_id.get(con_id)
+    if task is None:
+        task = asyncio.create_task(resolve_once())
+        option_contract_timing_inflight_by_con_id[con_id] = task
+
+        def clear_inflight(completed_task):
+            if option_contract_timing_inflight_by_con_id.get(con_id) is completed_task:
+                option_contract_timing_inflight_by_con_id.pop(con_id, None)
+
+        task.add_done_callback(clear_inflight)
+
+    # One browser disconnect must not cancel the lookup shared by IVTS or
+    # another portfolio tab.
+    timing = await asyncio.shield(task)
+    return dict(timing or {})
 
 def _build_underlying_request(raw_underlying, options_data):
     if isinstance(raw_underlying, dict):
@@ -1427,6 +1706,10 @@ def _build_iv_term_structure_environment():
         'ib': ib,
         'client_subscriptions': client_subscriptions,
         'market_data_generic_ticks_by_con_id': market_data_generic_ticks_by_con_id,
+        'market_data_quote_as_of_by_ticker_key': market_data_quote_as_of_by_ticker_key,
+        'market_data_quote_fingerprint_by_ticker_key': market_data_quote_fingerprint_by_ticker_key,
+        'option_contract_timing_by_con_id': option_contract_timing_by_con_id,
+        'futures_contract_month_by_con_id': underlying_contract_month_by_con_id,
         'client_subscription_settings': client_subscription_settings,
         'iv_term_structure_sync_tasks': iv_term_structure_sync_tasks,
         'iv_term_structure_contract_details_semaphore': iv_term_structure_contract_details_semaphore,
@@ -1437,6 +1720,7 @@ def _build_iv_term_structure_environment():
         'build_underlying_request': _build_underlying_request,
         'build_contract_from_request': _build_contract_from_request,
         'qualify_one': _qualify_one,
+        'resolve_option_contract_timing': _resolve_option_contract_timing,
         'unsubscribe_client_safely': unsubscribe_client_safely,
         'get_client_subscription_settings': _get_client_subscription_settings,
         'extract_quote_snapshot': _extract_quote_snapshot,
@@ -1595,6 +1879,10 @@ def _build_market_data_environment():
         'connected_clients': connected_clients,
         'client_subscriptions': client_subscriptions,
         'client_subscription_settings': client_subscription_settings,
+        'market_data_quote_as_of_by_ticker_key': market_data_quote_as_of_by_ticker_key,
+        'market_data_quote_fingerprint_by_ticker_key': market_data_quote_fingerprint_by_ticker_key,
+        'option_contract_timing_by_con_id': option_contract_timing_by_con_id,
+        'futures_contract_month_by_con_id': underlying_contract_month_by_con_id,
         'send_message_safe': send_message_safe,
         'log_option_iv_debug_if_needed': _log_option_iv_debug_if_needed,
         'build_contract_from_request': _build_contract_from_request,
@@ -1617,6 +1905,8 @@ def unsubscribe_client_safely(ws):
         client_subscriptions=client_subscriptions,
         ib=ib,
         generic_ticks_by_con_id=market_data_generic_ticks_by_con_id,
+        quote_as_of_by_ticker_key=market_data_quote_as_of_by_ticker_key,
+        quote_fingerprint_by_ticker_key=market_data_quote_fingerprint_by_ticker_key,
     )
 
 
@@ -1644,7 +1934,10 @@ def _build_ws_handler_environment():
         'client_subscriptions': client_subscriptions,
         'market_data_generic_ticks_by_con_id': market_data_generic_ticks_by_con_id,
         'client_subscription_settings': client_subscription_settings,
+        'option_contract_timing_by_con_id': option_contract_timing_by_con_id,
+        'futures_contract_month_by_con_id': underlying_contract_month_by_con_id,
         'historical_replay_service': historical_replay_service,
+        'get_discount_curve_snapshot': _get_discount_curve_snapshot,
         'execution_engine': execution_engine,
         'send_portfolio_avg_cost_snapshot': _send_portfolio_avg_cost_snapshot,
         'send_portfolio_positions_snapshot': _send_portfolio_positions_snapshot,
@@ -1659,6 +1952,7 @@ def _build_ws_handler_environment():
         'build_contract_from_request': _build_contract_from_request,
         'get_client_subscription_settings': _get_client_subscription_settings,
         'qualify_one': _qualify_one,
+        'resolve_option_contract_timing': _resolve_option_contract_timing,
         'handle_iv_term_structure_subscription': _handle_iv_term_structure_subscription,
         'iv_term_structure_catalog_timeout_seconds': IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS,
         'build_ib_connection_status_payload': _build_ib_connection_status_payload,

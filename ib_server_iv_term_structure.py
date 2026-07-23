@@ -8,6 +8,8 @@ from uuid import uuid4
 from ib_async import Contract
 
 from ib_server_market_data import (
+    IV_TERM_STRUCTURE_SNAPSHOT_STATE_KEY,
+    build_iv_term_structure_quote_snapshot,
     cancel_mkt_data_if_unused,
     req_mkt_data_pooled,
     server_utc_now_iso,
@@ -31,7 +33,7 @@ from iv_term_structure_service import (
 IV_TERM_STRUCTURE_OPTION_QUALIFY_TIMEOUT_SECONDS = 8.0
 IV_TERM_STRUCTURE_OPTION_SUBSCRIPTION_CONCURRENCY = 4
 IV_TERM_STRUCTURE_SHARED_ATM_PROBE_TIMEOUT_SECONDS = 20.0
-IV_TERM_STRUCTURE_DEFAULT_MAX_OPTION_STREAMS = 10
+IV_TERM_STRUCTURE_DEFAULT_MAX_OPTION_STREAMS = 20
 
 
 def build_iv_term_structure_payload_evidence(coherence_reason: str) -> dict[str, Any]:
@@ -292,8 +294,9 @@ async def fetch_iv_term_structure_contract_rows_for_expiry(
         if normalized_expiry and candidate_expiry and candidate_expiry != normalized_expiry:
             continue
 
-        candidate_under_con_id = getattr(candidate, 'underConId', None)
-        if requested_under_con_id and candidate_under_con_id and candidate_under_con_id != requested_under_con_id:
+        # underConId is returned on ContractDetails, not on its Contract.
+        candidate_under_con_id = getattr(detail, 'underConId', None)
+        if requested_under_con_id and candidate_under_con_id != requested_under_con_id:
             continue
 
         candidate_multiplier = str(getattr(candidate, 'multiplier', '') or '').strip()
@@ -373,8 +376,9 @@ async def fetch_iv_term_structure_contract_rows_for_exact_strike(
         if normalized_expiry and candidate_expiry and candidate_expiry != normalized_expiry:
             continue
 
-        candidate_under_con_id = getattr(candidate, 'underConId', None)
-        if requested_under_con_id and candidate_under_con_id and candidate_under_con_id != requested_under_con_id:
+        # underConId is returned on ContractDetails, not on its Contract.
+        candidate_under_con_id = getattr(detail, 'underConId', None)
+        if requested_under_con_id and candidate_under_con_id != requested_under_con_id:
             continue
 
         candidate_multiplier = str(getattr(candidate, 'multiplier', '') or '').strip()
@@ -551,18 +555,13 @@ async def resolve_iv_term_structure_common_selections_from_candidates(
     if not (target_price == target_price):
         return {}
 
-    nearest_index = min(
+    search_indices = sorted(
         range(len(normalized_candidates)),
-        key=lambda index: (abs(normalized_candidates[index] - target_price), normalized_candidates[index]),
+        key=lambda index: (
+            abs(normalized_candidates[index] - target_price),
+            normalized_candidates[index],
+        ),
     )
-    search_indices = []
-    for offset in range(len(normalized_candidates)):
-        left_index = nearest_index - offset
-        right_index = nearest_index + offset
-        if left_index >= 0 and left_index not in search_indices:
-            search_indices.append(left_index)
-        if offset and right_index < len(normalized_candidates) and right_index not in search_indices:
-            search_indices.append(right_index)
 
     probe_cache = {}
     probe_semaphore = asyncio.Semaphore(4)
@@ -950,6 +949,19 @@ async def subscribe_iv_term_structure_option_request(
         record_failure('qualification_empty', message)
         return False
 
+    timing_resolver = env.get('resolve_option_contract_timing')
+    if callable(timing_resolver):
+        try:
+            timing = await timing_resolver(qualified_option)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logging.warning(
+                'IV term structure option timing resolution failed for %s: %s; using product fallback.',
+                sub_id or '<missing>',
+                exc,
+            )
+
     try:
         option_ticker = req_mkt_data_pooled(
             qualified_option,
@@ -973,6 +985,8 @@ async def subscribe_iv_term_structure_option_request(
             client_subscriptions=env['client_subscriptions'],
             ib=env['ib'],
             generic_ticks_by_con_id=env.setdefault('market_data_generic_ticks_by_con_id', {}),
+            quote_as_of_by_ticker_key=env.setdefault('market_data_quote_as_of_by_ticker_key', {}),
+            quote_fingerprint_by_ticker_key=env.setdefault('market_data_quote_fingerprint_by_ticker_key', {}),
         )
         return False
 
@@ -1029,6 +1043,9 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
     timed_out_option_count = 0
     subscription_error_message = ''
     shared_atm_probe_timed_out = False
+    snapshot_state_id = ''
+    expected_option_ids: set[str] = set()
+    subscribed_option_ids: set[str] = set()
 
     try:
         expiry_rows = []
@@ -1073,6 +1090,7 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
                 IV_TERM_STRUCTURE_DEFAULT_MAX_OPTION_STREAMS,
             )
             global_candidate_strikes = list(sync_context.get('globalCandidateStrikes') or [])
+            snapshot_state_id = str(sync_context.get('snapshotStateId') or '').strip()
 
         prioritized_expiry_rows = prioritize_iv_term_structure_expiry_rows(
             expiry_rows,
@@ -1260,6 +1278,11 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
                 async with progress_lock:
                     resolved_expiry_count += 1
                     expected_option_count += len(option_requests)
+                    expected_option_ids.update(
+                        str(request.get('id') or '').strip()
+                        for request in option_requests
+                        if str(request.get('id') or '').strip()
+                    )
                     resolved_count = resolved_expiry_count
                     expected_count = expected_option_count
                     subscribed_count = subscribed_option_count
@@ -1305,6 +1328,7 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
                         attempted_option_count += 1
                         if subscribed:
                             subscribed_option_count += 1
+                            subscribed_option_ids.add(str(option_request.get('id') or '').strip())
                         else:
                             failed_option_count += 1
                             if subscription_result.get('kind') == 'qualification_timeout':
@@ -1351,6 +1375,27 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
         if prioritized_expiry_rows:
             await asyncio.gather(*(process_expiry(expiry_row) for expiry_row in prioritized_expiry_rows))
 
+        settings_getter = env.get('get_client_subscription_settings')
+        if callable(settings_getter):
+            settings = settings_getter(websocket)
+            snapshot_state = settings.get(IV_TERM_STRUCTURE_SNAPSHOT_STATE_KEY)
+            if (
+                isinstance(snapshot_state, dict)
+                and snapshot_state_id
+                and snapshot_state.get('stateId') == snapshot_state_id
+            ):
+                snapshot_state.update({
+                    'symbol': option_symbol,
+                    'subscriptionComplete': True,
+                    'expectedOptionIds': sorted(expected_option_ids),
+                    'subscribedOptionIds': sorted(subscribed_option_ids),
+                    'expectedOptionCount': expected_option_count,
+                    'subscribedOptionCount': subscribed_option_count,
+                    'attemptedOptionCount': attempted_option_count,
+                    'failedOptionCount': failed_option_count,
+                    'timedOutOptionCount': timed_out_option_count,
+                })
+
         complete_payload: IvTermStructureSyncCompletePayload = {
             **build_iv_term_structure_payload_evidence('subscriptions_ready_without_coherent_quote_snapshot'),
             'action': 'iv_term_structure_sync_complete',
@@ -1364,6 +1409,17 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             'sharedAtmProbeTimedOut': shared_atm_probe_timed_out,
         }
         await env['send_message_safe'](websocket, json.dumps(complete_payload))
+
+        # Quotes may already have arrived while contracts were being resolved.
+        # Attempt one full snapshot now; if any leg is still missing evidence,
+        # the regular pending-ticker path will retry after its next real update.
+        if (
+            'client_subscription_settings' in env
+            and 'market_data_quote_as_of_by_ticker_key' in env
+        ):
+            full_snapshot = build_iv_term_structure_quote_snapshot(env, websocket)
+            if full_snapshot is not None:
+                await env['send_message_safe'](websocket, json.dumps(full_snapshot))
     except asyncio.CancelledError:
         logging.info(
             "Cancelled IV term structure background sync for %s",
@@ -1487,7 +1543,17 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
 
     await cancel_iv_term_structure_sync_task(env, websocket)
     env['unsubscribe_client_safely'](websocket)
-    env['get_client_subscription_settings'](websocket)['greeks_enabled'] = False
+    client_settings = env['get_client_subscription_settings'](websocket)
+    client_settings['greeks_enabled'] = False
+    snapshot_state_id = uuid4().hex
+    client_settings[IV_TERM_STRUCTURE_SNAPSHOT_STATE_KEY] = {
+        'stateId': snapshot_state_id,
+        'symbol': underlying_symbol,
+        'underlyingContractMonth': underlying_contract_month,
+        'subscriptionComplete': False,
+        'expectedOptionIds': [],
+        'subscribedOptionIds': [],
+    }
 
     qualified_underlying = await env['qualify_one'](underlying_contract, underlying_request)
     if not subscription_generation_is_current():
@@ -1636,6 +1702,8 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
     option_descriptors = {}
 
     option_symbol = normalize_symbol(option_template.get('symbol') or underlying_symbol)
+    client_settings[IV_TERM_STRUCTURE_SNAPSHOT_STATE_KEY]['symbol'] = option_symbol
+    client_settings[IV_TERM_STRUCTURE_SNAPSHOT_STATE_KEY]['underlyingContractMonth'] = underlying_contract_month
     option_sec_type = normalize_symbol(option_template.get('secType') or option_template.get('sec_type') or 'OPT')
     option_exchange = option_template.get('exchange') or 'SMART'
     option_currency = option_template.get('currency') or (underlying_request or {}).get('currency') or 'USD'
@@ -1727,6 +1795,7 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
                 'strikeRadius': strike_radius,
                 'maxOptionStreams': max_option_streams,
                 'globalCandidateStrikes': merged_chain_fields.get('strikes') or [],
+                'snapshotStateId': snapshot_state_id,
             })
         )
         track_iv_term_structure_sync_task(env, websocket, task)

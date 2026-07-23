@@ -17,7 +17,14 @@ const percentFormatter = new Intl.NumberFormat('en-US', {
 
 // App State
 const today = new Date();
-const initialDateStr = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+const localInitialDateStr = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+const initialDateStr = window.OptionComboPricingContext
+    && typeof window.OptionComboPricingContext.resolveLiveQuoteDate === 'function'
+    ? (window.OptionComboPricingContext.resolveLiveQuoteDate({
+        marketDataMode: 'live',
+        underlyingSymbol: 'SPY',
+    }, today.toISOString()) || localInitialDateStr)
+    : localInitialDateStr;
 
 /**
  * @typedef {Object} OptionComboBootstrapRuntimeConfig
@@ -88,19 +95,53 @@ const state = {
     underlyingSymbol: 'SPY',
     underlyingContractMonth: '',
     underlyingPrice: 100.00,
-    baseDate: initialDateStr, // Today local YYYY-MM-DD
-    simulatedDate: initialDateStr, // Initially same as baseDate
+    baseDate: initialDateStr, // Entry/session date; never rolled by live quotes
+    simulatedDate: initialDateStr, // Scenario target; initially the live market date
     marketDataMode: bootstrapRuntimeConfig.marketDataMode,
     workspaceVariant: bootstrapRuntimeConfig.workspaceVariant,
     marketDataModeLocked: bootstrapRuntimeConfig.marketDataModeLocked === true,
     historicalQuoteDate: '',
+    liveQuoteDate: '',
+    liveQuoteAsOf: '',
+    // Subscription ids the backend could not qualify, keyed by leg id.
+    liveSubscriptionUnresolvedById: {},
     historicalAvailableStartDate: '',
     historicalAvailableEndDate: '',
     historicalTradingDates: [],
-    interestRate: 0.03, // 3% default risk-free rate
+    // Continuously compounded discount-rate fallback.  A live/historical
+    // discount curve overrides this scalar when useMarketDiscountCurve=true.
+    interestRate: 0.03,
+    useMarketDiscountCurve: true,
+    discountCurve: null,
+    discountCurveLastError: '',
+    discountCurveRequestPending: false,
+    discountCurveRequestManual: false,
+    discountCurveLastResponseStatus: '',
+    discountCurveLastLoadedAt: '',
+    discountCurveLastLoadWasManual: false,
     ivOffset: 0.0, // 0%
     simTimeBasis: 'weighted', // 'calendar' (TWS default) | 'trading' | 'weighted'
     simWeekendWeight: 0.3, // λ: weekend/holiday variance weight used by 'weighted'
+    // Strict-by-default: a live weighted-clock projection must consume the
+    // IVTS per-non-trading-day curve (or visibly fail closed).  The scalar λ
+    // remains an explicit opt-out selected by the user, never an implicit
+    // compatibility fallback for old sessions.
+    simUseImpliedLambda: true,
+    simImpliedLambdaEntry: null, // runtime cache of the matched IVTS handoff entry (not exported)
+    simImpliedLambdaFileEntry: null, // explicit portable-file fallback; never populated by localStorage
+    simImpliedLambdaCoverage: null, // runtime per-live-leg coverage audit; never exported
+    simulationTiming: null, // runtime portfolio-global valuation instant; never exported
+    // Accuracy-first live What-If gate. Every option that remains alive at the
+    // target must have a fresh valid two-sided BBO whose IV this runtime can
+    // invert locally. `legacy-input-iv` is import-only compatibility mode.
+    projectionConvergenceMode: 'strict-bbo',
+    liveProjectionFeedConnected: false, // runtime websocket health; not exported
+    liveProjectionFeedStale: true, // runtime market-data watchdog; not exported
+    liveProjectionLastReceivedAt: '', // local receipt clock; not exported
+    // Live short-dated/FOP/INDEX projections require IB contract-level expiry
+    // timestamps. Historical replay and an explicit false opt-out retain the
+    // legacy product-profile cutoff behavior.
+    requireExactContractTiming: true,
     greeksEnabled: false,
     deltaHedge: OptionComboSessionLogic.createDefaultDeltaHedgeConfig(),
     primaryControlPanelCollapsed: false,
@@ -135,6 +176,8 @@ window.__optionComboApp = {
 // Throttle flag for slider-driven updates (one rAF per frame max)
 let _sliderRafPending = false;
 let _latestPortfolioDerivedData = null;
+let _impliedLambdaRefreshPending = false;
+let _impliedLambdaRefreshRequested = false;
 function throttledUpdate() {
     if (!_sliderRafPending) {
         _sliderRafPending = true;
@@ -164,17 +207,68 @@ function consumePendingCalendarHandoff() {
     }
 
     state.underlyingSymbol = payload.symbol;
-    state.underlyingContractMonth = '';
+    state.underlyingContractMonth = String(payload.underlyingContractMonth || '')
+        .replace(/\D/g, '').slice(0, 6);
+    state.simImpliedLambdaEntry = null;
+    state.simImpliedLambdaFileEntry = null;
+    state.simImpliedLambdaCoverage = null;
+    state.simulationTiming = null;
     if (Number.isFinite(payload.underlyingPrice) && payload.underlyingPrice > 0) {
         state.underlyingPrice = payload.underlyingPrice;
     }
 
     const productRegistry = _getProductRegistryApi();
-    if (productRegistry && typeof productRegistry.resolveDefaultUnderlyingContractMonth === 'function') {
+    if (!state.underlyingContractMonth
+        && productRegistry
+        && typeof productRegistry.resolveDefaultUnderlyingContractMonth === 'function') {
         state.underlyingContractMonth = productRegistry.resolveDefaultUnderlyingContractMonth(
             state.underlyingSymbol,
             state.simulatedDate || state.baseDate
         );
+    }
+
+    const profile = productRegistry && typeof productRegistry.resolveUnderlyingProfile === 'function'
+        ? productRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
+        : null;
+    const requiresFutureBinding = !!(profile && (
+        profile.requiresPerLegForwardBinding === true
+        || String(profile.optionSecType || '').trim().toUpperCase() === 'FOP'
+        || String(profile.underlyingSecType || '').trim().toUpperCase() === 'FUT'
+    ));
+    let handoffFutureId = '';
+    if (requiresFutureBinding && /^\d{6}$/.test(state.underlyingContractMonth)) {
+        if (!Array.isArray(state.futuresPool)) state.futuresPool = [];
+        let futureEntry = state.futuresPool.find(entry =>
+            String(entry && entry.contractMonth || '').replace(/\D/g, '').slice(0, 6)
+                === state.underlyingContractMonth
+        );
+        const payloadFuture = payload.underlyingFuture && typeof payload.underlyingFuture === 'object'
+            ? payload.underlyingFuture
+            : {};
+        if (!futureEntry) {
+            futureEntry = {
+                id: generateId(),
+                contractMonth: state.underlyingContractMonth,
+                bid: null,
+                ask: null,
+                mark: Number.isFinite(parseFloat(payloadFuture.mark))
+                    ? parseFloat(payloadFuture.mark)
+                    : (Number.isFinite(payload.underlyingPrice) ? payload.underlyingPrice : null),
+                quoteAsOf: String(payloadFuture.quoteAsOf || '').trim(),
+                lastQuotedAt: String(payloadFuture.quoteAsOf || '').trim() || null,
+                conId: Number.isFinite(parseInt(payloadFuture.conId, 10))
+                    ? parseInt(payloadFuture.conId, 10)
+                    : null,
+                localSymbol: String(payloadFuture.localSymbol || '').trim(),
+                exchange: String(payloadFuture.exchange || profile.underlyingExchange || '').trim(),
+                currency: String(payloadFuture.currency || profile.currency || 'USD').trim().toUpperCase(),
+                multiplier: String(payloadFuture.multiplier || profile.underlyingLegMultiplier || '').trim(),
+                secType: 'FUT',
+                symbol: state.underlyingSymbol,
+            };
+            state.futuresPool.push(futureEntry);
+        }
+        handoffFutureId = String(futureEntry.id || '');
     }
 
     OptionComboGroupEditorUI.addGroup(state, generateId, {
@@ -184,12 +278,16 @@ function consumePendingCalendarHandoff() {
     const group = state.groups[state.groups.length - 1];
     if (group) {
         group.name = handoffApi.buildGroupName(payload);
-        group.legs = handoffApi.buildCalendarLegs(payload, generateId);
+        group.legs = handoffApi.buildCalendarLegs(payload, generateId, handoffFutureId);
+        group.liveData = true;
     }
 
     OptionComboSessionUI.syncControlPanel(state, currencyFormatter, {
         diffDays,
         calendarToTradingDays,
+        requestDiscountCurveSnapshot: typeof requestDiscountCurveSnapshot === 'function'
+            ? requestDiscountCurveSnapshot
+            : null,
     });
     if (typeof handleLiveSubscriptions === 'function') {
         handleLiveSubscriptions();
@@ -208,6 +306,28 @@ document.addEventListener('DOMContentLoaded', () => {
         runDeltaHedgeAutoSupervisor();
     }, 5000);
 });
+
+// Re-price when the IVTS tab explicitly syncs a new implied-lambda array (the
+// 'storage' event only fires for writes from other tabs).
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('storage', (event) => {
+        const handoff = typeof OptionComboImpliedLambdaHandoff !== 'undefined'
+            ? OptionComboImpliedLambdaHandoff
+            : null;
+        if (!handoff || !event || event.key !== handoff.STORAGE_KEY) {
+            return;
+        }
+        if (state.simUseImpliedLambda === true && state.simTimeBasis === 'weighted') {
+            _scheduleImpliedLambdaRefresh();
+        }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden !== true && _impliedLambdaRefreshRequested) {
+            _scheduleImpliedLambdaRefresh();
+        }
+    });
+}
 
 // Calculate unique ID
 function generateId() {
@@ -324,6 +444,9 @@ function bindControlPanelEvents() {
         addDays,
         diffDays,
         calendarToTradingDays,
+        requestDiscountCurveSnapshot: typeof requestDiscountCurveSnapshot === 'function'
+            ? requestDiscountCurveSnapshot
+            : null,
     });
     const deltaHedgeUi = _getDeltaHedgeUiApi();
     if (_pageHasFeature('deltaHedgePanel')
@@ -550,6 +673,65 @@ function _syncWorkspaceChrome() {
     }
 }
 
+function _scheduleImpliedLambdaRefresh() {
+    if (state.simUseImpliedLambda !== true || state.simTimeBasis !== 'weighted') {
+        _impliedLambdaRefreshRequested = false;
+        return false;
+    }
+
+    _impliedLambdaRefreshRequested = true;
+    if (typeof document !== 'undefined' && document.hidden === true) {
+        return false;
+    }
+    if (_impliedLambdaRefreshPending) {
+        return false;
+    }
+
+    _impliedLambdaRefreshPending = true;
+    const runRefresh = () => {
+        _impliedLambdaRefreshPending = false;
+        if (!_impliedLambdaRefreshRequested
+            || state.simUseImpliedLambda !== true
+            || state.simTimeBasis !== 'weighted') {
+            return;
+        }
+        if (typeof document !== 'undefined' && document.hidden === true) {
+            return;
+        }
+        _impliedLambdaRefreshRequested = false;
+        updateDerivedValues();
+    };
+
+    if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(runRefresh);
+    } else {
+        runRefresh();
+    }
+    return true;
+}
+
+function _refreshSimTimeBasisUi() {
+    const controlPanelUi = typeof OptionComboControlPanelUI !== 'undefined'
+        ? OptionComboControlPanelUI
+        : null;
+    if (controlPanelUi && typeof controlPanelUi.refreshSimTimeBasisUi === 'function') {
+        _runUiRefreshSafely('simTimeBasisUi', () => {
+            controlPanelUi.refreshSimTimeBasisUi(state);
+        });
+    }
+}
+
+function _refreshSimulationDateUi() {
+    const controlPanelUi = typeof OptionComboControlPanelUI !== 'undefined'
+        ? OptionComboControlPanelUI
+        : null;
+    if (controlPanelUi && typeof controlPanelUi.refreshSimulationDateUi === 'function') {
+        _runUiRefreshSafely('simulationDateUi', () => {
+            controlPanelUi.refreshSimulationDateUi(state);
+        });
+    }
+}
+
 function _applyPortfolioDerivedData(derivedData, options = {}) {
     if (!derivedData) {
         return;
@@ -607,6 +789,58 @@ function _applyPortfolioDerivedData(derivedData, options = {}) {
     }
 }
 
+function _peekImpliedLambdaEntry() {
+    const handoff = typeof OptionComboImpliedLambdaHandoff !== 'undefined'
+        ? OptionComboImpliedLambdaHandoff
+        : null;
+    if (!handoff || state.marketDataMode === 'historical') {
+        return null;
+    }
+    // Futures identity is symbol + contract month: a lambda surface solved on
+    // a different underlying future must not be silently substituted.
+    const expectedAnchorDate = String(state.liveQuoteDate || '').trim();
+    // The live exchange trade date is part of the V2 identity.  Before the
+    // first real quote establishes it, accepting a merely fresh entry would
+    // let yesterday's (or another session's) surface leak into pricing.
+    if (!expectedAnchorDate) {
+        return null;
+    }
+    const storedEntry = handoff.peekSymbolEntry(
+        state.underlyingSymbol,
+        undefined,
+        Date.now(),
+        state.underlyingContractMonth,
+        expectedAnchorDate
+    );
+    if (storedEntry) {
+        // Once browser storage is demonstrably available, it is the live
+        // source of truth. Do not resurrect an older portable file after a
+        // later IVTS invalidation removes the stored surface.
+        state.simImpliedLambdaFileEntry = null;
+        return storedEntry;
+    }
+
+    // Loading a portable JSON file is an explicit request and must still
+    // work when localStorage is unavailable (private browsing / blocked
+    // storage). Keep the parsed entry in this tab as a fail-soft runtime
+    // fallback. A stored IVTS publication wins whenever one is available.
+    const runtimeEntry = typeof handoff.normalizeSymbolEntry === 'function'
+        ? handoff.normalizeSymbolEntry(state.simImpliedLambdaFileEntry, Date.now())
+        : null;
+    const expectedSymbol = String(state.underlyingSymbol || '').trim().toUpperCase();
+    const runtimeSymbol = String(runtimeEntry && runtimeEntry.symbol || '').trim().toUpperCase();
+    const expectedKey = typeof handoff.entryStorageKey === 'function'
+        ? handoff.entryStorageKey(expectedSymbol, state.underlyingContractMonth)
+        : expectedSymbol;
+    const runtimeKey = typeof handoff.entryStorageKey === 'function'
+        ? handoff.entryStorageKey(runtimeSymbol, runtimeEntry && runtimeEntry.underlyingContractMonth)
+        : runtimeSymbol;
+    return expectedSymbol && runtimeKey === expectedKey
+        && runtimeEntry.anchorDate === expectedAnchorDate
+        ? runtimeEntry
+        : null;
+}
+
 function _syncSimTimeBasisPricingConfig() {
     const pricingCore = typeof OptionComboPricingCore !== 'undefined' ? OptionComboPricingCore : null;
     const sessionLogic = typeof OptionComboSessionLogic !== 'undefined' ? OptionComboSessionLogic : null;
@@ -616,11 +850,29 @@ function _syncSimTimeBasisPricingConfig() {
         || typeof sessionLogic.resolveSimWeekendWeight !== 'function') {
         return;
     }
-    pricingCore.configureSimTimeBasis({
-        weekendWeight: sessionLogic.resolveSimWeekendWeight(
+    const impliedEntry = state.simUseImpliedLambda === true ? _peekImpliedLambdaEntry() : null;
+    state.simImpliedLambdaEntry = impliedEntry;
+    const pricingContext = typeof OptionComboPricingContext !== 'undefined'
+        ? OptionComboPricingContext
+        : null;
+    state.simulationTiming = pricingContext
+        && typeof pricingContext.resolveSimulationTiming === 'function'
+        ? pricingContext.resolveSimulationTiming(state)
+        : null;
+    state.simImpliedLambdaCoverage = pricingContext
+        && typeof pricingContext.assessProjectionLambdaCoverage === 'function'
+        ? pricingContext.assessProjectionLambdaCoverage(state, impliedEntry)
+        : null;
+    const weekendWeight = typeof sessionLogic.resolveSimWeekendWeightSpec === 'function'
+        ? sessionLogic.resolveSimWeekendWeightSpec(
             state.simTimeBasis,
-            state.simWeekendWeight
-        ),
+            state.simWeekendWeight,
+            state.simUseImpliedLambda,
+            impliedEntry
+        )
+        : sessionLogic.resolveSimWeekendWeight(state.simTimeBasis, state.simWeekendWeight);
+    pricingCore.configureSimTimeBasis({
+        weekendWeight,
         observedTradingDates: state.marketDataMode === 'historical'
             ? state.historicalTradingDates
             : null,
@@ -635,6 +887,14 @@ function updateDerivedValues() {
     _applyPortfolioDerivedData(derivedData, {
         syncWorkspaceChrome: true,
     });
+    // _syncSimTimeBasisPricingConfig above may have accepted, replaced, or
+    // expired a cross-tab V2 entry. Keep the visible status in the same full
+    // refresh transaction as the pricing state.
+    _refreshSimTimeBasisUi();
+    // simulationTiming is recomputed at the start of this transaction. Keep
+    // the Timeline target text aligned with the exact state used by valuation,
+    // including rAF-throttled date-slider changes.
+    _refreshSimulationDateUi();
     return derivedData;
 }
 
@@ -1196,12 +1456,46 @@ function applyImportedState(normalizedState, importedSessionTitle = '') {
     }
     state.historicalQuoteDate = normalizedState.historicalQuoteDate
         || (state.marketDataMode === 'historical' ? (normalizedState.baseDate || normalizedState.simulatedDate || '') : '');
+    // Live quote clocks are transport-derived runtime state. Never revive a
+    // stale market date from a saved session.
+    state.liveQuoteDate = '';
+    state.liveQuoteAsOf = '';
     state.historicalAvailableStartDate = '';
     state.historicalAvailableEndDate = '';
     state.interestRate = normalizedState.interestRate;
+    state.useMarketDiscountCurve = normalizedState.useMarketDiscountCurve !== false;
+    state.discountCurve = normalizedState.discountCurve && typeof normalizedState.discountCurve === 'object'
+        ? normalizedState.discountCurve
+        : null;
+    state.discountCurveLastError = '';
+    state.discountCurveRequestPending = false;
+    state.discountCurveRequestManual = false;
+    state.discountCurveLastResponseStatus = '';
+    state.discountCurveLastLoadedAt = '';
+    state.discountCurveLastLoadWasManual = false;
     state.ivOffset = normalizedState.ivOffset;
     state.simTimeBasis = OptionComboSessionLogic.normalizeSimTimeBasis(normalizedState.simTimeBasis);
     state.simWeekendWeight = OptionComboSessionLogic.normalizeSimWeekendWeight(normalizedState.simWeekendWeight);
+    state.simUseImpliedLambda = typeof OptionComboSessionLogic.normalizeSimUseImpliedLambda === 'function'
+        ? OptionComboSessionLogic.normalizeSimUseImpliedLambda(normalizedState.simUseImpliedLambda)
+        : normalizedState.simUseImpliedLambda !== false;
+    // The data itself is runtime market state and must be reloaded from a
+    // validated IVTS publication/file for the imported symbol. Never leak the
+    // previous workspace's array into a newly imported session.
+    state.simImpliedLambdaEntry = null;
+    state.simImpliedLambdaFileEntry = null;
+    state.simImpliedLambdaCoverage = null;
+    state.simulationTiming = null;
+    state.projectionConvergenceMode = typeof OptionComboSessionLogic.normalizeProjectionConvergenceMode === 'function'
+        ? OptionComboSessionLogic.normalizeProjectionConvergenceMode(
+            normalizedState.projectionConvergenceMode
+        )
+        : 'strict-bbo';
+    state.liveProjectionFeedConnected = false;
+    state.liveProjectionFeedStale = true;
+    state.liveProjectionLastReceivedAt = '';
+    // Exact live expiry cutoffs are an invariant, not an imported preference.
+    state.requireExactContractTiming = true;
     state.greeksEnabled = normalizedState.greeksEnabled === true;
     state.deltaHedge = OptionComboSessionLogic.normalizeDeltaHedgeConfig(normalizedState.deltaHedge);
     state.primaryControlPanelCollapsed = normalizedState.primaryControlPanelCollapsed === true;

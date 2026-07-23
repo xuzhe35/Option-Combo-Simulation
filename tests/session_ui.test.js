@@ -244,8 +244,9 @@ module.exports = {
                         underlyingSymbol: 'HG',
                         underlyingContractMonth: '202605',
                         underlyingPrice: 4.35789,
-                        baseDate: '2026-04-02',
-                        simulatedDate: '2026-04-02',
+                        baseDate: '2026-04-01',
+                        liveQuoteDate: '2026-04-03',
+                        simulatedDate: '2026-04-05',
                         marketDataMode: 'live',
                         workspaceVariant: 'live',
                         marketDataModeLocked: false,
@@ -257,8 +258,16 @@ module.exports = {
                     },
                     currencyFormatter,
                     {
-                        diffDays() { return 0; },
-                        calendarToTradingDays() { return 0; },
+                        diffDays(fromDate, toDate) {
+                            assert.equal(fromDate, '2026-04-03');
+                            assert.equal(toDate, '2026-04-05');
+                            return 2;
+                        },
+                        calendarToTradingDays(fromDate, toDate) {
+                            assert.equal(fromDate, '2026-04-03');
+                            assert.equal(toDate, '2026-04-05');
+                            return 1;
+                        },
                     }
                 );
 
@@ -266,6 +275,10 @@ module.exports = {
                 assert.equal(elements.underlyingPrice.step, '0.00001');
                 assert.equal(elements.underlyingPriceSlider.step, '0.00001');
                 assert.equal(elements.underlyingPriceDisplay.textContent, '$4.35789');
+                assert.equal(elements.simulatedDate.min, '2026-04-03');
+                assert.equal(elements.simulatedDate.value, '2026-04-05');
+                assert.equal(elements.daysPassedSlider.value, 2);
+                assert.equal(elements.daysPassedDisplay.textContent, '+1 td / +2 cd');
             },
         },
     ],

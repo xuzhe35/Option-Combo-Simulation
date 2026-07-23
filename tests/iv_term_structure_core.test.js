@@ -17,6 +17,7 @@ module.exports = {
                         {
                             expiry: '20260424',
                             dte: 1,
+                            timeYears: 0.001,
                             atmStrike: 500,
                             atmCallSubId: 'spy_call_1d',
                             atmPutSubId: 'spy_put_1d',
@@ -31,8 +32,8 @@ module.exports = {
                         },
                     ],
                     {
-                        spy_call_1d: { iv: 0.21, mark: 5.1 },
-                        spy_put_1d: { iv: 0.25, mark: 4.8 },
+                        spy_call_1d: { iv: 0.21, bid: 5, ask: 5.2, mark: 5.1 },
+                        spy_put_1d: { iv: 0.25, bid: 4.7, ask: 4.9, mark: 4.8 },
                         spy_call_3w: { iv: 0.24, mark: 7.2 },
                         spy_put_3w: { iv: 0.28, mark: 6.9 },
                     }
@@ -41,12 +42,17 @@ module.exports = {
                 assert.equal(rows.length, 2);
                 assert.equal(rows[0].expiry, '20260424');
                 assert.equal(rows[0].dte, 1);
+                assert.equal(rows[0].timeYears, 0.001);
                 assert.equal(rows[0].atmStrike, 500);
                 assert.equal(rows[0].callIv, 0.21);
                 assert.equal(rows[0].putIv, 0.25);
                 assert.equal(rows[0].atmIv, 0.23);
                 assert.equal(rows[0].callMark, 5.1);
                 assert.equal(rows[0].putMark, 4.8);
+                assert.equal(rows[0].callBid, 5);
+                assert.equal(rows[0].callAsk, 5.2);
+                assert.equal(rows[0].putBid, 4.7);
+                assert.equal(rows[0].putAsk, 4.9);
                 assert.equal(rows[0].atmStraddleMark, 9.9);
                 assert.equal(rows[0].hasCompleteStraddle, true);
                 assert.equal(rows[0].subscriptionSelected, true);
@@ -84,6 +90,38 @@ module.exports = {
                 assert.equal(rows[0].hasCompletePair, false);
                 assert.equal(rows[0].atmStraddleMark, null);
                 assert.equal(rows[0].hasCompleteStraddle, false);
+            },
+        },
+        {
+            name: 'uses matching contract expiry timestamps for exact intraday straddle time',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const rows = ctx.OptionComboIvTermStructureCore.buildExpiryDetailRows(
+                    [{
+                        expiry: '20260717',
+                        dte: 0,
+                        timeYears: 0.123,
+                        atmStrike: 7530,
+                        atmCallSubId: 'call',
+                        atmPutSubId: 'put',
+                    }],
+                    {
+                        call: {
+                            iv: 0.687, mark: 2.8,
+                            quoteAsOf: '2026-07-17T19:59:00.000Z',
+                            expiryAsOf: '2026-07-17T20:00:00.000Z',
+                        },
+                        put: {
+                            iv: 0.687, mark: 2.9,
+                            quoteAsOf: '2026-07-17T19:58:59.000Z',
+                            expiryAsOf: '2026-07-17T20:00:00.000Z',
+                        },
+                    }
+                );
+                const oneMinuteYears = 1 / (365 * 24 * 60);
+                assert.ok(Math.abs(rows[0].timeYears - oneMinuteYears) < 1e-14);
+                assert.equal(rows[0].callExpiryAsOf, '2026-07-17T20:00:00.000Z');
+                assert.equal(rows[0].putExpiryAsOf, '2026-07-17T20:00:00.000Z');
             },
         },
         {
@@ -387,7 +425,7 @@ module.exports = {
             },
         },
         {
-            name: 'counts trading days on a weekday clock with an optional holiday hook',
+            name: 'counts trading days only inside official calendar coverage',
             run() {
                 const ctx = loadBrowserScripts([
                     'js/iv_term_structure_core.js',
@@ -406,6 +444,11 @@ module.exports = {
                 );
                 assert.equal(core.countTradingDays('2026-07-08', '20260710', 'NYSE'), 2);
                 assert.equal(core.countTradingDays('2026-07-08', '20260710', 'CME:ES'), 1);
+
+                // Even a supplied holiday callback cannot authorize dates for
+                // which the formal exchange snapshot has no coverage.
+                ctx.isOfficialExchangeCalendarAvailable = () => false;
+                assert.equal(core.countTradingDays('2026-07-08', '20260710', 'NYSE'), null);
             },
         },
         {
@@ -503,6 +546,65 @@ module.exports = {
                 );
                 assert.equal(calendarRows[0].callIvTd, 0.25);
                 assert.equal(calendarRows[0].putIvTd, 0.21);
+            },
+        },
+        {
+            name: 'feeds straddle-implied per-date lambda into TD IV and marks median extrapolation beyond coverage',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const vendorIv = 0.2;
+                const rows = [
+                    { expiry: '20260724', dte: 4, tradDte: 4, callIv: vendorIv, putIv: vendorIv },
+                    { expiry: '20260727', dte: 7, tradDte: 5, callIv: vendorIv, putIv: vendorIv },
+                    { expiry: '20260803', dte: 14, tradDte: 10, callIv: vendorIv, putIv: vendorIv },
+                ];
+                const implied = {
+                    varianceSource: 'straddle',
+                    medianLambda: 0.2,
+                    byDate: {
+                        '2026-07-25': 0.2,
+                        '2026-07-26': 0.2,
+                    },
+                    quality: {
+                        status: 'ok', coherent: true, quoteComplete: true,
+                    },
+                };
+
+                const corrected = core.applyImpliedLambdaClockToRows(
+                    rows, '2026-07-20', implied, 'NYSE'
+                );
+                const effYear = 252 + 0.2 * 113;
+                const fridayExpected = vendorIv * Math.sqrt((4 / 365) / (4 / effYear));
+                const mondayExpected = vendorIv * Math.sqrt((7 / 365) / (5.4 / effYear));
+
+                assert.equal(corrected[0].tdIvSource, 'implied_lambda');
+                assert.equal(corrected[0].tdIvStatus, 'ok');
+                assert.equal(Object.keys(corrected[0].tdIvAppliedWeights).length, 0);
+                assert.ok(Math.abs(corrected[0].callIvTd - fridayExpected) < 1e-6);
+
+                assert.equal(corrected[1].tdIvEffectiveDte, 5.4);
+                assert.equal(corrected[1].tdIvAppliedWeights['2026-07-25'], 0.2);
+                assert.equal(corrected[1].tdIvAppliedWeights['2026-07-26'], 0.2);
+                assert.ok(Math.abs(corrected[1].callIvTd - mondayExpected) < 1e-6);
+
+                const farExpected = vendorIv * Math.sqrt((14 / 365) / (10.8 / effYear));
+                assert.equal(corrected[2].tdIvStatus, 'ok_extrapolated');
+                assert.ok(Math.abs(corrected[2].callIvTd - farExpected) < 1e-6);
+                assert.ok(Math.abs(corrected[2].putIvTd - farExpected) < 1e-6);
+                assert.deepEqual(
+                    Array.from(corrected[2].tdIvExtrapolatedWeightDates),
+                    ['2026-08-01', '2026-08-02']
+                );
+                assert.equal(corrected[2].tdIvAppliedWeights['2026-08-01'], 0.2);
+                assert.equal(corrected[2].tdIvAppliedWeights['2026-08-02'], 0.2);
+
+                const bucket = core.buildBucketRows(corrected, [{ label: '1W', targetDays: 7 }])[0];
+                assert.equal(bucket.tdIvSource, 'implied_lambda');
+                assert.equal(bucket.tdIvEffectiveDte, 5.4);
+                assert.equal(bucket.tdIvAppliedWeights['2026-07-25'], 0.2);
             },
         },
         {
@@ -893,21 +995,23 @@ module.exports = {
                 ]);
                 const core = ctx.OptionComboIvTermStructureCore;
                 const rows = [
-                    { expiry: '20260713', dte: 0, tradDte: 0, atmIv: 0.1721, hasCompletePair: true },
-                    { expiry: '20260715', dte: 2, tradDte: 2, atmIv: 0.1375, hasCompletePair: true },
-                    { expiry: '20260717', dte: 4, tradDte: 4, atmIv: 0.1337, hasCompletePair: true },
-                    { expiry: '20260720', dte: 7, tradDte: 5, atmIv: 0.1150, hasCompletePair: true },
-                    { expiry: '20260724', dte: 11, tradDte: 9, atmIv: 0.1100, hasCompletePair: false },
+                    { expiry: '20260713', dte: 0, atmIv: 0.99, atmIvTd: null, hasCompletePair: true },
+                    { expiry: '20260715', dte: 2, atmIv: 0.01, atmIvTd: 0.1375, hasCompletePair: true },
+                    { expiry: '20260717', dte: 4, atmIv: 0.99, atmIvTd: 0.1337, hasCompletePair: true },
+                    { expiry: '20260720', dte: 7, atmIv: 0.01, atmIvTd: 0.1150, hasCompletePair: true },
+                    { expiry: '20260724', dte: 11, atmIv: 0.99, atmIvTd: 0.1100, hasCompletePair: false },
                 ];
 
                 const vs2d = core.annotateTdSlopeVsBaseline(rows, '20260715');
                 const byExpiry = (annotated, expiry) => annotated.find((r) => r.expiry === expiry);
-                // Baseline row itself carries no slope; 0 DTE cannot convert;
-                // incomplete pairs are excluded.
+                // Baseline row itself carries no slope; a missing displayed
+                // TD IV and incomplete pairs are excluded.
                 assert.equal(byExpiry(vs2d, '20260715').tdSlopeVsBaseline, null);
                 assert.equal(byExpiry(vs2d, '20260713').tdSlopeVsBaseline, null);
                 assert.equal(byExpiry(vs2d, '20260724').tdSlopeVsBaseline, null);
-                // 2d IV above 4d IV -> that pair reads backwardation (>1).
+                // The poisoned raw ATM IVs above are deliberately opposite.
+                // 2d displayed TD IV is still above 4d displayed TD IV, so the
+                // pair must read backwardation (>1) from atmIvTd.
                 const pair24 = byExpiry(vs2d, '20260717').tdSlopeVsBaseline;
                 assert.ok(pair24 > 1, `expected 2d/4d pair > 1, got ${pair24}`);
 
@@ -922,15 +1026,17 @@ module.exports = {
                 assert.equal(byExpiry(vs2d, '20260720').tdSlopePairRatio, 3.5);
                 assert.equal(byExpiry(vs2d, '20260715').tdSlopePairRatio, null);
 
-                // The ~7d/~11d pair must agree with the regime signal's slope.
-                const signal = core.computeRegimeSignal(rows.map((r) => ({
-                    ...r, hasCompletePair: r.expiry !== '20260724' ? r.hasCompletePair : true,
-                })));
+                // A later pair likewise uses the displayed TD values. The
+                // separate regime signal intentionally remains on frozen
+                // lambda=0.3 and is not required to match this display column.
                 const vs7d = core.annotateTdSlopeVsBaseline(rows.map((r) => ({
                     ...r, hasCompletePair: r.expiry !== '20260724' ? r.hasCompletePair : true,
                 })), '20260720');
-                assert.equal(signal.status, 'ok');
-                assert.equal(byExpiry(vs7d, '20260724').tdSlopeVsBaseline, signal.slope);
+                assert.equal(
+                    byExpiry(vs7d, '20260724').tdSlopeVsBaseline,
+                    Math.round((0.115 / 0.11) * 10000) / 10000
+                );
+                assert.equal(byExpiry(vs7d, '20260724').tdSlopeSource, 'display_atm_td_iv');
 
                 // No baseline -> annotation present but null everywhere.
                 const none = core.annotateTdSlopeVsBaseline(rows, '');
@@ -991,6 +1097,1068 @@ module.exports = {
                 assert.equal(bucketRows[0].callIvTd, detailRows[0].callIvTd);
                 assert.equal(bucketRows[0].putIvTd, detailRows[0].putIvTd);
                 assert.equal(bucketRows[0].atmIvTd, detailRows[0].atmIvTd);
+            },
+        },
+        {
+            name: 'computeImpliedWeekendLambdas recovers the priced weekend weight from the surface',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                // Legitimate Black-76 price surface: a flat 8e-5 per-trading-
+                // day variance with weekends priced at lambda 0.2, call/put
+                // mids generated by pricing_core's INDEPENDENT Black-76
+                // implementation at a strike 2.5 points off the future (the
+                // review's failing scenario for the old approximation).
+                // Anchor 2026-07-17 is a Friday.
+                const pctx = require('./helpers/load-browser-scripts').loadPricingContext();
+                const lambdaTrue = 0.2;
+                const dailyVar = 8e-5;
+                const future = 7530;
+                const strike = 7527.5;
+                const rate = 0.04;
+                const snapshotId = 'surface-close-1';
+                const snapshotMetadata = {
+                    snapshotId,
+                    underlyingSnapshotId: snapshotId,
+                    coherent: true,
+                    quoteComplete: true,
+                    quoteAsOf: '2026-07-17T20:00:10Z',
+                    underlyingQuoteAsOf: '2026-07-17T20:00:05Z',
+                };
+                const makeRow = (expiry, dte, tradDays) => {
+                    const totalVar = dailyVar * (tradDays + lambdaTrue * (dte - tradDays));
+                    const sigma = Math.sqrt(totalVar / (dte / 365));
+                    const callMark = pctx.calculateBlack76Price('call', future, strike, dte / 365, rate, sigma);
+                    const putMark = pctx.calculateBlack76Price('put', future, strike, dte / 365, rate, sigma);
+                    return {
+                        expiry,
+                        dte,
+                        atmStrike: strike,
+                        callMark,
+                        putMark,
+                        callBid: callMark * 0.995,
+                        callAsk: callMark * 1.005,
+                        putBid: putMark * 0.995,
+                        putAsk: putMark * 1.005,
+                        callMarkSource: 'bid_ask_mid',
+                        putMarkSource: 'bid_ask_mid',
+                        callQuoteAsOf: '2026-07-17T20:00:00Z',
+                        putQuoteAsOf: '2026-07-17T20:00:10Z',
+                        callSnapshotId: snapshotId,
+                        putSnapshotId: snapshotId,
+                        atmIv: 9.99, // poisoned vendor IV: must never be consulted
+                    };
+                };
+                const rows = [
+                    makeRow('20260720', 3, 1),
+                    makeRow('20260721', 4, 2),
+                    makeRow('20260722', 5, 3),
+                    makeRow('20260723', 6, 4),
+                    makeRow('20260724', 7, 5),
+                    makeRow('20260727', 10, 6),
+                    makeRow('20260728', 11, 7),
+                ];
+
+                const result = core.computeImpliedWeekendLambdas(rows, '2026-07-17', {
+                    underlyingPrice: future,
+                    pricingModel: 'black76',
+                    interestRate: rate,
+                    snapshotMetadata,
+                });
+                assert.equal(result.anchorDate, '2026-07-17');
+                assert.equal(result.varianceSource, 'straddle');
+                assert.equal(result.pricingModel, 'black76');
+                assert.equal(result.pureIntervalCount, 5);
+
+                const front = result.intervals.find((interval) => interval.isFront);
+                assert.ok(front);
+                assert.equal(front.status, 'unverified_front');
+                assert.equal(front.tradingDays, 1);
+                assert.equal(front.nonTradingDays, 2);
+                assert.deepEqual([...front.nonTradingDates], ['2026-07-18', '2026-07-19']);
+                assert.equal(front.lambda, null);
+                assert.ok(!('2026-07-18' in result.byDate));
+
+                const second = result.intervals.find((interval) => interval.endExpiry === '20260727');
+                assert.ok(second);
+                assert.equal(second.status, 'ok');
+                assert.equal(second.startExpiry, '20260724');
+                assert.equal(second.snapshotId, snapshotId);
+                assert.equal(second.quoteAsOf, '2026-07-17T20:00:10.000Z');
+                assert.deepEqual([...second.nonTradingDates], ['2026-07-25', '2026-07-26']);
+                assert.ok(Math.abs(second.lambda - lambdaTrue) < 1e-3);
+
+                assert.ok(Math.abs(result.medianLambda - lambdaTrue) < 1e-3);
+                assert.ok(Math.abs(result.byDate['2026-07-26'] - lambdaTrue) < 1e-3);
+
+                // Only an explicitly completed-session anchor may publish the
+                // synthetic front interval.
+                const verified = core.computeImpliedWeekendLambdas(rows, '2026-07-17', {
+                    underlyingPrice: future,
+                    pricingModel: 'black76',
+                    interestRate: rate,
+                    snapshotMetadata,
+                    frontIntervalVerified: true,
+                });
+                const verifiedFront = verified.intervals.find((interval) => interval.isFront);
+                assert.equal(verifiedFront.status, 'ok');
+                assert.ok(Math.abs(verifiedFront.lambda - lambdaTrue) < 1e-3);
+                assert.ok(Math.abs(verified.byDate['2026-07-18'] - lambdaTrue) < 1e-3);
+            },
+        },
+        {
+            name: 'solves exported lambda on exact expiry seconds when adjacent cutoffs differ',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/date_utils.js',
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const dateUtils = ctx.OptionComboDateUtils;
+                const pctx = require('./helpers/load-browser-scripts').loadPricingContext();
+                const lambdaTrue = 0.2;
+                const dailyVar = 8e-5;
+                const future = 7530;
+                const strike = 7530;
+                const rate = 0.04;
+                const quoteAsOf = '2026-07-17T20:00:00.000Z';
+                const snapshotId = 'fractional-expiry-clock';
+                const expiries = [
+                    ['20260720', 3, '2026-07-20T20:00:00.000Z'],
+                    ['20260721', 4, '2026-07-21T19:00:00.000Z'],
+                    ['20260722', 5, '2026-07-22T20:00:00.000Z'],
+                    ['20260723', 6, '2026-07-23T19:00:00.000Z'],
+                    ['20260724', 7, '2026-07-24T20:00:00.000Z'],
+                    ['20260727', 10, '2026-07-27T19:00:00.000Z'],
+                    ['20260728', 11, '2026-07-28T20:00:00.000Z'],
+                ];
+                const rows = expiries.map(([expiry, dte, expiryAsOf]) => {
+                    const clock = dateUtils.resolveWeightedTime(
+                        quoteAsOf,
+                        expiryAsOf,
+                        lambdaTrue,
+                        'NYSE',
+                        null,
+                        'America/New_York',
+                        null
+                    );
+                    assert.equal(clock.available, true);
+                    const timeYears = (Date.parse(expiryAsOf) - Date.parse(quoteAsOf))
+                        / (365 * 86400000);
+                    const totalVariance = dailyVar * clock.effectiveDays;
+                    const sigma = Math.sqrt(totalVariance / timeYears);
+                    const callMark = pctx.calculateBlack76Price(
+                        'call', future, strike, timeYears, rate, sigma
+                    );
+                    const putMark = pctx.calculateBlack76Price(
+                        'put', future, strike, timeYears, rate, sigma
+                    );
+                    return {
+                        expiry,
+                        dte,
+                        timeYears,
+                        atmStrike: strike,
+                        callMark,
+                        putMark,
+                        callBid: callMark * 0.995,
+                        callAsk: callMark * 1.005,
+                        putBid: putMark * 0.995,
+                        putAsk: putMark * 1.005,
+                        callMarkSource: 'bid_ask_mid',
+                        putMarkSource: 'bid_ask_mid',
+                        callQuoteAsOf: quoteAsOf,
+                        putQuoteAsOf: quoteAsOf,
+                        callExpiryAsOf: expiryAsOf,
+                        putExpiryAsOf: expiryAsOf,
+                        callSnapshotId: snapshotId,
+                        putSnapshotId: snapshotId,
+                    };
+                });
+                const options = {
+                    calendarKey: 'NYSE',
+                    timeZone: 'America/New_York',
+                    requireExactExpiryTimestamps: true,
+                    underlyingPrice: future,
+                    pricingModel: 'black76',
+                    interestRate: rate,
+                    snapshotMetadata: {
+                        snapshotId,
+                        underlyingSnapshotId: snapshotId,
+                        coherent: true,
+                        quoteComplete: true,
+                        quoteAsOf,
+                        underlyingQuoteAsOf: quoteAsOf,
+                    },
+                };
+                const result = core.computeImpliedWeekendLambdas(
+                    rows, '2026-07-17', options
+                );
+                const weekend = result.intervals.find(
+                    interval => interval.endExpiry === '20260727'
+                );
+                assert.ok(weekend);
+                assert.equal(weekend.status, 'ok');
+                assert.equal(weekend.exactTimestampClock, true);
+                assert.equal(weekend.startAsOf, '2026-07-24T20:00:00.000Z');
+                assert.equal(weekend.endAsOf, '2026-07-27T19:00:00.000Z');
+                assert.equal(weekend.calendarDays, 3);
+                assert.equal(weekend.tradingDays, 1);
+                assert.equal(weekend.nonTradingDays, 2);
+                assert.ok(Math.abs(weekend.varianceCalendarDays - 71 / 24) < 1e-12);
+                assert.ok(Math.abs(weekend.varianceTradingDays - 23 / 24) < 1e-12);
+                assert.ok(Math.abs(weekend.varianceNonTradingDays - 2) < 1e-12);
+                assert.ok(Math.abs(weekend.lambda - lambdaTrue) < 1e-3);
+                assert.equal(result.byDate['2026-07-26'], weekend.lambda);
+                assert.equal(
+                    result.methodology.intervalClock,
+                    'contract-expiry-fractional-seconds'
+                );
+
+                const missingExact = core.computeImpliedWeekendLambdas(
+                    rows.map(row => ({
+                        ...row,
+                        callExpiryAsOf: '',
+                        putExpiryAsOf: '',
+                    })),
+                    '2026-07-17',
+                    options
+                );
+                assert.equal(
+                    missingExact.quality.status,
+                    'exact_expiry_timestamp_unavailable'
+                );
+                assert.ok(missingExact.rowDiagnostics.every(
+                    row => row.status === 'exact_expiry_timestamp_unavailable'
+                ));
+                assert.deepEqual(Object.keys(missingExact.byDate), []);
+            },
+        },
+        {
+            name: 'keeps early-close dates trading while full holidays require lambda',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/date_utils.js',
+                    'js/iv_term_structure_core.js',
+                ]);
+                const strictNoDates = {
+                    default: 0.3,
+                    strictByDate: true,
+                    byDate: {},
+                };
+                const earlyClose = ctx.OptionComboDateUtils.resolveWeightedTime(
+                    '2026-11-27T17:00:00.000Z',
+                    '2026-11-27T18:15:00.000Z',
+                    strictNoDates,
+                    'NYSE',
+                    null,
+                    'America/New_York',
+                    null
+                );
+                assert.equal(earlyClose.available, true);
+                assert.deepEqual([...earlyClose.nonTradingDates], []);
+                assert.ok(Math.abs(earlyClose.tradingDays - 1.25 / 24) < 1e-12);
+
+                const laborDay = ctx.OptionComboDateUtils.resolveWeightedTime(
+                    '2026-09-07T14:00:00.000Z',
+                    '2026-09-07T15:00:00.000Z',
+                    strictNoDates,
+                    'NYSE',
+                    null,
+                    'America/New_York',
+                    null
+                );
+                assert.equal(laborDay.available, false);
+                assert.equal(laborDay.status, 'implied_lambda_incomplete');
+                assert.deepEqual([...laborDay.missingWeightDates], ['2026-09-07']);
+            },
+        },
+        {
+            name: 'uses a real 0DTE straddle to remove the remaining Friday session intraday',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const pctx = require('./helpers/load-browser-scripts').loadPricingContext();
+                const lambdaTrue = 0.2;
+                const dailyVar = 8e-5;
+                const future = 7530;
+                const strike = 7530;
+                const rate = 0.04;
+
+                const solveAt = (remainingFridayUnits, label) => {
+                    const snapshotId = `intraday-${label}`;
+                    const asOf = label === 'open'
+                        ? '2026-07-17T13:31:00Z'
+                        : '2026-07-17T18:00:00Z';
+                    let cumulative = remainingFridayUnits * dailyVar;
+                    const schedule = [
+                        ['20260717', 0, 0],
+                        ['20260720', 3, 1 + 2 * lambdaTrue],
+                        ['20260721', 4, 1],
+                        ['20260722', 5, 1],
+                        ['20260723', 6, 1],
+                        ['20260724', 7, 1],
+                        ['20260727', 10, 1 + 2 * lambdaTrue],
+                        ['20260728', 11, 1],
+                    ];
+                    const rows = schedule.map(([expiry, dte, addedUnits], index) => {
+                        if (index > 0) cumulative += addedUnits * dailyVar;
+                        const timeYears = dte === 0
+                            ? Math.max(remainingFridayUnits * 6.5, 1 / 60) / (365 * 24)
+                            : dte / 365;
+                        const sigma = Math.sqrt(cumulative / timeYears);
+                        const callMark = pctx.calculateBlack76Price(
+                            'call', future, strike, timeYears, rate, sigma
+                        );
+                        const putMark = pctx.calculateBlack76Price(
+                            'put', future, strike, timeYears, rate, sigma
+                        );
+                        return {
+                            expiry,
+                            dte,
+                            timeYears,
+                            atmStrike: strike,
+                            callMark,
+                            putMark,
+                            callBid: callMark * 0.995,
+                            callAsk: callMark * 1.005,
+                            putBid: putMark * 0.995,
+                            putAsk: putMark * 1.005,
+                            callMarkSource: 'bid_ask_mid',
+                            putMarkSource: 'bid_ask_mid',
+                            callQuoteAsOf: asOf,
+                            putQuoteAsOf: asOf,
+                            callSnapshotId: snapshotId,
+                            putSnapshotId: snapshotId,
+                        };
+                    });
+                    return core.computeImpliedWeekendLambdas(rows, '2026-07-17', {
+                        underlyingPrice: future,
+                        pricingModel: 'black76',
+                        interestRate: rate,
+                        snapshotMetadata: {
+                            snapshotId,
+                            underlyingSnapshotId: snapshotId,
+                            coherent: true,
+                            quoteComplete: true,
+                            quoteAsOf: asOf,
+                            underlyingQuoteAsOf: asOf,
+                        },
+                    });
+                };
+
+                for (const [remaining, label] of [[0.95, 'open'], [0.25, 'midday']]) {
+                    const result = solveAt(remaining, label);
+                    const immediateWeekend = result.intervals.find(
+                        (interval) => interval.endExpiry === '20260720'
+                    );
+                    assert.ok(immediateWeekend);
+                    assert.equal(immediateWeekend.isFront, false);
+                    assert.equal(immediateWeekend.status, 'ok');
+                    assert.ok(Math.abs(immediateWeekend.lambda - lambdaTrue) < 1e-3);
+                    assert.ok(Math.abs(result.byDate['2026-07-18'] - lambdaTrue) < 1e-3);
+                }
+            },
+        },
+        {
+            name: 'computeImpliedWeekendLambdas survives an event day in the baseline window',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                const lambdaTrue = 0.1;
+                const dailyVar = 8e-5;
+                const rowFromTotalVar = (expiry, dte, totalVar) => (
+                    { expiry, dte, atmIv: Math.sqrt(totalVar * 365 / dte) }
+                );
+                let cumVar = 0;
+                const rows = [];
+                const schedule = [
+                    ['20260720', 3, 1 + 2 * lambdaTrue],
+                    ['20260721', 4, 1],
+                    ['20260722', 5, 3],   // event day: triple variance (FOMC-style)
+                    ['20260723', 6, 1],
+                    ['20260724', 7, 1],
+                    ['20260727', 10, 1 + 2 * lambdaTrue],
+                    ['20260728', 11, 1],
+                ];
+                for (const [expiry, dte, dayUnits] of schedule) {
+                    cumVar += dailyVar * dayUnits;
+                    rows.push(rowFromTotalVar(expiry, dte, cumVar));
+                }
+
+                const result = core.computeImpliedWeekendLambdas(rows, '2026-07-17', { varianceSource: 'vendor_iv' });
+                assert.equal(result.varianceSource, 'vendor_iv');
+                const second = result.intervals.find((interval) => interval.endExpiry === '20260727');
+                assert.equal(second.status, 'ok');
+                // Median baseline ignores the single 3x event day.
+                assert.ok(Math.abs(second.lambda - lambdaTrue) < 1e-3);
+            },
+        },
+        {
+            name: 'computeImpliedWeekendLambdas flags unusable intervals instead of guessing',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                // Inverted front: the 20260727 expiry quotes BELOW the 20260724
+                // total variance, so the weekend interval has negative forward
+                // variance and must be flagged, not extrapolated.
+                const rows = [
+                    { expiry: '20260720', dte: 3, atmIv: 0.14 },
+                    { expiry: '20260721', dte: 4, atmIv: 0.14 },
+                    { expiry: '20260722', dte: 5, atmIv: 0.14 },
+                    { expiry: '20260723', dte: 6, atmIv: 0.14 },
+                    { expiry: '20260724', dte: 7, atmIv: 0.14 },
+                    { expiry: '20260727', dte: 10, atmIv: 0.11 },
+                ];
+                const result = core.computeImpliedWeekendLambdas(rows, '2026-07-17', { varianceSource: 'vendor_iv' });
+                const bad = result.intervals.find((interval) => interval.endExpiry === '20260727');
+                assert.equal(bad.status, 'nonpositive_forward_variance');
+                assert.equal(bad.lambda, null);
+                assert.ok(!('2026-07-25' in result.byDate));
+
+                // Weekly-only surface: every interval spans a weekend, so there
+                // is no pure trading-day baseline anywhere.
+                const weeklies = [
+                    { expiry: '20260724', dte: 7, atmIv: 0.14 },
+                    { expiry: '20260731', dte: 14, atmIv: 0.14 },
+                ];
+                const weeklyResult = core.computeImpliedWeekendLambdas(weeklies, '2026-07-17', { varianceSource: 'vendor_iv' });
+                assert.equal(weeklyResult.intervals[0].status, 'unverified_front');
+                assert.equal(weeklyResult.intervals[1].status, 'no_baseline');
+                assert.equal(weeklyResult.medianLambda, null);
+            },
+        },
+        {
+            name: 'preserves and publishes signed lambda outside the conventional clock range',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const dailyVar = 8e-5;
+                const makeRows = (weekendLambda) => {
+                    let totalVar = 0;
+                    return [
+                        ['20260720', 3, 1.4],
+                        ['20260721', 4, 1],
+                        ['20260722', 5, 1],
+                        ['20260723', 6, 1],
+                        ['20260724', 7, 1],
+                        ['20260727', 10, 1 + 2 * weekendLambda],
+                    ].map(([expiry, dte, units]) => {
+                        totalVar += dailyVar * units;
+                        return { expiry, dte, atmIv: Math.sqrt(totalVar * 365 / dte) };
+                    });
+                };
+
+                for (const signedLambda of [-0.2, 1.2]) {
+                    const result = core.computeImpliedWeekendLambdas(
+                        makeRows(signedLambda),
+                        '2026-07-17',
+                        { varianceSource: 'vendor_iv' }
+                    );
+                    const interval = result.intervals.find((row) => row.endExpiry === '20260727');
+                    assert.equal(interval.status, 'ok');
+                    assert.ok(Math.abs(interval.rawLambda - signedLambda) < 1e-6);
+                    assert.ok(Math.abs(interval.lambda - signedLambda) < 1e-4);
+                    assert.equal(interval.lambdaClamped, signedLambda < 0 ? 0 : 1);
+                    assert.equal(
+                        interval.conventionalRange,
+                        signedLambda < 0 ? 'inverted' : 'above_calendar'
+                    );
+                    assert.equal(interval.isInverted, signedLambda < 0);
+                    assert.ok(Math.abs(result.byDate['2026-07-25'] - signedLambda) < 1e-4);
+                    assert.ok(Math.abs(result.medianLambda - signedLambda) < 1e-4);
+                    assert.equal(result.quality.status, 'ok');
+                }
+            },
+        },
+        {
+            name: 'uses nearest pure-trading baselines for later weekly weekends',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const dailyVar = 8e-5;
+                let totalVar = 0;
+                const rows = [
+                    ['20260720', 3, 1],
+                    ['20260721', 4, 1],
+                    ['20260722', 5, 1],
+                    ['20260723', 6, 1],
+                    ['20260724', 7, 1],
+                    ['20260727', 10, 1.2],
+                    ['20260803', 17, 5.4],
+                    ['20260810', 24, 5.4],
+                ].map(([expiry, dte, varianceUnits]) => {
+                    totalVar += dailyVar * varianceUnits;
+                    return { expiry, dte, atmIv: Math.sqrt(totalVar * 365 / dte) };
+                });
+                const result = core.computeImpliedWeekendLambdas(
+                    rows, '2026-07-17', { varianceSource: 'vendor_iv' }
+                );
+                const later = result.intervals.find(
+                    interval => interval.endExpiry === '20260810'
+                );
+                assert.equal(later.status, 'ok');
+                assert.equal(later.baselineMode, 'nearest_extrapolated');
+                assert.ok(Number.isFinite(later.lambda));
+                assert.equal(result.byDate['2026-08-08'], later.lambda);
+                assert.equal(result.byDate['2026-08-09'], later.lambda);
+            },
+        },
+        {
+            name: 'computeImpliedWeekendLambdas treats holidays as non-trading days',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+
+                // 2026-09-07 is Labor Day: the 20260904 -> 20260908 interval
+                // holds Sat + Sun + holiday Monday (3 non-trading days).
+                const lambdaTrue = 0.15;
+                const dailyVar = 8e-5;
+                const makeRow = (expiry, dte, tradDays) => {
+                    const totalVar = dailyVar * (tradDays + lambdaTrue * (dte - tradDays));
+                    return { expiry, dte, atmIv: Math.sqrt(totalVar * 365 / dte) };
+                };
+                // Anchor 2026-09-03 (Thursday).
+                const rows = [
+                    makeRow('20260904', 1, 1),
+                    makeRow('20260908', 5, 2),
+                    makeRow('20260909', 6, 3),
+                    makeRow('20260910', 7, 4),
+                    makeRow('20260911', 8, 5),
+                ];
+                const result = core.computeImpliedWeekendLambdas(rows, '2026-09-03', { varianceSource: 'vendor_iv' });
+                const holidaySpan = result.intervals.find((interval) => interval.endExpiry === '20260908');
+                assert.ok(holidaySpan);
+                assert.equal(holidaySpan.status, 'ok');
+                assert.equal(holidaySpan.tradingDays, 1);
+                assert.equal(holidaySpan.nonTradingDays, 3);
+                assert.deepEqual(
+                    [...holidaySpan.nonTradingDates],
+                    ['2026-09-05', '2026-09-06', '2026-09-07']
+                );
+                assert.deepEqual(
+                    [...holidaySpan.weekendDates],
+                    ['2026-09-05', '2026-09-06']
+                );
+                assert.deepEqual([...holidaySpan.holidayDates], ['2026-09-07']);
+                assert.equal(holidaySpan.nonTradingDateKinds['2026-09-05'], 'weekend');
+                assert.equal(
+                    holidaySpan.nonTradingDateKinds['2026-09-07'],
+                    'exchange_holiday'
+                );
+                assert.ok(Math.abs(holidaySpan.lambda - lambdaTrue) < 1e-3);
+                assert.ok(Math.abs(result.byDate['2026-09-07'] - lambdaTrue) < 1e-3);
+            },
+        },
+        {
+            name: 'straddle inversion is exact for off-forward Black-76 and BSM surfaces',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const pctx = require('./helpers/load-browser-scripts').loadPricingContext();
+
+                // The straddle pricer must agree with pricing_core's separate
+                // BSM and Black-76 implementations (non-circular benchmark).
+                const bsmStraddle = pctx.calculateOptionPrice('call', 100, 100, 1, 0.05, 0.2)
+                    + pctx.calculateOptionPrice('put', 100, 100, 1, 0.05, 0.2);
+                assert.ok(Math.abs(
+                    core.priceStraddleFromTotalVol('bsm-spot', 100, 100, 1, 0.05, 0.2) - bsmStraddle
+                ) < 1e-9);
+                const b76Straddle = pctx.calculateBlack76Price('call', 7530, 7500, 0.05, 0.04, 0.14)
+                    + pctx.calculateBlack76Price('put', 7530, 7500, 0.05, 0.04, 0.14);
+                assert.ok(Math.abs(
+                    core.priceStraddleFromTotalVol('black76', 7530, 7500, 0.05, 0.04, 0.14 * Math.sqrt(0.05)) - b76Straddle
+                ) < 1e-9);
+
+                const lambdaTrue = 0.2;
+                const dailyVar = 8e-5;
+                const snapshotId = 'exact-surface-1';
+                const snapshotMetadata = {
+                    snapshotId,
+                    underlyingSnapshotId: snapshotId,
+                    coherent: true,
+                    quoteComplete: true,
+                    quoteAsOf: '2026-07-17T20:00:00Z',
+                    underlyingQuoteAsOf: '2026-07-17T20:00:00Z',
+                };
+                const buildRows = (price, strike, priceFn) => [
+                    ['20260720', 3, 1], ['20260721', 4, 2], ['20260722', 5, 3],
+                    ['20260723', 6, 4], ['20260724', 7, 5], ['20260727', 10, 6],
+                    ['20260728', 11, 7],
+                ].map(([expiry, dte, trad]) => {
+                    const totalVar = dailyVar * (trad + lambdaTrue * (dte - trad));
+                    const sigma = Math.sqrt(totalVar / (dte / 365));
+                    const callMark = priceFn('call', price, strike, dte / 365, 0.04, sigma);
+                    const putMark = priceFn('put', price, strike, dte / 365, 0.04, sigma);
+                    return {
+                        expiry,
+                        dte,
+                        atmStrike: strike,
+                        callMark,
+                        putMark,
+                        callBid: callMark * 0.995,
+                        callAsk: callMark * 1.005,
+                        putBid: putMark * 0.995,
+                        putAsk: putMark * 1.005,
+                        callMarkSource: 'bid_ask_mid',
+                        putMarkSource: 'bid_ask_mid',
+                        callQuoteAsOf: '2026-07-17T20:00:00Z',
+                        putQuoteAsOf: '2026-07-17T20:00:00Z',
+                        callSnapshotId: snapshotId,
+                        putSnapshotId: snapshotId,
+                        atmIv: 9.99,
+                    };
+                });
+
+                // Black-76, strike a full 5 points off the future: the old
+                // approximation read lambda ~0.13 here; exact inversion holds.
+                const b76 = core.computeImpliedWeekendLambdas(
+                    buildRows(7530, 7525, pctx.calculateBlack76Price),
+                    '2026-07-17',
+                    {
+                        underlyingPrice: 7530,
+                        pricingModel: 'black76',
+                        interestRate: 0.04,
+                        snapshotMetadata,
+                        frontIntervalVerified: true,
+                    }
+                );
+                const b76Front = b76.intervals.find((interval) => interval.isFront);
+                assert.ok(Math.abs(b76Front.lambda - lambdaTrue) < 1e-3);
+
+                // BSM equity ETF surface, strike below spot, nonzero rate.
+                const bsm = core.computeImpliedWeekendLambdas(
+                    buildRows(660, 659, pctx.calculateOptionPrice),
+                    '2026-07-17',
+                    {
+                        underlyingPrice: 660,
+                        pricingModel: 'bsm-spot',
+                        interestRate: 0.04,
+                        snapshotMetadata,
+                        frontIntervalVerified: true,
+                    }
+                );
+                const bsmFront = bsm.intervals.find((interval) => interval.isFront);
+                assert.ok(Math.abs(bsmFront.lambda - lambdaTrue) < 1e-3);
+            },
+        },
+        {
+            name: 'uses the shared discount curve per expiry without assuming q=0 for spot products',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_curves.js',
+                    'js/iv_term_structure_core.js',
+                ]);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const curves = ctx.OptionComboMarketCurves;
+                const pctx = require('./helpers/load-browser-scripts').loadPricingContext();
+                const discountCurve = curves.createDiscountCurve({
+                    id: 'test-per-expiry-discount',
+                    asOf: '2026-07-17',
+                    maxExtrapolationDays: 31,
+                    source: 'test_zero_curve',
+                    quoteAsOf: '2026-07-17T20:00:00Z',
+                    quality: { status: 'good' },
+                    points: [
+                        { tenorDays: 3, zeroRate: 0.10 },
+                        { tenorDays: 7, zeroRate: 0.35 },
+                        { tenorDays: 11, zeroRate: 0.60 },
+                    ],
+                });
+                const lambdaTrue = 0.2;
+                const dailyVar = 8e-5;
+                const spot = 660;
+                const strike = 658;
+                const carryRate = -1.0;
+                const snapshotId = 'spot-dividend-surface';
+                const asOf = '2026-07-17T20:00:00Z';
+                const schedule = [
+                    ['20260720', 3, 1], ['20260721', 4, 2], ['20260722', 5, 3],
+                    ['20260723', 6, 4], ['20260724', 7, 5], ['20260727', 10, 6],
+                    ['20260728', 11, 7],
+                ];
+                const rows = schedule.map(([expiry, dte, trad]) => {
+                    const timeYears = dte / 365;
+                    const discount = curves.resolveDiscount(discountCurve, { tenorDays: dte });
+                    const forward = spot * Math.exp(carryRate * timeYears);
+                    const totalVar = dailyVar * (trad + lambdaTrue * (dte - trad));
+                    const sigma = Math.sqrt(totalVar / timeYears);
+                    const callMark = pctx.calculateBlack76Price(
+                        'call', forward, strike, timeYears, discount.zeroRate, sigma
+                    );
+                    const putMark = pctx.calculateBlack76Price(
+                        'put', forward, strike, timeYears, discount.zeroRate, sigma
+                    );
+                    return {
+                        expiry,
+                        dte,
+                        timeYears,
+                        atmStrike: strike,
+                        callBid: callMark * 0.995,
+                        callAsk: callMark * 1.005,
+                        putBid: putMark * 0.995,
+                        putAsk: putMark * 1.005,
+                        callMarkSource: 'bid_ask_mid',
+                        putMarkSource: 'bid_ask_mid',
+                        callQuoteAsOf: asOf,
+                        putQuoteAsOf: asOf,
+                        callSnapshotId: snapshotId,
+                        putSnapshotId: snapshotId,
+                    };
+                });
+                const result = core.computeImpliedWeekendLambdas(rows, '2026-07-17', {
+                    underlyingPrice: spot,
+                    pricingModel: 'bsm-spot',
+                    interestRate: 0.04,
+                    discountCurve,
+                    snapshotMetadata: {
+                        snapshotId,
+                        underlyingSnapshotId: snapshotId,
+                        coherent: true,
+                        quoteComplete: true,
+                        quoteAsOf: asOf,
+                        underlyingQuoteAsOf: asOf,
+                    },
+                    frontIntervalVerified: true,
+                });
+
+                const dteSeven = result.rowDiagnostics.find((row) => row.expiry === '20260724');
+                assert.equal(dteSeven.status, 'ok');
+                assert.ok(Math.abs(dteSeven.discountRate - 0.35) < 1e-10);
+                assert.equal(dteSeven.discountSource, 'test_zero_curve');
+                assert.equal(dteSeven.discountFallbackUsed, false);
+                assert.equal(dteSeven.referenceForward, null);
+                assert.equal(dteSeven.referenceForwardSource, null);
+                const weekend = result.intervals.find((row) => row.endExpiry === '20260727');
+                assert.equal(weekend.status, 'ok');
+                assert.ok(Math.abs(weekend.lambda - lambdaTrue) < 1e-3);
+                assert.equal(result.discounting.curveRowCount, rows.length);
+                assert.equal(result.discounting.fallbackRowCount, 0);
+                assert.equal(result.methodology.discounting.source, 'test_zero_curve');
+
+                // Cash indexes use discounted-forward pricing too, but their
+                // subscribed IND quote is spot rather than a futures forward.
+                // Explicit product semantics must therefore suppress the same
+                // invalid spot-vs-parity rejection on the Black-76 route.
+                const indexResult = core.computeImpliedWeekendLambdas(rows, '2026-07-17', {
+                    underlyingPrice: spot,
+                    pricingModel: 'black76',
+                    underlyingQuoteIsForward: false,
+                    interestRate: 0.04,
+                    discountCurve,
+                    snapshotMetadata: {
+                        snapshotId,
+                        underlyingSnapshotId: snapshotId,
+                        coherent: true,
+                        quoteComplete: true,
+                        quoteAsOf: asOf,
+                        underlyingQuoteAsOf: asOf,
+                    },
+                    frontIntervalVerified: true,
+                });
+                const indexDiagnostic = indexResult.rowDiagnostics.find(
+                    (row) => row.expiry === '20260724'
+                );
+                assert.equal(indexDiagnostic.status, 'ok');
+                assert.equal(indexDiagnostic.referenceForward, null);
+                assert.equal(indexResult.methodology.underlyingQuoteIsForward, false);
+
+                const staleCurve = curves.createDiscountCurve({
+                    id: 'stale-test-discount',
+                    asOf: '2026-07-01',
+                    source: 'stale_test_zero_curve',
+                    quoteAsOf: '2026-07-01T20:00:00Z',
+                    quality: { status: 'good' },
+                    points: [
+                        { tenorDays: 3, zeroRate: 0.10 },
+                        { tenorDays: 7, zeroRate: 0.35 },
+                        { tenorDays: 11, zeroRate: 0.60 },
+                    ],
+                });
+                const staleResult = core.computeImpliedWeekendLambdas(rows, '2026-07-17', {
+                    underlyingPrice: spot,
+                    pricingModel: 'bsm-spot',
+                    interestRate: 0.04,
+                    discountCurve: staleCurve,
+                    snapshotMetadata: {
+                        snapshotId,
+                        underlyingSnapshotId: snapshotId,
+                        coherent: true,
+                        quoteComplete: true,
+                        quoteAsOf: asOf,
+                        underlyingQuoteAsOf: asOf,
+                    },
+                });
+                assert.equal(staleResult.discounting.curveConfigured, true);
+                assert.equal(staleResult.discounting.curveUsable, false);
+                assert.equal(staleResult.discounting.curveFallbackReason, 'curve_stale');
+                assert.equal(staleResult.discounting.curveAgeDays, 16);
+                assert.equal(staleResult.discounting.fallbackRowCount, rows.length);
+                assert.equal(staleResult.rowDiagnostics[0].discountFallbackReason, 'curve_stale');
+                assert.equal(staleResult.rowDiagnostics[0].discountRate, 0.04);
+
+                const futureCurve = curves.createDiscountCurve({
+                    id: 'future-test-discount',
+                    asOf: '2026-07-18',
+                    source: 'future_test_zero_curve',
+                    quoteAsOf: '2026-07-18T20:00:00Z',
+                    quality: { status: 'good' },
+                    points: [{ tenorDays: 7, zeroRate: 0.05 }],
+                });
+                const futureResult = core.computeImpliedWeekendLambdas(rows, '2026-07-17', {
+                    underlyingPrice: spot,
+                    pricingModel: 'bsm-spot',
+                    interestRate: 0.04,
+                    discountCurve: futureCurve,
+                    snapshotMetadata: {
+                        snapshotId,
+                        underlyingSnapshotId: snapshotId,
+                        coherent: true,
+                        quoteComplete: true,
+                        quoteAsOf: asOf,
+                        underlyingQuoteAsOf: asOf,
+                    },
+                });
+                assert.equal(futureResult.discounting.curveUsable, false);
+                assert.equal(futureResult.discounting.curveFallbackReason, 'curve_from_future');
+                assert.equal(futureResult.discounting.curveAgeDays, -1);
+            },
+        },
+        {
+            name: 'uses per-expiry parity forwards and rejects disagreement with the underlying',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const pctx = require('./helpers/load-browser-scripts').loadPricingContext();
+                const lambdaTrue = 0.2;
+                const dailyVar = 8e-5;
+                const referenceFuture = 7530;
+                const strike = 7530;
+                const rate = 0.04;
+                const snapshotId = 'parity-forward-surface';
+                const asOf = '2026-07-17T20:00:00Z';
+                const schedule = [
+                    ['20260720', 3, 1], ['20260721', 4, 2], ['20260722', 5, 3],
+                    ['20260723', 6, 4], ['20260724', 7, 5], ['20260727', 10, 6],
+                    ['20260728', 11, 7],
+                ];
+                const buildRows = (badIndex = -1) => schedule.map(([expiry, dte, trad], index) => {
+                    const parityForward = index === badIndex ? 7600 : referenceFuture + index * 2;
+                    const totalVar = dailyVar * (trad + lambdaTrue * (dte - trad));
+                    const sigma = Math.sqrt(totalVar / (dte / 365));
+                    const callMark = pctx.calculateBlack76Price(
+                        'call', parityForward, strike, dte / 365, rate, sigma
+                    );
+                    const putMark = pctx.calculateBlack76Price(
+                        'put', parityForward, strike, dte / 365, rate, sigma
+                    );
+                    return {
+                        expiry,
+                        dte,
+                        atmStrike: strike,
+                        callMark,
+                        putMark,
+                        callBid: callMark * 0.995,
+                        callAsk: callMark * 1.005,
+                        putBid: putMark * 0.995,
+                        putAsk: putMark * 1.005,
+                        callMarkSource: 'bid_ask_mid',
+                        putMarkSource: 'bid_ask_mid',
+                        callQuoteAsOf: asOf,
+                        putQuoteAsOf: asOf,
+                        callSnapshotId: snapshotId,
+                        putSnapshotId: snapshotId,
+                    };
+                });
+                const opts = {
+                    underlyingPrice: referenceFuture,
+                    pricingModel: 'black76',
+                    interestRate: rate,
+                    snapshotMetadata: {
+                        snapshotId,
+                        underlyingSnapshotId: snapshotId,
+                        coherent: true,
+                        quoteComplete: true,
+                        quoteAsOf: asOf,
+                        underlyingQuoteAsOf: asOf,
+                    },
+                };
+                const result = core.computeImpliedWeekendLambdas(buildRows(), '2026-07-17', opts);
+                const weekend = result.intervals.find((row) => row.endExpiry === '20260727');
+                assert.equal(weekend.status, 'ok');
+                assert.ok(Math.abs(weekend.lambda - lambdaTrue) < 1e-3);
+                const diagnostic = result.rowDiagnostics.find((row) => row.expiry === '20260724');
+                assert.ok(Math.abs(diagnostic.parityForward - 7538) < 1e-6);
+
+                const mismatch = core.computeImpliedWeekendLambdas(buildRows(2), '2026-07-17', opts);
+                assert.equal(
+                    mismatch.rowDiagnostics.find((row) => row.expiry === '20260722').status,
+                    'forward_mismatch'
+                );
+            },
+        },
+        {
+            name: 'straddle route enforces mid-market marks, coherent snapshots, and complete inputs',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const pctx = require('./helpers/load-browser-scripts').loadPricingContext();
+                const lambdaTrue = 0.2;
+                const dailyVar = 8e-5;
+                const future = 7530;
+                const snapshotId = 'coherent-surface-1';
+                const snapshotMetadata = {
+                    snapshotId,
+                    underlyingSnapshotId: snapshotId,
+                    coherent: true,
+                    quoteComplete: true,
+                    quoteAsOf: '2026-07-17T20:00:00Z',
+                    underlyingQuoteAsOf: '2026-07-17T20:00:00Z',
+                };
+                const makeRow = (expiry, dte, trad, overrides = {}) => {
+                    const totalVar = dailyVar * (trad + lambdaTrue * (dte - trad));
+                    const sigma = Math.sqrt(totalVar / (dte / 365));
+                    const callMark = pctx.calculateBlack76Price('call', future, 7527.5, dte / 365, 0.04, sigma);
+                    const putMark = pctx.calculateBlack76Price('put', future, 7527.5, dte / 365, 0.04, sigma);
+                    return {
+                        expiry,
+                        dte,
+                        atmStrike: 7527.5,
+                        callMark,
+                        putMark,
+                        callBid: callMark * 0.995,
+                        callAsk: callMark * 1.005,
+                        putBid: putMark * 0.995,
+                        putAsk: putMark * 1.005,
+                        callMarkSource: 'bid_ask_mid',
+                        putMarkSource: 'bid_ask_mid',
+                        callQuoteAsOf: '2026-07-17T20:00:00Z',
+                        putQuoteAsOf: '2026-07-17T20:00:00Z',
+                        callSnapshotId: snapshotId,
+                        putSnapshotId: snapshotId,
+                        ...overrides,
+                    };
+                };
+                const baseRows = () => [
+                    makeRow('20260720', 3, 1),
+                    makeRow('20260721', 4, 2),
+                    makeRow('20260722', 5, 3),
+                    makeRow('20260723', 6, 4),
+                    makeRow('20260724', 7, 5),
+                    makeRow('20260727', 10, 6),
+                    makeRow('20260728', 11, 7),
+                ];
+                const opts = {
+                    underlyingPrice: future,
+                    pricingModel: 'black76',
+                    interestRate: 0.04,
+                    snapshotMetadata,
+                    frontIntervalVerified: true,
+                };
+
+                // TWS model-price fallback must be rejected: poison the front
+                // row and the front interval shifts to the next expiry.
+                const modelRows = baseRows();
+                modelRows[0].putMarkSource = 'model';
+                const modelResult = core.computeImpliedWeekendLambdas(modelRows, '2026-07-17', opts);
+                const modelFront = modelResult.intervals.find((interval) => interval.isFront);
+                assert.equal(modelFront.endExpiry, '20260721');
+                // Missing markSource (older backend) is equally ineligible.
+                const unsourcedRows = baseRows().map((row) => ({
+                    ...row, callMarkSource: '', putMarkSource: '',
+                }));
+                assert.equal(
+                    core.computeImpliedWeekendLambdas(unsourcedRows, '2026-07-17', opts).intervals.length,
+                    0
+                );
+
+                // Call and put quoted minutes apart is not one snapshot.
+                const skewRows = baseRows();
+                skewRows[0].putQuoteAsOf = '2026-07-17T20:06:00Z';
+                const skewResult = core.computeImpliedWeekendLambdas(skewRows, '2026-07-17', opts);
+                assert.equal(
+                    skewResult.intervals.find((interval) => interval.isFront).endExpiry,
+                    '20260721'
+                );
+
+                // An expiry quoted 10 minutes after its neighbors poisons the
+                // intervals that straddle it: the weekend one is flagged.
+                const staleRows = baseRows().map((row) => (
+                    row.expiry === '20260727'
+                        ? { ...row, callQuoteAsOf: '2026-07-17T20:10:00Z', putQuoteAsOf: '2026-07-17T20:10:00Z' }
+                        : row
+                ));
+                const staleResult = core.computeImpliedWeekendLambdas(staleRows, '2026-07-17', opts);
+                assert.equal(
+                    staleResult.rowDiagnostics.find((row) => row.expiry === '20260727').status,
+                    'underlying_stale_mix'
+                );
+                assert.equal(staleResult.quality.status, 'underlying_stale_mix');
+                assert.equal(staleResult.quality.coherent, false);
+                assert.ok(!('2026-07-25' in staleResult.byDate));
+                // Uniformly-timed off-hours snapshots stay fully usable.
+                const okResult = core.computeImpliedWeekendLambdas(baseRows(), '2026-07-17', opts);
+                assert.equal(okResult.intervals.find((interval) => interval.endExpiry === '20260727').status, 'ok');
+
+                // Structural requirements: strike and underlying price.
+                const noStrikeRows = baseRows().map((row) => ({ ...row, atmStrike: null }));
+                assert.equal(
+                    core.computeImpliedWeekendLambdas(noStrikeRows, '2026-07-17', opts).intervals.length,
+                    0
+                );
+                assert.equal(
+                    core.computeImpliedWeekendLambdas(baseRows(), '2026-07-17', { pricingModel: 'black76' }).intervals.length,
+                    0
+                );
+
+                // Coherence is server evidence, not a timestamp heuristic.
+                const noMetadata = core.computeImpliedWeekendLambdas(baseRows(), '2026-07-17', {
+                    underlyingPrice: future,
+                    pricingModel: 'black76',
+                    interestRate: 0.04,
+                });
+                assert.equal(noMetadata.quality.status, 'missing_snapshot_metadata');
+                assert.equal(noMetadata.intervals.length, 0);
+
+                const mixedRows = baseRows();
+                mixedRows[2].putSnapshotId = 'another-snapshot';
+                const mixed = core.computeImpliedWeekendLambdas(mixedRows, '2026-07-17', opts);
+                assert.equal(
+                    mixed.rowDiagnostics.find((row) => row.expiry === '20260722').status,
+                    'mixed_snapshot'
+                );
+                assert.equal(mixed.quality.status, 'mixed_snapshot');
+                assert.equal(Object.keys(mixed.byDate).length, 0);
+
+                const wideRows = baseRows();
+                wideRows[1].callBid = wideRows[1].callMark * 0.5;
+                wideRows[1].callAsk = wideRows[1].callMark * 1.5;
+                const wide = core.computeImpliedWeekendLambdas(wideRows, '2026-07-17', opts);
+                assert.equal(
+                    wide.rowDiagnostics.find((row) => row.expiry === '20260721').status,
+                    'wide_market'
+                );
+
+                const crossedRows = baseRows();
+                crossedRows[1].putBid = crossedRows[1].putMark * 1.01;
+                crossedRows[1].putAsk = crossedRows[1].putMark * 0.99;
+                const crossed = core.computeImpliedWeekendLambdas(crossedRows, '2026-07-17', opts);
+                assert.equal(
+                    crossed.rowDiagnostics.find((row) => row.expiry === '20260721').status,
+                    'crossed_market'
+                );
+
+                const badUnderlyingSnapshot = core.computeImpliedWeekendLambdas(
+                    baseRows(),
+                    '2026-07-17',
+                    {
+                        ...opts,
+                        snapshotMetadata: { ...snapshotMetadata, underlyingSnapshotId: 'old-underlying' },
+                    }
+                );
+                assert.equal(badUnderlyingSnapshot.quality.status, 'underlying_snapshot_mismatch');
             },
         },
     ],

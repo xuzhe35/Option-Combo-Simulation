@@ -105,6 +105,11 @@
         return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
     }
 
+    function _toNonNegativeFiniteNumber(value) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    }
+
     function _resolveObservedQuoteForLeg(leg) {
         const liveQuotes = globalScope.OptionComboWsLiveQuotes;
         if (!liveQuotes || !leg) {
@@ -127,9 +132,9 @@
         if (!request || !quote) {
             return request;
         }
-        const bid = _toPositiveFiniteNumber(quote.bid);
-        const ask = _toPositiveFiniteNumber(quote.ask);
-        const mark = _toPositiveFiniteNumber(quote.mark);
+        const bid = _toNonNegativeFiniteNumber(quote.bid);
+        const ask = _toNonNegativeFiniteNumber(quote.ask);
+        const mark = _toNonNegativeFiniteNumber(quote.mark);
         if (bid !== null) request.observedBid = bid;
         if (ask !== null) request.observedAsk = ask;
         if (mark !== null) request.observedMark = mark;

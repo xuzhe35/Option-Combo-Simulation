@@ -1,6 +1,6 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-07-12
+**Updated:** 2026-07-19
 
 ## 1. Current Product State
 
@@ -41,6 +41,61 @@ Current surfaces:
 - configurable browser WS endpoint in `index.html`
 - Delta Hedge dialog beside Enable Greeks, persistent global operating status, broker preview, manual execution, cancel / clear, and guarded automation
 - shared fail-closed Order Intent, position-impact, confirmation, and one-time backend authorization for Open Combo and Delta Hedge
+
+### Forward / Carry / Discount infrastructure
+
+- `js/market_curves.js` owns typed `discount`, `forward`, and `carry` curves.
+  Do not bypass the runtime kind checks: Black-76 discount `r` and carry
+  `r-q` are deliberately not interchangeable.
+- `js/pricing_context.js` resolves per-leg discount `r(T)` and the appropriate
+  pricing input: INDEX uses expiry carry/forward samples, FOP uses its bound
+  Futures Pool quote, and stock/ETF remains spot BSM.
+- INDEX samples use coherent call/put/spot evidence and
+  `F=K+(C-P)/D(T)`. The stored row carries `F`, `r`, `D`, `r-q`, source,
+  snapshot time, skew, and quality. Its tenor is the fractional interval from
+  `max(call, put, spot quoteAsOf)` to the matching ContractDetails
+  `expiryAsOf`; invalid evidence clears the prior sample even with the panel
+  collapsed. A live sample more than two minutes behind the current payload
+  timestamp is not priced.
+- INDEX option legs fail closed when no usable parity sample exists; only an
+  explicit index underlying leg may use spot directly. FOP legs likewise fail
+  closed when their explicit Futures Pool binding has no current-generation,
+  qualified, identity-matching quote within the 120-second market clock gate.
+  New subscriptions and rejected/stale quotes clear the old pool mark. Do not
+  restore either spot/anchor substitution.
+- `OptionComboWsLiveQuotes.getForwardCarrySnapshot()` is the diagnostic/read
+  API. FOP points retain entry id, family/currency, contract identity, exact
+  expiry when IB supplies it, `quoteAsOf`, source, and quality. ES/MES use SPX
+  and NQ/MNQ use NDX only as optional diagnostics. Reference qualification or
+  subscription failure must not block FOP streams. `carryRate` stays null when
+  expiry is only YYYYMM or future/reference age/skew exceeds 120 seconds; the
+  outright exchange futures curve remains valid. CL/HG/GC/SI have no cash-index
+  reference and never infer their curve from discount `r`.
+- `yield_curve/` owns the complete current-data path: official NY Fed SOFR and
+  Treasury CMT adapters, hybrid `D(T)` construction, atomic dated JSON storage,
+  strict as-of repository reads, CLI, and the thin backend adapter.
+- Through 30 days the curve uses latest overnight SOFR flat; 30-to-first-CMT
+  uses a smooth instantaneous-forward transition; later nodes preserve the CMT
+  proxy slope. SOFR Averages are diagnostics only and CMT remains explicitly
+  non-zero/OIS proxy input.
+- Both backends are read-only curve consumers. Missing/stale live data may
+  start `sys.executable -m yield_curve update --if-needed` once; there is no
+  rate provider or hourly refresh loop inside either server.
+- User-facing daily maintenance is double-clickable via
+  `update_yield_curve.bat` on Windows and `update_yield_curve_mac.command` on
+  macOS. Both resolve the project-configured Python, force one daily update,
+  then run `status` and leave interactive output visible. The Windows wrapper
+  delegates to `powershell_scripts/update_yield_curve.ps1`; `-IfNeeded` opts
+  into the backend-style skip guard and `-StatusOnly` performs no network
+  request. The macOS `.command` is a native zsh double-click entry point.
+- Main/Chart Lab request the curve on socket open and every six hours. IVTS uses
+  the same control-socket payload. Network failure retains the prior complete
+  curve; a future-dated or more-than-ten-calendar-day-old live curve is rejected,
+  and the visible manual continuous `r` remains the final fallback.
+- Historical replay rejects any curve dated after the replay effective date.
+  A legacy rates.db Treasury curve is adapted only when no dated JSON exists;
+  its scalar compatibility rate comes from that same curve. Never relax this
+  strict as-of rule: it is the rate-path look-ahead guard.
 
 ### Group surface
 
@@ -102,9 +157,141 @@ Current surfaces:
 
 - ETF plus FOP cards configured in `iv_term_structure/iv_term_structure_config.json`
 - ATM call/put aggregation, calendar finder, bucket history, and per-symbol option-stream limits
+- the primary expiry table shows lambda-independent cumulative `Total Var`
+  (`W×10,000`) beside annualized adjacent-expiry `Fwd Var`
+  (`(W₂−W₁)/(T₂−T₁)×10,000`), using exact quote-to-expiry horizons when
+  available and otherwise calendar DTE/365. Every `W` point is numerically
+  inverted from the real two-sided ATM Call+Put BBO midpoint straddle after
+  parity supplies the expiry forward; the display never falls back to vendor
+  IV, TD IV, or fitted lambda. Missing usable BBO therefore renders `--`.
+  Cumulative drops and negative forward intervals are red hard-inversion
+  candidates, not automatic arbitrage claims
+- the explicit `Estimate Missing Var` table control is the only exception to
+  that strict display rule. It fills a strict `--` from the same Call/Put marks
+  that produced the visible ATM Straddle, preserves their `model` / `last_close`
+  / asynchronous-BBO provenance, and marks both recovered cumulative and
+  dependent forward values with `≈` plus an estimated style. Strict BBO values
+  retain priority. Forward variance uses the immediate previous expiry only;
+  it must not bridge a missing row. This UI-only mode never feeds the implied-λ
+  calculation or simulator handoff
 - equity/index SecDef discovery prefers the exact-symbol standard trading
   class and excludes adjusted roots such as `2SPY` from the expiry calendar
-- one global `TD IV λ` control (default `0.30`) that re-annualizes every card without resubscribing
+- one global `TD IV fallback λ` control (default `0.30`) that re-annualizes every card until a manual straddle calculation succeeds; the frozen price-derived per-date implied-λ curve then feeds back into TD IV, directly covered closures use their own weights, later closures visibly extrapolate the curve median for the display only, and `TD Slope` is the shorter-over-longer ratio of the displayed ATM TD IV. The simulator's synchronized V2 curve remains strict by date and never receives display extrapolations
+- implied λ is a separate price-derived series, not that display scalar:
+  backend protocol `20260719.5` emits complete coherent underlying/call/put
+  snapshots when TWS provides all receipt evidence. `js/iv_term_structure.js`
+  prefers that strict snapshot, but `Calculate λ` can atomically stamp the
+  currently usable two-sided BBO subset, skip bad expiries, and publish an
+  audited `best_effort` curve when callback evidence is incomplete. If TWS has
+  not supplied two usable BBO expiry pairs, the button remains enabled when at
+  least two visible expiries have finite ATM Call/Put IV; it then publishes an
+  explicitly audited `vendor_iv` / `vendor_atm_iv_fallback` estimate. This
+  final tier is intentionally syncable/exportable but must never be labeled a
+  strict price-derived snapshot. The
+  best-effort route reconstructs omitted expiry cutoffs from product metadata,
+  prefers strict intervals when they cover equally many dates, and replaces a
+  partial strict result when the audited estimate recovers more closures. Raw
+  signed λ is preserved: negative inversion and values above one are quality
+  labels, not rejection conditions. Weekly intervals beyond the daily-expiry
+  region may use a marked nearest-pure-interval baseline extrapolation. The
+  structured result stays frozen, and is persisted only when `Sync to
+  Simulators` is pressed through `js/implied_lambda_handoff.js`
+- never move V2 calculation or synchronization into markup/render helpers.
+  Card-body redraw may be intentionally suppressed while a select/input is
+  focused; market-data delivery must only flag newer source quotes and must not
+  trigger estimator work
+- "price-derived" is not "assumption-free": the strict/BBO routes use European
+  Black-76/BSM inversion, call-put parity/discounting, and a local pure-
+  trading-day forward-variance baseline. The separate last-resort vendor-IV
+  tier exists for incomplete TWS books and carries explicit provenance through
+  handoff and simulator coverage checks
+- each expiry resolves its own shared-curve `r(T)` / `D(T)` and records curve
+  source/as-of/proxy/fallback diagnostics. FUT quotes may independently check
+  the parity forward; ETF/index spot is never treated as an outright forward,
+  and `S*exp(rT)` is not assumed when dividends/carry are unknown
+- default stream limit is 20 (10 expiry pairs). The strict route retains its
+  timestamp/spread/coherence checks. Best-effort mode tolerates missing callback
+  evidence and spread/skew gates, but still skips crossed books and wrong-month
+  futures bindings; it publishes when the retained surface yields at least one
+  official-calendar interval with a finite signed estimate.
+- the main simulator accepts only validated V2 `straddle` data matching symbol,
+  futures month, and `liveQuoteDate`. Implied mode is strict-by-date: an
+  uncovered required weekend/holiday stops projection and never uses either
+  the visible scalar λ or the sample median. Portable imports preserve the real
+  quote timestamp for audit but remain usable without a wall-clock timeout.
+- implied-λ interval dates are revalidated against the product's official
+  exchange calendar at publication/import time. Full exchange holidays share
+  the interval λ with weekends; exports retain `weekendDates`, `holidayDates`,
+  `nonTradingDateKinds`, calendar provenance, and a symbol/month/quote-time
+  curve id. Unknown, stale, or out-of-coverage calendars fail closed.
+- live valuation keeps entry/base date, exchange-derived `liveQuoteDate`, and
+  scenario target date separate. A future target equal to the near expiry is
+  close/settlement; on the actual live expiry date the leg instead retains
+  fractional 0DTE time until its exact IB ContractDetails last-trade cutoff.
+  Contract timing is cached by conId and stripped from saved sessions because
+  it is transient market metadata. In the live app, missing contract timing
+  blocks target-expiry legs, all surviving FOP/INDEX legs, and all surviving
+  legs inside seven days; it does not silently fall back to a profile clock.
+  The websocket sends qualified identity/timing through a dedicated
+  `option_contract_metadata` payload immediately after subscription attach;
+  this remains true when the ticker is reused from the IVTS pool and emits no
+  subsequent price tick. The browser treats this payload as metadata only, so
+  it cannot refresh BBO/feed timestamps or replace price/IV. Only complete
+  exact timing is cached; partial ContractDetails results retry, and concurrent
+  lookups for one conId use a shared in-flight request.
+- live What-If is `strict-bbo` by default across valuation, main/global charts,
+  Chart Lab, probability and amortized paths. Every option still live at the
+  common target needs a fresh valid two-sided midpoint and successful local IV
+  inversion; target-expired intrinsic legs and historical replay are exempt.
+  Option/Forward/live-clock skew is capped at 30 seconds. Structured-λ clock
+  errors take priority over generic BBO failures and list missing closure dates.
+  `legacy-input-iv` is the only persisted compatibility opt-out.
+- structured λ coverage itself has no live closure-crossing opt-out: scalar,
+  Calendar/Trading basis, an unchecked IVTS control, and even the legacy IV
+  compatibility path are blocked when `coverage.required && !coverage.ready`.
+- signed per-date IVTS λ remains untouched in session/handoff and option
+  clocks. `js/prob_charts.js` coalesces negative closure residuals into the
+  nearest positive trading segments only at the Monte Carlo boundary, keeping
+  the signed aggregate horizon unchanged while ensuring every Worker variance
+  block is nonnegative. Do not replace this with per-date clipping; a
+  nonpositive aggregate horizon is the actual fail-closed condition.
+  Only the explicit `not_required` audit state proceeds without V2 dates.
+- production implied-λ export requires exact ContractDetails `expiryAsOf` for
+  each contributing expiry. The equation uses fractional trading/non-trading
+  interval evidence on the same exchange timezone/17:00 futures rollover clock
+  as pricing; integer DTE remains only compatibility metadata.
+- Chart Lab's independent socket supplies daily bars and the visual price line
+  only. Projection code copies the main app state and never splices the
+  auxiliary price into main-socket BBO/Forward/discount timestamps.
+- qualified option identity accompanies every live quote. The browser checks
+  expiry/right/strike/tradingClass plus conId/localSymbol; FOP additionally
+  requires verified underConId and the requested underlying futures month. A
+  mismatch invalidates old price/timing evidence rather than retaining it.
+- Combo Template Straddles create the exact expiration and strike entered by the
+  user. There is no IBKR preflight or automatic strike rewrite; normal live
+  subscription qualification reports missing contracts for manual correction.
+- standard SPX and traditional quarterly AM ES/NQ/MES/MNQ cannot be represented
+  as intrinsic at their last-trade screen underlier because SET/SOQ is a later
+  special fixing. Those targets fail as
+  `deferred_settlement_fixing_unsupported`; weekly/EOM/PM classes are unchanged.
+- at current date + exact current underlier + zero IV offset, the simulator and
+  both chart grids include and use the selected observable live mark. A fresh
+  valid two-sided midpoint additionally seeds a per-leg local BSM/Black-76 IV
+  inversion using quote-horizon Forward/r and the exact weighted clock; future
+  points hold that local IV. Model/last/Portfolio/manual sources never seed the
+  inversion, and an invalid attempted BBO anchor fails closed.
+- calculating a new V2 still requires a coherent quote snapshot whose oldest
+  leg BBO is within 120 seconds. Once calculated or explicitly imported, the
+  curve is frozen without a wall-clock expiry; its original `quoteAsOf` remains
+  audit evidence. Product/month and live anchor-date identity checks still
+  apply, and a user-selected file may intentionally replace an automatically
+  synchronized curve for that same identity.
+- when changing `implied_lambda_handoff.js`, `iv_term_structure.js`, `app.js`, or
+  the Time Basis control UI, update the matching HTML query-version on every
+  page that loads the file and hard refresh already-open tabs. A backend restart
+  alone does not replace frontend code already running in the browser
+- after changing this protocol, restart `ib_server.py`; an old backend will
+  keep the λ status unavailable rather than falling back to incremental quotes
 - per-symbol `Load/Resume Auto JSON` selects an existing writable auto-sample
   file as the explicit append target; `New Auto JSON` creates one, and a
   separate stop/resume control pauses or resumes the bound target
@@ -151,12 +338,14 @@ Windows wrappers:
 
 - `start_option_combo.bat`
 - `start_historical_replay.bat`
+- `update_yield_curve.bat`
 - `install_ib_bridge_deps.bat`
 
 Underlying PowerShell scripts:
 
 - `powershell_scripts/start_option_combo.ps1`
 - `powershell_scripts/start_historical_replay.ps1`
+- `powershell_scripts/update_yield_curve.ps1`
 - `powershell_scripts/start_option_combo_codex.ps1`
 - `powershell_scripts/launch_ib_server_codex.ps1`
 - `powershell_scripts/restart_option_combo_codex.ps1`
@@ -170,6 +359,7 @@ POSIX / macOS:
 - `start_option_combo.sh`
 - `start_option_combo_mac.command`
 - `start_historical_replay_mac.command`
+- `update_yield_curve_mac.command`
 - `install_ib_bridge_deps_mac.command`
 - `cleanup_logs_mac.command`
 
@@ -330,6 +520,7 @@ Current server responsibilities:
 
 - IB connection lifecycle
 - pooled live quote subscriptions, including generic-tick upgrades for Greeks
+- price-independent option contract metadata handoff for pooled subscribers
 - managed-account snapshot fan-out
 - portfolio average-cost snapshot fan-out
 - authoritative `ib.positions()` quantity snapshot fan-out for Leg Exists and Close checks; do not use `updatePortfolioEvent` as the complete position universe
@@ -431,15 +622,32 @@ Important nuance:
 - live tracking-consumer coverage now lives in `tests/ib_server_order_tracking_test.py`
 - shared combo/hedge tracking helper coverage now lives in `tests/order_tracking_test.py`
 - hedge execution engine / adapter coverage lives in `tests/trade_execution_engine_test.py` and `tests/ibkr_hedge_adapter_test.py`
+- `node scripts/validate_calendar_projection.js` is the read-only real-data EOD
+  calendar convergence harness. It loads the production JS pricing runtime,
+  refuses incomplete structured lambda dates, and keeps its ETF/EOD limitation
+  explicit; it is not a substitute for an intraday ES/FOP recorder.
 
 ## 9. Suggested Read Orders
 
 ### Product / pricing changes
 
 - `js/product_registry.js`
+- `js/market_curves.js`
+- `js/index_forward_rate.js`
 - `js/pricing_context.js`
 - `js/pricing_core.js`
 - `js/valuation.js`
+
+### Yield curve / rates changes
+
+- `yield_curve/README.md`
+- `yield_curve/builder.py`
+- `yield_curve/sources/`
+- `yield_curve/repository.py`
+- `yield_curve/backend_adapter.py`
+- `ib_server.py` and `historical_server.py` (read-only integration only)
+- `js/market_curves.js`
+- `js/ws_client.js`
 
 ### Historical replay changes
 

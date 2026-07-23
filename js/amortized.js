@@ -15,6 +15,9 @@
         computeSimulatedPrice,
         resolveInstrumentProfile,
         isUnderlyingLeg,
+        assessProjectionConvergence,
+        formatProjectionConvergenceFailure,
+        formatProjectionTimingFailure,
     } = pricingCore;
 
     function buildUnsupportedResult(profile, reason) {
@@ -57,11 +60,53 @@
         const quoteDate = pricingContext && typeof pricingContext.resolveQuoteDate === 'function'
             ? pricingContext.resolveQuoteDate(globalState)
             : globalState.baseDate;
+        const simulationTiming = pricingContext
+            && typeof pricingContext.resolveSimulationTiming === 'function'
+            ? pricingContext.resolveSimulationTiming(globalState)
+            : (globalState && globalState.simulationTiming || null);
+        if (simulationTiming && simulationTiming.available === false) {
+            return buildUnsupportedResult(
+                profile,
+                `Amortized projection timing unavailable (${simulationTiming.status}).`
+            );
+        }
+        const timingForLeg = (leg) => {
+            const observable = pricingContext
+                && typeof pricingContext.resolveObservableLegPrice === 'function'
+                ? pricingContext.resolveObservableLegPrice(globalState, group, leg)
+                : null;
+            const quotePricingInputs = pricingContext
+                && typeof pricingContext.resolveLegQuotePricingInputs === 'function'
+                ? pricingContext.resolveLegQuotePricingInputs(globalState, leg, {
+                    underlyingPrice: globalState.underlyingPrice,
+                    interestRate: globalState.interestRate,
+                })
+                : null;
+            return {
+                quoteAsOf: globalState.liveQuoteAsOf,
+                allowLegacyQuoteCutoff: !globalState.marketDataMode,
+                targetAsOf: simulationTiming && simulationTiming.available
+                    ? simulationTiming.targetAsOf
+                    : null,
+                targetSource: simulationTiming && simulationTiming.source || null,
+                timingStatus: simulationTiming && simulationTiming.status || null,
+                observablePrice: observable && observable.available ? observable.price : null,
+                observablePriceSource: observable && observable.source || null,
+                observablePriceAsOf: observable && observable.quoteAsOf || null,
+                observablePriceFresh: observable && observable.fresh === true,
+                quotePricingInputsAvailable: quotePricingInputs && quotePricingInputs.available === true,
+                quotePricingInputStatus: quotePricingInputs && quotePricingInputs.status || null,
+                quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
+                quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
+                quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+            };
+        };
 
         group.legs.forEach(leg => {
             const legInterestRate = pricingContext && typeof pricingContext.resolveLegInterestRate === 'function'
                 ? pricingContext.resolveLegInterestRate(globalState, leg, globalState.interestRate)
                 : globalState.interestRate;
+            const legTiming = timingForLeg(leg);
             const pLeg = processLegData(
                 leg,
                 simulationDate,
@@ -71,7 +116,8 @@
                 legInterestRate,
                 group.viewMode || 'active',
                 profile,
-                globalState.marketDataMode
+                globalState.marketDataMode,
+                legTiming
             );
             initialCashOutflow += pLeg.costBasis;
             if (isUnderlyingLeg(leg)) {
@@ -85,8 +131,8 @@
             return sum + (Number.isFinite(realized) ? realized : 0);
         }, 0);
 
-        group.legs.forEach(leg => {
-            if (isUnderlyingLeg(leg)) return;
+        for (const leg of group.legs) {
+            if (isUnderlyingLeg(leg)) continue;
 
             const pos = leg.pos;
             const activeViewMode = leg._viewMode || group.viewMode || 'active';
@@ -98,27 +144,76 @@
                     globalState.underlyingPrice
                 )
                 : evalUnderlyingPrice;
+            // processLegData stamps the leg's live anchor, which computeSimulatedPrice
+            // compares the evaluated price against to decide whether the observable mark
+            // reproduces exactly. Feeding it the scenario price makes that comparison
+            // trivially true, so every settlement scenario returns the live mark and the
+            // amortized cash figure stops moving. chart.js keeps the same split.
+            const legAnchorUnderlyingPrice = pricingContext
+                && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
+                ? pricingContext.resolveLegCurrentUnderlyingPrice(
+                    globalState,
+                    leg,
+                    globalState.underlyingPrice
+                )
+                : globalState.underlyingPrice;
             const legInterestRate = pricingContext && typeof pricingContext.resolveLegInterestRate === 'function'
                 ? pricingContext.resolveLegInterestRate(globalState, leg, globalState.interestRate)
                 : globalState.interestRate;
 
+            const legTiming = timingForLeg(leg);
             const pLeg = processLegData(
                 leg,
                 simulationDate,
                 globalState.ivOffset,
                 quoteDate,
-                legUnderlyingPrice,
+                legAnchorUnderlyingPrice,
                 legInterestRate,
                 activeViewMode,
                 profile,
-                globalState.marketDataMode
+                globalState.marketDataMode,
+                legTiming
             );
             const contractMultiplier = pLeg.contractMultiplier || 100;
             const settlementUnitsPerContract = pLeg.settlementUnitsPerContract || 100;
 
             if (leg.closePrice !== null && leg.closePrice !== '') {
                 currentCash += parseFloat(leg.closePrice) * pos * contractMultiplier;
-                return;
+                continue;
+            }
+
+            if (pLeg.timingStatus === 'implied_lambda_incomplete') {
+                return buildUnsupportedResult(
+                    profile,
+                    typeof formatProjectionTimingFailure === 'function'
+                        ? formatProjectionTimingFailure(
+                            pLeg.timingStatus,
+                            'Amortized projection',
+                            pLeg
+                        )
+                        : 'Amortized projection unavailable: required weekend/holiday implied λ data is missing.'
+                );
+            }
+            const convergence = typeof assessProjectionConvergence === 'function'
+                ? assessProjectionConvergence(globalState, [leg], [pLeg])
+                : { ready: true };
+            if (convergence.ready === false) {
+                return buildUnsupportedResult(
+                    profile,
+                    typeof formatProjectionConvergenceFailure === 'function'
+                        ? formatProjectionConvergenceFailure(
+                            convergence,
+                            'Amortized projection'
+                        )
+                        : 'Amortized projection unavailable: strict live BBO convergence inputs are missing.'
+                );
+            }
+
+            if (!Number.isFinite(legUnderlyingPrice) || legUnderlyingPrice <= 0) {
+                return buildUnsupportedResult(
+                    profile,
+                    'Amortized projection unavailable because the pricing underlying quote is missing.'
+                );
             }
 
             const simPricePerShare = computeSimulatedPrice(
@@ -129,8 +224,15 @@
                 activeViewMode,
                 simulationDate,
                 quoteDate,
-                globalState.ivOffset
+                globalState.ivOffset,
+                legTiming
             );
+            if (!Number.isFinite(simPricePerShare)) {
+                return buildUnsupportedResult(
+                    profile,
+                    'Amortized projection unavailable because a pricing input is missing.'
+                );
+            }
 
             if (!pLeg.isExpired) {
                 const value = simPricePerShare * pos * contractMultiplier;
@@ -146,7 +248,7 @@
                 currentCash += flow;
                 assignmentCash += flow;
             }
-        });
+        }
 
         let basis = 0;
         if (netShares !== 0) {
@@ -191,7 +293,7 @@
         let assignmentCash = 0;
         let initialCost = 0;
 
-        groups.forEach(group => {
+        for (const group of groups) {
             const liveAnchorUnderlyingPrice = pricingContext
                 ? pricingContext.resolveAnchorUnderlyingPrice(globalState, globalState.underlyingPrice)
                 : globalState.underlyingPrice;
@@ -199,12 +301,13 @@
                 ? group.settleUnderlyingPrice
                 : liveAnchorUnderlyingPrice;
             const result = calculateAmortizedCost(group, evalUnderlyingPrice, globalState);
+            if (!result.isSupported) return result;
             netShares += result.netShares;
             totalCash += result.totalCash;
             residualValue += result.residualValue;
             assignmentCash += result.assignmentCash;
             initialCost += result.initialCost;
-        });
+        }
 
         let basis = 0;
         if (netShares > 0) {

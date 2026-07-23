@@ -9,7 +9,7 @@
 (function (globalScope) {
     'use strict';
 
-    const STORAGE_KEY = 'optionComboCalendarHandoffV1';
+    const STORAGE_KEY = 'optionComboCalendarHandoffV2';
     const MAX_AGE_MS = 10 * 60 * 1000;
 
     function _coercePositiveNumber(value) {
@@ -20,6 +20,21 @@
     function _normalizeExpiryKey(value) {
         const normalized = String(value || '').trim().replace(/-/g, '');
         return /^\d{8}$/.test(normalized) ? normalized : '';
+    }
+
+    function _normalizeContractMonth(value) {
+        const normalized = String(value || '').replace(/\D/g, '').slice(0, 6);
+        return /^\d{6}$/.test(normalized) ? normalized : '';
+    }
+
+    function _requiresFuturesBinding(symbol) {
+        const registry = globalScope.OptionComboProductRegistry;
+        if (!registry || typeof registry.resolveUnderlyingProfile !== 'function') return false;
+        const profile = registry.resolveUnderlyingProfile(symbol);
+        return !!(profile && (
+            profile.requiresPerLegForwardBinding === true
+            || String(profile.optionSecType || '').trim().toUpperCase() === 'FOP'
+        ));
     }
 
     function expiryKeyToDate(expiryKey) {
@@ -46,15 +61,41 @@
         const longExpiry = _normalizeExpiryKey(row.longExpiry);
         const shortStrike = _coercePositiveNumber(row.shortAtmStrike);
         const longStrike = _coercePositiveNumber(row.longAtmStrike);
+        const underlyingContractMonth = _normalizeContractMonth(data.underlyingContractMonth);
         if (!symbol || !shortExpiry || !longExpiry || shortStrike == null || longStrike == null) {
+            return null;
+        }
+        if (_requiresFuturesBinding(symbol) && !underlyingContractMonth) {
+            return null;
+        }
+        const underlyingQuote = data.underlyingQuote && typeof data.underlyingQuote === 'object'
+            ? data.underlyingQuote
+            : {};
+        const quoteContractMonth = _normalizeContractMonth(underlyingQuote.contractMonth);
+        if (underlyingContractMonth && quoteContractMonth
+            && underlyingContractMonth !== quoteContractMonth) {
             return null;
         }
 
         return {
-            version: 1,
+            version: 2,
             createdAt: Date.now(),
             symbol,
             underlyingPrice: _coercePositiveNumber(data.underlyingPrice),
+            underlyingContractMonth: underlyingContractMonth || null,
+            underlyingFuture: underlyingContractMonth ? {
+                contractMonth: underlyingContractMonth,
+                conId: Number.isFinite(parseInt(underlyingQuote.conId, 10))
+                    ? parseInt(underlyingQuote.conId, 10)
+                    : null,
+                localSymbol: String(underlyingQuote.localSymbol || '').trim(),
+                exchange: String(underlyingQuote.exchange || '').trim(),
+                currency: String(underlyingQuote.currency || 'USD').trim().toUpperCase(),
+                multiplier: String(underlyingQuote.multiplier || '').trim(),
+                quoteAsOf: String(underlyingQuote.quoteAsOf || '').trim(),
+                mark: _coercePositiveNumber(underlyingQuote.mark)
+                    || _coercePositiveNumber(data.underlyingPrice),
+            } : null,
             shortExpiry,
             longExpiry,
             shortStrike,
@@ -72,7 +113,7 @@
 
     function normalizeHandoffPayload(raw, nowMs) {
         const data = raw && typeof raw === 'object' ? raw : null;
-        if (!data || data.version !== 1) {
+        if (!data || ![1, 2].includes(data.version)) {
             return null;
         }
         const createdAt = parseInt(data.createdAt, 10);
@@ -83,6 +124,8 @@
         return buildHandoffPayload({
             symbol: data.symbol,
             underlyingPrice: data.underlyingPrice,
+            underlyingContractMonth: data.underlyingContractMonth,
+            underlyingQuote: data.underlyingFuture,
             row: {
                 shortExpiry: data.shortExpiry,
                 longExpiry: data.longExpiry,
@@ -141,7 +184,7 @@
         return `${payload.symbol} Calendar ${payload.shortExpiry}/${payload.longExpiry}`;
     }
 
-    function buildCalendarLegs(payload, generateId) {
+    function buildCalendarLegs(payload, generateId, underlyingFutureId = '') {
         const makeLeg = (type, pos, strike, expiryKey, iv, mark) => ({
             id: generateId(),
             type,
@@ -158,7 +201,7 @@
             portfolioUnrealizedPnl: null,
             cost: mark != null ? mark : 0.00,
             closePrice: null,
-            underlyingFutureId: '',
+            underlyingFutureId: String(underlyingFutureId || ''),
         });
 
         return [

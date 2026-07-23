@@ -8,7 +8,7 @@
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260711-delta-hedge-dialog">
+    <link rel="stylesheet" href="style.css?v=20260722-best-effort-payoff-v1">
 </head>
 
 <body data-option-combo-page="portfolio">
@@ -98,24 +98,69 @@
                         </div>
                     </div>
 
-                    <div class="panel-card control-panel-card" id="primaryControlPanelCard">
-                        <div class="control-panel-section-header">
-                            <div>
-                                <h2 class="control-panel-section-title">Simulation Controls</h2>
-                                <div class="control-panel-section-subtitle text-muted small">
-                                    Collapse this block to bring Portfolio Valuation into view faster.
-                                </div>
-                            </div>
-                            <button id="togglePrimaryControlPanelBtn" class="btn btn-secondary btn-sm control-panel-section-toggle" type="button" aria-expanded="true" title="Collapse Simulation Controls">
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                                    class="control-panel-section-chevron" aria-hidden="true">
-                                    <polyline points="6 9 12 15 18 9"></polyline>
-                                </svg>
-                                <span class="control-panel-toggle-label">Collapse</span>
-                            </button>
+                    <div class="panel-card simulation-controls-launcher" id="primaryControlPanelCard">
+                        <div class="simulation-controls-launcher-icon" aria-hidden="true">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="4" y1="21" x2="4" y2="14"></line>
+                                <line x1="4" y1="10" x2="4" y2="3"></line>
+                                <line x1="12" y1="21" x2="12" y2="12"></line>
+                                <line x1="12" y1="8" x2="12" y2="3"></line>
+                                <line x1="20" y1="21" x2="20" y2="16"></line>
+                                <line x1="20" y1="12" x2="20" y2="3"></line>
+                                <line x1="1" y1="14" x2="7" y2="14"></line>
+                                <line x1="9" y1="8" x2="15" y2="8"></line>
+                                <line x1="17" y1="16" x2="23" y2="16"></line>
+                            </svg>
                         </div>
-                        <div id="primaryControlPanelBody" class="control-panel-collapsible-body">
+                        <div class="simulation-controls-launcher-copy">
+                            <h2>Simulation Controls</h2>
+                            <p>Market, timeline, and pricing inputs in one workspace.</p>
+                        </div>
+                        <button id="togglePrimaryControlPanelBtn" class="btn btn-primary simulation-controls-open-btn"
+                            type="button" aria-expanded="false" aria-haspopup="dialog"
+                            aria-controls="simulationControlsDialog" title="Open Simulation Controls">
+                            <span class="control-panel-toggle-label">Open Controls</span>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <polyline points="9 18 15 12 9 6"></polyline>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div id="simulationControlsDialog" class="simulation-controls-dialog" role="dialog"
+                        aria-modal="true" aria-labelledby="simulationControlsDialogTitle"
+                        aria-describedby="simulationControlsDialogDescription" hidden>
+                        <section class="simulation-controls-dialog-panel" tabindex="-1">
+                            <header class="simulation-controls-dialog-header">
+                                <div>
+                                    <div class="simulation-controls-dialog-eyebrow">Workspace settings</div>
+                                    <h2 id="simulationControlsDialogTitle">Simulation Controls</h2>
+                                    <p id="simulationControlsDialogDescription">
+                                        Configure market context, projection timing, and valuation assumptions.
+                                        Changes apply immediately.
+                                    </p>
+                                </div>
+                                <button type="button" class="icon-btn simulationControlsDialogCloseBtn simulation-controls-close-btn"
+                                    aria-label="Close Simulation Controls" title="Close Simulation Controls">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                                    </svg>
+                                </button>
+                            </header>
+                            <div id="primaryControlPanelBody" class="simulation-controls-dialog-body">
+                                <div class="simulation-controls-grid">
+                                    <section class="simulation-control-section">
+                                        <div class="simulation-control-section-heading">
+                                            <span class="simulation-control-section-index">01</span>
+                                            <div>
+                                                <h3>Market &amp; Underlying</h3>
+                                                <p>Choose the data source and define the instrument being simulated.</p>
+                                            </div>
+                                        </div>
+                                        <div class="simulation-control-section-grid">
                         <div class="control-group">
                             <label for="marketDataMode">
                                 Data Environment
@@ -183,6 +228,19 @@
                             </div>
                         </div>
 
+                                        </div>
+                                    </section>
+
+                                    <section class="simulation-control-section">
+                                        <div class="simulation-control-section-heading">
+                                            <span class="simulation-control-section-index">02</span>
+                                            <div>
+                                                <h3>Timeline</h3>
+                                                <p>Move the replay and valuation clocks without losing market context.</p>
+                                            </div>
+                                        </div>
+                                        <div class="simulation-control-section-grid">
+
                         <div class="control-group" id="historicalReplayDateGroup" hidden>
                             <label for="historicalReplayDate" id="historicalReplayDateLabel">
                                 Replay Date
@@ -223,24 +281,48 @@
                             </div>
                         </div>
 
-                        <div class="control-group">
+                                        </div>
+                                    </section>
+
+                                    <section class="simulation-control-section simulation-control-section-wide">
+                                        <div class="simulation-control-section-heading">
+                                            <span class="simulation-control-section-index">03</span>
+                                            <div>
+                                                <h3>Valuation Assumptions</h3>
+                                                <p>Fine-tune rates, volatility, time decay, and product-specific curve inputs.</p>
+                                            </div>
+                                        </div>
+                                        <div class="simulation-control-section-grid simulation-control-pricing-grid">
+
+                        <div class="control-group simulation-assumption-control" id="discountRateControlGroup">
                             <label for="interestRate">
-                                Interest Rate (%)
+                                <span id="interestRateLabelText">Discount Rate Fallback r (%)</span>
                                 <span class="value-display" id="interestRateDisplay">3.0%</span>
                             </label>
                             <input type="number" id="interestRate" class="number-input" value="3.0" step="0.1">
+                            <label class="text-muted small" style="display: flex; align-items: center; gap: 0.4rem; margin-top: 0.4rem;">
+                                <input type="checkbox" id="useMarketDiscountCurve" checked>
+                                Automatically load and use latest yield curve
+                            </label>
+                            <button type="button" class="btn btn-secondary btn-sm" id="loadLatestDiscountCurveBtn"
+                                style="width: 100%; margin-top: 0.5rem;">
+                                Reload Latest Yield Curve
+                            </button>
+                            <div class="text-muted small mt-1" id="discountCurveStatus">
+                                Waiting for the shared yield-curve snapshot; the value above is the offline fallback.
+                            </div>
                         </div>
 
-                        <div class="control-group" id="forwardRatePanel" hidden>
+                        <div class="control-group simulation-control-item-wide simulation-product-panel" id="forwardRatePanel" hidden>
                             <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem;">
-                                <label style="margin: 0;">Forward Carry (r-q approx)</label>
+                                <label style="margin: 0;">Forward / Carry (F, r-q)</label>
                                 <div style="display: flex; align-items: center; gap: 0.5rem;">
                                     <button type="button" class="btn btn-secondary btn-sm" id="addForwardRateSampleBtn">Add Sample</button>
                                     <button type="button" class="btn btn-secondary btn-sm" id="toggleForwardRatePanelBtn" title="Collapse Forward Carry samples">Hide</button>
                                 </div>
                             </div>
                             <div class="text-muted small" id="forwardRateStatus" style="margin-bottom: 0.5rem;">
-                                Add one or more reference samples to derive market-implied daily carry.
+                                Add expiry-matched call/put samples to derive a discount-aware Forward and market-implied carry.
                             </div>
                             <div class="text-muted small" id="forwardRateSamplesHeader" style="display: grid; grid-template-columns: 72px minmax(0, 1fr) minmax(0, 1fr); gap: 0.5rem; margin-bottom: 0.35rem; font-size: 0.72rem;">
                                 <span>Days</span>
@@ -252,7 +334,7 @@
                             <div id="forwardRateSamplesList"></div>
                         </div>
 
-                        <div class="control-group" id="futuresPoolPanel" hidden>
+                        <div class="control-group simulation-control-item-wide simulation-product-panel" id="futuresPoolPanel" hidden>
                             <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem;">
                                 <label style="margin: 0;">Futures Pool</label>
                                 <div style="display: flex; align-items: center; gap: 0.5rem;">
@@ -271,7 +353,7 @@
                             <div id="futuresPoolList"></div>
                         </div>
 
-                        <div class="control-group">
+                        <div class="control-group simulation-assumption-control">
                             <label for="ivOffset">
                                 IV Adjustment (%)
                                 <span class="value-display" id="ivOffsetDisplay">+0.0%</span>
@@ -280,7 +362,7 @@
                             <input type="range" id="ivOffsetSlider" min="-100" max="100" value="0" step="1">
                         </div>
 
-                        <div class="control-group">
+                        <div class="control-group simulation-assumption-control">
                             <label for="simTimeBasis" title="How simulated time decays across weekends and holidays. Calendar = TWS convention (weekends decay in full). Trading days = weekends carry no variance. Weighted = each weekend day counts as λ of a trading day. Switching never changes today's prices, only the decay path.">
                                 Time Basis (Weekend θ)
                                 <span class="value-display" id="simTimeBasisDisplay">λ=0.30</span>
@@ -290,10 +372,25 @@
                                 <option value="trading">Trading days (λ=0)</option>
                                 <option value="weighted" selected>Weighted weekends (λ)</option>
                             </select>
-                            <input type="number" id="simWeekendWeight" class="number-input" value="0.30" step="0.05" min="0" max="1" style="display: none;" title="Weekend/holiday variance weight λ: 0 = trading-day clock, 1 = calendar clock.">
+                            <input type="number" id="simWeekendWeight" class="number-input" value="0.30" step="0.05" min="0" max="1" style="display: none;" title="Diagnostic scalar weekend/holiday variance weight λ: 0 = trading-day clock, 1 = calendar clock. It cannot replace required IVTS per-date coverage in live projections.">
+                            <div id="simImpliedLambdaReceived" class="sim-implied-lambda-received" role="status" style="display: none;">已经从IVTS接受到</div>
+                            <div id="simImpliedLambdaLabel" style="display: none;" title="Use the fresh V2 per-date implied λ curve calculated from coherent two-sided straddle prices. Coverage is strict: every weekend and full-day exchange closure from the quote instant through each target-surviving option expiry must be present. Disabling this control or selecting a scalar/Calendar/Trading clock cannot bypass a required live projection gate. In a same-origin IVTS tab, press Calculate λ and then Sync to Simulators; use Load λ File for another machine or origin.">
+                                <label for="simUseImpliedLambda"><input type="checkbox" id="simUseImpliedLambda" checked> IVTS implied λ per weekend (required across closures)</label>
+                                <button type="button" id="simImpliedLambdaLoadBtn" class="btn btn-secondary btn-sm" title="Load an implied λ JSON file exported from the IV Term Structure page (Export λ).">Load λ File…</button>
+                                <span class="value-display" id="simImpliedLambdaStatus" role="status" aria-live="polite"></span>
+                            </div>
+                            <input type="file" id="simImpliedLambdaFileInput" accept=".json,application/json" hidden>
                         </div>
+                                        </div>
+                                    </section>
+                                </div>
+                            </div>
+                            <footer class="simulation-controls-dialog-footer">
+                                <span>Controls update the active workspace immediately.</span>
+                                <button type="button" class="btn btn-primary simulationControlsDialogCloseBtn">Done</button>
+                            </footer>
+                        </section>
                         </div>
-                    </div>
 
                     <div class="panel-card summary-card">
                         <h2>Portfolio Valuation</h2>
@@ -616,8 +713,17 @@
                                             onchange="triggerGlobalChartRedraw()">
                                     </div>
                                 </div>
+                                <div class="chart-control-item payoff-chart-quality-control">
+                                    <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Quote Quality</label>
+                                    <button type="button" class="btn btn-secondary btn-sm best-effort-payoff-btn"
+                                        aria-pressed="false" onclick="toggleBestEffortPayoffChart(this)"
+                                        title="Strict BBO remains the default. When enabled, only legs whose local BBO IV inversion fails may fall back to their current usable input / TWS IV.">
+                                        Draw Best Effort
+                                    </button>
+                                </div>
                             </div>
                             <div class="text-muted small global-chart-anchor-note" style="display: none; margin: -0.25rem 0 0.75rem 0;"></div>
+                            <div class="payoff-chart-quality-note small" role="status" aria-live="polite" style="display: none;"></div>
                             <div class="canvas-wrapper" style="width: 100%; height: 250px; position: relative;">
                                 <canvas class="global-pnl-canvas"
                                     style="width: 100%; height: 100%; display: block;"></canvas>
@@ -921,6 +1027,7 @@
                                             style="accent-color: var(--primary-color);">
                                         <span class="small font-weight-semibold market-data-toggle-label">Market Data Feed</span>
                                     </label>
+                                    <div class="live-subscription-warning" style="display: none;"></div>
                                     <label class="small text-muted" style="display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;">
                                         <input type="checkbox" class="avg-cost-sync-toggle" style="accent-color: var(--success-color);">
                                         <span>Fill Cost From TWS Avg Cost</span>
@@ -1255,8 +1362,17 @@
                                                 onchange="triggerChartRedraw(this)">
                                         </div>
                                     </div>
+                                    <div class="chart-control-item payoff-chart-quality-control">
+                                        <label class="small text-muted" style="display:block; margin-bottom: 0.25rem;">Quote Quality</label>
+                                        <button type="button" class="btn btn-secondary btn-sm best-effort-payoff-btn"
+                                            aria-pressed="false" onclick="toggleBestEffortPayoffChart(this)"
+                                            title="Strict BBO remains the default. When enabled, only legs whose local BBO IV inversion fails may fall back to their current usable input / TWS IV.">
+                                            Draw Best Effort
+                                        </button>
+                                    </div>
                                 </div>
                                 <div class="text-muted small chart-anchor-note" style="display: none; margin: -0.25rem 0 0.75rem 0;"></div>
+                                <div class="payoff-chart-quality-note small" role="status" aria-live="polite" style="display: none;"></div>
                                 <div class="canvas-wrapper" style="width: 100%; height: 250px; position: relative;">
                                     <canvas class="pnl-canvas"
                                         style="width: 100%; height: 100%; display: block;"></canvas>
@@ -1423,10 +1539,12 @@
     <script src="js/regime_conditional_samples.generated.js?v=20260715-v1"></script>
     <script src="js/official_exchange_calendars.generated.js?v=20260713-v2"></script>
     <script src="js/market_holidays.js?v=20260713-official-only"></script>
-    <script src="js/date_utils.js?v=20260713-product-calendar"></script>
-    <script src="js/product_registry.js?v=20260715-strike-increment"></script>
-    <script src="js/index_forward_rate.js"></script>
-    <script src="js/pricing_context.js?v=20260322-histsimdate"></script>
+    <script src="js/date_utils.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/implied_lambda_handoff.js?v=20260721-best-effort-lambda-v1"></script>
+    <script src="js/product_registry.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/market_curves.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/index_forward_rate.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/pricing_context.js?v=20260720-carry-lambda-cutoff-v3"></script>
     <script src="js/trade_trigger_logic.js"></script>
     <script src="js/group_order_builder.js?v=20260713-position-fop-fix"></script>
     <script src="js/leg_position_check.js?v=20260711-leg-exists"></script>
@@ -1434,18 +1552,18 @@
     <script src="js/order_confirmation_ui.js?v=20260711-safe-execution"></script>
     <script src="js/delta_hedge_logic.js"></script>
     <script src="js/distribution_proxy_config.js"></script>
-    <script src="js/pricing_core.js?v=20260713-product-calendar"></script>
+    <script src="js/pricing_core.js?v=20260722-best-effort-payoff-v1"></script>
     <script src="js/bsm.js"></script>
-    <script src="js/chart.js?v=20260711-partial-close"></script>
-    <script src="js/prob_charts.js?v=20260715-regime-conditioned"></script>
-    <script src="js/chart_controls.js?v=20260713-product-calendar"></script>
-    <script src="js/amortized.js?v=20260711-partial-close"></script>
-    <script src="js/valuation.js?v=20260711-partial-close"></script>
-    <script src="js/session_logic.js?v=20260711-partial-close"></script>
-    <script src="js/session_ui.js?v=20260713-product-calendar"></script>
-    <script src="js/control_panel_ui.js?v=20260713-product-calendar"></script>
+    <script src="js/chart.js?v=20260722-best-effort-payoff-v1"></script>
+    <script src="js/prob_charts.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/chart_controls.js?v=20260722-best-effort-payoff-v1"></script>
+    <script src="js/amortized.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/valuation.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/session_logic.js?v=20260721-auto-future-v1"></script>
+    <script src="js/session_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/control_panel_ui.js?v=20260721-auto-future-v1"></script>
     <script src="js/hedge_editor_ui.js"></script>
-    <script src="js/group_editor_ui.js?v=20260715-quote-scroll"></script>
+    <script src="js/group_editor_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
     <script src="js/hedge_ui.js"></script>
     <script src="js/group_ui.js?v=20260713-reverse-butterfly"></script>
     <script src="js/global_ui.js"></script>
@@ -1453,9 +1571,9 @@
     <script src="js/combo_order_transport.js?v=20260711-partial-close"></script>
     <script src="js/delta_hedge_transport.js"></script>
     <script src="js/delta_hedge_ui.js?v=20260711-dialog-status"></script>
-    <script src="js/calendar_handoff.js?v=20260612c"></script>
-    <script src="js/app.js?v=20260711-time-basis"></script>
-    <script src="js/ws_client.js?v=20260713-position-fop-fix"></script>
+    <script src="js/calendar_handoff.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/app.js?v=20260721-timeline-target-v1"></script>
+    <script src="js/ws_client.js?v=20260721-auto-future-v1"></script>
 </body>
 
 </html>

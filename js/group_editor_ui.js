@@ -106,10 +106,17 @@
     }
 
     function getLegAnchorDate(state) {
+        const pricingContext = globalScope.OptionComboPricingContext;
+        if (pricingContext && typeof pricingContext.resolveQuoteDate === 'function') {
+            const resolved = pricingContext.resolveQuoteDate(state);
+            if (resolved) {
+                return resolved;
+            }
+        }
         if (state && state.marketDataMode === 'historical' && state.historicalQuoteDate) {
             return state.historicalQuoteDate;
         }
-        return state.baseDate;
+        return state && (state.liveQuoteDate || state.baseDate);
     }
 
     function _normalizeDateValue(value) {
@@ -258,6 +265,39 @@
         return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
     }
 
+    function _normalizeNonNegativeNumber(value) {
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    }
+
+    function _resolveRealBboMidpoint(quote) {
+        if (!quote || typeof quote !== 'object') {
+            return null;
+        }
+        const bid = _normalizeNonNegativeNumber(quote.bid);
+        const ask = _normalizeNonNegativeNumber(quote.ask);
+        if (bid === null || ask === null || ask < bid) {
+            return null;
+        }
+
+        const markSource = String(quote.markSource || '').trim();
+        const hasValidityFlag = typeof quote.bidAskValid === 'boolean';
+        const hasPresenceFlags = Object.prototype.hasOwnProperty.call(quote, 'bidPresent')
+            || Object.prototype.hasOwnProperty.call(quote, 'askPresent');
+        let realTwoSided;
+        if (hasValidityFlag) {
+            realTwoSided = quote.bidAskValid === true;
+        } else if (hasPresenceFlags || markSource) {
+            realTwoSided = markSource === 'bid_ask_mid';
+        } else {
+            realTwoSided = bid > 0 && ask > 0;
+        }
+        realTwoSided = realTwoSided
+            && quote.bidPresent !== false
+            && quote.askPresent !== false;
+        return realTwoSided ? (bid + ask) / 2 : null;
+    }
+
     function _getButterflyWingWidthFromStrikes(strikes) {
         if (!strikes || strikes.lower === null || strikes.middle === null || strikes.upper === null) {
             return null;
@@ -302,13 +342,7 @@
         const quote = liveQuotes && typeof liveQuotes.getOptionQuote === 'function'
             ? liveQuotes.getOptionQuote(quoteId)
             : null;
-        const bid = _normalizePositiveNumber(quote && quote.bid);
-        const ask = _normalizePositiveNumber(quote && quote.ask);
-        if (bid !== null && ask !== null) {
-            return (bid + ask) / 2;
-        }
-        const mark = _normalizePositiveNumber(quote && quote.mark);
-        return mark !== null ? mark : null;
+        return _resolveRealBboMidpoint(quote);
     }
 
     function _resolveQuoteDisplayById(quoteId) {
@@ -316,17 +350,17 @@
         const quote = liveQuotes && typeof liveQuotes.getOptionQuote === 'function'
             ? liveQuotes.getOptionQuote(quoteId)
             : null;
-        const bid = _normalizePositiveNumber(quote && quote.bid);
-        const ask = _normalizePositiveNumber(quote && quote.ask);
-        const mark = _normalizePositiveNumber(quote && quote.mark);
-        const mid = bid !== null && ask !== null ? (bid + ask) / 2 : mark;
+        const bid = _normalizeNonNegativeNumber(quote && quote.bid);
+        const ask = _normalizeNonNegativeNumber(quote && quote.ask);
+        const mark = _normalizeNonNegativeNumber(quote && quote.mark);
+        const mid = _resolveRealBboMidpoint(quote);
         return {
             bid,
             ask,
             mark,
             mid: mid !== null ? mid : null,
             hasQuote: bid !== null || ask !== null || mark !== null,
-            complete: bid !== null && ask !== null,
+            complete: mid !== null,
         };
     }
 
@@ -1537,6 +1571,58 @@
         return true;
     }
 
+    function _collectGroupUnresolvedLegs(state, group) {
+        const unresolvedById = (state && state.liveSubscriptionUnresolvedById) || {};
+        const isHistoricalMode = !!(state && state.marketDataMode === 'historical');
+        if (!group || group.liveData !== true || isHistoricalMode) return [];
+
+        const hits = [];
+        const seen = new Set();
+        (group.legs || []).forEach((leg) => {
+            const record = leg && unresolvedById[String(leg.id)];
+            if (!record) return;
+            // Identical legs share one subscription id after dedupe; report the
+            // contract once rather than once per leg row.
+            const key = record.label || record.message;
+            if (seen.has(key)) return;
+            seen.add(key);
+            hits.push(record);
+        });
+        return hits;
+    }
+
+    function _renderGroupLiveSubscriptionWarning(state, group, card) {
+        const warningEl = card && card.querySelector('.live-subscription-warning');
+        if (!warningEl) return;
+
+        const hits = _collectGroupUnresolvedLegs(state, group);
+        if (hits.length === 0) {
+            warningEl.style.display = 'none';
+            warningEl.textContent = '';
+            warningEl.removeAttribute('title');
+            return;
+        }
+
+        const labels = hits.map((hit) => hit.label).filter(Boolean);
+        warningEl.textContent = hits.length === 1
+            ? `⚠️ No contract found: ${labels[0] || 'one leg'}`
+            : `⚠️ No contract found for ${hits.length} legs: ${labels.join(', ')}`;
+        warningEl.title = hits.map((hit) => hit.message).join('\n');
+        warningEl.style.display = 'block';
+    }
+
+    function applyLiveSubscriptionWarnings(state) {
+        if (typeof document === 'undefined') return;
+        const groupsById = new Map(
+            ((state && state.groups) || []).map((group) => [String(group && group.id), group])
+        );
+        document.querySelectorAll('.group-card').forEach((card) => {
+            const group = groupsById.get(String(card.dataset.groupId));
+            if (!group) return;
+            _renderGroupLiveSubscriptionWarning(state, group, card);
+        });
+    }
+
     function applyMarketDataToggleUi(state, group, liveToggle) {
         if (!liveToggle) return;
 
@@ -1557,6 +1643,12 @@
                 ? 'Historical Replay'
                 : 'Market Data Feed';
         }
+
+        _renderGroupLiveSubscriptionWarning(
+            state,
+            group,
+            typeof liveToggle.closest === 'function' ? liveToggle.closest('.group-card') : null
+        );
     }
 
     function _ensureTradeTrigger(group) {
@@ -1657,18 +1749,8 @@
         return Math.abs(parseFloat(leg && leg.cost) || 0) > 0;
     }
 
-    function _toPositiveFiniteNumber(value) {
-        const parsed = parseFloat(value);
-        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-    }
-
     function _resolveSnapshotMidpoint(snapshot) {
-        const bid = _toPositiveFiniteNumber(snapshot && snapshot.bid);
-        const ask = _toPositiveFiniteNumber(snapshot && snapshot.ask);
-        if (bid === null || ask === null) {
-            return null;
-        }
-        return (bid + ask) / 2;
+        return _resolveRealBboMidpoint(snapshot);
     }
 
     function _resolveLiveQuoteSnapshotForLeg(leg) {
@@ -1693,8 +1775,20 @@
         return null;
     }
 
-    function _resolveSimulatedOpenPrice(group, leg) {
-        const currentPrice = _toPositiveFiniteNumber(leg && leg.currentPrice);
+    function _resolveSimulatedOpenPrice(group, leg, state = null) {
+        const pricingContext = globalScope.OptionComboPricingContext;
+        if (pricingContext && typeof pricingContext.resolveObservableLegPrice === 'function') {
+            const observable = pricingContext.resolveObservableLegPrice(state, group, leg);
+            const observablePrice = _normalizeNonNegativeNumber(observable && observable.price);
+            if (observable && observable.available === true && observablePrice !== null) {
+                return {
+                    price: observablePrice,
+                    source: observable.source || 'observable',
+                };
+            }
+        }
+
+        const currentPrice = _normalizeNonNegativeNumber(leg && leg.currentPrice);
         const currentPriceSource = String(leg && leg.currentPriceSource || '').trim();
         if (currentPriceSource === 'manual' && currentPrice !== null) {
             return {
@@ -1704,8 +1798,9 @@
         }
 
         const livePriceMode = _ensureLivePriceMode(group);
-        const midpointPrice = _resolveSnapshotMidpoint(_resolveLiveQuoteSnapshotForLeg(leg));
-        const portfolioMarketPrice = _toPositiveFiniteNumber(leg && leg.portfolioMarketPrice);
+        const snapshot = _resolveLiveQuoteSnapshotForLeg(leg);
+        const midpointPrice = _resolveSnapshotMidpoint(snapshot);
+        const portfolioMarketPrice = _normalizeNonNegativeNumber(leg && leg.portfolioMarketPrice);
 
         if (livePriceMode === 'mark' && portfolioMarketPrice !== null) {
             return {
@@ -1728,7 +1823,18 @@
             };
         }
 
-        if (currentPriceSource !== 'missing' && currentPrice !== null) {
+        const snapshotMark = _normalizeNonNegativeNumber(snapshot && snapshot.mark);
+        const markSource = String(snapshot && snapshot.markSource || '').trim();
+        if (snapshotMark !== null && markSource) {
+            return {
+                price: snapshotMark,
+                source: markSource === 'model' ? 'tws_model' : `live_${markSource}`,
+            };
+        }
+
+        if (currentPriceSource !== 'missing'
+            && currentPrice !== null
+            && (currentPrice > 0 || !!currentPriceSource)) {
             return {
                 price: currentPrice,
                 source: currentPriceSource || 'current_price',
@@ -1751,7 +1857,7 @@
             || status === 'test_submitted';
     }
 
-    function _collectSimulatedOpenPrices(group) {
+    function _collectSimulatedOpenPrices(group, state = null) {
         const entries = [];
         let missingCount = 0;
 
@@ -1760,7 +1866,7 @@
                 return;
             }
 
-            const resolvedPrice = _resolveSimulatedOpenPrice(group, leg);
+            const resolvedPrice = _resolveSimulatedOpenPrice(group, leg, state);
             if (!resolvedPrice) {
                 missingCount += 1;
                 return;
@@ -1783,7 +1889,7 @@
     function describeSimulatedOpenState(group, state, activeViewMode) {
         const renderMode = activeViewMode || (group && group.viewMode) || 'active';
         const isHistoricalMode = !!(state && state.marketDataMode === 'historical');
-        const collected = _collectSimulatedOpenPrices(group);
+        const collected = _collectSimulatedOpenPrices(group, state);
         const visible = !isHistoricalMode && renderMode === 'trial' && collected.openLegCount > 0;
         let reason = '';
 
@@ -3311,6 +3417,13 @@
             const availableFutures = Array.isArray(state.futuresPool) ? state.futuresPool : [];
             const shouldShowFutureSelector = requiresPerLegFuture;
 
+            if (shouldShowFutureSelector) {
+                const sessionLogic = globalScope.OptionComboSessionLogic;
+                if (sessionLogic && typeof sessionLogic.autoBindSingleFuturesPoolEntry === 'function') {
+                    sessionLogic.autoBindSingleFuturesPoolEntry(state);
+                }
+            }
+
             underlyingFutureField.style.display = shouldShowFutureSelector ? 'block' : 'none';
 
             if (shouldShowFutureSelector) {
@@ -3318,9 +3431,11 @@
 
                 const placeholderOption = document.createElement('option');
                 placeholderOption.value = '';
-                placeholderOption.textContent = availableFutures.length > 0
+                placeholderOption.textContent = availableFutures.length > 1
                     ? 'Select future'
-                    : 'Add future in Futures Pool first';
+                    : (availableFutures.length === 1
+                        ? 'Automatically selected'
+                        : 'Add future in Futures Pool first');
                 underlyingFutureSelect.appendChild(placeholderOption);
 
                 availableFutures.forEach((entry) => {
@@ -3340,9 +3455,11 @@
                 }
 
                 if (underlyingFutureHint) {
-                    underlyingFutureHint.textContent = availableFutures.length > 0
-                        ? 'Required for FOP legs.'
-                        : 'Required for FOP legs. Add futures above first.';
+                    underlyingFutureHint.textContent = availableFutures.length === 1
+                        ? 'Automatically bound to the only Futures Pool contract.'
+                        : (availableFutures.length > 1
+                            ? 'Required for FOP legs.'
+                            : 'Required for FOP legs. Add futures above first.');
                 }
 
                 underlyingFutureSelect.addEventListener('change', (e) => {
@@ -3608,6 +3725,7 @@
         addLegToGroup,
         removeLeg,
         renderGroups,
+        applyLiveSubscriptionWarnings,
         applyModeLockState,
         applyOptionAssignmentConversion,
         resolveDefaultLegExpirationDate,

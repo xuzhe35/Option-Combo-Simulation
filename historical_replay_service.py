@@ -6,6 +6,7 @@ from historical_data import (
     DEFAULT_RATES_DB,
     HistoricalReplayStore,
 )
+from yield_curve.builder import resolve_snapshot_discount
 
 
 def normalize_symbol(value):
@@ -51,11 +52,13 @@ def normalize_history_lookup_date(value):
 
 class HistoricalReplayService:
     def __init__(self, chain_service_url=DEFAULT_CHAIN_SERVICE_URL,
-                 rates_db_path=DEFAULT_RATES_DB, logger=None):
+                 rates_db_path=DEFAULT_RATES_DB, logger=None,
+                 yield_curve_data_dir=None):
         self.store = HistoricalReplayStore(
             chain_service_url,
             os.path.abspath(rates_db_path) if rates_db_path else '',
             logger=logger,
+            yield_curve_data_dir=yield_curve_data_dir,
         )
         self._trading_dates_cache = {}
 
@@ -91,6 +94,7 @@ class HistoricalReplayService:
                 "yieldCurveEffectiveDate": '',
                 "yieldCurveSource": '',
                 "yieldCurvePoints": [],
+                "discountCurve": None,
             },
         }
 
@@ -114,17 +118,28 @@ class HistoricalReplayService:
             payload["underlyingQuote"] = underlying_quote
             payload["underlyingPrice"] = underlying_quote.get("mark")
 
-        risk_free_snapshot = self.store.get_risk_free_rate_snapshot(effective_date)
-        if risk_free_snapshot:
-            payload["riskFreeRate"] = risk_free_snapshot.get("rate")
-            payload["historicalReplay"]["riskFreeRateEffectiveDate"] = risk_free_snapshot.get("effectiveDate", '')
-            payload["historicalReplay"]["riskFreeRateSource"] = risk_free_snapshot.get("source", '')
-
         yield_curve_snapshot = self.store.get_yield_curve_snapshot(effective_date)
         if yield_curve_snapshot:
+            payload["historicalReplay"]["discountCurve"] = yield_curve_snapshot
             payload["historicalReplay"]["yieldCurveEffectiveDate"] = yield_curve_snapshot.get("effectiveDate", '')
             payload["historicalReplay"]["yieldCurveSource"] = yield_curve_snapshot.get("source", '')
             payload["historicalReplay"]["yieldCurvePoints"] = list(yield_curve_snapshot.get("points") or [])
+            try:
+                scalar_quote = resolve_snapshot_discount(yield_curve_snapshot, 30)
+            except ValueError:
+                scalar_quote = None
+            if scalar_quote:
+                payload["riskFreeRate"] = scalar_quote.get("continuousRate")
+                payload["historicalReplay"]["riskFreeRateEffectiveDate"] = yield_curve_snapshot.get("effectiveDate", '')
+                payload["historicalReplay"]["riskFreeRateSource"] = yield_curve_snapshot.get("source", '')
+        else:
+            # Final migration fallback for replay dates that predate both the
+            # JSON archive and the legacy tenor curve.
+            risk_free_snapshot = self.store.get_risk_free_rate_snapshot(effective_date)
+            if risk_free_snapshot:
+                payload["riskFreeRate"] = risk_free_snapshot.get("rate")
+                payload["historicalReplay"]["riskFreeRateEffectiveDate"] = risk_free_snapshot.get("effectiveDate", '')
+                payload["historicalReplay"]["riskFreeRateSource"] = risk_free_snapshot.get("source", '')
 
         expiry_dates = sorted({
             normalized_expiry

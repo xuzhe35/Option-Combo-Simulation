@@ -143,6 +143,146 @@ module.exports = {
             },
         },
         {
+            name: 'applies contract-only timing metadata without treating it as market-price evidence',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 745.53,
+                    baseDate: '2026-07-20',
+                    simulatedDate: '2026-07-24',
+                    liveQuoteDate: '2026-07-20',
+                    liveQuoteAsOf: '2026-07-20T14:00:00.000Z',
+                    liveProjectionFeedConnected: false,
+                    liveProjectionFeedStale: true,
+                    liveProjectionLastReceivedAt: '2026-07-20T13:59:00.000Z',
+                    greeksEnabled: false,
+                    groups: [{
+                        id: 'spy_butterfly',
+                        liveData: true,
+                        legs: [{
+                            id: 'spy_750_put',
+                            type: 'put',
+                            pos: -1,
+                            strike: 750,
+                            expDate: '2026-07-24',
+                            currentPrice: 6.86,
+                            currentPriceSource: 'live',
+                            iv: 0.140127,
+                            ivSource: 'live',
+                            cost: 7.49,
+                            closePrice: null,
+                        }],
+                    }],
+                    hedges: [],
+                    futuresPool: [],
+                };
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/market_holidays.js',
+                        'js/date_utils.js',
+                        'js/product_registry.js',
+                        'js/pricing_context.js',
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        document: {
+                            activeElement: null,
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                MockWebSocket.instance.onopen();
+                const marketClockBeforeMetadata = {
+                    liveQuoteAsOf: state.liveQuoteAsOf,
+                    liveQuoteDate: state.liveQuoteDate,
+                    connected: state.liveProjectionFeedConnected,
+                    stale: state.liveProjectionFeedStale,
+                    receivedAt: state.liveProjectionLastReceivedAt,
+                };
+
+                MockWebSocket.instance.onmessage({
+                    data: JSON.stringify({
+                    action: 'option_contract_metadata',
+                    contractMetadataOnly: true,
+                    // Even if a server receipt timestamp is present, contract
+                    // metadata is not proof that any market price advanced.
+                    payloadAsOf: '2026-07-20T14:05:00.000Z',
+                    options: {
+                        spy_750_put: {
+                            conId: 701,
+                            secType: 'OPT',
+                            symbol: 'SPY',
+                            localSymbol: 'SPY   260724P00750000',
+                            exchange: 'SMART',
+                            currency: 'USD',
+                            multiplier: '100',
+                            tradingClass: 'SPY',
+                            right: 'P',
+                            strike: 750,
+                            optionExpiry: '20260724',
+                            contractIdentitySource: 'ib_contract_details',
+                            expiryAsOf: '2026-07-24T20:00:00.000Z',
+                            expiryTimingSource: 'ib_contract_details',
+                            lastTradeDate: '20260724',
+                            lastTradeTime: '16:00:00',
+                            timeZoneId: 'US/Eastern',
+                            realExpirationDate: '20260724',
+                        },
+                    },
+                    }),
+                });
+
+                const leg = state.groups[0].legs[0];
+                assert.equal(leg.expiryAsOf, '2026-07-24T20:00:00.000Z');
+                assert.equal(leg.qualifiedOptionConId, 701);
+                assert.equal(leg.currentPrice, 6.86);
+                assert.equal(leg.currentPriceSource, 'live');
+                assert.equal(leg.iv, 0.140127);
+                assert.equal(leg.ivSource, 'live');
+                assert.equal(ctx.OptionComboWsLiveQuotes.getOptionQuote('spy_750_put'), null);
+                assert.equal(state.liveQuoteAsOf, marketClockBeforeMetadata.liveQuoteAsOf);
+                assert.equal(state.liveQuoteDate, marketClockBeforeMetadata.liveQuoteDate);
+                assert.equal(
+                    state.liveProjectionFeedConnected,
+                    marketClockBeforeMetadata.connected
+                );
+                assert.equal(state.liveProjectionFeedStale, marketClockBeforeMetadata.stale);
+                assert.equal(
+                    state.liveProjectionLastReceivedAt,
+                    marketClockBeforeMetadata.receivedAt
+                );
+            },
+        },
+        {
             name: 'routes delta-only option updates through lightweight group delta refresh',
             run() {
                 const state = {
@@ -260,6 +400,11 @@ module.exports = {
                 const state = {
                     marketDataMode: 'live',
                     greeksEnabled: false,
+                    // This case isolates the greeks-disabled delta path.  A
+                    // separate test covers the first-payload feed transition.
+                    liveProjectionFeedConnected: true,
+                    liveProjectionFeedStale: false,
+                    liveProjectionLastReceivedAt: new Date().toISOString(),
                     groups: [],
                     hedges: [],
                 };
@@ -323,6 +468,148 @@ module.exports = {
             },
         },
         {
+            name: 'rolls the live quote anchor from payload time without moving the entry date',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 600,
+                    baseDate: '2026-07-01',
+                    simulatedDate: '2026-07-15',
+                    liveQuoteDate: '',
+                    liveQuoteAsOf: '',
+                    greeksEnabled: false,
+                    forwardRateSamples: [],
+                    futuresPool: [],
+                    groups: [
+                        {
+                            id: 'group_updated_quote',
+                            liveData: true,
+                            legs: [{
+                                id: 'leg_updated_quote',
+                                type: 'call',
+                                pos: 1,
+                                strike: 600,
+                                expDate: '2026-07-20',
+                                iv: 0.2,
+                                currentPrice: 3,
+                                cost: 3,
+                            }],
+                        },
+                        {
+                            id: 'group_clock_only',
+                            liveData: true,
+                            legs: [{
+                                id: 'leg_clock_only',
+                                type: 'put',
+                                pos: 1,
+                                strike: 590,
+                                expDate: '2026-07-20',
+                                iv: 0.2,
+                                currentPrice: 2,
+                                cost: 2,
+                            }],
+                        },
+                    ],
+                    hedges: [],
+                };
+                let fullRefreshes = 0;
+                let incrementalRefreshes = 0;
+                let controlRefreshes = 0;
+
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/session_logic.js',
+                    'js/ws_client.js',
+                ], {
+                    state,
+                    renderGroups() {},
+                    updateDerivedValues() {
+                        fullRefreshes += 1;
+                    },
+                    updateLiveQuoteDerivedValues() {
+                        incrementalRefreshes += 1;
+                    },
+                    OptionComboControlPanelUI: {
+                        refreshBoundDynamicControls() {
+                            controlRefreshes += 1;
+                        },
+                    },
+                    requestAnimationFrame(callback) {
+                        callback();
+                        return 1;
+                    },
+                    flashElement() {},
+                    document: {
+                        activeElement: null,
+                        getElementById() { return null; },
+                        querySelector() { return null; },
+                    },
+                    localStorage: {
+                        getItem() { return null; },
+                        setItem() {},
+                    },
+                    WebSocket: function MockWebSocket() {},
+                });
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-10T20:00:00Z',
+                    options: {
+                        leg_updated_quote: { bid: 3.1, ask: 3.3, mark: 3.2, iv: 0.21 },
+                    },
+                });
+
+                assert.equal(state.baseDate, '2026-07-01');
+                assert.equal(state.liveQuoteDate, '2026-07-10');
+                assert.equal(state.liveQuoteAsOf, '2026-07-10T20:00:00Z');
+                assert.equal(state.simulatedDate, '2026-07-15');
+                assert.equal(fullRefreshes, 1);
+                assert.equal(incrementalRefreshes, 0);
+                assert.equal(controlRefreshes, 1);
+
+                // A market-date roll changes theta for every group, even if
+                // this payload only contains one unchanged ticker.
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-15T20:00:00Z',
+                    options: {
+                        leg_updated_quote: { bid: 3.1, ask: 3.3, mark: 3.2, iv: 0.21 },
+                    },
+                });
+                assert.equal(state.liveQuoteDate, '2026-07-15');
+                assert.equal(state.simulatedDate, '2026-07-15');
+                assert.equal(fullRefreshes, 2);
+                assert.equal(incrementalRefreshes, 0);
+
+                // Delayed/out-of-order data may update a quote, but must not
+                // move the valuation clock backwards.
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-11T20:00:00Z',
+                    options: {
+                        leg_updated_quote: { bid: 3.2, ask: 3.4, mark: 3.3, iv: 0.22 },
+                    },
+                });
+                assert.equal(state.liveQuoteDate, '2026-07-15');
+                assert.equal(state.liveQuoteAsOf, '2026-07-15T20:00:00Z');
+                assert.equal(state.baseDate, '2026-07-01');
+
+                // A stale historical response cannot overwrite the live
+                // clock even if the UI has already switched back to live.
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-20T20:00:00Z',
+                    historicalReplay: { effectiveDate: '2024-03-15' },
+                    options: {
+                        leg_updated_quote: { bid: 3.2, ask: 3.4, mark: 3.3, iv: 0.22 },
+                    },
+                });
+                assert.equal(state.liveQuoteDate, '2026-07-15');
+                assert.equal(state.liveQuoteAsOf, '2026-07-15T20:00:00Z');
+            },
+        },
+        {
             name: 'builds CL live subscriptions with FUT underlying and FOP option payloads',
             run() {
                 const state = {
@@ -333,7 +620,7 @@ module.exports = {
                     baseDate: '2026-03-17',
                     greeksEnabled: false,
                     futuresPool: [
-                        { id: 'future_jul', contractMonth: '202607' },
+                        { id: 'future_jul', contractMonth: '202607', conId: 60701 },
                     ],
                     groups: [
                         {
@@ -411,12 +698,228 @@ module.exports = {
                 assert.equal(firstMessage.options[0].secType, 'FOP');
                 assert.equal(firstMessage.options[0].symbol, 'CL');
                 assert.equal(firstMessage.options[0].exchange, 'NYMEX');
-                assert.equal(firstMessage.options[0].tradingClass, 'ML3');
+                // ML3 names one Monday week-3 crude listing, so it is wrong for
+                // most CL expiries.  IB names the class from the exact contract.
+                assert.equal(firstMessage.options[0].tradingClass, undefined);
                 assert.equal(firstMessage.options[0].underlyingContractMonth, '202607');
+                assert.deepEqual(Array.from(firstMessage.carryReferences), []);
                 const secondMessage = JSON.parse(MockWebSocket.instance.sent[1]);
                 assert.equal(secondMessage.action, 'request_portfolio_avg_cost_snapshot');
                 const thirdMessage = JSON.parse(MockWebSocket.instance.sent[2]);
                 assert.equal(thirdMessage.action, 'request_managed_accounts_snapshot');
+            },
+        },
+        {
+            name: 'qualifies ES daily FOPs without a guessed trading class and accepts the IB identity',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'ES',
+                    underlyingContractMonth: '202609',
+                    underlyingPrice: 7516.25,
+                    simulatedDate: '2026-07-20',
+                    baseDate: '2026-07-20',
+                    greeksEnabled: false,
+                    futuresPool: [{
+                        id: 'future_sep', contractMonth: '202609', conId: 60901,
+                    }],
+                    groups: [{
+                        id: 'group_es_daily',
+                        liveData: true,
+                        legs: [{
+                            id: 'leg_es_jul22_call',
+                            type: 'call',
+                            pos: 1,
+                            strike: 7520,
+                            expDate: '2026-07-22',
+                            underlyingFutureId: '',
+                            currentPrice: null,
+                        }],
+                    }],
+                    hedges: [],
+                };
+                class MockWebSocket {
+                    constructor() { this.sent = []; MockWebSocket.instance = this; }
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {}, updateDerivedValues() {}, flashElement() {},
+                        requestAnimationFrame(callback) { callback(); },
+                        document: {
+                            activeElement: null,
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                            querySelectorAll() { return []; },
+                        },
+                        localStorage: { getItem() { return null; }, setItem() {} },
+                        location: { protocol: 'file:', hostname: '' },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                const subscribe = MockWebSocket.instance.sent
+                    .map(message => JSON.parse(message))
+                    .find(message => message.action === 'subscribe');
+                assert.equal(state.groups[0].legs[0].underlyingFutureId, 'future_sep');
+                assert.equal(subscribe.options.length, 1);
+                assert.equal(subscribe.options[0].expDate, '20260722');
+                assert.equal(subscribe.options[0].underlyingContractMonth, '202609');
+                assert.equal(Object.prototype.hasOwnProperty.call(
+                    subscribe.options[0], 'tradingClass'
+                ), false);
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-20T17:00:00.000Z',
+                    options: {
+                        leg_es_jul22_call: {
+                            bid: 22.5,
+                            ask: 23,
+                            mark: 22.75,
+                            quoteAsOf: '2026-07-20T17:00:00.000Z',
+                            conId: 7227520,
+                            secType: 'FOP',
+                            symbol: 'ES',
+                            localSymbol: 'ES qualified daily call',
+                            tradingClass: 'IB_ACTUAL_CLASS',
+                            right: 'C',
+                            strike: 7520,
+                            optionExpiry: '20260722',
+                            multiplier: '50',
+                            underConId: 60901,
+                            underlyingContractMonth: '202609',
+                            underlyingBindingVerified: true,
+                            expiryAsOf: '2026-07-22T20:00:00.000Z',
+                            expiryTimingSource: 'ib_contract_details',
+                            lastTradeDate: '20260722',
+                            lastTradeTime: '15:00:00',
+                            timeZoneId: 'US/Central',
+                        },
+                    },
+                });
+
+                const quote = ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_es_jul22_call');
+                assert.equal(quote.mark, 22.75);
+                assert.equal(quote.tradingClass, 'IB_ACTUAL_CLASS');
+                assert.equal(state.groups[0].legs[0].currentPrice, 22.75);
+                assert.equal(state.groups[0].legs[0].liveQuoteIdentityStatus, 'verified');
+                assert.equal(state.groups[0].legs[0].qualifiedOptionTradingClass, 'IB_ACTUAL_CLASS');
+                assert.equal(state.groups[0].legs[0].expiryAsOf, '2026-07-22T20:00:00.000Z');
+            },
+        },
+        {
+            name: 'qualifies a Tuesday CL FOP that the ML3 weekly class guess would have rejected',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'CL',
+                    underlyingContractMonth: '202609',
+                    underlyingPrice: 84.43,
+                    simulatedDate: '2026-08-04',
+                    baseDate: '2026-07-22',
+                    greeksEnabled: false,
+                    futuresPool: [{
+                        id: 'future_sep', contractMonth: '202609', conId: 70102,
+                    }],
+                    groups: [{
+                        id: 'group_cl_calendar',
+                        liveData: true,
+                        legs: [{
+                            id: 'leg_cl_aug04_call',
+                            type: 'call',
+                            pos: 1,
+                            strike: 85,
+                            // A Tuesday.  ML3 is a Monday week-3 crude class.
+                            expDate: '2026-08-04',
+                            underlyingFutureId: '',
+                            currentPrice: null,
+                        }],
+                    }],
+                    hedges: [],
+                };
+                class MockWebSocket {
+                    constructor() { this.sent = []; MockWebSocket.instance = this; }
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {}, updateDerivedValues() {}, flashElement() {},
+                        requestAnimationFrame(callback) { callback(); },
+                        document: {
+                            activeElement: null,
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                            querySelectorAll() { return []; },
+                        },
+                        localStorage: { getItem() { return null; }, setItem() {} },
+                        location: { protocol: 'file:', hostname: '' },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                const subscribe = MockWebSocket.instance.sent
+                    .map(message => JSON.parse(message))
+                    .find(message => message.action === 'subscribe');
+                assert.equal(subscribe.options.length, 1);
+                assert.equal(subscribe.options[0].expDate, '20260804');
+                assert.equal(Object.prototype.hasOwnProperty.call(
+                    subscribe.options[0], 'tradingClass'
+                ), false);
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-22T17:00:00.000Z',
+                    options: {
+                        leg_cl_aug04_call: {
+                            bid: 1.2,
+                            ask: 1.3,
+                            mark: 1.25,
+                            quoteAsOf: '2026-07-22T17:00:00.000Z',
+                            conId: 812345,
+                            secType: 'FOP',
+                            symbol: 'CL',
+                            localSymbol: 'LO4Q6 C8500',
+                            tradingClass: 'LO4',
+                            right: 'C',
+                            strike: 85,
+                            optionExpiry: '20260804',
+                            multiplier: '1000',
+                            underConId: 70102,
+                            underlyingContractMonth: '202609',
+                            underlyingBindingVerified: true,
+                            expiryAsOf: '2026-08-04T18:30:00.000Z',
+                            expiryTimingSource: 'ib_contract_details',
+                            lastTradeDate: '20260804',
+                            lastTradeTime: '13:30:00',
+                            timeZoneId: 'US/Central',
+                        },
+                    },
+                });
+
+                const leg = state.groups[0].legs[0];
+                assert.equal(leg.currentPrice, 1.25);
+                assert.equal(leg.liveQuoteIdentityStatus, 'verified');
+                assert.equal(leg.qualifiedOptionTradingClass, 'LO4');
+                // Without this the leg has no expiryAsOf and the simulated-date
+                // projection fails closed as exact_contract_timing_missing.
+                assert.equal(leg.expiryAsOf, '2026-08-04T18:30:00.000Z');
             },
         },
         {
@@ -526,7 +1029,28 @@ module.exports = {
 
                 ctx.processLiveMarketData({
                     options: {
-                        combo_template_CL_20260420_C_75: { bid: 1.2, ask: 1.4 },
+                        combo_template_CL_20260420_C_75: {
+                            bid: 1.2,
+                            ask: 1.4,
+                            conId: 42075,
+                            secType: 'FOP',
+                            symbol: 'CL',
+                            localSymbol: 'LOJ6 C7500',
+                            tradingClass: 'ML3',
+                            right: 'C',
+                            strike: 75,
+                            optionExpiry: '20260420',
+                            multiplier: '1000',
+                            underConId: 60701,
+                            underlyingContractMonth: '202607',
+                            underlyingBindingVerified: true,
+                            expiryAsOf: '2026-04-20T18:30:00.000Z',
+                            expiryTimingSource: 'ib_contract_details',
+                            lastTradeDate: '20260420',
+                            lastTradeTime: '13:30:00',
+                            timeZoneId: 'US/Central',
+                            realExpirationDate: '20260420',
+                        },
                     },
                 });
 
@@ -538,6 +1062,389 @@ module.exports = {
                 assert.equal(legAQuote.ask, 1.4);
                 assert.equal(legBQuote.bid, 1.2);
                 assert.equal(legBQuote.ask, 1.4);
+                assert.equal(state.groups[0].legs[0].expiryAsOf, '2026-04-20T18:30:00.000Z');
+                assert.equal(state.groups[1].legs[0].expiryAsOf, '2026-04-20T18:30:00.000Z');
+                assert.equal(state.groups[0].legs[0].expiryTimeZoneId, 'US/Central');
+                assert.equal(state.groups[0].legs[0].qualifiedOptionConId, 42075);
+                assert.equal(state.groups[0].legs[0].qualifiedOptionUnderConId, 60701);
+                assert.equal(state.groups[0].legs[0].qualifiedOptionUnderlyingContractMonth, '202607');
+
+                ctx.handleLiveSubscriptions({ force: true });
+                assert.equal(state.groups[0].legs[0].expiryAsOf, undefined);
+                assert.equal(state.groups[1].legs[0].expiryAsOf, undefined);
+            },
+        },
+        {
+            name: 'accepts FOP quotes after a futures roll instead of asserting the old month conId',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'ES',
+                    underlyingContractMonth: '202612',
+                    underlyingPrice: 7516.25,
+                    simulatedDate: '2026-07-22',
+                    baseDate: '2026-07-22',
+                    greeksEnabled: false,
+                    // Rolled from 202609 to 202612: the entry still carries the
+                    // conId and qualified month IB confirmed for September.
+                    futuresPool: [{
+                        id: 'future_front',
+                        contractMonth: '202612',
+                        conId: 495512563,
+                        secType: 'FUT',
+                        symbol: 'ES',
+                        qualifiedContractMonth: '202609',
+                        requestIdentityVerified: true,
+                        liveQuoteIdentityStatus: 'verified',
+                    }],
+                    comboTemplateQuoteRequests: [],
+                    groups: [{
+                        id: 'group_es',
+                        liveData: true,
+                        legs: [{
+                            id: 'leg_dec', type: 'call', pos: 1, currentPrice: 20,
+                            strike: 7520, expDate: '2026-08-21',
+                            underlyingFutureId: 'future_front',
+                        }],
+                    }],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() { this.sent = []; MockWebSocket.instance = this; }
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    ['js/session_logic.js', 'js/product_registry.js', 'js/ws_client.js'],
+                    {
+                        state,
+                        renderGroups() {}, updateDerivedValues() {}, flashElement() {},
+                        requestAnimationFrame(callback) { callback(); },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                            querySelectorAll() { return []; },
+                        },
+                        localStorage: { getItem() { return null; }, setItem() {} },
+                        location: { protocol: 'file:', hostname: '' },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+
+                // IB qualifies the December FOP and returns the December
+                // underlying conId, which is the correct answer.
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-22T17:00:00.000Z',
+                    options: {
+                        leg_dec: {
+                            bid: 19.5, ask: 20.5, mark: 20,
+                            quoteAsOf: '2026-07-22T17:00:00.000Z',
+                            conId: 7227520,
+                            secType: 'FOP', symbol: 'ES',
+                            localSymbol: 'ES qualified dec call',
+                            right: 'C', strike: 7520,
+                            optionExpiry: '20260821', multiplier: '50',
+                            underConId: 511223344,
+                            underlyingContractMonth: '202612',
+                            underlyingBindingVerified: true,
+                            expiryAsOf: '2026-08-21T20:00:00.000Z',
+                            expiryTimingSource: 'ib_contract_details',
+                            lastTradeDate: '20260821',
+                            lastTradeTime: '15:00:00',
+                            timeZoneId: 'US/Central',
+                        },
+                    },
+                });
+
+                const leg = state.groups[0].legs[0];
+                assert.equal(leg.liveQuoteIdentityStatus, 'verified');
+                assert.equal(leg.currentPrice, 20);
+                assert.equal(leg.expiryAsOf, '2026-08-21T20:00:00.000Z');
+            },
+        },
+        {
+            name: 'keeps otherwise identical FOPs on different futures months separate and rejects mismatched identity',
+            run() {
+                const state = {
+                    underlyingSymbol: 'CL',
+                    underlyingContractMonth: '',
+                    underlyingPrice: 72.5,
+                    simulatedDate: '2026-03-17',
+                    baseDate: '2026-03-17',
+                    greeksEnabled: false,
+                    futuresPool: [
+                        { id: 'future_jul', contractMonth: '202607', conId: 60701 },
+                        { id: 'future_sep', contractMonth: '202609', conId: 60901 },
+                    ],
+                    comboTemplateQuoteRequests: [],
+                    groups: [
+                        {
+                            id: 'group_jul',
+                            liveData: true,
+                            legs: [{
+                                id: 'leg_jul', type: 'call', pos: 1, currentPrice: 0.5,
+                                strike: 75, expDate: '2026-04-20', underlyingFutureId: 'future_jul',
+                            }],
+                        },
+                        {
+                            id: 'group_sep',
+                            liveData: true,
+                            legs: [{
+                                id: 'leg_sep', type: 'call', pos: -1, currentPrice: 0.6,
+                                strike: 75, expDate: '2026-04-20', underlyingFutureId: 'future_sep',
+                            }],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() { this.sent = []; MockWebSocket.instance = this; }
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    ['js/session_logic.js', 'js/product_registry.js', 'js/ws_client.js'],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        requestAnimationFrame(callback) { callback(); },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                            querySelectorAll() { return []; },
+                        },
+                        localStorage: { getItem() { return null; }, setItem() {} },
+                        location: { protocol: 'file:', hostname: '' },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                const subscribeMessage = JSON.parse(MockWebSocket.instance.sent[0]);
+                assert.equal(subscribeMessage.options.length, 2);
+                assert.deepEqual(
+                    subscribeMessage.options
+                        .map(request => [request.id, request.underlyingContractMonth])
+                        .sort(),
+                    [['leg_jul', '202607'], ['leg_sep', '202609']]
+                );
+
+                const identity = {
+                    conId: 42075,
+                    secType: 'FOP',
+                    symbol: 'CL',
+                    localSymbol: 'LOJ6 C7500',
+                    tradingClass: 'ML3',
+                    right: 'C',
+                    strike: 75,
+                    optionExpiry: '20260420',
+                    multiplier: '1000',
+                    underConId: 60901,
+                    underlyingContractMonth: '202609',
+                    underlyingBindingVerified: true,
+                };
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_jul: {
+                            ...identity,
+                            mark: 1.25,
+                            expiryAsOf: '2026-04-20T18:30:00.000Z',
+                            lastTradeDate: '20260420',
+                        },
+                    },
+                });
+                assert.equal(ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_jul'), null);
+                assert.equal(state.groups[0].legs[0].currentPrice, 0.5);
+                assert.equal(state.groups[0].legs[0].expiryAsOf, undefined);
+
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_jul: {
+                            ...identity,
+                            underConId: 60701,
+                            underlyingContractMonth: '202607',
+                            mark: 1.25,
+                            expiryAsOf: '2026-04-20T18:30:00.000Z',
+                            expiryTimingSource: 'ib_contract_details',
+                            lastTradeDate: '20260420',
+                        },
+                    },
+                });
+                assert.equal(ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_jul').mark, 1.25);
+                assert.equal(state.groups[0].legs[0].currentPrice, 1.25);
+                assert.equal(state.groups[0].legs[0].qualifiedOptionUnderConId, 60701);
+                assert.equal(state.groups[0].legs[0].expiryAsOf, '2026-04-20T18:30:00.000Z');
+
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_jul: {
+                            ...identity,
+                            mark: 9.99,
+                            expiryAsOf: '2026-04-20T18:30:00.000Z',
+                            lastTradeDate: '20260420',
+                        },
+                    },
+                });
+                assert.equal(ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_jul'), null);
+                assert.equal(state.groups[0].legs[0].currentPrice, null);
+                assert.equal(state.groups[0].legs[0].currentPriceSource, 'missing');
+                assert.equal(state.groups[0].legs[0].expiryAsOf, undefined);
+                assert.equal(state.groups[0].legs[0].qualifiedOptionConId, undefined);
+                assert.equal(state.groups[0].legs[0].liveQuoteIdentityStatus, 'rejected');
+                assert.match(state.groups[0].legs[0].liveQuoteIdentityReason, /underlying futures/);
+            },
+        },
+        {
+            name: 'accepts IB canonical SPX symbol for an SPXW option request',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPX',
+                    underlyingPrice: 6200,
+                    simulatedDate: '2026-04-01',
+                    baseDate: '2026-04-01',
+                    greeksEnabled: false,
+                    futuresPool: [],
+                    comboTemplateQuoteRequests: [],
+                    groups: [{
+                        id: 'group_spxw',
+                        liveData: true,
+                        legs: [{
+                            id: 'leg_spxw', type: 'put', pos: 1, currentPrice: 1,
+                            strike: 6200, expDate: '2026-04-20',
+                        }],
+                    }],
+                    hedges: [],
+                };
+                class MockWebSocket {
+                    constructor() { this.sent = []; MockWebSocket.instance = this; }
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+                const ctx = loadBrowserScripts(
+                    ['js/session_logic.js', 'js/product_registry.js', 'js/ws_client.js'],
+                    {
+                        state,
+                        renderGroups() {}, updateDerivedValues() {}, flashElement() {},
+                        requestAnimationFrame(callback) { callback(); },
+                        document: {
+                            getElementById() { return null; }, querySelector() { return null; },
+                            querySelectorAll() { return []; },
+                        },
+                        localStorage: { getItem() { return null; }, setItem() {} },
+                        location: { protocol: 'file:', hostname: '' },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                const request = JSON.parse(MockWebSocket.instance.sent[0]).options[0];
+                assert.equal(request.symbol, 'SPXW');
+                assert.equal(request.tradingClass, 'SPXW');
+
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_spxw: {
+                            mark: 12.5,
+                            conId: 998877,
+                            secType: 'OPT',
+                            symbol: 'SPX',
+                            localSymbol: 'SPXW  260420P06200000',
+                            tradingClass: 'SPXW',
+                            right: 'P',
+                            strike: 6200,
+                            optionExpiry: '20260420',
+                            multiplier: '100',
+                        },
+                    },
+                });
+                assert.equal(state.groups[0].legs[0].currentPrice, 12.5);
+                assert.equal(state.groups[0].legs[0].qualifiedOptionTradingClass, 'SPXW');
+                assert.equal(state.groups[0].legs[0].liveQuoteIdentityStatus, 'verified');
+            },
+        },
+        {
+            name: 'auto-subscribes the initial ES front-month future and ignores an identical repeat intent',
+            run() {
+                const state = {
+                    underlyingSymbol: 'ES',
+                    underlyingContractMonth: '',
+                    underlyingPrice: 7493.5,
+                    simulatedDate: '2026-07-20',
+                    baseDate: '2026-07-20',
+                    greeksEnabled: false,
+                    futuresPool: [],
+                    groups: [],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        location: {
+                            protocol: 'file:',
+                            hostname: '',
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+
+                const subscribeMessages = MockWebSocket.instance.sent
+                    .map(message => JSON.parse(message))
+                    .filter(message => message.action === 'subscribe');
+                assert.equal(subscribeMessages.length, 1);
+                assert.equal(state.underlyingContractMonth, '202609');
+                assert.equal(state.futuresPool.length, 1);
+                assert.equal(state.futuresPool[0].contractMonth, '202609');
+                assert.equal(subscribeMessages[0].underlying.contractMonth, '202609');
+                assert.equal(subscribeMessages[0].futures.length, 1);
+                assert.equal(subscribeMessages[0].futures[0].contractMonth, '202609');
+
+                const sentBeforeRepeat = MockWebSocket.instance.sent.length;
+                assert.equal(ctx.handleLiveSubscriptions(), false);
+                assert.equal(MockWebSocket.instance.sent.length, sentBeforeRepeat);
+                assert.equal(state.futuresPool.length, 1);
             },
         },
         {
@@ -726,9 +1633,9 @@ module.exports = {
             name: 'builds MES and MNQ live subscriptions with micro FUT and FOP multipliers',
             run() {
                 [
-                    { symbol: 'MES', multiplier: '5', strike: 5400 },
-                    { symbol: 'MNQ', multiplier: '2', strike: 19500 },
-                ].forEach(({ symbol, multiplier, strike }) => {
+                    { symbol: 'MES', multiplier: '5', strike: 5400, referenceSymbol: 'SPX' },
+                    { symbol: 'MNQ', multiplier: '2', strike: 19500, referenceSymbol: 'NDX' },
+                ].forEach(({ symbol, multiplier, strike, referenceSymbol }) => {
                     const state = {
                         underlyingSymbol: symbol,
                         underlyingContractMonth: '',
@@ -822,6 +1729,12 @@ module.exports = {
                     assert.equal(firstMessage.options[0].underlyingMultiplier, multiplier);
                     assert.equal(firstMessage.options[0].underlyingContractMonth, '202606');
                     assert.equal(Object.prototype.hasOwnProperty.call(firstMessage.options[0], 'tradingClass'), false);
+                    assert.equal(firstMessage.carryReferences.length, 1);
+                    assert.equal(firstMessage.carryReferences[0].id, 'spot');
+                    assert.equal(firstMessage.carryReferences[0].secType, 'IND');
+                    assert.equal(firstMessage.carryReferences[0].symbol, referenceSymbol);
+                    assert.equal(firstMessage.carryReferences[0].currency, 'USD');
+                    assert.equal(firstMessage.carryReferences[0].purpose, 'diagnostic_net_carry_reference');
                 });
             },
         },
@@ -3351,6 +4264,189 @@ module.exports = {
             },
         },
         {
+            name: 'refreshes and invalidates collapsed INDEX parity carry from the live data path',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPX',
+                    underlyingPrice: 6300,
+                    liveQuoteDate: '2026-07-17',
+                    liveQuoteAsOf: '2026-07-17T20:00:00Z',
+                    simulatedDate: '2026-07-17',
+                    baseDate: '2026-07-17',
+                    interestRate: 0,
+                    useMarketDiscountCurve: true,
+                    forwardRatePanelCollapsed: true,
+                    forwardRateSamples: [{
+                        id: 'sample_jul20',
+                        expDate: '2026-07-20',
+                        daysToExpiry: 3,
+                        strike: 6300,
+                        carryRate: 9,
+                        forwardPrice: 9999,
+                        isStale: false,
+                    }],
+                    groups: [],
+                    hedges: [],
+                    futuresPool: [],
+                };
+                let derivedRefreshes = 0;
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/market_curves.js',
+                        'js/product_registry.js',
+                        'js/index_forward_rate.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() { derivedRefreshes += 1; },
+                        flashElement() {},
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        document: {
+                            activeElement: null,
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                MockWebSocket.instance.onopen();
+                const subscribe = MockWebSocket.instance.sent
+                    .map(message => JSON.parse(message))
+                    .find(message => message.action === 'subscribe');
+                const requests = Object.fromEntries(subscribe.options.map(request => [request.id, request]));
+                const callId = '__forward_rate_sample_jul20_call';
+                const putId = '__forward_rate_sample_jul20_put';
+                const expiryAsOf = '2026-07-20T13:30:00.000Z';
+                const quoteAsOf = '2026-07-17T20:00:00.000Z';
+                const optionQuote = (request, bid, ask, extra = {}) => ({
+                    bid,
+                    ask,
+                    mark: (bid + ask) / 2,
+                    markSource: 'bid_ask_mid',
+                    bidPresent: true,
+                    askPresent: true,
+                    bidAskValid: ask >= bid,
+                    bidAskStatus: ask >= bid ? 'two_sided' : 'crossed',
+                    quoteAsOf,
+                    expiryAsOf,
+                    expiryTimingSource: 'ib_contract_details',
+                    contractIdentitySource: 'ib_contract_details',
+                    lastTradeDate: '20260720',
+                    lastTradeTime: '09:30:00',
+                    timeZoneId: 'US/Eastern',
+                    conId: request.right === 'C' ? 101 : 102,
+                    localSymbol: request.right === 'C' ? 'SPXW C' : 'SPXW P',
+                    secType: request.secType,
+                    symbol: request.symbol,
+                    right: request.right,
+                    strike: request.strike,
+                    optionExpiry: request.expDate,
+                    tradingClass: request.tradingClass,
+                    multiplier: request.multiplier,
+                    ...extra,
+                });
+                const underlyingQuote = {
+                    bid: 6299.5,
+                    ask: 6300.5,
+                    mark: 6300,
+                    markSource: 'market_price',
+                    bidPresent: true,
+                    askPresent: true,
+                    bidAskValid: true,
+                    bidAskStatus: 'two_sided',
+                    quoteAsOf,
+                };
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: quoteAsOf,
+                    underlyingPrice: 6300,
+                    underlyingQuote,
+                    options: {
+                        [callId]: optionQuote(requests[callId], 5.1, 5.3),
+                        [putId]: optionQuote(requests[putId], 4.9, 5.1),
+                    },
+                });
+
+                const sample = state.forwardRateSamples[0];
+                const expectedSeconds = (Date.parse(expiryAsOf) - Date.parse(quoteAsOf)) / 1000;
+                assert.equal(sample.isStale, false);
+                assert.equal(sample.tenorSeconds, expectedSeconds);
+                assert.equal(sample.tenorDays, expectedSeconds / 86400);
+                assert.ok(Number.isFinite(sample.carryRate));
+                assert.notEqual(sample.forwardPrice, 9999);
+
+                const beforeCurveForward = sample.forwardPrice;
+                MockWebSocket.instance.onmessage({
+                    data: JSON.stringify({
+                        action: 'discount_curve_snapshot',
+                        curve: {
+                            schemaVersion: 2,
+                            kind: 'hybrid_discount_curve',
+                            snapshotId: 'usd:test-index-parity',
+                            curveAsOf: '2026-07-17',
+                            effectiveDate: '2026-07-17',
+                            availableAsOf: quoteAsOf,
+                            source: 'test',
+                            curveSemantics: { discountingIsApproximate: true },
+                            points: [
+                                { tenorDays: 1, zeroRate: 0.10, discountFactor: Math.exp(-0.10 / 365), proxy: true },
+                                { tenorDays: 365, zeroRate: 0.10, discountFactor: Math.exp(-0.10), proxy: true },
+                            ],
+                        },
+                    }),
+                });
+                assert.ok(Math.abs(sample.discountRate - 0.10) < 1e-12);
+                assert.notEqual(sample.forwardPrice, beforeCurveForward);
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:00:10.000Z',
+                    options: {
+                        [callId]: optionQuote(requests[callId], 5.4, 5.2, {
+                            quoteAsOf: '2026-07-17T20:00:10.000Z',
+                        }),
+                    },
+                });
+                assert.equal(sample.carryRate, null);
+                assert.equal(sample.forwardPrice, null);
+                assert.equal(sample.isStale, true);
+                assert.equal(sample.unavailableReason, 'call_bbo_unavailable');
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:00:20.000Z',
+                    options: {
+                        [callId]: optionQuote(requests[callId], 5.1, 5.3, {
+                            quoteAsOf: '2026-07-17T20:00:20.000Z',
+                            strike: 6305,
+                        }),
+                    },
+                });
+                assert.equal(sample.carryRate, null);
+                assert.equal(sample.isStale, true);
+                assert.match(sample.unavailableReason, /bbo_unavailable/);
+                assert.ok(derivedRefreshes > 0);
+            },
+        },
+        {
             name: 'caches live bid ask snapshots for browser-side quote consumers',
             run() {
                 const state = {
@@ -3472,6 +4568,31 @@ module.exports = {
                 assert.equal(stockQuote.ask, 284.2);
                 assert.equal(state.groups[0].legs[0].currentPrice, 1.23);
                 assert.equal(state.hedges[0].currentPrice, 284.1);
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-03-19T14:00:00Z',
+                    options: {
+                        leg_slv_call: {
+                            mark: 0.10,
+                            bid: 0,
+                            ask: 0.20,
+                            iv: 0.31,
+                            markSource: 'bid_ask_mid',
+                            bidPresent: true,
+                            askPresent: true,
+                            bidAskValid: true,
+                            bidAskStatus: 'two_sided',
+                            quoteAsOf: '2026-03-19T14:00:00Z',
+                        },
+                    },
+                });
+                const zeroBidQuote = ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_slv_call');
+                assert.equal(zeroBidQuote.bid, 0);
+                assert.equal(zeroBidQuote.ask, 0.20);
+                assert.equal(zeroBidQuote.bidPresent, true);
+                assert.equal(zeroBidQuote.bidAskValid, true);
+                assert.equal(zeroBidQuote.bidAskStatus, 'two_sided');
+                assert.equal(state.groups[0].legs[0].currentPrice, 0.10);
             },
         },
         {
@@ -3539,11 +4660,19 @@ module.exports = {
                             bid: 70.00,
                             ask: 70.20,
                             mark: 70.10,
+                            quoteAsOf: '2026-03-19T14:00:00Z',
+                            lastTradeDate: '20260420',
+                            localSymbol: 'CLJ6',
+                            conId: 12345,
                         },
                     },
                 });
 
                 assert.equal(state.futuresPool[0].mark, 70.10);
+                assert.equal(state.futuresPool[0].quoteAsOf, '2026-03-19T14:00:00Z');
+                assert.equal(state.futuresPool[0].lastTradeDate, '20260420');
+                assert.equal(state.futuresPool[0].localSymbol, 'CLJ6');
+                assert.equal(state.futuresPool[0].conId, 12345);
                 assert.equal(state.groups[0].legs[0].currentPrice, 70.10);
                 assert.equal(ctx.OptionComboWsLiveQuotes.getFutureQuote('future_apr').mark, 70.10);
                 assert.equal(refreshCalls, 1);
@@ -5602,6 +6731,925 @@ module.exports = {
                 assert.equal(state.groups[0].closeExecution.lastPreview.status, 'Filled');
                 assert.equal(state.groups[0].legs[0].pos, 1);
                 assert.equal(state.groups[0].legs[1].pos, -2);
+            },
+        },
+        {
+            name: 'exposes an ES versus SPX diagnostic carry snapshot without changing the FOP pricing forward',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'ES',
+                    underlyingContractMonth: '202609',
+                    underlyingPrice: 6298,
+                    simulatedDate: '2026-07-17',
+                    baseDate: '2026-07-17',
+                    liveQuoteDate: '2026-07-17',
+                    liveFuturesRequestGeneration: 1,
+                    futuresPool: [{
+                        id: 'future_sep', contractMonth: '202609',
+                        bid: null, ask: null, mark: null, lastQuotedAt: null,
+                    }],
+                    groups: [],
+                    hedges: [],
+                };
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/market_holidays.js',
+                        'js/date_utils.js',
+                        'js/product_registry.js',
+                        'js/market_curves.js',
+                        'js/index_forward_rate.js',
+                        'js/pricing_context.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:00:00Z',
+                    futures: {
+                        future_sep: {
+                            secType: 'FUT', symbol: 'ES', currency: 'USD',
+                            exchange: 'CME', multiplier: '50',
+                            localSymbol: 'ESU6', conId: 60901,
+                            bid: 6299, ask: 6301, mark: 6300,
+                            quoteAsOf: '2026-07-17T20:00:00Z',
+                            contractMonth: '202609',
+                            contractMonthSource: 'ib_contract_details',
+                            lastTradeDate: '20260918',
+                            requestIdentityVerified: true,
+                            requestGeneration: 1,
+                            requestId: 'isolated_test_generation_1',
+                            requestedSecType: 'FUT',
+                            requestedSymbol: 'ES',
+                            requestedExchange: 'CME',
+                            requestedCurrency: 'USD',
+                            requestedMultiplier: '50',
+                            requestedContractMonth: '202609',
+                        },
+                    },
+                    carryReferences: {
+                        spot: {
+                            secType: 'IND', symbol: 'SPX', currency: 'USD',
+                            bid: 6279, ask: 6281, mark: 6280,
+                            quoteAsOf: '2026-07-17T20:00:00Z',
+                        },
+                    },
+                });
+
+                const reference = ctx.OptionComboWsLiveQuotes.getCarryReferenceQuote('spot');
+                assert.equal(reference.symbol, 'SPX');
+                assert.equal(reference.mark, 6280);
+                const snapshot = ctx.OptionComboWsLiveQuotes.getForwardCarrySnapshot();
+                assert.equal(snapshot.family, 'ES');
+                assert.equal(snapshot.reference.symbol, 'SPX');
+                assert.equal(snapshot.points[0].forwardPrice, 6300);
+                assert.ok(Number.isFinite(snapshot.points[0].carryRate));
+                const legForward = ctx.OptionComboPricingContext.resolveLegForwardObservation(
+                    state,
+                    { type: 'call', underlyingFutureId: 'future_sep' }
+                );
+                assert.equal(legForward.source, 'bound_futures_quote');
+                assert.equal(legForward.forwardPrice, 6300);
+            },
+        },
+        {
+            name: 'automatically loads and refreshes the live discount curve by default',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    useMarketDiscountCurve: true,
+                    discountCurve: null,
+                    discountCurveLastError: '',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 600,
+                    simulatedDate: '2026-07-19',
+                    baseDate: '2026-07-19',
+                    groups: [],
+                    hedges: [],
+                    futuresPool: [],
+                    forwardRateSamples: [],
+                };
+                const refreshIntervals = [];
+                let derivedRefreshes = 0;
+                let controlRefreshes = 0;
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(message);
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    ['js/session_logic.js', 'js/product_registry.js', 'js/ws_client.js'],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {
+                            derivedRefreshes += 1;
+                        },
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        setInterval(handler, delay) {
+                            refreshIntervals.push({ handler, delay });
+                            return refreshIntervals.length;
+                        },
+                        OptionComboControlPanelUI: {
+                            refreshBoundDynamicControls() {
+                                controlRefreshes += 1;
+                            },
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                MockWebSocket.instance.onopen();
+                const initialActions = MockWebSocket.instance.sent.map(message => JSON.parse(message).action);
+                assert.equal(initialActions.includes('request_discount_curve'), true);
+                assert.equal(
+                    initialActions[0],
+                    'request_discount_curve',
+                    'discount curve must be requested before market-data subscription work'
+                );
+                assert.equal(refreshIntervals.length, 2);
+                assert.ok(refreshIntervals.some(entry => entry.delay === 5 * 1000));
+                assert.ok(refreshIntervals.some(entry => entry.delay === 6 * 60 * 60 * 1000));
+
+                assert.equal(ctx.requestDiscountCurveSnapshot({ manual: true, refresh: true }), true);
+                assert.equal(state.discountCurveRequestPending, true);
+                assert.deepEqual(
+                    JSON.parse(MockWebSocket.instance.sent[MockWebSocket.instance.sent.length - 1]),
+                    {
+                        action: 'request_discount_curve',
+                        refresh: true,
+                        requestedBy: 'manual_control',
+                    }
+                );
+
+                MockWebSocket.instance.onmessage({
+                    data: JSON.stringify({
+                        action: 'discount_curve_snapshot',
+                        status: 'refreshed',
+                        error: '',
+                        curve: {
+                            schemaVersion: 1,
+                            kind: 'treasury_discount_curve',
+                            effectiveDate: '2026-07-17',
+                            quoteAsOf: '2026-07-17T19:30:00Z',
+                            source: 'us_treasury_nominal_cmt',
+                            points: [
+                                { tenorCode: '1M', tenorDays: 31, parYield: 0.043 },
+                                { tenorCode: '1Y', tenorDays: 365, parYield: 0.041 },
+                            ],
+                            curveSemantics: 'cmt_par_yield',
+                        },
+                    }),
+                });
+
+                const cachedCurve = state.discountCurve;
+                assert.equal(cachedCurve.kind, 'discount');
+                assert.equal(cachedCurve.asOf, '2026-07-17');
+                assert.equal(cachedCurve.isProxy, true);
+                assert.equal(state.discountCurveLastError, '');
+                assert.equal(state.discountCurveRequestPending, false);
+                assert.equal(state.discountCurveLastLoadWasManual, true);
+                assert.equal(state.discountCurveLastResponseStatus, 'refreshed');
+                assert.equal(derivedRefreshes, 1);
+                assert.equal(controlRefreshes, 2);
+
+                MockWebSocket.instance.onmessage({
+                    data: JSON.stringify({
+                        action: 'discount_curve_snapshot',
+                        status: 'unavailable',
+                        error: 'Treasury feed is temporarily unavailable.',
+                        curve: null,
+                    }),
+                });
+                assert.equal(state.discountCurve, cachedCurve);
+                assert.equal(state.discountCurveLastError, 'Treasury feed is temporarily unavailable.');
+                assert.equal(derivedRefreshes, 1);
+                assert.equal(controlRefreshes, 3);
+
+                MockWebSocket.instance.sent.length = 0;
+                refreshIntervals.find(entry => entry.delay === 6 * 60 * 60 * 1000).handler();
+                assert.deepEqual(
+                    MockWebSocket.instance.sent.map(message => JSON.parse(message).action),
+                    ['request_discount_curve']
+                );
+            },
+        },
+        {
+            name: 'marks strict projection quotes stale on feed timeout and websocket close',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    useMarketDiscountCurve: false,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 600,
+                    simulatedDate: '2026-07-20',
+                    baseDate: '2026-07-20',
+                    groups: [],
+                    hedges: [],
+                    futuresPool: [],
+                    forwardRateSamples: [],
+                };
+                const intervals = [];
+                let derivedRefreshes = 0;
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/official_exchange_calendars.generated.js',
+                        'js/market_holidays.js',
+                        'js/date_utils.js',
+                        'js/product_registry.js',
+                        'js/market_curves.js',
+                        'js/index_forward_rate.js',
+                        'js/pricing_context.js',
+                        'js/session_logic.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() { derivedRefreshes += 1; },
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        setTimeout() { return 1; },
+                        clearTimeout() {},
+                        setInterval(handler, delay) {
+                            intervals.push({ handler, delay });
+                            return intervals.length;
+                        },
+                        flashElement() {},
+                        OptionComboControlPanelUI: {
+                            refreshBoundDynamicControls() {},
+                        },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                MockWebSocket.instance.onopen();
+                assert.equal(ctx.OptionComboWsLiveQuotes.isConnected(), true);
+                assert.equal(state.liveProjectionFeedConnected, true);
+                assert.equal(state.liveProjectionFeedStale, true);
+
+                const quoteAsOf = new Date().toISOString();
+                MockWebSocket.instance.onmessage({
+                    data: JSON.stringify({
+                        underlyingPrice: 600,
+                        underlyingQuote: { mark: 600, quoteAsOf },
+                    }),
+                });
+                assert.equal(state.liveProjectionFeedStale, false);
+                assert.ok(Number.isFinite(Date.parse(state.liveProjectionLastReceivedAt)));
+
+                state.liveProjectionLastReceivedAt = new Date(Date.now() - 120001).toISOString();
+                const watchdog = intervals.find(entry => entry.delay === 5000);
+                assert.ok(watchdog);
+                const beforeTimeoutRefresh = derivedRefreshes;
+                watchdog.handler();
+                assert.equal(state.liveProjectionFeedStale, true);
+                assert.ok(derivedRefreshes > beforeTimeoutRefresh);
+
+                state.liveProjectionFeedStale = false;
+                const beforeCloseRefresh = derivedRefreshes;
+                MockWebSocket.instance.onclose();
+                assert.equal(ctx.OptionComboWsLiveQuotes.isConnected(), false);
+                assert.equal(state.liveProjectionFeedConnected, false);
+                assert.equal(state.liveProjectionFeedStale, true);
+                assert.ok(derivedRefreshes > beforeCloseRefresh);
+            },
+        },
+        {
+            name: 'hydrates historical discount curves strictly as-of and rejects future replay data',
+            run() {
+                const state = {
+                    marketDataMode: 'historical',
+                    useMarketDiscountCurve: true,
+                    discountCurve: null,
+                    discountCurveLastError: '',
+                    interestRate: 0.03,
+                    baseDate: '2022-01-03',
+                    historicalQuoteDate: '2022-01-03',
+                    simulatedDate: '2022-01-03',
+                    groups: [],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    ['js/session_logic.js', 'js/product_registry.js', 'js/ws_client.js'],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        OptionComboControlPanelUI: {
+                            refreshBoundDynamicControls() {},
+                        },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const changed = ctx._applyHistoricalReplayMetadata({
+                    riskFreeRate: 0.04,
+                    historicalReplay: {
+                        effectiveDate: '2022-01-04',
+                        discountCurve: {
+                            schemaVersion: 2,
+                            kind: 'hybrid_discount_curve',
+                            snapshotId: 'usd-reference:historical-test',
+                            curveAsOf: '2022-01-04',
+                            effectiveDate: '2022-01-03',
+                            availableAsOf: '2022-01-04T23:00:00Z',
+                            source: 'nyfed:sofr+treasury:test',
+                            curveSemantics: { discountingIsApproximate: true },
+                            points: [
+                                {
+                                    tenorDays: 30,
+                                    zeroRate: 0.001,
+                                    discountFactor: Math.exp(-0.001 * 30 / 365),
+                                    proxy: true,
+                                },
+                                {
+                                    tenorDays: 365,
+                                    zeroRate: 0.004,
+                                    discountFactor: Math.exp(-0.004),
+                                    proxy: true,
+                                },
+                            ],
+                        },
+                    },
+                });
+
+                assert.equal(changed, true);
+                assert.equal(state.interestRate, 0.04);
+                assert.equal(state.discountCurve.kind, 'discount');
+                assert.equal(state.discountCurve.asOf, '2022-01-04');
+                assert.equal(state.discountCurve.effectiveDate, '2022-01-03');
+                assert.equal(state.discountCurve.isProxy, true);
+                assert.equal(state.discountCurve.snapshotId, 'usd-reference:historical-test');
+                assert.equal(state.discountCurveLastError, '');
+
+                const rejected = ctx._applyHistoricalReplayMetadata({
+                    riskFreeRate: 0.035,
+                    historicalReplay: {
+                        effectiveDate: '2021-12-31',
+                        discountCurve: {
+                            schemaVersion: 2,
+                            kind: 'sofr_discount_curve',
+                            snapshotId: 'usd-reference:future-test',
+                            curveAsOf: '2022-01-03',
+                            effectiveDate: '2021-12-31',
+                            availableAsOf: '2022-01-03T12:00:00Z',
+                            source: 'nyfed:sofr',
+                            points: [{
+                                tenorDays: 30,
+                                zeroRate: 0.001,
+                                discountFactor: Math.exp(-0.001 * 30 / 365),
+                                proxy: true,
+                            }],
+                        },
+                    },
+                });
+
+                assert.equal(rejected, true);
+                assert.equal(state.discountCurve, null);
+                assert.match(state.discountCurveLastError, /Rejected future yield curve 2022-01-03/);
+                assert.equal(state.interestRate, 0.035);
+            },
+        },
+        {
+            name: 'generation-scopes Futures Pool requests and clears wrong-contract or stale live quotes',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'ES',
+                    underlyingContractMonth: '202609',
+                    underlyingPrice: 6300,
+                    simulatedDate: '2026-07-17',
+                    baseDate: '2026-07-17',
+                    liveQuoteDate: '2026-07-17',
+                    liveQuoteAsOf: '2026-07-17T19:59:00Z',
+                    greeksEnabled: false,
+                    futuresPool: [{
+                        id: 'future_sep', contractMonth: '202609',
+                        bid: 6299, ask: 6301, mark: 6300,
+                        conId: 60901,
+                        qualifiedContractMonth: '202609',
+                        requestIdentityVerified: true,
+                        liveQuoteIdentityStatus: 'verified',
+                        secType: 'FUT', symbol: 'ES', multiplier: '50',
+                    }],
+                    comboTemplateQuoteRequests: [],
+                    forwardRateSamples: [],
+                    groups: [{
+                        id: 'es_calendar',
+                        liveData: true,
+                        legs: [{
+                            id: 'es_far_call', type: 'call', pos: 1,
+                            strike: 6300, expDate: '2026-07-20',
+                            underlyingFutureId: 'future_sep',
+                        }],
+                    }],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/session_logic.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/ws_client.js',
+                ], {
+                    state,
+                    renderGroups() {},
+                    updateDerivedValues() {},
+                    flashElement() {},
+                    requestAnimationFrame(callback) { callback(); return 1; },
+                    document: {
+                        getElementById() { return null; },
+                        querySelector() { return null; },
+                        querySelectorAll() { return []; },
+                    },
+                    localStorage: { getItem() { return null; }, setItem() {} },
+                    location: { protocol: 'file:', hostname: '' },
+                    WebSocket: MockWebSocket,
+                });
+
+                const futureQuote = (overrides = {}) => ({
+                    bid: 6299,
+                    ask: 6301,
+                    mark: 6300,
+                    quoteAsOf: '2026-07-17T20:00:00Z',
+                    conId: 60901,
+                    secType: 'FUT',
+                    symbol: 'ES',
+                    localSymbol: 'ESU6',
+                    exchange: 'CME',
+                    currency: 'USD',
+                    multiplier: '50.0',
+                    contractMonth: '202609',
+                    contractMonthSource: 'ib_contract_details',
+                    lastTradeDate: '20260918',
+                    ...overrides,
+                });
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                const subscribeMessages = () => MockWebSocket.instance.sent
+                    .map(message => JSON.parse(message))
+                    .filter(message => message.action === 'subscribe');
+                const firstSubscribe = subscribeMessages()[0];
+                const firstWireId = firstSubscribe.futures[0].id;
+                assert.equal(firstSubscribe.futuresRequestGeneration, 1);
+                assert.match(firstWireId, /^frqg1x/);
+                assert.equal(state.futuresPool[0].mark, null);
+                assert.equal(state.futuresPool[0].liveQuoteIdentityStatus, 'pending');
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:00:00Z',
+                    futures: { [firstWireId]: futureQuote() },
+                });
+                assert.equal(state.futuresPool[0].mark, 6300);
+                assert.equal(state.futuresPool[0].qualifiedContractMonth, '202609');
+                assert.equal(state.futuresPool[0].liveQuoteIdentityStatus, 'verified');
+                assert.equal(state.futuresPool[0].liveQuoteRequestGeneration, 1);
+                assert.equal(ctx.OptionComboWsLiveQuotes.getFutureQuote('future_sep').mark, 6300);
+
+                const subscribeCountBeforeDuplicate = subscribeMessages().length;
+                assert.equal(ctx.handleLiveSubscriptions(), false);
+                assert.equal(subscribeMessages().length, subscribeCountBeforeDuplicate);
+                assert.equal(state.futuresPool[0].mark, 6300);
+
+                ctx.handleLiveSubscriptions({ force: true });
+                const secondSubscribe = subscribeMessages().at(-1);
+                const secondWireId = secondSubscribe.futures[0].id;
+                assert.equal(secondSubscribe.futuresRequestGeneration, 2);
+                assert.notEqual(secondWireId, firstWireId);
+                assert.equal(state.futuresPool[0].mark, null);
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:00:10Z',
+                    futures: { [firstWireId]: futureQuote({ quoteAsOf: '2026-07-17T20:00:10Z' }) },
+                });
+                assert.equal(state.futuresPool[0].mark, null);
+                assert.equal(state.futuresPool[0].liveQuoteIdentityStatus, 'pending');
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:00:20Z',
+                    futures: {
+                        [secondWireId]: futureQuote({
+                            quoteAsOf: '2026-07-17T20:00:20Z',
+                            contractMonth: '202612',
+                            lastTradeDate: '20261218',
+                        }),
+                    },
+                });
+                assert.equal(state.futuresPool[0].mark, null);
+                assert.equal(state.futuresPool[0].bid, null);
+                assert.equal(state.futuresPool[0].ask, null);
+                assert.equal(state.futuresPool[0].liveQuoteIdentityStatus, 'rejected');
+                assert.match(state.futuresPool[0].liveQuoteIdentityReason, /contract month mismatch/);
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:00:30Z',
+                    futures: {
+                        [secondWireId]: futureQuote({
+                            quoteAsOf: '2026-07-17T20:00:30Z',
+                            conId: 99999,
+                        }),
+                    },
+                });
+                assert.equal(state.futuresPool[0].mark, null);
+                assert.match(state.futuresPool[0].liveQuoteIdentityReason, /conId mismatch/);
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:00:40Z',
+                    futures: {
+                        [secondWireId]: futureQuote({ quoteAsOf: '2026-07-17T20:00:40Z' }),
+                    },
+                });
+                assert.equal(state.futuresPool[0].mark, 6300);
+                assert.equal(state.futuresPool[0].liveQuoteRequestGeneration, 2);
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:02:41Z',
+                    underlyingPrice: 6302,
+                    underlyingQuote: {
+                        mark: 6302,
+                        quoteAsOf: '2026-07-17T20:02:41Z',
+                    },
+                });
+                assert.equal(state.futuresPool[0].mark, null);
+                assert.equal(state.futuresPool[0].bid, null);
+                assert.equal(state.futuresPool[0].ask, null);
+                assert.match(state.futuresPool[0].liveQuoteIdentityReason, /stale/);
+                const unavailable = ctx.OptionComboPricingContext.resolveLegForwardObservation(
+                    state,
+                    state.groups[0].legs[0]
+                );
+                assert.equal(unavailable.usable, false);
+            },
+        },
+        {
+            name: 'accepts an energy future whose last trade date precedes its delivery month',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'CL',
+                    underlyingContractMonth: '202609',
+                    underlyingPrice: 64.5,
+                    simulatedDate: '2026-07-17',
+                    baseDate: '2026-07-17',
+                    liveQuoteDate: '2026-07-17',
+                    liveQuoteAsOf: '2026-07-17T19:59:00Z',
+                    greeksEnabled: false,
+                    futuresPool: [{
+                        id: 'future_sep', contractMonth: '202609',
+                        conId: null,
+                        secType: 'FUT', symbol: 'CL',
+                        exchange: 'NYMEX', currency: 'USD', multiplier: '1000',
+                    }],
+                    comboTemplateQuoteRequests: [],
+                    forwardRateSamples: [],
+                    groups: [{
+                        id: 'cl_calendar',
+                        liveData: true,
+                        legs: [{
+                            id: 'cl_call', type: 'call', pos: 1,
+                            strike: 65, expDate: '2026-08-17',
+                            underlyingFutureId: 'future_sep',
+                        }],
+                    }],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/session_logic.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/ws_client.js',
+                ], {
+                    state,
+                    renderGroups() {},
+                    updateDerivedValues() {},
+                    flashElement() {},
+                    requestAnimationFrame(callback) { callback(); return 1; },
+                    document: {
+                        getElementById() { return null; },
+                        querySelector() { return null; },
+                        querySelectorAll() { return []; },
+                    },
+                    localStorage: { getItem() { return null; }, setItem() {} },
+                    location: { protocol: 'file:', hostname: '' },
+                    WebSocket: MockWebSocket,
+                });
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                const subscribe = MockWebSocket.instance.sent
+                    .map(message => JSON.parse(message))
+                    .find(message => message.action === 'subscribe');
+                const wireId = subscribe.futures[0].id;
+
+                // CLU6 delivers in Sep 2026 but stops trading 2026-08-20.  The
+                // delivery month is only knowable from ContractDetails.
+                const clQuote = (overrides = {}) => ({
+                    bid: 64.4, ask: 64.6, mark: 64.5,
+                    quoteAsOf: '2026-07-17T20:00:00Z',
+                    conId: 70102,
+                    secType: 'FUT', symbol: 'CL', localSymbol: 'CLU6',
+                    exchange: 'NYMEX', currency: 'USD', multiplier: '1000',
+                    contractMonth: '202609',
+                    contractMonthSource: 'ib_contract_details',
+                    lastTradeDate: '20260820',
+                    ...overrides,
+                });
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:00:00Z',
+                    futures: { [wireId]: clQuote() },
+                });
+                assert.equal(state.futuresPool[0].mark, 64.5);
+                assert.equal(state.futuresPool[0].liveQuoteIdentityStatus, 'verified');
+                assert.equal(state.futuresPool[0].qualifiedContractMonth, '202609');
+
+                // Without ContractDetails evidence the month is only a guess,
+                // so it must be reported unverified rather than silently trusted.
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-17T20:00:10Z',
+                    futures: {
+                        [wireId]: clQuote({
+                            quoteAsOf: '2026-07-17T20:00:10Z',
+                            contractMonth: '202608',
+                            contractMonthSource: 'last_trade_date',
+                        }),
+                    },
+                });
+                assert.equal(state.futuresPool[0].mark, null);
+                assert.equal(state.futuresPool[0].liveQuoteIdentityStatus, 'rejected');
+                assert.match(
+                    state.futuresPool[0].liveQuoteIdentityReason,
+                    /contract month unverified/
+                );
+                assert.equal(state.futuresPool[0].qualifiedContractMonth, '');
+            },
+        },
+        {
+            name: 'flags option legs the backend could not qualify instead of leaving them silently unquoted',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'QQQ',
+                    groups: [
+                        {
+                            id: 'group_live',
+                            liveData: true,
+                            legs: [
+                                { id: 'leg_missing', type: 'call', strike: 585, expDate: '2026-08-21', currentPrice: 4.2 },
+                                { id: 'leg_ok', type: 'put', strike: 570, expDate: '2026-08-21', currentPrice: 3.1 },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                const warningCalls = [];
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        OptionComboGroupEditorUI: {
+                            applyLiveSubscriptionWarnings(passedState) {
+                                warningCalls.push(passedState);
+                            },
+                        },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const handled = ctx._handleOptionSubscriptionStatusMessage({
+                    action: 'option_subscription_status',
+                    unresolved: [
+                        {
+                            id: 'leg_missing',
+                            reason: 'contract_not_found',
+                            symbol: 'QQQ',
+                            right: 'C',
+                            strike: 585,
+                            expDate: '20260821',
+                        },
+                    ],
+                });
+
+                assert.equal(handled, true);
+
+                const flagged = state.groups[0].legs[0];
+                assert.equal(flagged.liveQuoteIdentityStatus, 'not_found');
+                assert.equal(flagged.currentPrice, null);
+                assert.equal(flagged.currentPriceSource, 'missing');
+                assert.match(flagged.liveQuoteIdentityReason, /QQQ 2026-08-21 C 585/);
+                assert.match(flagged.liveQuoteIdentityReason, /no matching contract/i);
+
+                // A leg that did qualify must keep its quote untouched.
+                const untouched = state.groups[0].legs[1];
+                assert.equal(untouched.currentPrice, 3.1);
+                assert.equal(untouched.liveQuoteIdentityStatus, undefined);
+
+                assert.equal(state.liveSubscriptionUnresolvedById.leg_missing.reason, 'contract_not_found');
+                assert.equal(warningCalls.length, 1);
+
+                // An all-clear report clears the map so a re-resolved strike stops warning.
+                ctx._handleOptionSubscriptionStatusMessage({
+                    action: 'option_subscription_status',
+                    unresolved: [],
+                });
+                assert.equal(Object.keys(state.liveSubscriptionUnresolvedById).length, 0);
+                assert.equal(warningCalls.length, 2);
+            },
+        },
+        {
+            name: 'propagates an unresolved contract to duplicate legs that shared one deduped subscription',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'QQQ',
+                    groups: [
+                        {
+                            id: 'group_a',
+                            liveData: true,
+                            legs: [{ id: 'leg_canonical', type: 'call', pos: 1, strike: 585, expDate: '2026-08-21' }],
+                        },
+                        {
+                            // Same contract in a second group: deduped away, so the
+                            // backend only ever names leg_canonical.
+                            id: 'group_b',
+                            liveData: true,
+                            legs: [{ id: 'leg_duplicate', type: 'call', pos: -1, strike: 585, expDate: '2026-08-21' }],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const optionRequest = (id) => ({
+                    id,
+                    secType: 'OPT',
+                    symbol: 'QQQ',
+                    expDate: '20260821',
+                    strike: 585,
+                    right: 'C',
+                    exchange: 'SMART',
+                    currency: 'USD',
+                    multiplier: '100',
+                    tradingClass: 'QQQ',
+                });
+
+                const deduped = ctx._dedupeOptionRequestsForSubscription([
+                    optionRequest('leg_canonical'),
+                    optionRequest('leg_duplicate'),
+                ]);
+                assert.equal(deduped.length, 1);
+                assert.equal(deduped[0].id, 'leg_canonical');
+
+                ctx._handleOptionSubscriptionStatusMessage({
+                    action: 'option_subscription_status',
+                    unresolved: [{
+                        id: 'leg_canonical',
+                        reason: 'contract_not_found',
+                        symbol: 'QQQ',
+                        right: 'C',
+                        strike: 585,
+                        expDate: '20260821',
+                    }],
+                });
+
+                // Both legs must warn, not just the one the backend named.
+                assert.equal(state.groups[0].legs[0].liveQuoteIdentityStatus, 'not_found');
+                assert.equal(state.groups[1].legs[0].liveQuoteIdentityStatus, 'not_found');
+                assert.equal(state.groups[1].legs[0].currentPriceSource, 'missing');
+                assert.equal(
+                    state.liveSubscriptionUnresolvedById.leg_duplicate.label,
+                    'QQQ 2026-08-21 C 585'
+                );
             },
         },
     ],
