@@ -22,12 +22,11 @@
 
     function formatOptionRedundancyBucket(label, bucket) {
         const summary = bucket && typeof bucket === 'object' ? bucket : {};
-        const redundantContracts = Number(summary.redundantContracts);
-        if (!Number.isFinite(redundantContracts) || Math.abs(redundantContracts) < 0.000001) {
+        const netContracts = Number(summary.netContracts);
+        if (!Number.isFinite(netContracts) || Math.abs(netContracts) < 0.000001) {
             return `${label} 0`;
         }
-        const direction = summary.direction === 'short' ? 'Short' : 'Long';
-        return `${label} ${direction} ${formatContractQuantity(redundantContracts)}`;
+        return `${label} ${netContracts > 0 ? '+' : ''}${formatContractQuantity(netContracts)}`;
     }
 
     function formatOptionLegRedundancyTitle(optionLegRedundancy) {
@@ -54,13 +53,97 @@
         valueEl.title = formatOptionLegRedundancyTitle(summary);
     }
 
+    function formatSignedQuantity(value, suffix = '') {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) {
+            return `--${suffix}`;
+        }
+        const formatted = Math.abs(parsed).toLocaleString(undefined, {
+            maximumFractionDigits: 4,
+        });
+        return `${parsed > 0 ? '+' : (parsed < 0 ? '-' : '')}${formatted}${suffix}`;
+    }
+
+    function formatProjectedOptionDelivery(result) {
+        const delivery = result && typeof result === 'object' ? result : {};
+        if (delivery.status === 'cash_settled') {
+            return {
+                html: '<span class="text-muted">Cash settled</span>',
+                title: 'This product is cash-settled, so option expiry does not create an underlying position.',
+            };
+        }
+        if (delivery.status === 'non_equity_delivery') {
+            return {
+                html: '<span class="text-muted">Futures delivery</span>',
+                title: 'This compact share projection is only shown for equity-deliverable options. Futures-option delivery remains contract-specific.',
+            };
+        }
+        if (delivery.available !== true) {
+            const reason = delivery.status === 'current_price_unavailable'
+                ? 'Current underlying price is unavailable.'
+                : 'Simulation date is unavailable.';
+            return {
+                html: '<span class="text-muted">Expiry: --</span>',
+                title: `Projected expiry delivery is unavailable. ${reason}`,
+            };
+        }
+
+        const callContracts = Number(delivery.callContracts) || 0;
+        const putContracts = Number(delivery.putContracts) || 0;
+        const netDeliverables = Number(delivery.netDeliverables) || 0;
+        const contractParts = [];
+        if (Math.abs(callContracts) > 0.000001) {
+            contractParts.push(`${formatSignedQuantity(callContracts)} CALL`);
+        }
+        if (Math.abs(putContracts) > 0.000001) {
+            contractParts.push(`${formatSignedQuantity(putContracts)} PUT`);
+        }
+        if (contractParts.length === 0) {
+            contractParts.push('0 ITM');
+        }
+        const symbol = String(delivery.underlyingSymbol || 'Underlying').trim().toUpperCase();
+        const valueClass = netDeliverables > 0
+            ? 'success-text'
+            : (netDeliverables < 0 ? 'danger-text' : 'text-muted');
+        const priceText = Number.isFinite(delivery.referencePrice)
+            ? ` at a fixed current ${symbol} price of ${delivery.referencePrice.toLocaleString(undefined, { maximumFractionDigits: 4 })}`
+            : '';
+        const unitLabel = Math.abs(netDeliverables) === 1
+            ? (delivery.deliverableUnitSingular || 'share')
+            : (delivery.deliverableUnitPlural || 'shares');
+        return {
+            html: `<span class="${valueClass}">${contractParts.join(' / ')} &rarr; ${formatSignedQuantity(netDeliverables)} ${symbol}</span>`,
+            title: `Assuming the current underlying price stays unchanged${priceText}, open in-the-money options expiring on or before ${delivery.simulationDate} in Groups included in global totals project to ${formatSignedQuantity(netDeliverables)} ${unitLabel}. Unchecked Groups, closed legs, and later expiries are excluded.`,
+        };
+    }
+
+    function applyProjectedOptionDelivery(derivedData) {
+        const valueEl = document.getElementById('projectedOptionDelivery');
+        if (!valueEl) {
+            return;
+        }
+        const formatted = formatProjectedOptionDelivery(derivedData && derivedData.projectedOptionDelivery);
+        valueEl.innerHTML = formatted.html;
+        valueEl.title = formatted.title;
+    }
+
     function applyGlobalDerivedData(derivedData, currencyFormatter, chartApi) {
         document.getElementById('totalCost').textContent = currencyFormatter.format(derivedData.globalTotalCost);
         document.getElementById('simulatedValue').textContent = Number.isFinite(derivedData.globalSimulatedValue)
             ? currencyFormatter.format(derivedData.globalSimulatedValue)
             : 'N/A';
         document.getElementById('unrealizedPnL').innerHTML = formatSignedCurrencyValue(currencyFormatter, derivedData.globalPnL, 'profit', 'loss');
+        const allGroupsNetCashFlowValue = document.getElementById('allGroupsNetCashFlowValue');
+        if (allGroupsNetCashFlowValue) {
+            allGroupsNetCashFlowValue.innerHTML = formatSignedCurrencyValue(
+                currencyFormatter,
+                derivedData.allGroupsNetCashFlow,
+                'success-text',
+                'danger-text'
+            );
+        }
         applyOptionLegRedundancy(derivedData);
+        applyProjectedOptionDelivery(derivedData);
 
         const globalLivePnLRow = document.getElementById('globalLivePnLRow');
         if (globalLivePnLRow) {
@@ -146,5 +229,6 @@
 
     globalScope.OptionComboGlobalUI = {
         applyGlobalDerivedData,
+        formatProjectedOptionDelivery,
     };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

@@ -922,6 +922,18 @@
             : 'N/A';
         card.querySelector('.group-pnl').innerHTML = formatSignedCurrencyValue(currencyFormatter, groupResult.groupPnL, 'success-text', 'danger-text');
 
+        const netCashFlowItem = card.querySelector('.group-header-net-cash-flow-item');
+        const netCashFlowValue = card.querySelector('.group-header-net-cash-flow-value');
+        if (netCashFlowItem && netCashFlowValue) {
+            netCashFlowValue.innerHTML = buildGroupLivePnlHtml(
+                currencyFormatter,
+                groupResult.groupNetCashFlow
+            );
+            netCashFlowItem.title = groupResult.activeViewMode === 'trial'
+                ? 'Net option premium at the current Trial prices: short-option proceeds minus long-option costs. Underlying legs and commissions are excluded.'
+                : 'Net option premium from entry Cost: short-option proceeds minus long-option costs. Underlying legs and commissions are excluded.';
+        }
+
         const amContainer = card.querySelector('.amortization-container');
         const settleControls = card.querySelector('.settlement-controls');
         const simulateBtn = card.querySelector('.btn-simulate-amortized');

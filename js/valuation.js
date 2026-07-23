@@ -234,6 +234,128 @@
         };
     }
 
+    function normalizeDateKey(value) {
+        const normalized = String(value || '').trim().replace(/\//g, '-').slice(0, 10);
+        return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : '';
+    }
+
+    function computeProjectedOptionDelivery(globalState) {
+        const state = globalState && typeof globalState === 'object' ? globalState : {};
+        const profile = productRegistry.resolveUnderlyingProfile(state.underlyingSymbol);
+        const simulationDate = normalizeDateKey(
+            pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
+                ? pricingContext.resolveSimulationDate(state)
+                : state.simulatedDate
+        );
+        const underlyingSymbol = String(state.underlyingSymbol || '').trim().toUpperCase() || 'Underlying';
+        const settlementKind = String(profile && profile.settlementKind || 'equity-deliverable');
+        const settlementUnitsPerContract = normalizeFiniteNumber(
+            profile && profile.settlementUnitsPerContract,
+            0
+        );
+        const baseResult = {
+            available: false,
+            status: 'unavailable',
+            simulationDate,
+            underlyingSymbol,
+            settlementKind,
+            settlementUnitsPerContract,
+            callContracts: 0,
+            putContracts: 0,
+            netDeliverables: 0,
+            eligibleLegCount: 0,
+            itmLegCount: 0,
+            referencePrice: null,
+            deliverableUnitSingular: profile && profile.deliverableUnitSingular || 'share',
+            deliverableUnitPlural: profile && profile.deliverableUnitPlural || 'shares',
+        };
+
+        if (!simulationDate) {
+            return { ...baseResult, status: 'simulation_date_unavailable' };
+        }
+        if (settlementKind === 'cash-settled' || settlementUnitsPerContract === 0) {
+            return { ...baseResult, available: true, status: 'cash_settled' };
+        }
+        if (settlementKind !== 'equity-deliverable') {
+            return { ...baseResult, status: 'non_equity_delivery' };
+        }
+
+        const expiringLegs = [];
+        (Array.isArray(state.groups) ? state.groups : []).forEach((group) => {
+            if (!group || !isGroupIncludedInGlobal(group)) {
+                return;
+            }
+            (Array.isArray(group && group.legs) ? group.legs : []).forEach((leg) => {
+                if (!leg || isClosedLeg(leg)) {
+                    return;
+                }
+                const type = String(leg.type || '').trim().toLowerCase();
+                const expDate = normalizeDateKey(leg.expDate);
+                const position = normalizeLegPosition(leg.pos);
+                if ((type !== 'call' && type !== 'put')
+                    || !expDate
+                    || expDate > simulationDate
+                    || Math.abs(position) < 0.000001) {
+                    return;
+                }
+                expiringLegs.push({ leg, type, position });
+            });
+        });
+
+        if (expiringLegs.length === 0) {
+            return { ...baseResult, available: true, status: 'ok' };
+        }
+
+        const anchorPrice = pricingContext && typeof pricingContext.resolveAnchorUnderlyingPrice === 'function'
+            ? pricingContext.resolveAnchorUnderlyingPrice(state, state.underlyingPrice)
+            : normalizeFiniteNumber(state.underlyingPrice, null);
+        if (!Number.isFinite(anchorPrice) || anchorPrice <= 0) {
+            return {
+                ...baseResult,
+                status: 'current_price_unavailable',
+                eligibleLegCount: expiringLegs.length,
+            };
+        }
+        // Physical exercise is decided against one common settlement spot,
+        // not each leg's model/forward pricing input. This guarantees that a
+        // Call and Put sharing the same expiry and strike cannot both be ITM.
+        const referencePrice = anchorPrice;
+        let callContracts = 0;
+        let putContracts = 0;
+        let itmLegCount = 0;
+
+        for (const entry of expiringLegs) {
+            const strike = normalizeFiniteNumber(entry.leg.strike, null);
+            if (!Number.isFinite(strike)) {
+                continue;
+            }
+            const isItm = entry.type === 'call'
+                ? referencePrice > strike
+                : referencePrice < strike;
+            if (!isItm) {
+                continue;
+            }
+            itmLegCount += 1;
+            if (entry.type === 'call') {
+                callContracts += entry.position;
+            } else {
+                putContracts += entry.position;
+            }
+        }
+
+        return {
+            ...baseResult,
+            available: true,
+            status: 'ok',
+            callContracts,
+            putContracts,
+            netDeliverables: (callContracts - putContracts) * settlementUnitsPerContract,
+            eligibleLegCount: expiringLegs.length,
+            itmLegCount,
+            referencePrice,
+        };
+    }
+
     function computeHedgeDelta(hedge) {
         const position = normalizeFiniteNumber(hedge && hedge.pos, 0);
         const multiplier = normalizeFiniteNumber(hedge && hedge.multiplier, 1);
@@ -752,6 +874,7 @@
             : liveAnchorUnderlyingPrice;
 
         let groupCost = 0;
+        let groupNetCashFlow = 0;
         let groupSimValue = 0;
         let groupLivePnL = 0;
         let groupPartialCloseRealizedPnl = 0;
@@ -771,6 +894,13 @@
                 liveAnchorUnderlyingPrice
             );
             groupCost += legResult.processedLeg.costBasis;
+            if (!legResult.processedLeg.isUnderlyingLeg) {
+                // Entry premiums are cash flows in the opposite direction of
+                // their signed cost basis: short options receive cash while
+                // long options pay cash. Underlying legs are intentionally
+                // excluded from this option-premium summary.
+                groupNetCashFlow -= legResult.processedLeg.costBasis;
+            }
             groupPartialCloseRealizedPnl += legResult.partialCloseRealizedPnl || 0;
             if (legResult.simulationAvailable) {
                 groupSimValue += legResult.simValue;
@@ -801,6 +931,7 @@
             legResults,
             legResultsById: new Map(legResults.map(result => [result.id, result])),
             groupCost,
+            groupNetCashFlow,
             groupSimulationAvailable,
             groupSimValue: groupSimulationAvailable ? groupSimValue : null,
             groupPnL: groupSimulationAvailable
@@ -821,7 +952,12 @@
             : null;
         const includedGroupResults = groupResults.filter(result => result.isIncludedInGlobal);
         const optionLegRedundancy = computeOptionLegRedundancy(globalState && globalState.groups);
+        const projectedOptionDelivery = computeProjectedOptionDelivery(globalState);
 
+        const allGroupsNetCashFlow = groupResults.reduce(
+            (sum, result) => sum + (Number.isFinite(result.groupNetCashFlow) ? result.groupNetCashFlow : 0),
+            0
+        );
         const globalTotalCost = includedGroupResults.reduce((sum, result) => sum + result.groupCost, 0);
         const globalPartialCloseRealizedPnl = includedGroupResults.reduce(
             (sum, result) => sum + (result.groupPartialCloseRealizedPnl || 0),
@@ -852,6 +988,8 @@
             groupResults,
             groupResultsById: new Map(groupResults.map(result => [result.id, result])),
             optionLegRedundancy,
+            projectedOptionDelivery,
+            allGroupsNetCashFlow,
             globalTotalCost,
             globalSimulationAvailable,
             globalSimulatedValue,
@@ -910,6 +1048,7 @@
         computeHedgeDerivedData,
         computeLegDerivedData,
         computeOptionLegRedundancy,
+        computeProjectedOptionDelivery,
         resolveLegSelectedLivePrice,
         computeGroupDeltaSummary,
         computeGroupDerivedData,
