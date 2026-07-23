@@ -8,7 +8,7 @@
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260722-best-effort-payoff-v1">
+    <link rel="stylesheet" href="style.css?v=20260723-projected-delivery-v1">
 </head>
 
 <body data-option-combo-page="portfolio">
@@ -412,7 +412,10 @@
 
                         <div class="summary-item option-redundancy-summary" id="optionLegRedundancyRow">
                             <span class="label">All Groups Net Options</span>
-                            <span class="value option-redundancy-value" id="optionLegRedundancy">C 0 / P 0</span>
+                            <div class="option-redundancy-values">
+                                <span class="value option-redundancy-value" id="optionLegRedundancy">C 0 / P 0</span>
+                                <span class="value projected-delivery-value" id="projectedOptionDelivery">0 ITM &rarr; 0 SPY</span>
+                            </div>
                         </div>
 
                         <div class="summary-item" id="globalLivePnLRow"
@@ -635,7 +638,12 @@
                             </button>
                             <h2 style="margin: 0;">Combo Groups</h2>
                         </div>
-                        <div style="display: flex; gap: 0.6rem; align-items: center;">
+                        <div class="portfolio-header-actions">
+                        <div id="allGroupsNetCashFlow" class="global-net-cash-flow"
+                            title="Sum of net option cash flow across every Group, including Groups excluded from global P&amp;L and charts. Underlying legs and commissions are excluded.">
+                            <span class="global-net-cash-flow-label">Global Net Cash Flow:</span>
+                            <span id="allGroupsNetCashFlowValue" class="font-weight-semibold">+$0.00</span>
+                        </div>
                         <button class="btn btn-secondary" type="button" onclick="requestLegExistsCheck()" title="Compare all workspace group legs with net TWS positions in the selected account">
                             Check All Legs in TWS
                         </button>
@@ -933,6 +941,10 @@
                                         <input type="checkbox" class="group-global-toggle" checked>
                                     </label>
                                     <input type="text" class="group-name-input h3-style" value="New Combo">
+                                    <div class="group-header-net-cash-flow-item">
+                                        <span class="label">Net Cash Flow:</span>
+                                        <span class="group-header-net-cash-flow-value font-weight-semibold">+$0.00</span>
+                                    </div>
                                     <div class="group-order-controls" aria-label="Reorder Group">
                                         <button class="btn btn-secondary btn-sm move-group-top-btn" type="button" title="Move this group to the top">
                                             Top
@@ -1558,15 +1570,15 @@
     <script src="js/prob_charts.js?v=20260720-carry-lambda-cutoff-v3"></script>
     <script src="js/chart_controls.js?v=20260722-best-effort-payoff-v1"></script>
     <script src="js/amortized.js?v=20260720-carry-lambda-cutoff-v3"></script>
-    <script src="js/valuation.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/valuation.js?v=20260723-projected-delivery-v3"></script>
     <script src="js/session_logic.js?v=20260721-auto-future-v1"></script>
     <script src="js/session_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
     <script src="js/control_panel_ui.js?v=20260721-auto-future-v1"></script>
     <script src="js/hedge_editor_ui.js"></script>
     <script src="js/group_editor_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
     <script src="js/hedge_ui.js"></script>
-    <script src="js/group_ui.js?v=20260713-reverse-butterfly"></script>
-    <script src="js/global_ui.js"></script>
+    <script src="js/group_ui.js?v=20260723-group-cash-flow-v1"></script>
+    <script src="js/global_ui.js?v=20260723-projected-delivery-v3"></script>
     <script src="js/page_capabilities.js"></script>
     <script src="js/combo_order_transport.js?v=20260711-partial-close"></script>
     <script src="js/delta_hedge_transport.js"></script>
