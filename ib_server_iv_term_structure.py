@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -11,7 +10,11 @@ from ib_server_market_data import (
     IV_TERM_STRUCTURE_SNAPSHOT_STATE_KEY,
     build_iv_term_structure_quote_snapshot,
     cancel_mkt_data_if_unused,
+    capture_market_data_generation,
+    market_data_generation_is_current,
+    normalize_market_data_generation,
     req_mkt_data_pooled,
+    send_market_data_payload_if_current,
     server_utc_now_iso,
     stamp_quote_as_of,
 )
@@ -1046,6 +1049,15 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
     snapshot_state_id = ''
     expected_option_ids: set[str] = set()
     subscribed_option_ids: set[str] = set()
+    sync_generation = normalize_market_data_generation(
+        (sync_context or {}).get('marketDataGeneration')
+        if isinstance(sync_context, dict)
+        else None
+    )
+    if sync_generation is None:
+        sync_generation = capture_market_data_generation(env)
+    if not market_data_generation_is_current(env, sync_generation):
+        return
 
     try:
         expiry_rows = []
@@ -1149,7 +1161,12 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             normalized_message = str(message or '').strip()
             if normalized_message:
                 patch_payload['message'] = normalized_message
-            await env['send_message_safe'](websocket, json.dumps(patch_payload))
+            await send_market_data_payload_if_current(
+                env,
+                websocket,
+                patch_payload,
+                sync_generation,
+            )
 
         expiry_selections = {}
         if subscription_expiry_rows:
@@ -1245,7 +1262,10 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             nonlocal timed_out_option_count
             nonlocal subscription_error_message
 
-            if websocket not in env['client_subscriptions']:
+            if (
+                websocket not in env['client_subscriptions']
+                or not market_data_generation_is_current(env, sync_generation)
+            ):
                 return
 
             expiry = str((expiry_row or {}).get('expiry') or '').strip()
@@ -1304,7 +1324,12 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
                     'sharedAtmProbeTimedOut': shared_atm_probe_timed_out,
                     'subscriptionPending': True,
                 }
-                await env['send_message_safe'](websocket, json.dumps(patch_payload))
+                await send_market_data_payload_if_current(
+                    env,
+                    websocket,
+                    patch_payload,
+                    sync_generation,
+                )
 
                 for option_request in option_requests:
                     if websocket not in env['client_subscriptions']:
@@ -1323,6 +1348,8 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
                             qualified_option=qualified_options_by_key.get(option_key),
                             result_details=subscription_result,
                         )
+                    if not market_data_generation_is_current(env, sync_generation):
+                        return
 
                     async with progress_lock:
                         attempted_option_count += 1
@@ -1362,7 +1389,12 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
                             or attempted_count < expected_count
                         ),
                     }
-                    await env['send_message_safe'](websocket, json.dumps(patch_payload))
+                    await send_market_data_payload_if_current(
+                        env,
+                        websocket,
+                        patch_payload,
+                        sync_generation,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1408,7 +1440,12 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             'subscriptionErrorMessage': subscription_error_message,
             'sharedAtmProbeTimedOut': shared_atm_probe_timed_out,
         }
-        await env['send_message_safe'](websocket, json.dumps(complete_payload))
+        await send_market_data_payload_if_current(
+            env,
+            websocket,
+            complete_payload,
+            sync_generation,
+        )
 
         # Quotes may already have arrived while contracts were being resolved.
         # Attempt one full snapshot now; if any leg is still missing evidence,
@@ -1417,9 +1454,18 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             'client_subscription_settings' in env
             and 'market_data_quote_as_of_by_ticker_key' in env
         ):
-            full_snapshot = build_iv_term_structure_quote_snapshot(env, websocket)
+            full_snapshot = build_iv_term_structure_quote_snapshot(
+                env,
+                websocket,
+                market_data_generation=sync_generation,
+            )
             if full_snapshot is not None:
-                await env['send_message_safe'](websocket, json.dumps(full_snapshot))
+                await send_market_data_payload_if_current(
+                    env,
+                    websocket,
+                    full_snapshot,
+                    sync_generation,
+                )
     except asyncio.CancelledError:
         logging.info(
             "Cancelled IV term structure background sync for %s",
@@ -1437,22 +1483,28 @@ async def run_iv_term_structure_option_sync(env, websocket, symbol, sync_context
             'symbol': normalize_symbol(symbol),
             'message': f'Background IV option subscription failed: {exc}',
         }
-        await env['send_message_safe'](websocket, json.dumps(error_payload))
+        await send_market_data_payload_if_current(
+            env,
+            websocket,
+            error_payload,
+            sync_generation,
+        )
 
 
-async def handle_iv_term_structure_subscription(env, websocket, client_ip, data):
-    generation_getter = env.get('get_api_market_data_generation')
-    reset_in_progress = env.get('api_market_data_reset_in_progress')
-    subscription_generation = generation_getter() if callable(generation_getter) else None
+async def handle_iv_term_structure_subscription(
+    env,
+    websocket,
+    client_ip,
+    data,
+    subscription_generation=None,
+):
+    if normalize_market_data_generation(subscription_generation) is None:
+        subscription_generation = capture_market_data_generation(env)
 
     def subscription_generation_is_current():
-        return (
-            not (callable(reset_in_progress) and reset_in_progress())
-            and (
-                subscription_generation is None
-                or not callable(generation_getter)
-                or generation_getter() == subscription_generation
-            )
+        return market_data_generation_is_current(
+            env,
+            subscription_generation,
         )
 
     if not subscription_generation_is_current():
@@ -1465,7 +1517,12 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
             'symbol': normalize_symbol((data.get('underlying') or {}).get('symbol')),
             'message': 'IB is not connected.',
         }
-        await env['send_message_safe'](websocket, json.dumps(error_payload))
+        await send_market_data_payload_if_current(
+            env,
+            websocket,
+            error_payload,
+            subscription_generation,
+        )
         return
 
     raw_underlying = data.get('underlying')
@@ -1508,7 +1565,12 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
             'symbol': underlying_symbol,
             'message': f'Choose an underlying futures month for {underlying_symbol or "this FOP"} before syncing.',
         }
-        await env['send_message_safe'](websocket, json.dumps(error_payload))
+        await send_market_data_payload_if_current(
+            env,
+            websocket,
+            error_payload,
+            subscription_generation,
+        )
         return
     if underlying_sec_type == 'FUT' and underlying_contract_month and isinstance(underlying_request, dict):
         underlying_request = {
@@ -1538,7 +1600,12 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
             'symbol': underlying_symbol,
             'message': f'Invalid underlying request: {exc}',
         }
-        await env['send_message_safe'](websocket, json.dumps(error_payload))
+        await send_market_data_payload_if_current(
+            env,
+            websocket,
+            error_payload,
+            subscription_generation,
+        )
         return
 
     await cancel_iv_term_structure_sync_task(env, websocket)
@@ -1548,6 +1615,7 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
     snapshot_state_id = uuid4().hex
     client_settings[IV_TERM_STRUCTURE_SNAPSHOT_STATE_KEY] = {
         'stateId': snapshot_state_id,
+        'marketDataGeneration': subscription_generation,
         'symbol': underlying_symbol,
         'underlyingContractMonth': underlying_contract_month,
         'subscriptionComplete': False,
@@ -1573,7 +1641,12 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
             'symbol': underlying_symbol,
             'message': f'Failed to qualify underlying {underlying_description}.',
         }
-        await env['send_message_safe'](websocket, json.dumps(error_payload))
+        await send_market_data_payload_if_current(
+            env,
+            websocket,
+            error_payload,
+            subscription_generation,
+        )
         return
 
     request_option_chains = getattr(env['ib'], 'reqSecDefOptParamsAsync', None)
@@ -1584,7 +1657,12 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
             'symbol': underlying_symbol,
             'message': 'The current ib_async build does not expose reqSecDefOptParamsAsync.',
         }
-        await env['send_message_safe'](websocket, json.dumps(error_payload))
+        await send_market_data_payload_if_current(
+            env,
+            websocket,
+            error_payload,
+            subscription_generation,
+        )
         return
 
     async def resolve_chain_fields_for_underlying(current_underlying_request, current_qualified_underlying):
@@ -1695,7 +1773,12 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
             'symbol': underlying_symbol,
             'message': f'No live underlying quote is available yet for {underlying_symbol or "the requested symbol"}.',
         }
-        await env['send_message_safe'](websocket, json.dumps(error_payload))
+        await send_market_data_payload_if_current(
+            env,
+            websocket,
+            error_payload,
+            subscription_generation,
+        )
         return
 
     expiry_payload_rows = []
@@ -1774,7 +1857,12 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
             suffix = f' for {underlying_symbol} {requested_underlying_contract_month}. Try a later underlying futures month.'
         payload['warning'] = f'No option expiries were available within {max_dte} calendar days{suffix}'
 
-    await env['send_message_safe'](websocket, json.dumps(payload))
+    await send_market_data_payload_if_current(
+        env,
+        websocket,
+        payload,
+        subscription_generation,
+    )
     if expiry_payload_rows and subscription_generation_is_current():
         task = asyncio.create_task(
             run_iv_term_structure_option_sync(env, websocket, option_symbol, {
@@ -1796,6 +1884,7 @@ async def handle_iv_term_structure_subscription(env, websocket, client_ip, data)
                 'maxOptionStreams': max_option_streams,
                 'globalCandidateStrikes': merged_chain_fields.get('strikes') or [],
                 'snapshotStateId': snapshot_state_id,
+                'marketDataGeneration': subscription_generation,
             })
         )
         track_iv_term_structure_sync_task(env, websocket, task)

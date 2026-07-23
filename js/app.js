@@ -290,7 +290,7 @@ function consumePendingCalendarHandoff() {
             : null,
     });
     if (typeof handleLiveSubscriptions === 'function') {
-        handleLiveSubscriptions();
+        handleLiveSubscriptions({ automatic: true });
     }
     return true;
 }

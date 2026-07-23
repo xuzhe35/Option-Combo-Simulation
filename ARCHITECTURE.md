@@ -22,6 +22,12 @@ Runtime surfaces:
    - `ib_server.py` for live IBKR market data, live execution, Chart Lab bars, IV term-structure sync, and historical fallback paths
    - `historical_server.py` for historical replay snapshots only (options-chain-service backed)
 
+5. Optional Docker lifecycle layer
+   - `option_combo_starter/supervisor.py` runs as PID 1
+   - the HTTP server and `ib_server.py` are critical child processes
+   - the backend remains the sole owner of IB reconnect attempts
+   - yield-curve refresh is a separately scheduled maintenance job
+
 ## 2. Frontend Entry Surfaces
 
 ### `index.html`
@@ -461,7 +467,11 @@ Responsibilities:
 
 Responsibilities:
 
-- background IB connection lifecycle
+- single-owner background IB connection lifecycle with immediate recovery and
+  fixed ten-minute retry scheduling
+- exact error-326 client-ID collision handling; no other failure changes the ID
+- generation-based market-data invalidation and one-time frontend subscription
+  replay after unexpected/startup recovery
 - pooled live underlying, option, futures, and stock-hedge subscriptions
 - dedicated option contract metadata fan-out independent of market-data ticks
 - product-aware IBKR contract qualification
@@ -475,7 +485,8 @@ Responsibilities:
 - combo validation, preview, test submit, and live submit
 - pre-submit warnings when an order would reduce an existing net TWS position
 - STK / FUT Delta Hedge validation, preview, submit, cancel, and active-order snapshot flows
-- managed repricing and order supervision
+- managed repricing and order supervision, with fail-closed pause on IB or
+  market-data reset while the broker order remains live
 - close-group execution through the same managed order path
 - execution-report attribution back into group legs
 
@@ -545,6 +556,17 @@ Responsibilities:
 - dependency installation
 - standalone official yield-curve refresh and local snapshot inspection
 - local runtime log and stale pid cleanup
+
+`option_combo_starter/` is intentionally a separate deployment layer.
+`entrypoint.sh` performs checkout/config/dependency setup and then execs
+`supervisor.py`. PID 1 restarts neither child for an ordinary TWS disconnect;
+`ib_server.py` reconnects in-process. A critical HTTP/backend process exit
+causes PID 1 to stop its peer and exit non-zero for Docker restart policy.
+Yield maintenance uses the same configured data directory as both backends and
+persists it in `/app/state/yield_curve`. Startup/hourly checks use
+`--if-needed`; one weekday post-publication run after 18:00 New York time is
+forced so earlier same-date source observations cannot suppress the completed
+official release.
 
 ## 5. Shared State Model
 
@@ -644,6 +666,10 @@ Live backend nuance:
 
 Supporting live-backend helper modules:
 
+- `ib_connection_supervisor.py`
+  - the single persistent TWS/API connection owner
+  - fixed retry scheduling and exact error-326 client-ID fallback
+  - ordered disconnect/connect lifecycle callbacks
 - `ib_server_ws.py`
   - WebSocket session lifecycle
   - action dispatch and connection cleanup

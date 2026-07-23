@@ -1,9 +1,10 @@
 # Docker Build
-docker buildx build --platform linux/amd64 --no-cache -t patsiesoblast0l/option-combo-starter:20260408 .
+docker buildx build --platform linux/amd64 --no-cache -f Dockerfile --load -t patsiesoblast0l/option-combo-starter:20260723 .
 
-# Docker Run (sample with all available env overrides)
+# Docker Run (drop-in runtime settings)
 docker run -d \
     --name option-combo \
+    --restart unless-stopped \
     -p 8000:8000 \
     -p 8765:8765 \
     -e TWS_HOST=10.3.10.253 \
@@ -11,4 +12,5 @@ docker run -d \
     -e TWS_CLIENT_ID=999 \
     -e WS_HOST=0.0.0.0 \
     -e WS_PORT=8765 \
-    patsiesoblast0l/option-combo-starter:20260408
+    -v option-combo-state:/app/state \
+    patsiesoblast0l/option-combo-starter:20260723

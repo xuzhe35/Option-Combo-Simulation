@@ -54,6 +54,8 @@
     const AUTO_SAMPLE_MONITOR_INTERVAL_MS = 60 * 1000;
     const AUTO_SAMPLE_RETRY_DELAY_MS = 5 * 60 * 1000;
     const DISCOUNT_CURVE_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+    const CONTROL_RECONNECT_BASE_DELAY_MS = 1500;
+    const CONTROL_RECONNECT_MAX_DELAY_MS = 30000;
     const IMPLIED_LAMBDA_DEFAULT_MAX_QUOTE_AGE_SECONDS = 120;
     // Widest spread between the oldest and newest quote a manually assembled
     // surface may carry and still be called coherent. The incremental quote
@@ -100,8 +102,19 @@
         discountCurveRefreshTimerId: null,
         controlWs: null,
         controlWsOpenPromise: null,
+        controlStatusHandshake: null,
+        controlReconnectTimerId: null,
+        controlReconnectDelayMs: CONTROL_RECONNECT_BASE_DELAY_MS,
         ibStatusPollTimerId: null,
         apiResetInProgress: false,
+        marketDataGeneration: null,
+        marketDataState: '',
+        serverSessionId: '',
+        explicitResetEpoch: 0,
+        explicitResetBoundaryGeneration: null,
+        recoveryActiveSymbols: new Set(),
+        recoveryReplayBySymbol: new Map(),
+        automaticReplayBlockedGeneration: null,
         tdIvWeekendWeight: DEFAULT_TD_IV_LAMBDA,
         impliedLambdaRate: 0.04,
         discountCurve: null,
@@ -306,9 +319,429 @@
             port: data.port,
             clientId: data.clientId,
             message: String(data.message || '').trim(),
+            marketDataGeneration: normalizeMarketDataGeneration(data.marketDataGeneration),
+            marketDataState: String(data.marketDataState || '').trim().toLowerCase(),
+            recoveryReason: String(data.recoveryReason || '').trim().toLowerCase(),
         };
         scheduleIbStatusPollIfNeeded();
         render(true);
+    }
+
+    function normalizeMarketDataGeneration(value) {
+        const parsed = Number(value);
+        return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+    }
+
+    function isExplicitStreamReset(payload) {
+        return String(payload && payload.recoveryReason || '').trim().toLowerCase()
+            === 'explicit_stream_reset';
+    }
+
+    function statusBlocksAutomaticReplay(payload) {
+        return isExplicitStreamReset(payload)
+            || (payload
+                && payload.subscriptionsRequired === true
+                && payload.automaticReplayAllowed === false);
+    }
+
+    function isRegressiveConnectionStatus(generation, marketDataState) {
+        if (generation === null || runtime.marketDataGeneration === null) {
+            return false;
+        }
+        if (generation < runtime.marketDataGeneration) {
+            return true;
+        }
+        return generation === runtime.marketDataGeneration
+            && runtime.marketDataState === 'ready'
+            && marketDataState === 'invalidated';
+    }
+
+    function adoptServerSession(payload) {
+        const incomingSessionId = String(
+            payload && payload.serverSessionId || ''
+        ).trim();
+        if (!incomingSessionId || incomingSessionId === runtime.serverSessionId) {
+            return false;
+        }
+
+        const replacesKnownGeneration = runtime.marketDataGeneration !== null;
+        runtime.serverSessionId = incomingSessionId;
+        if (!replacesKnownGeneration) {
+            return false;
+        }
+
+        // Market-data generations are process-local. A replacement backend
+        // starts a new namespace at zero and must not be compared with the
+        // previous process's final generation.
+        runtime.marketDataGeneration = null;
+        runtime.marketDataState = '';
+        runtime.recoveryReplayBySymbol.clear();
+        runtime.automaticReplayBlockedGeneration = null;
+        runtime.explicitResetBoundaryGeneration = null;
+        return true;
+    }
+
+    function recordExplicitResetBoundary(payload, generationValue) {
+        const generation = generationValue === undefined
+            ? normalizeMarketDataGeneration(payload && payload.marketDataGeneration)
+            : generationValue;
+        if (generation !== null
+            && runtime.explicitResetBoundaryGeneration === generation) {
+            return false;
+        }
+        runtime.explicitResetEpoch += 1;
+        runtime.explicitResetBoundaryGeneration = generation;
+        return true;
+    }
+
+    function automaticSyncDecisionFromStatus(payload) {
+        const data = payload && typeof payload === 'object' ? payload : {};
+        if (statusBlocksAutomaticReplay(data)) {
+            return {
+                settled: true,
+                allowed: false,
+                reason: 'explicit_stream_reset',
+            };
+        }
+        const marketDataState = String(data.marketDataState || '').trim().toLowerCase();
+        if (marketDataState === 'ready' && data.connected === true) {
+            return { settled: true, allowed: true, reason: 'ready' };
+        }
+        const recoveryReason = String(data.recoveryReason || '').trim().toLowerCase();
+        if (marketDataState === 'invalidated'
+            && data.subscriptionsRequired !== true
+            && recoveryReason.startsWith('startup')) {
+            return {
+                settled: true,
+                allowed: true,
+                reason: 'startup_intent',
+            };
+        }
+        return { settled: false, allowed: false, reason: 'waiting_for_ready' };
+    }
+
+    function ensureControlStatusHandshake(ws) {
+        const existing = runtime.controlStatusHandshake;
+        if (existing && existing.socket === ws) {
+            return existing;
+        }
+        let resolveHandshake = null;
+        const promise = new Promise((resolve) => {
+            resolveHandshake = resolve;
+        });
+        const handshake = {
+            socket: ws,
+            promise,
+            resolve: resolveHandshake,
+            result: null,
+        };
+        runtime.controlStatusHandshake = handshake;
+        return handshake;
+    }
+
+    function resetControlStatusHandshakePending(handshake) {
+        let resolveHandshake = null;
+        handshake.promise = new Promise((resolve) => {
+            resolveHandshake = resolve;
+        });
+        handshake.resolve = resolveHandshake;
+        handshake.result = null;
+    }
+
+    function settleControlStatusHandshake(ws, payload) {
+        const handshake = runtime.controlStatusHandshake;
+        if (!handshake || handshake.socket !== ws) {
+            return false;
+        }
+        const decision = automaticSyncDecisionFromStatus(payload);
+        if (!decision.settled) {
+            // An unexpected disconnect revokes a previously granted automatic
+            // permission. Future automatic work waits on the replacement
+            // promise until a later READY status settles it.
+            if (handshake.result) {
+                resetControlStatusHandshakePending(handshake);
+            }
+            return false;
+        }
+        const result = {
+            ...decision,
+            payload,
+        };
+        if (handshake.result) {
+            // Explicit reset can revoke an already-resolved READY decision,
+            // and a later recovery can grant permission again.
+            handshake.result = result;
+            handshake.promise = Promise.resolve(result);
+            handshake.resolve = null;
+            return true;
+        }
+        handshake.result = result;
+        handshake.resolve(result);
+        return true;
+    }
+
+    function closeControlStatusHandshake(ws) {
+        const handshake = runtime.controlStatusHandshake;
+        if (!handshake || handshake.socket !== ws) {
+            return;
+        }
+        if (!handshake.result) {
+            handshake.result = {
+                settled: true,
+                allowed: false,
+                reason: 'socket_closed',
+                payload: null,
+            };
+            handshake.resolve(handshake.result);
+        }
+        runtime.controlStatusHandshake = null;
+    }
+
+    async function replayRecoveryActiveCards(
+        generation,
+        dependencies = {},
+        options = {}
+    ) {
+        const sync = typeof dependencies.syncCard === 'function'
+            ? dependencies.syncCard
+            : syncCard;
+        const resyncedSymbols = [];
+        const replayTasks = [];
+        runtime.recoveryActiveSymbols.forEach((symbol) => {
+            const card = getCard(symbol);
+            if (!card) return;
+            const previousReplay = runtime.recoveryReplayBySymbol.get(symbol);
+            if (previousReplay
+                && previousReplay.generation === generation
+                && (
+                    ['in_flight', 'complete'].includes(previousReplay.state)
+                    || (
+                        previousReplay.state === 'failed'
+                        && options.retryFailed !== true
+                    )
+                )) {
+                return;
+            }
+            // Claim before awaiting; the same broadcast is delivered to the
+            // control socket and every active card socket.
+            const recoveryIntentEpoch = Number(card.recoveryIntentEpoch) || 0;
+            const replayClaim = {
+                generation,
+                state: 'in_flight',
+            };
+            runtime.recoveryReplayBySymbol.set(symbol, replayClaim);
+            setCardStatus(card, 'IB reconnected. Resyncing the live IV term structure...', '');
+            replayTasks.push((async () => {
+                try {
+                    await sync(card, {
+                        waitForQuotes: false,
+                        automatic: true,
+                        expectedRecoveryIntentEpoch: recoveryIntentEpoch,
+                    });
+                    if ((Number(card.recoveryIntentEpoch) || 0) !== recoveryIntentEpoch
+                        || !runtime.recoveryActiveSymbols.has(symbol)) {
+                        if (runtime.recoveryReplayBySymbol.get(symbol) === replayClaim) {
+                            runtime.recoveryReplayBySymbol.delete(symbol);
+                        }
+                        return;
+                    }
+                    if (runtime.recoveryReplayBySymbol.get(symbol) !== replayClaim) {
+                        return;
+                    }
+                    replayClaim.state = 'complete';
+                    resyncedSymbols.push(symbol);
+                } catch (error) {
+                    if ((Number(card.recoveryIntentEpoch) || 0) !== recoveryIntentEpoch
+                        || !runtime.recoveryActiveSymbols.has(symbol)
+                        || runtime.recoveryReplayBySymbol.get(symbol) !== replayClaim) {
+                        return;
+                    }
+                    replayClaim.state = 'failed';
+                    setCardStatus(
+                        card,
+                        error && error.message || 'Unable to resync IVTS after IB reconnect.',
+                        'error'
+                    );
+                }
+            })());
+        });
+        await Promise.all(replayTasks);
+        render(true);
+        return resyncedSymbols;
+    }
+
+    function isRecoveryActiveCard(card) {
+        return !!(card && card.ws);
+    }
+
+    function invalidateCardLiveEvidence(card, message) {
+        if (!card) return;
+        const evidenceEpoch = Number(card.marketEvidenceEpoch);
+        card.marketEvidenceEpoch = Number.isSafeInteger(evidenceEpoch) && evidenceEpoch >= 0
+            ? evidenceEpoch + 1
+            : 1;
+        clearCatalogPatchWatchdog(card);
+        if (card.pendingCatalog) {
+            const pending = card.pendingCatalog;
+            card.pendingCatalog = null;
+            clearPendingCatalogTimers(pending);
+            if (typeof pending.reject === 'function') {
+                pending.reject(new Error(message));
+            }
+        }
+        card.syncInProgress = false;
+        card.sampleInProgress = false;
+        card.autoSampleInProgress = false;
+        card.catalog = null;
+        card.quotesBySubId = {};
+        card.lambdaSnapshot = null;
+        card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
+        card.underlyingPrice = null;
+        card.lastSyncLabel = '';
+        card.catalogPatchCount = 0;
+        card.tradeDateResyncPending = false;
+        setCardStatus(card, message, 'error');
+    }
+
+    function invalidateAllCardLiveEvidence(message, options = {}) {
+        const captureActive = options.captureActive === true;
+        if (captureActive) {
+            runtime.cardsBySymbol.forEach((card) => {
+                if (isRecoveryActiveCard(card)) {
+                    runtime.recoveryActiveSymbols.add(card.symbol);
+                }
+            });
+        } else if (options.clearActive !== false) {
+            runtime.recoveryActiveSymbols.clear();
+        }
+        runtime.cardsBySymbol.forEach(card => invalidateCardLiveEvidence(card, message));
+        render(true);
+    }
+
+    function detachCardSocketsForControlLoss(message) {
+        runtime.cardsBySymbol.forEach((card) => {
+            if (!card) return;
+            const socket = card.ws;
+            if (socket && !String(card.closeNotice || '').trim()) {
+                runtime.recoveryActiveSymbols.add(card.symbol);
+            }
+            card.recoveryIntentEpoch = (Number(card.recoveryIntentEpoch) || 0) + 1;
+            card.ws = null;
+            card.wsOpenPromise = null;
+            if (socket) {
+                try {
+                    socket.close(1000, 'control socket disconnected');
+                } catch (_) {
+                    // The replacement sync will create a fresh card socket.
+                }
+            }
+            invalidateCardLiveEvidence(card, message);
+        });
+        render(true);
+    }
+
+    async function handleIbConnectionStatus(payload, dependencies = {}) {
+        if (!payload || payload.action !== 'ib_connection_status') {
+            return { handled: false, resyncedSymbols: [] };
+        }
+
+        const serverSessionChanged = dependencies.serverSessionAlreadyAdopted === true
+            ? dependencies.serverSessionChanged === true
+            : adoptServerSession(payload);
+        const generation = normalizeMarketDataGeneration(payload.marketDataGeneration);
+        const marketDataState = String(payload.marketDataState || '').trim().toLowerCase();
+        if (!serverSessionChanged
+            && isRegressiveConnectionStatus(generation, marketDataState)) {
+            return { handled: true, resyncedSymbols: [] };
+        }
+        if (isExplicitStreamReset(payload)) {
+            recordExplicitResetBoundary(payload, generation);
+        }
+        if (serverSessionChanged) {
+            // A generation value has meaning only inside one backend process.
+            // Force every card onto a socket created after the new control
+            // session was adopted; an old OPEN card socket can otherwise
+            // accept/send colliding generation numbers from the dead process.
+            runtime.recoveryReplayBySymbol.clear();
+            detachCardSocketsForControlLoss(
+                'Backend session changed; waiting for a fresh IV term-structure sync.'
+            );
+        }
+        updateIbStatus(payload);
+        const generationChanged = generation !== null
+            && generation !== runtime.marketDataGeneration;
+        if (generation !== null) runtime.marketDataGeneration = generation;
+        if (marketDataState) runtime.marketDataState = marketDataState;
+        const automaticReplayBlocked = statusBlocksAutomaticReplay(payload);
+        if (generation !== null && automaticReplayBlocked) {
+            // READY does not imply replay permission after an explicit stream
+            // reset. A late status query can be the page's first observation
+            // of that manual boundary.
+            runtime.automaticReplayBlockedGeneration = generation;
+        } else if (generation !== null
+            && payload.automaticReplayAllowed === true
+            && runtime.automaticReplayBlockedGeneration === generation) {
+            runtime.automaticReplayBlockedGeneration = null;
+        }
+
+        if (marketDataState === 'invalidated') {
+            if (generationChanged) {
+                runtime.recoveryReplayBySymbol.clear();
+                if (!serverSessionChanged) {
+                    runtime.recoveryActiveSymbols.clear();
+                }
+            }
+            const automaticReplayAllowed = !automaticReplayBlocked;
+            const recoveryReason = String(payload.recoveryReason || '').trim().toLowerCase();
+            const preserveStartupIntent = !isExplicitStreamReset(payload)
+                && recoveryReason.startsWith('startup');
+            if (!automaticReplayAllowed) {
+                runtime.automaticReplayBlockedGeneration = generation;
+            } else if (generationChanged
+                || runtime.automaticReplayBlockedGeneration !== generation) {
+                runtime.automaticReplayBlockedGeneration = null;
+            }
+            invalidateAllCardLiveEvidence(
+                String(payload.message || 'IB disconnected; live IV term-structure evidence was invalidated.'),
+                {
+                    captureActive: automaticReplayAllowed || preserveStartupIntent,
+                    clearActive: !(automaticReplayAllowed || preserveStartupIntent),
+                }
+            );
+            const shouldRegisterStartupIntent = !automaticReplayBlocked
+                && payload.subscriptionsRequired !== true
+                && preserveStartupIntent;
+            if (shouldRegisterStartupIntent && dependencies.allowReplay !== false) {
+                return {
+                    handled: true,
+                    resyncedSymbols: await replayRecoveryActiveCards(
+                        generation,
+                        dependencies,
+                        { retryFailed: false }
+                    ),
+                };
+            }
+            return { handled: true, resyncedSymbols: [] };
+        }
+
+        const shouldReplay = marketDataState === 'ready'
+            && payload.connected === true
+            && !automaticReplayBlocked
+            && generation !== null
+            && runtime.automaticReplayBlockedGeneration !== generation
+            && dependencies.allowReplay !== false;
+        if (!shouldReplay) {
+            return { handled: true, resyncedSymbols: [] };
+        }
+
+        return {
+            handled: true,
+            resyncedSymbols: await replayRecoveryActiveCards(
+                generation,
+                dependencies,
+                { retryFailed: true }
+            ),
+        };
     }
 
     function formatIbStatus() {
@@ -347,33 +780,67 @@
                 : 'Unable to clear API market-data subscriptions.'
         )).trim();
 
-        runtime.apiResetInProgress = false;
-        runtime.ibStatus = buildIbStatusAfterApiMarketDataReset(runtime.ibStatus, data, message);
-
         if (succeeded) {
-            runtime.cardsBySymbol.forEach((card) => {
-                clearCatalogPatchWatchdog(card);
-                if (card.pendingCatalog) {
-                    const pending = card.pendingCatalog;
-                    card.pendingCatalog = null;
-                    clearPendingCatalogTimers(pending);
-                    pending.reject(new Error(message));
-                }
-                card.syncInProgress = false;
-                card.sampleInProgress = false;
-                card.catalog = null;
-                card.quotesBySubId = {};
-                card.lambdaSnapshot = null;
-                card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
-                card.underlyingPrice = null;
-                card.lastSyncLabel = '';
-                card.catalogPatchCount = 0;
-                setCardStatus(card, message, 'error');
-            });
+            const generation = normalizeMarketDataGeneration(data.marketDataGeneration);
+            if (generation !== null
+                && runtime.marketDataGeneration !== null
+                && generation < runtime.marketDataGeneration) {
+                return false;
+            }
+            recordExplicitResetBoundary(data, generation);
+
+            const preserveCurrentReadyState = generation !== null
+                && generation === runtime.marketDataGeneration
+                && runtime.marketDataState === 'ready';
+            const responseMarketDataState = String(data.marketDataState || '')
+                .trim()
+                .toLowerCase();
+            const nextMarketDataState = preserveCurrentReadyState
+                ? 'ready'
+                : (['ready', 'invalidated'].includes(responseMarketDataState)
+                    ? responseMarketDataState
+                    : 'invalidated');
+            runtime.apiResetInProgress = false;
+            if (nextMarketDataState === 'ready') {
+                runtime.ibStatus = {
+                    ...(runtime.ibStatus || {}),
+                    connected: true,
+                    connecting: false,
+                    marketDataGeneration: generation === null
+                        ? runtime.marketDataGeneration
+                        : generation,
+                    marketDataState: 'ready',
+                    recoveryReason: String(
+                        data.recoveryReason || 'explicit_stream_reset'
+                    ).trim().toLowerCase(),
+                    message,
+                };
+            } else {
+                runtime.ibStatus = buildIbStatusAfterApiMarketDataReset(
+                    runtime.ibStatus,
+                    data,
+                    message
+                );
+            }
+            if (generation !== null) runtime.marketDataGeneration = generation;
+            runtime.marketDataState = nextMarketDataState;
+            runtime.automaticReplayBlockedGeneration = generation === null
+                ? runtime.marketDataGeneration
+                : generation;
+            runtime.recoveryReplayBySymbol.clear();
+            invalidateAllCardLiveEvidence(message, { captureActive: false });
+        } else {
+            runtime.apiResetInProgress = false;
+            runtime.ibStatus = buildIbStatusAfterApiMarketDataReset(
+                runtime.ibStatus,
+                data,
+                message
+            );
         }
 
         scheduleIbStatusPollIfNeeded();
         render(true);
+        return succeeded;
     }
 
     function escapeHtml(value) {
@@ -1074,6 +1541,8 @@
             syncInProgress: false,
             sampleInProgress: false,
             autoSampleInProgress: false,
+            marketEvidenceEpoch: 0,
+            recoveryIntentEpoch: 0,
             autoFileSelectionInProgress: false,
             autoSamplingEnabled: false,
             autoHistoryDocument: null,
@@ -1718,6 +2187,9 @@
             strikeRadius: runtime.config ? runtime.config.strikeRadius : EMBEDDED_DEFAULT_CONFIG.strikeRadius,
             maxOptionStreams: normalizeOptionStreamLimit(card && card.maxOptionStreams),
         };
+        if (runtime.marketDataGeneration !== null) {
+            payload.marketDataGeneration = runtime.marketDataGeneration;
+        }
 
         if (futuresContractMonth) {
             payload.underlying.contractMonth = futuresContractMonth;
@@ -1799,6 +2271,50 @@
             try {
                 payload = JSON.parse(event.data);
             } catch (_) {
+                return;
+            }
+
+            if (payload && payload.action === 'ib_connection_status') {
+                const incomingSessionId = String(
+                    payload.serverSessionId || ''
+                ).trim();
+                if (incomingSessionId
+                    && incomingSessionId !== runtime.serverSessionId) {
+                    // Only the current control socket establishes a backend
+                    // process namespace. Ignore queued or early card frames
+                    // from any other process.
+                    return;
+                }
+                const generation = normalizeMarketDataGeneration(
+                    payload.marketDataGeneration
+                );
+                const marketDataState = String(payload.marketDataState || '')
+                    .trim()
+                    .toLowerCase();
+                const regressive = isRegressiveConnectionStatus(
+                    generation,
+                    marketDataState
+                );
+                void handleIbConnectionStatus(payload, {
+                    serverSessionAlreadyAdopted: true,
+                    serverSessionChanged: false,
+                    allowReplay: false,
+                });
+                if (!regressive && runtime.controlWs) {
+                    const decision = automaticSyncDecisionFromStatus(payload);
+                    if (decision.allowed !== true) {
+                        // A card broadcast may fail closed, but it must never
+                        // grant a replacement control socket permission.
+                        settleControlStatusHandshake(runtime.controlWs, payload);
+                    }
+                }
+                return;
+            }
+            const payloadGeneration = normalizeMarketDataGeneration(
+                payload && payload.marketDataGeneration
+            );
+            if (runtime.marketDataGeneration !== null
+                && payloadGeneration !== runtime.marketDataGeneration) {
                 return;
             }
 
@@ -1893,7 +2409,7 @@
                         );
                         setTimeout(async () => {
                             try {
-                                await syncCard(card);
+                                await syncCard(card, { automatic: true });
                             } catch (error) {
                                 setCardStatus(card, error.message || 'Trade-date resync failed.', 'error');
                                 render(true);
@@ -1932,7 +2448,17 @@
             }
 
             if (payload && payload.action === 'api_market_data_subscriptions_reset') {
-                handleApiMarketDataReset(payload);
+                const accepted = handleApiMarketDataReset(payload);
+                if (accepted && runtime.controlWs) {
+                    settleControlStatusHandshake(runtime.controlWs, {
+                        ...payload,
+                        action: 'ib_connection_status',
+                        connected: false,
+                        recoveryReason: payload.recoveryReason || 'explicit_stream_reset',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: false,
+                    });
+                }
                 return;
             }
 
@@ -2022,23 +2548,40 @@
                 return;
             }
 
-            clearCatalogPatchWatchdog(card);
-            card.lambdaSnapshot = null;
-            card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
+            const closeNotice = String(card.closeNotice || '').trim();
             card.ws = null;
             card.wsOpenPromise = null;
-            if (card.pendingCatalog) {
-                const pending = card.pendingCatalog;
-                card.pendingCatalog = null;
-                clearPendingCatalogTimers(pending);
-                pending.reject(new Error('Socket closed before the sync completed.'));
+            if (!closeNotice && runtime.pageSuspended !== true) {
+                runtime.recoveryActiveSymbols.add(card.symbol);
+                runtime.recoveryReplayBySymbol.delete(card.symbol);
+                invalidateCardLiveEvidence(
+                    card,
+                    'Card socket disconnected; waiting for a fresh IV term-structure sync.'
+                );
+                if (runtime.controlWs
+                    && runtime.controlWs.readyState === WebSocket.OPEN) {
+                    runtime.controlWs.send(JSON.stringify({
+                        action: 'request_ib_connection_status',
+                    }));
+                } else {
+                    scheduleControlReconnect();
+                }
+            } else {
+                clearCatalogPatchWatchdog(card);
+                card.lambdaSnapshot = null;
+                card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
+                if (card.pendingCatalog) {
+                    const pending = card.pendingCatalog;
+                    card.pendingCatalog = null;
+                    clearPendingCatalogTimers(pending);
+                    pending.reject(new Error('Socket closed before the sync completed.'));
+                }
+                setCardStatus(
+                    card,
+                    closeNotice || 'Socket disconnected. Use Sync/Update to reconnect this ETF.',
+                    ''
+                );
             }
-            const closeNotice = String(card.closeNotice || '').trim();
-            setCardStatus(
-                card,
-                closeNotice || 'Socket disconnected. Use Sync/Update to reconnect this ETF.',
-                ''
-            );
             card.closeNotice = '';
             render(true);
         });
@@ -2063,18 +2606,35 @@
         const ws = new WebSocket(getWsUrl());
         card.ws = ws;
         card.wsOpenPromise = new Promise((resolve, reject) => {
-            ws.addEventListener('open', () => resolve(ws), { once: true });
-            ws.addEventListener('error', () => reject(new Error('Unable to connect websocket.')), { once: true });
+            let settled = false;
+            ws.addEventListener('open', () => {
+                if (settled) return;
+                settled = true;
+                resolve(ws);
+            }, { once: true });
+            ws.addEventListener('error', () => {
+                if (settled) return;
+                settled = true;
+                reject(new Error('Unable to connect websocket.'));
+            }, { once: true });
+            ws.addEventListener('close', () => {
+                if (settled) return;
+                settled = true;
+                reject(new Error('Card websocket closed before it connected.'));
+            }, { once: true });
         });
         attachSocketHandlers(card, ws);
         return card.wsOpenPromise;
     }
 
     function attachControlSocketHandlers(ws) {
+        ensureControlStatusHandshake(ws);
         ws.addEventListener('open', () => {
             if (runtime.controlWs !== ws) {
                 return;
             }
+            clearControlReconnectTimer();
+            runtime.controlReconnectDelayMs = CONTROL_RECONNECT_BASE_DELAY_MS;
             runtime.controlWsOpenPromise = Promise.resolve(ws);
             ws.send(JSON.stringify({ action: 'request_ib_connection_status' }));
             ws.send(JSON.stringify({ action: 'request_discount_curve' }));
@@ -2091,12 +2651,44 @@
                 return;
             }
             if (payload && payload.action === 'ib_connection_status') {
-                updateIbStatus(payload);
+                const generation = normalizeMarketDataGeneration(
+                    payload.marketDataGeneration
+                );
+                const marketDataState = String(payload.marketDataState || '')
+                    .trim()
+                    .toLowerCase();
+                const serverSessionChanged = adoptServerSession(payload);
+                const regressive = !serverSessionChanged
+                    && isRegressiveConnectionStatus(
+                        generation,
+                        marketDataState
+                    );
+                if (!regressive) {
+                    // Only this control socket may grant or revoke its own
+                    // automatic permission. Card-socket broadcasts must not
+                    // authorize a replacement control connection.
+                    settleControlStatusHandshake(ws, payload);
+                }
+                const handling = handleIbConnectionStatus(payload, {
+                    serverSessionAlreadyAdopted: true,
+                    serverSessionChanged,
+                });
+                void handling;
             } else if (payload && payload.action === 'discount_curve_snapshot') {
                 applyDiscountCurveSnapshot(payload);
                 render(true);
             } else if (payload && payload.action === 'api_market_data_subscriptions_reset') {
-                handleApiMarketDataReset(payload);
+                const accepted = handleApiMarketDataReset(payload);
+                if (accepted) {
+                    settleControlStatusHandshake(ws, {
+                        ...payload,
+                        action: 'ib_connection_status',
+                        connected: payload.marketDataState === 'ready',
+                        recoveryReason: payload.recoveryReason || 'explicit_stream_reset',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: false,
+                    });
+                }
             }
         });
 
@@ -2106,12 +2698,18 @@
             }
             runtime.controlWs = null;
             runtime.controlWsOpenPromise = null;
+            closeControlStatusHandshake(ws);
+            runtime.recoveryReplayBySymbol.clear();
+            detachCardSocketsForControlLoss(
+                'Control socket disconnected; waiting for authoritative IB status.'
+            );
             runtime.ibStatus = {
                 connected: false,
-                connecting: false,
-                message: 'Control socket disconnected.',
+                connecting: true,
+                message: 'Control socket disconnected. Reconnecting...',
             };
             runtime.discountCurveLastError = 'Control socket disconnected; retaining the last usable curve.';
+            scheduleControlReconnect();
             render(true);
         });
 
@@ -2125,26 +2723,65 @@
                 message: 'Unable to reach ib_server websocket.',
             };
             runtime.discountCurveLastError = 'Unable to refresh the unified daily discount curve.';
+            scheduleControlReconnect();
             render(true);
         });
     }
 
-    async function ensureControlSocket() {
+    async function ensureControlSocket(options = {}) {
+        let activeSocket = null;
         if (runtime.controlWs && runtime.controlWs.readyState === WebSocket.OPEN) {
-            return runtime.controlWs;
-        }
-        if (runtime.controlWs && runtime.controlWs.readyState === WebSocket.CONNECTING && runtime.controlWsOpenPromise) {
-            return runtime.controlWsOpenPromise;
+            activeSocket = runtime.controlWs;
+        } else if (runtime.controlWs
+            && runtime.controlWs.readyState === WebSocket.CONNECTING
+            && runtime.controlWsOpenPromise) {
+            activeSocket = await runtime.controlWsOpenPromise;
+        } else {
+            const ws = new WebSocket(getWsUrl());
+            runtime.controlWs = ws;
+            ensureControlStatusHandshake(ws);
+            runtime.controlWsOpenPromise = new Promise((resolve, reject) => {
+                let settled = false;
+                ws.addEventListener('open', () => {
+                    if (settled) return;
+                    settled = true;
+                    resolve(ws);
+                }, { once: true });
+                ws.addEventListener('error', () => {
+                    if (settled) return;
+                    settled = true;
+                    reject(new Error('Unable to connect websocket.'));
+                }, { once: true });
+                ws.addEventListener('close', () => {
+                    if (settled) return;
+                    settled = true;
+                    reject(new Error('Control websocket closed before it connected.'));
+                }, { once: true });
+            });
+            attachControlSocketHandlers(ws);
+            activeSocket = await runtime.controlWsOpenPromise;
         }
 
-        const ws = new WebSocket(getWsUrl());
-        runtime.controlWs = ws;
-        runtime.controlWsOpenPromise = new Promise((resolve, reject) => {
-            ws.addEventListener('open', () => resolve(ws), { once: true });
-            ws.addEventListener('error', () => reject(new Error('Unable to connect websocket.')), { once: true });
-        });
-        attachControlSocketHandlers(ws);
-        return runtime.controlWsOpenPromise;
+        if (options.requireAutomaticMarketDataPermission === true
+            || options.requireAuthoritativeMarketDataStatus === true) {
+            const handshake = ensureControlStatusHandshake(activeSocket);
+            const result = await handshake.promise;
+            if (runtime.controlWs !== activeSocket
+                || !result) {
+                throw new Error(
+                    'IV term-structure sync is waiting for an authoritative IB status.'
+                );
+            }
+            if (options.requireAutomaticMarketDataPermission === true
+                && result.allowed !== true) {
+                throw new Error(
+                    result.reason === 'explicit_stream_reset'
+                        ? 'Automatic IV term-structure sync is blocked after the explicit API stream reset. Use Sync/Update to subscribe manually.'
+                        : 'Automatic IV term-structure sync is waiting for an authoritative ready IB status.'
+                );
+            }
+        }
+        return activeSocket;
     }
 
     async function requestIbStatus() {
@@ -2180,6 +2817,44 @@
             clearTimeout(runtime.ibStatusPollTimerId);
             runtime.ibStatusPollTimerId = null;
         }
+    }
+
+    function clearControlReconnectTimer() {
+        if (runtime.controlReconnectTimerId != null) {
+            clearTimeout(runtime.controlReconnectTimerId);
+            runtime.controlReconnectTimerId = null;
+        }
+    }
+
+    function scheduleControlReconnect() {
+        if (runtime.pageSuspended === true
+            || runtime.controlReconnectTimerId != null
+            || (runtime.controlWs
+                && [WebSocket.OPEN, WebSocket.CONNECTING].includes(
+                    runtime.controlWs.readyState
+                ))) {
+            return;
+        }
+        const delay = Math.max(
+            CONTROL_RECONNECT_BASE_DELAY_MS,
+            Math.min(
+                CONTROL_RECONNECT_MAX_DELAY_MS,
+                Number(runtime.controlReconnectDelayMs)
+                    || CONTROL_RECONNECT_BASE_DELAY_MS
+            )
+        );
+        runtime.controlReconnectTimerId = setTimeout(async () => {
+            runtime.controlReconnectTimerId = null;
+            try {
+                await ensureControlSocket();
+            } catch (_) {
+                runtime.controlReconnectDelayMs = Math.min(
+                    delay * 2,
+                    CONTROL_RECONNECT_MAX_DELAY_MS
+                );
+                scheduleControlReconnect();
+            }
+        }, delay);
     }
 
     function scheduleIbStatusPollIfNeeded() {
@@ -2249,9 +2924,13 @@
 
     function closeSocketsForEndpointChange() {
         clearIbStatusPollTimer();
-        if (runtime.controlWs) {
+        clearControlReconnectTimer();
+        runtime.controlReconnectDelayMs = CONTROL_RECONNECT_BASE_DELAY_MS;
+        const controlWs = runtime.controlWs;
+        closeControlStatusHandshake(controlWs);
+        if (controlWs) {
             try {
-                runtime.controlWs.close(1000, 'endpoint changed');
+                controlWs.close(1000, 'endpoint changed');
             } catch (_) {
                 // Ignore best-effort shutdown failures.
             }
@@ -2346,10 +3025,40 @@
         if (isFuturesOptionProfile(profile) && !normalizeFuturesContractMonth(card && card.futuresContractMonth)) {
             throw new Error(`Enter the ${profile.underlyingSymbol || card.symbol} underlying futures month as YYYYMM before syncing.`);
         }
+        const requestedExplicitResetEpoch = runtime.explicitResetEpoch;
+        const controlPermissionOptions = options.automatic === true
+            ? { requireAutomaticMarketDataPermission: true }
+            : { requireAuthoritativeMarketDataStatus: true };
+        const assertExplicitResetEpoch = () => {
+            if (runtime.explicitResetEpoch !== requestedExplicitResetEpoch) {
+                throw new Error(
+                    'API market-data streams were reset; press Sync/Update again.'
+                );
+            }
+        };
+        const assertRecoveryIntent = () => {
+            if (options.expectedRecoveryIntentEpoch === undefined) return;
+            if ((Number(card.recoveryIntentEpoch) || 0)
+                !== Number(options.expectedRecoveryIntentEpoch)) {
+                throw new Error('Automatic IV term-structure recovery was cancelled.');
+            }
+        };
+        assertRecoveryIntent();
+        await ensureControlSocket(controlPermissionOptions);
+        assertRecoveryIntent();
+        assertExplicitResetEpoch();
 
         card.lambdaSnapshot = null;
         card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
         const ws = await ensureSocket(card);
+        assertRecoveryIntent();
+        assertExplicitResetEpoch();
+        // Permission and the generation namespace are both revocable. The
+        // card socket may have taken time to open, so re-check immediately
+        // before constructing/sending the subscription.
+        await ensureControlSocket(controlPermissionOptions);
+        assertRecoveryIntent();
+        assertExplicitResetEpoch();
         card.syncInProgress = true;
         card.closeNotice = '';
         card.catalog = null;
@@ -2361,6 +3070,9 @@
 
         try {
             const catalog = await new Promise((resolve, reject) => {
+                // Keep the check adjacent to the send. A reset that happened
+                // while either socket was opening must require a fresh click.
+                assertExplicitResetEpoch();
                 const pending = {
                     resolve,
                     reject,
@@ -3492,16 +4204,58 @@
         }
     }
 
-    async function writeHistoryDocument(card) {
-        const payload = JSON.stringify(card.historyDocument, null, 2);
+    function assertCardMarketEvidenceEpoch(card, expectedEpoch) {
+        if (expectedEpoch === null || expectedEpoch === undefined) {
+            return;
+        }
+        if (card && card.marketEvidenceEpoch === expectedEpoch) {
+            return;
+        }
+        const error = new Error(
+            'Live market data was invalidated before the sample could be saved. Sync again and retry.'
+        );
+        error.code = 'IVTS_MARKET_EVIDENCE_INVALIDATED';
+        throw error;
+    }
+
+    async function abortWritableQuietly(writable) {
+        if (!writable || typeof writable.abort !== 'function') {
+            return;
+        }
+        try {
+            await writable.abort();
+        } catch (_) {
+            // Best effort only; retain the original invalidation/write error.
+        }
+    }
+
+    async function writeHistoryDocument(card, options = {}) {
+        const historyDocument = options.historyDocument || card.historyDocument;
+        const expectedEpoch = Object.prototype.hasOwnProperty.call(
+            options,
+            'expectedMarketEvidenceEpoch'
+        )
+            ? options.expectedMarketEvidenceEpoch
+            : null;
+        assertCardMarketEvidenceEpoch(card, expectedEpoch);
+        const payload = JSON.stringify(historyDocument, null, 2);
 
         if (card.currentFileHandle && typeof card.currentFileHandle.createWritable === 'function') {
-            const writable = await card.currentFileHandle.createWritable();
-            await writable.write(payload);
-            await writable.close();
+            let writable = null;
+            try {
+                writable = await card.currentFileHandle.createWritable();
+                assertCardMarketEvidenceEpoch(card, expectedEpoch);
+                await writable.write(payload);
+                assertCardMarketEvidenceEpoch(card, expectedEpoch);
+                await writable.close();
+            } catch (error) {
+                await abortWritableQuietly(writable);
+                throw error;
+            }
             return;
         }
 
+        assertCardMarketEvidenceEpoch(card, expectedEpoch);
         const dataBlob = new Blob([payload], { type: 'application/json' });
         const url = URL.createObjectURL(dataBlob);
         const anchor = document.createElement('a');
@@ -3569,13 +4323,29 @@
         }
     }
 
-    async function writeAutoHistoryDocument(card) {
+    async function writeAutoHistoryDocument(card, options = {}) {
         if (!card.autoFileHandle || typeof card.autoFileHandle.createWritable !== 'function') {
             throw new Error('The automatic sample file is no longer writable. Load the Auto JSON again to restore append access.');
         }
-        const writable = await card.autoFileHandle.createWritable();
-        await writable.write(JSON.stringify(card.autoHistoryDocument, null, 2));
-        await writable.close();
+        const historyDocument = options.historyDocument || card.autoHistoryDocument;
+        const expectedEpoch = Object.prototype.hasOwnProperty.call(
+            options,
+            'expectedMarketEvidenceEpoch'
+        )
+            ? options.expectedMarketEvidenceEpoch
+            : null;
+        assertCardMarketEvidenceEpoch(card, expectedEpoch);
+        let writable = null;
+        try {
+            writable = await card.autoFileHandle.createWritable();
+            assertCardMarketEvidenceEpoch(card, expectedEpoch);
+            await writable.write(JSON.stringify(historyDocument, null, 2));
+            assertCardMarketEvidenceEpoch(card, expectedEpoch);
+            await writable.close();
+        } catch (error) {
+            await abortWritableQuietly(writable);
+            throw error;
+        }
     }
 
     function bindAutoHistoryFile(card, fileHandle, historyDocument) {
@@ -3671,28 +4441,60 @@
         }
 
         card.autoSampleInProgress = true;
+        const marketEvidenceEpoch = Number.isSafeInteger(card.marketEvidenceEpoch)
+            ? card.marketEvidenceEpoch
+            : 0;
+        card.marketEvidenceEpoch = marketEvidenceEpoch;
         card.autoSampleRetryAfter = 0;
         setCardStatus(card, `Auto Sample (${reason}): preparing a valid ATM snapshot...`, '');
         render(true);
 
         try {
+            const buildSample = typeof options.buildSampleRecord === 'function'
+                ? options.buildSampleRecord
+                : buildCurrentSampleRecord;
+            const sync = typeof options.syncCard === 'function'
+                ? options.syncCard
+                : syncCard;
+            if (sync === syncCard) {
+                await ensureControlSocket({
+                    requireAutomaticMarketDataPermission: true,
+                });
+            }
+            const readHistory = typeof options.readAutoHistoryFile === 'function'
+                ? options.readAutoHistoryFile
+                : readAutoHistoryFile;
+            const writeHistory = typeof options.writeAutoHistoryDocument === 'function'
+                ? options.writeAutoHistoryDocument
+                : writeAutoHistoryDocument;
             let sampleRecord = options.preferCachedSnapshot === true && hasUsableLiveSnapshot(card)
-                ? buildCurrentSampleRecord(card)
+                ? buildSample(card)
                 : null;
             if (!hasUsableWatermarkSeed(sampleRecord)) {
-                await syncCard(card, { waitForQuotes: true, quoteTimeoutMs: 3500 });
-                sampleRecord = buildCurrentSampleRecord(card);
+                await sync(card, {
+                    waitForQuotes: true,
+                    quoteTimeoutMs: 3500,
+                    automatic: true,
+                });
+                assertCardMarketEvidenceEpoch(card, marketEvidenceEpoch);
+                sampleRecord = buildSample(card);
             }
             if (!hasUsableWatermarkSeed(sampleRecord)) {
                 throw new Error('No usable 4-10 DTE ATM straddle mark is available yet.');
             }
+            assertCardMarketEvidenceEpoch(card, marketEvidenceEpoch);
 
             // Re-read immediately before writing so a file edited outside this
             // page is not silently replaced with an older in-memory copy.
-            const historyDocument = await readAutoHistoryFile(card.autoFileHandle, card.symbol);
+            const historyDocument = await readHistory(card.autoFileHandle, card.symbol);
+            assertCardMarketEvidenceEpoch(card, marketEvidenceEpoch);
             historyDocument.samples = historyDocument.samples.concat(sampleRecord);
+            await writeHistory(card, {
+                historyDocument,
+                expectedMarketEvidenceEpoch: marketEvidenceEpoch,
+            });
+            assertCardMarketEvidenceEpoch(card, marketEvidenceEpoch);
             card.autoHistoryDocument = historyDocument;
-            await writeAutoHistoryDocument(card);
             card.lastAutoSampleLabel = sampleRecord.sampledAt;
             card.forceBodyRefreshOnce = true;
             setCardStatus(
@@ -3801,7 +4603,7 @@
         });
     }
 
-    async function sampleCard(card) {
+    async function sampleCard(card, dependencies = {}) {
         const canWriteViaHandle = !!(card.currentFileHandle && typeof card.currentFileHandle.createWritable === 'function');
         const canWriteViaFallbackImport = !globalScope.showOpenFilePicker && !!card.historyDocument;
 
@@ -3817,6 +4619,10 @@
         }
 
         card.sampleInProgress = true;
+        const marketEvidenceEpoch = Number.isSafeInteger(card.marketEvidenceEpoch)
+            ? card.marketEvidenceEpoch
+            : 0;
+        card.marketEvidenceEpoch = marketEvidenceEpoch;
         const shouldResyncBeforeSample = !hasUsableLiveSnapshot(card);
         setCardStatus(
             card,
@@ -3828,14 +4634,28 @@
         render(true);
 
         try {
+            const sync = typeof dependencies.syncCard === 'function'
+                ? dependencies.syncCard
+                : syncCard;
+            const buildSample = typeof dependencies.buildSampleRecord === 'function'
+                ? dependencies.buildSampleRecord
+                : buildCurrentSampleRecord;
+            const writeHistory = typeof dependencies.writeHistoryDocument === 'function'
+                ? dependencies.writeHistoryDocument
+                : writeHistoryDocument;
             if (shouldResyncBeforeSample) {
-                await syncCard(card, { waitForQuotes: true, quoteTimeoutMs: 2500 });
+                await sync(card, { waitForQuotes: true, quoteTimeoutMs: 2500 });
             }
-            const sampleRecord = buildCurrentSampleRecord(card);
+            assertCardMarketEvidenceEpoch(card, marketEvidenceEpoch);
+            const sampleRecord = buildSample(card);
             const historyDocument = normalizeHistoryDocument(readOnlyHistoryDocument(card), card.symbol);
             historyDocument.samples = historyDocument.samples.concat(sampleRecord);
+            await writeHistory(card, {
+                historyDocument,
+                expectedMarketEvidenceEpoch: marketEvidenceEpoch,
+            });
+            assertCardMarketEvidenceEpoch(card, marketEvidenceEpoch);
             card.historyDocument = historyDocument;
-            await writeHistoryDocument(card);
             card.lastSampleLabel = sampleRecord.sampledAt;
             setCardStatus(card, `Sample saved. ${historyDocument.samples.length} total samples in ${card.symbol}.json.`, 'success');
         } catch (error) {
@@ -5374,6 +6194,9 @@
 
         card.syncInProgress = false;
         card.sampleInProgress = false;
+        card.recoveryIntentEpoch = (Number(card.recoveryIntentEpoch) || 0) + 1;
+        runtime.recoveryActiveSymbols.delete(card.symbol);
+        runtime.recoveryReplayBySymbol.delete(card.symbol);
         card.closeNotice = options.notice || 'Subscription closed. Showing the last received snapshot.';
         card.lambdaSnapshot = null;
         card.impliedLambdaNeedsRecalculation = !!card.impliedLambdaComputedEntry;
@@ -5397,6 +6220,8 @@
         const firstSuspend = runtime.pageSuspended !== true;
         runtime.pageSuspended = true;
         clearIbStatusPollTimer();
+        clearControlReconnectTimer();
+        runtime.controlReconnectDelayMs = CONTROL_RECONNECT_BASE_DELAY_MS;
         if (runtime.autoSampleMonitorTimerId != null) {
             clearInterval(runtime.autoSampleMonitorTimerId);
             runtime.autoSampleMonitorTimerId = null;
@@ -5406,6 +6231,7 @@
             runtime.discountCurveRefreshTimerId = null;
         }
         const controlWs = runtime.controlWs;
+        closeControlStatusHandshake(controlWs);
         runtime.controlWs = null;
         runtime.controlWsOpenPromise = null;
         if (controlWs) {
@@ -5487,7 +6313,9 @@
             : ensureControlSocket;
         let controlRestored = false;
         try {
-            await ensureControl();
+            await ensureControl({
+                requireAutomaticMarketDataPermission: true,
+            });
             controlRestored = true;
         } catch (error) {
             runtime.ibStatus = {
@@ -5497,6 +6325,14 @@
             };
             runtime.discountCurveLastError = 'Unable to refresh the unified daily discount curve after page restore.';
         }
+        if (!controlRestored) {
+            render(true);
+            return {
+                resumed: true,
+                controlRestored: false,
+                resyncedSymbols: [],
+            };
+        }
 
         const sync = typeof dependencies.syncCard === 'function'
             ? dependencies.syncCard
@@ -5504,7 +6340,10 @@
         const resyncedSymbols = [];
         await Promise.all(cardsToResume.map(async (card) => {
             try {
-                await sync(card, { waitForQuotes: false });
+                await sync(card, {
+                    waitForQuotes: false,
+                    automatic: true,
+                });
                 resyncedSymbols.push(card.symbol);
             } catch (error) {
                 setCardStatus(
@@ -5716,12 +6555,17 @@
             buildSubscribePayload,
             buildSubscriptionStatus,
             buildIbStatusAfterApiMarketDataReset,
+            handleApiMarketDataReset,
+            handleIbConnectionStatus,
             applyDiscountCurveSnapshot,
             formatDiscountCurveStatus,
             discountCurveStatusTitle,
             attachControlSocketHandlers,
+            ensureControlSocket,
+            syncCard,
             applyRuntimeConfig,
             getCard,
+            closeSocketsForEndpointChange,
             closeAllSocketsForPageExit,
             resumePageAfterCache,
             setControlSocketForTest: (ws) => {
@@ -5760,7 +6604,10 @@
             strategyHistoryDocument,
             shouldRunAutoSample,
             hasUsableWatermarkSeed,
+            writeHistoryDocument,
             writeAutoHistoryDocument,
+            runAutoSample,
+            sampleCard,
             bindAutoHistoryFile,
             loadAutoHistoryFile,
             createAutoHistoryFile,
@@ -5771,6 +6618,16 @@
             restoreCardViewState,
             evaluateLambdaSnapshotFreshness,
             expireCardImpliedLambdaIfStale,
+            getRecoveryState: () => ({
+                marketDataGeneration: runtime.marketDataGeneration,
+                marketDataState: runtime.marketDataState,
+                serverSessionId: runtime.serverSessionId,
+                explicitResetEpoch: runtime.explicitResetEpoch,
+                automaticReplayBlockedGeneration: runtime.automaticReplayBlockedGeneration,
+                activeSymbols: Array.from(runtime.recoveryActiveSymbols),
+                replayClaims: Array.from(runtime.recoveryReplayBySymbol.entries())
+                    .map(([symbol, claim]) => ({ symbol, ...claim })),
+            }),
         },
     };
 

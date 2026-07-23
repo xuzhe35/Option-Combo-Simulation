@@ -12,6 +12,7 @@ class QuoteTimeEvidence(TypedDict, total=False):
 
 
 class PayloadTimeEvidence(TypedDict, total=False):
+    marketDataGeneration: int
     payloadAsOf: str
     batchId: str
     quoteComplete: bool
@@ -66,7 +67,7 @@ class OptionQuoteSnapshot(QuoteSnapshot, total=False):
     realExpirationDate: str
 
 
-class OptionContractMetadataPayload(TypedDict):
+class OptionContractMetadataPayload(TypedDict, total=False):
     """Price-independent qualified option identity and expiry timing.
 
     This payload deliberately does not inherit ``PayloadTimeEvidence``.  A
@@ -75,6 +76,7 @@ class OptionContractMetadataPayload(TypedDict):
     """
 
     action: str
+    marketDataGeneration: int
     contractMetadataOnly: bool
     options: dict[str, OptionQuoteSnapshot]
 
@@ -106,7 +108,8 @@ class LiveMarketDataPayload(PayloadTimeEvidence):
     carryReferences: dict[str, MarketReferenceQuoteSnapshot]
 
 
-class ManualUnderlyingSyncPayload(TypedDict):
+class ManualUnderlyingSyncPayload(TypedDict, total=False):
+    marketDataGeneration: int
     underlyingPrice: float
     underlyingQuote: QuoteSnapshot
     options: dict[str, Any]
@@ -114,12 +117,14 @@ class ManualUnderlyingSyncPayload(TypedDict):
 
 class HistoricalReplayErrorPayload(TypedDict, total=False):
     action: str
+    marketDataGeneration: int
     message: str
     requestId: str
 
 
 class HistoricalBarsResponsePayload(TypedDict, total=False):
     action: str
+    marketDataGeneration: int
     symbol: str
     bars: list[dict[str, Any]]
     dataSource: str
@@ -185,6 +190,27 @@ TreasuryCurvePointPayload = DiscountCurvePointPayload
 TreasuryCurveSnapshotPayload = DiscountCurveDataPayload
 
 
+class IbConnectionStatusPayload(TypedDict, total=False):
+    action: str
+    serverSessionId: str
+    connected: bool
+    connecting: bool
+    reconnecting: bool
+    connectionState: str
+    host: str
+    port: int
+    clientId: int
+    configuredClientId: int
+    retryIntervalSeconds: int
+    marketDataGeneration: int
+    marketDataState: str
+    recoveryReason: str
+    subscriptionsRequired: bool
+    automaticReplayAllowed: bool
+    requestId: str
+    message: str
+
+
 class ApiMarketDataResetPayload(TypedDict, total=False):
     action: str
     success: bool
@@ -197,6 +223,11 @@ class ApiMarketDataResetPayload(TypedDict, total=False):
     connectionWasConnected: bool
     connectionReset: bool
     reconnecting: bool
+    marketDataGeneration: int
+    marketDataState: str
+    recoveryReason: str
+    subscriptionsRequired: bool
+    automaticReplayAllowed: bool
     message: str
 
 

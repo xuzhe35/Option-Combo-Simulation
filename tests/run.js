@@ -7,6 +7,7 @@ const suites = [
     require('./distribution_proxy_config.test'),
     require('./prob_charts.test'),
     require('./projection_fail_closed.test'),
+    require('./chart_lab_recovery.test'),
     require('./calendar_convergence.test'),
     require('./calendar_projection_validator.test'),
     require('./iv_term_structure_core.test'),

@@ -2,10 +2,10 @@ import asyncio
 import json
 import logging
 import os
-import random
 import signal
 import sqlite3
 import configparser
+import uuid
 from contextlib import AsyncExitStack
 from datetime import datetime
 from ib_async import *
@@ -13,6 +13,10 @@ import websockets
 
 from chain_service_config import resolve_chain_service_url
 from historical_replay_service import HistoricalReplayService, normalize_replay_date
+from ib_connection_supervisor import (
+    DEFAULT_RETRY_INTERVAL_SECONDS as IB_RECONNECT_INTERVAL_SECONDS,
+    IbConnectionSupervisor,
+)
 from yield_curve.backend_adapter import YieldCurveBackendAdapter
 from ib_server_order_tracking import (
     build_active_combo_orders_snapshot as build_active_combo_orders_snapshot_via_module,
@@ -67,6 +71,7 @@ from ib_server_market_data import (
     extract_quote_snapshot,
     get_client_subscription_settings,
     log_option_iv_debug_if_needed,
+    normalize_market_data_generation,
     normalize_bool,
     option_contract_timing_is_publishable,
     positive_contract_id as _positive_contract_id,
@@ -180,11 +185,18 @@ option_contract_timing_inflight_by_con_id = {}
 # Map websocket -> per-client live-data preferences
 client_subscription_settings = {}
 ib_connect_task = None
+ib_connection_supervisor = None
 iv_term_structure_sync_tasks = {}
 iv_term_structure_contract_details_semaphore = asyncio.Semaphore(4)
 iv_term_structure_option_subscription_semaphore = asyncio.Semaphore(4)
 api_market_data_reset_lock = asyncio.Lock()
+ib_subscription_recovery_lock = asyncio.Lock()
+ib_server_session_id = uuid.uuid4().hex
 api_market_data_generation = 0
+ib_market_data_state = 'invalidated'
+ib_recovery_reason = 'startup'
+ib_subscriptions_required = False
+ib_automatic_replay_allowed = False
 qualified_underlyings = {}
 # Verified futures delivery month keyed by the actual IB underlying conId.
 # Populated only from ContractDetails.contractMonth, never by copying the
@@ -962,53 +974,200 @@ ib.execDetailsEvent += on_combo_order_exec_details
 on_hedge_order_exec_details = build_hedge_order_exec_details_handler(_tracking_env)
 ib.execDetailsEvent += on_hedge_order_exec_details
 
-async def connect_ib():
-    """Connect to IB TWS/Gateway. Retries indefinitely — one connection per session.
 
-    If Error 326 (client ID already in use) is received during the handshake,
-    automatically picks a new random client ID and retries immediately.
+async def _broadcast_ib_connection_status(message=''):
+    if not connected_clients:
+        return
+    payload = json.dumps(_build_ib_connection_status_payload(message))
+    await asyncio.gather(*(
+        send_message_safe(websocket, payload)
+        for websocket in list(connected_clients)
+    ))
+
+
+async def _on_ib_supervisor_connected():
+    global ib_market_data_state
+
+    async with ib_subscription_recovery_lock:
+        ib_market_data_state = 'ready'
+        ib.reqMarketDataType(1)
+        mark_recovery_complete = getattr(execution_adapter, 'complete_ib_recovery', None)
+        if callable(mark_recovery_complete):
+            mark_recovery_complete()
+        logging.info("Managed accounts available: %s", ', '.join(_get_managed_accounts()) or '<none>')
+        _broadcast_managed_accounts_snapshot()
+        _broadcast_portfolio_positions_snapshot()
+        await _broadcast_ib_connection_status('Connected to IB TWS/Gateway.')
+
+
+async def _on_ib_supervisor_disconnected():
+    global api_market_data_generation
+    global ib_automatic_replay_allowed
+    global ib_market_data_state
+    global ib_recovery_reason
+    global ib_subscriptions_required
+    global portfolio_positions_snapshot_ready
+
+    async with ib_subscription_recovery_lock:
+        api_market_data_generation += 1
+        ib_market_data_state = 'invalidated'
+        ib_recovery_reason = 'unexpected_disconnect'
+        ib_subscriptions_required = True
+        ib_automatic_replay_allowed = True
+
+        for task in list(iv_term_structure_sync_tasks.values()):
+            if not task.done():
+                task.cancel()
+        iv_term_structure_sync_tasks.clear()
+        for websocket in list(client_subscriptions):
+            client_subscriptions[websocket] = {}
+        market_data_generic_ticks_by_con_id.clear()
+        market_data_quote_as_of_by_ticker_key.clear()
+        market_data_quote_fingerprint_by_ticker_key.clear()
+
+        portfolio_positions_snapshot_ready = False
+        _broadcast_managed_accounts_snapshot()
+        _broadcast_portfolio_positions_snapshot()
+        await _broadcast_ib_connection_status(
+            f'IB connection was lost. Reconnecting now, then every '
+            f'{int(IB_RECONNECT_INTERVAL_SECONDS)} seconds.'
+        )
+    await execution_adapter.pause_managed_for_ib_recovery(
+        reason='unexpected_disconnect'
+    )
+
+
+async def _prepare_ib_live_subscription_generation(
+    requested_generation=None,
+    has_explicit_generation=False,
+):
+    """Atomically validate/adopt a request and publish startup invalidation.
+
+    The lock keeps concurrent first-subscription requests behind the same
+    invalidation broadcast. This guarantees every new-generation market-data
+    response is sent only after connected clients have observed that generation.
     """
-    client_id = TWS_CLIENT_ID
 
-    while not ib.isConnected():
-        # Temporary listener to capture any error codes emitted during the handshake.
-        error_codes: list[int] = []
-        def _capture_error(reqId, errorCode, errorString, contract):
-            error_codes.append(errorCode)
+    global api_market_data_generation
+    global ib_automatic_replay_allowed
+    global ib_market_data_state
+    global ib_recovery_reason
+    global ib_subscriptions_required
 
-        ib.errorEvent += _capture_error
-        try:
-            logging.info(f"Connecting to IB TWS/Gateway at {TWS_HOST}:{TWS_PORT} (Client ID: {client_id})...")
-            await ib.connectAsync(TWS_HOST, TWS_PORT, clientId=client_id, timeout=20)
-            logging.info(f"Successfully connected to IB (Client ID: {client_id}).")
-            # Enforce Real-Time Data (1)
-            ib.reqMarketDataType(1)
-            logging.info("Managed accounts available: %s", ', '.join(_get_managed_accounts()) or '<none>')
-            _broadcast_managed_accounts_snapshot()
-        except Exception as e:
-            if 326 in error_codes:
-                # Error 326: "Client ID already in use" — pick a random ID and retry immediately
-                client_id = random.randint(1, 998)
-                logging.warning(f"Client ID already in use (Error 326). Retrying with Client ID: {client_id}...")
-                await asyncio.sleep(1)
-            else:
-                logging.error(f"Connection failed: {e}. Retrying in 5 seconds...")
-                await asyncio.sleep(5)
-        finally:
-            # Always remove the temporary listener so it doesn't fire during normal operation
-            ib.errorEvent -= _capture_error
+    async with ib_subscription_recovery_lock:
+        normalized_request_generation = normalize_market_data_generation(
+            requested_generation
+        )
+        if has_explicit_generation and normalized_request_generation is None:
+            return {
+                'accepted': False,
+                'generationChanged': False,
+                'marketDataGeneration': api_market_data_generation,
+            }
+
+        connected = bool(ib.isConnected())
+        can_adopt_startup_transition = (
+            not connected
+            and has_explicit_generation
+            and ib_recovery_reason == 'startup_subscription_wait'
+            and ib_subscriptions_required
+            and ib_automatic_replay_allowed
+            and normalized_request_generation == api_market_data_generation - 1
+        )
+        if (
+            has_explicit_generation
+            and normalized_request_generation != api_market_data_generation
+            and not can_adopt_startup_transition
+        ):
+            return {
+                'accepted': False,
+                'generationChanged': False,
+                'marketDataGeneration': api_market_data_generation,
+            }
+
+        if connected:
+            return {
+                'accepted': True,
+                'generationChanged': False,
+                'marketDataGeneration': api_market_data_generation,
+            }
+        if ib_recovery_reason == 'explicit_stream_reset':
+            # Explicit stream reset is a manual safety boundary. Requests arriving
+            # before its replacement connection must not re-enable auto replay.
+            return {
+                'accepted': True,
+                'generationChanged': False,
+                'marketDataGeneration': api_market_data_generation,
+            }
+        if ib_subscriptions_required and ib_automatic_replay_allowed:
+            return {
+                'accepted': True,
+                'generationChanged': False,
+                'marketDataGeneration': api_market_data_generation,
+            }
+
+        api_market_data_generation += 1
+        ib_market_data_state = 'invalidated'
+        ib_recovery_reason = 'startup_subscription_wait'
+        ib_subscriptions_required = True
+        ib_automatic_replay_allowed = True
+        await _broadcast_ib_connection_status(
+            'A live subscription was requested while IB was unavailable. '
+            'It will replay once after the first successful connection.'
+        )
+        return {
+            'accepted': True,
+            'generationChanged': True,
+            'marketDataGeneration': api_market_data_generation,
+        }
+
+
+async def _mark_ib_subscription_requested_while_disconnected():
+    """Compatibility wrapper returning whether it opened a new generation."""
+
+    decision = await _prepare_ib_live_subscription_generation()
+    return decision.get('generationChanged') is True
+
+
+ib_connection_supervisor = IbConnectionSupervisor(
+    ib=ib,
+    host=TWS_HOST,
+    port=TWS_PORT,
+    client_id=TWS_CLIENT_ID,
+    retry_interval_seconds=IB_RECONNECT_INTERVAL_SECONDS,
+    connect_timeout_seconds=20,
+    logger=logging.getLogger('ib_connection.supervisor'),
+    on_connected=_on_ib_supervisor_connected,
+    on_disconnected=_on_ib_supervisor_disconnected,
+)
+
+
+async def connect_ib():
+    """Compatibility entry point for the persistent IB connection lifecycle."""
+    task = ib_connection_supervisor.start()
+    await task
 
 
 def _build_ib_connection_status_payload(message=''):
-    task = ib_connect_task
     connected = bool(ib.isConnected())
+    supervisor = ib_connection_supervisor
     return {
         'action': 'ib_connection_status',
+        'serverSessionId': ib_server_session_id,
         'connected': connected,
-        'connecting': bool(task and not task.done() and not connected),
+        'connecting': bool(supervisor and supervisor.connecting and not connected),
+        'reconnecting': bool(supervisor and supervisor.reconnecting and not connected),
+        'connectionState': supervisor.state if supervisor else ('connected' if connected else 'stopped'),
         'host': TWS_HOST,
         'port': TWS_PORT,
-        'clientId': TWS_CLIENT_ID,
+        'clientId': supervisor.effective_client_id if supervisor else TWS_CLIENT_ID,
+        'configuredClientId': TWS_CLIENT_ID,
+        'retryIntervalSeconds': int(IB_RECONNECT_INTERVAL_SECONDS),
+        'marketDataGeneration': api_market_data_generation,
+        'marketDataState': ib_market_data_state,
+        'recoveryReason': ib_recovery_reason,
+        'subscriptionsRequired': ib_subscriptions_required,
+        'automaticReplayAllowed': ib_automatic_replay_allowed,
         'message': str(message or '').strip(),
     }
 
@@ -1017,19 +1176,42 @@ async def _ensure_ib_connect_task():
     global ib_connect_task
     if ib.isConnected():
         return 'IB is already connected.'
-    if ib_connect_task is None or ib_connect_task.done():
-        ib_connect_task = asyncio.create_task(connect_ib())
-        logging.info("Started manual/background IB connection task.")
-        return 'Connecting to IB TWS/Gateway...'
-    return 'IB connection attempt is already running.'
+    was_running = ib_connection_supervisor.running
+    was_connecting = ib_connection_supervisor.connecting
+    requested = ib_connection_supervisor.request_connect()
+    ib_connect_task = ib_connection_supervisor.task
+    if not was_running:
+        logging.info("Started background IB connection supervisor.")
+    elif requested and not was_connecting:
+        logging.info("Manual IB connection request woke the background supervisor.")
+    if was_connecting:
+        return 'IB connection attempt is already running.'
+    return 'Connecting to IB TWS/Gateway...'
 
 
 async def _reset_all_api_market_data_subscriptions(requested_by='Unknown'):
     """Clear all streams for this IB API client, including untracked leaked lines."""
-    global api_market_data_generation, ib_connect_task
+    global api_market_data_generation
+    global ib_automatic_replay_allowed
+    global ib_connect_task
+    global ib_market_data_state
+    global ib_recovery_reason
+    global ib_subscriptions_required
 
     async with api_market_data_reset_lock:
-        api_market_data_generation += 1
+        async with ib_subscription_recovery_lock:
+            api_market_data_generation += 1
+            ib_market_data_state = 'invalidated'
+            ib_recovery_reason = 'explicit_stream_reset'
+            ib_subscriptions_required = True
+            ib_automatic_replay_allowed = False
+            await execution_adapter.pause_managed_for_ib_recovery(
+                reason='explicit_stream_reset'
+            )
+            await _broadcast_ib_connection_status(
+                'API market-data streams are being reset. Automatic subscription '
+                'replay is blocked until the user subscribes again.'
+            )
         tracked_client_count = sum(1 for subscriptions in client_subscriptions.values() if subscriptions)
         active_iv_tasks = [task for task in iv_term_structure_sync_tasks.values() if not task.done()]
         stopped_iv_sync_count = len(active_iv_tasks)
@@ -1049,17 +1231,11 @@ async def _reset_all_api_market_data_subscriptions(requested_by='Unknown'):
 
         connection_was_connected = bool(ib.isConnected())
         connection_reset = False
-        if ib_connect_task is not None and not ib_connect_task.done():
-            ib_connect_task.cancel()
-            await asyncio.gather(ib_connect_task, return_exceptions=True)
-        ib_connect_task = None
-
         if connection_was_connected:
-            ib.disconnect()
-            connection_reset = True
+            connection_reset = ib_connection_supervisor.disconnect_intentionally()
 
         reconnect_message = await _ensure_ib_connect_task()
-        reconnecting = bool(ib_connect_task and not ib_connect_task.done())
+        reconnecting = bool(ib_connection_supervisor.reconnecting)
         payload = {
             'action': 'api_market_data_subscriptions_reset',
             'success': True,
@@ -1072,6 +1248,11 @@ async def _reset_all_api_market_data_subscriptions(requested_by='Unknown'):
             'connectionWasConnected': connection_was_connected,
             'connectionReset': connection_reset,
             'reconnecting': reconnecting,
+            'marketDataGeneration': api_market_data_generation,
+            'marketDataState': ib_market_data_state,
+            'recoveryReason': ib_recovery_reason,
+            'subscriptionsRequired': ib_subscriptions_required,
+            'automaticReplayAllowed': ib_automatic_replay_allowed,
             'message': (
                 f"Cleared all market-data subscriptions for this API client "
                 f"({cancellation['knownTickerCount']} known tickers, {tracked_client_count} active web sessions). "
@@ -1846,12 +2027,18 @@ async def _run_iv_term_structure_option_sync(websocket, symbol, sync_context):
     )
 
 
-async def _handle_iv_term_structure_subscription(websocket, client_ip, data):
+async def _handle_iv_term_structure_subscription(
+    websocket,
+    client_ip,
+    data,
+    subscription_generation=None,
+):
     await handle_iv_term_structure_subscription(
         _build_iv_term_structure_environment(),
         websocket,
         client_ip,
         data,
+        subscription_generation=subscription_generation,
     )
 
 def _describe_contract_request(contract_data):
@@ -1883,6 +2070,8 @@ def _build_market_data_environment():
         'market_data_quote_fingerprint_by_ticker_key': market_data_quote_fingerprint_by_ticker_key,
         'option_contract_timing_by_con_id': option_contract_timing_by_con_id,
         'futures_contract_month_by_con_id': underlying_contract_month_by_con_id,
+        'get_api_market_data_generation': _get_api_market_data_generation,
+        'api_market_data_reset_in_progress': _api_market_data_reset_in_progress,
         'send_message_safe': send_message_safe,
         'log_option_iv_debug_if_needed': _log_option_iv_debug_if_needed,
         'build_contract_from_request': _build_contract_from_request,
@@ -1956,6 +2145,8 @@ def _build_ws_handler_environment():
         'handle_iv_term_structure_subscription': _handle_iv_term_structure_subscription,
         'iv_term_structure_catalog_timeout_seconds': IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS,
         'build_ib_connection_status_payload': _build_ib_connection_status_payload,
+        'prepare_ib_live_subscription_generation': _prepare_ib_live_subscription_generation,
+        'mark_ib_subscription_requested': _mark_ib_subscription_requested_while_disconnected,
         'ensure_ib_connect_task': _ensure_ib_connect_task,
         'reset_all_api_market_data_subscriptions': _reset_all_api_market_data_subscriptions,
         'get_api_market_data_generation': _get_api_market_data_generation,
@@ -2016,8 +2207,11 @@ async def main():
 
         # Start IB connection in the background so historical replay can work
         # even when TWS/Gateway is not running.
-        ib_connect_task = asyncio.create_task(connect_ib())
-        logging.info("Started background IB connection task.")
+        ib_connect_task = ib_connection_supervisor.start()
+        logging.info(
+            "Started background IB connection supervisor with a %.0f-second retry cadence.",
+            IB_RECONNECT_INTERVAL_SECONDS,
+        )
 
         # Start one WebSocket listener per configured interface so localhost and
         # a Tailscale/LAN address can both reach the same ib_server.py process.
@@ -2040,17 +2234,23 @@ async def main():
             for ws_server in ws_servers:
                 await stack.enter_async_context(ws_server)
 
-            # Keep the event loop running forever, yielding to ib_async's network operations.
-            while True:
-                await asyncio.sleep(1)
+            try:
+                await ib_connect_task
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    'IB connection supervisor failed unexpectedly.'
+                ) from exc
+            raise RuntimeError('IB connection supervisor stopped unexpectedly.')
     finally:
-        if ib_connect_task and not ib_connect_task.done():
-            ib_connect_task.cancel()
-        # Guaranteed cleanup: runs on Ctrl+C, SIGTERM, or any unhandled exception
+        # Guaranteed cleanup: stop retries before disconnecting so Ctrl+C,
+        # SIGTERM, or an unhandled exception cannot start a new API session.
         if ib.isConnected():
             logging.info("Disconnecting from IB...")
-            ib.disconnect()
-            logging.info("Disconnected from IB.")
+        await ib_connection_supervisor.stop(disconnect=True)
+        ib_connect_task = None
+        logging.info("IB connection supervisor stopped.")
 
 if __name__ == "__main__":
     # Treat SIGTERM (e.g. `kill`, service stop, terminal closure) identically to

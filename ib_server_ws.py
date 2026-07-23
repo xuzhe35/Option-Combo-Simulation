@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import sqlite3
@@ -10,9 +11,13 @@ from websockets.exceptions import ConnectionClosed
 from ib_server_iv_term_structure import build_iv_term_structure_payload_evidence
 from ib_server_market_data import (
     cancel_mkt_data_if_unused,
+    capture_market_data_generation,
     extract_option_contract_identity,
+    market_data_generation_is_current,
+    normalize_market_data_generation,
     option_contract_timing_is_publishable,
     req_mkt_data_pooled,
+    send_market_data_payload_if_current,
 )
 from runtime_contracts import (
     ApiMarketDataResetPayload,
@@ -163,16 +168,95 @@ def _req_mkt_data_pooled(env, qualified_contract, generic_ticks=''):
 
 
 def _capture_api_market_data_generation(env):
-    getter = env.get('get_api_market_data_generation')
-    return getter() if callable(getter) else None
+    return capture_market_data_generation(env)
 
 
 def _api_market_data_generation_is_current(env, captured_generation):
-    getter = env.get('get_api_market_data_generation')
-    reset_in_progress = env.get('api_market_data_reset_in_progress')
-    if callable(reset_in_progress) and reset_in_progress():
+    return market_data_generation_is_current(env, captured_generation)
+
+
+def _explicit_request_generation_is_current(env, data):
+    if (
+        not isinstance(data, dict)
+        or 'marketDataGeneration' not in data
+        or data.get('marketDataGeneration') in (None, '')
+    ):
+        return True
+    requested_generation = normalize_market_data_generation(
+        data.get('marketDataGeneration')
+    )
+    if requested_generation is None:
         return False
-    return captured_generation is None or not callable(getter) or getter() == captured_generation
+    server_generation = _capture_api_market_data_generation(env)
+    if server_generation is None:
+        return True
+    return _api_market_data_generation_is_current(env, requested_generation)
+
+
+async def _mark_subscription_requested(env):
+    """Await the startup invalidation barrier when the backend provides one."""
+
+    marker = env.get('mark_ib_subscription_requested')
+    if not callable(marker):
+        return False
+    result = marker()
+    if inspect.isawaitable(result):
+        return await result
+    return bool(result)
+
+
+async def _prepare_subscription_generation(env, data):
+    """Validate a live request across the awaited startup-generation barrier."""
+
+    has_explicit_generation = (
+        isinstance(data, dict)
+        and 'marketDataGeneration' in data
+        and data.get('marketDataGeneration') not in (None, '')
+    )
+    requested_generation = normalize_market_data_generation(
+        data.get('marketDataGeneration') if isinstance(data, dict) else None
+    )
+    if has_explicit_generation and requested_generation is None:
+        return False, None
+
+    preparer = env.get('prepare_ib_live_subscription_generation')
+    if callable(preparer):
+        result = preparer(
+            requested_generation=requested_generation,
+            has_explicit_generation=has_explicit_generation,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, dict):
+            if result.get('accepted') is not True:
+                return False, None
+            prepared_generation = normalize_market_data_generation(
+                result.get('marketDataGeneration')
+            )
+        else:
+            prepared_generation = _capture_api_market_data_generation(env)
+    else:
+        # Compatibility path for the lightweight test/historical environments:
+        # reject stale input before invoking a marker that could mutate state.
+        if not _explicit_request_generation_is_current(env, data):
+            return False, None
+        generation_before_marker = _capture_api_market_data_generation(env)
+        generation_changed = await _mark_subscription_requested(env)
+        prepared_generation = _capture_api_market_data_generation(env)
+        if (
+            has_explicit_generation
+            and prepared_generation is not None
+            and prepared_generation != requested_generation
+            and not (
+                generation_changed
+                and generation_before_marker == requested_generation
+            )
+        ):
+            return False, None
+
+    if not _api_market_data_generation_is_current(env, prepared_generation):
+        return False, None
+    return True, prepared_generation
 
 
 def _option_contract_metadata_is_publishable(qualified_option, timing):
@@ -183,7 +267,14 @@ def _option_contract_metadata_is_publishable(qualified_option, timing):
     return not timing_sec_type or not qualified_sec_type or timing_sec_type == qualified_sec_type
 
 
-async def _send_option_contract_metadata(env, websocket, leg_id, qualified_option, timing):
+async def _send_option_contract_metadata(
+    env,
+    websocket,
+    leg_id,
+    qualified_option,
+    timing,
+    market_data_generation=None,
+):
     """Handoff ContractDetails without pretending it is a market quote.
 
     A pooled ticker may already belong to IVTS or another browser tab and may
@@ -200,7 +291,12 @@ async def _send_option_contract_metadata(env, websocket, leg_id, qualified_optio
         'contractMetadataOnly': True,
         'options': {str(leg_id): metadata},
     }
-    return await env['send_message_safe'](websocket, json.dumps(payload))
+    return await send_market_data_payload_if_current(
+        env,
+        websocket,
+        payload,
+        market_data_generation,
+    )
 
 
 def _describe_unresolved_option(opt, reason, detail=''):
@@ -224,7 +320,12 @@ def _describe_unresolved_option(opt, reason, detail=''):
     return record
 
 
-async def _send_option_subscription_status(env, websocket, unresolved):
+async def _send_option_subscription_status(
+    env,
+    websocket,
+    unresolved,
+    market_data_generation=None,
+):
     """Tell the client which requested option legs produced no subscription.
 
     Without this the leg id is simply absent from every market-data payload,
@@ -236,11 +337,23 @@ async def _send_option_subscription_status(env, websocket, unresolved):
         'action': 'option_subscription_status',
         'unresolved': unresolved,
     }
-    return await env['send_message_safe'](websocket, json.dumps(payload))
+    return await send_market_data_payload_if_current(
+        env,
+        websocket,
+        payload,
+        market_data_generation,
+    )
 
 
-async def _handle_subscribe(env, websocket, data, client_ip):
-    subscription_generation = _capture_api_market_data_generation(env)
+async def _handle_subscribe(
+    env,
+    websocket,
+    data,
+    client_ip,
+    subscription_generation=None,
+):
+    if normalize_market_data_generation(subscription_generation) is None:
+        subscription_generation = _capture_api_market_data_generation(env)
     if not _api_market_data_generation_is_current(env, subscription_generation):
         return
     raw_underlying = data.get('underlying')
@@ -325,6 +438,7 @@ async def _handle_subscribe(env, websocket, data, client_ip):
             leg_id,
             qualified_option,
             timing,
+            subscription_generation,
         )
         if not _api_market_data_generation_is_current(env, subscription_generation):
             return
@@ -339,7 +453,12 @@ async def _handle_subscribe(env, websocket, data, client_ip):
                 len(options_data),
                 client_ip,
             )
-        await _send_option_subscription_status(env, websocket, unresolved_options)
+        await _send_option_subscription_status(
+            env,
+            websocket,
+            unresolved_options,
+            subscription_generation,
+        )
 
     for future_req in futures_data:
         future_id = future_req.get('id')
@@ -427,7 +546,12 @@ async def _handle_subscribe(env, websocket, data, client_ip):
                 price = env['extract_market_price'](ticker)
                 if price is not None:
                     payload: dict[str, Any] = {'options': {}, 'stocks': {symbol: {'mark': price}}}
-                    asyncio.create_task(env['send_message_safe'](ws, json.dumps(payload)))
+                    asyncio.create_task(send_market_data_payload_if_current(
+                        env,
+                        ws,
+                        payload,
+                        subscription_generation,
+                    ))
             return _on_stock_tick
 
         stock_ticker.updateEvent += make_stock_tick_handler(stock_sym, websocket)
@@ -435,8 +559,15 @@ async def _handle_subscribe(env, websocket, data, client_ip):
         logging.info(f"Subscribed to stock: {stock_sym}")
 
 
-async def _handle_sync_underlying(env, websocket, data, client_ip):
-    subscription_generation = _capture_api_market_data_generation(env)
+async def _handle_sync_underlying(
+    env,
+    websocket,
+    data,
+    client_ip,
+    subscription_generation=None,
+):
+    if normalize_market_data_generation(subscription_generation) is None:
+        subscription_generation = _capture_api_market_data_generation(env)
     if not _api_market_data_generation_is_current(env, subscription_generation):
         return
     raw_underlying = data.get('underlying')
@@ -467,7 +598,12 @@ async def _handle_sync_underlying(env, websocket, data, client_ip):
                 'underlyingQuote': quote,
                 'options': {},
             }
-            await env['send_message_safe'](websocket, json.dumps(payload))
+            await send_market_data_payload_if_current(
+                env,
+                websocket,
+                payload,
+                subscription_generation,
+            )
     finally:
         cancel_mkt_data_if_unused(
             ticker,
@@ -478,6 +614,13 @@ async def _handle_sync_underlying(env, websocket, data, client_ip):
 
 
 async def _handle_request_historical_bars(env, websocket, data, client_ip):
+    request_generation = normalize_market_data_generation(
+        data.get('marketDataGeneration')
+    )
+    if request_generation is None:
+        request_generation = _capture_api_market_data_generation(env)
+    if not _api_market_data_generation_is_current(env, request_generation):
+        return
     raw_underlying = data.get('underlying')
     options_data = data.get('options', [])
     underlying_request = env['build_underlying_request'](raw_underlying, options_data)
@@ -533,12 +676,22 @@ async def _handle_request_historical_bars(env, websocket, data, client_ip):
                 f"{env['describe_contract_request'](underlying_request)}."
             ),
         }
-        await env['send_message_safe'](websocket, json.dumps(error_payload))
+        await send_market_data_payload_if_current(
+            env,
+            websocket,
+            error_payload,
+            request_generation,
+        )
         return
 
     if request_id:
         payload['requestId'] = request_id
-    await env['send_message_safe'](websocket, json.dumps(payload))
+    await send_market_data_payload_if_current(
+        env,
+        websocket,
+        payload,
+        request_generation,
+    )
 
 
 async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
@@ -546,8 +699,32 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
     if action == 'request_historical_snapshot':
         await _handle_request_historical_snapshot(env, websocket, data, client_ip)
     elif action == 'subscribe':
-        await _handle_subscribe(env, websocket, data, client_ip)
+        generation_accepted, subscription_generation = (
+            await _prepare_subscription_generation(env, data)
+        )
+        if not generation_accepted:
+            logging.warning(
+                'Ignoring stale live subscription generation from %s.',
+                client_ip,
+            )
+            return
+        await _handle_subscribe(
+            env,
+            websocket,
+            data,
+            client_ip,
+            subscription_generation,
+        )
     elif action == 'subscribe_iv_term_structure':
+        generation_accepted, subscription_generation = (
+            await _prepare_subscription_generation(env, data)
+        )
+        if not generation_accepted:
+            logging.warning(
+                'Ignoring stale IV term-structure subscription generation from %s.',
+                client_ip,
+            )
+            return
         try:
             timeout_seconds = max(
                 IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_FLOOR,
@@ -590,12 +767,22 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
             client_protocol_version or '<missing>',
             IV_TERM_STRUCTURE_PROTOCOL_VERSION,
         )
-        await env['send_message_safe'](websocket, json.dumps(started_payload))
+        await send_market_data_payload_if_current(
+            env,
+            websocket,
+            started_payload,
+            subscription_generation,
+        )
         if not protocol_matches:
             return
         try:
             await asyncio.wait_for(
-                env['handle_iv_term_structure_subscription'](websocket, client_ip, data),
+                env['handle_iv_term_structure_subscription'](
+                    websocket,
+                    client_ip,
+                    data,
+                    subscription_generation=subscription_generation,
+                ),
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -614,11 +801,22 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
                     'then retry with fewer option streams.'
                 ),
             }
-            await env['send_message_safe'](websocket, json.dumps(timeout_payload))
+            await send_market_data_payload_if_current(
+                env,
+                websocket,
+                timeout_payload,
+                subscription_generation,
+            )
     elif action == 'request_ib_connection_status':
+        status_payload = env['build_ib_connection_status_payload']()
+        request_id = str(data.get('requestId') or '').strip()
+        if request_id:
+            # Correlate this direct response without changing unsolicited
+            # connection-status broadcasts sent by ib_server.py.
+            status_payload['requestId'] = request_id
         await env['send_message_safe'](
             websocket,
-            json.dumps(env['build_ib_connection_status_payload']()),
+            json.dumps(status_payload),
         )
     elif action == 'connect_ib':
         message = await env['ensure_ib_connect_task']()
@@ -653,7 +851,22 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
             for recipient in recipients
         ))
     elif action == 'sync_underlying':
-        await _handle_sync_underlying(env, websocket, data, client_ip)
+        generation_accepted, subscription_generation = (
+            await _prepare_subscription_generation(env, data)
+        )
+        if not generation_accepted:
+            logging.warning(
+                'Ignoring stale underlying-sync generation from %s.',
+                client_ip,
+            )
+            return
+        await _handle_sync_underlying(
+            env,
+            websocket,
+            data,
+            client_ip,
+            subscription_generation,
+        )
     elif action == 'request_historical_bars':
         await _handle_request_historical_bars(env, websocket, data, client_ip)
     elif action == 'request_discount_curve':

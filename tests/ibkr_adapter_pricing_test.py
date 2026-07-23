@@ -87,6 +87,9 @@ class _DummyIb:
     def __init__(self):
         self.orderStatusEvent = _DummyEvent()
 
+    def isConnected(self):
+        return True
+
 
 class IbkrAdapterPricingTests(unittest.TestCase):
     def setUp(self):
@@ -2674,6 +2677,9 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.orderStatusEvent = _DummyEvent()
 
+            def isConnected(self):
+                return True
+
             def placeOrder(self, contract, order):
                 order_index = len(placed_orders)
                 order.orderId = 5100 + order_index
@@ -2824,6 +2830,9 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.orderStatusEvent = _DummyEvent()
 
+            def isConnected(self):
+                return True
+
             def placeOrder(self, contract, order):
                 events.append('place_order')
                 order.orderId = 4500
@@ -2895,7 +2904,7 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             'quote': {'bid': 1.2, 'ask': 1.3, 'mark': 1.25},
         }]
 
-        async def fake_build(websocket, request):
+        async def fake_build(websocket, request, operation_recovery_epoch=None):
             return {
                 'comboContract': SimpleNamespace(secType='BAG'),
                 'order': order,
@@ -2941,6 +2950,9 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
         class _SubmitIb:
             def __init__(self):
                 self.orderStatusEvent = _DummyEvent()
+
+            def isConnected(self):
+                return True
 
             def placeOrder(self, contract, order):
                 order.orderId = 4600
@@ -3008,7 +3020,7 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             'quote': {'bid': 1.2, 'ask': 1.3, 'mark': 1.25},
         }]
 
-        async def fake_build(_websocket, _request):
+        async def fake_build(_websocket, _request, operation_recovery_epoch=None):
             return {
                 'comboContract': SimpleNamespace(secType='BAG'),
                 'order': order,
@@ -3052,6 +3064,9 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.orderStatusEvent = _DummyEvent()
 
+            def isConnected(self):
+                return True
+
             def placeOrder(self, contract, order):
                 order_index = len(placed_orders)
                 order.orderId = 4700 + order_index
@@ -3090,7 +3105,15 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             index_exchange_fallbacks={},
         )
 
-        def fake_register(_websocket, _request, _combo_contract, trade, _preview, _resolved_legs):
+        def fake_register(
+            _websocket,
+            _request,
+            _combo_contract,
+            trade,
+            _preview,
+            _resolved_legs,
+            ib_recovery_epoch=None,
+        ):
             managed_order_ids.append(getattr(getattr(trade, 'order', None), 'orderId', None))
             return None
 
@@ -3148,7 +3171,7 @@ class IbkrAdapterSubmitPreRegistrationTests(unittest.IsolatedAsyncioTestCase):
             },
         ]
 
-        async def fake_build(_websocket, _request):
+        async def fake_build(_websocket, _request, operation_recovery_epoch=None):
             return {
                 'comboContract': SimpleNamespace(secType='BAG', exchange='CME'),
                 'order': order,
@@ -3284,6 +3307,1018 @@ class IbkrAdapterManagedAdoptionTests(unittest.TestCase):
         self.assertFalse(adapter.adopt_managed_combo_order(other_websocket, 5200, 5201))
         self.assertIs(owned_context['websocket'], owner_websocket)
         self.assertFalse(adapter.adopt_managed_combo_order(other_websocket, 9999, None))
+
+
+class IbkrAdapterIbRecoverySafetyTests(unittest.IsolatedAsyncioTestCase):
+    class _ConnectedIb:
+        def __init__(self, connected=True):
+            self.orderStatusEvent = _DummyEvent()
+            self.connected = connected
+            self.placed_orders = []
+            self.cancelled_orders = []
+
+        def isConnected(self):
+            return self.connected
+
+        def placeOrder(self, contract, order):
+            self.placed_orders.append((contract, order))
+            return SimpleNamespace(order=order)
+
+        def cancelOrder(self, order):
+            self.cancelled_orders.append(order)
+
+    class _FilledIb(_ConnectedIb):
+        def placeOrder(self, contract, order):
+            order_index = len(self.placed_orders)
+            order.orderId = 7100 + order_index
+            trade = SimpleNamespace(
+                contract=contract,
+                order=order,
+                orderStatus=SimpleNamespace(
+                    permId=8100 + order_index,
+                    status='Filled',
+                    filled=float(getattr(order, 'totalQuantity', 0) or 0),
+                    remaining=0.0,
+                    avgFillPrice=float(getattr(order, 'lmtPrice', 0) or 0),
+                    lastFillPrice=float(getattr(order, 'lmtPrice', 0) or 0),
+                    whyHeld='',
+                    mktCapPrice=0.0,
+                ),
+                fills=[],
+                log=[],
+                advancedError='',
+            )
+            self.placed_orders.append((contract, order))
+            return trade
+
+    def _build_adapter(self, ib):
+        return IbkrExecutionAdapter(
+            ib=ib,
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+
+    async def test_ib_recovery_stops_repricing_without_cancelling_live_broker_order(self):
+        ib = self._ConnectedIb(connected=False)
+        adapter = self._build_adapter(ib)
+        task_started = asyncio.Event()
+
+        async def reprice_loop():
+            task_started.set()
+            await asyncio.sleep(100)
+
+        task = asyncio.create_task(reprice_loop())
+        await task_started.wait()
+        context = {
+            'orderId': 6100,
+            'permId': 6101,
+            'groupId': 'recovery_group',
+            'status': 'Submitted',
+            'managedState': 'watching',
+            'managedMessage': 'Watching.',
+            'terminated': False,
+            'task': task,
+            'trade': SimpleNamespace(order=SimpleNamespace(orderId=6100)),
+            'lastManagedEmitSignature': None,
+        }
+        adapter.managed_executions_by_order_id[6100] = context
+        adapter.managed_executions_by_perm_id[6101] = context
+        emitted = []
+
+        async def capture_emit(paused_context):
+            emitted.append(adapter._build_managed_snapshot(paused_context))
+
+        adapter._emit_managed_update = capture_emit
+        await adapter.pause_managed_for_ib_recovery()
+
+        self.assertTrue(task.done())
+        self.assertTrue(context['terminated'])
+        self.assertEqual(context['managedState'], 'stopped_ib_recovery')
+        self.assertIn('LIVE in TWS', context['managedMessage'])
+        self.assertEqual(ib.placed_orders, [])
+        self.assertEqual(ib.cancelled_orders, [])
+        self.assertIs(adapter.managed_executions_by_order_id[6100], context)
+        self.assertIs(adapter.managed_executions_by_perm_id[6101], context)
+        self.assertFalse(emitted[-1]['canContinueRepricing'])
+        self.assertFalse(emitted[-1]['canConcedePricing'])
+        self.assertNotIn('continueActionLabel', emitted[-1])
+
+        websocket = object()
+        recovery_identity = {'orderId': 6100, 'permId': 6101}
+        with self.assertRaisesRegex(ValueError, 'manually in TWS'):
+            await adapter.resume_managed_combo_order(websocket, recovery_identity)
+        with self.assertRaisesRegex(ValueError, 'manually in TWS'):
+            await adapter.concede_managed_combo_order(websocket, recovery_identity)
+        with self.assertRaisesRegex(ConnectionError, 'recovery is still in progress'):
+            await adapter.cancel_managed_combo_order(websocket, recovery_identity)
+        adapter.complete_ib_recovery()
+        ib.connected = True
+        with self.assertRaisesRegex(ValueError, 'manually in TWS'):
+            await adapter.cancel_managed_combo_order(websocket, recovery_identity)
+        self.assertEqual(ib.placed_orders, [])
+        self.assertEqual(ib.cancelled_orders, [])
+
+    async def test_recovery_gate_blocks_new_order_work_and_stale_inflight_epoch(self):
+        ib = self._ConnectedIb(connected=True)
+        adapter = self._build_adapter(ib)
+        captured_epoch = adapter._ib_recovery_epoch
+
+        await adapter.pause_managed_for_ib_recovery()
+
+        with self.assertRaisesRegex(ConnectionError, 'recovery is still in progress'):
+            adapter._require_ib_connection_for_place_order('place a test order')
+        with self.assertRaisesRegex(ConnectionError, 'action was in flight'):
+            adapter._require_current_ib_recovery_epoch(
+                captured_epoch,
+                'modify a test order',
+            )
+
+        adapter.complete_ib_recovery()
+        adapter._require_ib_connection_for_place_order('place a test order')
+
+    async def test_combo_submit_and_cancel_entered_during_recovery_fail_immediately(self):
+        ib = self._ConnectedIb(connected=True)
+        adapter = self._build_adapter(ib)
+        websocket = object()
+        context = self._register_live_managed_cancel_context(adapter, websocket)
+        build_called = False
+
+        async def unexpected_build(*_args, **_kwargs):
+            nonlocal build_called
+            build_called = True
+            raise AssertionError('combo build must not start during recovery')
+
+        adapter._build_combo_order_from_request = unexpected_build
+        await adapter.pause_managed_for_ib_recovery()
+        request = ComboOrderRequest(
+            group_id='entry_recovery',
+            group_name='Entry Recovery',
+            underlying_symbol='SPY',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='DU_TEST',
+        )
+
+        with self.assertRaisesRegex(ConnectionError, 'recovery is still in progress'):
+            await adapter.submit_combo_order(websocket, request)
+        with self.assertRaisesRegex(ConnectionError, 'recovery is still in progress'):
+            await adapter.cancel_managed_combo_order(
+                websocket,
+                {'orderId': 7600},
+            )
+
+        self.assertFalse(build_called)
+        self.assertEqual(ib.placed_orders, [])
+        self.assertEqual(ib.cancelled_orders, [])
+        self.assertEqual(context['managedState'], 'stopped_ib_recovery')
+
+    async def test_disconnected_combo_place_attempt_is_rejected_before_place_order(self):
+        ib = self._ConnectedIb(connected=False)
+        adapter = self._build_adapter(ib)
+        order = SimpleNamespace(
+            action='BUY',
+            totalQuantity=1,
+            lmtPrice=1.25,
+            tif='DAY',
+        )
+        request = SimpleNamespace(group_id='disconnected_group', execution_mode='submit')
+
+        with self.assertRaisesRegex(ConnectionError, 'not connected'):
+            await adapter._place_combo_order_attempt(
+                object(),
+                request,
+                object(),
+                order,
+                [],
+            )
+
+        self.assertEqual(ib.placed_orders, [])
+
+    async def test_combo_submit_keeps_entry_epoch_across_qualification(self):
+        ib = self._ConnectedIb(connected=True)
+        adapter = self._build_adapter(ib)
+        qualification_started = asyncio.Event()
+        release_qualification = asyncio.Event()
+
+        async def blocked_resolve(_websocket, _leg_request):
+            qualification_started.set()
+            await release_qualification.wait()
+            return (
+                SimpleNamespace(
+                    conId=7201,
+                    secType='OPT',
+                    symbol='SPY',
+                    localSymbol='SPY  260619C00500000',
+                    exchange='SMART',
+                    currency='USD',
+                    right='C',
+                    strike=500.0,
+                ),
+                {'bid': 1.2, 'ask': 1.3, 'mark': 1.25},
+            )
+
+        adapter._resolve_leg_contract_and_mark = blocked_resolve
+        request = ComboOrderRequest(
+            group_id='qualification_epoch',
+            group_name='Qualification Epoch',
+            underlying_symbol='SPY',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='DU_TEST',
+            legs=[ComboLegRequest.from_payload({
+                'id': 'leg_1',
+                'type': 'call',
+                'pos': 1,
+                'secType': 'OPT',
+                'symbol': 'SPY',
+                'underlyingSymbol': 'SPY',
+                'exchange': 'SMART',
+                'currency': 'USD',
+                'right': 'C',
+                'strike': 500,
+                'expDate': '20260619',
+            })],
+        )
+
+        submit_task = asyncio.create_task(
+            adapter.submit_combo_order(object(), request)
+        )
+        await qualification_started.wait()
+        await adapter.pause_managed_for_ib_recovery()
+        adapter.complete_ib_recovery()
+        release_qualification.set()
+
+        with self.assertRaisesRegex(ConnectionError, 'action was in flight'):
+            await submit_task
+        self.assertEqual(ib.placed_orders, [])
+
+    async def test_combo_tick_retry_reuses_entry_epoch_after_recovery(self):
+        ib = self._ConnectedIb(connected=True)
+        adapter = self._build_adapter(ib)
+        settle_started = asyncio.Event()
+        release_settle = asyncio.Event()
+        preview = ComboOrderPreview(
+            group_id='retry_epoch',
+            group_name='Retry Epoch',
+            combo_symbol='MES',
+            combo_exchange='CME',
+            order_action='BUY',
+            total_quantity=1,
+            limit_price=2.55,
+            pricing_source='middle',
+            raw_net_mid=2.58,
+            execution_mode='submit',
+        )
+        preview.price_increment = 0.05
+        order = SimpleNamespace(
+            action='BUY',
+            orderType='LMT',
+            totalQuantity=1,
+            lmtPrice=2.55,
+            tif='DAY',
+            transmit=True,
+        )
+
+        async def fake_build(
+            _websocket,
+            _request,
+            operation_recovery_epoch=None,
+        ):
+            self.assertEqual(operation_recovery_epoch, 0)
+            return {
+                'comboContract': SimpleNamespace(secType='BAG', exchange='CME'),
+                'order': order,
+                'preview': preview,
+                'resolvedLegs': [],
+                'priceIncrement': 0.05,
+                'rawLimitPrice': 2.58,
+            }
+
+        async def blocked_settle(_trade, _placement_tracking):
+            settle_started.set()
+            await release_settle.wait()
+            return {
+                'orderId': 7300,
+                'permId': 8300,
+                'status': 'Inactive',
+                'statusMessage': (
+                    'The price does not conform to the minimum price variation.'
+                ),
+            }
+
+        adapter._build_combo_order_from_request = fake_build
+        adapter._await_combo_submit_settle = blocked_settle
+        request = ComboOrderRequest(
+            group_id='retry_epoch',
+            group_name='Retry Epoch',
+            underlying_symbol='MES',
+            underlying_contract_month='202609',
+            execution_mode='submit',
+            account='DU_TEST',
+        )
+
+        submit_task = asyncio.create_task(
+            adapter.submit_combo_order(object(), request)
+        )
+        await settle_started.wait()
+        self.assertEqual(len(ib.placed_orders), 1)
+        await adapter.pause_managed_for_ib_recovery()
+        adapter.complete_ib_recovery()
+        release_settle.set()
+
+        with self.assertRaisesRegex(ConnectionError, 'action was in flight'):
+            await submit_task
+        self.assertEqual(len(ib.placed_orders), 1)
+
+    async def test_combo_recovery_during_submit_settle_registers_stopped_context(self):
+        ib = self._ConnectedIb(connected=True)
+        adapter = self._build_adapter(ib)
+        settle_started = asyncio.Event()
+        release_settle = asyncio.Event()
+        reprice_started = asyncio.Event()
+        preview = ComboOrderPreview(
+            group_id='settle_epoch',
+            group_name='Settle Epoch',
+            combo_symbol='SPY',
+            combo_exchange='SMART',
+            order_action='BUY',
+            total_quantity=1,
+            limit_price=1.25,
+            pricing_source='middle',
+            raw_net_mid=1.25,
+            execution_mode='submit',
+        )
+        order = SimpleNamespace(
+            orderId=7700,
+            action='BUY',
+            orderType='LMT',
+            totalQuantity=1,
+            lmtPrice=1.25,
+            tif='DAY',
+            transmit=True,
+            account='DU_TEST',
+        )
+
+        async def fake_build(
+            _websocket,
+            _request,
+            operation_recovery_epoch=None,
+        ):
+            self.assertEqual(operation_recovery_epoch, 0)
+            return {
+                'comboContract': SimpleNamespace(secType='OPT', exchange='SMART'),
+                'order': order,
+                'preview': preview,
+                'resolvedLegs': [],
+                'priceIncrement': 0.01,
+                'rawLimitPrice': 1.25,
+            }
+
+        async def blocked_settle(_trade, _placement_tracking):
+            settle_started.set()
+            await release_settle.wait()
+            return {
+                'orderId': 7700,
+                'permId': None,
+                'status': 'Submitted',
+                'statusMessage': '',
+            }
+
+        async def unexpected_reprice(_context):
+            reprice_started.set()
+
+        adapter._build_combo_order_from_request = fake_build
+        adapter._await_combo_submit_settle = blocked_settle
+        adapter._managed_reprice_loop = unexpected_reprice
+        request = ComboOrderRequest(
+            group_id='settle_epoch',
+            group_name='Settle Epoch',
+            underlying_symbol='SPY',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='DU_TEST',
+        )
+
+        submit_task = asyncio.create_task(
+            adapter.submit_combo_order(object(), request)
+        )
+        await settle_started.wait()
+        self.assertEqual(len(ib.placed_orders), 1)
+        await adapter.pause_managed_for_ib_recovery()
+        adapter.complete_ib_recovery()
+        release_settle.set()
+        result = await submit_task
+        await asyncio.sleep(0)
+
+        context = adapter.managed_executions_by_order_id[7700]
+        self.assertTrue(result.preview.managed_mode)
+        self.assertEqual(result.preview.managed_state, 'stopped_ib_recovery')
+        self.assertTrue(context['terminated'])
+        self.assertEqual(context['managedState'], 'stopped_ib_recovery')
+        self.assertIsNone(context['task'])
+        self.assertIn('manually in TWS', context['managedMessage'])
+        self.assertFalse(reprice_started.is_set())
+        self.assertEqual(len(ib.placed_orders), 1)
+
+    async def test_underlying_stage_recovery_blocks_second_underlying_leg(self):
+        ib = self._FilledIb(connected=True)
+        adapter = self._build_adapter(ib)
+        adapter.underlying_close_settle_seconds = 0
+        second_qualification_started = asyncio.Event()
+        release_second_qualification = asyncio.Event()
+        first_leg = ComboLegRequest.from_payload({
+            'id': 'stock_1',
+            'type': 'stock',
+            'pos': -10,
+            'secType': 'STK',
+            'symbol': 'SPY',
+            'exchange': 'SMART',
+            'currency': 'USD',
+        })
+        second_leg = ComboLegRequest.from_payload({
+            'id': 'stock_2',
+            'type': 'stock',
+            'pos': -5,
+            'secType': 'STK',
+            'symbol': 'QQQ',
+            'exchange': 'SMART',
+            'currency': 'USD',
+        })
+
+        async def resolve_leg(_websocket, leg_request):
+            if leg_request.id == 'stock_2':
+                second_qualification_started.set()
+                await release_second_qualification.wait()
+            mark = 500.0 if leg_request.id == 'stock_1' else 450.0
+            return (
+                SimpleNamespace(
+                    conId=7401 if leg_request.id == 'stock_1' else 7402,
+                    secType='STK',
+                    symbol=leg_request.symbol,
+                    localSymbol=leg_request.symbol,
+                    exchange='SMART',
+                ),
+                {'bid': mark - 0.05, 'ask': mark + 0.05, 'mark': mark},
+            )
+
+        adapter._resolve_leg_contract_and_mark = resolve_leg
+        request = ComboOrderRequest(
+            group_id='underlying_epoch',
+            group_name='Underlying Epoch',
+            underlying_symbol='SPY',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='DU_TEST',
+        )
+        stage_task = asyncio.create_task(
+            adapter._submit_underlying_first_close_plan(
+                object(),
+                request,
+                {'underlyingLegs': [first_leg, second_leg]},
+                operation_recovery_epoch=adapter._ib_recovery_epoch,
+            )
+        )
+        await second_qualification_started.wait()
+        self.assertEqual(len(ib.placed_orders), 1)
+        await adapter.pause_managed_for_ib_recovery()
+        adapter.complete_ib_recovery()
+        release_second_qualification.set()
+
+        with self.assertRaisesRegex(ConnectionError, 'action was in flight'):
+            await stage_task
+        self.assertEqual(len(ib.placed_orders), 1)
+
+    async def test_underlying_stage_recovery_blocks_following_option_order(self):
+        ib = self._FilledIb(connected=True)
+        adapter = self._build_adapter(ib)
+        adapter.underlying_close_settle_seconds = 0
+        option_build_started = asyncio.Event()
+        release_option_build = asyncio.Event()
+        underlying_leg = ComboLegRequest.from_payload({
+            'id': 'stock_leg',
+            'type': 'stock',
+            'pos': -10,
+            'secType': 'STK',
+            'symbol': 'SPY',
+            'exchange': 'SMART',
+            'currency': 'USD',
+        })
+        option_leg = ComboLegRequest.from_payload({
+            'id': 'option_leg',
+            'type': 'call',
+            'pos': 1,
+            'secType': 'OPT',
+            'symbol': 'SPY',
+            'underlyingSymbol': 'SPY',
+            'exchange': 'SMART',
+            'currency': 'USD',
+            'right': 'C',
+            'strike': 500,
+            'expDate': '20260619',
+        })
+        option_request = ComboOrderRequest(
+            group_id='underlying_option_epoch',
+            group_name='Underlying Option Epoch',
+            underlying_symbol='SPY',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='DU_TEST',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[option_leg],
+        )
+        original_request = ComboOrderRequest(
+            group_id=option_request.group_id,
+            group_name=option_request.group_name,
+            underlying_symbol='SPY',
+            underlying_contract_month='',
+            execution_mode='submit',
+            account='DU_TEST',
+            execution_intent='close',
+            request_source='close_group',
+            legs=[underlying_leg, option_leg],
+        )
+        close_plan = {
+            'underlyingLegs': [underlying_leg],
+            'optionRequest': option_request,
+            'assignmentAdjustments': [],
+            'messages': [],
+        }
+
+        async def resolve_underlying(_websocket, _leg_request):
+            return (
+                SimpleNamespace(
+                    conId=7501,
+                    secType='STK',
+                    symbol='SPY',
+                    localSymbol='SPY',
+                    exchange='SMART',
+                ),
+                {'bid': 499.95, 'ask': 500.05, 'mark': 500.0},
+            )
+
+        preview = ComboOrderPreview(
+            group_id=option_request.group_id,
+            group_name=option_request.group_name,
+            combo_symbol='SPY',
+            combo_exchange='SMART',
+            order_action='BUY',
+            total_quantity=1,
+            limit_price=1.25,
+            pricing_source='middle',
+            raw_net_mid=1.25,
+            execution_mode='submit',
+        )
+        option_order = SimpleNamespace(
+            action='BUY',
+            orderType='LMT',
+            totalQuantity=1,
+            lmtPrice=1.25,
+            tif='DAY',
+            transmit=True,
+        )
+
+        async def blocked_option_build(
+            _websocket,
+            _request,
+            operation_recovery_epoch=None,
+        ):
+            self.assertEqual(operation_recovery_epoch, 0)
+            option_build_started.set()
+            await release_option_build.wait()
+            return {
+                'comboContract': SimpleNamespace(secType='OPT', exchange='SMART'),
+                'order': option_order,
+                'preview': preview,
+                'resolvedLegs': [],
+                'priceIncrement': 0.01,
+                'rawLimitPrice': 1.25,
+            }
+
+        adapter._build_assignment_aware_close_plan = lambda _request: close_plan
+        adapter._validate_close_plan_confirmation = lambda *_args: None
+        adapter._resolve_leg_contract_and_mark = resolve_underlying
+        adapter._build_combo_order_from_request = blocked_option_build
+
+        submit_task = asyncio.create_task(
+            adapter.submit_combo_order(object(), original_request)
+        )
+        await option_build_started.wait()
+        self.assertEqual(len(ib.placed_orders), 1)
+        await adapter.pause_managed_for_ib_recovery()
+        adapter.complete_ib_recovery()
+        release_option_build.set()
+
+        with self.assertRaisesRegex(ConnectionError, 'action was in flight'):
+            await submit_task
+        self.assertEqual(len(ib.placed_orders), 1)
+
+    def _register_live_managed_cancel_context(self, adapter, websocket):
+        order = SimpleNamespace(orderId=7600)
+        context = {
+            'websocket': websocket,
+            'orderId': 7600,
+            'permId': 8600,
+            'groupId': 'cancel_epoch',
+            'account': 'DU_TEST',
+            'status': 'Submitted',
+            'managedState': 'watching',
+            'managedMessage': 'Watching.',
+            'terminated': False,
+            'task': None,
+            'trade': SimpleNamespace(order=order),
+            'ibRecoveryEpoch': adapter._ib_recovery_epoch,
+            'lastManagedEmitSignature': None,
+        }
+        adapter.managed_executions_by_order_id[7600] = context
+        adapter.managed_executions_by_perm_id[8600] = context
+        return context
+
+    async def test_managed_combo_cancel_revalidates_after_task_shutdown_await(self):
+        ib = self._ConnectedIb(connected=True)
+        adapter = self._build_adapter(ib)
+        websocket = object()
+        context = self._register_live_managed_cancel_context(adapter, websocket)
+        shutdown_started = asyncio.Event()
+        release_shutdown = asyncio.Event()
+
+        async def blocked_shutdown(target_context):
+            if target_context.get('managedState') == 'cancelling':
+                shutdown_started.set()
+                await release_shutdown.wait()
+
+        async def ignore_emit(_context):
+            return None
+
+        adapter._cancel_reprice_task_and_wait = blocked_shutdown
+        adapter._emit_managed_update = ignore_emit
+        cancel_task = asyncio.create_task(
+            adapter.cancel_managed_combo_order(
+                websocket,
+                {'orderId': 7600},
+            )
+        )
+        await shutdown_started.wait()
+        await adapter.pause_managed_for_ib_recovery()
+        adapter.complete_ib_recovery()
+        release_shutdown.set()
+
+        with self.assertRaisesRegex(ConnectionError, 'action was in flight'):
+            await cancel_task
+        self.assertEqual(ib.cancelled_orders, [])
+        self.assertEqual(context['managedState'], 'stopped_ib_recovery')
+
+    async def test_managed_combo_cancel_revalidates_after_update_await(self):
+        ib = self._ConnectedIb(connected=True)
+        adapter = self._build_adapter(ib)
+        websocket = object()
+        context = self._register_live_managed_cancel_context(adapter, websocket)
+        update_started = asyncio.Event()
+        release_update = asyncio.Event()
+
+        async def blocked_emit(target_context):
+            if target_context.get('managedState') == 'cancelling':
+                update_started.set()
+                await release_update.wait()
+
+        adapter._emit_managed_update = blocked_emit
+        cancel_task = asyncio.create_task(
+            adapter.cancel_managed_combo_order(
+                websocket,
+                {'orderId': 7600},
+            )
+        )
+        await update_started.wait()
+        await adapter.pause_managed_for_ib_recovery()
+        adapter.complete_ib_recovery()
+        release_update.set()
+
+        with self.assertRaisesRegex(ConnectionError, 'action was in flight'):
+            await cancel_task
+        self.assertEqual(ib.cancelled_orders, [])
+        self.assertEqual(context['managedState'], 'stopped_ib_recovery')
+
+
+class IbServerConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._saved = {
+            'ib': ib_server.ib,
+            'ib_connection_supervisor': ib_server.ib_connection_supervisor,
+            'execution_adapter': ib_server.execution_adapter,
+            'broadcast': ib_server._broadcast_ib_connection_status,
+            'ensure': ib_server._ensure_ib_connect_task,
+            'serve': ib_server.websockets.serve,
+            'ws_hosts': ib_server.WS_HOSTS,
+            'generation': ib_server.api_market_data_generation,
+            'state': ib_server.ib_market_data_state,
+            'reason': ib_server.ib_recovery_reason,
+            'required': ib_server.ib_subscriptions_required,
+            'replay': ib_server.ib_automatic_replay_allowed,
+            'recovery_lock': ib_server.ib_subscription_recovery_lock,
+        }
+        ib_server.ib_subscription_recovery_lock = asyncio.Lock()
+
+    def tearDown(self):
+        ib_server.ib = self._saved['ib']
+        ib_server.ib_connection_supervisor = self._saved['ib_connection_supervisor']
+        ib_server.execution_adapter = self._saved['execution_adapter']
+        ib_server._broadcast_ib_connection_status = self._saved['broadcast']
+        ib_server._ensure_ib_connect_task = self._saved['ensure']
+        ib_server.websockets.serve = self._saved['serve']
+        ib_server.WS_HOSTS = self._saved['ws_hosts']
+        ib_server.api_market_data_generation = self._saved['generation']
+        ib_server.ib_market_data_state = self._saved['state']
+        ib_server.ib_recovery_reason = self._saved['reason']
+        ib_server.ib_subscriptions_required = self._saved['required']
+        ib_server.ib_automatic_replay_allowed = self._saved['replay']
+        ib_server.ib_subscription_recovery_lock = self._saved['recovery_lock']
+
+    class _LifecycleIb:
+        def __init__(self, connected=False):
+            self.connected = connected
+            self.pendingTickersEvent = _DummyEvent()
+            self.market_data_types = []
+
+        def isConnected(self):
+            return self.connected
+
+        def reqMarketDataType(self, value):
+            self.market_data_types.append(value)
+
+        def managedAccounts(self):
+            return []
+
+        def tickers(self):
+            return []
+
+    async def test_startup_subscription_waiter_gets_one_replay_ready_transition(self):
+        fake_ib = self._LifecycleIb(connected=False)
+        ib_server.ib = fake_ib
+        ib_server.api_market_data_generation = 0
+        ib_server.ib_market_data_state = 'invalidated'
+        ib_server.ib_recovery_reason = 'startup'
+        ib_server.ib_subscriptions_required = False
+        ib_server.ib_automatic_replay_allowed = False
+        broadcasts = []
+        async def capture_broadcast(message=''):
+            broadcasts.append(
+                ib_server._build_ib_connection_status_payload(message)
+            )
+        ib_server._broadcast_ib_connection_status = capture_broadcast
+
+        self.assertTrue(await ib_server._mark_ib_subscription_requested_while_disconnected())
+        self.assertFalse(await ib_server._mark_ib_subscription_requested_while_disconnected())
+        self.assertEqual(len(broadcasts), 1)
+        self.assertEqual(broadcasts[0]['marketDataState'], 'invalidated')
+        self.assertTrue(broadcasts[0]['subscriptionsRequired'])
+        self.assertTrue(broadcasts[0]['automaticReplayAllowed'])
+
+        fake_ib.connected = True
+        await ib_server._on_ib_supervisor_connected()
+        self.assertEqual(len(broadcasts), 2)
+        self.assertEqual(broadcasts[1]['marketDataState'], 'ready')
+        self.assertTrue(broadcasts[1]['subscriptionsRequired'])
+        self.assertTrue(broadcasts[1]['automaticReplayAllowed'])
+
+        late_status = ib_server._build_ib_connection_status_payload()
+        self.assertTrue(late_status['subscriptionsRequired'])
+        self.assertTrue(late_status['automaticReplayAllowed'])
+
+    async def test_concurrent_startup_requests_adopt_one_new_generation(self):
+        fake_ib = self._LifecycleIb(connected=False)
+        ib_server.ib = fake_ib
+        ib_server.api_market_data_generation = 0
+        ib_server.ib_market_data_state = 'invalidated'
+        ib_server.ib_recovery_reason = 'startup'
+        ib_server.ib_subscriptions_required = False
+        ib_server.ib_automatic_replay_allowed = False
+        invalidation_started = asyncio.Event()
+        release_invalidation = asyncio.Event()
+        broadcasts = []
+
+        async def capture_broadcast(message=''):
+            broadcasts.append(
+                ib_server._build_ib_connection_status_payload(message)
+            )
+            invalidation_started.set()
+            await release_invalidation.wait()
+
+        ib_server._broadcast_ib_connection_status = capture_broadcast
+        first = asyncio.create_task(
+            ib_server._prepare_ib_live_subscription_generation(
+                requested_generation=0,
+                has_explicit_generation=True,
+            )
+        )
+        await invalidation_started.wait()
+        second = asyncio.create_task(
+            ib_server._prepare_ib_live_subscription_generation(
+                requested_generation=0,
+                has_explicit_generation=True,
+            )
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(second.done())
+
+        release_invalidation.set()
+        first_result, second_result = await asyncio.gather(first, second)
+
+        self.assertTrue(first_result['accepted'])
+        self.assertTrue(first_result['generationChanged'])
+        self.assertTrue(second_result['accepted'])
+        self.assertFalse(second_result['generationChanged'])
+        self.assertEqual(first_result['marketDataGeneration'], 1)
+        self.assertEqual(second_result['marketDataGeneration'], 1)
+        self.assertEqual(len(broadcasts), 1)
+
+    async def test_clean_first_connection_does_not_request_replay_for_later_page(self):
+        fake_ib = self._LifecycleIb(connected=True)
+        ib_server.ib = fake_ib
+        ib_server.api_market_data_generation = 0
+        ib_server.ib_market_data_state = 'invalidated'
+        ib_server.ib_recovery_reason = 'startup'
+        ib_server.ib_subscriptions_required = False
+        ib_server.ib_automatic_replay_allowed = False
+        broadcasts = []
+        async def capture_broadcast(message=''):
+            broadcasts.append(
+                ib_server._build_ib_connection_status_payload(message)
+            )
+        ib_server._broadcast_ib_connection_status = capture_broadcast
+
+        await ib_server._on_ib_supervisor_connected()
+
+        self.assertEqual(len(broadcasts), 1)
+        self.assertEqual(broadcasts[0]['marketDataState'], 'ready')
+        self.assertFalse(broadcasts[0]['subscriptionsRequired'])
+        self.assertFalse(broadcasts[0]['automaticReplayAllowed'])
+
+    async def test_ready_status_waits_for_startup_invalidation_broadcast(self):
+        fake_ib = self._LifecycleIb(connected=False)
+        ib_server.ib = fake_ib
+        ib_server.api_market_data_generation = 0
+        ib_server.ib_market_data_state = 'invalidated'
+        ib_server.ib_recovery_reason = 'startup'
+        ib_server.ib_subscriptions_required = False
+        ib_server.ib_automatic_replay_allowed = False
+        invalidation_started = asyncio.Event()
+        release_invalidation = asyncio.Event()
+        broadcasts = []
+
+        async def capture_broadcast(message=''):
+            broadcasts.append((
+                ib_server.ib_market_data_state,
+                ib_server.api_market_data_generation,
+                message,
+            ))
+            if ib_server.ib_market_data_state == 'invalidated':
+                invalidation_started.set()
+                await release_invalidation.wait()
+
+        ib_server._broadcast_ib_connection_status = capture_broadcast
+        marker_task = asyncio.create_task(
+            ib_server._mark_ib_subscription_requested_while_disconnected()
+        )
+        await invalidation_started.wait()
+
+        fake_ib.connected = True
+        connected_task = asyncio.create_task(
+            ib_server._on_ib_supervisor_connected()
+        )
+        await asyncio.sleep(0)
+        self.assertEqual(
+            [(state, generation) for state, generation, _message in broadcasts],
+            [('invalidated', 1)],
+        )
+
+        release_invalidation.set()
+        await asyncio.gather(marker_task, connected_task)
+        self.assertEqual(
+            [(state, generation) for state, generation, _message in broadcasts],
+            [('invalidated', 1), ('ready', 1)],
+        )
+
+    async def test_connection_status_distinguishes_handshake_from_scheduled_retry(self):
+        fake_ib = self._LifecycleIb(connected=False)
+        ib_server.ib = fake_ib
+        ib_server.ib_connection_supervisor = SimpleNamespace(
+            connecting=False,
+            reconnecting=True,
+            state='disconnected',
+            effective_client_id=998,
+            configured_client_id=999,
+        )
+
+        waiting = ib_server._build_ib_connection_status_payload()
+        self.assertFalse(waiting['connecting'])
+        self.assertTrue(waiting['reconnecting'])
+
+        ib_server.ib_connection_supervisor.connecting = True
+        ib_server.ib_connection_supervisor.state = 'connecting'
+        handshaking = ib_server._build_ib_connection_status_payload()
+        self.assertTrue(handshaking['connecting'])
+        self.assertTrue(handshaking['reconnecting'])
+
+    async def test_explicit_reset_broadcasts_invalidation_pauses_orders_and_returns_generation(self):
+        events = []
+        fake_ib = self._LifecycleIb(connected=False)
+        ib_server.ib = fake_ib
+        ib_server.api_market_data_generation = 4
+        ib_server.ib_market_data_state = 'ready'
+        ib_server.ib_recovery_reason = ''
+        ib_server.ib_subscriptions_required = False
+        ib_server.ib_automatic_replay_allowed = True
+
+        class _ExecutionAdapter:
+            def __init__(self):
+                self.recovery_gate_active = False
+
+            async def pause_managed_for_ib_recovery(self, **_kwargs):
+                self.recovery_gate_active = True
+                events.append('pause_managed')
+
+        class _Supervisor:
+            reconnecting = True
+
+            def disconnect_intentionally(self):
+                events.append('disconnect')
+                return True
+
+        async def ensure_connect():
+            events.append('ensure_connect')
+            return 'connecting'
+
+        async def capture_broadcast(message=''):
+            self.assertTrue(
+                ib_server.execution_adapter.recovery_gate_active,
+                'explicit reset must activate the execution recovery gate before broadcasting',
+            )
+            events.append((
+                'broadcast',
+                ib_server.api_market_data_generation,
+                ib_server.ib_market_data_state,
+                ib_server.ib_automatic_replay_allowed,
+                message,
+            ))
+
+        ib_server.execution_adapter = _ExecutionAdapter()
+        ib_server.ib_connection_supervisor = _Supervisor()
+        ib_server._ensure_ib_connect_task = ensure_connect
+        ib_server._broadcast_ib_connection_status = capture_broadcast
+
+        payload = await ib_server._reset_all_api_market_data_subscriptions('test')
+
+        self.assertEqual(payload['marketDataGeneration'], 5)
+        self.assertEqual(payload['marketDataState'], 'invalidated')
+        self.assertEqual(payload['recoveryReason'], 'explicit_stream_reset')
+        self.assertTrue(payload['subscriptionsRequired'])
+        self.assertFalse(payload['automaticReplayAllowed'])
+        self.assertEqual(events[0], 'pause_managed')
+        self.assertEqual(events[1][0], 'broadcast')
+        self.assertEqual(events[1][2], 'invalidated')
+        self.assertFalse(events[1][3])
+        self.assertEqual(events[2:], ['ensure_connect'])
+
+    async def test_backend_main_fails_when_reconnect_supervisor_task_returns(self):
+        stopped = []
+        fake_ib = self._LifecycleIb(connected=False)
+        ib_server.ib = fake_ib
+
+        class _StoppedSupervisor:
+            def start(self):
+                async def stop_immediately():
+                    return None
+
+                return asyncio.create_task(stop_immediately())
+
+            async def stop(self, *, disconnect):
+                stopped.append(disconnect)
+
+        class _WsServer:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            def close(self):
+                return None
+
+            async def wait_closed(self):
+                return None
+
+        async def fake_serve(*_args, **_kwargs):
+            return _WsServer()
+
+        ib_server.ib_connection_supervisor = _StoppedSupervisor()
+        ib_server.websockets.serve = fake_serve
+        ib_server.WS_HOSTS = ['127.0.0.1']
+
+        with self.assertRaisesRegex(RuntimeError, 'connection supervisor'):
+            await asyncio.wait_for(ib_server.main(), timeout=0.1)
+        self.assertEqual(stopped, [True])
 
 
 class IbServerSubmissionFillReplayTests(unittest.IsolatedAsyncioTestCase):

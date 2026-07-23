@@ -176,7 +176,22 @@ Current responsibilities include:
 - IV term-structure option-chain discovery and live option subscriptions
 - IB connection-status and manual connect messages
 
-`ib_server.py` starts the IB connection in the background so the process can still serve replay and fallback paths even if TWS / Gateway is not available.
+`ib_server.py` starts one persistent IB connection supervisor in the background
+so the process can still serve replay and fallback paths when TWS / Gateway is
+unavailable. After an unexpected disconnect, it attempts to reconnect
+immediately, then retries on a fixed 600-second cadence. Manual connect requests
+wake that same task instead of starting a competing reconnect loop.
+
+The configured client ID changes only after IB reports numeric error `326`
+(client ID already in use). Each such collision lowers the effective ID by one
+and promptly retries; ordinary connection failures do not alter it. An
+unexpected disconnect advances a market-data generation, invalidates live
+evidence, and lets Main, Chart Lab, and active IVTS cards replay subscriptions
+once after recovery. An explicit global stream reset remains manual.
+
+Managed combo repricing stops when the IB session or its market-data streams
+are invalidated. The broker order remains live at its last submitted limit and
+requires manual review; reconnecting never silently resumes or modifies it.
 
 Live market-data streams are pooled by qualified contract id. A second subscription for an already-streaming contract reuses the existing ticker; if a later subscriber needs extra generic ticks such as option Greeks tick `106`, the stream is reopened once with the merged tick list. Manual `sync_underlying` requests use the same pool and cancel one-shot lines when no active subscription shares the contract.
 
@@ -581,6 +596,13 @@ Daily maintenance and inspection:
 - Windows: double-click `update_yield_curve.bat`.
 - macOS: double-click `update_yield_curve_mac.command`.
 - Linux: run `./update_yield_curve.sh`.
+
+For the long-running Docker deployment, `option_combo_starter/supervisor.py`
+runs the same updater at startup and checks hourly. It also forces one refresh
+after 18:00 New York time on each weekday, so an early same-date snapshot
+cannot suppress observations published later that day. Failed, partial,
+timed-out, or cache-fallback refreshes retry after ten minutes. The shared
+snapshot is stored in the persistent `/app/state/yield_curve` volume.
 
 All launchers resolve the same configured/project virtual-environment Python
 used by the application, perform one update from the official sources, then

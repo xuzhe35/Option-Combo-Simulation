@@ -110,9 +110,18 @@ def _build_hedge_order(self, request):
     return order
 
 
-async def _build_hedge_order_from_request(self, request):
+async def _build_hedge_order_from_request(
+    self,
+    request,
+    operation_recovery_epoch=None,
+):
     self._validate_hedge_order_request(request)
     qualified_contract = await self._qualify_hedge_contract(request)
+    if operation_recovery_epoch is not None:
+        self._require_current_ib_recovery_epoch(
+            operation_recovery_epoch,
+            'continue hedge qualification',
+        )
     order = self._build_hedge_order(request)
 
     price_increment = None
@@ -127,6 +136,11 @@ async def _build_hedge_order_from_request(self, request):
             getattr(order, 'lmtPrice', None),
             self.default_price_increment,
         )
+        if operation_recovery_epoch is not None:
+            self._require_current_ib_recovery_epoch(
+                operation_recovery_epoch,
+                'continue hedge qualification',
+            )
         order.lmtPrice = self._quantize_underlying_limit_price(
             order.lmtPrice,
             order.action,
@@ -165,7 +179,15 @@ async def _build_hedge_order_from_request(self, request):
     }
 
 
-def _register_hedge_order_context(self, websocket, request, contract, trade, preview):
+def _register_hedge_order_context(
+    self,
+    websocket,
+    request,
+    contract,
+    trade,
+    preview,
+    ib_recovery_epoch=None,
+):
     order = getattr(trade, 'order', None)
     order_status = getattr(trade, 'orderStatus', None)
     context = {
@@ -200,6 +222,11 @@ def _register_hedge_order_context(self, websocket, request, contract, trade, pre
         'whyHeld': getattr(order_status, 'whyHeld', None),
         'mktCapPrice': getattr(order_status, 'mktCapPrice', None),
         'cancelRequested': False,
+        'ibRecoveryEpoch': (
+            self._ib_recovery_epoch
+            if ib_recovery_epoch is None
+            else int(ib_recovery_epoch)
+        ),
     }
     if context['orderId'] is not None:
         self.hedge_orders_by_order_id[context['orderId']] = context
@@ -339,9 +366,17 @@ async def preview_hedge_order(self, websocket, request):
 
 
 async def submit_hedge_order(self, websocket, request):
+    operation_recovery_epoch = self._ib_recovery_epoch
+    self._require_ib_operation_ready(
+        operation_recovery_epoch,
+        'start the hedge order submission',
+    )
     if not str(request.account or '').strip():
         raise ValueError('Hedge live submit requires an explicit account.')
-    build_result = await self._build_hedge_order_from_request(request)
+    build_result = await self._build_hedge_order_from_request(
+        request,
+        operation_recovery_epoch=operation_recovery_epoch,
+    )
     contract = build_result['contract']
     order = build_result['order']
     preview = build_result['preview']
@@ -352,10 +387,21 @@ async def submit_hedge_order(self, websocket, request):
         f"orderType={order.orderType} limit={getattr(order, 'lmtPrice', None)} "
         f"tif={order.tif} account={getattr(order, 'account', '') or ''}"
     )
+    self._require_ib_operation_ready(
+        operation_recovery_epoch,
+        'place the hedge order',
+    )
     trade = self.ib.placeOrder(contract, order)
     order_status = getattr(trade, 'orderStatus', None)
     status_message = extract_trade_status_message(trade)
-    self._register_hedge_order_context(websocket, request, contract, trade, preview)
+    self._register_hedge_order_context(
+        websocket,
+        request,
+        contract,
+        trade,
+        preview,
+        ib_recovery_epoch=operation_recovery_epoch,
+    )
     result = HedgeSubmitResult(
         preview=preview,
         order_id=getattr(getattr(trade, 'order', None), 'orderId', None),
@@ -372,6 +418,11 @@ async def submit_hedge_order(self, websocket, request):
 
 
 async def cancel_hedge_order(self, websocket, raw_data):
+    operation_recovery_epoch = self._ib_recovery_epoch
+    self._require_ib_operation_ready(
+        operation_recovery_epoch,
+        'start the hedge-order cancellation',
+    )
     try:
         order_id = int(raw_data.get('orderId')) if raw_data.get('orderId') not in (None, '') else None
     except (TypeError, ValueError):
@@ -404,10 +455,22 @@ async def cancel_hedge_order(self, websocket, raw_data):
         return self._build_hedge_order_snapshot(context)
 
     reason = str(raw_data.get('reason') or 'manual_cancel').strip()
+    context_recovery_epoch = context.get(
+        'ibRecoveryEpoch',
+        operation_recovery_epoch,
+    )
+    self._require_current_ib_recovery_epoch(
+        context_recovery_epoch,
+        'cancel the hedge order',
+    )
+    self._require_ib_operation_ready(
+        operation_recovery_epoch,
+        'cancel the hedge order',
+    )
+    self.ib.cancelOrder(order)
     context['cancelRequested'] = True
     context['status'] = 'PendingCancel'
     context['cancelReason'] = reason
-    self.ib.cancelOrder(order)
     self.logger.info(
         f"Requested hedge order cancellation for hedgeId={context.get('hedgeId')} "
         f"orderId={context.get('orderId')} permId={context.get('permId')} "

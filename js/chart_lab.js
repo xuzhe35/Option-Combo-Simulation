@@ -8,6 +8,14 @@
         visibleBars: 180,
         lastBarsKey: '',
         latestRequestId: '',
+        marketDataGeneration: null,
+        marketDataState: '',
+        lastReplayGeneration: null,
+        lastReplaySocket: null,
+        lastSubscribeSocket: null,
+        automaticReplayBlockedGeneration: null,
+        serverSessionId: '',
+        allowSharedPriceSeed: true,
     };
 
     const WS_PORT_STORAGE_KEY = 'optionComboWsPort';
@@ -44,6 +52,208 @@
         el.textContent = text || '';
         el.classList.remove('error', 'success');
         if (kind) el.classList.add(kind);
+    }
+
+    function normalizeMarketDataGeneration(value) {
+        const parsed = Number(value);
+        return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+    }
+
+    function isExplicitStreamReset(payload) {
+        return String(payload && payload.recoveryReason || '').trim().toLowerCase()
+            === 'explicit_stream_reset';
+    }
+
+    function statusBlocksAutomaticReplay(payload) {
+        return isExplicitStreamReset(payload)
+            || (payload
+                && payload.subscriptionsRequired === true
+                && payload.automaticReplayAllowed === false);
+    }
+
+    function isRegressiveConnectionStatus(generation, marketDataState) {
+        if (generation === null || lab.marketDataGeneration === null) {
+            return false;
+        }
+        if (generation < lab.marketDataGeneration) {
+            return true;
+        }
+        return generation === lab.marketDataGeneration
+            && lab.marketDataState === 'ready'
+            && marketDataState === 'invalidated';
+    }
+
+    function adoptServerSession(payload) {
+        const incomingSessionId = String(
+            payload && payload.serverSessionId || ''
+        ).trim();
+        if (!incomingSessionId || incomingSessionId === lab.serverSessionId) {
+            return false;
+        }
+
+        const replacesKnownGeneration = lab.marketDataGeneration !== null;
+        lab.serverSessionId = incomingSessionId;
+        if (!replacesKnownGeneration) {
+            return false;
+        }
+
+        lab.marketDataGeneration = null;
+        lab.marketDataState = '';
+        lab.lastReplayGeneration = null;
+        lab.lastReplaySocket = null;
+        lab.lastSubscribeSocket = null;
+        lab.automaticReplayBlockedGeneration = null;
+        return true;
+    }
+
+    function invalidateLiveEvidence(message) {
+        lab.allowSharedPriceSeed = false;
+        lab.currentPrice = NaN;
+        // mergeLivePriceIntoBars mutates today's candle. Drop the bar cache so
+        // a pre-reconnect synthetic close cannot survive until the next load.
+        lab.bars = [];
+        lab.barsSource = 'Waiting';
+        lab.lastBarsKey = '';
+        lab.latestRequestId = '';
+        lab.lastSubscribeSocket = null;
+        setMessage(
+            message || 'IB disconnected. Waiting for fresh daily bars and a new live price...',
+            'error'
+        );
+        draw();
+    }
+
+    function handleIbConnectionStatus(payload, sourceSocket = lab.socket) {
+        if (!payload || payload.action !== 'ib_connection_status') return false;
+        if (sourceSocket !== lab.socket) return true;
+        adoptServerSession(payload);
+        const generation = normalizeMarketDataGeneration(payload.marketDataGeneration);
+        const marketDataState = String(payload.marketDataState || '').trim().toLowerCase();
+        if (isRegressiveConnectionStatus(generation, marketDataState)) {
+            return true;
+        }
+        const previousGeneration = lab.marketDataGeneration;
+        const generationChanged = generation !== null && generation !== previousGeneration;
+        if (generation !== null) lab.marketDataGeneration = generation;
+        if (marketDataState) lab.marketDataState = marketDataState;
+        const automaticReplayBlocked = statusBlocksAutomaticReplay(payload);
+        if (generation !== null && automaticReplayBlocked) {
+            // A reconnect can reach READY before a page that missed the
+            // explicit-reset invalidation asks for status. The READY reply
+            // still carries the manual replay boundary.
+            lab.automaticReplayBlockedGeneration = generation;
+        } else if (generation !== null
+            && payload.automaticReplayAllowed === true
+            && lab.automaticReplayBlockedGeneration === generation) {
+            lab.automaticReplayBlockedGeneration = null;
+        }
+
+        if (marketDataState === 'invalidated') {
+            if (generationChanged) {
+                lab.lastReplayGeneration = null;
+                lab.lastReplaySocket = null;
+            }
+            if (automaticReplayBlocked) {
+                lab.automaticReplayBlockedGeneration = generation;
+            } else if (generationChanged || lab.automaticReplayBlockedGeneration !== generation) {
+                lab.automaticReplayBlockedGeneration = null;
+            }
+            invalidateLiveEvidence(payload.message);
+            const recoveryReason = String(payload.recoveryReason || '').trim().toLowerCase();
+            const shouldRegisterStartupIntent = !automaticReplayBlocked
+                && payload.subscriptionsRequired !== true
+                && recoveryReason.startsWith('startup')
+                && sourceSocket
+                && sourceSocket.readyState === WebSocket.OPEN;
+            if (shouldRegisterStartupIntent
+                && !(lab.lastReplaySocket === sourceSocket
+                    && lab.lastReplayGeneration === generation)) {
+                lab.lastReplaySocket = sourceSocket;
+                lab.lastReplayGeneration = generation;
+                subscribeUnderlying();
+                requestBars(true);
+            }
+            return true;
+        }
+
+        const shouldSubscribe = marketDataState === 'ready'
+            && payload.connected === true
+            && !automaticReplayBlocked
+            && lab.automaticReplayBlockedGeneration !== generation
+            && sourceSocket
+            && sourceSocket.readyState === WebSocket.OPEN;
+        if (!shouldSubscribe) return true;
+        if (lab.lastReplaySocket === sourceSocket
+            && lab.lastReplayGeneration === generation) {
+            return true;
+        }
+        if (lab.lastSubscribeSocket === sourceSocket
+            && (previousGeneration === null || !generationChanged)) {
+            // Preserve any explicit/manual subscription that happened while
+            // the status request was in flight, while still completing the
+            // ordinary Chart Lab bar load after the handshake.
+            lab.lastReplaySocket = sourceSocket;
+            lab.lastReplayGeneration = generation;
+            requestBars(true);
+            return true;
+        }
+
+        lab.lastReplaySocket = sourceSocket;
+        lab.lastReplayGeneration = generation;
+        subscribeUnderlying();
+        requestBars(true);
+        return true;
+    }
+
+    function handleApiMarketDataReset(payload) {
+        if (!payload
+            || payload.action !== 'api_market_data_subscriptions_reset') {
+            return false;
+        }
+        if (payload.success !== true) {
+            return true;
+        }
+
+        const generation = normalizeMarketDataGeneration(payload.marketDataGeneration);
+        if (generation !== null
+            && lab.marketDataGeneration !== null
+            && generation < lab.marketDataGeneration) {
+            return true;
+        }
+
+        const preserveCurrentReadyState = generation !== null
+            && generation === lab.marketDataGeneration
+            && lab.marketDataState === 'ready';
+        const responseMarketDataState = String(payload.marketDataState || '')
+            .trim()
+            .toLowerCase();
+        const nextMarketDataState = preserveCurrentReadyState
+            ? 'ready'
+            : (['ready', 'invalidated'].includes(responseMarketDataState)
+                ? responseMarketDataState
+                : 'invalidated');
+        if (generation !== null) {
+            lab.marketDataGeneration = generation;
+        }
+        lab.marketDataState = nextMarketDataState;
+        lab.automaticReplayBlockedGeneration = generation === null
+            ? lab.marketDataGeneration
+            : generation;
+        lab.lastReplayGeneration = null;
+        lab.lastReplaySocket = null;
+        invalidateLiveEvidence(
+            String(payload.message
+                || 'All API market-data subscriptions were cleared. Subscribe again to resume live data.')
+        );
+        return true;
+    }
+
+    function payloadMatchesCurrentGeneration(payload) {
+        const payloadGeneration = normalizeMarketDataGeneration(
+            payload && payload.marketDataGeneration
+        );
+        return lab.marketDataGeneration === null
+            || payloadGeneration === lab.marketDataGeneration;
     }
 
     function normalizeDate(value) {
@@ -699,34 +909,70 @@
             durationStr: '2 Y',
             useRTH: true,
             limit: Math.max(lab.visibleBars + 20, 220),
+            ...(lab.marketDataGeneration === null
+                ? {}
+                : { marketDataGeneration: lab.marketDataGeneration }),
         }));
     }
 
     function subscribeUnderlying() {
         const state = appState();
-        if (!state || !lab.socket || lab.socket.readyState !== WebSocket.OPEN) return;
+        if (!state || !lab.socket || lab.socket.readyState !== WebSocket.OPEN) return false;
         lab.socket.send(JSON.stringify({
             action: 'subscribe',
             underlying: underlyingRequest(state),
             options: [],
             futures: [],
             stocks: [],
+            ...(lab.marketDataGeneration === null
+                ? {}
+                : { marketDataGeneration: lab.marketDataGeneration }),
         }));
+        lab.lastSubscribeSocket = lab.socket;
+        return true;
+    }
+
+    function seedCurrentPriceFromSharedState() {
+        const state = appState();
+        if (!state
+            || lab.allowSharedPriceSeed !== true
+            || lab.marketDataGeneration !== null
+            || lab.marketDataState
+            || Number.isFinite(lab.currentPrice)
+            || !Number.isFinite(Number(state.underlyingPrice))) {
+            return false;
+        }
+        lab.currentPrice = Number(state.underlyingPrice);
+        draw();
+        return true;
     }
 
     function openSocket() {
         if (lab.socket && (lab.socket.readyState === WebSocket.OPEN || lab.socket.readyState === WebSocket.CONNECTING)) return;
-        lab.socket = new WebSocket(`ws://127.0.0.1:${wsPort()}`);
-        lab.socket.addEventListener('open', () => {
-            setMessage('Chart Lab connected. Loading daily bars and live price...', 'success');
-            subscribeUnderlying();
-            requestBars(true);
+        const socket = new WebSocket(`ws://127.0.0.1:${wsPort()}`);
+        lab.socket = socket;
+        socket.addEventListener('open', () => {
+            if (lab.socket !== socket) return;
+            setMessage('Chart Lab connected. Checking IB recovery state...', 'success');
+            socket.send(JSON.stringify({ action: 'request_ib_connection_status' }));
         });
-        lab.socket.addEventListener('message', (event) => {
+        socket.addEventListener('message', (event) => {
+            if (lab.socket !== socket) return;
             let payload = null;
             try {
                 payload = JSON.parse(event.data);
             } catch (_) {
+                return;
+            }
+            if (payload && payload.action === 'ib_connection_status') {
+                handleIbConnectionStatus(payload, socket);
+                return;
+            }
+            if (payload && payload.action === 'api_market_data_subscriptions_reset') {
+                handleApiMarketDataReset(payload);
+                return;
+            }
+            if (!payloadMatchesCurrentGeneration(payload)) {
                 return;
             }
             if (payload && payload.action === 'historical_bars_response') {
@@ -755,17 +1001,22 @@
                 return;
             }
             if (payload && Number.isFinite(Number(payload.underlyingPrice))) {
+                lab.allowSharedPriceSeed = false;
                 lab.currentPrice = Number(payload.underlyingPrice);
                 mergeLivePriceIntoBars();
                 draw();
             }
         });
-        lab.socket.addEventListener('close', () => {
+        socket.addEventListener('close', () => {
+            if (lab.socket !== socket) return;
             lab.socket = null;
-            setMessage('Chart Lab socket disconnected. Retrying...', 'error');
+            invalidateLiveEvidence('Chart Lab socket disconnected. Retrying...');
             setTimeout(openSocket, 2500);
         });
-        lab.socket.addEventListener('error', () => setMessage('Chart Lab socket error.', 'error'));
+        socket.addEventListener('error', () => {
+            if (lab.socket !== socket) return;
+            setMessage('Chart Lab socket error.', 'error');
+        });
     }
 
     function activateTab(targetId) {
@@ -827,10 +1078,7 @@
             const state = appState();
             if (!state) return;
             populateGroupSelect();
-            if (!Number.isFinite(lab.currentPrice) && Number.isFinite(Number(state.underlyingPrice))) {
-                lab.currentPrice = Number(state.underlyingPrice);
-                draw();
-            }
+            seedCurrentPriceFromSharedState();
         }, 800);
     }
 
@@ -846,6 +1094,29 @@
         _test: Object.freeze({
             buildProjectionPricingState,
             projectionCurve,
+            handleApiMarketDataReset,
+            handleIbConnectionStatus,
+            openSocket,
+            seedCurrentPriceFromSharedState,
+            setSocketForTest(socket) {
+                lab.socket = socket;
+            },
+            setCurrentPriceForTest(value) {
+                lab.currentPrice = Number(value);
+            },
+            getRecoveryState() {
+                return {
+                    currentPrice: lab.currentPrice,
+                    marketDataGeneration: lab.marketDataGeneration,
+                    marketDataState: lab.marketDataState,
+                    lastReplayGeneration: lab.lastReplayGeneration,
+                    lastReplaySocket: lab.lastReplaySocket,
+                    lastSubscribeSocket: lab.lastSubscribeSocket,
+                    automaticReplayBlockedGeneration: lab.automaticReplayBlockedGeneration,
+                    serverSessionId: lab.serverSessionId,
+                    allowSharedPriceSeed: lab.allowSharedPriceSeed,
+                };
+            },
         }),
     });
 

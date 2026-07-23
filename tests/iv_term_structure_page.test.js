@@ -41,6 +41,43 @@ function fixedDateClass(isoTimestamp) {
     };
 }
 
+function createWebSocketHarness() {
+    const sockets = [];
+    class MockWebSocket {
+        static OPEN = 1;
+        static CONNECTING = 0;
+
+        constructor() {
+            this.readyState = MockWebSocket.CONNECTING;
+            this.listeners = {};
+            this.sent = [];
+            this.closeCalls = [];
+            sockets.push(this);
+        }
+
+        addEventListener(type, listener) {
+            if (!this.listeners[type]) this.listeners[type] = [];
+            this.listeners[type].push(listener);
+        }
+
+        send(message) {
+            this.sent.push(JSON.parse(message));
+        }
+
+        emit(type, event = {}) {
+            if (type === 'open') this.readyState = MockWebSocket.OPEN;
+            if (type === 'close') this.readyState = 3;
+            (this.listeners[type] || []).forEach(listener => listener(event));
+        }
+
+        close(code, reason) {
+            this.closeCalls.push({ code, reason });
+            this.readyState = 3;
+        }
+    }
+    return { MockWebSocket, sockets };
+}
+
 function createCoherentPublicationFixture(options = {}) {
     const focusedStreamSelect = {
         matches(selector) {
@@ -1477,12 +1514,14 @@ module.exports = {
                 assert.match(card.statusMessage, /paused while this page is hidden/);
 
                 let controlRestoreCount = 0;
+                let controlRestoreOptions = null;
                 const syncCalls = [];
                 const restored = await testApi.resumePageAfterCache(
                     { persisted: true },
                     {
-                        async ensureControlSocket() {
+                        async ensureControlSocket(options) {
                             controlRestoreCount += 1;
+                            controlRestoreOptions = options;
                             return {};
                         },
                         async syncCard(resumeCard, syncOptions) {
@@ -1495,15 +1534,111 @@ module.exports = {
                 assert.equal(restored.controlRestored, true);
                 assert.deepEqual(Array.from(restored.resyncedSymbols), ['SPY']);
                 assert.equal(controlRestoreCount, 1);
+                assert.equal(
+                    controlRestoreOptions.requireAutomaticMarketDataPermission,
+                    true
+                );
                 assert.equal(syncCalls.length, 1);
                 assert.equal(syncCalls[0].symbol, 'SPY');
                 assert.equal(syncCalls[0].syncOptions.waitForQuotes, false);
+                assert.equal(syncCalls[0].syncOptions.automatic, true);
                 assert.equal(card.resumeAfterPageShow, false);
                 assert.match(card.statusMessage, /Resyncing live IVTS/);
                 assert.deepEqual(
                     intervalDelays.slice().sort((a, b) => a - b),
                     [60000, 6 * 60 * 60 * 1000]
                 );
+            },
+        },
+        {
+            name: 'blocks bfcache automatic resync until replacement control status permits it',
+            async run() {
+                const sockets = [];
+                class MockWebSocket {
+                    static OPEN = 1;
+                    static CONNECTING = 0;
+
+                    constructor() {
+                        this.readyState = MockWebSocket.CONNECTING;
+                        this.listeners = {};
+                        this.sent = [];
+                        sockets.push(this);
+                    }
+
+                    addEventListener(type, listener) {
+                        if (!this.listeners[type]) this.listeners[type] = [];
+                        this.listeners[type].push(listener);
+                    }
+
+                    send(message) {
+                        this.sent.push(JSON.parse(message));
+                    }
+
+                    emit(type, event = {}) {
+                        if (type === 'open') this.readyState = MockWebSocket.OPEN;
+                        (this.listeners[type] || []).forEach(listener => listener(event));
+                    }
+
+                    close() {
+                        this.readyState = 3;
+                    }
+                }
+
+                const ctx = loadPageContext(null, {
+                    WebSocket: MockWebSocket,
+                    setInterval() { return 1; },
+                    clearInterval() {},
+                });
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.applyRuntimeConfig({
+                    title: 'bfcache handshake test',
+                    symbols: [{
+                        symbol: 'SPY',
+                        historyPath: 'iv_term_structure/data/SPY.json',
+                    }],
+                }, 'test');
+                const card = testApi.getCard('SPY');
+                card.resumeAfterPageShow = true;
+                const syncCalls = [];
+
+                const resumePromise = testApi.resumePageAfterCache(
+                    { persisted: true },
+                    {
+                        async syncCard(resumeCard, options) {
+                            syncCalls.push({ symbol: resumeCard.symbol, options });
+                        },
+                    }
+                );
+                await Promise.resolve();
+                const controlSocket = sockets[0];
+                assert.ok(controlSocket);
+                assert.deepEqual(syncCalls, []);
+
+                controlSocket.emit('open');
+                await Promise.resolve();
+                assert.deepEqual(
+                    controlSocket.sent.map(payload => payload.action),
+                    ['request_ib_connection_status', 'request_discount_curve']
+                );
+                assert.deepEqual(syncCalls, []);
+
+                controlSocket.emit('message', {
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        connected: true,
+                        connecting: false,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 9,
+                        recoveryReason: 'explicit_stream_reset',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                const restored = await resumePromise;
+                assert.equal(restored.resumed, true);
+                assert.equal(restored.controlRestored, false);
+                assert.deepEqual(Array.from(restored.resyncedSymbols), []);
+                assert.deepEqual(syncCalls, []);
             },
         },
         {
@@ -2604,6 +2739,1045 @@ module.exports = {
 
                 store.optionComboIvtsCalendarFinder = '{broken json';
                 assert.equal(testApi.loadSavedCalendarFinderConfig('SPY'), null);
+            },
+        },
+        {
+            name: 'invalidates every card and resyncs only previously active cards once per unexpected recovery epoch',
+            async run() {
+                const ctx = loadPageContext(null);
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.applyRuntimeConfig({
+                    title: 'Recovery test',
+                    symbols: [
+                        { symbol: 'SPY', historyPath: 'iv_term_structure/data/SPY.json' },
+                        { symbol: 'QQQ', historyPath: 'iv_term_structure/data/QQQ.json' },
+                    ],
+                }, 'test');
+                const spy = testApi.getCard('SPY');
+                const qqq = testApi.getCard('QQQ');
+                spy.ws = { readyState: 1 };
+                spy.catalog = { anchorDate: '2026-07-20', expiryRows: [] };
+                spy.quotesBySubId = { call: { mark: 5 } };
+                spy.lambdaSnapshot = { snapshotId: 'strict-before-recovery' };
+                spy.underlyingPrice = 600;
+                spy.impliedLambdaComputedEntry = { snapshotId: 'frozen-calculation' };
+                qqq.catalog = { anchorDate: '2026-07-20', expiryRows: [] };
+                qqq.quotesBySubId = { put: { mark: 4 } };
+                qqq.lambdaSnapshot = { snapshotId: 'inactive-stale-snapshot' };
+                qqq.underlyingPrice = 500;
+
+                const syncCalls = [];
+                let releaseReplay = null;
+                const replayGate = new Promise((resolve) => {
+                    releaseReplay = resolve;
+                });
+                let deferReplay = true;
+                const dependencies = {
+                    async syncCard(card, options) {
+                        syncCalls.push({ symbol: card.symbol, options });
+                        // Reproduce the closed-socket race: sync immediately
+                        // creates a replacement socket before awaiting open.
+                        card.ws = { readyState: 0, replacement: true };
+                        if (deferReplay) {
+                            await replayGate;
+                        }
+                    },
+                };
+                const invalidated = {
+                    action: 'ib_connection_status',
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 11,
+                    recoveryReason: 'unexpected_disconnect',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                };
+                await testApi.handleIbConnectionStatus(invalidated, dependencies);
+
+                assert.equal(spy.catalog, null);
+                assert.equal(Object.keys(spy.quotesBySubId).length, 0);
+                assert.equal(spy.lambdaSnapshot, null);
+                assert.equal(spy.underlyingPrice, null);
+                assert.equal(spy.impliedLambdaComputedEntry.snapshotId, 'frozen-calculation');
+                assert.equal(spy.impliedLambdaNeedsRecalculation, true);
+                assert.equal(qqq.catalog, null);
+                assert.equal(Object.keys(qqq.quotesBySubId).length, 0);
+                assert.equal(qqq.lambdaSnapshot, null);
+                assert.equal(qqq.underlyingPrice, null);
+
+                // A duplicate invalidated frame arriving after the old card
+                // socket closes must union with, rather than replace, the
+                // active intent captured by the first frame.
+                spy.ws = null;
+                await testApi.handleIbConnectionStatus(invalidated, dependencies);
+                assert.deepEqual(
+                    Array.from(testApi.getRecoveryState().activeSymbols),
+                    ['SPY']
+                );
+
+                const ready = {
+                    action: 'ib_connection_status',
+                    connected: true,
+                    connecting: false,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 11,
+                    recoveryReason: 'unexpected_disconnect',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                };
+                const firstReady = testApi.handleIbConnectionStatus(ready, dependencies);
+                const duplicateReady = testApi.handleIbConnectionStatus(ready, dependencies);
+                assert.deepEqual(syncCalls.map(call => call.symbol), ['SPY']);
+                releaseReplay();
+                await Promise.all([firstReady, duplicateReady]);
+                assert.equal(syncCalls[0].options.waitForQuotes, false);
+                assert.equal(syncCalls[0].options.automatic, true);
+                assert.deepEqual(
+                    JSON.parse(JSON.stringify(testApi.getRecoveryState().replayClaims)),
+                    [{ symbol: 'SPY', generation: 11, state: 'complete' }]
+                );
+
+                spy.underlyingPrice = 615;
+                spy.catalog = { anchorDate: '2026-07-21', expiryRows: [] };
+                await testApi.handleIbConnectionStatus({
+                    ...invalidated,
+                    marketDataGeneration: 10,
+                }, dependencies);
+                await testApi.handleIbConnectionStatus({
+                    ...invalidated,
+                    marketDataGeneration: 11,
+                }, dependencies);
+                assert.equal(spy.underlyingPrice, 615);
+                assert.equal(testApi.getRecoveryState().marketDataState, 'ready');
+
+                syncCalls.length = 0;
+                spy.catalog = { anchorDate: '2026-07-20', expiryRows: [] };
+                await testApi.handleIbConnectionStatus({
+                    ...ready,
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 12,
+                    recoveryReason: 'explicit_stream_reset',
+                    automaticReplayAllowed: false,
+                }, dependencies);
+                await testApi.handleIbConnectionStatus({
+                    ...ready,
+                    marketDataGeneration: 12,
+                    recoveryReason: 'explicit_stream_reset',
+                    automaticReplayAllowed: false,
+                }, dependencies);
+                assert.deepEqual(syncCalls, []);
+
+                // Startup may initially say replay=false, then become
+                // authoritative-ready in the same generation once a waiting
+                // subscription is known. Preserve and replay that intent.
+                deferReplay = false;
+                spy.ws = { readyState: 1 };
+                const startupUnavailable = {
+                    ...ready,
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 13,
+                    recoveryReason: 'startup_subscription_wait',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: false,
+                };
+                await testApi.handleIbConnectionStatus(startupUnavailable, dependencies);
+                await testApi.handleIbConnectionStatus(startupUnavailable, dependencies);
+                assert.deepEqual(syncCalls.map(call => call.symbol), ['SPY']);
+                assert.equal(syncCalls[0].options.automatic, true);
+                spy.ws = null;
+                await testApi.handleIbConnectionStatus({
+                    ...ready,
+                    marketDataGeneration: 13,
+                    recoveryReason: 'startup_subscription_wait',
+                    automaticReplayAllowed: true,
+                }, dependencies);
+                assert.deepEqual(syncCalls.map(call => call.symbol), ['SPY']);
+                assert.equal(
+                    testApi.getRecoveryState().automaticReplayBlockedGeneration,
+                    null
+                );
+            },
+        },
+        {
+            name: 'rejects unstamped or stale IVTS payloads after a recovery epoch is known',
+            async run() {
+                const ctx = loadPageContext(null);
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.applyRuntimeConfig({
+                    title: 'Generation gate test',
+                    symbols: [
+                        { symbol: 'SPY', historyPath: 'iv_term_structure/data/SPY.json' },
+                    ],
+                }, 'test');
+                const card = testApi.getCard('SPY');
+                const handlers = {};
+                const ws = {
+                    readyState: 1,
+                    addEventListener(type, handler) {
+                        handlers[type] = handler;
+                    },
+                };
+                card.ws = ws;
+                testApi.attachSocketHandlers(card, ws);
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    connected: true,
+                    connecting: false,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 7,
+                    recoveryReason: 'connected',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: false,
+                });
+
+                handlers.message({
+                    data: JSON.stringify({ underlyingPrice: 700 }),
+                });
+                handlers.message({
+                    data: JSON.stringify({
+                        marketDataGeneration: 6,
+                        underlyingPrice: 701,
+                    }),
+                });
+                assert.equal(card.underlyingPrice, null);
+
+                handlers.message({
+                    data: JSON.stringify({
+                        marketDataGeneration: 7,
+                        underlyingPrice: 702,
+                    }),
+                });
+                assert.equal(card.underlyingPrice, 702);
+            },
+        },
+        {
+            name: 'keeps clean ready unblocked and applies reset acknowledgements monotonically',
+            async run() {
+                const ctx = loadPageContext(null);
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.applyRuntimeConfig({
+                    title: 'Reset acknowledgement race test',
+                    symbols: [
+                        { symbol: 'SPY', historyPath: 'iv_term_structure/data/SPY.json' },
+                    ],
+                }, 'test');
+                const card = testApi.getCard('SPY');
+                const syncCalls = [];
+                const dependencies = {
+                    async syncCard(candidate) {
+                        syncCalls.push(candidate.symbol);
+                    },
+                };
+
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    connected: true,
+                    connecting: false,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 0,
+                    recoveryReason: 'startup',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: false,
+                }, dependencies);
+                assert.equal(
+                    testApi.getRecoveryState().automaticReplayBlockedGeneration,
+                    null
+                );
+                card.underlyingPrice = 610;
+
+                // No INVALIDATED status was observed for generation 1.
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    connected: true,
+                    connecting: false,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 1,
+                    recoveryReason: 'explicit_stream_reset',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: false,
+                }, dependencies);
+                assert.equal(testApi.getRecoveryState().marketDataGeneration, 1);
+                assert.equal(testApi.getRecoveryState().marketDataState, 'ready');
+                assert.equal(
+                    testApi.getRecoveryState().automaticReplayBlockedGeneration,
+                    1
+                );
+                assert.equal(testApi.getRecoveryState().explicitResetEpoch, 1);
+                assert.deepEqual(syncCalls, []);
+
+                testApi.handleApiMarketDataReset({
+                    action: 'api_market_data_subscriptions_reset',
+                    success: true,
+                    marketDataGeneration: 0,
+                    message: 'Stale reset acknowledgement.',
+                });
+                assert.equal(card.underlyingPrice, 610);
+                assert.equal(testApi.getRecoveryState().marketDataGeneration, 1);
+                assert.equal(testApi.getRecoveryState().marketDataState, 'ready');
+                assert.equal(testApi.getRecoveryState().explicitResetEpoch, 1);
+
+                testApi.handleApiMarketDataReset({
+                    action: 'api_market_data_subscriptions_reset',
+                    success: true,
+                    marketDataGeneration: 1,
+                    message: 'Current reset acknowledgement.',
+                });
+                assert.equal(card.underlyingPrice, null);
+                assert.equal(testApi.getRecoveryState().marketDataGeneration, 1);
+                assert.equal(testApi.getRecoveryState().marketDataState, 'ready');
+                assert.equal(
+                    testApi.getRecoveryState().automaticReplayBlockedGeneration,
+                    1
+                );
+                assert.equal(
+                    testApi.getRecoveryState().explicitResetEpoch,
+                    1,
+                    'status and acknowledgement for one reset share one boundary'
+                );
+
+                // A higher-generation reset acknowledgement may already
+                // report READY after a fast reconnect. Adopt that state while
+                // retaining the explicit manual boundary.
+                testApi.handleApiMarketDataReset({
+                    action: 'api_market_data_subscriptions_reset',
+                    success: true,
+                    marketDataGeneration: 2,
+                    marketDataState: 'ready',
+                    recoveryReason: 'explicit_stream_reset',
+                    message: 'Fast reconnect completed.',
+                });
+                assert.equal(testApi.getRecoveryState().marketDataGeneration, 2);
+                assert.equal(testApi.getRecoveryState().marketDataState, 'ready');
+                assert.equal(
+                    testApi.getRecoveryState().automaticReplayBlockedGeneration,
+                    2
+                );
+                assert.equal(testApi.getRecoveryState().explicitResetEpoch, 2);
+                assert.deepEqual(syncCalls, []);
+            },
+        },
+        {
+            name: 'aborts manual and automatic sample writes when live evidence is invalidated in flight',
+            async run() {
+                const ctx = loadPageContext(null);
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.applyRuntimeConfig({
+                    title: 'Sampling invalidation test',
+                    symbols: [
+                        { symbol: 'SPY', historyPath: 'iv_term_structure/data/SPY.json' },
+                    ],
+                }, 'test');
+                const card = testApi.getCard('SPY');
+
+                let resolveWritable = null;
+                let writableWriteCount = 0;
+                let writableCloseCount = 0;
+                let writableAbortCount = 0;
+                card.autoHistoryDocument = {
+                    purpose: 'iv_term_structure_auto_samples',
+                    symbol: 'SPY',
+                    samples: [],
+                };
+                card.autoFileHandle = {
+                    createWritable() {
+                        return new Promise((resolve) => {
+                            resolveWritable = resolve;
+                        });
+                    },
+                };
+                const guardedWrite = testApi.writeAutoHistoryDocument(card, {
+                    expectedMarketEvidenceEpoch: card.marketEvidenceEpoch,
+                });
+                await Promise.resolve();
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 20,
+                    recoveryReason: 'unexpected_disconnect',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                });
+                resolveWritable({
+                    async write() {
+                        writableWriteCount += 1;
+                    },
+                    async close() {
+                        writableCloseCount += 1;
+                    },
+                    async abort() {
+                        writableAbortCount += 1;
+                    },
+                });
+                await assert.rejects(guardedWrite, /invalidated before the sample/i);
+                assert.equal(writableWriteCount, 0);
+                assert.equal(writableCloseCount, 0);
+                assert.equal(writableAbortCount, 1);
+
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    connected: true,
+                    connecting: false,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 20,
+                    recoveryReason: 'unexpected_disconnect',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: true,
+                });
+
+                const sampleRecord = {
+                    symbol: 'SPY',
+                    sampledAt: '2026-07-23T12:00:00.000Z',
+                    underlyingPrice: 600,
+                    details: [{ dte: 7, atmStraddleMark: 10 }],
+                };
+                card.autoSamplingEnabled = true;
+                let releaseAutoRead = null;
+                let signalAutoRead = null;
+                const autoReadStarted = new Promise((resolve) => {
+                    signalAutoRead = resolve;
+                });
+                const autoReadGate = new Promise((resolve) => {
+                    releaseAutoRead = resolve;
+                });
+                let autoWriteCount = 0;
+                const autoSample = testApi.runAutoSample(card, 'test', {
+                    async syncCard() {},
+                    buildSampleRecord() {
+                        return sampleRecord;
+                    },
+                    async readAutoHistoryFile() {
+                        signalAutoRead();
+                        await autoReadGate;
+                        return {
+                            purpose: 'iv_term_structure_auto_samples',
+                            symbol: 'SPY',
+                            samples: [],
+                        };
+                    },
+                    async writeAutoHistoryDocument() {
+                        autoWriteCount += 1;
+                    },
+                });
+                await autoReadStarted;
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 21,
+                    recoveryReason: 'unexpected_disconnect',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                });
+                releaseAutoRead();
+                assert.equal(await autoSample, false);
+                assert.equal(autoWriteCount, 0);
+
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    connected: true,
+                    connecting: false,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 21,
+                    recoveryReason: 'unexpected_disconnect',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: true,
+                });
+                card.currentFileHandle = {
+                    async createWritable() {
+                        throw new Error('injected writer should be used');
+                    },
+                };
+                card.historyDocument = { symbol: 'SPY', samples: [] };
+                let releaseManualSync = null;
+                let signalManualSync = null;
+                const manualSyncStarted = new Promise((resolve) => {
+                    signalManualSync = resolve;
+                });
+                const manualSyncGate = new Promise((resolve) => {
+                    releaseManualSync = resolve;
+                });
+                let manualWriteCount = 0;
+                const manualSample = testApi.sampleCard(card, {
+                    async syncCard() {
+                        signalManualSync();
+                        await manualSyncGate;
+                    },
+                    buildSampleRecord() {
+                        return sampleRecord;
+                    },
+                    async writeHistoryDocument() {
+                        manualWriteCount += 1;
+                    },
+                });
+                await manualSyncStarted;
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 22,
+                    recoveryReason: 'unexpected_disconnect',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                });
+                releaseManualSync();
+                await manualSample;
+                assert.equal(manualWriteCount, 0);
+                assert.equal(card.historyDocument.samples.length, 0);
+            },
+        },
+        {
+            name: 'revokes automatic sync permission until authoritative status allows it again',
+            async run() {
+                const handlers = {};
+                const sent = [];
+                const ws = {
+                    readyState: 1,
+                    addEventListener(type, handler) {
+                        handlers[type] = handler;
+                    },
+                    send(message) {
+                        sent.push(JSON.parse(message));
+                    },
+                };
+                const ctx = loadPageContext(null, {
+                    WebSocket: { OPEN: 1, CONNECTING: 0 },
+                });
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.setControlSocketForTest(ws);
+                testApi.attachControlSocketHandlers(ws);
+                handlers.open();
+
+                const startupPermission = testApi.ensureControlSocket({
+                    requireAutomaticMarketDataPermission: true,
+                });
+                let startupSettled = false;
+                startupPermission.then(
+                    () => { startupSettled = true; },
+                    () => { startupSettled = true; }
+                );
+                await Promise.resolve();
+                assert.equal(startupSettled, false);
+
+                handlers.message({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'ivts-server-a',
+                        connected: true,
+                        connecting: false,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 1,
+                        recoveryReason: 'connected',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: true,
+                    }),
+                });
+                assert.equal(await startupPermission, ws);
+
+                handlers.message({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'ivts-server-a',
+                        connected: false,
+                        connecting: true,
+                        marketDataState: 'invalidated',
+                        marketDataGeneration: 2,
+                        recoveryReason: 'unexpected_disconnect',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: true,
+                    }),
+                });
+                const revokedPermission = testApi.ensureControlSocket({
+                    requireAutomaticMarketDataPermission: true,
+                });
+                let revokedSettled = false;
+                revokedPermission.then(
+                    () => { revokedSettled = true; },
+                    () => { revokedSettled = true; }
+                );
+                await Promise.resolve();
+                assert.equal(revokedSettled, false);
+
+                const denied = assert.rejects(
+                    revokedPermission,
+                    /blocked after the explicit API stream reset/i
+                );
+                handlers.message({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'ivts-server-a',
+                        connected: true,
+                        connecting: false,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 3,
+                        recoveryReason: 'explicit_stream_reset',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                await denied;
+                assert.equal(
+                    await testApi.ensureControlSocket({
+                        requireAuthoritativeMarketDataStatus: true,
+                    }),
+                    ws,
+                    'manual sync may cross an explicit reset after status is authoritative'
+                );
+
+                handlers.message({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'ivts-server-a',
+                        connected: true,
+                        connecting: false,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 3,
+                        recoveryReason: 'unexpected_disconnect',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: true,
+                    }),
+                });
+                assert.equal(
+                    await testApi.ensureControlSocket({
+                        requireAutomaticMarketDataPermission: true,
+                    }),
+                    ws
+                );
+                assert.deepEqual(
+                    sent.map(payload => payload.action),
+                    ['request_ib_connection_status', 'request_discount_curve']
+                );
+            },
+        },
+        {
+            name: 'detaches old card sockets before replaying a restarted backend namespace',
+            async run() {
+                const ctx = loadPageContext(null);
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.applyRuntimeConfig({
+                    title: 'Backend restart socket test',
+                    symbols: [
+                        { symbol: 'SPY', historyPath: 'iv_term_structure/data/SPY.json' },
+                    ],
+                }, 'test');
+                const card = testApi.getCard('SPY');
+                const cardHandlers = {};
+                let oldSocketCloseCount = 0;
+                const oldCardSocket = {
+                    readyState: 1,
+                    addEventListener(type, handler) {
+                        cardHandlers[type] = handler;
+                    },
+                    close() {
+                        oldSocketCloseCount += 1;
+                    },
+                };
+                card.ws = oldCardSocket;
+                testApi.attachSocketHandlers(card, oldCardSocket);
+
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'ivts-server-a',
+                    connected: true,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 7,
+                    recoveryReason: 'connected',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                });
+
+                const syncCalls = [];
+                const replacementResult = await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'ivts-server-b',
+                    connected: true,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 0,
+                    recoveryReason: 'startup',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: false,
+                }, {
+                    async syncCard(candidate, options) {
+                        syncCalls.push({ symbol: candidate.symbol, options });
+                    },
+                });
+
+                assert.equal(oldSocketCloseCount, 1);
+                assert.equal(card.ws, null);
+                assert.equal(testApi.getRecoveryState().serverSessionId, 'ivts-server-b');
+                assert.equal(testApi.getRecoveryState().marketDataGeneration, 0);
+                assert.deepEqual(Array.from(replacementResult.resyncedSymbols), ['SPY']);
+                assert.equal(syncCalls.length, 1);
+                assert.equal(syncCalls[0].symbol, 'SPY');
+                assert.equal(syncCalls[0].options.automatic, true);
+
+                cardHandlers.message({
+                    data: JSON.stringify({
+                        action: 'iv_term_structure_quote_snapshot',
+                        serverSessionId: 'ivts-server-a',
+                        marketDataGeneration: 7,
+                        symbol: 'SPY',
+                        underlyingPrice: 999,
+                        options: {},
+                    }),
+                });
+                assert.equal(card.underlyingPrice, null);
+            },
+        },
+        {
+            name: 'rechecks automatic permission after the card socket opens',
+            async run() {
+                const { MockWebSocket, sockets } = createWebSocketHarness();
+                const ctx = loadPageContext(null, {
+                    WebSocket: MockWebSocket,
+                    setTimeout() { return 1; },
+                    clearTimeout() {},
+                });
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.applyRuntimeConfig({
+                    title: 'Permission race',
+                    symbols: [{ symbol: 'SPY', historyPath: 'iv_term_structure/data/SPY.json' }],
+                }, 'test');
+                const card = testApi.getCard('SPY');
+                const permission = testApi.ensureControlSocket({
+                    requireAutomaticMarketDataPermission: true,
+                });
+                const control = sockets[0];
+                control.emit('open');
+                control.emit('message', {
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'ivts-race',
+                        connected: true,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 1,
+                        recoveryReason: 'connected',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: true,
+                    }),
+                });
+                await permission;
+
+                const syncing = testApi.syncCard(card, { automatic: true });
+                for (let index = 0; index < 5 && sockets.length < 2; index += 1) {
+                    await Promise.resolve();
+                }
+                const cardSocket = sockets[1];
+                assert.ok(cardSocket);
+                control.emit('message', {
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'ivts-race',
+                        connected: true,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 2,
+                        recoveryReason: 'explicit_stream_reset',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                cardSocket.emit('open');
+                await assert.rejects(
+                    syncing,
+                    /explicit API stream reset|API market-data streams were reset/i
+                );
+                assert.equal(
+                    cardSocket.sent.some(
+                        payload => payload.action === 'subscribe_iv_term_structure'
+                    ),
+                    false
+                );
+            },
+        },
+        {
+            name: 'cancels a pre-reset manual sync while its card socket is opening',
+            async run() {
+                const { MockWebSocket, sockets } = createWebSocketHarness();
+                const ctx = loadPageContext(null, {
+                    WebSocket: MockWebSocket,
+                    setTimeout() { return 1; },
+                    clearTimeout() {},
+                });
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.applyRuntimeConfig({
+                    title: 'Manual reset race',
+                    symbols: [{ symbol: 'SPY', historyPath: 'iv_term_structure/data/SPY.json' }],
+                }, 'test');
+                const card = testApi.getCard('SPY');
+
+                const authority = testApi.ensureControlSocket({
+                    requireAuthoritativeMarketDataStatus: true,
+                });
+                const control = sockets[0];
+                control.emit('open');
+                control.emit('message', {
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'ivts-manual-race',
+                        connected: true,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 1,
+                        recoveryReason: 'connected',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: true,
+                    }),
+                });
+                await authority;
+
+                const syncing = testApi.syncCard(card);
+                for (let index = 0; index < 5 && sockets.length < 2; index += 1) {
+                    await Promise.resolve();
+                }
+                const cardSocket = sockets[1];
+                assert.ok(cardSocket);
+
+                control.emit('message', {
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'ivts-manual-race',
+                        connected: true,
+                        marketDataState: 'invalidated',
+                        marketDataGeneration: 2,
+                        recoveryReason: 'explicit_stream_reset',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                cardSocket.emit('open');
+
+                await assert.rejects(syncing, /API market-data streams were reset/i);
+                assert.equal(
+                    cardSocket.sent.some(
+                        payload => payload.action === 'subscribe_iv_term_structure'
+                    ),
+                    false
+                );
+            },
+        },
+        {
+            name: 'preserves restart intent and retries a failed offline startup replay',
+            async run() {
+                const ctx = loadPageContext(null, {
+                    WebSocket: { OPEN: 1, CONNECTING: 0 },
+                });
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.applyRuntimeConfig({
+                    title: 'Offline restart',
+                    symbols: [{ symbol: 'SPY', historyPath: 'iv_term_structure/data/SPY.json' }],
+                }, 'test');
+                const card = testApi.getCard('SPY');
+                const oldSocket = {
+                    readyState: 1,
+                    closeCount: 0,
+                    close() { this.closeCount += 1; },
+                };
+                card.ws = oldSocket;
+                card.catalog = { expiryRows: [{ expiry: '20260724' }] };
+                card.quotesBySubId = { call: { mark: 1 } };
+                card.underlyingPrice = 600;
+                card.lastSyncLabel = 'old';
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'offline-a',
+                    connected: true,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 7,
+                    recoveryReason: 'connected',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                });
+
+                let attempts = 0;
+                const dependencies = {
+                    async syncCard() {
+                        attempts += 1;
+                        if (attempts === 1) throw new Error('IB is not connected');
+                    },
+                };
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'offline-b',
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 0,
+                    recoveryReason: 'startup_subscription_wait',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: false,
+                }, dependencies);
+                assert.equal(oldSocket.closeCount, 1);
+                assert.equal(card.catalog, null);
+                assert.deepEqual(Object.keys(card.quotesBySubId), []);
+                assert.equal(card.underlyingPrice, null);
+                assert.equal(card.lastSyncLabel, '');
+                assert.deepEqual(
+                    Array.from(testApi.getRecoveryState().activeSymbols),
+                    ['SPY']
+                );
+                assert.equal(attempts, 1);
+
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'offline-b',
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 0,
+                    recoveryReason: 'startup_subscription_wait',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: false,
+                }, dependencies);
+                assert.equal(
+                    attempts,
+                    1,
+                    'duplicate offline status must not hammer a failed startup sync'
+                );
+
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'offline-b',
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 0,
+                    recoveryReason: 'startup_subscription_wait',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: false,
+                }, dependencies);
+                assert.equal(
+                    attempts,
+                    1,
+                    'duplicate offline status polls must not hammer a failed replay'
+                );
+
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'offline-b',
+                    connected: true,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 0,
+                    recoveryReason: 'startup_subscription_wait',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                }, dependencies);
+                assert.equal(attempts, 2);
+                assert.equal(testApi.getRecoveryState().replayClaims[0].state, 'complete');
+            },
+        },
+        {
+            name: 'settles a connecting control waiter when the endpoint changes',
+            async run() {
+                const { MockWebSocket, sockets } = createWebSocketHarness();
+                const ctx = loadPageContext(null, {
+                    WebSocket: MockWebSocket,
+                    setTimeout() { return 1; },
+                    clearTimeout() {},
+                });
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                const waiting = testApi.ensureControlSocket({
+                    requireAutomaticMarketDataPermission: true,
+                });
+                const connecting = sockets[0];
+                testApi.closeSocketsForEndpointChange();
+                connecting.emit('close');
+                await assert.rejects(waiting, /closed before it connected/);
+            },
+        },
+        {
+            name: 'does not let an old recovery task overwrite a replacement replay claim',
+            async run() {
+                const ctx = loadPageContext(null);
+                const testApi = ctx.OptionComboIvTermStructurePage._test;
+                testApi.applyRuntimeConfig({
+                    title: 'Recovery claim ownership test',
+                    symbols: [
+                        { symbol: 'SPY', historyPath: 'iv_term_structure/data/SPY.json' },
+                    ],
+                }, 'test');
+                const card = testApi.getCard('SPY');
+                card.ws = {
+                    readyState: 1,
+                    close() {},
+                };
+
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'claim-server-a',
+                    connected: true,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 0,
+                    recoveryReason: 'connected',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                });
+                await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'claim-server-a',
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 1,
+                    recoveryReason: 'unexpected_disconnect',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                });
+
+                let rejectOldReplay = null;
+                const oldReplay = testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'claim-server-a',
+                    connected: true,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 1,
+                    recoveryReason: 'unexpected_disconnect',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                }, {
+                    async syncCard() {
+                        await new Promise((_resolve, reject) => {
+                            rejectOldReplay = reject;
+                        });
+                    },
+                });
+                await Promise.resolve();
+                assert.equal(
+                    testApi.getRecoveryState().replayClaims[0].state,
+                    'in_flight'
+                );
+
+                const replacement = await testApi.handleIbConnectionStatus({
+                    action: 'ib_connection_status',
+                    serverSessionId: 'claim-server-b',
+                    connected: true,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 1,
+                    recoveryReason: 'startup',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: false,
+                }, {
+                    async syncCard() {},
+                });
+                assert.deepEqual(Array.from(replacement.resyncedSymbols), ['SPY']);
+                assert.equal(
+                    testApi.getRecoveryState().replayClaims[0].state,
+                    'complete'
+                );
+
+                rejectOldReplay(new Error('old recovery failed after replacement'));
+                await oldReplay;
+                assert.equal(
+                    testApi.getRecoveryState().replayClaims[0].state,
+                    'complete'
+                );
+                assert.doesNotMatch(card.statusMessage, /old recovery failed/i);
             },
         },
     ],

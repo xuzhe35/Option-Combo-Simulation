@@ -1,0 +1,34 @@
+services:
+  option-combo:
+    image: patsiesoblast0l/option-combo-starter:20260723
+    container_name: option-combo
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "8765:8765"
+    environment:
+      TWS_HOST: "${TWS_HOST:-10.3.10.253}"
+      TWS_PORT: "${TWS_PORT:-7496}"
+      TWS_CLIENT_ID: "${TWS_CLIENT_ID:-999}"
+      WS_HOST: "0.0.0.0"
+      WS_PORT: "8765"
+    volumes:
+      - option-combo-state:/app/state
+
+volumes:
+  option-combo-state:
+    name: option-combo-state
+
+# Equivalent docker run:
+# docker run -d \
+#   --name option-combo \
+#   --restart unless-stopped \
+#   -p 8000:8000 \
+#   -p 8765:8765 \
+#   -e TWS_HOST=10.3.10.253 \
+#   -e TWS_PORT=7496 \
+#   -e TWS_CLIENT_ID=999 \
+#   -e WS_HOST=0.0.0.0 \
+#   -e WS_PORT=8765 \
+#   -v option-combo-state:/app/state \
+#   patsiesoblast0l/option-combo-starter:20260723

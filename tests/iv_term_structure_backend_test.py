@@ -99,6 +99,30 @@ class IvTermStructureBackendTests(unittest.TestCase):
         self.assertEqual(normalize_max_option_streams(0), 0)
         self.assertEqual(normalize_max_option_streams('all'), 0)
 
+    def test_iv_term_structure_error_is_generation_stamped(self):
+        websocket = object()
+        sent_messages = []
+
+        async def send_message_safe(_websocket, message):
+            sent_messages.append(json.loads(message))
+
+        env = {
+            'ib': types.SimpleNamespace(isConnected=lambda: False),
+            'send_message_safe': send_message_safe,
+            'get_api_market_data_generation': lambda: 45,
+            'api_market_data_reset_in_progress': lambda: False,
+        }
+        asyncio.run(handle_iv_term_structure_subscription(
+            env,
+            websocket,
+            '127.0.0.1',
+            {'underlying': {'symbol': 'SPX'}},
+        ))
+
+        self.assertEqual(len(sent_messages), 1)
+        self.assertEqual(sent_messages[0]['action'], 'iv_term_structure_error')
+        self.assertEqual(sent_messages[0]['marketDataGeneration'], 45)
+
     def test_contract_last_trade_timing_uses_exchange_zone_and_not_real_expiration_date(self):
         contract = types.SimpleNamespace(
             conId=101,
@@ -500,6 +524,8 @@ class IvTermStructureBackendTests(unittest.TestCase):
             'ib': fake_ib,
             'client_subscriptions': {websocket: {}},
             'client_subscription_settings': settings,
+            'get_api_market_data_generation': lambda: 41,
+            'api_market_data_reset_in_progress': lambda: False,
             'get_client_subscription_settings': lambda socket: settings[socket],
             'iv_term_structure_sync_tasks': {},
             'send_message_safe': send_message_safe,
@@ -541,6 +567,7 @@ class IvTermStructureBackendTests(unittest.TestCase):
 
         complete = sent_messages[-1]
         self.assertEqual(complete['action'], 'iv_term_structure_sync_complete')
+        self.assertEqual(complete['marketDataGeneration'], 41)
         self.assert_server_time_evidence(
             complete,
             'subscriptions_ready_without_coherent_quote_snapshot',
@@ -582,6 +609,7 @@ class IvTermStructureBackendTests(unittest.TestCase):
             for payload in sent_messages
             if payload.get('action') == 'iv_term_structure_catalog_patch'
         ):
+            self.assertEqual(catalog_patch['marketDataGeneration'], 41)
             self.assert_server_time_evidence(
                 catalog_patch,
                 'catalog_progress_without_complete_option_quotes',
@@ -643,6 +671,8 @@ class IvTermStructureBackendTests(unittest.TestCase):
             },
             'send_message_safe': send_message_safe,
             'log_option_iv_debug_if_needed': lambda *_args: None,
+            'get_api_market_data_generation': lambda: 42,
+            'api_market_data_reset_in_progress': lambda: False,
         }
         handler = build_pending_tickers_handler(env)
 
@@ -654,6 +684,7 @@ class IvTermStructureBackendTests(unittest.TestCase):
 
         self.assertEqual(len(sent_messages), 1)
         payload = sent_messages[0]
+        self.assertEqual(payload['marketDataGeneration'], 42)
         self.assert_server_time_evidence(
             payload,
             'incremental_changed_tickers_only',
@@ -678,6 +709,50 @@ class IvTermStructureBackendTests(unittest.TestCase):
         self.assertEqual(changed_quote['underConId'], 70001)
         self.assertEqual(changed_quote['underlyingContractMonth'], '202609')
         self.assertIs(changed_quote['underlyingBindingVerified'], True)
+
+    def test_pending_ticker_send_is_suppressed_if_generation_changes_before_task_runs(self):
+        websocket = object()
+        sent_messages = []
+        generation = [44]
+        contract = types.SimpleNamespace(
+            conId=4401,
+            secType='STK',
+            symbol='SPY',
+        )
+        ticker = types.SimpleNamespace(
+            contract=contract,
+            bid=500.0,
+            ask=500.2,
+            last=500.1,
+            close=499.0,
+            ticks=[types.SimpleNamespace(tickType=1)],
+            marketPrice=lambda: 500.1,
+        )
+
+        async def send_message_safe(_websocket, message):
+            sent_messages.append(json.loads(message))
+
+        env = {
+            'connected_clients': {websocket},
+            'client_subscriptions': {websocket: {'underlying': ticker}},
+            'client_subscription_settings': {
+                websocket: {'greeks_enabled': False},
+            },
+            'send_message_safe': send_message_safe,
+            'log_option_iv_debug_if_needed': lambda *_args: None,
+            'get_api_market_data_generation': lambda: generation[0],
+            'api_market_data_reset_in_progress': lambda: False,
+        }
+        handler = build_pending_tickers_handler(env)
+
+        async def exercise_handler():
+            handler([ticker])
+            generation[0] += 1
+            await asyncio.sleep(0)
+
+        asyncio.run(exercise_handler())
+
+        self.assertEqual(sent_messages, [])
 
     def test_pending_tickers_emits_one_complete_coherent_ivts_snapshot(self):
         websocket = object()
@@ -749,6 +824,8 @@ class IvTermStructureBackendTests(unittest.TestCase):
             },
             'send_message_safe': send_message_safe,
             'log_option_iv_debug_if_needed': lambda *_args: None,
+            'get_api_market_data_generation': lambda: 43,
+            'api_market_data_reset_in_progress': lambda: False,
         }
         handler = build_pending_tickers_handler(env)
 
@@ -763,6 +840,8 @@ class IvTermStructureBackendTests(unittest.TestCase):
             payload for payload in sent_messages
             if payload.get('action') == 'iv_term_structure_quote_snapshot'
         )
+        self.assertEqual(incremental['marketDataGeneration'], 43)
+        self.assertEqual(snapshot['marketDataGeneration'], 43)
         self.assertIs(incremental['coherent'], False)
         self.assertIs(snapshot['quoteComplete'], True)
         self.assertIs(snapshot['coherent'], True)
@@ -1131,6 +1210,8 @@ class IvTermStructureBackendTests(unittest.TestCase):
             'ib': fake_ib,
             'client_subscriptions': {websocket: {}},
             'client_subscription_settings': {},
+            'get_api_market_data_generation': lambda: 46,
+            'api_market_data_reset_in_progress': lambda: False,
             'iv_term_structure_sync_tasks': {},
             'send_message_safe': send_message_safe,
             'build_underlying_request': lambda raw_underlying, _options: raw_underlying,
@@ -1188,6 +1269,7 @@ class IvTermStructureBackendTests(unittest.TestCase):
         self.assertEqual(captured_underlying_requests[0]['currency'], 'USD')
         self.assertEqual(fake_ib.secdef_calls, [('SI', 'COMEX', 'FUT', 505405746)])
         self.assertEqual(sent_messages[0]['action'], 'iv_term_structure_snapshot')
+        self.assertEqual(sent_messages[0]['marketDataGeneration'], 46)
         self.assert_server_time_evidence(
             sent_messages[0],
             'catalog_without_complete_option_quotes',

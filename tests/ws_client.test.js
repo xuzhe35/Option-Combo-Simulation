@@ -1,6 +1,23 @@
 const assert = require('node:assert/strict');
+const vm = require('node:vm');
 
 const { loadBrowserScripts } = require('./helpers/load-browser-scripts');
+
+function completeMainSocketHandshake(socket, overrides = {}) {
+    socket.onmessage({
+        data: JSON.stringify({
+            action: 'ib_connection_status',
+            connected: true,
+            connecting: false,
+            marketDataState: 'ready',
+            marketDataGeneration: 0,
+            recoveryReason: 'startup',
+            subscriptionsRequired: false,
+            automaticReplayAllowed: false,
+            ...overrides,
+        }),
+    });
+}
 
 module.exports = {
     name: 'ws_client.js',
@@ -221,6 +238,7 @@ module.exports = {
                 );
 
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
                 const marketClockBeforeMetadata = {
                     liveQuoteAsOf: state.liveQuoteAsOf,
                     liveQuoteDate: state.liveQuoteDate,
@@ -232,6 +250,7 @@ module.exports = {
                 MockWebSocket.instance.onmessage({
                     data: JSON.stringify({
                     action: 'option_contract_metadata',
+                    marketDataGeneration: 0,
                     contractMetadataOnly: true,
                     // Even if a server receipt timestamp is present, contract
                     // metadata is not proof that any market price advanced.
@@ -683,30 +702,35 @@ module.exports = {
 
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
 
-                const firstMessage = JSON.parse(MockWebSocket.instance.sent[0]);
-                assert.equal(firstMessage.action, 'subscribe');
-                assert.equal(firstMessage.greeksEnabled, false);
-                assert.equal(firstMessage.underlying.secType, 'FUT');
-                assert.equal(firstMessage.underlying.symbol, 'CL');
-                assert.equal(firstMessage.underlying.exchange, 'NYMEX');
-                assert.equal(firstMessage.underlying.contractMonth, '202607');
-                assert.equal(firstMessage.underlying.multiplier, '1000');
-                assert.equal(firstMessage.options.length, 1);
-                assert.equal(firstMessage.futures.length, 1);
-                assert.equal(firstMessage.futures[0].contractMonth, '202607');
-                assert.equal(firstMessage.options[0].secType, 'FOP');
-                assert.equal(firstMessage.options[0].symbol, 'CL');
-                assert.equal(firstMessage.options[0].exchange, 'NYMEX');
+                const sentMessages = MockWebSocket.instance.sent.map(message => JSON.parse(message));
+                assert.equal(sentMessages[0].action, 'request_ib_connection_status');
+                const subscribeMessage = sentMessages.find(message => message.action === 'subscribe');
+                assert.ok(subscribeMessage);
+                assert.equal(subscribeMessage.greeksEnabled, false);
+                assert.equal(subscribeMessage.underlying.secType, 'FUT');
+                assert.equal(subscribeMessage.underlying.symbol, 'CL');
+                assert.equal(subscribeMessage.underlying.exchange, 'NYMEX');
+                assert.equal(subscribeMessage.underlying.contractMonth, '202607');
+                assert.equal(subscribeMessage.underlying.multiplier, '1000');
+                assert.equal(subscribeMessage.options.length, 1);
+                assert.equal(subscribeMessage.futures.length, 1);
+                assert.equal(subscribeMessage.futures[0].contractMonth, '202607');
+                assert.equal(subscribeMessage.options[0].secType, 'FOP');
+                assert.equal(subscribeMessage.options[0].symbol, 'CL');
+                assert.equal(subscribeMessage.options[0].exchange, 'NYMEX');
                 // ML3 names one Monday week-3 crude listing, so it is wrong for
                 // most CL expiries.  IB names the class from the exact contract.
-                assert.equal(firstMessage.options[0].tradingClass, undefined);
-                assert.equal(firstMessage.options[0].underlyingContractMonth, '202607');
-                assert.deepEqual(Array.from(firstMessage.carryReferences), []);
-                const secondMessage = JSON.parse(MockWebSocket.instance.sent[1]);
-                assert.equal(secondMessage.action, 'request_portfolio_avg_cost_snapshot');
-                const thirdMessage = JSON.parse(MockWebSocket.instance.sent[2]);
-                assert.equal(thirdMessage.action, 'request_managed_accounts_snapshot');
+                assert.equal(subscribeMessage.options[0].tradingClass, undefined);
+                assert.equal(subscribeMessage.options[0].underlyingContractMonth, '202607');
+                assert.deepEqual(Array.from(subscribeMessage.carryReferences), []);
+                assert.ok(sentMessages.some(
+                    message => message.action === 'request_portfolio_avg_cost_snapshot'
+                ));
+                assert.ok(sentMessages.some(
+                    message => message.action === 'request_managed_accounts_snapshot'
+                ));
             },
         },
         {
@@ -767,6 +791,7 @@ module.exports = {
 
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
                 const subscribe = MockWebSocket.instance.sent
                     .map(message => JSON.parse(message))
                     .find(message => message.action === 'subscribe');
@@ -875,6 +900,7 @@ module.exports = {
 
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
                 const subscribe = MockWebSocket.instance.sent
                     .map(message => JSON.parse(message))
                     .find(message => message.action === 'subscribe');
@@ -1017,9 +1043,12 @@ module.exports = {
 
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
 
-                const subscribeMessage = JSON.parse(MockWebSocket.instance.sent[0]);
-                assert.equal(subscribeMessage.action, 'subscribe');
+                const sentMessages = MockWebSocket.instance.sent.map(message => JSON.parse(message));
+                assert.equal(sentMessages[0].action, 'request_ib_connection_status');
+                const subscribeMessage = sentMessages.find(message => message.action === 'subscribe');
+                assert.ok(subscribeMessage);
                 // Template request + two legs on the same contract collapse into one line.
                 assert.equal(subscribeMessage.options.length, 1);
                 assert.equal(subscribeMessage.options[0].id, 'combo_template_CL_20260420_C_75');
@@ -1230,7 +1259,11 @@ module.exports = {
 
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
-                const subscribeMessage = JSON.parse(MockWebSocket.instance.sent[0]);
+                completeMainSocketHandshake(MockWebSocket.instance);
+                const sentMessages = MockWebSocket.instance.sent.map(message => JSON.parse(message));
+                assert.equal(sentMessages[0].action, 'request_ib_connection_status');
+                const subscribeMessage = sentMessages.find(message => message.action === 'subscribe');
+                assert.ok(subscribeMessage);
                 assert.equal(subscribeMessage.options.length, 2);
                 assert.deepEqual(
                     subscribeMessage.options
@@ -1347,7 +1380,12 @@ module.exports = {
                 );
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
-                const request = JSON.parse(MockWebSocket.instance.sent[0]).options[0];
+                completeMainSocketHandshake(MockWebSocket.instance);
+                const sentMessages = MockWebSocket.instance.sent.map(message => JSON.parse(message));
+                assert.equal(sentMessages[0].action, 'request_ib_connection_status');
+                const subscribeMessage = sentMessages.find(message => message.action === 'subscribe');
+                assert.ok(subscribeMessage);
+                const request = subscribeMessage.options[0];
                 assert.equal(request.symbol, 'SPXW');
                 assert.equal(request.tradingClass, 'SPXW');
 
@@ -1429,6 +1467,7 @@ module.exports = {
 
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
 
                 const subscribeMessages = MockWebSocket.instance.sent
                     .map(message => JSON.parse(message))
@@ -1536,10 +1575,13 @@ module.exports = {
 
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
 
-                const firstMessage = JSON.parse(MockWebSocket.instance.sent[0]);
-                assert.equal(firstMessage.action, 'subscribe');
-                assert.ok(firstMessage.options.length > 0);
+                const initialMessages = MockWebSocket.instance.sent.map(message => JSON.parse(message));
+                assert.equal(initialMessages[0].action, 'request_ib_connection_status');
+                const initialSubscribe = initialMessages.find(message => message.action === 'subscribe');
+                assert.ok(initialSubscribe);
+                assert.ok(initialSubscribe.options.length > 0);
 
                 const sentBefore = MockWebSocket.instance.sent.length;
                 const result = ctx.unsubscribeAllOptionQuotes();
@@ -1707,34 +1749,37 @@ module.exports = {
 
                     ctx.connectWebSocket();
                     MockWebSocket.instance.onopen();
+                    completeMainSocketHandshake(MockWebSocket.instance);
 
-                    const firstMessage = JSON.parse(MockWebSocket.instance.sent[0]);
-                    assert.equal(firstMessage.action, 'subscribe');
-                    assert.equal(firstMessage.underlying.secType, 'FUT');
-                    assert.equal(firstMessage.underlying.symbol, symbol);
-                    assert.equal(firstMessage.underlying.exchange, 'CME');
-                    assert.equal(firstMessage.underlying.contractMonth, '202606');
-                    assert.equal(firstMessage.underlying.multiplier, multiplier);
-                    assert.equal(firstMessage.futures.length, 1);
-                    assert.equal(firstMessage.futures[0].secType, 'FUT');
-                    assert.equal(firstMessage.futures[0].symbol, symbol);
-                    assert.equal(firstMessage.futures[0].exchange, 'CME');
-                    assert.equal(firstMessage.futures[0].contractMonth, '202606');
-                    assert.equal(firstMessage.futures[0].multiplier, multiplier);
-                    assert.equal(firstMessage.options.length, 1);
-                    assert.equal(firstMessage.options[0].secType, 'FOP');
-                    assert.equal(firstMessage.options[0].symbol, symbol);
-                    assert.equal(firstMessage.options[0].exchange, 'CME');
-                    assert.equal(firstMessage.options[0].multiplier, multiplier);
-                    assert.equal(firstMessage.options[0].underlyingMultiplier, multiplier);
-                    assert.equal(firstMessage.options[0].underlyingContractMonth, '202606');
-                    assert.equal(Object.prototype.hasOwnProperty.call(firstMessage.options[0], 'tradingClass'), false);
-                    assert.equal(firstMessage.carryReferences.length, 1);
-                    assert.equal(firstMessage.carryReferences[0].id, 'spot');
-                    assert.equal(firstMessage.carryReferences[0].secType, 'IND');
-                    assert.equal(firstMessage.carryReferences[0].symbol, referenceSymbol);
-                    assert.equal(firstMessage.carryReferences[0].currency, 'USD');
-                    assert.equal(firstMessage.carryReferences[0].purpose, 'diagnostic_net_carry_reference');
+                    const sentMessages = MockWebSocket.instance.sent.map(message => JSON.parse(message));
+                    assert.equal(sentMessages[0].action, 'request_ib_connection_status');
+                    const subscribeMessage = sentMessages.find(message => message.action === 'subscribe');
+                    assert.ok(subscribeMessage);
+                    assert.equal(subscribeMessage.underlying.secType, 'FUT');
+                    assert.equal(subscribeMessage.underlying.symbol, symbol);
+                    assert.equal(subscribeMessage.underlying.exchange, 'CME');
+                    assert.equal(subscribeMessage.underlying.contractMonth, '202606');
+                    assert.equal(subscribeMessage.underlying.multiplier, multiplier);
+                    assert.equal(subscribeMessage.futures.length, 1);
+                    assert.equal(subscribeMessage.futures[0].secType, 'FUT');
+                    assert.equal(subscribeMessage.futures[0].symbol, symbol);
+                    assert.equal(subscribeMessage.futures[0].exchange, 'CME');
+                    assert.equal(subscribeMessage.futures[0].contractMonth, '202606');
+                    assert.equal(subscribeMessage.futures[0].multiplier, multiplier);
+                    assert.equal(subscribeMessage.options.length, 1);
+                    assert.equal(subscribeMessage.options[0].secType, 'FOP');
+                    assert.equal(subscribeMessage.options[0].symbol, symbol);
+                    assert.equal(subscribeMessage.options[0].exchange, 'CME');
+                    assert.equal(subscribeMessage.options[0].multiplier, multiplier);
+                    assert.equal(subscribeMessage.options[0].underlyingMultiplier, multiplier);
+                    assert.equal(subscribeMessage.options[0].underlyingContractMonth, '202606');
+                    assert.equal(Object.prototype.hasOwnProperty.call(subscribeMessage.options[0], 'tradingClass'), false);
+                    assert.equal(subscribeMessage.carryReferences.length, 1);
+                    assert.equal(subscribeMessage.carryReferences[0].id, 'spot');
+                    assert.equal(subscribeMessage.carryReferences[0].secType, 'IND');
+                    assert.equal(subscribeMessage.carryReferences[0].symbol, referenceSymbol);
+                    assert.equal(subscribeMessage.carryReferences[0].currency, 'USD');
+                    assert.equal(subscribeMessage.carryReferences[0].purpose, 'diagnostic_net_carry_reference');
                 });
             },
         },
@@ -4249,18 +4294,21 @@ module.exports = {
 
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
 
-                const firstMessage = JSON.parse(MockWebSocket.instance.sent[0]);
-                assert.equal(firstMessage.action, 'subscribe');
-                assert.equal(firstMessage.greeksEnabled, true);
-                assert.equal(firstMessage.underlying.secType, 'IND');
-                assert.equal(firstMessage.options.length, 2);
-                assert.equal(firstMessage.options[0].id, '__forward_rate_sample_30d_call');
-                assert.equal(firstMessage.options[1].id, '__forward_rate_sample_30d_put');
-                assert.equal(firstMessage.options[0].right, 'C');
-                assert.equal(firstMessage.options[1].right, 'P');
-                assert.equal(firstMessage.options[0].strike, 5800);
-                assert.equal(firstMessage.options[0].expDate, '20260416');
+                const sentMessages = MockWebSocket.instance.sent.map(message => JSON.parse(message));
+                assert.equal(sentMessages[0].action, 'request_ib_connection_status');
+                const subscribeMessage = sentMessages.find(message => message.action === 'subscribe');
+                assert.ok(subscribeMessage);
+                assert.equal(subscribeMessage.greeksEnabled, true);
+                assert.equal(subscribeMessage.underlying.secType, 'IND');
+                assert.equal(subscribeMessage.options.length, 2);
+                assert.equal(subscribeMessage.options[0].id, '__forward_rate_sample_30d_call');
+                assert.equal(subscribeMessage.options[1].id, '__forward_rate_sample_30d_put');
+                assert.equal(subscribeMessage.options[0].right, 'C');
+                assert.equal(subscribeMessage.options[1].right, 'P');
+                assert.equal(subscribeMessage.options[0].strike, 5800);
+                assert.equal(subscribeMessage.options[0].expDate, '20260416');
             },
         },
         {
@@ -4330,6 +4378,7 @@ module.exports = {
                 );
 
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
                 const subscribe = MockWebSocket.instance.sent
                     .map(message => JSON.parse(message))
                     .find(message => message.action === 'subscribe');
@@ -6897,11 +6946,19 @@ module.exports = {
                 );
 
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
                 const initialActions = MockWebSocket.instance.sent.map(message => JSON.parse(message).action);
                 assert.equal(initialActions.includes('request_discount_curve'), true);
                 assert.equal(
                     initialActions[0],
-                    'request_discount_curve',
+                    'request_ib_connection_status',
+                    'IB recovery status must be requested before any market-data work'
+                );
+                const discountRequestIndex = initialActions.indexOf('request_discount_curve');
+                const subscriptionIndex = initialActions.indexOf('subscribe');
+                assert.ok(discountRequestIndex > 0);
+                assert.ok(
+                    subscriptionIndex > discountRequestIndex,
                     'discount curve must be requested before market-data subscription work'
                 );
                 assert.equal(refreshIntervals.length, 2);
@@ -7265,6 +7322,7 @@ module.exports = {
 
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
                 const subscribeMessages = () => MockWebSocket.instance.sent
                     .map(message => JSON.parse(message))
                     .filter(message => message.action === 'subscribe');
@@ -7428,6 +7486,7 @@ module.exports = {
 
                 ctx.connectWebSocket();
                 MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
                 const subscribe = MockWebSocket.instance.sent
                     .map(message => JSON.parse(message))
                     .find(message => message.action === 'subscribe');
@@ -7650,6 +7709,801 @@ module.exports = {
                     state.liveSubscriptionUnresolvedById.leg_duplicate.label,
                     'QQQ 2026-08-21 C 585'
                 );
+            },
+        },
+        {
+            name: 'invalidates live evidence and replays subscriptions once per unexpected IB recovery epoch',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 600,
+                    baseDate: '2026-07-20',
+                    simulatedDate: '2026-07-20',
+                    useMarketDiscountCurve: false,
+                    liveProjectionFeedConnected: true,
+                    liveProjectionFeedStale: false,
+                    liveQuoteAsOf: '2026-07-20T14:00:00Z',
+                    groups: [{
+                        id: 'group_live',
+                        liveData: true,
+                        legs: [
+                            {
+                                id: 'leg_live',
+                                type: 'call',
+                                pos: 1,
+                                strike: 600,
+                                expDate: '2026-08-21',
+                                currentPrice: 12.5,
+                                currentPriceSource: 'live',
+                                iv: 0.22,
+                                ivSource: 'live',
+                                portfolioMarketPrice: 12.6,
+                                portfolioMarketPriceSource: 'tws_portfolio',
+                                portfolioMarketPriceAsOf: '2026-07-20T14:00:00Z',
+                                portfolioUnrealizedPnl: 125,
+                            },
+                            {
+                                id: 'leg_manual',
+                                type: 'put',
+                                pos: 1,
+                                strike: 590,
+                                expDate: '2026-08-21',
+                                currentPrice: 8.25,
+                                currentPriceSource: 'manual',
+                                iv: 0.24,
+                                ivSource: 'manual',
+                                ivManualOverride: true,
+                            },
+                        ],
+                    }, {
+                        id: 'group_disabled',
+                        liveData: false,
+                        legs: [{
+                            id: 'leg_disabled_live',
+                            type: 'call',
+                            pos: 1,
+                            strike: 610,
+                            expDate: '2026-08-21',
+                            currentPrice: 9.5,
+                            currentPriceSource: 'live',
+                            iv: 0.21,
+                            ivSource: 'estimated',
+                        }],
+                    }],
+                    hedges: [{
+                        id: 'hedge_spy',
+                        liveData: true,
+                        secType: 'STK',
+                        symbol: 'SPY',
+                        currentPrice: 600,
+                        currentPriceSource: 'live',
+                    }, {
+                        id: 'hedge_disabled',
+                        liveData: false,
+                        secType: 'STK',
+                        symbol: 'QQQ',
+                        currentPrice: 500,
+                        currentPriceSource: 'live',
+                    }],
+                    futuresPool: [{
+                        id: 'future_1',
+                        contractMonth: '202609',
+                        mark: 602,
+                        bid: 601.75,
+                        ask: 602.25,
+                        quoteAsOf: '2026-07-20T14:00:00Z',
+                        liveQuoteIdentityStatus: 'verified',
+                    }],
+                    forwardRateSamples: [],
+                    liveComboOrderAccounts: [],
+                    liveComboOrderAccountsConnected: false,
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(JSON.parse(message));
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        setTimeout() { return 1; },
+                        clearTimeout() {},
+                        setInterval() { return 1; },
+                        flashElement() {},
+                        OptionComboControlPanelUI: {
+                            refreshBoundDynamicControls() {},
+                        },
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                const socket = MockWebSocket.instance;
+                socket.onopen();
+                assert.equal(
+                    socket.sent[0].action,
+                    'request_ib_connection_status'
+                );
+                assert.equal(
+                    socket.sent.filter(payload => payload.action === 'subscribe').length,
+                    0
+                );
+                assert.equal(
+                    socket.sent.some(payload => payload.action === 'request_ib_connection_status'),
+                    true
+                );
+
+                // Automatic subscription work stays behind the authoritative
+                // status response for this specific browser socket.
+                socket.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        connected: true,
+                        connecting: false,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 3,
+                        recoveryReason: 'startup',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: true,
+                    }),
+                });
+                assert.equal(
+                    socket.sent.filter(payload => payload.action === 'subscribe').length,
+                    1
+                );
+                ctx.requestUnderlyingPriceSync();
+                const manualUnderlyingSync = socket.sent.find(
+                    payload => payload.action === 'sync_underlying'
+                );
+                assert.equal(manualUnderlyingSync.marketDataGeneration, 3);
+                socket.sent.length = 0;
+
+                socket.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        connected: false,
+                        connecting: true,
+                        marketDataState: 'invalidated',
+                        marketDataGeneration: 2,
+                        recoveryReason: 'unexpected_disconnect',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: true,
+                    }),
+                });
+                assert.equal(state.groups[0].legs[0].currentPrice, 12.5);
+
+                socket.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        connected: false,
+                        connecting: true,
+                        marketDataState: 'invalidated',
+                        marketDataGeneration: 4,
+                        recoveryReason: 'unexpected_disconnect',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: true,
+                    }),
+                });
+
+                assert.equal(state.groups[0].legs[0].currentPrice, null);
+                assert.equal(state.groups[0].legs[0].currentPriceSource, 'missing');
+                assert.equal(state.groups[0].legs[0].ivSource, 'missing');
+                assert.equal(state.groups[0].legs[0].portfolioMarketPrice, null);
+                assert.equal(state.groups[0].legs[0].portfolioMarketPriceSource, '');
+                assert.equal(state.groups[0].legs[0].portfolioMarketPriceAsOf, '');
+                assert.equal(state.groups[0].legs[0].portfolioUnrealizedPnl, null);
+                assert.equal(state.groups[0].legs[1].currentPrice, 8.25);
+                assert.equal(state.groups[0].legs[1].currentPriceSource, 'manual');
+                assert.equal(state.groups[0].legs[1].ivSource, 'manual');
+                assert.equal(state.groups[1].legs[0].currentPrice, null);
+                assert.equal(state.groups[1].legs[0].currentPriceSource, 'missing');
+                assert.equal(state.groups[1].legs[0].ivSource, 'missing');
+                assert.equal(state.hedges[0].currentPrice, null);
+                assert.equal(state.hedges[1].currentPrice, null);
+                assert.equal(state.hedges[1].currentPriceSource, 'missing');
+                assert.equal(state.futuresPool[0].mark, null);
+                assert.equal(state.liveProjectionFeedConnected, false);
+                assert.equal(state.liveProjectionFeedStale, true);
+                assert.deepEqual(socket.sent, []);
+
+                // If the browser transport is down for the complete IB
+                // recovery broadcast, its replacement asks for the current
+                // epoch and remains unsubscribed until the ready reply.
+                socket.onclose();
+                ctx.connectWebSocket();
+                const replacementSocket = MockWebSocket.instance;
+                replacementSocket.onopen();
+                assert.equal(
+                    replacementSocket.sent.some(
+                        payload => payload.action === 'request_ib_connection_status'
+                    ),
+                    true
+                );
+                assert.equal(
+                    replacementSocket.sent.some(payload => payload.action === 'subscribe'),
+                    false
+                );
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        stocks: { SPY: { mark: 605 } },
+                    }),
+                });
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        marketDataGeneration: 3,
+                        stocks: { SPY: { mark: 606 } },
+                    }),
+                });
+                assert.equal(state.hedges[0].currentPrice, null);
+
+                const ready = {
+                    action: 'ib_connection_status',
+                    connected: true,
+                    connecting: false,
+                    marketDataState: 'ready',
+                    marketDataGeneration: 4,
+                    recoveryReason: 'unexpected_disconnect',
+                    subscriptionsRequired: true,
+                    automaticReplayAllowed: true,
+                };
+                replacementSocket.onmessage({ data: JSON.stringify(ready) });
+                replacementSocket.onmessage({ data: JSON.stringify(ready) });
+
+                const subscribePayloads = replacementSocket.sent.filter(
+                    payload => payload.action === 'subscribe'
+                );
+                assert.equal(subscribePayloads.length, 1);
+                assert.equal(subscribePayloads[0].marketDataGeneration, 4);
+                assert.equal(
+                    replacementSocket.sent.some(payload => [
+                        'resume_managed_combo_order',
+                        'concede_managed_combo_order',
+                        'submit_combo_order',
+                        'submit_hedge_order',
+                        'cancel_managed_combo_order',
+                    ].includes(payload.action)),
+                    false
+                );
+
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        marketDataGeneration: 4,
+                        stocks: { SPY: { mark: 610 } },
+                    }),
+                });
+                assert.equal(state.hedges[0].currentPrice, 610);
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        ...ready,
+                        connected: false,
+                        connecting: true,
+                        marketDataState: 'invalidated',
+                    }),
+                });
+                assert.equal(
+                    state.hedges[0].currentPrice,
+                    610,
+                    'same-generation ready to invalidated regression must be ignored'
+                );
+
+                replacementSocket.sent.length = 0;
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        ...ready,
+                        connected: false,
+                        connecting: true,
+                        marketDataState: 'invalidated',
+                        marketDataGeneration: 5,
+                        recoveryReason: 'explicit_stream_reset',
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        ...ready,
+                        marketDataGeneration: 5,
+                        recoveryReason: 'explicit_stream_reset',
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                assert.equal(
+                    replacementSocket.sent.some(payload => payload.action === 'subscribe'),
+                    false
+                );
+
+                // Startup can initially report replay=false and learn that
+                // subscriptions are required only when IB becomes ready. A
+                // later authoritative ready=true status in the same epoch
+                // must release that startup block.
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        ...ready,
+                        connected: false,
+                        connecting: true,
+                        marketDataState: 'invalidated',
+                        marketDataGeneration: 6,
+                        recoveryReason: 'startup',
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        ...ready,
+                        marketDataGeneration: 6,
+                        recoveryReason: 'startup',
+                        automaticReplayAllowed: true,
+                    }),
+                });
+                assert.equal(
+                    replacementSocket.sent.filter(payload => payload.action === 'subscribe').length,
+                    1
+                );
+
+                // The browser can miss the INVALIDATED broadcast and first
+                // observe an explicit reset after IB is READY again. The
+                // authoritative READY status must still persist the manual
+                // replay boundary for later socket opens.
+                replacementSocket.sent.length = 0;
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        ...ready,
+                        marketDataGeneration: 7,
+                        recoveryReason: 'explicit_stream_reset',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                assert.equal(vm.runInContext('_ibMarketDataGeneration', ctx), 7);
+                assert.equal(vm.runInContext('_ibMarketDataState', ctx), 'ready');
+                assert.equal(
+                    vm.runInContext('_automaticReplayBlockedGeneration', ctx),
+                    7
+                );
+                assert.deepEqual(replacementSocket.sent, []);
+
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        action: 'market_data',
+                        marketDataGeneration: 7,
+                        stocks: { SPY: { mark: 612 } },
+                    }),
+                });
+                assert.equal(state.hedges[0].currentPrice, 612);
+
+                // An acknowledgement from an older reset is inert.
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        action: 'api_market_data_subscriptions_reset',
+                        success: true,
+                        marketDataGeneration: 6,
+                        recoveryReason: 'explicit_stream_reset',
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                assert.equal(vm.runInContext('_ibMarketDataGeneration', ctx), 7);
+                assert.equal(vm.runInContext('_ibMarketDataState', ctx), 'ready');
+                assert.equal(state.hedges[0].currentPrice, 612);
+
+                // A same-generation acknowledgement still invalidates stale
+                // evidence and asserts the block, but cannot roll READY back
+                // to INVALIDATED.
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        action: 'api_market_data_subscriptions_reset',
+                        success: true,
+                        marketDataGeneration: 7,
+                        recoveryReason: 'explicit_stream_reset',
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                assert.equal(vm.runInContext('_ibMarketDataGeneration', ctx), 7);
+                assert.equal(vm.runInContext('_ibMarketDataState', ctx), 'ready');
+                assert.equal(
+                    vm.runInContext('_automaticReplayBlockedGeneration', ctx),
+                    7
+                );
+                assert.equal(state.hedges[0].currentPrice, null);
+
+                // A fast reconnect can make the reset acknowledgement itself
+                // the first observation of a higher generation's READY state.
+                // Adopt it without losing the manual boundary.
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        action: 'api_market_data_subscriptions_reset',
+                        success: true,
+                        marketDataGeneration: 8,
+                        marketDataState: 'ready',
+                        recoveryReason: 'explicit_stream_reset',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                assert.equal(vm.runInContext('_ibMarketDataGeneration', ctx), 8);
+                assert.equal(vm.runInContext('_ibMarketDataState', ctx), 'ready');
+                assert.equal(
+                    vm.runInContext('_automaticReplayBlockedGeneration', ctx),
+                    8
+                );
+
+                replacementSocket.onclose();
+                ctx.connectWebSocket();
+                const manuallyBlockedSocket = MockWebSocket.instance;
+                manuallyBlockedSocket.onopen();
+                assert.equal(
+                    manuallyBlockedSocket.sent.some(
+                        payload => payload.action === 'request_ib_connection_status'
+                    ),
+                    true
+                );
+                assert.equal(
+                    manuallyBlockedSocket.sent.some(payload => payload.action === 'subscribe'),
+                    false
+                );
+            },
+        },
+        {
+            name: 'does not block replacement-socket subscriptions for a clean ready epoch',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPY',
+                    underlyingContractMonth: '',
+                    useMarketDiscountCurve: false,
+                    groups: [],
+                    hedges: [],
+                    futuresPool: [],
+                    forwardRateSamples: [],
+                    liveComboOrderAccounts: [],
+                    liveComboOrderAccountsConnected: false,
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+
+                    send(message) {
+                        this.sent.push(JSON.parse(message));
+                    }
+
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        setTimeout() { return 1; },
+                        clearTimeout() {},
+                        setInterval() { return 1; },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                const firstSocket = MockWebSocket.instance;
+                firstSocket.onopen();
+                assert.equal(
+                    firstSocket.sent.some(payload => payload.action === 'subscribe'),
+                    false
+                );
+                firstSocket.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        connected: true,
+                        connecting: false,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 0,
+                        recoveryReason: 'startup',
+                        subscriptionsRequired: false,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                assert.equal(
+                    vm.runInContext('_automaticReplayBlockedGeneration', ctx),
+                    null
+                );
+                assert.equal(
+                    firstSocket.sent.filter(payload => payload.action === 'subscribe').length,
+                    1
+                );
+
+                firstSocket.onclose();
+                ctx.connectWebSocket();
+                const replacementSocket = MockWebSocket.instance;
+                replacementSocket.onopen();
+                assert.equal(
+                    replacementSocket.sent.some(payload => payload.action === 'subscribe'),
+                    false
+                );
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        connected: true,
+                        connecting: false,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 0,
+                        recoveryReason: 'startup',
+                        subscriptionsRequired: false,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                replacementSocket.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        connected: true,
+                        connecting: false,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 0,
+                        recoveryReason: 'startup',
+                        subscriptionsRequired: false,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                assert.equal(
+                    replacementSocket.sent.filter(
+                        payload => payload.action === 'subscribe'
+                    ).length,
+                    1
+                );
+
+                // A later replacement starts from stale local READY state, but
+                // still queues no automatic subscription before its own
+                // authoritative explicit-reset response.
+                replacementSocket.onclose();
+                ctx.connectWebSocket();
+                const resetBlockedSocket = MockWebSocket.instance;
+                resetBlockedSocket.onopen();
+                assert.equal(
+                    resetBlockedSocket.sent.some(payload => payload.action === 'subscribe'),
+                    false
+                );
+                resetBlockedSocket.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        connected: true,
+                        connecting: false,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 1,
+                        recoveryReason: 'explicit_stream_reset',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                assert.equal(
+                    resetBlockedSocket.sent.some(payload => payload.action === 'subscribe'),
+                    false
+                );
+
+                const startupUnavailable = {
+                    action: 'ib_connection_status',
+                    connected: false,
+                    connecting: true,
+                    marketDataState: 'invalidated',
+                    marketDataGeneration: 2,
+                    recoveryReason: 'startup_subscription_wait',
+                    subscriptionsRequired: false,
+                    automaticReplayAllowed: false,
+                };
+                resetBlockedSocket.onmessage({
+                    data: JSON.stringify(startupUnavailable),
+                });
+                resetBlockedSocket.onmessage({
+                    data: JSON.stringify(startupUnavailable),
+                });
+                assert.equal(
+                    resetBlockedSocket.sent.filter(
+                        payload => payload.action === 'subscribe'
+                    ).length,
+                    1,
+                    'startup-unavailable status should register intent exactly once'
+                );
+                resetBlockedSocket.onmessage({
+                    data: JSON.stringify({
+                        ...startupUnavailable,
+                        connected: true,
+                        connecting: false,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 3,
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: true,
+                    }),
+                });
+                assert.equal(
+                    resetBlockedSocket.sent.filter(
+                        payload => payload.action === 'subscribe'
+                    ).length,
+                    2,
+                    'the registered startup intent should replay after first connection'
+                );
+            },
+        },
+        {
+            name: 'gates automatic subscriptions per socket and adopts a replacement backend generation namespace',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPY',
+                    underlyingContractMonth: '',
+                    useMarketDiscountCurve: false,
+                    groups: [],
+                    hedges: [],
+                    futuresPool: [],
+                    forwardRateSamples: [],
+                    liveComboOrderAccounts: [],
+                    liveComboOrderAccountsConnected: false,
+                };
+                const sockets = [];
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        sockets.push(this);
+                    }
+
+                    send(message) {
+                        this.sent.push(JSON.parse(message));
+                    }
+
+                    close() {}
+                }
+                const ctx = loadBrowserScripts(
+                    ['js/session_logic.js', 'js/product_registry.js', 'js/ws_client.js'],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        requestAnimationFrame(callback) { callback(); return 1; },
+                        setTimeout() { return 1; },
+                        clearTimeout() {},
+                        setInterval() { return 1; },
+                        flashElement() {},
+                        alert() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: MockWebSocket,
+                    }
+                );
+
+                const first = sockets[0];
+                first.onopen();
+                assert.equal(ctx.handleLiveSubscriptions({ automatic: true }), false);
+                assert.equal(
+                    first.sent.some(payload => payload.action === 'subscribe'),
+                    false
+                );
+                assert.equal(ctx.handleLiveSubscriptions(), true);
+                assert.equal(
+                    first.sent.filter(payload => payload.action === 'subscribe').length,
+                    1,
+                    'a direct user/manual subscription remains available before status'
+                );
+
+                first.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'server-a',
+                        connected: true,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 7,
+                        recoveryReason: 'startup',
+                        subscriptionsRequired: false,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                first.onmessage({
+                    data: JSON.stringify({
+                        action: 'api_market_data_subscriptions_reset',
+                        success: true,
+                        marketDataGeneration: 8,
+                        marketDataState: 'invalidated',
+                        recoveryReason: 'explicit_stream_reset',
+                    }),
+                });
+                first.sent.length = 0;
+                assert.equal(ctx.handleLiveSubscriptions({ automatic: true }), false);
+                assert.equal(ctx.handleLiveSubscriptions(), true);
+                assert.equal(
+                    first.sent.filter(payload => payload.action === 'subscribe').length,
+                    1,
+                    'an explicit reset revokes automatic permission without disabling manual retry'
+                );
+
+                first.onclose();
+                ctx.connectWebSocket();
+                const replacement = sockets[1];
+                replacement.onopen();
+                replacement.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'server-b',
+                        connected: true,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 0,
+                        recoveryReason: 'startup',
+                        subscriptionsRequired: false,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                let subscriptions = replacement.sent.filter(
+                    payload => payload.action === 'subscribe'
+                );
+                assert.equal(subscriptions.length, 1);
+                assert.equal(subscriptions[0].marketDataGeneration, 0);
+
+                replacement.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'server-b',
+                        connected: true,
+                        marketDataState: 'ready',
+                        marketDataGeneration: 2,
+                        recoveryReason: 'connected',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: true,
+                    }),
+                });
+                replacement.sent.length = 0;
+                replacement.onmessage({
+                    data: JSON.stringify({
+                        action: 'ib_connection_status',
+                        serverSessionId: 'server-b',
+                        connected: false,
+                        marketDataState: 'invalidated',
+                        marketDataGeneration: 1,
+                        recoveryReason: 'explicit_stream_reset',
+                        subscriptionsRequired: true,
+                        automaticReplayAllowed: false,
+                    }),
+                });
+                assert.equal(vm.runInContext('_ibMarketDataGeneration', ctx), 2);
+                assert.deepEqual(replacement.sent, []);
             },
         },
     ],

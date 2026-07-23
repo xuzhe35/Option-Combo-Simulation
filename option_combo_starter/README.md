@@ -1,85 +1,144 @@
 # Option Combo Starter (Docker)
 
-Docker wrapper for [Option-Combo-Simulation](https://github.com/xuzhe35/Option-Combo-Simulation). Builds an image that, at container runtime, clones the upstream repo, applies configuration, installs dependencies, and launches the IB bridge + web UI.
+Docker wrapper for
+[Option-Combo-Simulation](https://github.com/xuzhe35/Option-Combo-Simulation).
+It keeps the same container name, ports, TWS/server environment variables, and
+image repository used by `sample_commands.txt`, so the new image can replace
+the previous starter image without changing its callers.
 
-## What the Container Does
+## Runtime layout
 
-1. **Git clone** the upstream repo (first run only)
-2. **Replace `config.ini`** with the one bundled in this image
-3. **Copy `start_option_combo.sh`** into the repo if it doesn't exist there (the upstream repo only has `start_option_combo_mac.command`; this is a Linux-compatible replacement from an unmerged branch)
-4. **Apply env var overrides** for TWS and server settings (optional)
-5. **`pip install`** from `requirements-ib-bridge.txt`
-6. **Launch** via `start_option_combo.sh` — starts `ib_server.py` (WebSocket bridge) and `python3 -m http.server 8000` (web UI)
+`entrypoint.sh` performs repository setup, then replaces itself with
+`supervisor.py` as container PID 1. The supervisor owns container lifecycle,
+not IB market-data state:
 
-## Startup Behavior
+- `python -m http.server 8000` and `ib_server.py` are critical child processes.
+  If either process exits, PID 1 terminates the other and exits non-zero so
+  Docker's `unless-stopped` policy can restart the container.
+- An ordinary TWS/API disconnect does **not** restart either child or the
+  container. `ib_server.py` is the single reconnect owner.
+- The Docker supervisor observes IB status over the local WebSocket for
+  operational logging only. It never sends a competing connect request.
+- Yield-curve maintenance is independent of IB connectivity and runs in a
+  separate scheduled task.
 
-| Scenario | What happens |
+The runtime image contains `config.ini`, `config_overlay.py`, `entrypoint.sh`,
+and `supervisor.py`. The build-only `Dockerfile` is intentionally not copied
+into the image.
+
+## Startup behavior
+
+| Scenario | Behavior |
 |---|---|
-| **New container** (first run) | Full `git clone`, copy config.ini + start_option_combo.sh, pip install, launch |
-| **Upstream updated** (restart) | Detects remote HEAD differs → `git fetch && git reset --hard`, re-copy config + shell script, pip install, launch |
-| **No changes** (restart) | Skips clone/fetch/config/pip, launches immediately |
+| New container | Clone the upstream repo, overlay the starter-owned config keys, and install Python requirements. |
+| Upstream changed | Fetch/reset to upstream `main`, reapply the starter-owned config overlay, then reinstall requirements. |
+| No upstream change | Keep the existing checkout and start the supervised services immediately. |
+| Remote probe/fetch unavailable | Give the network operation a finite deadline, then log a warning and start the valid local checkout instead of entering a container restart loop. |
 
-The entrypoint compares `git rev-parse HEAD` against `git ls-remote origin HEAD`. If they match, it skips all setup steps for a fast restart.
+The repo checkout lives in the container layer. The yield-curve snapshot lives
+in the `option-combo-state` named volume at `/app/state/yield_curve`.
 
-When a clone or fetch is triggered, the entrypoint always:
-- Copies `config.ini` over the repo's default
-- Checks if `start_option_combo.sh` exists in the repo; if not, copies the bundled version in
+Clone, remote-probe, and fetch operations each have a 60-second wall-clock
+deadline plus a five-second termination grace. Set
+`OPTION_COMBO_GIT_NETWORK_TIMEOUT_SECONDS` to another positive whole number to
+change the deadline. A timed-out probe or fetch fails open only when a valid
+local checkout already exists; a timed-out first clone exits so Docker can
+retry rather than launching an incomplete checkout. First clones are built in
+a staging directory and promoted only after success, so a timed-out partial
+clone cannot poison the next container restart.
+
+Setup completion is recorded in `/app/.option_combo_setup_head` for the current
+Git commit only after the config overlay and dependency installation all
+succeed. If setup is interrupted, the absent/stale marker makes the next
+container start retry setup instead of repeatedly launching an incomplete
+runtime.
+
+## TWS reconnect behavior
+
+After an unexpected TWS/API disconnect, `ib_server.py` attempts to reconnect
+immediately and then every 600 seconds while TWS remains unavailable. A manual
+frontend connect request wakes the same supervisor; it does not create a second
+reconnect loop.
+
+IB error **326** specifically means the API client ID is already in use. Only
+after observing that exact error, the supervisor lowers the effective client ID
+by one and promptly retries. Repeated 326 responses lower it one step at a time
+down to the safe floor of 1. Other connection failures never change the client
+ID and retain the normal ten-minute retry cadence. The configured
+`TWS_CLIENT_ID` is not rewritten; a new container starts from that configured
+value again.
+
+On reconnect, live subscriptions are invalidated and replayed once. Managed
+combo repricing is stopped for manual review before any further order change;
+the supervisor does not cancel or replace the broker's still-live order.
+
+## Yield-curve scheduling
+
+PID 1 runs:
+
+```text
+python -m yield_curve update --if-needed --data-dir /app/state/yield_curve --json
+```
+
+at startup and once per hour. In addition, the first scheduler cycle at or
+after 18:00 America/New_York on each weekday runs one forced refresh without
+`--if-needed`. This post-publication pass prevents an early same-date snapshot
+from suppressing the official observations published later that day.
+
+A failed, partial, timed-out, or cache-fallback refresh is retried after 600
+seconds. A partial/cache-fallback result and a failed post-publication pass both
+retry as real refreshes instead of treating the same-date cache as complete.
+
+The timing can be adjusted with:
+
+| Environment variable | Default |
+|---|---:|
+| `OPTION_COMBO_YIELD_CHECK_SECONDS` | `3600` |
+| `OPTION_COMBO_YIELD_RETRY_SECONDS` | `600` |
+| `OPTION_COMBO_YIELD_PROCESS_TIMEOUT_SECONDS` | `120` |
+| `OPTION_COMBO_YIELD_POST_PUBLICATION_HOUR_NY` | `18` |
+| `YIELD_CURVE_DATA_DIR` | `/app/state/yield_curve` |
 
 ## Configuration
 
-### Default `config.ini`
+The freshly cloned repository's `config.ini` remains the base configuration.
+This preserves team-maintained sections and settings added by upstream. The
+starter atomically overlays only the six keys below; each nonempty environment
+value takes precedence over the corresponding bundled `config.ini` default.
+Other keys in the bundled config are not copied into the repository config.
 
-```ini
-[tws]
-host = 10.3.10.253
-port = 7496
-client_id = 999
-
-[server]
-ws_host = 0.0.0.0
-ws_port = 8765
-
-[execution]
-managed_reprice_threshold_default = 0.01
-managed_reprice_interval_seconds = 2.0
-managed_reprice_max_updates = 12
-managed_reprice_timeout_seconds = 600
-```
-
-### Environment Variable Overrides
-
-Override `[tws]` and `[server]` sections at `docker run` time:
-
-| Env Var | Config Key | Default |
+| Environment variable | Config key | Default |
 |---|---|---|
 | `TWS_HOST` | `tws.host` | `10.3.10.253` |
 | `TWS_PORT` | `tws.port` | `7496` |
 | `TWS_CLIENT_ID` | `tws.client_id` | `999` |
 | `WS_HOST` | `server.ws_host` | `0.0.0.0` |
 | `WS_PORT` | `server.ws_port` | `8765` |
+| `YIELD_CURVE_DATA_DIR` | `yield_curve.data_dir` | `/app/state/yield_curve` |
 
-Example:
+`OPTION_COMBO_IB_STATUS_HOST` optionally overrides only the supervisor's local
+status-monitor destination. By default it is derived from `WS_HOST`; wildcard
+bind addresses such as `0.0.0.0` and `::` are mapped to loopback for dialing.
 
-```bash
-docker run -e TWS_HOST=192.168.1.100 -e TWS_PORT=7497 -p 8000:8000 -p 8765:8765 option-combo-starter
-```
+Changing these values requires replacing the container, not merely restarting
+the same container, because setup overrides are applied when a checkout is
+created or updated.
 
-Changing env vars requires creating a new container (not just restarting), which triggers a full fresh setup.
+## Build and run
 
-## Ports
+The image does **not** embed the Option Combo project source. At startup it
+clones the hardcoded
+[`xuzhe35/Option-Combo-Simulation` `main` branch](https://github.com/xuzhe35/Option-Combo-Simulation).
+The reconnect implementation commit must therefore be merged into that branch
+before a container from this image is deployed; otherwise the new container
+will run the older backend from upstream.
 
-- **8000** — Web UI (`index.html`)
-- **8765** — WebSocket bridge (IB server)
+`sample_commands.txt` is the direct build/run replacement. `docker-compose.yml`
+contains the equivalent service definition and an equivalent `docker run`
+comment. `docker-build.txt` contains the release build command for
+`linux/amd64`, including the date-stamped registry tag and push.
 
-## Bundled Files
+Published ports remain:
 
-| File | Purpose |
-|---|---|
-| `config.ini` | Default TWS/server/execution config, copied into the repo at setup |
-| `start_option_combo.sh` | Linux-compatible launch script (from unmerged branch), copied into the repo if upstream doesn't have it yet |
-
-## Notes
-
-- The upstream repo only has `start_option_combo_mac.command` (macOS-specific). `start_option_combo.sh` is bundled here from an unmerged branch and will be copied in automatically. Once it's merged upstream, the copy step becomes a no-op.
-- Git clone runs at container start (not image build) so the container always gets the latest upstream code.
-- `[execution]` section values are baked into `config.ini` and not overridable via env vars (add more if needed).
+- `8000`: web UI
+- `8765`: WebSocket bridge

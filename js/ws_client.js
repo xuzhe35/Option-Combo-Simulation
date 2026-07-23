@@ -37,6 +37,14 @@ let _historicalReplayOrderCounter = 900000;
 let _futureSubscriptionGeneration = 0;
 let _lastLiveSubscriptionSignature = '';
 let _lastLiveSubscriptionSocket = null;
+let _ibMarketDataGeneration = null;
+let _ibMarketDataState = '';
+let _lastIbRecoveryReplayGeneration = null;
+let _lastIbRecoveryReplaySocket = null;
+let _automaticReplayBlockedGeneration = null;
+let _ibServerSessionId = '';
+let _automaticLiveSubscriptionSocket = null;
+let _automaticLiveSubscriptionAllowed = false;
 const _liveQuoteRuntime = {
     underlyingQuote: null,
     optionQuotesById: new Map(),
@@ -1524,16 +1532,284 @@ function _runLiveProjectionFeedWatchdog(nowMs = Date.now()) {
     return _setLiveProjectionFeedHealth({ stale }, true);
 }
 
+function _normalizeIbMarketDataGeneration(value) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function _isExplicitIbStreamReset(payload) {
+    return String(payload && payload.recoveryReason || '').trim().toLowerCase()
+        === 'explicit_stream_reset';
+}
+
+function _ibStatusBlocksAutomaticReplay(payload) {
+    return _isExplicitIbStreamReset(payload)
+        || (payload
+            && payload.subscriptionsRequired === true
+            && payload.automaticReplayAllowed === false);
+}
+
+function _isRegressiveIbConnectionStatus(generation, marketDataState) {
+    if (generation === null || _ibMarketDataGeneration === null) {
+        return false;
+    }
+    if (generation < _ibMarketDataGeneration) {
+        return true;
+    }
+    return generation === _ibMarketDataGeneration
+        && _ibMarketDataState === 'ready'
+        && marketDataState === 'invalidated';
+}
+
+function _adoptIbServerSession(payload) {
+    const incomingSessionId = String(
+        payload && payload.serverSessionId || ''
+    ).trim();
+    if (!incomingSessionId || incomingSessionId === _ibServerSessionId) {
+        return false;
+    }
+
+    const replacesKnownGeneration = _ibMarketDataGeneration !== null;
+    _ibServerSessionId = incomingSessionId;
+    if (!replacesKnownGeneration) {
+        return false;
+    }
+
+    // A backend process restart creates a new generation namespace beginning
+    // at zero. Never compare that namespace with the previous process.
+    _ibMarketDataGeneration = null;
+    _ibMarketDataState = '';
+    _lastIbRecoveryReplayGeneration = null;
+    _lastIbRecoveryReplaySocket = null;
+    _automaticReplayBlockedGeneration = null;
+    _automaticLiveSubscriptionAllowed = false;
+    return true;
+}
+
+function _isGenerationScopedLiveMarketPayload(data) {
+    if (!data || typeof data !== 'object' || _isHistoricalMode()) {
+        return false;
+    }
+    const action = String(data.action || '').trim();
+    return action === 'market_data'
+        || action === 'option_contract_metadata'
+        || action === 'option_subscription_status'
+        || action === 'underlying_sync'
+        || _hasLiveQuotePayload(data);
+}
+
+function _rejectsCurrentLiveMarketGeneration(data) {
+    if (_ibMarketDataGeneration === null || !_isGenerationScopedLiveMarketPayload(data)) {
+        return false;
+    }
+    return _normalizeIbMarketDataGeneration(data.marketDataGeneration)
+        !== _ibMarketDataGeneration;
+}
+
+function _invalidateLiveMarketEvidence(reason = 'IB market-data connection was invalidated.') {
+    if (!state || _isHistoricalMode()) return false;
+
+    _resetLiveQuoteRuntime();
+    _lastLiveSubscriptionSignature = '';
+    _lastLiveSubscriptionSocket = null;
+    _invalidateIndexForwardRateSamples('ib_connection_invalidated');
+    _clearSubscribedOptionContractMetadata();
+
+    let changed = _setLiveProjectionFeedHealth({
+        connected: false,
+        stale: true,
+        receivedAt: '',
+    }, false);
+    if (state.liveQuoteAsOf !== '') {
+        state.liveQuoteAsOf = '';
+        changed = true;
+    }
+
+    (state.groups || []).forEach((group) => {
+        if (!group) return;
+        (group.legs || []).forEach((leg) => {
+            if (!leg) return;
+            if (leg.currentPriceSource === 'live') {
+                if (leg.currentPrice !== null) {
+                    leg.currentPrice = null;
+                    changed = true;
+                }
+                if (leg.currentPriceSource !== 'missing') {
+                    leg.currentPriceSource = 'missing';
+                    changed = true;
+                }
+            }
+            if (leg.portfolioMarketPriceSource === 'tws_portfolio') {
+                if (leg.portfolioMarketPrice !== null
+                    && leg.portfolioMarketPrice !== undefined) {
+                    leg.portfolioMarketPrice = null;
+                    changed = true;
+                }
+                if (leg.portfolioMarketPriceSource !== '') {
+                    leg.portfolioMarketPriceSource = '';
+                    changed = true;
+                }
+                if (leg.portfolioMarketPriceAsOf) {
+                    leg.portfolioMarketPriceAsOf = '';
+                    changed = true;
+                }
+                if (leg.portfolioUnrealizedPnl !== null
+                    && leg.portfolioUnrealizedPnl !== undefined) {
+                    leg.portfolioUnrealizedPnl = null;
+                    changed = true;
+                }
+            }
+            if (!_isUnderlyingLeg(leg)
+                && leg.ivManualOverride !== true
+                && ['live', 'estimated'].includes(String(leg.ivSource || ''))) {
+                if (leg.ivSource !== 'missing') {
+                    leg.ivSource = 'missing';
+                    changed = true;
+                }
+            }
+        });
+    });
+
+    (state.hedges || []).forEach((hedge) => {
+        if (!hedge || hedge.currentPriceSource !== 'live') return;
+        if (hedge.currentPrice !== null) {
+            hedge.currentPrice = null;
+            changed = true;
+        }
+        if (hedge.currentPriceSource !== 'missing') {
+            hedge.currentPriceSource = 'missing';
+            changed = true;
+        }
+    });
+
+    (state.futuresPool || []).forEach((entry) => {
+        changed = _clearFuturesPoolEntryLiveQuote(
+            entry,
+            'invalidated',
+            reason
+        ) || changed;
+    });
+
+    _refreshFuturesPoolPanelUi();
+    if (changed) {
+        _scheduleDerivedValueRefresh({}, false);
+    }
+    return changed;
+}
+
+function _handleIbConnectionStatusMessage(data, sourceSocket = ws) {
+    if (!data || typeof data !== 'object' || data.action !== 'ib_connection_status') {
+        return false;
+    }
+    if (sourceSocket !== ws) {
+        return true;
+    }
+
+    _adoptIbServerSession(data);
+    const generation = _normalizeIbMarketDataGeneration(data.marketDataGeneration);
+    const marketDataState = String(data.marketDataState || '').trim().toLowerCase();
+    if (_isRegressiveIbConnectionStatus(generation, marketDataState)) {
+        return true;
+    }
+    _automaticLiveSubscriptionSocket = sourceSocket;
+    _automaticLiveSubscriptionAllowed = false;
+    const previousGeneration = _ibMarketDataGeneration;
+    const generationChanged = generation !== null && generation !== previousGeneration;
+    if (generation !== null) {
+        _ibMarketDataGeneration = generation;
+    }
+    if (marketDataState) {
+        _ibMarketDataState = marketDataState;
+    }
+    const automaticReplayBlocked = _ibStatusBlocksAutomaticReplay(data);
+    if (generation !== null && automaticReplayBlocked) {
+        // This is authoritative even when the backend is already READY. A
+        // browser can miss the reset-time INVALIDATED broadcast and learn
+        // about the manual replay boundary only from its later status query.
+        _automaticReplayBlockedGeneration = generation;
+    } else if (generation !== null
+        && data.automaticReplayAllowed === true
+        && _automaticReplayBlockedGeneration === generation) {
+        // The backend may learn that a startup/offline epoch does require
+        // replay only when IB becomes ready. Treat the current status as
+        // authoritative instead of carrying the earlier startup block
+        // forward forever.
+        _automaticReplayBlockedGeneration = null;
+    }
+
+    if (marketDataState === 'invalidated') {
+        if (generationChanged) {
+            _lastIbRecoveryReplayGeneration = null;
+            _lastIbRecoveryReplaySocket = null;
+        }
+        if (automaticReplayBlocked) {
+            _automaticReplayBlockedGeneration = generation;
+        } else if (generationChanged || _automaticReplayBlockedGeneration !== generation) {
+            _automaticReplayBlockedGeneration = null;
+        }
+        _invalidateLiveMarketEvidence(
+            String(data.message || 'IB disconnected; live market evidence was invalidated.')
+        );
+        const recoveryReason = String(data.recoveryReason || '').trim().toLowerCase();
+        const shouldRegisterStartupIntent = !automaticReplayBlocked
+            && data.subscriptionsRequired !== true
+            && recoveryReason.startsWith('startup')
+            && !_isHistoricalMode();
+        _automaticLiveSubscriptionAllowed = shouldRegisterStartupIntent;
+        if (shouldRegisterStartupIntent
+            && !(_lastIbRecoveryReplaySocket === sourceSocket
+                && _lastIbRecoveryReplayGeneration === generation)) {
+            // Startup has no subscriptions to replay yet. Submit the saved
+            // browser intent once so the backend opens a recovery generation
+            // and can replay it after the first successful IB connection.
+            _lastIbRecoveryReplaySocket = sourceSocket;
+            _lastIbRecoveryReplayGeneration = generation;
+            handleLiveSubscriptions({ automatic: true });
+        }
+        return true;
+    }
+
+    const readyForAutomaticSubscription = marketDataState === 'ready'
+        && data.connected === true
+        && !automaticReplayBlocked
+        && _automaticReplayBlockedGeneration !== generation
+        && !_isHistoricalMode();
+    if (!readyForAutomaticSubscription) {
+        return true;
+    }
+    _automaticLiveSubscriptionAllowed = true;
+    if (_lastIbRecoveryReplaySocket === sourceSocket
+        && _lastIbRecoveryReplayGeneration === generation) {
+        return true;
+    }
+
+    // Claim the socket/epoch before sending so the direct status response and
+    // any adjacent broadcast cannot start a second qualification pass.
+    _lastIbRecoveryReplaySocket = sourceSocket;
+    _lastIbRecoveryReplayGeneration = generation;
+    handleLiveSubscriptions({
+        automatic: true,
+        force: previousGeneration !== null && generationChanged,
+    });
+    requestActiveHedgeOrdersSnapshot();
+    requestActiveComboOrdersSnapshot();
+    return true;
+}
+
 function connectWebSocket() {
     _clearWsReconnectTimer();
 
     const wsUrl = _getWsUrl();
     ws = new WebSocket(wsUrl);
+    const connectionSocket = ws;
 
-    ws.onopen = () => {
+    connectionSocket.onopen = () => {
+        if (ws !== connectionSocket) return;
         isWsConnected = true;
         _lastLiveSubscriptionSignature = '';
         _lastLiveSubscriptionSocket = null;
+        _automaticLiveSubscriptionSocket = connectionSocket;
+        _automaticLiveSubscriptionAllowed = false;
         _setLiveProjectionFeedHealth({
             connected: true,
             stale: true,
@@ -1542,6 +1818,15 @@ function connectWebSocket() {
         _wsReconnectDelay = WS_BASE_DELAY;
         console.log(`WebSocket Connected to IB Gateway Backend at ${wsUrl}`);
         updateWsStatusUI('connected');
+        if (!_isHistoricalMode()) {
+            // Do not enqueue subscription work behind this request in the
+            // same callback. The status reply is the socket-specific safety
+            // boundary that decides whether ordinary startup is allowed,
+            // recovery must wait, or an explicit reset remains manual-only.
+            connectionSocket.send(JSON.stringify({
+                action: 'request_ib_connection_status',
+            }));
+        }
         // The backend handles messages from one websocket sequentially.
         // Request the lightweight shared discount snapshot before submitting
         // contract qualification/subscription work, otherwise a large saved
@@ -1549,16 +1834,23 @@ function connectWebSocket() {
         if (!_isHistoricalMode() && state.useMarketDiscountCurve === true) {
             requestDiscountCurveSnapshot();
         }
-        handleLiveSubscriptions();
+        if (_isHistoricalMode()) {
+            handleLiveSubscriptions({ automatic: true });
+        }
         requestActiveHedgeOrdersSnapshot();
         requestActiveComboOrdersSnapshot();
     };
 
-    ws.onclose = () => {
+    connectionSocket.onclose = () => {
+        if (ws !== connectionSocket) return;
         isWsConnected = false;
         _lastLiveSubscriptionSignature = '';
         _lastLiveSubscriptionSocket = null;
-        _setLiveProjectionFeedHealth({ connected: false, stale: true });
+        if (_automaticLiveSubscriptionSocket === connectionSocket) {
+            _automaticLiveSubscriptionSocket = null;
+            _automaticLiveSubscriptionAllowed = false;
+        }
+        _invalidateLiveMarketEvidence('Browser WebSocket disconnected.');
         state.liveComboOrderAccountsConnected = false;
         const controlPanelUi = _getControlPanelUiApi();
         if (controlPanelUi && typeof controlPanelUi.refreshBoundDynamicControls === 'function') {
@@ -1573,7 +1865,8 @@ function connectWebSocket() {
         _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, WS_MAX_DELAY);
     };
 
-    ws.onerror = (error) => {
+    connectionSocket.onerror = (error) => {
+        if (ws !== connectionSocket) return;
         console.error("WebSocket Error:", error);
         _setLiveProjectionFeedHealth({ connected: false, stale: true });
         state.liveComboOrderAccountsConnected = false;
@@ -1586,7 +1879,8 @@ function connectWebSocket() {
         updateWsStatusUI('error');
     };
 
-    ws.onmessage = (event) => {
+    connectionSocket.onmessage = (event) => {
+        if (ws !== connectionSocket) return;
         try {
             const data = JSON.parse(event.data);
             if (_handleManagedAccountsMessage(data)) {
@@ -1610,7 +1904,13 @@ function connectWebSocket() {
             if (_handleHistoricalReplayMessage(data)) {
                 return;
             }
+            if (_rejectsCurrentLiveMarketGeneration(data)) {
+                return;
+            }
             if (_handleOptionContractMetadataMessage(data)) {
+                return;
+            }
+            if (_handleIbConnectionStatusMessage(data, connectionSocket)) {
                 return;
             }
             if (_handleApiMarketDataSubscriptionsResetMessage(data)) {
@@ -1675,6 +1975,18 @@ function _handleApiMarketDataSubscriptionsResetMessage(data) {
         return false;
     }
 
+    const generation = data.success === true
+        ? _normalizeIbMarketDataGeneration(data.marketDataGeneration)
+        : null;
+    if (data.success === true
+        && generation !== null
+        && _ibMarketDataGeneration !== null
+        && generation < _ibMarketDataGeneration) {
+        // A delayed acknowledgement from an older reset must not discard
+        // evidence or move the browser back to its generation.
+        return true;
+    }
+
     const message = String(data.message || 'All API market-data subscriptions were cleared. Subscribe again to resume live data.');
     const statusElement = document.getElementById('wsStatus');
     if (statusElement) {
@@ -1683,8 +1995,36 @@ function _handleApiMarketDataSubscriptionsResetMessage(data) {
         statusElement.title = message;
     }
     if (data.success === true) {
+        // The reset acknowledgement is itself an authoritative manual replay
+        // boundary. Revoke permission immediately so automatic callers that
+        // run before the next connection-status broadcast cannot resubscribe.
+        _automaticLiveSubscriptionSocket = ws;
+        _automaticLiveSubscriptionAllowed = false;
+        const preserveCurrentReadyState = generation !== null
+            && generation === _ibMarketDataGeneration
+            && _ibMarketDataState === 'ready';
+        const responseMarketDataState = String(data.marketDataState || '')
+            .trim()
+            .toLowerCase();
+        const nextMarketDataState = preserveCurrentReadyState
+            ? 'ready'
+            : (['ready', 'invalidated'].includes(responseMarketDataState)
+                ? responseMarketDataState
+                : 'invalidated');
+        if (generation !== null) {
+            _ibMarketDataGeneration = generation;
+        }
+        _ibMarketDataState = nextMarketDataState;
+        _automaticReplayBlockedGeneration = generation === null
+            ? _ibMarketDataGeneration
+            : generation;
+        _automaticLiveSubscriptionSocket = ws;
+        _automaticLiveSubscriptionAllowed = false;
+        _lastIbRecoveryReplayGeneration = null;
+        _lastIbRecoveryReplaySocket = null;
         _lastLiveSubscriptionSignature = '';
         _lastLiveSubscriptionSocket = null;
+        _invalidateLiveMarketEvidence(message);
         if (typeof window.alert === 'function') {
             window.alert(message);
         }
@@ -2945,6 +3285,12 @@ function _clearSubscribedOptionContractMetadata() {
 
 function handleLiveSubscriptions(options = {}) {
     if (!isWsConnected || !ws) return false;
+    if (options.automatic === true
+        && !_isHistoricalMode()
+        && (_automaticLiveSubscriptionSocket !== ws
+            || _automaticLiveSubscriptionAllowed !== true)) {
+        return false;
+    }
     const registry = _getProductRegistryApi();
     const profile = registry && typeof registry.resolveUnderlyingProfile === 'function'
         ? registry.resolveUnderlyingProfile(state.underlyingSymbol)
@@ -2997,6 +3343,9 @@ function handleLiveSubscriptions(options = {}) {
         stocks: [],
         carryReferences: _buildCarryReferenceRequests(),
     };
+    if (_ibMarketDataGeneration !== null) {
+        payload.marketDataGeneration = _ibMarketDataGeneration;
+    }
 
     if (profile?.underlyingSecType === 'IND'
         && _getIndexForwardRateApi()
@@ -3277,6 +3626,9 @@ function requestUnderlyingPriceSync() {
             _buildFuturesPoolRequests(profile)
         )
     };
+    if (_ibMarketDataGeneration !== null) {
+        payload.marketDataGeneration = _ibMarketDataGeneration;
+    }
 
     ws.send(JSON.stringify(payload));
 }
@@ -4217,7 +4569,7 @@ function _applyHedgeOrderFillUpdate(data) {
             updateDerivedValues();
         }
         if (typeof handleLiveSubscriptions === 'function') {
-            handleLiveSubscriptions();
+            handleLiveSubscriptions({ automatic: true });
         }
     }
     _refreshDeltaHedgeBrokerPreviewUi();

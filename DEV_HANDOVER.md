@@ -81,6 +81,11 @@ Current surfaces:
 - Both backends are read-only curve consumers. Missing/stale live data may
   start `sys.executable -m yield_curve update --if-needed` once; there is no
   rate provider or hourly refresh loop inside either server.
+- The optional Docker PID-1 layer owns the periodic loop instead:
+  `option_combo_starter/supervisor.py` checks on startup and hourly, retries
+  incomplete refreshes after ten minutes, forces one post-publication weekday
+  refresh after 18:00 New York time, and writes the same configured persistent
+  data directory consumed by the backends.
 - User-facing daily maintenance is double-clickable via
   `update_yield_curve.bat` on Windows and `update_yield_curve_mac.command` on
   macOS, or runnable as `./update_yield_curve.sh` on Linux. All resolve the
@@ -535,7 +540,15 @@ Current server responsibilities:
 
 Important operational detail:
 
-- the IB connection is started in the background so replay and fallback paths can still work if TWS is down
+- the IB connection is owned by one persistent background supervisor so replay
+  and fallback paths keep working if TWS is down; unexpected loss is retried
+  immediately and then every 600 seconds
+- only numeric IB error 326 lowers the effective client ID, one step per
+  collision; generic connection failures never change it
+- disconnect recovery invalidates one market-data generation and replays each
+  active frontend surface once; explicit stream reset stays manual
+- managed combo repricing is stopped on disconnect/reset without cancelling or
+  changing the broker's still-live order
 - direct business flows should not call `ib.reqMktData` outside `ib_server_market_data.py`; use the pooled helper so duplicate contract streams do not leak TWS market-data lines
 
 ### `ib_server_order_tracking.py`

@@ -102,6 +102,8 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.managed_terminal_confirmation_seconds = 3.0
         self.managed_executions_by_order_id = {}
         self.managed_executions_by_perm_id = {}
+        self._ib_recovery_epoch = 0
+        self._ib_recovery_in_progress = False
         self.hedge_orders_by_order_id = {}
         self.hedge_orders_by_perm_id = {}
         self.contract_details_cache_by_con_id = {}
@@ -722,6 +724,45 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
     def _is_soft_terminal_order_status(self, status):
         return str(status or '').strip() in {'Cancelled', 'ApiCancelled', 'Inactive', 'Rejected'}
 
+    def _require_ib_connection_for_place_order(self, operation):
+        """Fail closed immediately before any new or modifying placeOrder call."""
+
+        if self._ib_recovery_in_progress:
+            raise ConnectionError(
+                f'IB recovery is still in progress; cannot '
+                f'{str(operation or "place the broker order")}.'
+            )
+        is_connected = getattr(self.ib, 'isConnected', None)
+        connected = False
+        if callable(is_connected):
+            try:
+                connected = bool(is_connected())
+            except Exception:
+                connected = False
+        if not connected:
+            raise ConnectionError(
+                f'IB is not connected; cannot {str(operation or "place the broker order")}.'
+            )
+
+    def complete_ib_recovery(self):
+        """Allow new broker work after the replacement API session is ready."""
+
+        self._ib_recovery_in_progress = False
+
+    def _require_current_ib_recovery_epoch(self, captured_epoch, operation):
+        if int(captured_epoch) != self._ib_recovery_epoch:
+            raise ConnectionError(
+                f'IB recovered while this action was in flight; cannot '
+                f'{str(operation or "modify the stale broker order")}. '
+                'Review or cancel the order manually in TWS.'
+            )
+
+    def _require_ib_operation_ready(self, captured_epoch, operation):
+        """Validate one operation epoch and the live socket at the broker boundary."""
+
+        self._require_current_ib_recovery_epoch(captured_epoch, operation)
+        self._require_ib_connection_for_place_order(operation)
+
     def _resolve_order_tracking(self, order_id, perm_id):
         return resolve_tracking(
             self.managed_executions_by_order_id,
@@ -775,8 +816,15 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             'maxRepriceCount': context.get('maxRepriceCount'),
             'lastRepriceAt': context.get('lastRepriceAt'),
             'managedMessage': context.get('managedMessage'),
-            'canContinueRepricing': managed_state in {'stopped_max_reprices', 'stopped_timeout'},
-            'canConcedePricing': managed_state in {'stopped_max_reprices', 'watching', 'repricing'},
+            'canContinueRepricing': managed_state in {
+                'stopped_max_reprices',
+                'stopped_timeout',
+            },
+            'canConcedePricing': managed_state in {
+                'stopped_max_reprices',
+                'watching',
+                'repricing',
+            },
             'continueActionLabel': continue_action_label,
         }
         return {key: value for key, value in snapshot.items() if value is not None}
@@ -1197,6 +1245,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                     f'(mid {latest_abs_mid}, worst {quote_stats["worstPrice"]}).'
                 )
                 await self._emit_managed_update(context)
+                self._require_ib_operation_ready(
+                    context.get('ibRecoveryEpoch', self._ib_recovery_epoch),
+                    'modify the managed combo order',
+                )
                 trade = self.ib.placeOrder(context['comboContract'], order)
                 context['trade'] = trade
                 context['workingLimitPrice'] = new_limit
@@ -1216,7 +1268,16 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 )
                 break
 
-    def _register_managed_context(self, websocket, request, combo_contract, trade, preview, resolved_legs):
+    def _register_managed_context(
+        self,
+        websocket,
+        request,
+        combo_contract,
+        trade,
+        preview,
+        resolved_legs,
+        ib_recovery_epoch=None,
+    ):
         if request.execution_mode != 'submit':
             return None
 
@@ -1225,6 +1286,15 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         if self._is_terminal_order_status(getattr(order_status, 'status', None)):
             return None
         managed_threshold = self._resolve_managed_reprice_threshold(request)
+        context_recovery_epoch = (
+            self._ib_recovery_epoch
+            if ib_recovery_epoch is None
+            else int(ib_recovery_epoch)
+        )
+        crossed_recovery_boundary = (
+            context_recovery_epoch != self._ib_recovery_epoch
+            or self._ib_recovery_in_progress
+        )
         context = {
             'websocket': websocket,
             'groupId': request.group_id,
@@ -1270,18 +1340,37 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 'managedManualConcessionCount': 0,
             }),
             'timeoutAt': time.monotonic() + self.managed_reprice_timeout_seconds,
-            'terminated': False,
+            'terminated': crossed_recovery_boundary,
+            'ibRecoveryEpoch': context_recovery_epoch,
             'lastManagedEmitSignature': None,
             'pendingTerminalStatus': None,
             'pendingTerminalToken': 0,
             'pendingTerminalTask': None,
             'repricingSuspended': False,
+            'task': None,
         }
+        if crossed_recovery_boundary:
+            context['managedState'] = 'stopped_ib_recovery'
+            context['managedMessage'] = (
+                'IB recovery occurred while the submitted order was settling. '
+                'Auto-repricing was not started; the broker order may remain LIVE '
+                'in TWS at its last submitted limit. Review the live order and cancel '
+                'it manually in TWS if needed because its old API-session identity '
+                'is no longer trusted.'
+            )
 
         if context['orderId'] is not None:
             self.managed_executions_by_order_id[context['orderId']] = context
         if context['permId'] is not None:
             self.managed_executions_by_perm_id[context['permId']] = context
+
+        if crossed_recovery_boundary:
+            self.logger.warning(
+                'Registered combo order groupId=%s as stopped after IB recovery '
+                'crossed its submit-settle window; no auto-reprice task was started.',
+                request.group_id,
+            )
+            return context
 
         context['task'] = asyncio.create_task(self._managed_reprice_loop(context))
         return context
@@ -1293,6 +1382,65 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             self.managed_executions_by_order_id.pop(order_id, None)
         if perm_id is not None:
             self.managed_executions_by_perm_id.pop(perm_id, None)
+
+    async def pause_managed_for_ib_recovery(self, *, reason='unexpected_disconnect'):
+        """Stop every live reprice loop while leaving broker orders untouched.
+
+        The API session can disappear while an order remains live in TWS. Cached
+        quotes must never drive a modify after that boundary, and reconnecting
+        must not silently resume supervision. Contexts stay registered so the
+        user can identify the affected orders and review/cancel them in TWS.
+        Resuming through the stale API-session Trade object is deliberately
+        blocked until open-order reconciliation is implemented.
+        """
+
+        self._ib_recovery_epoch += 1
+        self._ib_recovery_in_progress = True
+
+        contexts = [
+            context
+            for context in self._iter_unique_managed_contexts()
+            if not self._is_terminal_order_status(context.get('status'))
+        ]
+        if not contexts:
+            return 0
+
+        explicit_reset = str(reason or '').strip() == 'explicit_stream_reset'
+        message = (
+            'API market-data streams were reset. Auto-repricing stopped for IB recovery; '
+            'the broker order remains LIVE in TWS at its last submitted limit. Review the '
+            'live order and cancel it manually in TWS if needed. This saved context cannot '
+            'be resumed because its API-session order identity is no longer trusted.'
+            if explicit_reset else
+            'IB disconnected. Auto-repricing stopped for IB recovery; the broker order '
+            'remains LIVE in TWS at its last submitted limit. Review the live order after '
+            'reconnection and cancel it manually in TWS if needed. This saved context cannot '
+            'be resumed because its API-session order identity is no longer trusted.'
+        )
+
+        # Mark every context first. This closes the window in which cancelling
+        # one task could leave another task free to advance on cached quotes.
+        for context in contexts:
+            self._clear_pending_terminal_confirmation(context)
+            context['terminated'] = True
+            context['managedState'] = 'stopped_ib_recovery'
+            context['managedMessage'] = message
+
+        await asyncio.gather(*(
+            self._cancel_reprice_task_and_wait(context)
+            for context in contexts
+        ))
+        await asyncio.gather(*(
+            self._emit_managed_update(context)
+            for context in contexts
+        ))
+        self.logger.warning(
+            'Stopped auto-repricing for %d managed combo order(s) during %s; '
+            'live broker orders were not cancelled.',
+            len(contexts),
+            str(reason or 'IB recovery'),
+        )
+        return len(contexts)
 
     def _on_managed_order_status(self, trade):
         order = getattr(trade, 'order', None)
@@ -2612,10 +2760,22 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             return round(total_notional / total_quantity, 4)
         return None
 
-    async def _submit_underlying_first_close_plan(self, websocket, request, close_plan):
+    async def _submit_underlying_first_close_plan(
+        self,
+        websocket,
+        request,
+        close_plan,
+        operation_recovery_epoch=None,
+    ):
+        if operation_recovery_epoch is None:
+            operation_recovery_epoch = self._ib_recovery_epoch
         staged_orders = []
         for leg_request in close_plan.get('underlyingLegs') or []:
             qualified_contract, quote = await self._resolve_leg_contract_and_mark(websocket, leg_request)
+            self._require_current_ib_recovery_epoch(
+                operation_recovery_epoch,
+                'continue the staged underlying close',
+            )
             order_action = 'BUY' if int(leg_request.pos or 0) > 0 else 'SELL'
             raw_limit = self._resolve_underlying_close_raw_limit(request, quote, order_action)
             price_increment = await self._resolve_contract_price_increment(
@@ -2623,6 +2783,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 getattr(qualified_contract, 'exchange', '') or leg_request.exchange,
                 raw_limit,
                 self._resolve_combo_price_increment(request=request),
+            )
+            self._require_current_ib_recovery_epoch(
+                operation_recovery_epoch,
+                'continue the staged underlying close',
             )
             order = self._build_underlying_close_order(
                 request,
@@ -2636,6 +2800,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 f"id={leg_request.id} secType={leg_request.sec_type} symbol={leg_request.symbol} "
                 f"action={order.action} qty={order.totalQuantity} limit={order.lmtPrice} "
                 f"account={getattr(order, 'account', '') or ''}"
+            )
+            self._require_ib_operation_ready(
+                operation_recovery_epoch,
+                'place the underlying close order',
             )
             trade = self.ib.placeOrder(qualified_contract, order)
             tracking_legs = [{
@@ -2775,7 +2943,12 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         decimals = max(0, -increment.normalize().as_tuple().exponent)
         return round(float(quantized), decimals)
 
-    async def _build_combo_order_from_request(self, websocket, request):
+    async def _build_combo_order_from_request(
+        self,
+        websocket,
+        request,
+        operation_recovery_epoch=None,
+    ):
         if not request.legs:
             raise ValueError('No combo legs were provided.')
 
@@ -2792,6 +2965,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 continue
 
             qualified_contract, quote = await self._resolve_leg_contract_and_mark(websocket, leg_request)
+            if operation_recovery_epoch is not None:
+                self._require_current_ib_recovery_epoch(
+                    operation_recovery_epoch,
+                    'continue combo qualification',
+                )
             resolved_legs.append({
                 'request': leg_request,
                 'contract': qualified_contract,
@@ -2961,6 +3139,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             limit_price,
             combo_exchange,
         )
+        if operation_recovery_epoch is not None:
+            self._require_current_ib_recovery_epoch(
+                operation_recovery_epoch,
+                'continue combo qualification',
+            )
         order.lmtPrice = self._quantize_limit_price(limit_price, order_action, price_increment)
         order.tif = self._resolve_time_in_force(request)
         order.transmit = True
@@ -3265,7 +3448,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         price_increment=None,
         attempt_number=1,
         retry_reason='',
+        operation_recovery_epoch=None,
     ):
+        if operation_recovery_epoch is None:
+            operation_recovery_epoch = self._ib_recovery_epoch
         attempt_label = 'Retrying' if attempt_number > 1 else 'Placing'
         increment_text = self._format_price_increment(price_increment)
         retry_detail = f" retryReason={retry_reason}" if retry_reason else ''
@@ -3275,6 +3461,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             f"executionMode={request.execution_mode} action={order.action} qty={order.totalQuantity} "
             f"limit={order.lmtPrice} tif={order.tif} account={getattr(order, 'account', '') or ''}"
             f"{increment_detail}{retry_detail}"
+        )
+        self._require_ib_operation_ready(
+            operation_recovery_epoch,
+            'place the combo order',
         )
         trade = self.ib.placeOrder(combo_contract, order)
         tracking_legs = self._build_combo_tracking_legs(resolved_legs)
@@ -3301,6 +3491,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         return attempt
 
     async def submit_combo_order(self, websocket, request):
+        operation_recovery_epoch = self._ib_recovery_epoch
+        self._require_ib_operation_ready(
+            operation_recovery_epoch,
+            'start the combo order submission',
+        )
         close_plan = self._build_assignment_aware_close_plan(request)
         confirmation_record = self._validate_close_plan_confirmation(request, close_plan, 'submit')
         if confirmation_record:
@@ -3312,7 +3507,12 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 option_request._confirmed_close_plan_orders = request._confirmed_close_plan_orders
         staged_orders = []
         if close_plan.get('underlyingLegs'):
-            underlying_stage = await self._submit_underlying_first_close_plan(websocket, request, close_plan)
+            underlying_stage = await self._submit_underlying_first_close_plan(
+                websocket,
+                request,
+                close_plan,
+                operation_recovery_epoch=operation_recovery_epoch,
+            )
             staged_orders = underlying_stage.get('stagedOrders') or []
             if not underlying_stage.get('completed'):
                 return underlying_stage['result']
@@ -3399,7 +3599,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 )
             )
 
-        build_result = await self._build_combo_order_from_request(websocket, request)
+        build_result = await self._build_combo_order_from_request(
+            websocket,
+            request,
+            operation_recovery_epoch=operation_recovery_epoch,
+        )
         combo_contract = build_result['comboContract']
         order = build_result['order']
         preview = build_result['preview']
@@ -3433,6 +3637,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             resolved_legs,
             price_increment=price_increment,
             attempt_number=1,
+            operation_recovery_epoch=operation_recovery_epoch,
         )
         final_attempt = attempt
         retry_stages = []
@@ -3463,6 +3668,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                     price_increment=retry_increment,
                     attempt_number=next_attempt_number,
                     retry_reason='minimum_price_variation',
+                    operation_recovery_epoch=operation_recovery_epoch,
                 )
                 retry_stages.append(self._build_combo_attempt_stage(
                     retry_attempt,
@@ -3528,6 +3734,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 trade,
                 preview,
                 resolved_legs,
+                ib_recovery_epoch=operation_recovery_epoch,
             )
         status_message = final_attempt.get('statusMessage') or ''
         final_status = final_attempt.get('status')
@@ -3670,10 +3877,22 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         if self._is_terminal_order_status(status):
             raise ValueError(f'Cannot resume auto-repricing after terminal broker status {status}.')
 
-        resumable_states = {'stopped_max_reprices', 'stopped_timeout'}
+        resumable_states = {
+            'stopped_max_reprices',
+            'stopped_timeout',
+        }
         previous_managed_state = context.get('managedState')
+        if previous_managed_state == 'stopped_ib_recovery':
+            raise ValueError(
+                'This order crossed an IB API recovery boundary. Review or cancel it '
+                'manually in TWS; automatic repricing cannot safely resume without '
+                'broker open-order reconciliation.'
+            )
         if previous_managed_state not in resumable_states:
             raise ValueError('This combo order is not waiting for more repricing supervision.')
+        self._require_ib_connection_for_place_order(
+            'resume managed combo-order supervision'
+        )
 
         context['terminated'] = False
         context['managedState'] = 'watching'
@@ -3725,6 +3944,20 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         status = str(context.get('status') or '').strip()
         if self._is_terminal_order_status(status):
             raise ValueError(f'Cannot concede pricing after terminal broker status {status}.')
+        if context.get('managedState') == 'stopped_ib_recovery':
+            raise ValueError(
+                'This order crossed an IB API recovery boundary. Review or cancel it '
+                'manually in TWS; concession repricing cannot safely target the old '
+                'API-session order identity.'
+            )
+        operation_recovery_epoch = context.get(
+            'ibRecoveryEpoch',
+            self._ib_recovery_epoch,
+        )
+        self._require_current_ib_recovery_epoch(
+            operation_recovery_epoch,
+            'concede pricing on the managed combo order',
+        )
 
         is_manual_concession = str(raw_data.get('concessionMode') or '').strip().lower() == 'step'
         concession_ratio = None
@@ -3735,6 +3968,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             concession_ratio = self._resolve_managed_concession_ratio(raw_data.get('concessionRatio'))
 
         quote_stats = await self._compute_live_combo_quote_stats(context)
+        self._require_current_ib_recovery_epoch(
+            operation_recovery_epoch,
+            'concede pricing on the managed combo order',
+        )
         if quote_stats is None:
             raise ValueError('Live bid/ask quotes are not available on all combo legs yet.')
 
@@ -3793,6 +4030,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             )
 
         await self._cancel_reprice_task_and_wait(context)
+        self._require_current_ib_recovery_epoch(
+            operation_recovery_epoch,
+            'concede pricing on the managed combo order',
+        )
 
         context['terminated'] = False
         context['maxRepriceCount'] = int(context.get('maxRepriceCount') or self.managed_reprice_max_updates) + self.managed_reprice_max_updates
@@ -3819,6 +4060,10 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                     f'Updating working limit from {previous_limit} to {new_limit}.'
                 )
             await self._emit_managed_update(context)
+            self._require_ib_operation_ready(
+                operation_recovery_epoch,
+                'modify the managed combo order',
+            )
             trade = self.ib.placeOrder(context['comboContract'], order)
             context['trade'] = trade
             context['workingLimitPrice'] = new_limit
@@ -3857,6 +4102,11 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         return self._build_managed_snapshot(context)
 
     async def cancel_managed_combo_order(self, websocket, raw_data):
+        operation_recovery_epoch = self._ib_recovery_epoch
+        self._require_ib_operation_ready(
+            operation_recovery_epoch,
+            'start the managed combo-order cancellation',
+        )
         group_id = raw_data.get('groupId')
         try:
             order_id = int(raw_data.get('orderId')) if raw_data.get('orderId') not in (None, '') else None
@@ -3880,6 +4130,24 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         status = str(context.get('status') or '').strip()
         if self._is_terminal_order_status(status):
             raise ValueError(f'Cannot cancel combo order after terminal broker status {status}.')
+        if context.get('managedState') == 'stopped_ib_recovery':
+            raise ValueError(
+                'This order crossed an IB API recovery boundary. Review or cancel it '
+                'manually in TWS; the old API-session order identity cannot be used '
+                'for cancellation.'
+            )
+        context_recovery_epoch = context.get(
+            'ibRecoveryEpoch',
+            operation_recovery_epoch,
+        )
+        self._require_current_ib_recovery_epoch(
+            context_recovery_epoch,
+            'cancel the managed combo order',
+        )
+        self._require_ib_operation_ready(
+            operation_recovery_epoch,
+            'cancel the managed combo order',
+        )
 
         trade = context.get('trade')
         order = getattr(trade, 'order', None) if trade is not None else None
@@ -3895,8 +4163,24 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
             else 'Cancelling the live combo order in TWS.'
         )
         await self._cancel_reprice_task_and_wait(context)
+        self._require_current_ib_recovery_epoch(
+            context_recovery_epoch,
+            'cancel the managed combo order',
+        )
+        self._require_ib_operation_ready(
+            operation_recovery_epoch,
+            'cancel the managed combo order',
+        )
 
         await self._emit_managed_update(context)
+        self._require_current_ib_recovery_epoch(
+            context_recovery_epoch,
+            'cancel the managed combo order',
+        )
+        self._require_ib_operation_ready(
+            operation_recovery_epoch,
+            'cancel the managed combo order',
+        )
         self.ib.cancelOrder(order)
         self.logger.info(
             f"Requested combo order cancellation for groupId={group_id} "

@@ -119,6 +119,8 @@ class IbServerWsHandlerTests(unittest.TestCase):
         reset_api_subscription_calls = []
         active_hedge_snapshot_calls = []
         iv_subscription_calls = []
+        iv_subscription_generations = []
+        subscription_request_marks = []
         historical_bar_calls = []
         discount_curve_calls = []
         historical_replay_service = _FakeHistoricalReplayService()
@@ -181,8 +183,14 @@ class IbServerWsHandlerTests(unittest.TestCase):
                 'symbol': symbol,
             })()
 
-        async def handle_iv_term_structure_subscription(websocket, client_ip, data):
+        async def handle_iv_term_structure_subscription(
+            websocket,
+            client_ip,
+            data,
+            subscription_generation=None,
+        ):
             iv_subscription_calls.append((websocket, client_ip, data))
+            iv_subscription_generations.append(subscription_generation)
 
         async def request_ib_historical_bars(
             underlying_request,
@@ -267,6 +275,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
             ),
             'qualify_one': qualify_one,
             'handle_iv_term_structure_subscription': handle_iv_term_structure_subscription,
+            'mark_ib_subscription_requested': lambda: subscription_request_marks.append(True),
             'extract_quote_snapshot': lambda ticker, _sec_type='': {
                 'bid': 500.0,
                 'ask': 501.0,
@@ -295,6 +304,8 @@ class IbServerWsHandlerTests(unittest.TestCase):
                 'active_hedge_snapshot_calls': active_hedge_snapshot_calls,
                 'active_combo_snapshot_calls': active_combo_snapshot_calls,
                 'iv_subscription_calls': iv_subscription_calls,
+                'iv_subscription_generations': iv_subscription_generations,
+                'subscription_request_marks': subscription_request_marks,
                 'historical_bar_calls': historical_bar_calls,
                 'discount_curve_calls': discount_curve_calls,
             },
@@ -406,6 +417,23 @@ class IbServerWsHandlerTests(unittest.TestCase):
             'action': 'ib_connection_status',
             'connected': False,
             'message': None,
+        })
+
+    def test_ib_connection_status_direct_response_echoes_request_id(self):
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket(messages=[json.dumps({
+            'action': 'request_ib_connection_status',
+            'requestId': 'supervisor-poll-1',
+        })])
+        handler = build_ws_client_handler(env)
+
+        asyncio.run(handler(websocket))
+
+        self.assertEqual(sent_messages[0][1], {
+            'action': 'ib_connection_status',
+            'connected': False,
+            'message': None,
+            'requestId': 'supervisor-poll-1',
         })
 
     def test_handle_ws_client_routes_discount_curve_snapshot_action(self):
@@ -531,6 +559,112 @@ class IbServerWsHandlerTests(unittest.TestCase):
         self.assertEqual(env['ib'].req_mkt_data_calls, [])
         self.assertEqual(env['client_subscriptions'][websocket], {})
 
+    def test_stale_explicit_generation_is_rejected_before_subscription_marker(self):
+        requests = (
+            {
+                'action': 'subscribe',
+                'marketDataGeneration': 49,
+                'underlying': {'secType': 'STK', 'symbol': 'SPY'},
+                'options': [],
+                'futures': [],
+                'stocks': [],
+            },
+            {
+                'action': 'subscribe_iv_term_structure',
+                'marketDataGeneration': 49,
+                'underlying': {'secType': 'IND', 'symbol': 'SPX'},
+                'clientProtocolVersion': '20260719.5',
+            },
+            {
+                'action': 'sync_underlying',
+                'marketDataGeneration': 49,
+                'underlying': {'secType': 'STK', 'symbol': 'SPY'},
+            },
+        )
+
+        for request in requests:
+            with self.subTest(action=request['action']):
+                env, sent_messages, *_ = self._build_env()
+                websocket = _FakeWebSocket()
+                env['get_api_market_data_generation'] = lambda: 50
+                env['api_market_data_reset_in_progress'] = lambda: False
+
+                asyncio.run(dispatch_client_message(env, websocket, request))
+
+                self.assertEqual(
+                    env['_captures']['subscription_request_marks'],
+                    [],
+                )
+                self.assertEqual(
+                    env['_captures']['iv_subscription_calls'],
+                    [],
+                )
+                self.assertEqual(env['ib'].req_mkt_data_calls, [])
+                self.assertEqual(sent_messages, [])
+
+    def test_startup_invalidation_barrier_precedes_new_generation_iv_payload(self):
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        generation = [0]
+        env['get_api_market_data_generation'] = lambda: generation[0]
+        env['api_market_data_reset_in_progress'] = lambda: False
+
+        async def mark_and_publish_invalidation():
+            generation[0] += 1
+            await env['send_message_safe'](websocket, json.dumps({
+                'action': 'ib_connection_status',
+                'marketDataState': 'invalidated',
+                'marketDataGeneration': generation[0],
+            }))
+            return True
+
+        env['mark_ib_subscription_requested'] = mark_and_publish_invalidation
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {
+                'action': 'subscribe_iv_term_structure',
+                'marketDataGeneration': 0,
+                'underlying': {'secType': 'IND', 'symbol': 'SPX'},
+                'clientProtocolVersion': '20260719.5',
+            },
+        ))
+
+        self.assertEqual(
+            [payload['action'] for _socket, payload in sent_messages],
+            ['ib_connection_status', 'iv_term_structure_sync_started'],
+        )
+        self.assertEqual(sent_messages[0][1]['marketDataGeneration'], 1)
+        self.assertEqual(sent_messages[1][1]['marketDataGeneration'], 1)
+        self.assertEqual(env['_captures']['iv_subscription_generations'], [1])
+
+    def test_explicit_generation_is_revalidated_after_awaited_marker(self):
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        generation = [8]
+        env['get_api_market_data_generation'] = lambda: generation[0]
+        env['api_market_data_reset_in_progress'] = lambda: False
+
+        async def marker_changed_by_another_transition():
+            await asyncio.sleep(0)
+            generation[0] += 1
+            return False
+
+        env['mark_ib_subscription_requested'] = marker_changed_by_another_transition
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {
+                'action': 'subscribe_iv_term_structure',
+                'marketDataGeneration': 8,
+                'underlying': {'secType': 'IND', 'symbol': 'SPX'},
+                'clientProtocolVersion': '20260719.5',
+            },
+        ))
+
+        self.assertEqual(sent_messages, [])
+        self.assertEqual(env['_captures']['iv_subscription_calls'], [])
+
     def test_reset_during_option_timing_lookup_cannot_attach_or_send_stale_metadata(self):
         env, sent_messages, *_ = self._build_env()
         websocket = _FakeWebSocket()
@@ -612,6 +746,8 @@ class IbServerWsHandlerTests(unittest.TestCase):
         websocket = _FakeWebSocket()
         env['client_subscriptions'][websocket] = {}
         env['client_subscription_settings'][websocket] = {'greeks_enabled': False}
+        env['get_api_market_data_generation'] = lambda: 31
+        env['api_market_data_reset_in_progress'] = lambda: False
 
         async def qualify_missing_strike(contract, request=None):
             request_data = request if isinstance(request, dict) else {}
@@ -666,6 +802,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
         self.assertEqual(unresolved[0]['strike'], 585)
         self.assertEqual(unresolved[0]['right'], 'C')
         self.assertEqual(unresolved[0]['expDate'], '20260821')
+        self.assertEqual(status_payloads[0]['marketDataGeneration'], 31)
 
         # The unresolved leg must not subscribe; its sibling still must.
         self.assertNotIn('leg_missing', env['client_subscriptions'][websocket])
@@ -838,8 +975,11 @@ class IbServerWsHandlerTests(unittest.TestCase):
             _ensure_connect_calls,
             _active_hedge_snapshot_calls,
         ) = self._build_env()
+        env['get_api_market_data_generation'] = lambda: 33
+        env['api_market_data_reset_in_progress'] = lambda: False
         websocket = _FakeWebSocket(messages=[json.dumps({
             'action': 'request_historical_bars',
+            'marketDataGeneration': 33,
             'underlying': {'secType': 'FUT', 'symbol': 'ES'},
             'barSize': '1 day',
             'durationStr': '6 M',
@@ -867,7 +1007,79 @@ class IbServerWsHandlerTests(unittest.TestCase):
             'useRTH': False,
             'bars': [{'time': '2026-05-01', 'open': 1.0, 'high': 2.0, 'low': 0.5, 'close': 1.5, 'volume': 100}],
             'requestId': 'bars_1',
+            'marketDataGeneration': 33,
         })
+
+    def test_historical_bars_fallback_and_error_are_generation_stamped(self):
+        for fallback_available in (True, False):
+            with self.subTest(fallback_available=fallback_available):
+                env, sent_messages, *_ = self._build_env()
+                websocket = _FakeWebSocket()
+                env['get_api_market_data_generation'] = lambda: 34
+                env['api_market_data_reset_in_progress'] = lambda: False
+
+                async def unavailable_ib_bars(*_args, **_kwargs):
+                    raise RuntimeError('TWS unavailable')
+
+                env['request_ib_historical_bars'] = unavailable_ib_bars
+                if not fallback_available:
+                    env[
+                        'historical_replay_service'
+                    ].build_underlying_daily_bars_payload = (
+                        lambda _symbol, limit=260: None
+                    )
+
+                asyncio.run(dispatch_client_message(
+                    env,
+                    websocket,
+                    {
+                        'action': 'request_historical_bars',
+                        'marketDataGeneration': 34,
+                        'underlying': {'secType': 'FUT', 'symbol': 'ES'},
+                        'barSize': '1 day',
+                        'requestId': 'fallback-bars',
+                    },
+                ))
+
+                self.assertEqual(len(sent_messages), 1)
+                payload = sent_messages[0][1]
+                self.assertEqual(payload['marketDataGeneration'], 34)
+                self.assertEqual(
+                    payload['action'],
+                    (
+                        'historical_bars_response'
+                        if fallback_available
+                        else 'historical_bars_error'
+                    ),
+                )
+
+    def test_historical_bars_result_is_suppressed_after_generation_changes(self):
+        env, sent_messages, *_ = self._build_env()
+        websocket = _FakeWebSocket()
+        generation = [35]
+        env['get_api_market_data_generation'] = lambda: generation[0]
+        env['api_market_data_reset_in_progress'] = lambda: False
+
+        async def bars_crossing_generation(*_args, **_kwargs):
+            generation[0] += 1
+            return {
+                'action': 'historical_bars_response',
+                'symbol': 'ES',
+                'bars': [],
+            }
+
+        env['request_ib_historical_bars'] = bars_crossing_generation
+        asyncio.run(dispatch_client_message(
+            env,
+            websocket,
+            {
+                'action': 'request_historical_bars',
+                'marketDataGeneration': 35,
+                'underlying': {'secType': 'FUT', 'symbol': 'ES'},
+            },
+        ))
+
+        self.assertEqual(sent_messages, [])
 
     def test_handle_ws_client_routes_subscribe_action(self):
         (
@@ -1035,6 +1247,8 @@ class IbServerWsHandlerTests(unittest.TestCase):
         env, sent_messages, *_ = self._build_env()
         env['extract_quote_snapshot'] = lambda _ticker, _sec_type='': None
         env['option_contract_timing_by_con_id'] = {}
+        env['get_api_market_data_generation'] = lambda: 32
+        env['api_market_data_reset_in_progress'] = lambda: False
 
         async def qualify_spy_contract(contract, request=None):
             request_data = request if isinstance(request, dict) else {}
@@ -1128,6 +1342,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
             and 'second_leg' in (payload.get('options') or {})
         ]
         self.assertTrue(metadata_payloads)
+        self.assertEqual(metadata_payloads[-1]['marketDataGeneration'], 32)
         timing = metadata_payloads[-1]['options']['second_leg']
         self.assertEqual(timing['expiryAsOf'], '2026-07-24T20:00:00.000Z')
         for price_field in ('bid', 'ask', 'mark', 'iv', 'delta', 'quoteAsOf'):
@@ -1347,6 +1562,8 @@ class IbServerWsHandlerTests(unittest.TestCase):
             _ensure_connect_calls,
             _active_hedge_snapshot_calls,
         ) = self._build_env()
+        env['get_api_market_data_generation'] = lambda: 36
+        env['api_market_data_reset_in_progress'] = lambda: False
 
         websocket = _FakeWebSocket(messages=[])
         env['client_subscriptions'][websocket] = {}
@@ -1367,6 +1584,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
         )
         self.assertEqual(env.get('market_data_generic_ticks_by_con_id', {}), {})
         self.assertEqual(sent_messages[-1][1]['underlyingPrice'], 500.5)
+        self.assertEqual(sent_messages[-1][1]['marketDataGeneration'], 36)
 
     def test_handle_ws_client_routes_iv_term_structure_action(self):
         (
@@ -1379,6 +1597,8 @@ class IbServerWsHandlerTests(unittest.TestCase):
             _ensure_connect_calls,
             _active_hedge_snapshot_calls,
         ) = self._build_env()
+        env['get_api_market_data_generation'] = lambda: 37
+        env['api_market_data_reset_in_progress'] = lambda: False
         websocket = _FakeWebSocket(messages=[json.dumps({
             'action': 'subscribe_iv_term_structure',
             'underlying': {'secType': 'IND', 'symbol': 'SPX'},
@@ -1397,6 +1617,8 @@ class IbServerWsHandlerTests(unittest.TestCase):
                 'clientProtocolVersion': '20260719.5',
             },
         )])
+        self.assertEqual(env['_captures']['subscription_request_marks'], [True])
+        self.assertEqual(env['_captures']['iv_subscription_generations'], [37])
         started_payloads = [
             payload for _websocket, payload in env['_captures']['sent_messages']
             if payload.get('action') == 'iv_term_structure_sync_started'
@@ -1405,6 +1627,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
         self.assertEqual(started_payloads[0]['symbol'], 'SPX')
         self.assertEqual(started_payloads[0]['protocolVersion'], '20260719.5')
         self.assertIs(started_payloads[0]['accepted'], True)
+        self.assertEqual(started_payloads[0]['marketDataGeneration'], 37)
 
     def test_iv_term_structure_protocol_mismatch_is_rejected_before_subscription(self):
         env, sent_messages, *_ = self._build_env()
@@ -1437,7 +1660,12 @@ class IbServerWsHandlerTests(unittest.TestCase):
         # fails here instead of hanging the suite.
         env['iv_term_structure_catalog_timeout_seconds'] = 0.01
 
-        async def stalled_subscription(_websocket, _client_ip, _data):
+        async def stalled_subscription(
+            _websocket,
+            _client_ip,
+            _data,
+            subscription_generation=None,
+        ):
             await asyncio.sleep(30)
 
         env['handle_iv_term_structure_subscription'] = stalled_subscription

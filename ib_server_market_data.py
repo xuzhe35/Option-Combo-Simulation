@@ -37,6 +37,59 @@ def server_utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
 
+def normalize_market_data_generation(raw_value: Any) -> int | None:
+    try:
+        generation = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    return generation if generation >= 0 else None
+
+
+def capture_market_data_generation(env: dict[str, Any]) -> int | None:
+    getter = env.get('get_api_market_data_generation')
+    if not callable(getter):
+        return None
+    return normalize_market_data_generation(getter())
+
+
+def market_data_generation_is_current(
+    env: dict[str, Any],
+    captured_generation: Any,
+) -> bool:
+    reset_in_progress = env.get('api_market_data_reset_in_progress')
+    if callable(reset_in_progress) and reset_in_progress():
+        return False
+    normalized = normalize_market_data_generation(captured_generation)
+    getter = env.get('get_api_market_data_generation')
+    if normalized is None or not callable(getter):
+        return True
+    return normalize_market_data_generation(getter()) == normalized
+
+
+def stamp_market_data_generation(
+    payload: dict[str, Any],
+    generation: Any,
+) -> dict[str, Any]:
+    normalized = normalize_market_data_generation(generation)
+    if normalized is not None:
+        payload['marketDataGeneration'] = normalized
+    return payload
+
+
+async def send_market_data_payload_if_current(
+    env: dict[str, Any],
+    websocket: Any,
+    payload: dict[str, Any],
+    captured_generation: Any,
+) -> bool:
+    """Stamp and send only while the producing market-data epoch is current."""
+
+    if not market_data_generation_is_current(env, captured_generation):
+        return False
+    stamp_market_data_generation(payload, captured_generation)
+    return await env['send_message_safe'](websocket, json.dumps(payload))
+
+
 def positive_contract_id(raw_value: Any) -> int | None:
     try:
         value = int(raw_value)
@@ -641,6 +694,7 @@ def build_iv_term_structure_quote_snapshot(
     *,
     payload_as_of: str | None = None,
     batch_id: str | None = None,
+    market_data_generation: Any = None,
 ) -> IvTermStructureQuoteSnapshotPayload | None:
     """Build one server-side, whole-curve IVTS quote snapshot.
 
@@ -701,6 +755,14 @@ def build_iv_term_structure_quote_snapshot(
         'options': {},
         'underlyingContractMonth': str(state.get('underlyingContractMonth') or '').strip(),
     }
+    snapshot_generation = (
+        market_data_generation
+        if normalize_market_data_generation(market_data_generation) is not None
+        else state.get('marketDataGeneration')
+    )
+    if normalize_market_data_generation(snapshot_generation) is None:
+        snapshot_generation = capture_market_data_generation(env)
+    stamp_market_data_generation(payload, snapshot_generation)
     if not payload['subscriptionComplete'] or not expected_option_ids:
         return payload
     if set(expected_option_ids) != set(subscribed_option_ids):
@@ -868,6 +930,9 @@ def build_pending_tickers_handler(env):
         if not env['connected_clients']:
             return
 
+        market_data_generation = capture_market_data_generation(env)
+        if not market_data_generation_is_current(env, market_data_generation):
+            return
         payload_as_of = server_utc_now_iso()
         batch_id = uuid4().hex
         changed_ticker_ids, changed_contract_ids = collect_changed_ticker_keys(tickers)
@@ -914,6 +979,7 @@ def build_pending_tickers_handler(env):
                 'stocks': {},
                 'carryReferences': {},
             }
+            stamp_market_data_generation(payload, market_data_generation)
             has_data = False
 
             if 'underlying' in subs:
@@ -984,19 +1050,30 @@ def build_pending_tickers_handler(env):
                     has_data = True
 
             if has_data:
-                asyncio.create_task(env['send_message_safe'](ws, json.dumps(payload)))
+                asyncio.create_task(send_market_data_payload_if_current(
+                    env,
+                    ws,
+                    payload,
+                    market_data_generation,
+                ))
             if ivts_snapshot_event_relevant:
                 full_snapshot = build_iv_term_structure_quote_snapshot(
                     env,
                     ws,
                     payload_as_of=payload_as_of,
                     batch_id=batch_id,
+                    market_data_generation=market_data_generation,
                 )
                 # Incoherent snapshots are explicit invalidation evidence for
                 # the browser; silently dropping them would leave the last
                 # good lambda active after a crossed/missing/stale BBO.
                 if full_snapshot is not None:
-                    asyncio.create_task(env['send_message_safe'](ws, json.dumps(full_snapshot)))
+                    asyncio.create_task(send_market_data_payload_if_current(
+                        env,
+                        ws,
+                        full_snapshot,
+                        market_data_generation,
+                    ))
 
     return on_pending_tickers
 

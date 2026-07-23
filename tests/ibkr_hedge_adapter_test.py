@@ -1,3 +1,4 @@
+import asyncio
 import pathlib
 import sys
 import types
@@ -42,9 +43,13 @@ class _DummyEvent:
 class _FakeIb:
     def __init__(self):
         self.orderStatusEvent = _DummyEvent()
+        self.connected = True
         self.qualified_contracts = []
         self.placed_orders = []
         self.cancelled_orders = []
+
+    def isConnected(self):
+        return self.connected
 
     async def qualifyContractsAsync(self, contract):
         self.qualified_contracts.append(contract)
@@ -334,6 +339,127 @@ class IbkrHedgeAdapterTests(unittest.TestCase):
         import asyncio
 
         return asyncio.run(awaitable)
+
+
+class IbkrHedgeRecoverySafetyTests(unittest.IsolatedAsyncioTestCase):
+    def _build_adapter(self, ib):
+        return IbkrExecutionAdapter(
+            ib=ib,
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+        )
+
+    def _build_market_submit_request(self, hedge_id):
+        return HedgeOrderRequest.from_payload({
+            "hedgeId": hedge_id,
+            "hedgeName": "Recovery Safety Hedge",
+            "secType": "STK",
+            "symbol": "SPY",
+            "exchange": "SMART",
+            "currency": "USD",
+            "orderAction": "SELL",
+            "quantity": 1,
+            "orderType": "MKT",
+            "account": "TEST_ACCOUNT",
+            "requestSource": "delta_hedge_manual",
+        })
+
+    async def test_submit_entered_during_recovery_stops_before_qualification(self):
+        ib = _FakeIb()
+        adapter = self._build_adapter(ib)
+        await adapter.pause_managed_for_ib_recovery()
+
+        with self.assertRaisesRegex(ConnectionError, "recovery is still in progress"):
+            await adapter.submit_hedge_order(
+                object(),
+                self._build_market_submit_request("recovery_in_progress_submit"),
+            )
+
+        self.assertEqual(ib.qualified_contracts, [])
+        self.assertEqual(ib.placed_orders, [])
+
+    async def test_cancel_entered_during_recovery_stops_before_context_processing(self):
+        ib = _FakeIb()
+        adapter = self._build_adapter(ib)
+        websocket = object()
+        result = await adapter.submit_hedge_order(
+            websocket,
+            self._build_market_submit_request("recovery_in_progress_cancel"),
+        )
+        context = adapter._resolve_hedge_order_tracking(result.order_id, result.perm_id)
+        self.assertIsNotNone(context)
+        await adapter.pause_managed_for_ib_recovery()
+
+        def unexpected_context_resolution(_order_id, _perm_id):
+            raise AssertionError("recovery entry gate must run before hedge-context processing")
+
+        adapter._resolve_hedge_order_tracking = unexpected_context_resolution
+        with self.assertRaisesRegex(ConnectionError, "recovery is still in progress"):
+            await adapter.cancel_hedge_order(websocket, {
+                "hedgeId": "recovery_in_progress_cancel",
+                "orderId": result.order_id,
+                "permId": result.perm_id,
+            })
+
+        self.assertEqual(ib.cancelled_orders, [])
+        self.assertEqual(context["status"], "Submitted")
+        self.assertFalse(context["cancelRequested"])
+
+    async def test_completed_recovery_during_hedge_qualification_blocks_placement(self):
+        ib = _FakeIb()
+        adapter = self._build_adapter(ib)
+        qualification_started = asyncio.Event()
+        release_qualification = asyncio.Event()
+        qualify_contract = ib.qualifyContractsAsync
+
+        async def blocked_qualification(contract):
+            qualification_started.set()
+            await release_qualification.wait()
+            return await qualify_contract(contract)
+
+        ib.qualifyContractsAsync = blocked_qualification
+        submit_task = asyncio.create_task(adapter.submit_hedge_order(
+            object(),
+            self._build_market_submit_request("recovery_build"),
+        ))
+
+        await qualification_started.wait()
+        await adapter.pause_managed_for_ib_recovery()
+        adapter.complete_ib_recovery()
+        release_qualification.set()
+
+        with self.assertRaisesRegex(ConnectionError, "action was in flight"):
+            await submit_task
+        self.assertEqual(ib.placed_orders, [])
+
+    async def test_stale_submitted_hedge_cannot_be_cancelled_after_recovery(self):
+        ib = _FakeIb()
+        adapter = self._build_adapter(ib)
+        websocket = object()
+        result = await adapter.submit_hedge_order(
+            websocket,
+            self._build_market_submit_request("recovery_cancel"),
+        )
+        context = adapter._resolve_hedge_order_tracking(result.order_id, result.perm_id)
+        self.assertIsNotNone(context)
+        self.assertEqual(context["status"], "Submitted")
+        self.assertFalse(context["cancelRequested"])
+
+        await adapter.pause_managed_for_ib_recovery()
+        adapter.complete_ib_recovery()
+
+        with self.assertRaisesRegex(ConnectionError, "manually in TWS"):
+            await adapter.cancel_hedge_order(websocket, {
+                "hedgeId": "recovery_cancel",
+                "orderId": result.order_id,
+                "permId": result.perm_id,
+            })
+
+        self.assertEqual(ib.cancelled_orders, [])
+        self.assertEqual(context["status"], "Submitted")
+        self.assertFalse(context["cancelRequested"])
 
 
 if __name__ == "__main__":
