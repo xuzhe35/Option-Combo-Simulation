@@ -32,6 +32,7 @@ const suites = [
     require('./app.test'),
     require('./control_panel_ui.test'),
     require('./group_ui.test'),
+    require('./global_ui.test'),
     require('./ws_client.test'),
     require('./group_editor_ui.test'),
     require('./hedge_editor_ui.test'),
