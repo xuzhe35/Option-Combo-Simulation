@@ -61,6 +61,11 @@ module.exports = {
                 assert.match(chartLabHtml, /<body[^>]*data-option-combo-page="chart-lab"/i);
                 assert.match(indexHtml, /<script src="js\/page_capabilities\.js"><\/script>/i);
                 assert.match(chartLabHtml, /<script src="js\/page_capabilities\.js"><\/script>/i);
+                assert.match(indexHtml, /class="group-header-net-cash-flow-item"/i);
+                assert.match(chartLabHtml, /class="group-header-net-cash-flow-item"/i);
+                assert.match(indexHtml, /id="allGroupsNetCashFlowValue"/i);
+                assert.match(chartLabHtml, /id="allGroupsNetCashFlowValue"/i);
+                assert.match(indexHtml, /id="projectedOptionDelivery"/i);
             },
         },
         {
