@@ -262,6 +262,7 @@ Important PowerShell entry points:
 - `start_historical_replay_mac.command`
 - `update_yield_curve_mac.command`
 - `start_option_combo.sh`
+- `update_yield_curve.sh`
 - `install_ib_bridge_deps_mac.command`
 - `cleanup_logs_mac.command`
 
@@ -579,15 +580,16 @@ Daily maintenance and inspection:
 
 - Windows: double-click `update_yield_curve.bat`.
 - macOS: double-click `update_yield_curve_mac.command`.
+- Linux: run `./update_yield_curve.sh`.
 
-Both launchers resolve the same configured/project virtual-environment Python
+All launchers resolve the same configured/project virtual-environment Python
 used by the application, perform one update from the official sources, then
-print the current local snapshot status. Their terminal stays open after an
-interactive double-click so the source status or error remains visible. No API
-key is required. A failed official-source request does not overwrite the last
-complete snapshot. The manual launcher deliberately refreshes even if an
-earlier snapshot exists for the date, so a morning run can be replaced after
-the official sources publish newer observations.
+print the current local snapshot status. Interactive launchers keep their
+terminal open so the source status or error remains visible. No API key is
+required. A failed official-source request does not overwrite the last complete
+snapshot. The manual launcher deliberately refreshes even if an earlier
+snapshot exists for the date, so a morning run can be replaced after the
+official sources publish newer observations.
 
 The equivalent manual commands are:
 

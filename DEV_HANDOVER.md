@@ -83,11 +83,13 @@ Current surfaces:
   rate provider or hourly refresh loop inside either server.
 - User-facing daily maintenance is double-clickable via
   `update_yield_curve.bat` on Windows and `update_yield_curve_mac.command` on
-  macOS. Both resolve the project-configured Python, force one daily update,
-  then run `status` and leave interactive output visible. The Windows wrapper
-  delegates to `powershell_scripts/update_yield_curve.ps1`; `-IfNeeded` opts
-  into the backend-style skip guard and `-StatusOnly` performs no network
-  request. The macOS `.command` is a native zsh double-click entry point.
+  macOS, or runnable as `./update_yield_curve.sh` on Linux. All resolve the
+  project-configured Python, force one daily update, then run `status` and leave
+  interactive output visible. The Windows wrapper delegates to
+  `powershell_scripts/update_yield_curve.ps1`; `-IfNeeded` opts into the
+  backend-style skip guard and `-StatusOnly` performs no network request. The
+  macOS `.command` is a native zsh double-click entry point, while the Linux
+  script uses Bash.
 - Main/Chart Lab request the curve on socket open and every six hours. IVTS uses
   the same control-socket payload. Network failure retains the prior complete
   curve; a future-dated or more-than-ten-calendar-day-old live curve is rejected,
@@ -357,6 +359,7 @@ Underlying PowerShell scripts:
 POSIX / macOS:
 
 - `start_option_combo.sh`
+- `update_yield_curve.sh`
 - `start_option_combo_mac.command`
 - `start_historical_replay_mac.command`
 - `update_yield_curve_mac.command`

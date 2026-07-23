@@ -531,6 +531,7 @@ quality, and snapshot id.
 - `start_historical_replay_mac.command`
 - `update_yield_curve_mac.command`
 - `start_option_combo.sh`
+- `update_yield_curve.sh`
 - `install_ib_bridge_deps_mac.command`
 - `cleanup_logs_mac.command`
 - `scripts/cleanup_runtime_logs.py`

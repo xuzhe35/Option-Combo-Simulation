@@ -1,0 +1,13 @@
+FROM python:3.12.11-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY config.ini entrypoint.sh ./
+RUN chmod +x entrypoint.sh
+
+EXPOSE 8000 8765
+
+ENTRYPOINT ["./entrypoint.sh"]
