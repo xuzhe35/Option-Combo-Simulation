@@ -403,6 +403,7 @@ client_id = 999
 [server]
 ws_host = 127.0.0.1
 ws_port = 8765
+option_contract_timing_timeout_seconds = 5
 
 [execution]
 managed_reprice_threshold_default = 0.01
@@ -420,6 +421,13 @@ sec-def (2158) farms instead of stalling. Raise it when a slow sec-def farm make
 wide FOP chains legitimately overrun, but keep it under the browser's own 90s
 backstop — past that the client gives up first and reports no cause. Values below
 1s are floored.
+
+`option_contract_timing_timeout_seconds` (in `[server]`) bounds the ContractDetails
+lookups that resolve an option's exact last-trade timing and verify a FOP's
+underlying futures delivery month. On timeout a profile cutoff is treated as
+diagnostic/compatibility data only: live target-expiry, FOP/INDEX, and ≤7-day
+surviving legs fail closed until exact contract timing arrives rather than pricing
+on a guessed clock. The default is 5s; values below 0.5s are floored.
 
 Optional historical data overrides:
 
