@@ -322,6 +322,43 @@ module.exports = {
             },
         },
         {
+            name: 'MC worker interpolates a precomputed American binomial price grid',
+            run() {
+                const result = runMcWorker({
+                    df: 5,
+                    loc: 0,
+                    newScale: 0,
+                    stepWeights: [0],
+                    nPaths: 1,
+                    currentPrice: 100,
+                    minS: 90,
+                    maxS: 110,
+                    bins: 10,
+                    legs: [{
+                        id: 'american-put',
+                        type: 'put',
+                        isUnderlyingLeg: false,
+                        isExpired: false,
+                        pricingModel: 'american-binomial',
+                        strike: 100,
+                        rate: 0.05,
+                        varianceT: 0.1,
+                        discountT: 0.1,
+                        volatility: 0.2,
+                        posMultiplier: 2,
+                        costBasis: 1,
+                        underlyingScale: 1,
+                        americanGridMin: 90,
+                        americanGridMax: 110,
+                        americanPriceGrid: [12, 2, 0],
+                    }],
+                });
+
+                assert.equal(result.error, undefined);
+                assert.equal(result.exactExpectedPnL, 3);
+            },
+        },
+        {
             name: 'coalesces signed lambda days into nonnegative variance blocks without losing total time',
             run() {
                 const ctx = loadProbCharts();

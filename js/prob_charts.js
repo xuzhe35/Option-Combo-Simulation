@@ -209,9 +209,25 @@ self.onmessage = function(e) {
             }
             if (leg.isExpired) continue;
 
-            if (!['bsm-spot', 'black76'].includes(leg.pricingModel)) {
+            if (!['bsm-spot', 'black76', 'american-binomial'].includes(leg.pricingModel)) {
                 postError('pricing_model_unavailable', legId, 'pricingModel');
                 return;
+            }
+            if (leg.pricingModel === 'american-binomial') {
+                const grid = leg.americanPriceGrid;
+                if ((!Array.isArray(grid) && !ArrayBuffer.isView(grid))
+                    || grid.length < 2
+                    || !Number.isFinite(leg.americanGridMin)
+                    || !Number.isFinite(leg.americanGridMax)
+                    || leg.americanGridMin <= 0
+                    || leg.americanGridMax <= leg.americanGridMin) {
+                    postError('pricing_input_invalid', legId, 'americanPriceGrid');
+                    return;
+                }
+                leg.americanGridStep = (
+                    leg.americanGridMax - leg.americanGridMin
+                ) / (grid.length - 1);
+                continue;
             }
             if (!Number.isFinite(leg.rate)
                 || !Number.isFinite(leg.varianceT) || leg.varianceT <= 0
@@ -298,6 +314,24 @@ self.onmessage = function(e) {
                 } else if (leg.isExpired) {
                     if (leg.type === 'call') v_opt = Math.max(0, legPrice - leg.strike);
                     else                     v_opt = Math.max(0, leg.strike - legPrice);
+                } else if (leg.pricingModel === 'american-binomial') {
+                    if (legPrice <= leg.americanGridMin
+                        || legPrice >= leg.americanGridMax) {
+                        // Far outside the deliberately wide lookup range, the
+                        // immediate-exercise value is the stable American tail.
+                        v_opt = leg.type === 'call'
+                            ? Math.max(0, legPrice - leg.strike)
+                            : Math.max(0, leg.strike - legPrice);
+                    } else {
+                        const gridPosition = (
+                            legPrice - leg.americanGridMin
+                        ) / leg.americanGridStep;
+                        const lowerIndex = Math.floor(gridPosition);
+                        const fraction = gridPosition - lowerIndex;
+                        const lowerValue = leg.americanPriceGrid[lowerIndex];
+                        const upperValue = leg.americanPriceGrid[lowerIndex + 1];
+                        v_opt = lowerValue + fraction * (upperValue - lowerValue);
+                    }
                 } else {
                     const d1 = log_S * leg.inv_v_sqrt_T + leg.d1_const;
                     const d2 = d1 - leg.v_sqrt_T;
@@ -1658,6 +1692,48 @@ function updateProbCharts() {
                 costBasis: pLeg.costBasis,
                 underlyingScale,
             };
+            if (pLeg.pricingModel === 'american-binomial'
+                && !pLeg.isUnderlyingLeg
+                && !pLeg.isExpired
+                && fixedPrice === undefined) {
+                const americanGridPoints = 801;
+                const scaledMin = minS * underlyingScale;
+                const scaledMax = maxS * underlyingScale;
+                const americanGridMin = Math.max(
+                    0.0001,
+                    Math.min(scaledMin, pLeg.strike) * 0.5
+                );
+                const americanGridMax = Math.max(
+                    scaledMax,
+                    pLeg.strike
+                ) * 1.5;
+                const americanGridStep = (
+                    americanGridMax - americanGridMin
+                ) / (americanGridPoints - 1);
+                const americanPriceGrid = new Float64Array(americanGridPoints);
+                for (let gridIndex = 0; gridIndex < americanGridPoints; gridIndex += 1) {
+                    const gridSpot = americanGridMin + gridIndex * americanGridStep;
+                    americanPriceGrid[gridIndex] = pricingCore.calculatePrice(
+                        'american-binomial',
+                        pLeg.type,
+                        gridSpot,
+                        pLeg.strike,
+                        pLeg.T,
+                        legInterestRate,
+                        pLeg.simIV,
+                        pLeg.rateT,
+                        pLeg.dividendYield,
+                        pLeg.binomialSteps
+                    );
+                    if (!Number.isFinite(americanPriceGrid[gridIndex])) {
+                        workerPricingFailure = 'american_binomial_grid_unavailable';
+                        return;
+                    }
+                }
+                workerLeg.americanGridMin = americanGridMin;
+                workerLeg.americanGridMax = americanGridMax;
+                workerLeg.americanPriceGrid = americanPriceGrid;
+            }
             if (Number.isFinite(pLeg.expiryUnderlyingPrice)) {
                 workerLeg.expiryUnderlyingPrice = pLeg.expiryUnderlyingPrice;
             }
