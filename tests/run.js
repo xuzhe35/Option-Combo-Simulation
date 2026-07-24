@@ -25,6 +25,7 @@ const suites = [
     require('./delta_hedge_transport.test'),
     require('./delta_hedge_ui.test'),
     require('./chart_quality_note.test'),
+    require('./american_binomial.test'),
     require('./bsm.test'),
     require('./amortized.test'),
     require('./valuation.test'),

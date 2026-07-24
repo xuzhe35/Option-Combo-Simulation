@@ -111,6 +111,11 @@ const state = {
     // Continuously compounded discount-rate fallback.  A live/historical
     // discount curve overrides this scalar when useMarketDiscountCurve=true.
     interestRate: 0.03,
+    // Incremental opt-in. The existing European BSM path remains the default.
+    // The American model applies only to bsm-spot equity/ETF profiles.
+    equityOptionPricingModel: 'bsm-spot',
+    equityDividendYield: 0,
+    americanBinomialSteps: 201,
     useMarketDiscountCurve: true,
     discountCurve: null,
     discountCurveLastError: '',
@@ -877,6 +882,13 @@ function _syncSimTimeBasisPricingConfig() {
             ? state.historicalTradingDates
             : null,
     });
+    if (typeof pricingCore.configureEquityOptionPricing === 'function') {
+        pricingCore.configureEquityOptionPricing({
+            model: state.equityOptionPricingModel,
+            dividendYield: state.equityDividendYield,
+            steps: state.americanBinomialSteps,
+        });
+    }
 }
 
 function updateDerivedValues() {
@@ -1463,6 +1475,21 @@ function applyImportedState(normalizedState, importedSessionTitle = '') {
     state.historicalAvailableStartDate = '';
     state.historicalAvailableEndDate = '';
     state.interestRate = normalizedState.interestRate;
+    state.equityOptionPricingModel = typeof OptionComboSessionLogic.normalizeEquityOptionPricingModel === 'function'
+        ? OptionComboSessionLogic.normalizeEquityOptionPricingModel(
+            normalizedState.equityOptionPricingModel
+        )
+        : 'bsm-spot';
+    state.equityDividendYield = typeof OptionComboSessionLogic.normalizeEquityDividendYield === 'function'
+        ? OptionComboSessionLogic.normalizeEquityDividendYield(
+            normalizedState.equityDividendYield
+        )
+        : 0;
+    state.americanBinomialSteps = typeof OptionComboSessionLogic.normalizeAmericanBinomialSteps === 'function'
+        ? OptionComboSessionLogic.normalizeAmericanBinomialSteps(
+            normalizedState.americanBinomialSteps
+        )
+        : 201;
     state.useMarketDiscountCurve = normalizedState.useMarketDiscountCurve !== false;
     state.discountCurve = normalizedState.discountCurve && typeof normalizedState.discountCurve === 'object'
         ? normalizedState.discountCurve

@@ -313,6 +313,28 @@
                             </div>
                         </div>
 
+                        <div class="control-group simulation-assumption-control" id="equityOptionPricingControlGroup">
+                            <label>
+                                Equity Option Pricing
+                                <span class="value-display" id="equityOptionPricingModelStatus">European BSM (original default)</span>
+                            </label>
+                            <button type="button" class="btn btn-secondary btn-sm"
+                                id="toggleEquityOptionPricingModelBtn" aria-pressed="false"
+                                style="width: 100%;">
+                                Use American Binomial
+                            </button>
+                            <label for="equityDividendYield" class="text-muted small"
+                                style="display: flex; justify-content: space-between; margin-top: 0.55rem;">
+                                Continuous Dividend Yield q (%)
+                                <span class="value-display" id="equityDividendYieldDisplay">0.00%</span>
+                            </label>
+                            <input type="number" id="equityDividendYield" class="number-input"
+                                value="0.00" step="0.05" min="0" max="100" disabled>
+                            <div class="text-muted small mt-1">
+                                Incremental switch for stock/ETF options only; futures and index pricing are unchanged.
+                            </div>
+                        </div>
+
                         <div class="control-group simulation-control-item-wide simulation-product-panel" id="forwardRatePanel" hidden>
                             <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem;">
                                 <label style="margin: 0;">Forward / Carry (F, r-q)</label>
@@ -1564,16 +1586,17 @@
     <script src="js/order_confirmation_ui.js?v=20260711-safe-execution"></script>
     <script src="js/delta_hedge_logic.js"></script>
     <script src="js/distribution_proxy_config.js"></script>
-    <script src="js/pricing_core.js?v=20260722-best-effort-payoff-v1"></script>
+    <script src="js/american_binomial.js?v=20260723-american-binomial-v1"></script>
+    <script src="js/pricing_core.js?v=20260723-american-binomial-v1"></script>
     <script src="js/bsm.js"></script>
     <script src="js/chart.js?v=20260722-best-effort-payoff-v1"></script>
-    <script src="js/prob_charts.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/prob_charts.js?v=20260723-american-binomial-v1"></script>
     <script src="js/chart_controls.js?v=20260722-best-effort-payoff-v1"></script>
     <script src="js/amortized.js?v=20260720-carry-lambda-cutoff-v3"></script>
-    <script src="js/valuation.js?v=20260723-projected-delivery-v3"></script>
-    <script src="js/session_logic.js?v=20260721-auto-future-v1"></script>
+    <script src="js/valuation.js?v=20260723-american-binomial-v1"></script>
+    <script src="js/session_logic.js?v=20260723-american-binomial-v1"></script>
     <script src="js/session_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
-    <script src="js/control_panel_ui.js?v=20260721-auto-future-v1"></script>
+    <script src="js/control_panel_ui.js?v=20260723-american-binomial-v1"></script>
     <script src="js/hedge_editor_ui.js"></script>
     <script src="js/group_editor_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
     <script src="js/hedge_ui.js"></script>
@@ -1584,7 +1607,7 @@
     <script src="js/delta_hedge_transport.js"></script>
     <script src="js/delta_hedge_ui.js?v=20260711-dialog-status"></script>
     <script src="js/calendar_handoff.js?v=20260720-carry-lambda-cutoff-v3"></script>
-    <script src="js/app.js?v=20260721-timeline-target-v1"></script>
+    <script src="js/app.js?v=20260723-american-binomial-v1"></script>
     <script src="js/ws_client.js?v=20260721-auto-future-v1"></script>
 </body>
 

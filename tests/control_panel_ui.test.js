@@ -81,6 +81,11 @@ module.exports = {
                     daysPassedDisplay: createElement({ textContent: '+0 td / +0 cd' }),
                     interestRate: createElement({ value: '3.00' }),
                     interestRateDisplay: createElement({ textContent: '3.00%' }),
+                    equityOptionPricingControlGroup: createElement({ hidden: false, style: {} }),
+                    toggleEquityOptionPricingModelBtn: createElement({ textContent: '' }),
+                    equityOptionPricingModelStatus: createElement({ textContent: '' }),
+                    equityDividendYield: createElement({ value: '0.00', disabled: true }),
+                    equityDividendYieldDisplay: createElement({ textContent: '0.00%' }),
                     forwardRatePanel: createElement({ hidden: true, style: {} }),
                     addForwardRateSampleBtn: createElement(),
                     toggleForwardRatePanelBtn: createElement(),
@@ -158,6 +163,9 @@ module.exports = {
                     historicalAvailableStartDate: '',
                     historicalAvailableEndDate: '',
                     interestRate: 0.03,
+                    equityOptionPricingModel: 'bsm-spot',
+                    equityDividendYield: 0,
+                    americanBinomialSteps: 201,
                     ivOffset: 0,
                     simTimeBasis: 'weighted',
                     simWeekendWeight: 0.3,
@@ -205,6 +213,19 @@ module.exports = {
 
                 assert.equal(elements.toggleGreeksBtn.textContent, 'Enable Greeks');
                 assert.match(elements.greeksStatusText.textContent, /off by default/i);
+                assert.equal(elements.toggleEquityOptionPricingModelBtn.textContent, 'Use American Binomial');
+                assert.equal(elements.equityDividendYield.disabled, true);
+
+                const updateCallsBeforePricingToggle = updateCalls;
+                elements.toggleEquityOptionPricingModelBtn.listeners.click();
+                assert.equal(state.equityOptionPricingModel, 'american-binomial');
+                assert.equal(elements.toggleEquityOptionPricingModelBtn.textContent, 'Use European BSM');
+                assert.equal(elements.equityDividendYield.disabled, false);
+                assert.equal(updateCalls, updateCallsBeforePricingToggle + 1);
+
+                elements.equityDividendYield.listeners.input({ target: { value: '1.25' } });
+                assert.equal(state.equityDividendYield, 0.0125);
+                assert.equal(elements.equityDividendYieldDisplay.textContent, '1.25%');
 
                 elements.underlyingSymbol.listeners.change({ target: { value: 'qqq' } });
                 assert.equal(state.underlyingSymbol, 'QQQ');
