@@ -256,7 +256,13 @@ seconds even though general quote freshness remains 120 seconds. Historical
 replay bypasses this live gate; `legacy-input-iv` is explicit saved-session
 compatibility only. Websocket disconnects invalidate the gate immediately; a
 5-second watchdog independently detects 120 seconds without market payloads so
-a frozen `liveQuoteAsOf` cannot keep an old BBO fresh forever.
+a frozen `liveQuoteAsOf` cannot keep an old BBO fresh forever. A third value,
+`best-effort-input-iv`, is a per-payoff-chart-card display override: for a card
+with best-effort projection enabled, `js/chart_controls.js` clones the workspace
+state locally for that card's `PnLChart.draw()` only, letting the projection fall
+back to the leg's input IV when no live BBO anchor is available. It never mutates
+the workspace convergence mode, so the valuation, probability, session, and
+execution gates keep their strict semantics.
 The shared preflight also treats structured λ as mandatory whenever any option
 surviving the target crosses a weekend or full closure. Selecting a scalar,
 Calendar/Trading basis, or disabling the IVTS box cannot bypass that gate;
