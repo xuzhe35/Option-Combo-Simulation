@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 
-const { loadBrowserScripts } = require('./helpers/load-browser-scripts');
+const { loadBrowserScripts, loadPricingContext } = require('./helpers/load-browser-scripts');
 
 function loadProbCharts(extra = {}) {
     return loadBrowserScripts(['js/prob_charts.js'], {
@@ -356,6 +356,105 @@ module.exports = {
 
                 assert.equal(result.error, undefined);
                 assert.equal(result.exactExpectedPnL, 3);
+            },
+        },
+        {
+            name: 'MC worker builds the American grid from parameters matching the module pricer',
+            run() {
+                // No americanPriceGrid is supplied: the worker must build the
+                // 101-point grid in-thread from the parameters and price the leg
+                // by interpolation. currentPrice=100 lands exactly on grid node 50
+                // (gridMin 50 + 50 * step 1), so the interpolated value equals the
+                // module pricer's American value with no interpolation slack.
+                const american = loadPricingContext().OptionComboAmericanBinomial;
+                const expectedOpt = american.calculateAmericanOptionPrice({
+                    type: 'put',
+                    spot: 100,
+                    strike: 100,
+                    varianceTime: 0.1,
+                    rateTime: 0.1,
+                    riskFreeRate: 0.05,
+                    volatility: 0.2,
+                    dividendYield: 0,
+                    steps: 201,
+                });
+                const result = runMcWorker({
+                    df: 5,
+                    loc: 0,
+                    newScale: 0,
+                    stepWeights: [0],
+                    nPaths: 1,
+                    currentPrice: 100,
+                    minS: 50,
+                    maxS: 150,
+                    bins: 10,
+                    legs: [{
+                        id: 'american-built',
+                        type: 'put',
+                        isUnderlyingLeg: false,
+                        isExpired: false,
+                        pricingModel: 'american-binomial',
+                        strike: 100,
+                        rate: 0.05,
+                        varianceT: 0.1,
+                        discountT: 0.1,
+                        volatility: 0.2,
+                        dividendYield: 0,
+                        binomialSteps: 201,
+                        posMultiplier: 2,
+                        costBasis: 1,
+                        underlyingScale: 1,
+                        americanGridMin: 50,
+                        americanGridMax: 150,
+                        americanGridPoints: 101,
+                    }],
+                });
+
+                assert.equal(result.error, undefined);
+                assert.ok(
+                    Math.abs(result.exactExpectedPnL - (2 * expectedOpt - 1)) < 1e-9,
+                    `worker-built grid ${result.exactExpectedPnL} should match ${2 * expectedOpt - 1}`
+                );
+            },
+        },
+        {
+            name: 'MC worker fails closed when American grid parameters are incomplete',
+            run() {
+                // Neither a prebuilt grid nor a valid step count: the worker must
+                // report a pricing-input error rather than build a bad grid.
+                const result = runMcWorker({
+                    df: 5,
+                    loc: 0,
+                    newScale: 0,
+                    stepWeights: [0],
+                    nPaths: 1,
+                    currentPrice: 100,
+                    minS: 50,
+                    maxS: 150,
+                    bins: 10,
+                    legs: [{
+                        id: 'american-bad-params',
+                        type: 'put',
+                        isUnderlyingLeg: false,
+                        isExpired: false,
+                        pricingModel: 'american-binomial',
+                        strike: 100,
+                        rate: 0.05,
+                        varianceT: 0.1,
+                        discountT: 0.1,
+                        volatility: 0.2,
+                        dividendYield: 0,
+                        posMultiplier: 2,
+                        costBasis: 1,
+                        underlyingScale: 1,
+                        americanGridMin: 50,
+                        americanGridMax: 150,
+                        americanGridPoints: 101,
+                    }],
+                });
+
+                assert.ok(result.error, 'expected a pricing-input error');
+                assert.equal(result.error.code, 'pricing_input_invalid');
             },
         },
         {

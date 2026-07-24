@@ -112,6 +112,114 @@ function normalCDF(x) {
 }
 
 /**
+ * Cox-Ross-Rubinstein American option pricer, inlined from
+ * js/american_binomial.js so the price-vs-spot lookup grid is built inside
+ * this worker instead of on the main thread. These helpers must stay
+ * numerically identical to OptionComboAmericanBinomial.calculateAmericanOptionPrice.
+ */
+function americanIntrinsic(type, spot, strike) {
+    return type === 'call'
+        ? Math.max(0, spot - strike)
+        : Math.max(0, strike - spot);
+}
+
+function americanDeterministicValue(type, spot, strike, rate, dividendYield, rateTime, steps) {
+    let best = americanIntrinsic(type, spot, strike);
+    for (let index = 1; index <= steps; index += 1) {
+        const fraction = index / steps;
+        const nodeSpot = spot * Math.exp((rate - dividendYield) * rateTime * fraction);
+        const discountedExercise = Math.exp(-rate * rateTime * fraction)
+            * americanIntrinsic(type, nodeSpot, strike);
+        best = Math.max(best, discountedExercise);
+    }
+    return best;
+}
+
+function americanTreeValue(type, spot, strike, up, down, probabilityUp, discount, steps, values) {
+    const nodeRatio = up / down;
+    let nodeSpot = spot * Math.pow(down, steps);
+    for (let upMoves = 0; upMoves <= steps; upMoves += 1) {
+        values[upMoves] = americanIntrinsic(type, nodeSpot, strike);
+        nodeSpot *= nodeRatio;
+    }
+    for (let level = steps - 1; level >= 0; level -= 1) {
+        nodeSpot = spot * Math.pow(down, level);
+        for (let upMoves = 0; upMoves <= level; upMoves += 1) {
+            const continuation = discount * (
+                probabilityUp * values[upMoves + 1]
+                + (1 - probabilityUp) * values[upMoves]
+            );
+            const exercise = americanIntrinsic(type, nodeSpot, strike);
+            values[upMoves] = Math.max(exercise, continuation);
+            nodeSpot *= nodeRatio;
+        }
+    }
+    return Math.max(americanIntrinsic(type, spot, strike), values[0]);
+}
+
+/**
+ * Build the American price-vs-spot lookup grid in a single pass. The lattice
+ * constants (up/down factors, risk-neutral probability, per-step discount)
+ * depend only on volatility/rate/dividend/time/steps -- never on spot -- so
+ * they are computed once and reused across every grid point, and the scratch
+ * value buffer is shared. The fallback conditions (near-zero variance,
+ * degenerate probability) likewise depend only on shared inputs, so the branch
+ * is decided once rather than per point. Returns a Float64Array; entries are
+ * NaN only if the shared inputs are non-finite.
+ */
+function buildAmericanPriceGrid(params) {
+    const type = params.type;
+    const gridMin = params.gridMin;
+    const gridMax = params.gridMax;
+    const points = params.points;
+    const strike = params.strike;
+    const varianceTime = params.varianceTime;
+    const rateTime = params.rateTime;
+    const rate = params.rate;
+    const volatility = params.volatility;
+    const dividendYield = Number.isFinite(params.dividendYield) ? params.dividendYield : 0;
+    const steps = Math.min(1001, Math.max(25, Math.round(params.steps)));
+    const grid = new Float64Array(points);
+    const step = (gridMax - gridMin) / (points - 1);
+
+    if (!(varianceTime > 0)) {
+        for (let k = 0; k < points; k += 1) {
+            grid[k] = americanIntrinsic(type, gridMin + k * step, strike);
+        }
+        return grid;
+    }
+
+    const varianceStep = varianceTime / steps;
+    const rateStep = rateTime / steps;
+    const volatilityStep = volatility * Math.sqrt(varianceStep);
+    const carryGrowth = Math.exp((rate - dividendYield) * rateStep);
+
+    let useTree = false;
+    let up = 0;
+    let down = 0;
+    let probabilityUp = 0;
+    let discount = 0;
+    if (Number.isFinite(volatilityStep) && volatilityStep >= 1e-7) {
+        up = Math.exp(volatilityStep);
+        down = 1 / up;
+        probabilityUp = (carryGrowth - down) / (up - down);
+        discount = Math.exp(-rate * rateStep);
+        useTree = Number.isFinite(probabilityUp)
+            && probabilityUp >= 0
+            && probabilityUp <= 1;
+    }
+
+    const scratch = useTree ? new Float64Array(steps + 1) : null;
+    for (let k = 0; k < points; k += 1) {
+        const spot = gridMin + k * step;
+        grid[k] = useTree
+            ? americanTreeValue(type, spot, strike, up, down, probabilityUp, discount, steps, scratch)
+            : americanDeterministicValue(type, spot, strike, rate, dividendYield, rateTime, steps);
+    }
+    return grid;
+}
+
+/**
  * Main Worker message handler.
  *
  * Receives:
@@ -214,7 +322,47 @@ self.onmessage = function(e) {
                 return;
             }
             if (leg.pricingModel === 'american-binomial') {
-                const grid = leg.americanPriceGrid;
+                let grid = leg.americanPriceGrid;
+                if (!Array.isArray(grid) && !ArrayBuffer.isView(grid)) {
+                    // Production path: build the price-vs-spot grid here in the
+                    // worker so its O(points * steps^2) cost never blocks the
+                    // main thread. A prebuilt grid (tests) skips straight to the
+                    // shared validation below.
+                    if (!['call', 'put'].includes(leg.type)
+                        || !Number.isFinite(leg.strike) || leg.strike <= 0
+                        || !Number.isFinite(leg.americanGridMin) || leg.americanGridMin <= 0
+                        || !Number.isFinite(leg.americanGridMax)
+                        || leg.americanGridMax <= leg.americanGridMin
+                        || !Number.isInteger(leg.americanGridPoints) || leg.americanGridPoints < 2
+                        || !Number.isFinite(leg.varianceT) || leg.varianceT < 0
+                        || !Number.isFinite(leg.discountT) || leg.discountT < 0
+                        || !Number.isFinite(leg.rate)
+                        || !Number.isFinite(leg.volatility) || leg.volatility < 0
+                        || !Number.isFinite(leg.binomialSteps) || leg.binomialSteps < 1) {
+                        postError('pricing_input_invalid', legId, 'americanGridParams');
+                        return;
+                    }
+                    grid = buildAmericanPriceGrid({
+                        type: leg.type,
+                        gridMin: leg.americanGridMin,
+                        gridMax: leg.americanGridMax,
+                        points: leg.americanGridPoints,
+                        strike: leg.strike,
+                        varianceTime: leg.varianceT,
+                        rateTime: leg.discountT,
+                        rate: leg.rate,
+                        volatility: leg.volatility,
+                        dividendYield: leg.dividendYield,
+                        steps: leg.binomialSteps,
+                    });
+                    for (let gridIndex = 0; gridIndex < grid.length; gridIndex += 1) {
+                        if (!Number.isFinite(grid[gridIndex])) {
+                            postError('american_binomial_grid_unavailable', legId, 'americanPriceGrid');
+                            return;
+                        }
+                    }
+                    leg.americanPriceGrid = grid;
+                }
                 if ((!Array.isArray(grid) && !ArrayBuffer.isView(grid))
                     || grid.length < 2
                     || !Number.isFinite(leg.americanGridMin)
@@ -487,6 +635,23 @@ function _resolvePortfolioProjectionAvailability(portfolioState, groups, anchorP
  * BSM model with the current simulation date and IV settings.
  * Replicates the logic in chart.js / app.js updateDerivedValues().
  */
+// The probability visualization prices American legs across dense spot grids:
+// the 801-point worker lookup grid and the 500-point payoff/P&L curve. Neither
+// benefits from the higher binomial step count a user may pick for a single
+// authoritative quote -- the difference is far below Monte Carlo noise -- while
+// the O(steps^2) tree cost per point would dominate runtime. Cap curve/grid
+// pricing at the pricer's DEFAULT_STEPS; single-quote valuation is untouched.
+function _americanCurveStepCap(requestedSteps) {
+    const api = (typeof globalThis !== 'undefined' ? globalThis : self)
+        .OptionComboAmericanBinomial;
+    const cap = api && Number.isFinite(api.DEFAULT_STEPS) ? api.DEFAULT_STEPS : 201;
+    const minSteps = api && Number.isFinite(api.MIN_STEPS) ? api.MIN_STEPS : 25;
+    const requested = Number.isFinite(requestedSteps)
+        ? Math.round(requestedSteps)
+        : cap;
+    return Math.max(minSteps, Math.min(cap, requested));
+}
+
 function _computePortfolioPnLAtPrice(price) {
     if (!state || !state.groups) return 0;
 
@@ -565,6 +730,15 @@ function _computePortfolioPnLAtPrice(price) {
                 && (!Number.isFinite(legCurrentUnderlying) || legCurrentUnderlying <= 0
                     || !Number.isFinite(legScenarioUnderlying) || legScenarioUnderlying <= 0)) {
                 return null;
+            }
+            // The payoff/P&L curve is evaluated at 500 price points; an American
+            // leg would otherwise solve a full binomial tree per point at the
+            // user's single-quote step count (up to 1001). Cap this curve pricing
+            // at the pricer's default resolution -- the sub-cent difference is far
+            // below Monte Carlo noise and keeps the curve off the slow path.
+            if (pLeg && pLeg.pricingModel === 'american-binomial'
+                && Number.isFinite(pLeg.binomialSteps)) {
+                pLeg.binomialSteps = _americanCurveStepCap(pLeg.binomialSteps);
             }
             // Use unified simulation price (includes Zero-Delta bypass at current price)
             const pps = computeSimulatedPrice(
@@ -1707,32 +1881,20 @@ function updateProbCharts() {
                     scaledMax,
                     pLeg.strike
                 ) * 1.5;
-                const americanGridStep = (
-                    americanGridMax - americanGridMin
-                ) / (americanGridPoints - 1);
-                const americanPriceGrid = new Float64Array(americanGridPoints);
-                for (let gridIndex = 0; gridIndex < americanGridPoints; gridIndex += 1) {
-                    const gridSpot = americanGridMin + gridIndex * americanGridStep;
-                    americanPriceGrid[gridIndex] = pricingCore.calculatePrice(
-                        'american-binomial',
-                        pLeg.type,
-                        gridSpot,
-                        pLeg.strike,
-                        pLeg.T,
-                        legInterestRate,
-                        pLeg.simIV,
-                        pLeg.rateT,
-                        pLeg.dividendYield,
-                        pLeg.binomialSteps
-                    );
-                    if (!Number.isFinite(americanPriceGrid[gridIndex])) {
-                        workerPricingFailure = 'american_binomial_grid_unavailable';
-                        return;
-                    }
-                }
+                // The 801-point price-vs-spot grid is built inside the MC worker
+                // (buildAmericanPriceGrid) so its O(points * steps^2) cost never
+                // blocks the main thread. Only the parameters travel across; the
+                // worker already receives type/strike/rate/varianceT/discountT/
+                // volatility above. The grid step count is capped at the pricer's
+                // DEFAULT_STEPS: this dense visualization grid gains nothing from
+                // the higher single-quote precision a user may have selected.
                 workerLeg.americanGridMin = americanGridMin;
                 workerLeg.americanGridMax = americanGridMax;
-                workerLeg.americanPriceGrid = americanPriceGrid;
+                workerLeg.americanGridPoints = americanGridPoints;
+                workerLeg.dividendYield = Number.isFinite(pLeg.dividendYield)
+                    ? pLeg.dividendYield
+                    : 0;
+                workerLeg.binomialSteps = _americanCurveStepCap(pLeg.binomialSteps);
             }
             if (Number.isFinite(pLeg.expiryUnderlyingPrice)) {
                 workerLeg.expiryUnderlyingPrice = pLeg.expiryUnderlyingPrice;
