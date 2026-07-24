@@ -48,6 +48,24 @@ module.exports = {
             },
         },
         {
+            name: 'normalizes the opt-in American equity pricing settings',
+            run() {
+                const logic = loadSessionLogicContext().OptionComboSessionLogic;
+
+                assert.equal(logic.normalizeEquityOptionPricingModel(), 'bsm-spot');
+                assert.equal(
+                    logic.normalizeEquityOptionPricingModel('american-binomial'),
+                    'american-binomial'
+                );
+                assert.equal(logic.normalizeEquityOptionPricingModel('black76'), 'bsm-spot');
+                assert.equal(logic.normalizeEquityDividendYield('0.0125'), 0.0125);
+                assert.equal(logic.normalizeEquityDividendYield('bad'), 0);
+                assert.equal(logic.normalizeAmericanBinomialSteps(), 201);
+                assert.equal(logic.normalizeAmericanBinomialSteps(5), 25);
+                assert.equal(logic.normalizeAmericanBinomialSteps(5000), 1001);
+            },
+        },
+        {
             name: 'forces zero-cost groups into trial for render unless settlement',
             run() {
                 const ctx = loadSessionLogicContext();
@@ -218,6 +236,9 @@ module.exports = {
                 assert.equal(result.allowLiveHedgeOrders, false);
                 assert.equal(result.requireExactContractTiming, true);
                 assert.equal(result.projectionConvergenceMode, 'strict-bbo');
+                assert.equal(result.equityOptionPricingModel, 'bsm-spot');
+                assert.equal(result.equityDividendYield, 0);
+                assert.equal(result.americanBinomialSteps, 201);
                 assert.equal(result.hedges[1].id, 'id_3');
             },
         },

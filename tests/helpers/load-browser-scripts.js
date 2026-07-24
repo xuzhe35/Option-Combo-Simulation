@@ -38,6 +38,11 @@ function loadBrowserScripts(relativePaths, overrides = {}) {
             scriptQueue.push('js/delta_hedge_transport.js');
             seenPaths.add('js/delta_hedge_transport.js');
         }
+        if (relativePath === 'js/pricing_core.js'
+            && !seenPaths.has('js/american_binomial.js')) {
+            scriptQueue.push('js/american_binomial.js');
+            seenPaths.add('js/american_binomial.js');
+        }
         if (!seenPaths.has(relativePath)) {
             scriptQueue.push(relativePath);
             seenPaths.add(relativePath);

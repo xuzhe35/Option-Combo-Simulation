@@ -815,7 +815,12 @@
         } else if (!convergenceAvailable && typeof formatProjectionConvergenceFailure === 'function') {
             ivTitle = formatProjectionConvergenceFailure(convergence, 'Valuation');
         } else if (processedLeg.localIvAnchorAvailable) {
-            ivTitle = `Fresh two-sided BBO re-inverted with the local ${processedLeg.pricingModel === 'black76' ? 'Black-76' : 'BSM'} model at ${processedLeg.quoteAsOf || 'the quote instant'}; future repricing holds this local IV constant.`;
+            const modelLabel = processedLeg.pricingModel === 'black76'
+                ? 'Black-76'
+                : (processedLeg.pricingModel === 'american-binomial'
+                    ? 'American binomial'
+                    : 'BSM');
+            ivTitle = `Fresh two-sided BBO re-inverted with the local ${modelLabel} model at ${processedLeg.quoteAsOf || 'the quote instant'}; future repricing holds this local IV constant.`;
         } else if (processedLeg.localIvAnchorAttempted) {
             ivTitle = `Local BBO calibration failed closed: ${processedLeg.localIvAnchorStatus}.`;
         } else {

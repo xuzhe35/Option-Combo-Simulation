@@ -1224,6 +1224,59 @@
         }
     }
 
+    function _syncEquityOptionPricingUI(state) {
+        const controlGroup = _getElement('equityOptionPricingControlGroup');
+        const toggleButton = _getElement('toggleEquityOptionPricingModelBtn');
+        const status = _getElement('equityOptionPricingModelStatus');
+        const dividendInput = _getElement('equityDividendYield');
+        const dividendDisplay = _getElement('equityDividendYieldDisplay');
+        if (!toggleButton && !dividendInput) return;
+
+        const supported = _getPricingInputMode(state && state.underlyingSymbol) === 'STK';
+        const americanActive = supported
+            && state
+            && state.equityOptionPricingModel === 'american-binomial';
+        const parsedYield = Number(state && state.equityDividendYield);
+        const yieldPct = Number.isFinite(parsedYield) ? parsedYield * 100 : 0;
+
+        if (controlGroup) {
+            controlGroup.hidden = !supported;
+            if (controlGroup.style) {
+                controlGroup.style.display = supported ? '' : 'none';
+            }
+        }
+        if (toggleButton) {
+            toggleButton.textContent = americanActive
+                ? 'Use European BSM'
+                : 'Use American Binomial';
+            toggleButton.className = americanActive
+                ? 'btn btn-primary btn-sm'
+                : 'btn btn-secondary btn-sm';
+            toggleButton.setAttribute && toggleButton.setAttribute(
+                'aria-pressed',
+                americanActive ? 'true' : 'false'
+            );
+            toggleButton.title = americanActive
+                ? 'American CRR binomial pricing is active for stock and ETF options. Click to return to the original European BSM model.'
+                : 'Switch stock and ETF option valuation to an American CRR binomial tree with early-exercise checks.';
+        }
+        if (status) {
+            status.textContent = americanActive
+                ? `American CRR · ${Number(state.americanBinomialSteps) || 201} steps · continuous q`
+                : 'European BSM (original default)';
+        }
+        if (dividendInput) {
+            dividendInput.value = yieldPct.toFixed(2);
+            dividendInput.disabled = !americanActive;
+            dividendInput.title = americanActive
+                ? 'Continuously compounded annual dividend yield q used by the American binomial tree.'
+                : 'Enable American Binomial pricing to use dividend yield q.';
+        }
+        if (dividendDisplay) {
+            dividendDisplay.textContent = `${yieldPct.toFixed(2)}%`;
+        }
+    }
+
     function _syncMarketDataModeUI(state) {
         const mode = _getMarketDataMode(state);
         const workspaceVariant = _getWorkspaceVariant(state);
@@ -1885,6 +1938,7 @@
             underlyingPriceDisplay.textContent = _formatPriceDisplayValue(_boundState.underlyingSymbol, _boundState.underlyingPrice);
         }
         _syncInterestRateUI(_boundState);
+        _syncEquityOptionPricingUI(_boundState);
         _syncLiveComboOrderAccountUI(_boundState);
         refreshForwardRatePanel();
         refreshFuturesPoolPanel();
@@ -2045,6 +2099,7 @@
             symInput.value = state.underlyingSymbol;
             _syncUnderlyingContractMonthUI(state, symbolChanged);
             _syncInterestRateUI(state);
+            _syncEquityOptionPricingUI(state);
             if (upInput) {
                 upInput.step = _getPriceInputStep(state.underlyingSymbol);
                 upInput.value = _formatPriceInputValue(state.underlyingSymbol, state.underlyingPrice);
@@ -2259,6 +2314,8 @@
 
         const irInput = _getElement('interestRate');
         const irDisplay = _getElement('interestRateDisplay');
+        const toggleEquityPricingBtn = _getElement('toggleEquityOptionPricingModelBtn');
+        const equityDividendYieldInput = _getElement('equityDividendYield');
         const useMarketDiscountCurveInput = _getElement('useMarketDiscountCurve');
         const loadLatestDiscountCurveBtn = _getElement('loadLatestDiscountCurveBtn');
         if (irInput) {
@@ -2268,6 +2325,30 @@
                 state.interestRate = pct / 100.0;
                 if (irDisplay) irDisplay.textContent = `${pct.toFixed(2)}%`;
                 _syncInterestRateUI(state);
+                updateDerivedValues();
+            });
+        }
+        if (toggleEquityPricingBtn) {
+            toggleEquityPricingBtn.addEventListener('click', () => {
+                state.equityOptionPricingModel = state.equityOptionPricingModel === 'american-binomial'
+                    ? 'bsm-spot'
+                    : 'american-binomial';
+                if (!Number.isFinite(Number(state.equityDividendYield))) {
+                    state.equityDividendYield = 0;
+                }
+                if (!Number.isFinite(Number(state.americanBinomialSteps))) {
+                    state.americanBinomialSteps = 201;
+                }
+                _syncEquityOptionPricingUI(state);
+                updateDerivedValues();
+            });
+        }
+        if (equityDividendYieldInput) {
+            equityDividendYieldInput.addEventListener('input', (e) => {
+                const pct = Number(e.target.value);
+                if (!Number.isFinite(pct)) return;
+                state.equityDividendYield = Math.min(1, Math.max(0, pct / 100));
+                _syncEquityOptionPricingUI(state);
                 updateDerivedValues();
             });
         }

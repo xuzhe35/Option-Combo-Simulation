@@ -5,6 +5,7 @@
 (function attachPricingCore(globalScope) {
     const dateUtils = globalScope.OptionComboDateUtils;
     const productRegistry = globalScope.OptionComboProductRegistry;
+    const americanBinomial = globalScope.OptionComboAmericanBinomial;
     if (!dateUtils) {
         throw new Error('OptionComboDateUtils must be loaded before pricing_core.js');
     }
@@ -22,6 +23,36 @@
     // legacy calendar clock so nothing changes until the user opts in.
     let simTimeBasisWeekendWeight = 1;
     let simObservedTradingDates = null;
+    let equityOptionPricingModel = 'bsm-spot';
+    let equityDividendYield = 0;
+    let americanBinomialSteps = americanBinomial
+        && Number.isFinite(americanBinomial.DEFAULT_STEPS)
+        ? americanBinomial.DEFAULT_STEPS
+        : 201;
+
+    function configureEquityOptionPricing(options) {
+        const input = options && typeof options === 'object' ? options : {};
+        equityOptionPricingModel = input.model === 'american-binomial'
+            ? 'american-binomial'
+            : 'bsm-spot';
+        const parsedYield = Number(input.dividendYield);
+        equityDividendYield = Number.isFinite(parsedYield)
+            ? Math.min(1, Math.max(0, parsedYield))
+            : 0;
+        americanBinomialSteps = americanBinomial
+            && typeof americanBinomial.normalizeSteps === 'function'
+            ? americanBinomial.normalizeSteps(input.steps)
+            : 201;
+        return getEquityOptionPricingConfig();
+    }
+
+    function getEquityOptionPricingConfig() {
+        return {
+            model: equityOptionPricingModel,
+            dividendYield: equityDividendYield,
+            steps: americanBinomialSteps,
+        };
+    }
 
     function normalizeWeekendWeight(value) {
         if (value !== null && typeof value === 'object') {
@@ -615,15 +646,56 @@
      * Dispatch to the appropriate pricing model.
      * @param {string} pricingModel - 'bsm-spot' or 'black76'
      */
-    function calculatePrice(pricingModel, type, S, K, T, r, v, rateT = T) {
+    function calculatePrice(
+        pricingModel,
+        type,
+        S,
+        K,
+        T,
+        r,
+        v,
+        rateT = T,
+        dividendYield = 0,
+        binomialSteps = americanBinomialSteps
+    ) {
         if (pricingModel === 'black76') {
             return calculateBlack76Price(type, S, K, T, r, v, rateT);
+        }
+        if (pricingModel === 'american-binomial') {
+            if (!americanBinomial
+                || typeof americanBinomial.calculateAmericanOptionPrice !== 'function') {
+                throw new Error(
+                    'OptionComboAmericanBinomial must be loaded before using american-binomial pricing'
+                );
+            }
+            return americanBinomial.calculateAmericanOptionPrice({
+                type,
+                spot: S,
+                strike: K,
+                varianceTime: T,
+                rateTime: rateT,
+                riskFreeRate: r,
+                volatility: v,
+                dividendYield,
+                steps: binomialSteps,
+            });
         }
         return calculateOptionPrice(type, S, K, T, r, v, rateT);
     }
 
     function _optionPriceBounds(pricingModel, type, underlyingPrice, strike, rate, rateT) {
         const discount = Math.exp(-rate * rateT);
+        if (pricingModel === 'american-binomial') {
+            return type === 'call'
+                ? {
+                    lower: Math.max(0, underlyingPrice - strike),
+                    upper: underlyingPrice,
+                }
+                : {
+                    lower: Math.max(0, strike - underlyingPrice),
+                    upper: strike,
+                };
+        }
         if (pricingModel === 'black76') {
             return type === 'call'
                 ? {
@@ -661,9 +733,13 @@
         T,
         rate,
         optionPrice,
-        rateT = T
+        rateT = T,
+        dividendYield = 0,
+        binomialSteps = americanBinomialSteps
     ) {
-        const normalizedModel = pricingModel === 'black76' ? 'black76' : 'bsm-spot';
+        const normalizedModel = ['black76', 'american-binomial'].includes(pricingModel)
+            ? pricingModel
+            : 'bsm-spot';
         const normalizedType = String(type || '').trim().toLowerCase();
         const inputs = [underlyingPrice, strike, T, rate, optionPrice, rateT];
         if (!['call', 'put'].includes(normalizedType)
@@ -718,7 +794,9 @@
             T,
             rate,
             minimumVolatility,
-            rateT
+            rateT,
+            dividendYield,
+            binomialSteps
         );
         if (optionPrice <= priceAtMinimum + tolerance) {
             return {
@@ -741,7 +819,9 @@
             T,
             rate,
             high,
-            rateT
+            rateT,
+            dividendYield,
+            binomialSteps
         );
         while (highPrice < optionPrice - tolerance && high < 64) {
             high *= 2;
@@ -753,7 +833,9 @@
                 T,
                 rate,
                 high,
-                rateT
+                rateT,
+                dividendYield,
+                binomialSteps
             );
         }
         if (!Number.isFinite(highPrice) || highPrice < optionPrice - tolerance) {
@@ -776,7 +858,9 @@
                 T,
                 rate,
                 mid,
-                rateT
+                rateT,
+                dividendYield,
+                binomialSteps
             );
             if (!Number.isFinite(midPrice)) {
                 return {
@@ -799,7 +883,9 @@
             T,
             rate,
             impliedVolatility,
-            rateT
+            rateT,
+            dividendYield,
+            binomialSteps
         );
         return {
             available: true,
@@ -878,7 +964,9 @@
             anchorT,
             quoteInterestRate,
             optionPrice,
-            anchorRateT
+            anchorRateT,
+            pricingModel === 'american-binomial' ? equityDividendYield : 0,
+            americanBinomialSteps
         );
         if (!solved.available) {
             return {
@@ -1025,7 +1113,11 @@
 
     function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalQuoteDateStr = null, globalUnderlyingPrice = null, globalInterestRate = null, viewMode = 'active', instrumentProfile = null, marketDataMode = 'live', timingContext = null) {
         const resolvedProfile = resolveInstrumentProfile(instrumentProfile);
-        const pricingModel = (resolvedProfile && resolvedProfile.pricingModel) || 'bsm-spot';
+        const profilePricingModel = (resolvedProfile && resolvedProfile.pricingModel) || 'bsm-spot';
+        const pricingModel = profilePricingModel === 'bsm-spot'
+            ? equityOptionPricingModel
+            : profilePricingModel;
+        const dividendYield = pricingModel === 'american-binomial' ? equityDividendYield : 0;
         const lowerType = leg.type.toLowerCase();
         if (isUnderlyingLeg(leg)) {
             const contractMultiplier = getUnderlyingLegMultiplier(resolvedProfile);
@@ -1048,6 +1140,8 @@
                 simIV: 0,
                 isUnderlyingLeg: true,
                 pricingModel,
+                dividendYield,
+                binomialSteps: americanBinomialSteps,
                 contractMultiplier,
                 settlementUnitsPerContract: 1,
                 posMultiplier,
@@ -1287,7 +1381,10 @@
                         leg.strike,
                         quoteT,
                         globalInterestRate,
-                        leg.iv
+                        leg.iv,
+                        quoteT,
+                        dividendYield,
+                        americanBinomialSteps
                     );
                 }
             }
@@ -1318,6 +1415,8 @@
                 ? String(leg && leg.ivSource || 'manual')
                 : null,
             pricingModel,
+            dividendYield,
+            binomialSteps: americanBinomialSteps,
             contractMultiplier,
             settlementUnitsPerContract,
             posMultiplier,
@@ -1395,7 +1494,9 @@
             processedLeg.T,
             interestRate,
             processedLeg.simIV,
-            Number.isFinite(processedLeg.rateT) ? processedLeg.rateT : processedLeg.T
+            Number.isFinite(processedLeg.rateT) ? processedLeg.rateT : processedLeg.T,
+            Number.isFinite(processedLeg.dividendYield) ? processedLeg.dividendYield : 0,
+            processedLeg.binomialSteps
         );
     }
 
@@ -1667,6 +1768,8 @@
         calculatePrice,
         solveImpliedVolatility,
         configureSimTimeBasis,
+        configureEquityOptionPricing,
+        getEquityOptionPricingConfig,
         getSimTimeBasisWeekendWeight,
         weekendWeightDefault,
         weekendWeightActive,

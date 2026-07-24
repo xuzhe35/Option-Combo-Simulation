@@ -516,6 +516,21 @@
         return value === true;
     }
 
+    function normalizeEquityOptionPricingModel(value) {
+        return value === 'american-binomial' ? 'american-binomial' : 'bsm-spot';
+    }
+
+    function normalizeEquityDividendYield(value) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0;
+    }
+
+    function normalizeAmericanBinomialSteps(value) {
+        const parsed = Math.round(Number(value));
+        if (!Number.isFinite(parsed)) return 201;
+        return Math.min(1001, Math.max(25, parsed));
+    }
+
     function normalizeSimTimeBasis(value) {
         const normalized = String(value || '').trim().toLowerCase();
         return ['calendar', 'trading', 'weighted'].includes(normalized) ? normalized : 'weighted';
@@ -834,6 +849,15 @@
             liveQuoteDate: '',
             liveQuoteAsOf: '',
             interestRate: importedState.interestRate !== undefined ? importedState.interestRate : 0.03,
+            equityOptionPricingModel: normalizeEquityOptionPricingModel(
+                importedState.equityOptionPricingModel
+            ),
+            equityDividendYield: normalizeEquityDividendYield(
+                importedState.equityDividendYield
+            ),
+            americanBinomialSteps: normalizeAmericanBinomialSteps(
+                importedState.americanBinomialSteps
+            ),
             useMarketDiscountCurve: importedState.useMarketDiscountCurve !== false,
             discountCurve: importedState.discountCurve && typeof importedState.discountCurve === 'object'
                 ? JSON.parse(JSON.stringify(importedState.discountCurve))
@@ -1036,6 +1060,9 @@
         normalizeGroupLivePriceMode,
         normalizeHistoricalAutoCloseAtExpiry,
         normalizeGreeksEnabled,
+        normalizeEquityOptionPricingModel,
+        normalizeEquityDividendYield,
+        normalizeAmericanBinomialSteps,
         normalizeSimTimeBasis,
         normalizeSimWeekendWeight,
         resolveSimWeekendWeight,
