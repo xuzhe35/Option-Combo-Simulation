@@ -6,7 +6,7 @@ module.exports = {
     name: 'global_ui.js',
     tests: [
         {
-            name: 'renders the signed net cash flow across all groups',
+            name: 'renders the signed net cash flow for groups included in global totals',
             run() {
                 const elements = {
                     totalCost: { textContent: '' },
@@ -32,7 +32,7 @@ module.exports = {
                     globalTotalCost: 0,
                     globalSimulatedValue: 0,
                     globalPnL: 0,
-                    allGroupsNetCashFlow: -1191,
+                    globalNetCashFlow: -1191,
                     optionLegRedundancy: {
                         call: { buyContracts: 0, sellContracts: 20, netContracts: -20 },
                         put: { buyContracts: 0, sellContracts: 0, netContracts: 0 },

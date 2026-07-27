@@ -686,34 +686,28 @@
     }
 
     function normalizeProjectionConvergenceMode(value) {
-        // Missing/unknown live-session fields migrate to the accuracy-first
-        // policy.  The prior input-IV projection path survives only when a
-        // session explicitly records this compatibility value.
-        return String(value || '').trim().toLowerCase() === 'legacy-input-iv'
-            ? 'legacy-input-iv'
-            : 'strict-bbo';
+        // Migrate saved strict sessions to the resilient analysis policy.
+        // Strict BBO remains available as a local chart diagnostic.
+        void value;
+        return 'best-effort-input-iv';
     }
 
-    // Weekend weight actually handed to the pricing clock. Once the user asks
-    // for IVTS implied lambda, every non-trading date must have an explicit V2
-    // observation. Missing/invalid entries remain strict with an empty byDate
-    // map so pricing fails closed instead of silently substituting the scalar.
-    // The scalar remains available when implied-lambda mode is disabled, but
-    // live projections that cross closures are blocked by the shared coverage
-    // preflight; only `not_required` intervals may continue without V2 data.
+    // Prefer the IVTS date curve. Missing dates use its median and an
+    // unavailable curve uses the user's scalar λ, with fallback metadata kept
+    // for disclosure in the UI.
     function resolveSimWeekendWeightSpec(simTimeBasis, simWeekendWeight, useImpliedLambda, impliedEntry) {
         const scalar = resolveSimWeekendWeight(simTimeBasis, simWeekendWeight);
         if (normalizeSimTimeBasis(simTimeBasis) !== 'weighted'
             || normalizeSimUseImpliedLambda(useImpliedLambda) !== true) {
             return scalar;
         }
-        const strictSpec = {
+        const fallbackSpec = {
             default: scalar,
             byDate: null,
-            strictByDate: true,
+            strictByDate: false,
             coverageStart: null,
             coverageEnd: null,
-            fallbackSource: null,
+            fallbackSource: 'scalar-lambda',
         };
         const quality = impliedEntry && impliedEntry.quality;
         const acceptedVarianceSource = impliedEntry && (
@@ -728,25 +722,31 @@
             && quality.coherent === true
             && quality.quoteComplete === true;
         if (!isQualifiedV2) {
-            return strictSpec;
+            return fallbackSpec;
         }
         const byDate = impliedEntry && impliedEntry.byDate && typeof impliedEntry.byDate === 'object'
             ? impliedEntry.byDate
             : null;
         if (!byDate || !Object.keys(byDate).length) {
-            return strictSpec;
+            return fallbackSpec;
         }
+        const median = parseFloat(impliedEntry.medianLambda);
+        const fallback = Number.isFinite(median) && median >= 0 && median <= 1
+            ? median
+            : scalar;
         return {
-            default: scalar,
+            default: fallback,
             byDate,
-            strictByDate: true,
+            strictByDate: false,
             coverageStart: typeof impliedEntry.coverageStart === 'string'
                 ? impliedEntry.coverageStart
                 : null,
             coverageEnd: typeof impliedEntry.coverageEnd === 'string'
                 ? impliedEntry.coverageEnd
                 : null,
-            fallbackSource: null,
+            fallbackSource: Number.isFinite(median)
+                ? 'ivts-median-lambda'
+                : 'scalar-lambda',
         };
     }
 

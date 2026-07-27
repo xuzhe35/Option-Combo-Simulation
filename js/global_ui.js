@@ -135,9 +135,12 @@
         document.getElementById('unrealizedPnL').innerHTML = formatSignedCurrencyValue(currencyFormatter, derivedData.globalPnL, 'profit', 'loss');
         const allGroupsNetCashFlowValue = document.getElementById('allGroupsNetCashFlowValue');
         if (allGroupsNetCashFlowValue) {
+            const globalNetCashFlow = Number.isFinite(derivedData.globalNetCashFlow)
+                ? derivedData.globalNetCashFlow
+                : derivedData.allGroupsNetCashFlow;
             allGroupsNetCashFlowValue.innerHTML = formatSignedCurrencyValue(
                 currencyFormatter,
-                derivedData.allGroupsNetCashFlow,
+                globalNetCashFlow,
                 'success-text',
                 'danger-text'
             );

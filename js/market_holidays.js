@@ -9,7 +9,9 @@
 
 'use strict';
 
-const OFFICIAL_CALENDAR_MAX_AGE_DAYS = 14;
+// Exchange holiday schedules change infrequently. Freshness protects against
+// abandoning an unmaintained snapshot, not against intraday market risk.
+const OFFICIAL_CALENDAR_MAX_AGE_DAYS = 183;
 const CME_CALENDAR_DERIVATION_VERSION = 'business-trade-date-gaps-v2';
 
 function _officialCalendar(calendarKey) {

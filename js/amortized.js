@@ -99,6 +99,10 @@
                 quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
                 quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
                 quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+                allowProjectionIvFallback: typeof pricingCore.normalizeProjectionConvergenceMode !== 'function'
+                    || pricingCore.normalizeProjectionConvergenceMode(
+                        globalState.projectionConvergenceMode
+                    ) === 'best-effort-input-iv',
             };
         };
 

@@ -255,6 +255,42 @@
         return legs;
     }
 
+    function _allowsProductProfileTimingEstimate(globalState, leg, profile, expiry) {
+        if (!expiry || expiry.source !== 'product-profile'
+            || !Number.isFinite(expiry.cutoffMs)) {
+            return false;
+        }
+
+        // Pending/missing IB metadata is not evidence of a wrong contract,
+        // especially during reconnect. Explicit rejection remains a hard stop.
+        const identityStatus = String(
+            leg && leg.liveQuoteIdentityStatus || ''
+        ).trim().toLowerCase();
+        if (identityStatus === 'rejected' || identityStatus === 'not_found') {
+            return false;
+        }
+        const qualifiedTradingClass = String(
+            leg && leg.qualifiedOptionTradingClass || ''
+        ).trim().toUpperCase();
+        const expectedTradingClass = String(
+            profile && (profile.optionSymbol || profile.enteredSymbol)
+            || globalState && globalState.underlyingSymbol
+            || ''
+        ).trim().toUpperCase();
+        const canonical = value => ({ SPXW: 'SPX', NDXP: 'NDX' })[value] || value;
+        const strictTradingClassFamily = _resolvePricingInputMode(globalState) === 'STK'
+            && String(profile && profile.settlementKind || '').trim() === 'equity-deliverable';
+        if (strictTradingClassFamily
+            && qualifiedTradingClass && expectedTradingClass
+            && canonical(qualifiedTradingClass) !== canonical(expectedTradingClass)) {
+            return false;
+        }
+
+        // Contract identity, futures-month binding, and deferred settlement
+        // are checked independently and still block materially wrong results.
+        return !!(leg && profile);
+    }
+
     function _assessExactContractTiming(globalState, timing, simulationDate, profile) {
         const enabled = !!(globalState
             && globalState.marketDataMode !== 'historical'
@@ -265,6 +301,8 @@
             status: enabled ? 'complete' : 'not_required',
             missingContractTimingLegIds: [],
             missingContractTimingLegs: [],
+            profileFallbackLegIds: [],
+            profileFallbackLegs: [],
         };
         if (!enabled) return base;
 
@@ -274,6 +312,7 @@
         const pricingMode = _resolvePricingInputMode(globalState);
         const requiresEverySurvivingLeg = pricingMode === 'FOP' || pricingMode === 'INDEX';
         const missing = [];
+        const profileFallbacks = [];
         _openOptionLegs(globalState).forEach((leg) => {
             const expiryDate = _normalizeDateValue(leg && leg.expDate);
             const expiry = dateUtils && typeof dateUtils.resolveExpiryCutoffAsOf === 'function'
@@ -302,21 +341,41 @@
                 reasons.push('short_dated_surviving_leg_contract_timing_missing');
             }
             if (reasons.length > 0) {
-                missing.push({
+                const detail = {
                     legId: String(leg && leg.id || ''),
                     expDate: expiryDate,
                     remainingDays,
                     reasons: Array.from(new Set(reasons)),
-                });
+                };
+                if (_allowsProductProfileTimingEstimate(
+                    globalState, leg, profile, expiry
+                )) {
+                    profileFallbacks.push(detail);
+                } else {
+                    missing.push(detail);
+                }
             }
         });
-        if (missing.length === 0) return base;
+        if (missing.length === 0) {
+            return {
+                ...base,
+                status: profileFallbacks.length > 0 ? 'profile_fallback' : base.status,
+                profileFallbackLegIds: Array.from(new Set(
+                    profileFallbacks.map(item => item.legId)
+                )),
+                profileFallbackLegs: profileFallbacks,
+            };
+        }
         return {
             required: true,
             ready: false,
             status: 'exact_contract_timing_missing',
             missingContractTimingLegIds: Array.from(new Set(missing.map(item => item.legId))),
             missingContractTimingLegs: missing,
+            profileFallbackLegIds: Array.from(new Set(
+                profileFallbacks.map(item => item.legId)
+            )),
+            profileFallbackLegs: profileFallbacks,
         };
     }
 
@@ -395,6 +454,8 @@
                     contractTimingStatus: assessment.status,
                     missingContractTimingLegIds: assessment.missingContractTimingLegIds,
                     missingContractTimingLegs: assessment.missingContractTimingLegs,
+                    profileFallbackLegIds: assessment.profileFallbackLegIds,
+                    profileFallbackLegs: assessment.profileFallbackLegs,
                 };
             }
             const settlementAssessment = _assessDeferredSettlement(
@@ -410,6 +471,8 @@
                     contractTimingStatus: assessment.status,
                     missingContractTimingLegIds: [],
                     missingContractTimingLegs: [],
+                    profileFallbackLegIds: assessment.profileFallbackLegIds,
+                    profileFallbackLegs: assessment.profileFallbackLegs,
                     deferredSettlementLegIds: settlementAssessment.deferredSettlementLegIds,
                     deferredSettlementLegs: settlementAssessment.deferredSettlementLegs,
                 };
@@ -419,6 +482,8 @@
                 contractTimingStatus: assessment.status,
                 missingContractTimingLegIds: [],
                 missingContractTimingLegs: [],
+                profileFallbackLegIds: assessment.profileFallbackLegIds,
+                profileFallbackLegs: assessment.profileFallbackLegs,
                 deferredSettlementLegIds: [],
                 deferredSettlementLegs: [],
             };
@@ -1199,13 +1264,24 @@
                 : null);
 
         if (!Number.isFinite(dailyCarry)) {
+            const usableSpot = Number.isFinite(spotPrice) && spotPrice > 0;
             return {
                 kind: 'forward',
-                forwardPrice: null,
-                source: 'index_parity_carry_unavailable',
+                // Put-call parity is preferred, but an index spot proxy is a
+                // useful bounded estimate for analysis. Treating no dividend
+                // information as a reason to blank the whole tool is worse
+                // than visibly carrying spot flat to expiry.
+                forwardPrice: usableSpot ? spotPrice : null,
+                source: usableSpot
+                    ? 'index_spot_forward_estimate'
+                    : 'index_parity_carry_unavailable',
                 carryObservation: null,
-                quality: { status: 'invalid', flags: ['missing_parity_carry_sample'] },
-                usable: false,
+                quoteAsOf: String(globalState && globalState.liveQuoteAsOf || '').trim(),
+                quality: {
+                    status: usableSpot ? 'degraded' : 'invalid',
+                    flags: ['missing_parity_carry_sample', 'flat_spot_forward_assumption'],
+                },
+                usable: usableSpot,
             };
         }
 
@@ -1737,7 +1813,8 @@
                     marketClock.calendarId,
                     null,
                     marketClock.timeZone,
-                    marketClock.tradeDateRolloverHour
+                    marketClock.tradeDateRolloverHour,
+                    { allowEstimatedCalendar: true }
                 );
                 if (!interval.available) {
                     return {

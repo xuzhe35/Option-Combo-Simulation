@@ -53,6 +53,9 @@ function sampleEntry(overrides = {}) {
             baselineWindowDays: 7,
             minBaselines: 2,
             maxIntervalCalendarDays: 7,
+            maxAggregateIntervalCalendarDays: 31,
+            longIntervalPolicy: 'observed_multi_week_aggregate',
+            missingBaselinePolicy: 'same_surface_curve_median',
             minDte: 0,
             maxQuoteSkewMs: 120000,
             maxForwardDeviationPct: 0.005,
@@ -240,6 +243,45 @@ module.exports = {
                 assert.equal(entry.quality.strictSnapshot, false);
                 assert.equal(entry.quality.usableExpiryCount, 7);
                 assert.equal(entry.quality.skippedExpiryCount, 3);
+            },
+        },
+        {
+            name: 'preserves estimated coverage provenance without reweighting the curve center',
+            run() {
+                const api = loadHandoffApi();
+                const base = sampleEntry();
+                const entry = api.buildSymbolEntry({
+                    ...base,
+                    intervals: base.intervals.map((interval, index) => (
+                        index === 0
+                            ? { ...interval, estimateKind: 'direct_interval' }
+                            : {
+                                ...interval,
+                                rawLambda: 0.13,
+                                lambda: 0.13,
+                                estimateKind: 'curve_median_fill',
+                                isEstimated: true,
+                                originalStatus: 'aggregate_interval_too_long',
+                                exceedsDirectIntervalLimit: true,
+                                exceedsAggregateIntervalLimit: true,
+                                directIntervalLimitDays: 7,
+                                aggregateIntervalLimitDays: 31,
+                            }
+                    )),
+                }, TEST_NOW);
+
+                assert.ok(entry);
+                assert.equal(entry.quality.estimationMode, 'best_effort');
+                assert.equal(entry.quality.estimatedIntervalCount, 1);
+                assert.equal(entry.quality.curveMedianFillIntervalCount, 1);
+                assert.equal(entry.intervals[1].estimateKind, 'curve_median_fill');
+                assert.equal(entry.intervals[1].originalStatus, 'aggregate_interval_too_long');
+                assert.equal(entry.intervals[1].aggregateIntervalLimitDays, 31);
+                assert.equal(entry.medianLambda, 0.13);
+                assert.equal(
+                    entry.methodology.missingBaselinePolicy,
+                    'same_surface_curve_median'
+                );
             },
         },
         {

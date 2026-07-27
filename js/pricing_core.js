@@ -175,6 +175,7 @@
         // official snapshot. Prove live coverage for the whole non-empty
         // interval up front so an all-weekend horizon cannot slip beyond a
         // stale or out-of-range exchange calendar.
+        let calendarEstimated = false;
         if (!historicalMode && calDays > 0) {
             const lastIncluded = new Date(end);
             lastIncluded.setUTCDate(lastIncluded.getUTCDate() - 1);
@@ -185,19 +186,18 @@
                     startKey,
                     lastIncludedKey
                 )) {
-                return {
-                    ...unavailable('calendar_unavailable'),
-                    calDays,
-                };
+                calendarEstimated = true;
             }
         }
-        const verifiedTradingDays = calendarToTradingDays(
-            startKey,
-            endKey,
-            normalizedCalendarKey,
-            observedTradingDates
-        );
-        if (verifiedTradingDays === null) {
+        const verifiedTradingDays = calendarEstimated
+            ? null
+            : calendarToTradingDays(
+                startKey,
+                endKey,
+                normalizedCalendarKey,
+                observedTradingDates
+            );
+        if (!calendarEstimated && verifiedTradingDays === null) {
             return {
                 ...unavailable('calendar_unavailable'),
                 calDays,
@@ -212,11 +212,15 @@
         const current = new Date(start);
         while (current < end) {
             const date = current.toISOString().slice(0, 10);
-            const tradingDay = isTradingDay(
+            const verifiedTradingDay = isTradingDay(
                 date,
                 normalizedCalendarKey,
                 observedTradingDates
             );
+            const weekday = current.getUTCDay();
+            const tradingDay = verifiedTradingDay === null && calendarEstimated
+                ? weekday !== 0 && weekday !== 6
+                : verifiedTradingDay;
             if (tradingDay === null) {
                 return {
                     ...unavailable('calendar_unavailable'),
@@ -236,7 +240,6 @@
                 );
                 weight = hasDateOverride ? weightSpec.byDate[date] : weightSpec.default;
                 usedPerDateWeight = usedPerDateWeight || hasDateOverride;
-                const weekday = current.getUTCDay();
                 kind = weekday === 0 || weekday === 6 ? 'weekend' : 'exchange_holiday';
             }
             if (!Number.isFinite(weight)) {
@@ -252,7 +255,8 @@
 
         // Defensive agreement check: the detailed enumeration and the shared
         // official-calendar counter must never describe different horizons.
-        if (tradingDays !== verifiedTradingDays || steps.length !== calDays) {
+        if ((!calendarEstimated && tradingDays !== verifiedTradingDays)
+            || steps.length !== calDays) {
             return {
                 ...unavailable('calendar_inconsistent'),
                 calDays,
@@ -262,7 +266,8 @@
         const effYear = weightedDaysPerYear(weightSpec);
         return {
             available: true,
-            status: 'ok',
+            status: calendarEstimated ? 'calendar_estimate' : 'ok',
+            calendarEstimated,
             calendarKey: normalizedCalendarKey,
             calDays,
             tradingDays,
@@ -516,7 +521,8 @@
             calendarKey,
             observedTradingDates,
             timeZone,
-            rolloverHour
+            rolloverHour,
+            { allowEstimatedCalendar: marketDataMode !== 'historical' }
         );
         const isExpired = targetMs >= expiry.cutoffMs;
         const remainingClock = isExpired
@@ -555,7 +561,12 @@
         return {
             ...common,
             available: true,
-            status: 'ok',
+            status: remainingClock.calendarEstimated === true
+                || (anchorClock && anchorClock.calendarEstimated === true)
+                ? 'calendar_estimate'
+                : 'ok',
+            calendarEstimated: remainingClock.calendarEstimated === true
+                || !!(anchorClock && anchorClock.calendarEstimated === true),
             isExpired,
             remainingClock,
             anchorClock,
@@ -908,10 +919,16 @@
             ? timingContext
             : {};
         const source = String(context.observablePriceSource || '').trim();
+        const strictBboSource = source === 'live_midpoint';
+        const estimatedQuoteSource = context.allowProjectionIvFallback === true
+            && !!source
+            && Number.isFinite(parseFloat(context.observablePrice));
         const base = {
-            attempted: source === 'live_midpoint',
+            attempted: strictBboSource || estimatedQuoteSource,
             available: false,
-            status: source === 'live_midpoint' ? 'unavailable' : 'not_two_sided_bbo',
+            status: strictBboSource || estimatedQuoteSource
+                ? 'unavailable'
+                : 'not_two_sided_bbo',
             source,
             impliedVolatility: null,
             totalVariance: null,
@@ -920,7 +937,7 @@
         if (!exactTiming || exactTiming.active !== true) {
             return { ...base, status: 'exact_quote_clock_unavailable' };
         }
-        if (exactTiming.bboTimestampFresh !== true) {
+        if (strictBboSource && exactTiming.bboTimestampFresh !== true) {
             return { ...base, status: 'option_bbo_stale_or_timestamp_invalid' };
         }
         if (context.quotePricingInputsAvailable !== true) {
@@ -983,7 +1000,9 @@
             attempted: true,
             available: true,
             status: 'ok',
-            source: 'local-bbo-implied',
+            source: strictBboSource
+                ? 'local-bbo-implied'
+                : 'estimated-observable-price',
             impliedVolatility: solved.impliedVolatility,
             totalVariance: solved.totalVariance,
             modelPrice: solved.modelPrice,
@@ -1177,10 +1196,8 @@
             timingContext,
             weekendWeight
         );
-        // This flag is intentionally supplied only by an isolated chart-state
-        // copy.  Portfolio valuation, probability calculations, saved state,
-        // and order/execution paths remain strict even while a user elects to
-        // inspect a best-effort payoff curve.
+        // Analysis callers supply this consistently. Execution paths do not
+        // use this projection fallback.
         const allowProjectionIvFallback = !!(
             timingContext && timingContext.allowProjectionIvFallback === true
         );
@@ -1407,7 +1424,7 @@
             simIVSource: bestEffortIvFallbackUsed
                 ? 'best-effort-input-iv'
                 : (localIvAnchor.available
-                ? 'local-bbo-implied'
+                ? localIvAnchor.source
                 : (localIvAnchor.attempted
                     ? 'local-bbo-unavailable'
                     : (isLiveIvMissing(leg) ? 'missing' : (leg.ivSource || 'manual')))),
@@ -1429,6 +1446,7 @@
                 ? exactTiming.available === true
                 : calendarAvailable,
             timingStatus: exactTiming.status || null,
+            calendarEstimated: exactTiming.calendarEstimated === true,
             missingWeightDates: Array.from(new Set([
                 ...(exactTiming.remainingClock
                     && Array.isArray(exactTiming.remainingClock.missingWeightDates)
@@ -1562,21 +1580,15 @@
     }
 
     /**
-     * Live future projections are useful only when every option that survives
-     * the portfolio target is calibrated to an observable, executable book.
-     * The default therefore requires the local BSM/Black-76 inversion of a
-     * fresh valid two-sided BBO.  Expired target-date legs are deterministic
-     * intrinsic and deliberately do not need a quote/IV anchor.
-     *
-     * Historical replay remains on its recorded-IV path.  The old live input-
-     * IV behavior is retained solely as an explicit session compatibility
-     * value (`legacy-input-iv`); an absent or malformed live value is strict.
+     * Analysis defaults to the best available estimate. Strict BBO remains an
+     * explicit diagnostic mode; historical replay keeps its recorded-IV path.
      */
     function normalizeProjectionConvergenceMode(value) {
         const normalized = String(value || '').trim().toLowerCase();
         if (normalized === 'legacy-input-iv') return 'legacy-input-iv';
         if (normalized === 'best-effort-input-iv') return 'best-effort-input-iv';
-        return 'strict-bbo';
+        if (normalized === 'strict-bbo') return 'strict-bbo';
+        return 'best-effort-input-iv';
     }
 
     function _hasFixedProjectionPrice(leg) {
@@ -1605,6 +1617,7 @@
         // target-surviving leg crosses a closure the shared coverage audit is
         // a hard prerequisite. `not_required` is the sole exemption.
         const structuredLambdaRequired = live && !historical
+            && mode === 'strict-bbo'
             && lambdaCoverage && lambdaCoverage.required === true;
         const base = {
             required: strictBboRequired || structuredLambdaRequired,
@@ -1648,7 +1661,28 @@
                 }],
             };
         }
-        if (!strictBboRequired) return base;
+        if (!strictBboRequired) {
+            const lambdaEstimated = !!(
+                live && !historical
+                && lambdaCoverage
+                && lambdaCoverage.required === true
+                && lambdaCoverage.ready !== true
+            );
+            return {
+                ...base,
+                status: lambdaEstimated
+                    ? 'best_effort_lambda_fallback'
+                    : base.status,
+                estimated: lambdaEstimated || mode === 'best-effort-input-iv',
+                lambdaFallbackStatus: lambdaEstimated
+                    ? String(lambdaCoverage.status || 'unavailable')
+                    : null,
+                missingDates: lambdaEstimated
+                    && Array.isArray(lambdaCoverage.missingDates)
+                    ? Array.from(new Set(lambdaCoverage.missingDates.filter(Boolean))).sort()
+                    : [],
+            };
+        }
 
         const legs = Array.isArray(rawLegs) ? rawLegs : [];
         const processed = Array.isArray(processedLegs) ? processedLegs : [];

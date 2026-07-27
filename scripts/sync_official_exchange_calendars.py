@@ -11,7 +11,7 @@ Weekly use (all configured markets):
     CME_API_ID=... CME_API_SECRET=... \
       python3 scripts/sync_official_exchange_calendars.py
 
-NYSE-only bootstrap/refresh (explicitly leaves CME products unavailable):
+NYSE-only bootstrap/refresh (preserves existing CME entries unchanged):
 
     python3 scripts/sync_official_exchange_calendars.py --nyse-only
 
@@ -420,6 +420,25 @@ def _load_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def _merge_preserved_calendars(refreshed_calendars, existing_snapshot):
+    """Keep non-refreshed calendar entries without changing their timestamps."""
+    merged = dict(refreshed_calendars)
+    existing_calendars = (
+        existing_snapshot.get("calendars")
+        if isinstance(existing_snapshot, dict)
+        else None
+    )
+    preserved = []
+    if not isinstance(existing_calendars, dict):
+        return merged, preserved
+    for key, value in existing_calendars.items():
+        if key in merged or not isinstance(value, dict):
+            continue
+        merged[key] = value
+        preserved.append(key)
+    return merged, sorted(preserved)
+
+
 def _write_snapshot(snapshot):
     JSON_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     JSON_OUTPUT.write_text(
@@ -436,7 +455,7 @@ def _write_snapshot(snapshot):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--nyse-only", action="store_true",
-                        help="refresh NYSE only; CME calendars remain unavailable")
+                        help="refresh NYSE only; preserve existing CME calendars unchanged")
     parser.add_argument("--cme-products-json")
     parser.add_argument("--cme-schedules-json")
     parser.add_argument("--check", action="store_true",
@@ -446,6 +465,7 @@ def main(argv=None):
     fetched_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
     nyse_bytes, _ = _download(NYSE_URL, headers={"Accept": "text/html"})
     calendars = {"NYSE": parse_nyse_calendar(nyse_bytes, fetched_at)}
+    preserved_calendar_keys = []
 
     if not args.nyse_only:
         if bool(args.cme_products_json) != bool(args.cme_schedules_json):
@@ -470,6 +490,13 @@ def main(argv=None):
             products = {"queries": product_pages}
             schedules = _fetch_cme_collection("tradingSchedules", token)
         calendars.update(parse_cme_calendars(products, schedules, fetched_at))
+    elif not args.check and JSON_OUTPUT.exists():
+        try:
+            existing_snapshot = _load_json(JSON_OUTPUT)
+        except (OSError, json.JSONDecodeError):
+            existing_snapshot = None
+        calendars, preserved_calendar_keys = _merge_preserved_calendars(
+            calendars, existing_snapshot)
 
     snapshot = {
         "version": 2,
@@ -491,8 +518,13 @@ def main(argv=None):
     print(f"Wrote {JSON_OUTPUT}")
     print(f"Wrote {JS_OUTPUT}")
     for key, value in calendars.items():
+        preserved_note = (
+            f", preserved unchanged (fetchedAt={value.get('fetchedAt') or 'unknown'})"
+            if key in preserved_calendar_keys else ""
+        )
         print(f"  {key}: {value['coverageStart']} .. {value['coverageEnd']}, "
-              f"{len(value['closures'])} closures, {len(value['earlyCloses'])} early closes")
+              f"{len(value['closures'])} closures, {len(value['earlyCloses'])} early closes"
+              f"{preserved_note}")
     return 0
 
 

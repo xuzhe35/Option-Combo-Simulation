@@ -289,8 +289,8 @@
 
 `js/market_holidays.js` 现在只读取官方快照，不包含第 N 个星期一、复活节、周末顺延或手工例外规则。
 
-- **每周维护**：`./sync_exchange_calendars_mac.command` 或 `sync_exchange_calendars.bat`；
-- **失败策略**：快照缺失、超过 14 天或不覆盖目标日期时返回 calendar unavailable，不假定开市；
+- **每季度维护**：`./sync_exchange_calendars_mac.command`、`sync_exchange_calendars.bat` 或 `./sync_exchange_calendars.sh`；
+- **失败策略**：快照缺失、超过 183 天或不覆盖目标日期时返回 calendar unavailable，不假定开市；
 - **历史区间**：仅使用行情服务中实际观测到的交易会话及已审计数据缺口，不从规则反推休市。`scripts/sync_market_holidays.py` 只是兼容入口，会转调官方同步脚本。
 - **回测覆盖**：官方快照覆盖区间会覆盖历史观测日期；快照之前仅使用实际会话，不重建节假日规则。
 

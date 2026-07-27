@@ -69,7 +69,7 @@ module.exports = {
                 assert.equal(state.workspaceVariant, 'historical');
                 assert.equal(state.marketDataModeLocked, true);
                 assert.equal(state.requireExactContractTiming, true);
-                assert.equal(state.projectionConvergenceMode, 'strict-bbo');
+                assert.equal(state.projectionConvergenceMode, 'best-effort-input-iv');
             },
         },
         {
@@ -590,7 +590,7 @@ module.exports = {
                 assert.equal(state.simUseImpliedLambda, true);
                 assert.equal(state.simImpliedLambdaEntry, null);
                 assert.equal(state.requireExactContractTiming, true);
-                assert.equal(state.projectionConvergenceMode, 'strict-bbo');
+                assert.equal(state.projectionConvergenceMode, 'best-effort-input-iv');
             },
         },
         {
@@ -607,7 +607,7 @@ module.exports = {
                 );
                 assert.equal(
                     context.__optionComboApp.getState().projectionConvergenceMode,
-                    'legacy-input-iv'
+                    'best-effort-input-iv'
                 );
             },
         },

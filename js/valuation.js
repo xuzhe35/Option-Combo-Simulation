@@ -172,8 +172,8 @@
         return {
             text: `Sim DTE: ${tradingText} td / ${calendarText}`,
             title: processedLeg.expiryCutoffAsOf
-                ? `Expiry cutoff ${processedLeg.expiryCutoffAsOf} (${source}). All legs use the same portfolio target instant.`
-                : `Expiry cutoff source: ${source}.`,
+                ? `Expiry cutoff ${processedLeg.expiryCutoffAsOf} (${source}). All legs use the same portfolio target instant.${processedLeg.calendarEstimated ? ' Exchange calendar coverage is unavailable; weekdays/weekends are estimated.' : ''}`
+                : `Expiry cutoff source: ${source}.${processedLeg.calendarEstimated ? ' Exchange calendar coverage is unavailable; weekdays/weekends are estimated.' : ''}`,
         };
     }
 
@@ -728,6 +728,10 @@
             quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
             quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
             quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+            allowProjectionIvFallback: typeof pricingCore.normalizeProjectionConvergenceMode !== 'function'
+                || pricingCore.normalizeProjectionConvergenceMode(
+                    globalState.projectionConvergenceMode
+                ) === 'best-effort-input-iv',
         };
         const simulationTimingAvailable = !simulationTiming
             || simulationTiming.available !== false;
@@ -795,8 +799,13 @@
                 ivText = 'Sim IV: N/A (strict live BBO required)';
             } else if (processedLeg.simIVAvailable) {
                 const sourceSuffix = processedLeg.simIVSource === 'estimated'
+                    || processedLeg.simIVSource === 'estimated-observable-price'
                     ? ' (Estimated)'
-                    : (processedLeg.simIVSource === 'local-bbo-implied' ? ' (Local BBO)' : '');
+                    : (processedLeg.simIVSource === 'best-effort-input-iv'
+                        ? ' (Estimated)'
+                        : (processedLeg.simIVSource === 'local-bbo-implied'
+                            ? ' (Local BBO)'
+                            : ''));
                 ivText = `Sim IV: ${(processedLeg.simIV * 100).toFixed(2)}%${sourceSuffix}`;
             } else if (processedLeg.localIvAnchorAttempted) {
                 ivText = `Sim IV: N/A (Local BBO: ${processedLeg.localIvAnchorStatus})`;
@@ -820,7 +829,9 @@
                 : (processedLeg.pricingModel === 'american-binomial'
                     ? 'American binomial'
                     : 'BSM');
-            ivTitle = `Fresh two-sided BBO re-inverted with the local ${modelLabel} model at ${processedLeg.quoteAsOf || 'the quote instant'}; future repricing holds this local IV constant.`;
+            ivTitle = processedLeg.simIVSource === 'local-bbo-implied'
+                ? `Fresh two-sided BBO re-inverted with the local ${modelLabel} model at ${processedLeg.quoteAsOf || 'the quote instant'}; future repricing holds this local IV constant.`
+                : `Estimated IV re-inverted from the best available observable option price with the local ${modelLabel} model; future repricing holds this estimate constant.`;
         } else if (processedLeg.localIvAnchorAttempted) {
             ivTitle = `Local BBO calibration failed closed: ${processedLeg.localIvAnchorStatus}.`;
         } else {
@@ -959,7 +970,7 @@
         const optionLegRedundancy = computeOptionLegRedundancy(globalState && globalState.groups);
         const projectedOptionDelivery = computeProjectedOptionDelivery(globalState);
 
-        const allGroupsNetCashFlow = groupResults.reduce(
+        const globalNetCashFlow = includedGroupResults.reduce(
             (sum, result) => sum + (Number.isFinite(result.groupNetCashFlow) ? result.groupNetCashFlow : 0),
             0
         );
@@ -994,7 +1005,10 @@
             groupResultsById: new Map(groupResults.map(result => [result.id, result])),
             optionLegRedundancy,
             projectedOptionDelivery,
-            allGroupsNetCashFlow,
+            globalNetCashFlow,
+            // Compatibility alias for older UI consumers. The value now follows
+            // the same included-group boundary as every other global total.
+            allGroupsNetCashFlow: globalNetCashFlow,
             globalTotalCost,
             globalSimulationAvailable,
             globalSimulatedValue,

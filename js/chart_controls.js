@@ -84,14 +84,13 @@ function _refreshChartAnchorNotes(card) {
 }
 
 function _getPayoffChartState(card) {
-    if (!card || card.bestEffortProjectionEnabled !== true) return state;
+    if (!card || card.strictProjectionEnabled !== true) return state;
 
-    // This shallow copy is deliberately local to PnLChart.draw().  Never
-    // mutate the workspace convergence mode: valuation, probability, session,
-    // and execution surfaces must keep their existing safety semantics.
+    // Strict convergence is an opt-in chart diagnostic. It never changes
+    // shared valuation, probability, saved state, or execution behavior.
     return {
         ...state,
-        projectionConvergenceMode: 'best-effort-input-iv',
+        projectionConvergenceMode: 'strict-bbo',
     };
 }
 
@@ -107,11 +106,12 @@ function _renderPayoffChartQuality(card) {
     const note = card.querySelector('.payoff-chart-quality-note');
     if (!note) return;
 
-    const enabled = card.bestEffortProjectionEnabled === true;
+    const enabled = card.strictProjectionEnabled !== true;
     if (!enabled) {
-        note.textContent = '';
-        note.style.display = 'none';
+        note.textContent = 'Strict BBO diagnostic is on. The curve is hidden if any surviving option lacks a fresh two-sided quote and local IV inversion.';
+        note.style.display = 'block';
         note.classList.remove('is-success', 'is-warning', 'is-error');
+        note.classList.add('is-warning');
         return;
     }
 
@@ -161,12 +161,13 @@ function toggleBestEffortPayoffChart(btn) {
         : null;
     if (!card) return;
 
-    card.bestEffortProjectionEnabled = card.bestEffortProjectionEnabled !== true;
-    btn.classList.toggle('active', card.bestEffortProjectionEnabled);
-    btn.setAttribute('aria-pressed', card.bestEffortProjectionEnabled ? 'true' : 'false');
-    btn.textContent = card.bestEffortProjectionEnabled
-        ? 'Use Strict BBO'
-        : 'Draw Best Effort';
+    card.strictProjectionEnabled = card.strictProjectionEnabled !== true;
+    card.bestEffortProjectionEnabled = !card.strictProjectionEnabled;
+    btn.classList.toggle('active', card.strictProjectionEnabled);
+    btn.setAttribute('aria-pressed', card.strictProjectionEnabled ? 'true' : 'false');
+    btn.textContent = card.strictProjectionEnabled
+        ? 'Use Best Estimate'
+        : 'Require Strict BBO';
 
     if (card.id === 'globalChartCard') {
         drawGlobalChart(card);

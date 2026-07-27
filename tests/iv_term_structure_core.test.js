@@ -1496,7 +1496,7 @@ module.exports = {
             },
         },
         {
-            name: 'computeImpliedWeekendLambdas flags unusable intervals instead of guessing',
+            name: 'computeImpliedWeekendLambdas preserves hard inversions and still rejects unidentified surfaces',
             run() {
                 const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
                 const core = ctx.OptionComboIvTermStructureCore;
@@ -1514,9 +1514,11 @@ module.exports = {
                 ];
                 const result = core.computeImpliedWeekendLambdas(rows, '2026-07-17', { varianceSource: 'vendor_iv' });
                 const bad = result.intervals.find((interval) => interval.endExpiry === '20260727');
-                assert.equal(bad.status, 'nonpositive_forward_variance');
-                assert.equal(bad.lambda, null);
-                assert.ok(!('2026-07-25' in result.byDate));
+                assert.equal(bad.status, 'ok');
+                assert.equal(bad.hardInversion, true);
+                assert.ok(Number.isFinite(bad.lambda));
+                assert.ok(bad.lambda < 0);
+                assert.equal(result.byDate['2026-07-25'], bad.lambda);
 
                 // Weekly-only surface: every interval spans a weekend, so there
                 // is no pure trading-day baseline anywhere.
@@ -1528,6 +1530,97 @@ module.exports = {
                 assert.equal(weeklyResult.intervals[0].status, 'unverified_front');
                 assert.equal(weeklyResult.intervals[1].status, 'no_baseline');
                 assert.equal(weeklyResult.medianLambda, null);
+            },
+        },
+        {
+            name: 'fills a 14-day listed-expiry gap from its observed multi-week variance',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const lambdaTrue = 0.2;
+                const dailyVar = 8e-5;
+                const rows = [
+                    ['20260831', 3, 1.4],
+                    ['20260901', 4, 2.4],
+                    ['20260902', 5, 3.4],
+                    ['20260903', 6, 4.4],
+                    ['20260904', 7, 5.4],
+                    // 2026-09-04 -> 2026-09-18 contains nine trading-day
+                    // units and five closure dates, including Labor Day.
+                    ['20260918', 21, 15.4],
+                ].map(([expiry, dte, varianceUnits]) => ({
+                    expiry,
+                    dte,
+                    atmIv: Math.sqrt(dailyVar * varianceUnits * 365 / dte),
+                }));
+
+                const result = core.computeImpliedWeekendLambdas(
+                    rows, '2026-08-28', { varianceSource: 'vendor_iv' }
+                );
+                const longGap = result.intervals.find(
+                    interval => interval.endExpiry === '20260918'
+                );
+                assert.ok(longGap);
+                assert.equal(longGap.status, 'ok');
+                assert.equal(longGap.estimateKind, 'multi_week_aggregate');
+                assert.equal(longGap.isEstimated, true);
+                assert.equal(longGap.exceedsDirectIntervalLimit, true);
+                assert.ok(Math.abs(longGap.lambda - lambdaTrue) < 1e-3);
+                assert.deepEqual([...longGap.nonTradingDates], [
+                    '2026-09-05',
+                    '2026-09-06',
+                    '2026-09-07',
+                    '2026-09-12',
+                    '2026-09-13',
+                ]);
+                for (const date of longGap.nonTradingDates) {
+                    assert.equal(result.byDate[date], longGap.lambda);
+                }
+                assert.equal(result.coverageEnd, '2026-09-13');
+                assert.equal(result.quality.multiWeekAggregateIntervalCount, 1);
+                assert.equal(result.quality.estimatedIntervalCount, 1);
+                assert.equal(result.quality.estimationMode, 'best_effort');
+            },
+        },
+        {
+            name: 'fills an overlong expiry gap from the same-surface lambda median',
+            run() {
+                const ctx = loadBrowserScripts(['js/iv_term_structure_core.js']);
+                const core = ctx.OptionComboIvTermStructureCore;
+                const dailyVar = 8e-5;
+                let totalVar = 0;
+                const rows = [
+                    ['20260720', 3, 1],
+                    ['20260721', 4, 1],
+                    ['20260722', 5, 1],
+                    ['20260723', 6, 1],
+                    ['20260724', 7, 1],
+                    ['20260727', 10, 1.4],
+                    ['20260918', 63, 40],
+                ].map(([expiry, dte, increment]) => {
+                    totalVar += dailyVar * increment;
+                    return { expiry, dte, atmIv: Math.sqrt(totalVar * 365 / dte) };
+                });
+                const result = core.computeImpliedWeekendLambdas(
+                    rows, '2026-07-17', { varianceSource: 'vendor_iv' }
+                );
+                const first = result.intervals.find(
+                    interval => interval.endExpiry === '20260727'
+                );
+                const filled = result.intervals.find(
+                    interval => interval.endExpiry === '20260918'
+                );
+                assert.ok(first);
+                assert.ok(filled);
+                assert.equal(first.status, 'ok');
+                assert.equal(filled.status, 'ok');
+                assert.equal(filled.estimateKind, 'curve_median_fill');
+                assert.equal(filled.originalStatus, 'aggregate_interval_too_long');
+                assert.equal(filled.baselineMode, 'curve_median_extrapolated');
+                assert.equal(filled.lambda, first.lambda);
+                assert.equal(result.byDate['2026-08-01'], first.lambda);
+                assert.equal(result.byDate['2026-09-13'], first.lambda);
+                assert.equal(result.quality.curveMedianFillIntervalCount, 1);
             },
         },
         {

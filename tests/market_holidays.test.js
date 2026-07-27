@@ -66,6 +66,24 @@ module.exports = {
             },
         },
         {
+            name: 'keeps official snapshots usable inside the 183-day freshness window',
+            run() {
+                const withinWindow = snapshot(new Date(Date.now() - 182 * 86400000).toISOString());
+                const acceptedCtx = loadCalendar(withinWindow);
+                assert.equal(
+                    acceptedCtx.isOfficialExchangeCalendarAvailable('NYSE', '2026-07-01'),
+                    true
+                );
+
+                const beyondWindow = snapshot(new Date(Date.now() - 184 * 86400000).toISOString());
+                const rejectedCtx = loadCalendar(beyondWindow);
+                assert.equal(
+                    rejectedCtx.isOfficialExchangeCalendarAvailable('NYSE', '2026-07-01'),
+                    false
+                );
+            },
+        },
+        {
             name: 'date helpers carry product calendar keys and fail closed when unavailable',
             run() {
                 const ctx = loadCalendar(snapshot(), true);

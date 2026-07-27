@@ -77,7 +77,7 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
   - ATM call/put IV aggregation by expiry
   - live lambda-independent cumulative `Total Var` (`W×10,000`) and adjacent-expiry `Fwd Var` (`(W₂−W₁)/(T₂−T₁)×10,000`) side by side; every W point is numerically inverted from the real two-sided ATM Call+Put BBO midpoint straddle and never falls back to vendor IV; cumulative drops and negative forward intervals are highlighted as hard inversion candidates
   - TWS calendar-day Call/Put IV plus TD IV re-annualized on the last manually calculated price-derived implied-λ curve; the visible scalar (default `0.30`) is fallback-only until a calculation is available, directly covered closures use their own weights, and the display explicitly extrapolates the curve median to later closures
-  - per-weekend implied λ solved on demand through a three-tier source chain: a complete coherent two-sided ATM straddle snapshot is preferred, incomplete TWS evidence falls back to an atomic subset of usable BBO expiry pairs, and a final audited `vendor_iv` estimate uses the visible ATM Call/Put IV pairs when books are missing. Signed inversion values are preserved instead of clipped, and later weekly intervals may use explicitly marked nearest-baseline extrapolation. The result is frozen in the UI, then explicitly synced to same-origin simulators or exported as a V2 date array
+  - per-weekend implied λ solved on demand through a three-tier source chain: a complete coherent two-sided ATM straddle snapshot is preferred, incomplete TWS evidence falls back to an atomic subset of usable BBO expiry pairs, and a final audited `vendor_iv` estimate uses the visible ATM Call/Put IV pairs when books are missing. Signed inversion values are preserved instead of clipped. Listed-expiry gaps of 8–31 days use an explicitly marked endpoint-variance aggregate; longer gaps use the robust median of identifiable intervals from the same frozen surface. These inferred dates are marked `≈`, retained with provenance in V2, and prevent silent holes between usable expiry endpoints. The result is frozen in the UI, then explicitly synced to same-origin simulators or exported as a V2 date array
   - configurable DTE buckets
   - per-symbol JSON history files
 - Session persistence:
@@ -253,6 +253,8 @@ User-facing wrappers:
 - `start_option_combo.bat`
 - `start_historical_replay.bat`
 - `update_yield_curve.bat`
+- `sync_exchange_calendars.bat`
+- `run_market_data_maintenance.bat`
 - `install_ib_bridge_deps.bat`
 - `cleanup_logs.bat`
 
@@ -263,6 +265,8 @@ Important PowerShell entry points:
 - `powershell_scripts/start_option_combo.ps1`
 - `powershell_scripts/start_historical_replay.ps1`
 - `powershell_scripts/update_yield_curve.ps1`
+- `powershell_scripts/sync_exchange_calendars.ps1`
+- `powershell_scripts/run_market_data_maintenance.ps1`
 - `powershell_scripts/start_option_combo_codex.ps1`
 - `powershell_scripts/launch_ib_server_codex.ps1`
 - `powershell_scripts/restart_option_combo_codex.ps1`
@@ -276,8 +280,12 @@ Important PowerShell entry points:
 - `start_option_combo_mac.command`
 - `start_historical_replay_mac.command`
 - `update_yield_curve_mac.command`
+- `sync_exchange_calendars_mac.command`
+- `run_market_data_maintenance_mac.command`
 - `start_option_combo.sh`
 - `update_yield_curve.sh`
+- `sync_exchange_calendars.sh`
+- `run_market_data_maintenance.sh`
 - `install_ib_bridge_deps_mac.command`
 - `cleanup_logs_mac.command`
 
@@ -424,10 +432,11 @@ backstop — past that the client gives up first and reports no cause. Values be
 
 `option_contract_timing_timeout_seconds` (in `[server]`) bounds the ContractDetails
 lookups that resolve an option's exact last-trade timing and verify a FOP's
-underlying futures delivery month. On timeout a profile cutoff is treated as
-diagnostic/compatibility data only: live target-expiry, FOP/INDEX, and ≤7-day
-surviving legs fail closed until exact contract timing arrives rather than pricing
-on a guessed clock. The default is 5s; values below 0.5s are floored.
+underlying futures delivery month. On timeout, an otherwise IB-qualified
+standard stock/ETF option may continue on the visible product-profile cutoff.
+FOP/INDEX plus unverified, adjusted, or otherwise nonstandard options still fail
+closed until exact timing arrives. The default is 5s; values below 0.5s are
+floored.
 
 Optional historical data overrides:
 
@@ -606,6 +615,20 @@ Daily maintenance and inspection:
 - Windows: double-click `update_yield_curve.bat`.
 - macOS: double-click `update_yield_curve_mac.command`.
 - Linux: run `./update_yield_curve.sh`.
+
+For a combined maintenance run, the launchers update the yield curve
+first and the official exchange calendars second:
+
+- Windows: double-click `run_market_data_maintenance.bat`.
+- macOS: double-click `run_market_data_maintenance_mac.command`.
+- Linux: run `./run_market_data_maintenance.sh`.
+
+The second step is not started when the yield-curve step fails. The combined
+launcher updates all configured markets when CME credentials are available;
+without them it automatically refreshes NYSE only and preserves existing
+CME/NYMEX/COMEX entries with their original timestamps. Those preserved
+entries independently become unavailable when stale. Pass `--nyse-only` on
+macOS/Linux or `-NyseOnly` on PowerShell to force that scope explicitly.
 
 For the long-running Docker deployment, `option_combo_starter/supervisor.py`
 runs the same updater once at 09:30 America/New_York on each weekday. The
@@ -798,9 +821,12 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
    curve point cannot be resolved. `TD IV fallback λ` never feeds the
    implied-λ estimator; it is used only before a qualified implied curve is
    available. After that, the price-derived curve feeds back into TD IV and
-   the curve median is visibly extrapolated for display horizons beyond direct
-   coverage. The simulator remains strict by date and does not consume those
-   extrapolated display weights. After a frontend upgrade, hard
+   the curve median is visibly extrapolated for display horizons beyond the
+   last structured expiry. The simulator remains strict by date and does not
+   consume that display-only tail. Gaps between usable expiry endpoints are
+   instead filled during the audited calculation: 8–31 day gaps use observed
+   endpoint variance, while longer gaps use the same-surface robust median;
+   those synchronized dates are visibly marked `≈`. After a frontend upgrade, hard
    refresh every already-open IVTS, Portfolio, and Chart Lab tab once; restarting
    only the backend does not replace JavaScript already running in a tab.
 2. Wait until the card reports either `Strict coherent source ready` or
@@ -821,25 +847,19 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
    `Export λ` / `Load λ File` is for another origin or machine. Each export carries a `symbol[#futuresMonth]@quoteAsOf`
    curve id, complete `intervals`/`byDate`, official-calendar provenance, and a
    UTC quote timestamp in the filename so same-day observations stay distinct.
-4. Coverage is strict whenever implied λ is enabled. If any open option leg
-   that remains alive at the target crosses an unsampled weekend or full-day
-   exchange closure between the live quote instant and that leg's expiry, the
-   UI lists the missing dates and implied-mode projections stop. The sole
-   exception is the explicit `not_required` state: no such still-live leg
-   crosses a non-trading date, so no implied-λ observation is needed. Calendar,
-   Trading days, an unchecked IVTS box, and the numeric scalar λ are diagnostic
-   lenses only and cannot bypass this live projection gate; the array median is
-   descriptive and is never extrapolated.
+4. Per-date IVTS coverage is preferred whenever implied λ is enabled. Missing
+   closure dates are listed and filled with the accepted curve median; when no
+   qualified curve is loaded the configured scalar λ is used. These fallbacks
+   are visibly marked as estimates instead of stopping all projections.
+   Outside bundled live exchange-calendar coverage, weekdays/weekends are also
+   estimated; historical replay continues to require observed trading dates.
 
 For a live forecast such as "on 7/10, value the calendar at the 7/15 close",
 set the simulation date to `7/15`, select `Weighted weekends (λ)`, and enable
 the matching fresh IVTS array. A target date that is still in the future but
 equals the near leg's expiry means close/settlement: the near leg is intrinsic
 and the far leg retains the time from that close to its own expiry. The IVTS
-status must confirm complete coverage through every still-open leg's expiry.
-If no surviving interval crosses a weekend/full holiday, the explicit
-`not_required` state is sufficient; otherwise no scalar-clock choice can
-produce a strict live forecast.
+status reports complete coverage, estimated fallback, or `not_required`.
 
 ### Simulation target instant and expiry cutoff
 
@@ -861,21 +881,18 @@ near leg and every surviving far leg:
 For a subscribed option, `ib_server.py` gives priority to IB ContractDetails:
 `lastTradeDateOrContractMonth + lastTradeTime + timeZoneId` is converted to an
 exact UTC `expiryAsOf`. `realExpirationDate` is retained only as diagnostics
-because it can be later than the last trading instant. Live projections are
-strict by default: every open leg expiring on the target date, every surviving
-FOP/INDEX leg, and every surviving option with at most seven calendar days left
-must have contract-source timing. Until those facts arrive, the UI reports
-`exact_contract_timing_missing`, lists the affected leg ids, and every payoff/
-probability surface fails closed. The following profile times remain only for
-historical replay, explicit compatibility mode, or longer-dated stock/ETF legs:
+because it can be later than the last trading instant. Live analysis uses the
+visible product-profile cutoff whenever exact IB timing is pending or absent.
+Explicitly rejected/not-found contracts, incompatible adjusted equity classes,
+conflicting near-leg cutoffs, and deferred special settlement still fail
+closed. The profile timing estimates are:
 
 The timing handoff is independent of price ticks, including when a contract is
 already pooled by IVTS. A ContractDetails response is cacheable only after it
 contains a parseable exact cutoff (and, for FOP, verified underlying binding);
-partial responses are retried on a later subscription. Therefore a persistent
-`exact_contract_timing_missing` on current code means IB did not provide a
-complete cutoff or the qualified identity failed validation, rather than that
-the option had only one expiry or its ticker happened to be reused.
+partial responses are retried on a later subscription. A persistent
+`exact_contract_timing_missing` now means the contract identity was explicitly
+rejected/not found or conflicts with a known standard equity class.
 
 | Product family | Profile cutoff fallback |
 | --- | --- |
@@ -954,15 +971,12 @@ Forward, and quote-horizon discount rate. Future target points then hold that
 per-leg local BBO-equivalent IV constant. This removes the current-price basis
 caused by feeding a TWS IV back through different model inputs.
 
-Live What-If projections now use `projectionConvergenceMode: "strict-bbo"` by
-default. Every option leg that is still alive at the portfolio target must
-have that fresh valid two-sided midpoint and a successful local IV inversion;
-otherwise valuation, main/global payoff charts, Chart Lab, probability and
-amortized projections all fail closed. A near leg whose cutoff is at or before
-the target is intrinsic and is intentionally exempt. Historical replay is
-unchanged. The former live input-IV behavior is available only through the
-explicit saved/imported compatibility value `"legacy-input-iv"`; missing or
-unknown values normalize back to strict mode.
+Live What-If projections use
+`projectionConvergenceMode: "best-effort-input-iv"` by default. The shared
+priority is fresh local BBO inversion, best observable option-price inversion,
+then the latest usable TWS/input IV. Valuation, main/global payoff charts,
+Chart Lab, probability, and amortized projections all use this same policy.
+Strict BBO remains available as an opt-in chart diagnostic.
 
 The option BBO, quote-horizon Forward/spot and live portfolio clock used by a
 strict local inversion must be within 30 seconds of one another. This atomic
@@ -971,11 +985,10 @@ quote freshness window because a two-minute skew is material when the far leg
 has only hours or minutes left. A breach reports the exact local-anchor status
 instead of reverting to TWS/manual IV.
 
-Websocket health is independent of the frozen server quote clock. Disconnects
-immediately invalidate strict projections and trigger a redraw; a 5-second
-watchdog also marks the feed stale when no market-data payload has arrived for
-120 seconds. Stored quotes may remain visible for Live P&L diagnostics, but are
-tagged stale and cannot pass the projection gate until fresh data arrives.
+Websocket health is independent of the frozen server quote clock. A 5-second
+watchdog marks the feed stale when no market-data payload has arrived for 120
+seconds. Stored evidence is tagged stale; analysis continues from the best
+available estimate while the strict-BBO diagnostic remains unavailable.
 
 Chart Lab's auxiliary websocket is used only for daily bars and its visual live
 price overlay. Projection pricing always consumes the main Portfolio websocket
@@ -1106,7 +1119,8 @@ browser-ready snapshot:
 - CME/NYMEX/COMEX: CME Reference Data API v3 `tradingSchedules`, resolved per
   product (`ES`, `NQ`, `MES`, `MNQ`, `CL`, `GC`, `SI`, `HG`)
 
-Run the refresh once each weekend:
+Refresh the official calendars periodically; quarterly is sufficient for the
+183-day safety window:
 
 ```bash
 ./sync_exchange_calendars_mac.command
@@ -1115,6 +1129,19 @@ Run the refresh once each weekend:
 ```powershell
 .\sync_exchange_calendars.bat
 ```
+
+On Linux/POSIX:
+
+```bash
+./sync_exchange_calendars.sh
+```
+
+To update both maintained market-data inputs in one ordered run, use
+`run_market_data_maintenance_mac.command`,
+`run_market_data_maintenance.bat`, or
+`run_market_data_maintenance.sh` for the current operating system. These run
+the yield-curve updater before the calendar updater and stop on the first
+failed task.
 
 CME requires an OAuth API ID created under CME Group Login → Customer Center →
 My Profile → API Management. Both launchers read `api_id` / `api_secret` (or a
@@ -1127,12 +1154,13 @@ without writing them to disk. Never commit real values. Futures/options
 attributes use CME's default entitlement.
 
 For an NYSE-only bootstrap, explicitly pass `--nyse-only` on macOS/POSIX or
-`-NyseOnly` on PowerShell. This does not invent futures calendars: IVTS stays
-fail-closed for any product whose official snapshot is missing or stale. If the
-weekly job runs with no CME credentials **and** no `--nyse-only`, the Python
-sync fails before writing anything (NYSE included), so the scheduler must
-supply one or the other — monitor its exit code; non-zero means nothing was
-refreshed.
+`-NyseOnly` on PowerShell. Existing futures calendars are retained unchanged,
+including their original `fetchedAt`; they are not presented as refreshed and
+IVTS remains fail-closed once they are stale. The standalone calendar updater
+still fails before writing anything when no CME credentials and no explicit
+NYSE-only scope are provided. The combined one-click maintenance launcher is
+the exception: it automatically selects NYSE-only in that situation and prints
+the degraded scope.
 
 Generated files:
 
@@ -1143,8 +1171,9 @@ The downloader verifies TLS, validates table/API structure, and refuses to
 write on parsing errors. The old `scripts/sync_market_holidays.py` rule/database
 diff implementation is retired; the filename now delegates to this official
 sync so an old maintenance command cannot create a second calendar authority.
-IVTS treats a snapshot older than 14 days as unavailable, so missing a weekly
-refresh cannot silently leave strategy advice running on stale schedules.
+IVTS treats a snapshot older than 183 days as unavailable. This half-year
+guard catches genuinely abandoned maintenance without coupling ordinary TD-IV
+display to a weekly calendar download.
 CME full-day closures are derived from missing weekdays in the official
 Business Trade Date sequence (and from dates with no `open` event). Snapshots
 created by the older `has open`-only derivation are rejected by the browser and

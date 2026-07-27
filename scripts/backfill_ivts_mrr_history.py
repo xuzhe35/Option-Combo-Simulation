@@ -33,7 +33,7 @@ OFFICIAL_CALENDAR_PATH = PROJECT_ROOT / "exchange_calendars" / "official_exchang
 CALENDAR_ID = "NYSE"
 MARKET_TIMEZONE = ZoneInfo("America/New_York")
 REGULAR_OPTION_CLOSE = time(16, 15)
-OFFICIAL_CALENDAR_MAX_AGE_DAYS = 14
+OFFICIAL_CALENDAR_MAX_AGE_DAYS = 183
 
 # The watermark's front-row acceptance window (frontTargetDte +- 3).
 FRONT_TARGET, FRONT_LO, FRONT_HI = 7, 4, 10
@@ -84,7 +84,7 @@ def _require_fresh_official_calendar(official_calendar, now):
 
     The chain database is useful evidence for old observed sessions, but it
     cannot authenticate the current holiday/early-close schedule.  Require a
-    freshly downloaded NYSE snapshot before granting any row the durable
+    reasonably recent NYSE snapshot before granting any row the durable
     ``weeklySessionValidated`` provenance bit.
     """
     if not isinstance(official_calendar, dict):

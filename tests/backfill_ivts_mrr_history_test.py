@@ -70,7 +70,7 @@ class BackfillWeeklyEntryTest(unittest.TestCase):
 
     def test_stale_or_untrusted_official_calendar_fails_closed(self):
         now = datetime(2026, 7, 17, 20, 15, tzinfo=timezone.utc)
-        stale = _calendar(datetime(2026, 7, 1, tzinfo=timezone.utc))
+        stale = _calendar(datetime(2025, 12, 31, tzinfo=timezone.utc))
         untrusted = _calendar(now)
         untrusted["sourceKind"] = "hand_written"
         with mock.patch.object(BACKFILL, "_get") as mocked_get:
@@ -79,6 +79,14 @@ class BackfillWeeklyEntryTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "official_html"):
                 BACKFILL._validated_weekly_entries("SPY", now=now, official_calendar=untrusted)
         mocked_get.assert_not_called()
+
+    def test_calendar_remains_fresh_through_183_days(self):
+        now = datetime(2026, 7, 17, 20, 15, tzinfo=timezone.utc)
+        calendar = _calendar(datetime(2026, 1, 15, 20, 15, tzinfo=timezone.utc))
+
+        accepted = BACKFILL._require_fresh_official_calendar(calendar, now)
+
+        self.assertIs(accepted, calendar)
 
 
 if __name__ == "__main__":

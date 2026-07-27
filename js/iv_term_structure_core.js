@@ -452,7 +452,14 @@
     }
 
     const IMPLIED_LAMBDA_DEFAULTS = Object.freeze({
+        // Intervals through this length are treated as direct/local estimates.
+        // Longer listed-expiry gaps are still solved from their two observed
+        // endpoints, but are explicitly labelled multi-week aggregates.
         maxIntervalCalendarDays: 7,
+        // Beyond roughly one month, endpoint variance is too contaminated by
+        // unrelated events to apportion across every closure. Those intervals
+        // use the robust center of the nearer identifiable intervals instead.
+        maxAggregateIntervalCalendarDays: 31,
         // Keep the per-day variance baseline local to the weekend being
         // solved: a wide window lets scheduled-event days (FOMC, CPI, month
         // end) a week away inflate the "normal day" and crush the lambda.
@@ -1314,10 +1321,14 @@
                 ? (exactEndMs - exactStartMs) / MS_PER_DAY
                 : back.dte - front.dte;
             const calendarDays = back.dte - front.dte;
-            if (varianceCalendarDays <= 0
-                || varianceCalendarDays > opts.maxIntervalCalendarDays) {
+            if (varianceCalendarDays <= 0) {
                 return;
             }
+            const exceedsDirectIntervalLimit = Number.isFinite(opts.maxIntervalCalendarDays)
+                && varianceCalendarDays > opts.maxIntervalCalendarDays;
+            const exceedsAggregateIntervalLimit = Number.isFinite(
+                opts.maxAggregateIntervalCalendarDays
+            ) && varianceCalendarDays > opts.maxAggregateIntervalCalendarDays;
             const dateUtils = globalScope.OptionComboDateUtils;
             const exactClock = exactTimestampInterval
                 && dateUtils && typeof dateUtils.resolveWeightedTime === 'function'
@@ -1418,6 +1429,14 @@
                     ? new Date(intervalQuoteAsOfMs).toISOString()
                     : null,
                 snapshotId: back.snapshotId || front.snapshotId || snapshotId || null,
+                exceedsDirectIntervalLimit,
+                exceedsAggregateIntervalLimit,
+                directIntervalLimitDays: Number.isFinite(opts.maxIntervalCalendarDays)
+                    ? opts.maxIntervalCalendarDays
+                    : null,
+                aggregateIntervalLimitDays: Number.isFinite(
+                    opts.maxAggregateIntervalCalendarDays
+                ) ? opts.maxAggregateIntervalCalendarDays : null,
                 isFront,
                 frontIntervalVerified: !isFront || frontIntervalVerified,
             });
@@ -1457,6 +1476,12 @@
                     lambda: null,
                     lambdaClamped: null,
                     status: 'ok',
+                    estimateKind: interval.exceedsDirectIntervalLimit
+                        ? 'multi_week_aggregate'
+                        : 'direct_interval',
+                    isEstimated: interval.exceedsDirectIntervalLimit === true,
+                    originalStatus: null,
+                    hardInversion: false,
                 };
                 if (interval.isFront && !frontIntervalVerified) {
                     result.status = 'unverified_front';
@@ -1472,8 +1497,8 @@
                     result.status = 'stale_mix';
                     return result;
                 }
-                if (!(interval.forwardVariance > 0)) {
-                    result.status = 'nonpositive_forward_variance';
+                if (interval.exceedsAggregateIntervalLimit) {
+                    result.status = 'aggregate_interval_too_long';
                     return result;
                 }
                 let candidates = _madFilter(pure
@@ -1512,6 +1537,7 @@
                 const lambda = (
                     interval.forwardVariance / baseline - interval.varianceTradingDays
                 ) / interval.varianceNonTradingDays;
+                result.hardInversion = !(interval.forwardVariance > 0);
                 result.baselineVariance = baseline;
                 result.baselineCount = candidates.length;
                 result.baselineMode = baselineMode;
@@ -1524,6 +1550,46 @@
                 result.isInverted = lambda < -1e-8;
                 return result;
             });
+
+        // A listed chain can move from daily/weekly expiries to sparse monthly
+        // points. The long endpoint-to-endpoint interval above is the preferred
+        // estimate because it still uses observed cumulative variance. If an
+        // interval remains unidentified only because no pure-day baseline is
+        // available nearby, fill it from the robust center of the intervals
+        // that were identifiable from the same surface. This keeps the
+        // per-date curve contiguous while preserving explicit provenance.
+        const measuredLambdas = weekendIntervals
+            .filter((interval) => interval.status === 'ok'
+                && interval.estimateKind !== 'curve_median_fill'
+                && Number.isFinite(interval.lambda))
+            .map((interval) => interval.lambda);
+        const curveMedianFallback = measuredLambdas.length
+            ? _roundNumber(_median(measuredLambdas), 4)
+            : null;
+        if (curveMedianFallback !== null) {
+            for (const interval of weekendIntervals) {
+                if (!['no_baseline', 'aggregate_interval_too_long'].includes(interval.status)
+                    || !Array.isArray(interval.nonTradingDates)
+                    || !interval.nonTradingDates.length) {
+                    continue;
+                }
+                interval.originalStatus = interval.status;
+                interval.status = 'ok';
+                interval.estimateKind = 'curve_median_fill';
+                interval.isEstimated = true;
+                interval.baselineMode = 'curve_median_extrapolated';
+                interval.baselineCount = measuredLambdas.length;
+                interval.rawLambda = curveMedianFallback;
+                interval.lambda = curveMedianFallback;
+                interval.lambdaClamped = _roundNumber(
+                    Math.min(1, Math.max(0, curveMedianFallback)), 4
+                );
+                interval.conventionalRange = curveMedianFallback < -1e-8
+                    ? 'inverted'
+                    : (curveMedianFallback > 1 + 1e-8 ? 'above_calendar' : 'inside');
+                interval.isInverted = curveMedianFallback < -1e-8;
+            }
+        }
 
         const coherenceFailureStatuses = new Set([
             'missing_row_snapshot',
@@ -1555,6 +1621,25 @@
             : weekendIntervals
                 .filter((interval) => interval.status === 'ok')
                 .map((interval) => interval.lambda);
+        const centralLambdas = rowCoherenceFailure
+            ? []
+            : weekendIntervals
+                .filter((interval) => interval.status === 'ok'
+                    && interval.estimateKind !== 'curve_median_fill')
+                .map((interval) => interval.lambda);
+        const multiWeekAggregateIntervalCount = weekendIntervals.filter(
+            interval => interval.status === 'ok'
+                && interval.estimateKind === 'multi_week_aggregate'
+        ).length;
+        const curveMedianFillIntervalCount = weekendIntervals.filter(
+            interval => interval.status === 'ok'
+                && interval.estimateKind === 'curve_median_fill'
+        ).length;
+        const hardInversionIntervalCount = weekendIntervals.filter(
+            interval => interval.status === 'ok' && interval.hardInversion === true
+        ).length;
+        const estimatedIntervalCount = multiWeekAggregateIntervalCount
+            + curveMedianFillIntervalCount;
         const coveredDates = Object.keys(byDate).sort();
         const quoteAsOfMs = points
             .map((point) => point.asOfMs)
@@ -1621,6 +1706,7 @@
             methodology: {
                 pricingModel,
                 estimationMode: opts.estimationMode === 'best_effort'
+                    || estimatedIntervalCount > 0
                     ? 'best_effort'
                     : 'strict',
                 sourceQuoteEvidence: String(opts.sourceQuoteEvidence || '').trim() || null,
@@ -1632,6 +1718,9 @@
                 baselineWindowDays: opts.baselineWindowDays,
                 minBaselines: opts.minBaselines,
                 maxIntervalCalendarDays: opts.maxIntervalCalendarDays,
+                maxAggregateIntervalCalendarDays: opts.maxAggregateIntervalCalendarDays,
+                longIntervalPolicy: 'observed_multi_week_aggregate',
+                missingBaselinePolicy: 'same_surface_curve_median',
                 minDte: opts.minDte,
                 maxDiscountCurveAgeDays: Number.isFinite(maxDiscountCurveAgeDays)
                     ? maxDiscountCurveAgeDays
@@ -1656,7 +1745,9 @@
             pureIntervalCount: pure.length,
             okIntervalCount: okLambdas.length,
             byDate,
-            medianLambda: okLambdas.length ? _roundNumber(_median(okLambdas), 4) : null,
+            medianLambda: centralLambdas.length
+                ? _roundNumber(_median(centralLambdas), 4)
+                : (okLambdas.length ? _roundNumber(_median(okLambdas), 4) : null),
             coverageStart: coveredDates.length ? coveredDates[0] : null,
             coverageEnd: coveredDates.length ? coveredDates[coveredDates.length - 1] : null,
             quality: {
@@ -1668,6 +1759,7 @@
                 quoteComplete: !!(snapshotMetadata
                     && snapshotMetadata.quoteComplete === true),
                 estimationMode: opts.estimationMode === 'best_effort'
+                    || estimatedIntervalCount > 0
                     ? 'best_effort'
                     : 'strict',
                 strictSnapshot: varianceSource === 'straddle'
@@ -1677,6 +1769,10 @@
                 underlyingSnapshotId: underlyingSnapshotId || null,
                 usablePointCount: points.length,
                 rejectedRowCount: rowDiagnostics.filter((row) => row.status !== 'ok').length,
+                multiWeekAggregateIntervalCount,
+                curveMedianFillIntervalCount,
+                hardInversionIntervalCount,
+                estimatedIntervalCount,
             },
         };
     }

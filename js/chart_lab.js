@@ -445,6 +445,11 @@
                 quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
                 quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
                 quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+                allowProjectionIvFallback: globalScope.OptionComboPricingCore
+                    && typeof globalScope.OptionComboPricingCore.normalizeProjectionConvergenceMode === 'function'
+                    && globalScope.OptionComboPricingCore.normalizeProjectionConvergenceMode(
+                        workingState.projectionConvergenceMode
+                    ) === 'best-effort-input-iv',
             };
             timingContexts.push(timingContext);
             return processLegData(
