@@ -160,7 +160,7 @@ class PnLChart {
             ? pricingCore.normalizeProjectionConvergenceMode(
                 globalState && globalState.projectionConvergenceMode
             )
-            : 'strict-bbo';
+            : 'best-effort-input-iv';
         const allowProjectionIvFallback = convergenceMode === 'best-effort-input-iv';
         const productRegistry = _getChartProductRegistryApi();
         const underlyingProfile = productRegistry && typeof productRegistry.resolveUnderlyingProfile === 'function'
@@ -259,13 +259,18 @@ class PnLChart {
             !leg.isUnderlyingLeg && !leg.isExpired && !Number.isFinite(leg.simIV)
         );
         const fallbackLegs = processedLegs.flatMap((processedLeg, index) => {
-            if (!processedLeg || processedLeg.simIVSource !== 'best-effort-input-iv') return [];
+            if (!processedLeg || ![
+                'best-effort-input-iv',
+                'estimated-observable-price',
+            ].includes(processedLeg.simIVSource)) return [];
             const rawLeg = group.legs[index] || {};
             return [{
                 id: String(rawLeg.id || `leg-${index + 1}`),
                 type: String(rawLeg.type || 'option').toLowerCase(),
                 expDate: String(rawLeg.expDate || ''),
-                source: String(processedLeg.simIVFallbackSource || rawLeg.ivSource || 'manual'),
+                source: processedLeg.simIVSource === 'estimated-observable-price'
+                    ? 'observable option price'
+                    : String(processedLeg.simIVFallbackSource || rawLeg.ivSource || 'manual'),
                 iv: Number.isFinite(processedLeg.simIV) ? processedLeg.simIV : null,
                 localIvStatus: processedLeg.localIvAnchorStatus || null,
             }];

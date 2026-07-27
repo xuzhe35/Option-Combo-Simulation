@@ -337,7 +337,20 @@ module.exports = {
                     source: 'near-leg-profile-cutoff',
                 };
                 ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
-                assert.match(elements.simulatedDateHint.textContent, /product fallback is in use/i);
+                assert.match(elements.simulatedDateHint.textContent, /timing estimate is in use/i);
+                assert.equal(elements.simulatedDateHint.style.color, '#b45309');
+                assert.match(elements.simulatedDateHint.title, /Pricing remains available/i);
+
+                state.simulationTiming = {
+                    available: true,
+                    status: 'ok',
+                    targetAsOf: '2026-03-20T19:30:00.000Z',
+                    source: 'near-leg-contract-cutoff',
+                    profileFallbackLegIds: ['far-call'],
+                };
+                ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
+                assert.match(elements.simulatedDateHint.textContent, /far-call/i);
+                assert.match(elements.simulatedDateHint.textContent, /product-profile timing estimate/i);
                 assert.equal(elements.simulatedDateHint.style.color, '#b45309');
 
                 // No open leg expires on the target date, so the product close
@@ -354,7 +367,7 @@ module.exports = {
                 assert.match(elements.simulatedDateHint.textContent, /product-profile cutoff/i);
                 assert.doesNotMatch(
                     elements.simulatedDateHint.textContent,
-                    /product fallback is in use/i
+                    /timing estimate is in use/i
                 );
                 assert.equal(elements.simulatedDateHint.style.color, '#4b5563');
                 assert.match(elements.simulatedDateHint.title, /No open leg expires on this date/i);
@@ -524,9 +537,7 @@ module.exports = {
                 });
                 assert.match(elements.simImpliedLambdaStatus.textContent, /only V2 straddle exports/i);
 
-                // Strict coverage status is the UI source of truth. An entry
-                // with a missing required date is not shown as active and does
-                // not silently advertise the scalar as a fallback.
+                // Coverage quality is disclosed without disabling projection.
                 state.simImpliedLambdaCoverage = {
                     status: 'incomplete_coverage',
                     usable: false,
@@ -538,12 +549,13 @@ module.exports = {
                 assert.match(elements.simImpliedLambdaStatus.textContent, /coverage is incomplete/i);
                 assert.match(elements.simImpliedLambdaStatus.textContent, new RegExp(coveredDate2));
                 assert.match(elements.simImpliedLambdaStatus.textContent, /near-leg, far-leg/i);
-                assert.match(elements.simImpliedLambdaStatus.textContent, /scalar λ=.*diagnostic only/i);
-                assert.match(elements.simImpliedLambdaStatus.textContent, /cannot bypass/i);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /Projection remains available/i);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /λ≈0\.11/i);
+                assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /cannot bypass/i);
                 assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /automatic fallback/i);
-                assert.equal(elements.simImpliedLambdaStatus.style.color, '#dc2626');
+                assert.equal(elements.simImpliedLambdaStatus.style.color, '#b45309');
                 assert.equal(elements.simImpliedLambdaStatus.style.fontWeight, '600');
-                assert.equal(elements.simTimeBasisDisplay.textContent, 'λ=IVTS unavailable');
+                assert.equal(elements.simTimeBasisDisplay.textContent, 'λ≈0.11 estimated');
                 assert.equal(elements.simWeekendWeight.disabled, true);
                 assert.equal(elements.simWeekendWeight.style.display, 'none');
                 assert.equal(elements.simImpliedLambdaReceived.style.display, 'flex');
@@ -560,7 +572,7 @@ module.exports = {
                 ctx.OptionComboControlPanelUI.refreshSimTimeBasisUi(state);
                 assert.match(elements.simImpliedLambdaStatus.textContent, /no fresh matching V2 curve is loaded/i);
                 assert.match(elements.simImpliedLambdaStatus.textContent, new RegExp(coveredDate1));
-                assert.equal(elements.simImpliedLambdaStatus.style.color, '#dc2626');
+                assert.equal(elements.simImpliedLambdaStatus.style.color, '#b45309');
 
                 state.simImpliedLambdaCoverage = {
                     status: 'not_required',

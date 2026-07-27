@@ -492,31 +492,31 @@ module.exports = {
             },
         },
         {
-            name: 'MC horizon fails closed without complete official or observed calendar coverage',
+            name: 'MC horizon estimates live weekdays but keeps historical coverage strict',
             run() {
                 const ctx = loadPricingContext();
                 ctx.configureSimTimeBasis({ weekendWeight: 0.3 });
 
-                assert.equal(
-                    ctx.resolveSimHorizonClock(
-                        '2026-07-10', '2026-07-13', 'UNKNOWN', 'live'
-                    ).status,
-                    'calendar_unavailable'
+                const unknown = ctx.resolveSimHorizonClock(
+                    '2026-07-10', '2026-07-13', 'UNKNOWN', 'live'
                 );
-                assert.equal(
-                    ctx.resolveSimHorizonClock(
-                        '2024-07-10', '2024-07-13', 'NYSE', 'live'
-                    ).status,
-                    'calendar_unavailable'
+                assert.equal(unknown.status, 'calendar_estimate');
+                assert.equal(unknown.calendarEstimated, true);
+                assert.deepEqual(Array.from(unknown.stepWeights), [1, 0.3, 0.3]);
+
+                const oldNyse = ctx.resolveSimHorizonClock(
+                    '2024-07-10', '2024-07-13', 'NYSE', 'live'
                 );
-                // A weekend-only interval must still prove official coverage;
-                // CME coverage ends on 2028-05-05.
-                assert.equal(
-                    ctx.resolveSimHorizonClock(
-                        '2028-05-06', '2028-05-08', 'CME:ES', 'live'
-                    ).status,
-                    'calendar_unavailable'
+                assert.equal(oldNyse.status, 'calendar_estimate');
+                assert.equal(oldNyse.calendarEstimated, true);
+
+                // CME coverage ends on 2028-05-05; a weekend-only live
+                // interval remains usable as a disclosed weekday estimate.
+                const cmeWeekend = ctx.resolveSimHorizonClock(
+                    '2028-05-06', '2028-05-08', 'CME:ES', 'live'
                 );
+                assert.equal(cmeWeekend.status, 'calendar_estimate');
+                assert.deepEqual(Array.from(cmeWeekend.stepWeights), [0.3, 0.3]);
 
                 ctx.configureSimTimeBasis({ weekendWeight: 0.3 });
                 assert.equal(

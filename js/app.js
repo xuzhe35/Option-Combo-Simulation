@@ -127,25 +127,22 @@ const state = {
     ivOffset: 0.0, // 0%
     simTimeBasis: 'weighted', // 'calendar' (TWS default) | 'trading' | 'weighted'
     simWeekendWeight: 0.3, // λ: weekend/holiday variance weight used by 'weighted'
-    // Strict-by-default: a live weighted-clock projection must consume the
-    // IVTS per-non-trading-day curve (or visibly fail closed).  The scalar λ
-    // remains an explicit opt-out selected by the user, never an implicit
-    // compatibility fallback for old sessions.
+    // Prefer the IVTS per-date curve. Missing dates fall back to the curve
+    // median or this scalar and are reported as estimated.
     simUseImpliedLambda: true,
     simImpliedLambdaEntry: null, // runtime cache of the matched IVTS handoff entry (not exported)
     simImpliedLambdaFileEntry: null, // explicit portable-file fallback; never populated by localStorage
     simImpliedLambdaCoverage: null, // runtime per-live-leg coverage audit; never exported
     simulationTiming: null, // runtime portfolio-global valuation instant; never exported
-    // Accuracy-first live What-If gate. Every option that remains alive at the
-    // target must have a fresh valid two-sided BBO whose IV this runtime can
-    // invert locally. `legacy-input-iv` is import-only compatibility mode.
-    projectionConvergenceMode: 'strict-bbo',
+    // Prefer local BBO inversion, then use the latest usable input/TWS IV.
+    // Order and contract validation remain separate fail-closed paths.
+    projectionConvergenceMode: 'best-effort-input-iv',
     liveProjectionFeedConnected: false, // runtime websocket health; not exported
     liveProjectionFeedStale: true, // runtime market-data watchdog; not exported
     liveProjectionLastReceivedAt: '', // local receipt clock; not exported
-    // Live short-dated/FOP/INDEX projections require IB contract-level expiry
-    // timestamps. Historical replay and an explicit false opt-out retain the
-    // legacy product-profile cutoff behavior.
+    // Prefer IB contract-level timestamps. Analysis may use a visible
+    // product-profile estimate while metadata is pending; explicit identity,
+    // cutoff-conflict, and deferred-settlement failures remain hard blockers.
     requireExactContractTiming: true,
     greeksEnabled: false,
     deltaHedge: OptionComboSessionLogic.createDefaultDeltaHedgeConfig(),
@@ -1513,11 +1510,10 @@ function applyImportedState(normalizedState, importedSessionTitle = '') {
     state.simImpliedLambdaFileEntry = null;
     state.simImpliedLambdaCoverage = null;
     state.simulationTiming = null;
-    state.projectionConvergenceMode = typeof OptionComboSessionLogic.normalizeProjectionConvergenceMode === 'function'
-        ? OptionComboSessionLogic.normalizeProjectionConvergenceMode(
-            normalizedState.projectionConvergenceMode
-        )
-        : 'strict-bbo';
+    // Imported sessions may contain the former strict-BBO default. Analysis
+    // always migrates to the resilient policy; strict remains a per-chart
+    // diagnostic rather than a portable workspace gate.
+    state.projectionConvergenceMode = 'best-effort-input-iv';
     state.liveProjectionFeedConnected = false;
     state.liveProjectionFeedStale = true;
     state.liveProjectionLastReceivedAt = '';

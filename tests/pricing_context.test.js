@@ -455,9 +455,10 @@ module.exports = {
                     type: 'call',
                     expDate: '2026-04-17',
                 });
-                assert.equal(missingCarry.usable, false);
-                assert.equal(missingCarry.forwardPrice, null);
-                assert.equal(missingCarry.source, 'index_parity_carry_unavailable');
+                assert.equal(missingCarry.usable, true);
+                assert.equal(missingCarry.forwardPrice, 5800);
+                assert.equal(missingCarry.source, 'index_spot_forward_estimate');
+                assert.equal(missingCarry.quality.status, 'degraded');
 
                 const expirySpot = pricingContext.resolveLegScenarioUnderlyingPrice(
                     {
@@ -1122,7 +1123,7 @@ module.exports = {
             },
         },
         {
-            name: 'requires contract-source timing for target-date and surviving FOP legs',
+            name: 'uses product timing estimates for FOP legs when contract timing is missing',
             run() {
                 const ctx = loadPricingContext();
                 const pricingContext = ctx.OptionComboPricingContext;
@@ -1143,22 +1144,17 @@ module.exports = {
                 };
 
                 const missingNear = pricingContext.resolveSimulationTiming(state);
-                assert.equal(missingNear.available, false);
-                assert.equal(missingNear.status, 'exact_contract_timing_missing');
-                assert.deepEqual(Array.from(missingNear.missingContractTimingLegIds), ['near']);
-                assert.deepEqual(
-                    Array.from(missingNear.missingContractTimingLegs[0].reasons),
-                    ['target_expiry_contract_timing_missing']
-                );
+                assert.equal(missingNear.available, true);
+                assert.equal(missingNear.source, 'near-leg-profile-cutoff');
+                assert.equal(missingNear.contractTimingStatus, 'profile_fallback');
+                assert.deepEqual(Array.from(missingNear.profileFallbackLegIds), ['near']);
 
                 state.groups[0].legs[0].expiryAsOf = '2026-07-17T19:30:00Z';
                 delete state.groups[0].legs[1].expiryAsOf;
                 const missingFar = pricingContext.resolveSimulationTiming(state);
-                assert.equal(missingFar.available, false);
-                assert.deepEqual(Array.from(missingFar.missingContractTimingLegIds), ['far']);
-                assert.ok(missingFar.missingContractTimingLegs[0].reasons.includes(
-                    'product_surviving_leg_contract_timing_missing'
-                ));
+                assert.equal(missingFar.available, true);
+                assert.equal(missingFar.contractTimingStatus, 'profile_fallback');
+                assert.deepEqual(Array.from(missingFar.profileFallbackLegIds), ['far']);
 
                 state.groups[0].legs[1].expiryAsOf = '2026-07-20T20:00:00Z';
                 const complete = pricingContext.resolveSimulationTiming(state);
@@ -1208,7 +1204,7 @@ module.exports = {
             },
         },
         {
-            name: 'requires exact timing for any surviving leg inside seven days and preserves opt-outs',
+            name: 'uses equity profile timing while blocking rejected or adjusted contracts',
             run() {
                 const ctx = loadPricingContext();
                 const pricingContext = ctx.OptionComboPricingContext;
@@ -1224,20 +1220,57 @@ module.exports = {
                     }] }],
                 };
 
-                const blocked = pricingContext.resolveSimulationTiming(state);
-                assert.equal(blocked.available, false);
-                assert.equal(blocked.status, 'exact_contract_timing_missing');
-                assert.deepEqual(Array.from(blocked.missingContractTimingLegIds), ['short-dated']);
-                assert.ok(blocked.missingContractTimingLegs[0].remainingDays < 7);
-                assert.ok(blocked.missingContractTimingLegs[0].reasons.includes(
-                    'short_dated_surviving_leg_contract_timing_missing'
-                ));
+                const pending = pricingContext.resolveSimulationTiming(state);
+                assert.equal(pending.available, true);
+                assert.equal(pending.contractTimingStatus, 'profile_fallback');
+                assert.deepEqual(Array.from(pending.profileFallbackLegIds), ['short-dated']);
 
-                state.groups[0].legs[0].expDate = '2026-07-18';
-                const outsideWindow = pricingContext.resolveSimulationTiming(state);
-                assert.equal(outsideWindow.available, true);
+                Object.assign(state.groups[0].legs[0], {
+                    liveQuoteIdentityStatus: 'verified',
+                    qualifiedOptionConId: 123456,
+                    qualifiedOptionTradingClass: 'SPY',
+                });
+                const profileTimed = pricingContext.resolveSimulationTiming(state);
+                assert.equal(profileTimed.available, true);
+                assert.equal(profileTimed.contractTimingStatus, 'profile_fallback');
+                assert.deepEqual(
+                    Array.from(profileTimed.profileFallbackLegIds),
+                    ['short-dated']
+                );
 
-                state.groups[0].legs[0].expDate = '2026-07-16';
+                state.simulatedDate = '2026-07-16';
+                state.groups[0].legs.push({
+                    id: 'far-seven-day',
+                    type: 'call',
+                    pos: 1,
+                    expDate: '2026-07-23',
+                    liveQuoteIdentityStatus: 'verified',
+                    qualifiedOptionConId: 123457,
+                    qualifiedOptionTradingClass: 'SPY',
+                });
+                const targetExpiry = pricingContext.resolveSimulationTiming(state);
+                assert.equal(targetExpiry.available, true);
+                assert.equal(targetExpiry.source, 'near-leg-profile-cutoff');
+                assert.equal(targetExpiry.precision, 'profile');
+                assert.equal(targetExpiry.contractTimingStatus, 'profile_fallback');
+                assert.deepEqual(
+                    Array.from(targetExpiry.profileFallbackLegIds),
+                    ['short-dated', 'far-seven-day']
+                );
+
+                state.groups[0].legs[0].qualifiedOptionTradingClass = 'SPY1';
+                const adjustedContract = pricingContext.resolveSimulationTiming(state);
+                assert.equal(adjustedContract.available, false);
+                assert.equal(adjustedContract.status, 'exact_contract_timing_missing');
+
+                state.groups[0].legs[0].qualifiedOptionTradingClass = '';
+                state.groups[0].legs[0].liveQuoteIdentityStatus = 'rejected';
+                const rejectedContract = pricingContext.resolveSimulationTiming(state);
+                assert.equal(rejectedContract.available, false);
+                assert.equal(rejectedContract.status, 'exact_contract_timing_missing');
+
+                state.groups[0].legs[0].qualifiedOptionTradingClass = 'SPY';
+                state.groups[0].legs[0].liveQuoteIdentityStatus = 'verified';
                 state.requireExactContractTiming = false;
                 const explicitlyDisabled = pricingContext.resolveSimulationTiming(state);
                 assert.equal(explicitlyDisabled.available, true);

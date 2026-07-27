@@ -1118,6 +1118,21 @@ body {
     color: #c2410c;
 }
 
+.ivts-ratio.ivts-lambda-estimated {
+    color: #b45309;
+    text-decoration: underline dotted rgba(180, 83, 9, 0.55);
+    text-underline-offset: 3px;
+}
+
+.ivts-lambda-date-row strong.ivts-lambda-estimated {
+    color: #b45309;
+}
+
+.ivts-ratio.ivts-lambda-estimated.ivts-lambda-inverted,
+.ivts-lambda-date-row strong.ivts-lambda-estimated.ivts-lambda-inverted {
+    color: #c2410c;
+}
+
 .ivts-total-variance,
 .ivts-forward-variance {
     font-variant-numeric: tabular-nums;

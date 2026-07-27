@@ -2026,6 +2026,23 @@ module.exports = {
                 assert.match(invertedCell, /ivts-lambda-inverted/);
                 assert.match(invertedCell, /signed λ is preserved/);
                 assert.match(invertedCell, /product-profile expiry clock fallback/);
+
+                const estimatedCell = buildImpliedLambdaCell(
+                    { expiry: '20260918' },
+                    { intervals: [{
+                        endExpiry: '20260918', status: 'ok', rawLambda: 0.1672,
+                        baselineCount: 3, baselineMode: 'nearest_extrapolated',
+                        estimateKind: 'multi_week_aggregate', isEstimated: true,
+                        varianceCalendarDays: 14,
+                        nonTradingDates: [
+                            '2026-09-05', '2026-09-06', '2026-09-07',
+                            '2026-09-12', '2026-09-13',
+                        ],
+                    }] }
+                );
+                assert.match(estimatedCell, /≈0\.167/);
+                assert.match(estimatedCell, /ivts-lambda-estimated/);
+                assert.match(estimatedCell, /multi-week aggregate estimate across 14/);
             },
         },
         {

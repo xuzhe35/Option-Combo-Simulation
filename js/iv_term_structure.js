@@ -4080,6 +4080,10 @@
             return unavailable;
         }
 
+        if (calculationMode === 'strict'
+            && Number(entry.quality && entry.quality.estimatedIntervalCount) > 0) {
+            calculationMode = 'structured_estimate';
+        }
         card.impliedLambdaComputedResult = impliedLambda;
         card.impliedLambdaComputedEntry = entry;
         card.impliedLambdaComputedAt = new Date(nowValue).toISOString();
@@ -4097,7 +4101,9 @@
                 ? `Estimated implied λ from ${vendorIvSource.usableExpiryCount} ATM Call/Put IV pairs (${vendorIvSource.skippedExpiryCount} skipped): ${dateCount} structured dates, median ${formatNumber(entry.medianLambda, 4)}. Vendor-IV fallback is frozen; choose Sync or Export.`
                 : (calculationMode === 'best_effort'
                     ? `Estimated implied λ from ${bestEffortSource.usableExpiryCount} usable BBO expiries (${bestEffortSource.skippedExpiryCount} skipped): ${dateCount} structured dates, median ${formatNumber(entry.medianLambda, 4)}. Choose Sync or Export.`
-                    : `Calculated implied λ: ${dateCount} structured dates, median ${formatNumber(entry.medianLambda, 4)}. Choose Sync or Export.`),
+                    : (calculationMode === 'structured_estimate'
+                        ? `Estimated implied λ with ${Number(entry.quality && entry.quality.estimatedIntervalCount) || 0} inferred coverage interval(s): ${dateCount} structured dates, median ${formatNumber(entry.medianLambda, 4)}. Choose Sync or Export.`
+                        : `Calculated implied λ: ${dateCount} structured dates, median ${formatNumber(entry.medianLambda, 4)}. Choose Sync or Export.`)),
         };
         setCardStatus(card, result.message, 'success');
         return result;
@@ -5152,6 +5158,7 @@
     function buildImpliedLambdaCell(row, impliedLambda) {
         const reasons = {
             no_baseline: 'no pure trading-day interval nearby to act as the per-day variance baseline',
+            aggregate_interval_too_long: 'the expiry gap is too long for endpoint aggregation and no same-surface median is available',
             nonpositive_forward_variance: 'forward variance across this interval is not positive',
             calendar_unavailable: 'holiday calendar coverage is unavailable for this range',
             stale_mix: 'quotes were too far apart in time to form one coherent observation',
@@ -5220,15 +5227,28 @@
         const inversionLabel = rawLambda < 0 ? ' Inverted term structure; signed λ is preserved.' : '';
         const baselineLabel = interval.baselineMode === 'nearest_extrapolated'
             ? '; nearest-baseline extrapolation'
+            : (interval.baselineMode === 'curve_median_extrapolated'
+                ? '; same-surface median fill'
+                : '');
+        const estimateLabel = interval.estimateKind === 'multi_week_aggregate'
+            ? `; multi-week aggregate estimate across ${formatNumber(interval.varianceCalendarDays, 2)} calendar days`
+            : (interval.estimateKind === 'curve_median_fill'
+                ? `; filled from ${interval.baselineCount || 0} identifiable interval(s) on this surface`
+                : '');
+        const hardInversionLabel = interval.hardInversion === true
+            ? '; nonpositive observed forward variance retained as a signed hard-inversion estimate'
             : '';
         const clockLabel = interval.profileClockFallback
             ? '; product-profile expiry clock fallback'
             : '';
         const title = `Implied weight of ${dates} solved from adjacent-expiry forward variance`
-            + ` (${sourceLabel}; baseline n=${interval.baselineCount}${baselineLabel}${clockLabel}${interval.isFront ? '; verified front interval' : ''}).`
+            + ` (${sourceLabel}; baseline n=${interval.baselineCount}${baselineLabel}${estimateLabel}${hardInversionLabel}${clockLabel}${interval.isFront ? '; verified front interval' : ''}).`
             + ` Raw λ=${rawLambda}.`;
-        const valueClass = rawLambda < 0 ? 'ivts-ratio ivts-lambda-inverted' : 'ivts-ratio';
-        return `<span class="${valueClass}" title="${escapeHtml(title + inversionLabel)}">${escapeHtml(rawLambda.toFixed(3))}</span>`;
+        const valueClasses = ['ivts-ratio'];
+        if (rawLambda < 0) valueClasses.push('ivts-lambda-inverted');
+        if (interval.isEstimated === true) valueClasses.push('ivts-lambda-estimated');
+        const valuePrefix = interval.isEstimated === true ? '≈' : '';
+        return `<span class="${valueClasses.join(' ')}" title="${escapeHtml(title + inversionLabel)}">${valuePrefix}${escapeHtml(rawLambda.toFixed(3))}</span>`;
     }
 
     function buildVarianceRecoveryControl(card, comparedRows) {
@@ -5279,12 +5299,24 @@
         const profileClockCount = usableIntervals.filter(
             interval => interval.profileClockFallback === true
         ).length;
+        const multiWeekAggregateCount = usableIntervals.filter(
+            interval => interval.estimateKind === 'multi_week_aggregate'
+        ).length;
+        const curveMedianFillCount = usableIntervals.filter(
+            interval => interval.estimateKind === 'curve_median_fill'
+        ).length;
+        const hardInversionCount = usableIntervals.filter(
+            interval => interval.hardInversion === true
+        ).length;
         const coverageNotes = [];
         if (impliedLambda && Number.isFinite(impliedLambda.okIntervalCount)) {
-            coverageNotes.push(`Impl λ covers ${impliedLambda.okIntervalCount} weekend${impliedLambda.okIntervalCount === 1 ? '' : 's'}`);
+            coverageNotes.push(`Impl λ covers ${impliedLambda.okIntervalCount} closure interval${impliedLambda.okIntervalCount === 1 ? '' : 's'}`);
         }
         if (invertedCount) coverageNotes.push(`${invertedCount} inverted (signed)`);
         if (extrapolatedCount) coverageNotes.push(`${extrapolatedCount} nearest-baseline estimate${extrapolatedCount === 1 ? '' : 's'}`);
+        if (multiWeekAggregateCount) coverageNotes.push(`${multiWeekAggregateCount} multi-week aggregate estimate${multiWeekAggregateCount === 1 ? '' : 's'}`);
+        if (curveMedianFillCount) coverageNotes.push(`${curveMedianFillCount} median-filled interval${curveMedianFillCount === 1 ? '' : 's'}`);
+        if (hardInversionCount) coverageNotes.push(`${hardInversionCount} hard-inversion estimate${hardInversionCount === 1 ? '' : 's'}`);
         if (profileClockCount) coverageNotes.push(`${profileClockCount} product-profile clock fallback${profileClockCount === 1 ? '' : 's'}`);
         const impliedCoverageNote = coverageNotes.length
             ? ` · ${coverageNotes.join(' · ')}`
@@ -5541,10 +5573,20 @@
             : (synchronized
                 ? `${isVendorIvFallback ? 'Vendor-IV fallback · ' : (isBestEffort ? 'Best-effort · ' : '')}${needsRecalculation ? 'Synced · newer quotes available' : 'Synced'}`
                 : `${isVendorIvFallback ? 'Vendor-IV fallback' : (isBestEffort ? 'Best-effort estimate' : 'Calculated')}${needsRecalculation ? ' · newer quotes available' : ' · not synced'}`);
+        const estimatedDates = new Set();
+        for (const interval of (entry && Array.isArray(entry.intervals) ? entry.intervals : [])) {
+            if (interval && interval.isEstimated === true) {
+                for (const date of (Array.isArray(interval.nonTradingDates)
+                    ? interval.nonTradingDates : [])) {
+                    estimatedDates.add(date);
+                }
+            }
+        }
         const structureRows = byDateEntries.map(([date, lambda]) => `
             <div class="ivts-lambda-date-row">
                 <time datetime="${escapeHtml(date)}">${escapeHtml(date)}</time>
-                <strong class="${Number(lambda) < 0 ? 'ivts-lambda-inverted' : ''}">λ ${escapeHtml(formatNumber(lambda, 4))}</strong>
+                <strong class="${Number(lambda) < 0 ? 'ivts-lambda-inverted ' : ''}${estimatedDates.has(date) ? 'ivts-lambda-estimated' : ''}"
+                    ${estimatedDates.has(date) ? 'title="Best-estimate coverage inferred from the same observed term structure"' : ''}>λ ${estimatedDates.has(date) ? '≈' : ''}${escapeHtml(formatNumber(lambda, 4))}</strong>
             </div>
         `).join('');
         const note = !entry
@@ -5565,6 +5607,12 @@
             && entry.quality.extrapolatedBaselineIntervalCount) || 0;
         const profileClockFallbackIntervalCount = Number(entry && entry.quality
             && entry.quality.profileClockFallbackIntervalCount) || 0;
+        const multiWeekAggregateIntervalCount = Number(entry && entry.quality
+            && entry.quality.multiWeekAggregateIntervalCount) || 0;
+        const curveMedianFillIntervalCount = Number(entry && entry.quality
+            && entry.quality.curveMedianFillIntervalCount) || 0;
+        const hardInversionIntervalCount = Number(entry && entry.quality
+            && entry.quality.hardInversionIntervalCount) || 0;
         const qualityParts = !entry ? [] : [
             isVendorIvFallback
                 ? `${Number(entry.quality && entry.quality.usableExpiryCount) || 0} ATM-IV pairs · vendor fallback`
@@ -5575,6 +5623,15 @@
         if (invertedIntervalCount) qualityParts.push(`${invertedIntervalCount} inverted`);
         if (extrapolatedBaselineIntervalCount) {
             qualityParts.push(`${extrapolatedBaselineIntervalCount} baseline extrapolated`);
+        }
+        if (multiWeekAggregateIntervalCount) {
+            qualityParts.push(`${multiWeekAggregateIntervalCount} multi-week aggregate`);
+        }
+        if (curveMedianFillIntervalCount) {
+            qualityParts.push(`${curveMedianFillIntervalCount} median filled`);
+        }
+        if (hardInversionIntervalCount) {
+            qualityParts.push(`${hardInversionIntervalCount} hard inversion`);
         }
         if (profileClockFallbackIntervalCount) {
             qualityParts.push(`${profileClockFallbackIntervalCount} profile-clock fallback`);

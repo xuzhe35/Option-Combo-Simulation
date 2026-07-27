@@ -111,6 +111,11 @@
             baselineWindowDays: finiteOrNull(data.baselineWindowDays),
             minBaselines: integerOrNull(data.minBaselines),
             maxIntervalCalendarDays: finiteOrNull(data.maxIntervalCalendarDays),
+            maxAggregateIntervalCalendarDays: finiteOrNull(
+                data.maxAggregateIntervalCalendarDays
+            ),
+            longIntervalPolicy: String(data.longIntervalPolicy || '').trim() || null,
+            missingBaselinePolicy: String(data.missingBaselinePolicy || '').trim() || null,
             minDte: finiteOrNull(data.minDte),
             maxQuoteSkewMs: finiteOrNull(data.maxQuoteSkewMs),
             maxForwardDeviationPct: finiteOrNull(data.maxForwardDeviationPct),
@@ -191,6 +196,14 @@
             conventionalRange: String(data.conventionalRange || '').trim() || null,
             isInverted: data.isInverted === true || (rawLambda !== null && rawLambda < 0),
             baselineMode: String(data.baselineMode || '').trim() || null,
+            estimateKind: String(data.estimateKind || '').trim() || 'direct_interval',
+            isEstimated: data.isEstimated === true,
+            originalStatus: String(data.originalStatus || '').trim() || null,
+            hardInversion: data.hardInversion === true,
+            exceedsDirectIntervalLimit: data.exceedsDirectIntervalLimit === true,
+            exceedsAggregateIntervalLimit: data.exceedsAggregateIntervalLimit === true,
+            directIntervalLimitDays: _finiteNumber(data.directIntervalLimitDays),
+            aggregateIntervalLimitDays: _finiteNumber(data.aggregateIntervalLimitDays),
             profileClockFallback: data.profileClockFallback === true,
             nonTradingDates,
             weekendDates,
@@ -541,7 +554,26 @@
             };
         }
 
-        const lambdas = usableIntervals.map((interval) => interval.rawLambda);
+        const directLambdas = usableIntervals
+            .filter((interval) => interval.estimateKind !== 'curve_median_fill')
+            .map((interval) => interval.rawLambda);
+        const lambdas = directLambdas.length
+            ? directLambdas
+            : usableIntervals.map((interval) => interval.rawLambda);
+        const multiWeekAggregateIntervalCount = usableIntervals.filter(
+            interval => interval.estimateKind === 'multi_week_aggregate'
+        ).length;
+        const curveMedianFillIntervalCount = usableIntervals.filter(
+            interval => interval.estimateKind === 'curve_median_fill'
+        ).length;
+        const hardInversionIntervalCount = usableIntervals.filter(
+            interval => interval.hardInversion === true
+        ).length;
+        const estimatedIntervalCount = usableIntervals.filter(
+            interval => interval.isEstimated === true
+                || interval.estimateKind === 'multi_week_aggregate'
+                || interval.estimateKind === 'curve_median_fill'
+        ).length;
         const canonicalQuoteAsOf = new Date(quoteStamp.epochMs).toISOString();
         const storageKey = entryStorageKey(symbol, underlyingContractMonth);
         const curveId = `${storageKey}@${canonicalQuoteAsOf}`;
@@ -550,6 +582,7 @@
             coherent: true,
             quoteComplete: true,
             estimationMode: qualityInput.estimationMode === 'best_effort'
+                || estimatedIntervalCount > 0
                 ? 'best_effort'
                 : 'strict',
             strictSnapshot: qualityInput.strictSnapshot !== false,
@@ -587,6 +620,10 @@
             profileClockFallbackIntervalCount: usableIntervals.filter(
                 interval => interval.profileClockFallback === true
             ).length,
+            multiWeekAggregateIntervalCount,
+            curveMedianFillIntervalCount,
+            hardInversionIntervalCount,
+            estimatedIntervalCount,
         };
         return {
             errorCode: '',

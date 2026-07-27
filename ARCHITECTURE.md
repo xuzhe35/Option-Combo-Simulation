@@ -209,10 +209,10 @@ timestamp to the common ContractDetails `expiryAsOf`; invalid evidence clears
 the old sample even while its panel is collapsed. Live FOP pool quotes are
 generation-scoped and independently verified by qualified contract identity
 and 120-second freshness before they can become a Black-76 input.
-An INDEX option without a usable parity sample fails closed; spot remains valid
-only for an explicit underlying leg. An explicitly bound FOP leg without its
-future quote also fails closed. The sole degraded compatibility route is an
-unbound legacy FOP workspace with exactly one Futures Pool entry.
+An INDEX option without a usable parity sample uses current index spot as a
+visibly degraded flat-forward estimate; a valid parity sample always wins. An
+explicitly bound FOP leg without its qualified, matching future quote still
+fails closed because substituting another futures month is materially wrong.
 
 ES/NQ daily and weekly FOP `tradingClass` values are qualification output, not
 weekday-derived request constraints. The browser omits that unverified hint,
@@ -243,30 +243,22 @@ selection for its effective date.
 
 ### 4.3 Pricing and scenario context
 
-Live option projections use one observable-price boundary. In the default
-midpoint mode, only a fresh transport-validated two-sided BBO may seed the
-local IV inversion. The inversion uses quote-horizon spot/Forward, discount
-rate, and exact weighted quote-to-expiry time; target repricing holds that
-per-leg local IV on the remaining clock. Model/last/Portfolio/manual prices do
-not enter this calibration, and a bad BBO anchor fails closed. Live sessions
-default to `projectionConvergenceMode=strict-bbo`: every option surviving the
-target must have a successful local anchor, while a target-expired intrinsic
-leg is exempt. Option, spot/Forward and live-clock evidence must be within 30
-seconds even though general quote freshness remains 120 seconds. Historical
-replay bypasses this live gate; `legacy-input-iv` is explicit saved-session
-compatibility only. Websocket disconnects invalidate the gate immediately; a
-5-second watchdog independently detects 120 seconds without market payloads so
-a frozen `liveQuoteAsOf` cannot keep an old BBO fresh forever. A third value,
-`best-effort-input-iv`, is a per-payoff-chart-card display override: for a card
-with best-effort projection enabled, `js/chart_controls.js` clones the workspace
-state locally for that card's `PnLChart.draw()` only, letting the projection fall
-back to the leg's input IV when no live BBO anchor is available. It never mutates
-the workspace convergence mode, so the valuation, probability, session, and
-execution gates keep their strict semantics.
-The shared preflight also treats structured λ as mandatory whenever any option
-surviving the target crosses a weekend or full closure. Selecting a scalar,
-Calendar/Trading basis, or disabling the IVTS box cannot bypass that gate;
-`not_required` is the only exemption.
+Live option projections prefer a fresh validated two-sided BBO. If it cannot
+be inverted, the analysis path tries the best observable option mark and then
+the latest usable TWS/input IV. Live sessions default to
+`projectionConvergenceMode=best-effort-input-iv`; strict BBO is an opt-in
+per-chart diagnostic. This policy is shared by valuation, payoff, Chart Lab,
+probability, and amortized surfaces, but never relaxes order validation.
+
+Structured per-date λ is likewise preferred. Missing dates use the curve
+median; an unavailable curve uses the configured scalar λ. Product-profile
+expiry cutoffs are allowed while IB timing metadata is pending or absent.
+Outside bundled live calendar coverage, analysis estimates weekdays versus
+weekends and marks the clock degraded; historical replay still requires
+observed sessions.
+Explicit contract rejection, incompatible adjusted equity classes, conflicting
+near-leg cutoffs, wrong/missing FOP month quotes, unknown models, and deferred
+AM settlement fixings remain hard blockers.
 
 The IVTS λ solver and simulator share the same exact timestamp clock. Export
 requires ContractDetails `expiryAsOf`, and interval evidence carries fractional
@@ -296,8 +288,10 @@ Responsibilities:
 - probability leg repricing carries explicit `varianceT` and calendar
   `discountT`: equity/ETF legs use BSM, while index/FOP legs use Black-76
 - live 0DTE fractional time from IB ContractDetails last-trade metadata; the
-  live safety gate requires contract-source timing for target-expiry legs,
-  every surviving FOP/INDEX leg, and every surviving leg inside seven days
+  live safety gate requires contract-source timing for FOP/INDEX and for
+  unverified or nonstandard target/short-dated legs. Standard stock/ETF legs
+  with IB-verified conId and trading class may visibly degrade to the product
+  cutoff when only exact last-trade time is missing
 - price-independent `option_contract_metadata` handoff after each qualified
   subscription attach; pooled IVTS/portfolio reuse does not wait for another
   BBO tick, and the browser updates identity/timing without touching quote or
@@ -305,9 +299,10 @@ Responsibilities:
 - exact-timing cache admits only complete ContractDetails evidence (plus
   verified FOP underlying binding); partial results retry on later subscribe,
   while same-conId concurrent lookups share one in-flight request
-- defensive product-profile cutoffs remain only for historical/explicit
-  compatibility paths and longer-dated stock/ETF cases in live portfolio
-  pricing. The separate manual IVTS estimator may use a product-profile cutoff
+- defensive product-profile cutoffs remain available to historical/explicit
+  compatibility paths, longer-dated stock/ETF cases, and the controlled
+  identity-verified standard stock/ETF timing fallback. The separate manual
+  IVTS estimator may use a product-profile cutoff
   as audited best-effort evidence when IB omits ContractDetails timing; this
   does not weaken the simulator leg-timing gate
 - AM special-fixing contracts (standard SPX and traditional quarterly AM
@@ -545,13 +540,19 @@ quality, and snapshot id.
 - `start_option_combo.bat`
 - `start_historical_replay.bat`
 - `update_yield_curve.bat`
+- `sync_exchange_calendars.bat`
+- `run_market_data_maintenance.bat`
 - `install_ib_bridge_deps.bat`
 - `cleanup_logs.bat`
 - `start_option_combo_mac.command`
 - `start_historical_replay_mac.command`
 - `update_yield_curve_mac.command`
+- `sync_exchange_calendars_mac.command`
+- `run_market_data_maintenance_mac.command`
 - `start_option_combo.sh`
 - `update_yield_curve.sh`
+- `sync_exchange_calendars.sh`
+- `run_market_data_maintenance.sh`
 - `install_ib_bridge_deps_mac.command`
 - `cleanup_logs_mac.command`
 - `scripts/cleanup_runtime_logs.py`
@@ -561,6 +562,7 @@ Responsibilities:
 
 - Python resolution
 - local service launch
+- ordered yield-curve and official-calendar maintenance
 - Codex/background service launch and restart
 - dependency installation
 - standalone official yield-curve refresh and local snapshot inspection

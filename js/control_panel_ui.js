@@ -1568,13 +1568,13 @@
 
         basisSelect.value = basis;
         if (weightInput) {
-            // Scalar lambda remains available as a research/display lens, but
-            // it is never an accuracy-gate substitute for required V2 dates.
+            // The scalar remains the fail-soft clock when a structured curve
+            // or one of its dates is unavailable.
             weightInput.style.display = basis === 'weighted' && !showReceivedIndicator ? '' : 'none';
             weightInput.disabled = basis === 'weighted' && useImplied;
             weightInput.title = useImplied
-                ? 'IVTS implied λ is enabled. Uncheck only for scalar research; live projections across closures will remain blocked.'
-                : 'Diagnostic weekend/holiday variance weight λ: 0 = trading-day clock, 1 = calendar clock. It cannot bypass required structured coverage.';
+                ? 'IVTS implied λ is preferred. Missing curve dates use the IVTS median or this scalar estimate.'
+                : 'Weekend/holiday variance weight λ: 0 = trading-day clock, 1 = calendar clock.';
             if (options.keepWeightInputValue !== true) {
                 weightInput.value = weight.toFixed(2);
             }
@@ -1595,13 +1595,14 @@
                 } else if (contractTimingUnavailable) {
                     display.textContent = 'λ pending contract timing';
                 } else {
-                    display.textContent = 'λ=IVTS unavailable';
+                    const fallback = hasAcceptedImpliedEntry
+                        && Number.isFinite(impliedEntry.medianLambda)
+                        ? impliedEntry.medianLambda
+                        : weight;
+                    display.textContent = `λ≈${fallback.toFixed(2)} estimated`;
                 }
             } else {
-                display.textContent = impliedCoverage && impliedCoverage.required === true
-                    && impliedCoverage.ready !== true
-                    ? `λ=${effectiveWeight.toFixed(2)} diagnostic · projection blocked`
-                    : `λ=${effectiveWeight.toFixed(2)}`;
+                display.textContent = `λ=${effectiveWeight.toFixed(2)}`;
             }
         }
 
@@ -1715,12 +1716,16 @@
                 const closureCoverageRequired = requiredDates.length > 0
                     || missingDates.length > 0
                     || (impliedCoverage && impliedCoverage.required === true);
+                const fallback = hasAcceptedImpliedEntry
+                    && Number.isFinite(impliedEntry.medianLambda)
+                    ? impliedEntry.medianLambda
+                    : weight;
                 const closureTail = closureCoverageRequired
-                    ? ` Live projections that cross a weekend or full holiday require complete structured coverage; scalar λ=${weight.toFixed(2)} is diagnostic only and cannot bypass this gate.`
+                    ? ` Projection remains available using λ≈${fallback.toFixed(2)} for uncovered closure dates.`
                     : '';
-                impliedStatus.style.color = '#dc2626';
+                impliedStatus.style.color = '#b45309';
                 impliedStatus.style.fontWeight = '600';
-                impliedStatus.textContent = `Implied λ unavailable for ${identity}: ${reason}.${datesText}${legsText}${closureTail}`;
+                impliedStatus.textContent = `Implied λ is incomplete for ${identity}: ${reason}.${datesText}${legsText}${closureTail}`;
             }
         }
     }
@@ -1884,13 +1889,17 @@
                     ? ` · ${hours.toFixed(hours < 10 ? 2 : 1)} calendar hours from quote`
                     : '';
                 const source = String(timing.source || 'exact').trim();
+                const fallbackLegIds = Array.isArray(timing.profileFallbackLegIds)
+                    ? timing.profileFallbackLegIds.filter(Boolean)
+                    : [];
                 // Only a near-leg profile cutoff is a degraded stand-in: a leg
                 // really does expire on the target date and IB simply has not
                 // supplied its last-trade instant yet, so waiting helps.  A plain
                 // product-profile cutoff means no open leg expires that day at
                 // all, so there is no contract-level cutoff to wait for and the
                 // product close *is* the definition of the instant.
-                const profileFallback = source === 'near-leg-profile-cutoff';
+                const profileFallback = source === 'near-leg-profile-cutoff'
+                    || fallbackLegIds.length > 0;
                 const sourceText = source === 'near-leg-contract-cutoff'
                     ? 'IB near-leg cutoff'
                     : (source === 'live-quote'
@@ -1902,10 +1911,14 @@
                 simulatedDateHint.style.color = profileFallback ? '#b45309' : '#4b5563';
                 simulatedDateHint.textContent = `Pricing target: ${timing.targetAsOf} (${sourceText})${hoursText}.`
                     + (profileFallback
-                        ? ' Exact IB last-trade time is not yet available; the product fallback is in use.'
+                        ? ` Exact IB last-trade time is not yet available`
+                            + (fallbackLegIds.length
+                                ? ` for ${fallbackLegIds.join(', ')}`
+                                : '')
+                            + '; the product-profile timing estimate is in use.'
                         : '');
                 simulatedDateHint.title = profileFallback
-                    ? 'Keep TWS connected until ContractDetails supplies the contract-specific last-trade cutoff.'
+                    ? 'Pricing remains available using the product profile. ContractDetails can still replace this visible estimate with the exact last-trade time.'
                     : (source === 'product-profile-cutoff'
                         ? 'No open leg expires on this date, so the product close defines the instant. '
                             + 'All live legs are valued there.'

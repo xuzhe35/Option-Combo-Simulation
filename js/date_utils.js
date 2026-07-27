@@ -296,7 +296,8 @@
         calendarKey = 'NYSE',
         observedTradingDates = null,
         timeZone = 'America/New_York',
-        tradeDateRolloverHour = null
+        tradeDateRolloverHour = null,
+        options = null
     ) {
         const startMs = typeof startAsOf === 'number' ? startAsOf : Date.parse(String(startAsOf || ''));
         const endMs = typeof endAsOf === 'number' ? endAsOf : Date.parse(String(endAsOf || ''));
@@ -342,6 +343,10 @@
         const lastDate = classificationDate(endMs - 1);
         if (!startDate || !lastDate) return unavailable('timezone_unavailable');
         const observed = _observedTradingDateSet(observedTradingDates);
+        const allowEstimatedCalendar = !!(
+            options && options.allowEstimatedCalendar === true
+        );
+        let calendarEstimated = false;
         if (observed) {
             if (!_observedCovers(observed, startDate, lastDate)) {
                 return unavailable('calendar_unavailable');
@@ -350,7 +355,10 @@
             || !globalScope.isOfficialExchangeCalendarAvailable(
                 normalizedCalendarKey, startDate, lastDate
             )) {
-            return unavailable('calendar_unavailable');
+            if (!allowEstimatedCalendar) {
+                return unavailable('calendar_unavailable');
+            }
+            calendarEstimated = true;
         }
 
         const weightSpec = normalizeWeekendWeightSpec(weekendWeight);
@@ -384,7 +392,11 @@
             }
             const segmentEndMs = Math.min(endMs, nextBoundaryMs);
             const dayFraction = (segmentEndMs - cursorMs) / 86400000;
-            const tradingDay = isTradingDay(date, normalizedCalendarKey, observed);
+            const verifiedTradingDay = isTradingDay(date, normalizedCalendarKey, observed);
+            const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+            const tradingDay = verifiedTradingDay === null && calendarEstimated
+                ? weekday !== 0 && weekday !== 6
+                : verifiedTradingDay;
             if (tradingDay === null) return unavailable('calendar_unavailable');
             const hasDateWeight = !!(weightSpec.byDate
                 && Object.prototype.hasOwnProperty.call(weightSpec.byDate, date));
@@ -414,7 +426,7 @@
                 date,
                 kind: tradingDay
                     ? 'trading'
-                    : ([0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay())
+                    : ([0, 6].includes(weekday)
                         ? 'weekend'
                         : 'exchange_holiday'),
                 startAsOf: new Date(cursorMs).toISOString(),
@@ -429,7 +441,8 @@
 
         return {
             available: true,
-            status: 'ok',
+            status: calendarEstimated ? 'calendar_estimate' : 'ok',
+            calendarEstimated,
             calendarKey: normalizedCalendarKey,
             timeZone: normalizedTimeZone,
             calendarDays: (endMs - startMs) / 86400000,

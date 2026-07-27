@@ -181,15 +181,23 @@ module.exports = {
             },
         },
         {
-            name: 'main chart and Chart Lab block short-dated legs without contract timing',
+            name: 'main chart and Chart Lab estimate index timing and forward from product profiles',
             run() {
                 const messages = [];
-                const canvas = {
-                    getContext: () => ({
+                const canvasContext = new Proxy({
                         clearRect() {},
                         scale() {},
                         fillText(message) { messages.push(String(message)); },
-                    }),
+                        measureText(value) { return { width: String(value || '').length * 7 }; },
+                        createLinearGradient() { return { addColorStop() {} }; },
+                    }, {
+                        get(target, key) {
+                            if (key in target) return target[key];
+                            return () => {};
+                        },
+                    });
+                const canvas = {
+                    getContext: () => canvasContext,
                     addEventListener() {},
                     parentElement: {
                         getBoundingClientRect: () => ({ width: 800, height: 400 }),
@@ -205,7 +213,7 @@ module.exports = {
                     }],
                 };
                 const state = {
-                    underlyingSymbol: 'SPY',
+                    underlyingSymbol: 'SPX',
                     underlyingPrice: 100,
                     baseDate: '2026-07-01',
                     liveQuoteDate: '2026-07-10',
@@ -232,18 +240,25 @@ module.exports = {
                             readyState: 'loading',
                             addEventListener() {},
                             getElementById: () => null,
+                            createElement() {
+                                return {
+                                    width: 0,
+                                    height: 0,
+                                    getContext: () => canvasContext,
+                                };
+                            },
                         },
                     }
                 );
                 const PnLChart = new vm.Script('PnLChart').runInContext(ctx);
                 const chart = new PnLChart(canvas);
                 chart.draw(group, state, 80, 120);
-                assert.equal(chart.lastRenderData, null);
-                assert.ok(messages.some(message => /exact_contract_timing_missing/i.test(message)));
+                assert.ok(chart.lastRenderData);
+                assert.equal(chart.lastProjectionQuality.bestEffort, true);
 
                 const curve = ctx.OptionComboChartLab._test.projectionCurve(group, state, 80, 120);
-                assert.deepEqual(Array.from(curve.points), []);
-                assert.match(curve.error, /exact_contract_timing_missing/i);
+                assert.ok(curve.points.length > 0);
+                assert.equal(curve.error, undefined);
             },
         },
         {
@@ -304,7 +319,7 @@ module.exports = {
                     },
                 ];
                 const strict = core.assessProjectionConvergence(
-                    { marketDataMode: 'live' },
+                    { marketDataMode: 'live', projectionConvergenceMode: 'strict-bbo' },
                     raw,
                     processed
                 );
@@ -320,11 +335,14 @@ module.exports = {
                     simIVSource: 'local-bbo-implied',
                 };
                 assert.equal(core.assessProjectionConvergence(
-                    { marketDataMode: 'live' }, raw, processed
+                    { marketDataMode: 'live', projectionConvergenceMode: 'strict-bbo' },
+                    raw,
+                    processed
                 ).ready, true);
                 const disconnected = core.assessProjectionConvergence(
                     {
                         marketDataMode: 'live',
+                        projectionConvergenceMode: 'strict-bbo',
                         liveProjectionFeedConnected: false,
                     },
                     raw,
@@ -368,7 +386,7 @@ module.exports = {
                     raw,
                     processed
                 );
-                assert.equal(scalarBypass.ready, false);
+                assert.equal(scalarBypass.ready, true);
                 const bestEffortStillNeedsLambda = core.assessProjectionConvergence(
                     {
                         marketDataMode: 'live',
@@ -384,19 +402,15 @@ module.exports = {
                     raw,
                     processed
                 );
-                assert.equal(bestEffortStillNeedsLambda.ready, false);
+                assert.equal(bestEffortStillNeedsLambda.ready, true);
                 assert.equal(
                     bestEffortStillNeedsLambda.status,
-                    'structured_implied_lambda_required'
+                    'best_effort_lambda_fallback'
                 );
-                assert.equal(scalarBypass.status, 'structured_implied_lambda_required');
-                assert.match(
-                    core.formatProjectionConvergenceFailure(scalarBypass),
-                    /mandatory.*weekend.*full exchange holiday/i
-                );
-                assert.match(
-                    core.formatProjectionConvergenceFailure(scalarBypass),
-                    /2026-07-18/
+                assert.equal(scalarBypass.status, 'best_effort_lambda_fallback');
+                assert.deepEqual(
+                    Array.from(bestEffortStillNeedsLambda.missingDates),
+                    ['2026-07-18', '2026-07-19']
                 );
 
                 const noClosure = core.assessProjectionConvergence(
@@ -457,6 +471,7 @@ module.exports = {
                     liveQuoteAsOf: '2026-07-10T19:00:00Z',
                     simulatedDate: '2026-07-15',
                     marketDataMode: 'live',
+                    projectionConvergenceMode: 'strict-bbo',
                     requireExactContractTiming: false,
                     interestRate: 0.03,
                     useMarketDiscountCurve: false,

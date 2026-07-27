@@ -235,7 +235,7 @@ module.exports = {
                 assert.equal(result.selectedLiveComboOrderAccount, 'F7654321');
                 assert.equal(result.allowLiveHedgeOrders, false);
                 assert.equal(result.requireExactContractTiming, true);
-                assert.equal(result.projectionConvergenceMode, 'strict-bbo');
+                assert.equal(result.projectionConvergenceMode, 'best-effort-input-iv');
                 assert.equal(result.equityOptionPricingModel, 'bsm-spot');
                 assert.equal(result.equityDividendYield, 0);
                 assert.equal(result.americanBinomialSteps, 201);
@@ -333,7 +333,7 @@ module.exports = {
                 assert.equal(result.liveQuoteDate, '');
                 assert.equal(result.liveQuoteAsOf, '');
                 assert.equal(result.requireExactContractTiming, true);
-                assert.equal(result.projectionConvergenceMode, 'legacy-input-iv');
+                assert.equal(result.projectionConvergenceMode, 'best-effort-input-iv');
                 assert.equal(result.selectedLiveComboOrderAccount, 'DU12345');
                 assert.equal(result.groups.length, 1);
                 assert.equal(result.groups[0].id, 'gid_1');
@@ -765,15 +765,15 @@ module.exports = {
                 assert.equal(logic.resolveSimWeekendWeightSpec('weighted', 0.3, false, entry), 0.3);
                 assert.equal(logic.resolveSimWeekendWeightSpec('calendar', 0.3, true, entry), 1);
                 assert.equal(logic.resolveSimWeekendWeightSpec('trading', 0.3, true, entry), 0);
-                // Once implied mode is enabled, missing or unqualified data
-                // remains strict and cannot silently fall back to scalar.
+                // Missing or unqualified data falls back to the scalar clock.
                 const missing = logic.resolveSimWeekendWeightSpec('weighted', 0.3, true, null);
-                assert.equal(missing.strictByDate, true);
+                assert.equal(missing.strictByDate, false);
                 assert.equal(missing.byDate, null);
                 assert.equal(missing.default, 0.3);
+                assert.equal(missing.fallbackSource, 'scalar-lambda');
                 assert.equal(logic.resolveSimWeekendWeightSpec(
                     'weighted', 0.3, true, { ...entry, schemaVersion: 1 }
-                ).strictByDate, true);
+                ).strictByDate, false);
                 assert.equal(logic.resolveSimWeekendWeightSpec(
                     'weighted', 0.3, true, { ...entry, varianceSource: 'vendor_iv' }
                 ).byDate, null);
@@ -790,17 +790,16 @@ module.exports = {
                     'weighted', 0.3, true, auditedVendor
                 ).byDate['2026-07-18'], 0.13);
 
-                // Enabled with dates: every required non-trading date must be
-                // present. The scalar is metadata only, never a hole filler.
+                // Qualified curve dates win; holes use the curve median.
                 const spec = logic.resolveSimWeekendWeightSpec('weighted', 0.3, true, entry);
-                assert.equal(spec.default, 0.3);
+                assert.equal(spec.default, 0.12);
                 assert.equal(spec.byDate['2026-07-18'], 0.13);
-                assert.equal(spec.strictByDate, true);
+                assert.equal(spec.strictByDate, false);
                 assert.equal(spec.coverageStart, '2026-07-18');
                 assert.equal(spec.coverageEnd, '2026-07-19');
-                assert.equal(spec.fallbackSource, null);
+                assert.equal(spec.fallbackSource, 'ivts-median-lambda');
 
-                // Median is descriptive and never changes the fallback.
+                // A missing median uses the scalar; a valid median fills holes.
                 const noMedian = logic.resolveSimWeekendWeightSpec(
                     'weighted', 0.25, true, { ...entry, medianLambda: null }
                 );
@@ -808,22 +807,25 @@ module.exports = {
                 const misleadingMedian = logic.resolveSimWeekendWeightSpec(
                     'weighted', 0.25, true, { ...entry, medianLambda: 0.99 }
                 );
-                assert.equal(misleadingMedian.default, 0.25);
+                assert.equal(misleadingMedian.default, 0.99);
 
-                // New and pre-implied-λ sessions default to the strict mode;
-                // only an explicit false selects the scalar alternative.
+                // Implied λ remains preferred, while projection convergence
+                // settings migrate to the resilient analysis default.
                 assert.equal(logic.normalizeSimUseImpliedLambda(undefined), true);
                 assert.equal(logic.normalizeSimUseImpliedLambda(null), true);
                 assert.equal(logic.normalizeSimUseImpliedLambda(true), true);
                 assert.equal(logic.normalizeSimUseImpliedLambda(false), false);
 
-                assert.equal(logic.normalizeProjectionConvergenceMode(undefined), 'strict-bbo');
-                assert.equal(logic.normalizeProjectionConvergenceMode('strict-bbo'), 'strict-bbo');
+                assert.equal(logic.normalizeProjectionConvergenceMode(undefined), 'best-effort-input-iv');
+                assert.equal(
+                    logic.normalizeProjectionConvergenceMode('strict-bbo'),
+                    'best-effort-input-iv'
+                );
                 assert.equal(
                     logic.normalizeProjectionConvergenceMode('legacy-input-iv'),
-                    'legacy-input-iv'
+                    'best-effort-input-iv'
                 );
-                assert.equal(logic.normalizeProjectionConvergenceMode('loose'), 'strict-bbo');
+                assert.equal(logic.normalizeProjectionConvergenceMode('loose'), 'best-effort-input-iv');
 
                 // The runtime cache never reaches an exported session snapshot.
                 const snapshot = logic.buildExportState({
@@ -838,7 +840,7 @@ module.exports = {
                     deltaHedge: logic.createDefaultDeltaHedgeConfig(),
                 });
                 assert.equal(snapshot.simUseImpliedLambda, true);
-                assert.equal(snapshot.projectionConvergenceMode, 'strict-bbo');
+                assert.equal(snapshot.projectionConvergenceMode, 'best-effort-input-iv');
                 assert.equal('simImpliedLambdaEntry' in snapshot, false);
                 assert.equal('simImpliedLambdaFileEntry' in snapshot, false);
                 assert.equal('liveProjectionFeedConnected' in snapshot, false);

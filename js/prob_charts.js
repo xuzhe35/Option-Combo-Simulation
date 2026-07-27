@@ -673,6 +673,7 @@ function _computePortfolioPnLAtPrice(price) {
     const underlyingProfile = productRegistry && typeof productRegistry.resolveUnderlyingProfile === 'function'
         ? productRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
         : null;
+    const pricingCore = _getProbabilityPricingCoreApi();
 
     for (const group of state.groups.filter(_isGroupIncludedInGlobal)) {
         const activeViewMode = group.viewMode || 'active';
@@ -713,10 +714,14 @@ function _computePortfolioPnLAtPrice(price) {
                 quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
                 quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
                 quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+                allowProjectionIvFallback: !pricingCore
+                    || typeof pricingCore.normalizeProjectionConvergenceMode !== 'function'
+                    || pricingCore.normalizeProjectionConvergenceMode(
+                        state.projectionConvergenceMode
+                    ) === 'best-effort-input-iv',
             };
             // Use processLegData to handle unified BSM formatting (Exp, Implied Vol offset, T)
             const pLeg = processLegData(leg, simulationDate, state.ivOffset, quoteDate, legCurrentUnderlying, legInterestRate, activeViewMode, underlyingProfile, state.marketDataMode, timingContext);
-            const pricingCore = _getProbabilityPricingCoreApi();
             const convergence = pricingCore
                 && typeof pricingCore.assessProjectionConvergence === 'function'
                 ? pricingCore.assessProjectionConvergence(state, [leg], [pLeg])
@@ -1646,7 +1651,7 @@ function updateProbCharts() {
         : `${nCalDays.toFixed(nCalDays % 1 === 0 ? 0 : 2)} cd`;
     const horizonLabel = horizonClock.isCalendarClock
         ? calendarHorizonLabel
-        : `${calendarHorizonLabel} (eff ${horizonClock.effDays.toFixed(3)}d, ${lambdaLabel})`;
+        : `${calendarHorizonLabel} (eff ${horizonClock.effDays.toFixed(3)}d, ${lambdaLabel}${horizonClock.calendarEstimated ? ', weekday calendar estimate' : ''})`;
 
     // Run the same per-leg gate as valuation before asking for a portfolio
     // mean IV.  Otherwise a failed strict BBO inversion can be misreported as
@@ -1791,6 +1796,11 @@ function updateProbCharts() {
                 quoteUnderlyingPrice: quotePricingInputs && quotePricingInputs.underlyingPrice,
                 quoteUnderlyingAsOf: quotePricingInputs && quotePricingInputs.underlyingAsOf,
                 quoteInterestRate: quotePricingInputs && quotePricingInputs.interestRate,
+                allowProjectionIvFallback: !pricingCore
+                    || typeof pricingCore.normalizeProjectionConvergenceMode !== 'function'
+                    || pricingCore.normalizeProjectionConvergenceMode(
+                        state.projectionConvergenceMode
+                    ) === 'best-effort-input-iv',
             };
             const pLeg = processLegData(
                 leg,

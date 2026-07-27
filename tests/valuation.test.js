@@ -270,7 +270,7 @@ module.exports = {
             },
         },
         {
-            name: 'blocks portfolio valuation when exact short-dated contract timing is missing',
+            name: 'uses standard-equity timing estimates but blocks rejected legs',
             run() {
                 const ctx = loadValuationContext();
                 const group = {
@@ -306,19 +306,24 @@ module.exports = {
                     hedges: [],
                 };
 
-                const blocked = ctx.OptionComboValuation.computeGroupDerivedData(group, state);
-                assert.equal(blocked.groupSimulationAvailable, false);
-                assert.equal(blocked.groupSimValue, null);
-                assert.equal(blocked.legResults[0].simulationAvailable, false);
-                assert.equal(
-                    blocked.legResults[0].simulationTimingStatus,
-                    'exact_contract_timing_missing'
-                );
+                const pending = ctx.OptionComboValuation.computeGroupDerivedData(group, state);
+                assert.equal(pending.groupSimulationAvailable, true);
+                assert.ok(Number.isFinite(pending.groupSimValue));
 
-                group.legs[0].expiryAsOf = '2026-07-16T20:00:00Z';
-                const complete = ctx.OptionComboValuation.computeGroupDerivedData(group, state);
-                assert.equal(complete.groupSimulationAvailable, true);
-                assert.ok(Number.isFinite(complete.groupSimValue));
+                Object.assign(group.legs[0], {
+                    liveQuoteIdentityStatus: 'verified',
+                    qualifiedOptionConId: 123456,
+                    qualifiedOptionTradingClass: 'SPY',
+                });
+                const fallback = ctx.OptionComboValuation.computeGroupDerivedData(group, state);
+                assert.equal(fallback.groupSimulationAvailable, true);
+                assert.ok(Number.isFinite(fallback.groupSimValue));
+
+                group.legs[0].liveQuoteIdentityStatus = 'rejected';
+                delete group.legs[0].qualifiedOptionTradingClass;
+                const rejected = ctx.OptionComboValuation.computeGroupDerivedData(group, state);
+                assert.equal(rejected.groupSimulationAvailable, false);
+                assert.equal(rejected.legResults[0].simulationTimingStatus, 'exact_contract_timing_missing');
             },
         },
         {
@@ -444,6 +449,7 @@ module.exports = {
                 assert.equal(rebuiltResult.groupResults.length, fullResult.groupResults.length);
                 assert.equal(rebuiltResult.hedgeResults.length, fullResult.hedgeResults.length);
                 almostEqual(rebuiltResult.globalTotalCost, fullResult.globalTotalCost);
+                almostEqual(rebuiltResult.globalNetCashFlow, fullResult.globalNetCashFlow);
                 almostEqual(rebuiltResult.allGroupsNetCashFlow, fullResult.allGroupsNetCashFlow);
                 almostEqual(rebuiltResult.globalSimulatedValue, fullResult.globalSimulatedValue);
                 almostEqual(rebuiltResult.globalPnL, fullResult.globalPnL);
@@ -493,7 +499,7 @@ module.exports = {
                 assert.equal(result.groupSimValue, null);
                 assert.equal(result.groupPnL, null);
                 assert.equal(result.legResults[0].simPricePerShare, null);
-                assert.equal(result.legResults[0].ivText, 'Sim IV: N/A (TWS unavailable)');
+                assert.match(result.legResults[0].ivText, /quote_timestamp_unavailable/i);
             },
         },
         {
@@ -544,7 +550,7 @@ module.exports = {
             },
         },
         {
-            name: 'excludes unchecked groups from global totals and amortized aggregation',
+            name: 'excludes unchecked groups from global totals, net cash flow, and amortized aggregation',
             run() {
                 const ctx = loadValuationContext();
                 const globalState = {
@@ -597,7 +603,8 @@ module.exports = {
                 const result = ctx.OptionComboValuation.computePortfolioDerivedData(globalState);
 
                 assert.equal(result.groupResults.length, 2);
-                assert.equal(result.allGroupsNetCashFlow, 250);
+                assert.equal(result.globalNetCashFlow, 0);
+                assert.equal(result.allGroupsNetCashFlow, 0);
                 assert.equal(result.globalTotalCost, 900);
                 assert.equal(result.globalSimulatedValue, 1000);
                 assert.equal(result.globalPnL, 100);
@@ -741,7 +748,7 @@ module.exports = {
             },
         },
         {
-            name: 'marks an INDEX option projection unavailable instead of assuming zero carry',
+            name: 'uses a disclosed flat-spot INDEX forward estimate when parity is unavailable',
             run() {
                 const ctx = loadValuationContext();
                 const result = ctx.OptionComboValuation.computeGroupDerivedData({
@@ -760,9 +767,9 @@ module.exports = {
                     groups: [], hedges: [],
                 });
 
-                assert.equal(result.legResults[0].simulationAvailable, false);
-                assert.equal(result.legResults[0].simPricePerShare, null);
-                assert.equal(result.legResults[0].pnl, null);
+                assert.equal(result.legResults[0].simulationAvailable, true);
+                assert.ok(Number.isFinite(result.legResults[0].simPricePerShare));
+                assert.ok(Number.isFinite(result.legResults[0].pnl));
             },
         },
         {
@@ -1718,15 +1725,11 @@ module.exports = {
 
                 group.livePriceMode = 'mark';
                 const mark = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
-                assert.equal(mark.legResults[0].simPricePerShare, null);
-                assert.equal(mark.legResults[0].simulationAvailable, false);
-                assert.equal(
-                    mark.legResults[0].simulationUnavailableReason,
-                    'strict_convergence_bbo_unavailable'
-                );
-                assert.match(mark.legResults[0].ivText, /strict live BBO required/i);
+                almostEqual(mark.legResults[0].simPricePerShare, 0.12);
+                assert.equal(mark.legResults[0].simulationAvailable, true);
+                assert.match(mark.legResults[0].ivText, /Estimated/i);
                 almostEqual(mark.legResults[0].liveLegPnL, -3);
-                assert.equal(mark.legResults[0].pnl, null);
+                almostEqual(mark.legResults[0].pnl, -3);
             },
         },
         {

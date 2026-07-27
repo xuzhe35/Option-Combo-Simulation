@@ -35,6 +35,34 @@ class NyseParserTest(unittest.TestCase):
         self.assertIn("2026-07-03", [item["date"] for item in result["closures"]])
         self.assertEqual(result["earlyCloses"][0]["date"], "2026-11-27")
 
+    def test_nyse_only_merge_preserves_other_calendar_timestamps(self):
+        refreshed = {
+            "NYSE": {
+                "calendarKey": "NYSE",
+                "fetchedAt": "2026-07-28T00:00:00+00:00",
+            },
+        }
+        existing = {
+            "calendars": {
+                "NYSE": {
+                    "calendarKey": "NYSE",
+                    "fetchedAt": "2026-07-12T00:00:00+00:00",
+                },
+                "CME:ES": {
+                    "calendarKey": "CME:ES",
+                    "fetchedAt": "2026-07-12T00:00:00+00:00",
+                },
+            },
+        }
+
+        merged, preserved = sync._merge_preserved_calendars(refreshed, existing)
+
+        self.assertEqual(
+            merged["NYSE"]["fetchedAt"], "2026-07-28T00:00:00+00:00")
+        self.assertEqual(
+            merged["CME:ES"]["fetchedAt"], "2026-07-12T00:00:00+00:00")
+        self.assertEqual(preserved, ["CME:ES"])
+
 
 class CmeParserTest(unittest.TestCase):
     def test_normalizes_observed_cme_trading_date_formats(self):
