@@ -4404,5 +4404,104 @@ class IbServerSubmissionFillReplayTests(unittest.IsolatedAsyncioTestCase):
             ib_server.combo_order_tracking_by_perm_id.pop(941, None)
 
 
+class IbkrGlobalEquivalentClosePlanTests(unittest.TestCase):
+    def _leg(self, leg_id, right, strike, expiry='20260717'):
+        leg = ComboLegRequest.from_payload({
+            'id': leg_id,
+            'type': 'call' if right == 'C' else 'put',
+            'pos': -1,
+            'secType': 'OPT',
+            'symbol': 'GLD',
+            'underlyingSymbol': 'GLD',
+            'exchange': 'SMART',
+            'underlyingExchange': 'SMART',
+            'currency': 'USD',
+            'multiplier': '100',
+            'right': right,
+            'strike': strike,
+            'expDate': expiry,
+        })
+        leg.observed_bid = 29.8 if right == 'C' else 29.7
+        return leg
+
+    def _request(self, group_id, leg):
+        return ComboOrderRequest(
+            group_id=group_id,
+            group_name=group_id,
+            underlying_symbol='GLD',
+            underlying_contract_month='',
+            execution_mode='preview',
+            account='U1',
+            execution_intent='close',
+            request_source='global_equivalent_close',
+            close_strategy='auto',
+            observed_underlying_price=730,
+            profile={'underlyingSecType': 'STK', 'underlyingSymbol': 'GLD'},
+            legs=[leg],
+        )
+
+    def _adapter(self, positions):
+        return IbkrExecutionAdapter(
+            ib=_DummyIb(),
+            client_subscriptions={},
+            qualified_underlyings={},
+            supported_live_families={},
+            index_exchange_fallbacks={},
+            portfolio_positions_provider=lambda: positions,
+        )
+
+    def test_same_expiry_cross_group_itm_requirements_net_to_zero(self):
+        call = self._leg('long_call', 'C', 700)
+        put = self._leg('long_put', 'P', 760)
+        adapter = self._adapter([
+            {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260717', 'right': 'C', 'strike': 700, 'position': 1},
+            {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260717', 'right': 'P', 'strike': 760, 'position': 1},
+        ])
+
+        plan = adapter._build_global_equivalent_close_plan([
+            self._request('group_call', call),
+            self._request('group_put', put),
+        ])
+
+        self.assertEqual(plan['expiry'], '20260717')
+        self.assertEqual(plan['underlyingLegs'], [])
+        self.assertEqual(plan['netUnderlyingQuantity'], 0)
+        self.assertEqual(
+            [item['groupId'] for item in plan['assignmentAdjustments']],
+            ['group_call', 'group_put'],
+        )
+        self.assertEqual(
+            [item['internallyNettedUnderlyingQuantity'] for item in plan['assignmentAdjustments']],
+            [-100, 100],
+        )
+
+    def test_cross_expiry_candidates_are_blocked(self):
+        call = self._leg('front_call', 'C', 700, '20260717')
+        put = self._leg('back_put', 'P', 760, '20260724')
+        adapter = self._adapter([
+            {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260717', 'right': 'C', 'strike': 700, 'position': 1},
+            {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260724', 'right': 'P', 'strike': 760, 'position': 1},
+        ])
+
+        with self.assertRaisesRegex(ValueError, 'span multiple expiries'):
+            adapter._build_global_equivalent_close_plan([
+                self._request('front_group', call),
+                self._request('back_group', put),
+            ])
+
+    def test_duplicate_group_claims_are_aggregated_against_tws_position(self):
+        first = self._leg('first_call', 'C', 700)
+        second = self._leg('second_call', 'C', 700)
+        adapter = self._adapter([
+            {'account': 'U1', 'secType': 'OPT', 'symbol': 'GLD', 'expDate': '20260717', 'right': 'C', 'strike': 700, 'position': 1},
+        ])
+
+        with self.assertRaisesRegex(ValueError, 'requested close quantity 2'):
+            adapter._build_global_equivalent_close_plan([
+                self._request('first_group', first),
+                self._request('second_group', second),
+            ])
+
+
 if __name__ == '__main__':
     unittest.main()

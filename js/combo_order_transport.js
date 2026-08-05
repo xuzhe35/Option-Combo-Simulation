@@ -54,6 +54,276 @@
                 : null;
         }
 
+        function _getGlobalEquivalentRuntime() {
+            const state = _getState();
+            if (!state.globalEquivalentClose || typeof state.globalEquivalentClose !== 'object') {
+                state.globalEquivalentClose = {
+                    pendingRequest: false,
+                    status: 'idle',
+                    lastPlan: null,
+                    lastResult: null,
+                    lastError: '',
+                    pendingGroups: null,
+                };
+            }
+            return state.globalEquivalentClose;
+        }
+
+        function _refreshGlobalEquivalentStatus() {
+            const runtime = _getGlobalEquivalentRuntime();
+            const statusEl = globalScope.document
+                && typeof globalScope.document.getElementById === 'function'
+                ? globalScope.document.getElementById('globalAutoCloseStatus')
+                : null;
+            if (!statusEl) return;
+            if (runtime.lastError) {
+                statusEl.textContent = runtime.lastError;
+                statusEl.className = 'small danger-text';
+                return;
+            }
+            const labels = {
+                idle: '',
+                pending_preview: 'Building Global Close Plan…',
+                previewed: 'Plan previewed; no Groups changed.',
+                pending_submit: 'Submitting net Underlying order…',
+                working: 'Underlying order is working; Groups remain unchanged.',
+                completed: 'Global Auto Close completed.',
+            };
+            statusEl.textContent = labels[runtime.status] || '';
+            statusEl.className = 'small text-muted';
+        }
+
+        function _isGroupActiveForGlobalClose(group) {
+            if (!group || group.includedInGlobal === false || !_groupHasOpenPositions(group)) {
+                return false;
+            }
+            const sessionLogic = _getSessionLogicApi();
+            return !sessionLogic
+                || typeof sessionLogic.getRenderableGroupViewMode !== 'function'
+                || sessionLogic.getRenderableGroupViewMode(group) === 'active';
+        }
+
+        function _buildGlobalEquivalentGroupPayloads(executionMode = 'preview') {
+            const builder = _getGroupOrderBuilderApi();
+            if (!builder || typeof builder.buildGroupOrderRequestPayload !== 'function') {
+                return [];
+            }
+            const state = _getState();
+            return (state.groups || [])
+                .filter(_isGroupActiveForGlobalClose)
+                .map((group) => {
+                    const maxCloseQuantity = typeof builder.resolveGroupCloseQuantity === 'function'
+                        ? builder.resolveGroupCloseQuantity(group)
+                        : null;
+                    return builder.buildGroupOrderRequestPayload(group, state, {
+                        action: executionMode === 'preview'
+                            ? 'preview_global_equivalent_close'
+                            : 'submit_global_equivalent_close',
+                        executionMode,
+                        intent: 'close',
+                        source: 'global_equivalent_close',
+                        closeStrategy: 'auto',
+                        closeQuantity: maxCloseQuantity,
+                        timeInForce: 'DAY',
+                    });
+                })
+                .filter((payload) => Array.isArray(payload.legs) && payload.legs.length > 0);
+        }
+
+        function _formatGlobalEquivalentConfirmation(plan) {
+            const netQuantity = Number(plan && plan.netUnderlyingQuantity) || 0;
+            const symbol = String(plan && plan.underlyingSymbol || 'Underlying');
+            const action = netQuantity > 0 ? 'BUY' : (netQuantity < 0 ? 'SELL' : 'NO TRADE');
+            const unhandledCount = Array.isArray(plan && plan.unhandledLegs)
+                ? plan.unhandledLegs.length
+                : 0;
+            return [
+                `Global Auto Close Plan · Expiry ${plan && plan.expiry || '--'}`,
+                `Deep ITM hedged: ${Number(plan && plan.itmCount) || 0}`,
+                `Worthless OTM ignored: ${Number(plan && plan.ignoredCount) || 0}`,
+                `Net Underlying: ${action} ${Math.abs(netQuantity)} ${symbol}`,
+                `Normal liquid legs left unchanged: ${unhandledCount}`,
+                '',
+                'Equivalent option contracts remain at TWS until expiry. Execute this confirmed one-expiry plan?',
+            ].join('\n');
+        }
+
+        function requestGlobalEquivalentClosePlan() {
+            const runtime = _getGlobalEquivalentRuntime();
+            if (runtime.pendingRequest) return false;
+            if (_isHistoricalMode()) {
+                runtime.lastError = 'Global Auto Close is available only in the live TWS workspace.';
+                _refreshGlobalEquivalentStatus();
+                return false;
+            }
+            if (!_isWsConnected()) {
+                runtime.lastError = 'WebSocket is not connected.';
+                _refreshGlobalEquivalentStatus();
+                return false;
+            }
+            if (typeof deps.hasSelectedLiveComboOrderAccount === 'function'
+                && !deps.hasSelectedLiveComboOrderAccount()) {
+                runtime.lastError = typeof deps.getLiveComboOrderAccountRequirementMessage === 'function'
+                    ? deps.getLiveComboOrderAccountRequirementMessage()
+                    : 'Select a TWS account first.';
+                if (typeof deps.requestManagedAccountsSnapshot === 'function') {
+                    deps.requestManagedAccountsSnapshot();
+                }
+                _refreshGlobalEquivalentStatus();
+                return false;
+            }
+
+            const groups = _buildGlobalEquivalentGroupPayloads('preview');
+            if (!groups.length) {
+                runtime.lastError = 'No globally included Active Group has an open position.';
+                _refreshGlobalEquivalentStatus();
+                return false;
+            }
+            runtime.pendingRequest = true;
+            runtime.status = 'pending_preview';
+            runtime.lastError = '';
+            runtime.lastPlan = null;
+            runtime.lastResult = null;
+            runtime.pendingGroups = _clonePayload(groups);
+            _sendPayload({
+                action: 'preview_global_equivalent_close',
+                executionMode: 'preview',
+                confirmationTargetMode: 'submit',
+                groups,
+            });
+            _refreshGlobalEquivalentStatus();
+            return true;
+        }
+
+        function _submitGlobalEquivalentClose(plan) {
+            const runtime = _getGlobalEquivalentRuntime();
+            const state = _getState();
+            if (state.allowLiveComboOrders !== true) {
+                runtime.pendingRequest = false;
+                runtime.status = 'previewed';
+                runtime.lastError = 'Global live combo order switch is OFF; the Plan was not executed.';
+                _refreshGlobalEquivalentStatus();
+                return false;
+            }
+            const groups = _clonePayload(runtime.pendingGroups) || [];
+            groups.forEach((payload) => {
+                payload.action = 'submit_global_equivalent_close';
+                payload.executionMode = 'submit';
+            });
+            runtime.pendingRequest = true;
+            runtime.status = 'pending_submit';
+            runtime.lastError = '';
+            _sendPayload({
+                action: 'submit_global_equivalent_close',
+                executionMode: 'submit',
+                closePlanToken: String(plan && plan.closePlanToken || ''),
+                groups,
+            });
+            _refreshGlobalEquivalentStatus();
+            return true;
+        }
+
+        function _applyGlobalEquivalentAdjustments(adjustments) {
+            let changed = false;
+            const touchedGroups = new Set();
+            (adjustments || []).forEach((adjustment) => {
+                const group = _findGroupById(adjustment && adjustment.groupId);
+                if (!group) return;
+                if (_applyAssignmentAdjustment(group, adjustment)) {
+                    changed = true;
+                }
+                touchedGroups.add(group);
+            });
+            touchedGroups.forEach((group) => {
+                _maybePromoteEquivalentGroupToSettlement(group);
+            });
+            if (changed) {
+                _renderGroups();
+                _updateDerivedValues();
+            }
+            return changed;
+        }
+
+        function _handleGlobalEquivalentPreview(data) {
+            const runtime = _getGlobalEquivalentRuntime();
+            const plan = data && data.plan;
+            runtime.pendingRequest = false;
+            runtime.status = 'previewed';
+            runtime.lastError = '';
+            runtime.lastPlan = plan || null;
+            _refreshGlobalEquivalentStatus();
+            if (!plan || !String(plan.closePlanToken || '').trim()) {
+                runtime.lastError = 'Backend returned a non-confirmable Global Close Plan.';
+                _refreshGlobalEquivalentStatus();
+                return true;
+            }
+            const confirmed = typeof globalScope.confirm === 'function'
+                ? globalScope.confirm(_formatGlobalEquivalentConfirmation(plan))
+                : false;
+            if (confirmed) {
+                _submitGlobalEquivalentClose(plan);
+            }
+            return true;
+        }
+
+        function _handleGlobalEquivalentSubmit(data) {
+            const runtime = _getGlobalEquivalentRuntime();
+            const result = data && data.result || {};
+            runtime.pendingRequest = false;
+            runtime.lastResult = result;
+            runtime.lastError = '';
+            const adjustments = Array.isArray(result.assignmentAdjustments)
+                ? result.assignmentAdjustments
+                : [];
+            const status = String(result.status || '').trim();
+            if (status === 'Filled') {
+                _applyGlobalEquivalentAdjustments(adjustments);
+                runtime.status = 'completed';
+            } else if (['Cancelled', 'Canceled', 'ApiCancelled', 'Inactive', 'Rejected'].includes(status)) {
+                runtime.status = 'error';
+                runtime.lastError = `Net Underlying order ended with ${status}; Groups were not changed. Reconcile any partial fill in TWS before retrying.`;
+            } else {
+                runtime.status = 'working';
+            }
+            _refreshGlobalEquivalentStatus();
+            return true;
+        }
+
+        function _handleGlobalEquivalentStatus(data) {
+            const update = data && data.orderStatus || {};
+            if (String(update.requestSource || '').trim() !== 'global_equivalent_underlying') {
+                return false;
+            }
+            const runtime = _getGlobalEquivalentRuntime();
+            runtime.pendingRequest = false;
+            const status = String(update.status || '').trim();
+            if (status === 'Filled'
+                && Array.isArray(update.assignmentAdjustments)) {
+                _applyGlobalEquivalentAdjustments(update.assignmentAdjustments);
+                runtime.status = 'completed';
+                runtime.lastError = '';
+            } else if (['Cancelled', 'Canceled', 'ApiCancelled', 'Inactive', 'Rejected'].includes(status)) {
+                runtime.status = 'error';
+                runtime.lastError = `Net Underlying order ended with ${status}; Groups were not changed. Reconcile any partial fill in TWS before retrying.`;
+            } else {
+                runtime.status = 'working';
+            }
+            _refreshGlobalEquivalentStatus();
+            return true;
+        }
+
+        function _handleGlobalEquivalentError(data) {
+            const runtime = _getGlobalEquivalentRuntime();
+            runtime.pendingRequest = false;
+            runtime.status = 'error';
+            runtime.lastError = String(data && data.message || 'Global Auto Close failed.');
+            _refreshGlobalEquivalentStatus();
+            if (typeof globalScope.alert === 'function') {
+                globalScope.alert(runtime.lastError);
+            }
+            return true;
+        }
+
         function _requestClosePlanRevocation(group, runtime, reason) {
             const preview = runtime && runtime.lastPreview && typeof runtime.lastPreview === 'object'
                 ? runtime.lastPreview
@@ -1954,11 +2224,20 @@
                 if (!order || typeof order !== 'object' || !order.groupId) {
                     return;
                 }
-                _applyComboOrderStatusUpdate({
+                const update = {
                     action: 'combo_order_status_update',
                     groupId: order.groupId,
                     orderStatus: order,
-                });
+                };
+                // Global Auto Close orders carry the virtual '__global_equivalent__'
+                // group id, which the per-group handler silently drops. Route them
+                // through the global handler so a Filled net Underlying order that
+                // is only replayed via this snapshot (e.g. after a page reload)
+                // still applies its assignment adjustments to the real Groups.
+                if (_handleGlobalEquivalentStatus(update)) {
+                    return;
+                }
+                _applyComboOrderStatusUpdate(update);
             });
             return true;
         }
@@ -1966,6 +2245,20 @@
         function handleMessage(data) {
             if (!data || typeof data !== 'object' || !data.action) {
                 return false;
+            }
+
+            if (data.action === 'global_equivalent_close_preview_result') {
+                return _handleGlobalEquivalentPreview(data);
+            }
+            if (data.action === 'global_equivalent_close_submit_result') {
+                return _handleGlobalEquivalentSubmit(data);
+            }
+            if (data.action === 'global_equivalent_close_error') {
+                return _handleGlobalEquivalentError(data);
+            }
+            if (data.action === 'combo_order_status_update'
+                && _handleGlobalEquivalentStatus(data)) {
+                return true;
             }
 
             if (data.action === 'combo_order_validation_result') {
@@ -2005,6 +2298,7 @@
             requestTrialGroupComboOrder,
             requestCloseGroupComboOrder,
             requestEquivalentCloseGroupComboOrder,
+            requestGlobalEquivalentClosePlan,
             requestCloseLegComboOrder,
             confirmClosePlan,
             cancelClosePlan,
@@ -2026,6 +2320,10 @@
                 applyComboOrderCancelResult: _applyComboOrderCancelResult,
                 applyComboOrderFillCostUpdate: _applyComboOrderFillCostUpdate,
                 applyComboOrderError: _applyComboOrderError,
+                applyGlobalEquivalentAdjustments: _applyGlobalEquivalentAdjustments,
+                handleGlobalEquivalentPreview: _handleGlobalEquivalentPreview,
+                handleGlobalEquivalentSubmit: _handleGlobalEquivalentSubmit,
+                handleGlobalEquivalentStatus: _handleGlobalEquivalentStatus,
                 markExecutionError: _markExecutionError,
                 isSoftTerminalBrokerStatus: _isSoftTerminalBrokerStatus,
                 buildCloseGroupComboOrderPayload: _buildCloseGroupComboOrderPayload,

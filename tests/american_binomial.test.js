@@ -117,7 +117,7 @@ module.exports = {
             },
         },
         {
-            name: 'runtime switch affects only bsm-spot profiles',
+            name: 'equity runtime switch leaves FOP on Black-76 by default',
             run() {
                 const ctx = loadPricingContext();
                 ctx.OptionComboPricingCore.configureEquityOptionPricing({
@@ -172,6 +172,65 @@ module.exports = {
                 assert.equal(equityLeg.binomialSteps, 151);
                 assert.equal(futureOptionLeg.pricingModel, 'black76');
                 assert.equal(futureOptionLeg.dividendYield, 0);
+            },
+        },
+        {
+            name: 'FOP runtime switch uses an American zero-drift futures tree',
+            run() {
+                const ctx = loadPricingContext();
+                const rate = 0.08;
+                ctx.OptionComboPricingCore.configureEquityOptionPricing({
+                    model: 'bsm-spot',
+                    fopModel: 'american-binomial',
+                    dividendYield: 0.25,
+                    steps: 401,
+                });
+
+                const futureOptionLeg = ctx.processLegData(
+                    {
+                        type: 'put',
+                        pos: 1,
+                        strike: 100,
+                        expDate: '2027-07-23',
+                        iv: 0.15,
+                        ivSource: 'manual',
+                        cost: 0,
+                        currentPrice: 0,
+                        currentPriceSource: 'manual',
+                    },
+                    '2026-07-23',
+                    0,
+                    '2026-07-23',
+                    70,
+                    rate,
+                    'active',
+                    {
+                        pricingModel: 'black76',
+                        optionSecType: 'FOP',
+                        optionMultiplier: 5000,
+                    }
+                );
+
+                assert.equal(futureOptionLeg.pricingModel, 'american-binomial');
+                assert.equal(futureOptionLeg.americanUnderlyingMode, 'futures');
+                assert.equal(futureOptionLeg.dividendYield, rate);
+                assert.equal(futureOptionLeg.binomialSteps, 401);
+
+                const americanPrice = ctx.computeLegPrice(futureOptionLeg, 70, rate);
+                const europeanPrice = ctx.calculateBlack76Price(
+                    'put',
+                    70,
+                    100,
+                    futureOptionLeg.T,
+                    rate,
+                    futureOptionLeg.simIV,
+                    futureOptionLeg.rateT
+                );
+                assert.ok(americanPrice >= 30, `American FOP put ${americanPrice} fell below intrinsic`);
+                assert.ok(
+                    americanPrice > europeanPrice + 0.1,
+                    `American FOP put ${americanPrice} should exceed Black-76 ${europeanPrice}`
+                );
             },
         },
         {

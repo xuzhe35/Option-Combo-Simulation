@@ -1037,13 +1037,14 @@
             }
         }
 
+        const drawCharts = !chartApi || chartApi.drawCharts !== false;
         const chartContainer = card.querySelector('.chart-container');
-        if (chartContainer && chartContainer.style.display !== 'none') {
+        if (drawCharts && chartContainer && chartContainer.style.display !== 'none') {
             chartApi.drawGroupChart(card, groupResult.group);
         }
 
         const amortChartContainer = card.querySelector('.amortization-chart-container');
-        if (amortChartContainer && amortChartContainer.style.display !== 'none') {
+        if (drawCharts && amortChartContainer && amortChartContainer.style.display !== 'none') {
             const amortCanvas = amortChartContainer.querySelector('.amortization-canvas');
             const marginCanvas = amortChartContainer.querySelector('.margin-canvas');
             if (amortCanvas) chartApi.drawAmortizationChart(card, groupResult.group, amortCanvas, marginCanvas);

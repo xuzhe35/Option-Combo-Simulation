@@ -24,6 +24,7 @@
     let simTimeBasisWeekendWeight = 1;
     let simObservedTradingDates = null;
     let equityOptionPricingModel = 'bsm-spot';
+    let fopOptionPricingModel = 'black76';
     let equityDividendYield = 0;
     let americanBinomialSteps = americanBinomial
         && Number.isFinite(americanBinomial.DEFAULT_STEPS)
@@ -35,6 +36,9 @@
         equityOptionPricingModel = input.model === 'american-binomial'
             ? 'american-binomial'
             : 'bsm-spot';
+        fopOptionPricingModel = input.fopModel === 'american-binomial'
+            ? 'american-binomial'
+            : 'black76';
         const parsedYield = Number(input.dividendYield);
         equityDividendYield = Number.isFinite(parsedYield)
             ? Math.min(1, Math.max(0, parsedYield))
@@ -49,6 +53,7 @@
     function getEquityOptionPricingConfig() {
         return {
             model: equityOptionPricingModel,
+            fopModel: fopOptionPricingModel,
             dividendYield: equityDividendYield,
             steps: americanBinomialSteps,
         };
@@ -913,7 +918,8 @@
         pricingModel,
         exactTiming,
         timingContext,
-        weekendWeight
+        weekendWeight,
+        americanFuturesMode = false
     ) {
         const context = timingContext && typeof timingContext === 'object'
             ? timingContext
@@ -982,7 +988,9 @@
             quoteInterestRate,
             optionPrice,
             anchorRateT,
-            pricingModel === 'american-binomial' ? equityDividendYield : 0,
+            pricingModel === 'american-binomial'
+                ? (americanFuturesMode ? quoteInterestRate : equityDividendYield)
+                : 0,
             americanBinomialSteps
         );
         if (!solved.available) {
@@ -1133,10 +1141,21 @@
     function processLegData(leg, globalSimulatedDateStr, globalIvOffset, globalQuoteDateStr = null, globalUnderlyingPrice = null, globalInterestRate = null, viewMode = 'active', instrumentProfile = null, marketDataMode = 'live', timingContext = null) {
         const resolvedProfile = resolveInstrumentProfile(instrumentProfile);
         const profilePricingModel = (resolvedProfile && resolvedProfile.pricingModel) || 'bsm-spot';
+        const americanFuturesMode = profilePricingModel === 'black76'
+            && String(resolvedProfile && resolvedProfile.optionSecType || '').trim().toUpperCase() === 'FOP'
+            && fopOptionPricingModel === 'american-binomial';
         const pricingModel = profilePricingModel === 'bsm-spot'
             ? equityOptionPricingModel
-            : profilePricingModel;
-        const dividendYield = pricingModel === 'american-binomial' ? equityDividendYield : 0;
+            : (americanFuturesMode ? 'american-binomial' : profilePricingModel);
+        // A futures price has zero risk-neutral drift. In the generalized CRR
+        // tree, setting q=r produces that futures process while retaining the
+        // correct discounting and early-exercise checks at every node.
+        const parsedInterestRate = Number(globalInterestRate);
+        const dividendYield = pricingModel === 'american-binomial'
+            ? (americanFuturesMode && Number.isFinite(parsedInterestRate)
+                ? parsedInterestRate
+                : equityDividendYield)
+            : 0;
         const lowerType = leg.type.toLowerCase();
         if (isUnderlyingLeg(leg)) {
             const contractMultiplier = getUnderlyingLegMultiplier(resolvedProfile);
@@ -1160,6 +1179,7 @@
                 isUnderlyingLeg: true,
                 pricingModel,
                 dividendYield,
+                americanUnderlyingMode: americanFuturesMode ? 'futures' : 'spot',
                 binomialSteps: americanBinomialSteps,
                 contractMultiplier,
                 settlementUnitsPerContract: 1,
@@ -1194,7 +1214,8 @@
             pricingModel,
             exactTiming,
             timingContext,
-            weekendWeight
+            weekendWeight,
+            americanFuturesMode
         );
         // Analysis callers supply this consistently. Execution paths do not
         // use this projection fallback.
@@ -1433,6 +1454,7 @@
                 : null,
             pricingModel,
             dividendYield,
+            americanUnderlyingMode: americanFuturesMode ? 'futures' : 'spot',
             binomialSteps: americanBinomialSteps,
             contractMultiplier,
             settlementUnitsPerContract,

@@ -130,7 +130,7 @@ class PnLChart {
      * @param {number} minS 
      * @param {number} maxS 
      */
-    draw(group, globalState, minS, maxS) {
+    draw(group, globalState, minS, maxS, options = {}) {
         this.resize();
         this.ctx.clearRect(0, 0, this.width, this.height);
         this.lastProjectionQuality = null;
@@ -328,9 +328,13 @@ class PnLChart {
             return;
         }
 
-        const step = (maxS - minS) / (this.pointsCount - 1);
+        const requestedPointCount = Math.round(Number(options && options.pointsCount));
+        const pointsCount = Number.isFinite(requestedPointCount)
+            ? Math.max(32, Math.min(this.pointsCount, requestedPointCount))
+            : this.pointsCount;
+        const step = (maxS - minS) / (pointsCount - 1);
         let evalPoints = [];
-        for (let i = 0; i < this.pointsCount; i++) {
+        for (let i = 0; i < pointsCount; i++) {
             evalPoints.push(minS + (i * step));
         }
         // The current-underlier point is a live observable boundary: on the

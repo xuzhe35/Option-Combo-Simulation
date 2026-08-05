@@ -44,6 +44,7 @@ The main app shell owns:
 - amortized and probability analysis
 - trial trigger controls
 - close-group execution controls
+- one-expiry Global Auto Close planning/execution for conservative Auto-classified equivalent tails across globally included Active Groups; v1 rejects multiple candidate expiries and does not consume normal liquid legs
 - live account selection and WebSocket endpoint controls
 - Delta Hedge recommendation, broker preview, manual submit, cancel, clear, and guarded automation controls
 
@@ -277,7 +278,10 @@ Responsibilities:
 - quote-date and simulation-date semantics
 - entry date, rolling exchange trade date, and scenario target remain separate
 - futures-pool and forward-rate mapping
-- BSM and Black-76 pricing
+- BSM and Black-76 pricing, plus independent opt-in American CRR paths for
+  stock/ETF options and FOP. American FOP reuses the generalized tree with
+  `q=r`, so the bound futures price has zero risk-neutral drift while exercise
+  is checked at every node; European Black-76 remains the FOP default
 - weighted variance clocks with scalar or per-non-trading-date λ
 - probability MC horizons resolved as official-calendar `[quote,target)` daily
   weights; the Worker consumes the same scalar/`byDate` λ clock instead of
@@ -286,7 +290,8 @@ Responsibilities:
   simulation blocks are nonnegative while their sum remains the exact signed
   effective horizon
 - probability leg repricing carries explicit `varianceT` and calendar
-  `discountT`: equity/ETF legs use BSM, while index/FOP legs use Black-76
+  `discountT`: equity/ETF legs use BSM and index/FOP legs use Black-76 unless
+  their independent American switch selects the corresponding CRR price grid
 - live 0DTE fractional time from IB ContractDetails last-trade metadata; the
   live safety gate requires contract-source timing for FOP/INDEX and for
   unverified or nonstandard target/short-dated legs. Standard stock/ETF legs

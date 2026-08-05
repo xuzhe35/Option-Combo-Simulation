@@ -520,6 +520,10 @@
         return value === 'american-binomial' ? 'american-binomial' : 'bsm-spot';
     }
 
+    function normalizeFopOptionPricingModel(value) {
+        return value === 'american-binomial' ? 'american-binomial' : 'black76';
+    }
+
     function normalizeEquityDividendYield(value) {
         const parsed = Number(value);
         return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0;
@@ -813,6 +817,8 @@
         snapshot.futuresPool = (snapshot.futuresPool || [])
             .map(entry => _buildArchivableFuturesPoolEntry(entry));
         delete snapshot.comboTemplateQuoteRequests;
+        // One-shot live confirmation/runtime state; never persist plan tokens or broker workflow status.
+        delete snapshot.globalEquivalentClose;
         // Belongs to one live subscription attempt, never to the saved book.
         delete snapshot.liveSubscriptionUnresolvedById;
         delete snapshot.liveQuoteDate;
@@ -851,6 +857,9 @@
             interestRate: importedState.interestRate !== undefined ? importedState.interestRate : 0.03,
             equityOptionPricingModel: normalizeEquityOptionPricingModel(
                 importedState.equityOptionPricingModel
+            ),
+            fopOptionPricingModel: normalizeFopOptionPricingModel(
+                importedState.fopOptionPricingModel
             ),
             equityDividendYield: normalizeEquityDividendYield(
                 importedState.equityDividendYield
@@ -1061,6 +1070,7 @@
         normalizeHistoricalAutoCloseAtExpiry,
         normalizeGreeksEnabled,
         normalizeEquityOptionPricingModel,
+        normalizeFopOptionPricingModel,
         normalizeEquityDividendYield,
         normalizeAmericanBinomialSteps,
         normalizeSimTimeBasis,

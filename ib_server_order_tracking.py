@@ -600,6 +600,46 @@ def build_combo_order_status_payload(
             payload['orderStatus'][field] = value
 
     payload['orderStatus']['statusMessage'] = status_message or None
+    if str(tracking.get('requestSource') or '').strip() == 'global_equivalent_underlying':
+        plan_id = tracking.get('globalEquivalentPlanId')
+        adjustments = [
+            dict(item) for item in (tracking.get('globalEquivalentAdjustments') or [])
+            if isinstance(item, dict)
+        ]
+        avg_fill_price = payload['orderStatus'].get('avgFillPrice')
+        try:
+            avg_fill_price = float(avg_fill_price)
+        except (TypeError, ValueError):
+            avg_fill_price = None
+        if avg_fill_price is not None and avg_fill_price <= 0:
+            avg_fill_price = None
+        if _normalize_order_status_text(payload['orderStatus'].get('status')) == 'filled':
+            for adjustment in adjustments:
+                executed_quantity = abs(int(adjustment.get('executedUnderlyingQuantity') or 0))
+                netted_quantity = abs(int(adjustment.get('internallyNettedUnderlyingQuantity') or 0))
+                reference = adjustment.get('observedUnderlyingPrice')
+                try:
+                    reference = float(reference)
+                except (TypeError, ValueError):
+                    reference = None
+                if reference is not None and reference <= 0:
+                    reference = None
+                if executed_quantity and avg_fill_price is not None:
+                    adjustment['underlyingAvgFillPrice'] = avg_fill_price
+                total_quantity = executed_quantity + netted_quantity
+                if total_quantity and avg_fill_price is not None and reference is not None:
+                    adjustment['hedgeBasisPrice'] = round(
+                        (executed_quantity * avg_fill_price + netted_quantity * reference)
+                        / total_quantity,
+                        4,
+                    )
+                elif executed_quantity and avg_fill_price is not None:
+                    adjustment['hedgeBasisPrice'] = avg_fill_price
+                elif netted_quantity and reference is not None:
+                    adjustment['hedgeBasisPrice'] = reference
+                adjustment['globalEquivalentPlanId'] = plan_id
+            payload['orderStatus']['assignmentAdjustments'] = adjustments
+        payload['orderStatus']['globalEquivalentPlanId'] = plan_id
     return payload
 
 

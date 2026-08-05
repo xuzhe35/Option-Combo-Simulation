@@ -57,6 +57,10 @@ const _liveQuoteRuntime = {
     // Exact request identity for every canonical/alias id. Live option quotes
     // must prove that IB qualified this contract before they may update a leg.
     optionRequestIdentityById: new Map(),
+    // A contract editor invalidates its existing id immediately, before the
+    // debounced replacement subscribe request is sent. Old ticks must not
+    // bridge that gap and get reinterpreted using the edited strike/expiry.
+    invalidatedOptionSubscriptionIds: new Set(),
     rejectedOptionIdentityWarnings: new Set(),
     // Opaque futures subscription ids are generation-scoped.  Since the
     // backend returns the id unchanged, a delayed response from an older
@@ -312,6 +316,7 @@ function _resetLiveQuoteRuntime() {
     _liveQuoteRuntime.carryReferenceQuotesById.clear();
     _liveQuoteRuntime.optionQuoteAliasesByCanonicalId.clear();
     _liveQuoteRuntime.optionRequestIdentityById.clear();
+    _liveQuoteRuntime.invalidatedOptionSubscriptionIds.clear();
     _liveQuoteRuntime.rejectedOptionIdentityWarnings.clear();
     _liveQuoteRuntime.futureRequestIdentityByWireId.clear();
     _liveQuoteRuntime.rejectedFutureIdentityWarnings.clear();
@@ -448,6 +453,9 @@ function _expandOptionQuoteAliases(options) {
 }
 
 function _optionQuoteIdentityMismatchReason(subId, rawQuote) {
+    if (_liveQuoteRuntime.invalidatedOptionSubscriptionIds.has(subId)) {
+        return 'option contract edit pending resubscription';
+    }
     const expected = _liveQuoteRuntime.optionRequestIdentityById.get(subId);
     // Historical replay and isolated callers do not create live subscription
     // identities. Preserve those paths; live subscriptions below are strict.
@@ -463,6 +471,23 @@ function _optionQuoteIdentityMismatchReason(subId, rawQuote) {
     const actualRight = String(actual.right || '').trim().toUpperCase();
     const actualExpiry = _normalizeOptionExpiryIdentity(actual.optionExpiry);
     const actualTradingClass = String(actual.tradingClass || '').trim().toUpperCase();
+    const currentLeg = (state.groups || [])
+        .flatMap(group => Array.isArray(group && group.legs) ? group.legs : [])
+        .find(leg => leg && String(leg.id || '') === String(subId));
+    if (currentLeg) {
+        const currentRight = String(currentLeg.type || '').trim().charAt(0).toUpperCase();
+        const currentStrike = parseFloat(currentLeg.strike);
+        const currentExpiry = _normalizeOptionExpiryIdentity(currentLeg.expDate);
+        if (currentRight && actualRight !== currentRight) return 'current leg right mismatch';
+        if (!Number.isFinite(currentStrike)
+            || !Number.isFinite(actual.strike)
+            || Math.abs(actual.strike - currentStrike) > 0.000001) {
+            return 'current leg strike mismatch';
+        }
+        if (currentExpiry && actualExpiry !== currentExpiry) {
+            return 'current leg expiry mismatch';
+        }
+    }
     if (!actualSecType || actualSecType !== expected.secType) return 'secType mismatch';
     const symbolMatches = _canonicalOptionIdentitySymbol(actualSymbol)
         === _canonicalOptionIdentitySymbol(expected.symbol);
@@ -1018,6 +1043,53 @@ function getLiveForwardCarrySnapshot() {
     });
 }
 
+function invalidateLiveOptionSubscriptionForLeg(subId, reason = 'Option contract edited; waiting for replacement subscription.') {
+    const normalizedId = String(subId || '').trim();
+    if (!normalizedId) return false;
+
+    _liveQuoteRuntime.invalidatedOptionSubscriptionIds.add(normalizedId);
+    let changed = _liveQuoteRuntime.optionQuotesById.delete(normalizedId);
+
+    if (state.liveSubscriptionUnresolvedById
+        && Object.prototype.hasOwnProperty.call(state.liveSubscriptionUnresolvedById, normalizedId)) {
+        delete state.liveSubscriptionUnresolvedById[normalizedId];
+        changed = true;
+    }
+
+    (state.groups || []).forEach((group) => {
+        (group && Array.isArray(group.legs) ? group.legs : []).forEach((leg) => {
+            if (!leg || String(leg.id || '') !== normalizedId) return;
+            [
+                'expiryAsOf', 'expiryTimingSource', 'lastTradeDate', 'lastTradeTime',
+                'expiryTimeZoneId', 'realExpirationDate', 'qualifiedOptionConId',
+                'qualifiedOptionLocalSymbol', 'qualifiedOptionTradingClass',
+                'qualifiedOptionUnderConId', 'qualifiedOptionUnderlyingContractMonth',
+            ].forEach((key) => {
+                if (Object.prototype.hasOwnProperty.call(leg, key)) {
+                    delete leg[key];
+                    changed = true;
+                }
+            });
+            if (leg.currentPrice !== null) {
+                leg.currentPrice = null;
+                changed = true;
+            }
+            changed = _markOptionQuoteMissing(leg) || changed;
+            if (leg.liveQuoteIdentityStatus !== 'pending') {
+                leg.liveQuoteIdentityStatus = 'pending';
+                changed = true;
+            }
+            if (leg.liveQuoteIdentityReason !== reason) {
+                leg.liveQuoteIdentityReason = reason;
+                changed = true;
+            }
+        });
+    });
+
+    _refreshLiveSubscriptionWarnings();
+    return changed;
+}
+
 window.OptionComboWsLiveQuotes = {
     getOptionQuote: getLiveOptionQuote,
     getFutureQuote: getLiveFutureQuote,
@@ -1031,6 +1103,7 @@ window.OptionComboWsLiveQuotes = {
         stale: !state || state.liveProjectionFeedStale !== false,
         lastReceivedAt: String(state && state.liveProjectionLastReceivedAt || ''),
     }),
+    invalidateOptionSubscriptionForLeg: invalidateLiveOptionSubscriptionForLeg,
     clear: _resetLiveQuoteRuntime,
 };
 
@@ -2740,6 +2813,14 @@ function requestEquivalentCloseGroupComboOrder(group) {
     return transportApi.requestEquivalentCloseGroupComboOrder(group);
 }
 
+function requestGlobalEquivalentClosePlan() {
+    const transportApi = _getComboOrderTransportApi();
+    if (!transportApi || typeof transportApi.requestGlobalEquivalentClosePlan !== 'function') {
+        return false;
+    }
+    return transportApi.requestGlobalEquivalentClosePlan();
+}
+
 function requestCloseLegComboOrder(group, leg) {
     const transportApi = _getComboOrderTransportApi();
     if (!transportApi || typeof transportApi.requestCloseLegComboOrder !== 'function') {
@@ -2831,6 +2912,7 @@ window.requestManualConcedeManagedComboOrder = requestManualConcedeManagedComboO
 window.requestCancelManagedComboOrder = requestCancelManagedComboOrder;
 window.requestCloseGroupComboOrder = requestCloseGroupComboOrder;
 window.requestEquivalentCloseGroupComboOrder = requestEquivalentCloseGroupComboOrder;
+window.requestGlobalEquivalentClosePlan = requestGlobalEquivalentClosePlan;
 window.requestCloseLegComboOrder = requestCloseLegComboOrder;
 window.requestLegExistsCheck = requestLegExistsCheck;
 window.requestHistoricalReplayEntryGroup = requestHistoricalReplayEntryGroup;
@@ -3488,7 +3570,13 @@ function handleLiveSubscriptions(options = {}) {
     const historicalMode = _isHistoricalMode();
     if (!historicalMode && options.force !== true
         && _lastLiveSubscriptionSocket === ws
-        && _lastLiveSubscriptionSignature === subscriptionSignature) {
+        && _lastLiveSubscriptionSignature === subscriptionSignature
+        // An edited-then-reverted contract leaves its leg id invalidated while
+        // the wire payload matches the last subscription exactly. Skipping here
+        // would strand that leg (every tick rejected, metadata wiped), so fall
+        // through and resubscribe: the reset below clears the invalidation and
+        // the server re-confirms the contract identity and timing metadata.
+        && _liveQuoteRuntime.invalidatedOptionSubscriptionIds.size === 0) {
         return false;
     }
 

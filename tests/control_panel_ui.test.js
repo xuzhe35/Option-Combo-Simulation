@@ -82,8 +82,10 @@ module.exports = {
                     interestRate: createElement({ value: '3.00' }),
                     interestRateDisplay: createElement({ textContent: '3.00%' }),
                     equityOptionPricingControlGroup: createElement({ hidden: false, style: {} }),
+                    optionPricingControlLabelText: createElement({ textContent: '' }),
                     toggleEquityOptionPricingModelBtn: createElement({ textContent: '' }),
                     equityOptionPricingModelStatus: createElement({ textContent: '' }),
+                    equityDividendYieldControl: createElement({ hidden: false, style: {} }),
                     equityDividendYield: createElement({ value: '0.00', disabled: true }),
                     equityDividendYieldDisplay: createElement({ textContent: '0.00%' }),
                     forwardRatePanel: createElement({ hidden: true, style: {} }),
@@ -164,6 +166,7 @@ module.exports = {
                     historicalAvailableEndDate: '',
                     interestRate: 0.03,
                     equityOptionPricingModel: 'bsm-spot',
+                    fopOptionPricingModel: 'black76',
                     equityDividendYield: 0,
                     americanBinomialSteps: 201,
                     ivOffset: 0,
@@ -261,6 +264,17 @@ module.exports = {
                 assert.equal(elements.interestRate.disabled, false);
                 assert.equal(elements.forwardRatePanel.hidden, true);
                 assert.equal(elements.futuresPoolPanel.hidden, false);
+                assert.equal(elements.optionPricingControlLabelText.textContent, 'Futures Option Exercise Model');
+                assert.equal(elements.toggleEquityOptionPricingModelBtn.textContent, 'Use American Futures Binomial');
+                assert.equal(elements.equityDividendYieldControl.hidden, true);
+
+                const updateCallsBeforeFopPricingToggle = updateCalls;
+                elements.toggleEquityOptionPricingModelBtn.listeners.click();
+                assert.equal(state.fopOptionPricingModel, 'american-binomial');
+                assert.equal(state.equityOptionPricingModel, 'american-binomial');
+                assert.equal(elements.toggleEquityOptionPricingModelBtn.textContent, 'Use European Black-76');
+                assert.match(elements.equityOptionPricingModelStatus.textContent, /American futures CRR/);
+                assert.equal(updateCalls, updateCallsBeforeFopPricingToggle + 1);
 
                 elements.underlyingContractMonth.listeners.change({ target: { value: '202606' } });
                 assert.equal(state.underlyingContractMonth, '202606');

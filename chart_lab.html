@@ -211,7 +211,7 @@
 
                         <div class="control-group" id="equityOptionPricingControlGroup">
                             <label>
-                                Equity Option Pricing
+                                <span id="optionPricingControlLabelText">Equity Option Pricing</span>
                                 <span class="value-display" id="equityOptionPricingModelStatus">European BSM (original default)</span>
                             </label>
                             <button type="button" class="btn btn-secondary btn-sm"
@@ -219,15 +219,17 @@
                                 style="width: 100%;">
                                 Use American Binomial
                             </button>
-                            <label for="equityDividendYield" class="text-muted small"
-                                style="display: flex; justify-content: space-between; margin-top: 0.55rem;">
-                                Continuous Dividend Yield q (%)
-                                <span class="value-display" id="equityDividendYieldDisplay">0.00%</span>
-                            </label>
-                            <input type="number" id="equityDividendYield" class="number-input"
-                                value="0.00" step="0.05" min="0" max="100" disabled>
+                            <div id="equityDividendYieldControl">
+                                <label for="equityDividendYield" class="text-muted small"
+                                    style="display: flex; justify-content: space-between; margin-top: 0.55rem;">
+                                    Continuous Dividend Yield q (%)
+                                    <span class="value-display" id="equityDividendYieldDisplay">0.00%</span>
+                                </label>
+                                <input type="number" id="equityDividendYield" class="number-input"
+                                    value="0.00" step="0.05" min="0" max="100" disabled>
+                            </div>
                             <div class="text-muted small mt-1">
-                                Stock/ETF options only; other product models are unchanged.
+                                Stock/ETF and FOP choices are independent. American FOP uses the bound futures price with zero risk-neutral drift.
                             </div>
                         </div>
 
@@ -383,6 +385,10 @@
                             <span class="global-net-cash-flow-label">Global Net Cash Flow:</span>
                             <span id="allGroupsNetCashFlowValue" class="font-weight-semibold">+$0.00</span>
                         </div>
+                        <button class="btn btn-secondary" type="button" onclick="requestGlobalEquivalentClosePlan()" title="Preview one same-expiry Global Auto Close Plan for deep ITM and clearly worthless OTM legs in globally included Active Groups">
+                            Global Auto Close
+                        </button>
+                        <span id="globalAutoCloseStatus" class="small text-muted"></span>
                         <button class="btn btn-primary" onclick="addGroup()">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1287,26 +1293,26 @@
     <script src="js/order_confirmation_ui.js?v=20260711-safe-execution"></script>
     <script src="js/distribution_proxy_config.js"></script>
     <script src="js/american_binomial.js?v=20260723-american-binomial-v1"></script>
-    <script src="js/pricing_core.js?v=20260726-resilient-estimates-v1"></script>
+    <script src="js/pricing_core.js?v=20260728-fop-american-v1"></script>
     <script src="js/bsm.js"></script>
-    <script src="js/chart.js?v=20260726-resilient-estimates-v1"></script>
+    <script src="js/chart.js?v=20260729-live-edit-perf-v1"></script>
     <script src="js/prob_charts.js?v=20260726-resilient-estimates-v1"></script>
-    <script src="js/chart_controls.js?v=20260726-resilient-estimates-v1"></script>
+    <script src="js/chart_controls.js?v=20260729-live-edit-perf-v1"></script>
     <script src="js/amortized.js?v=20260726-resilient-estimates-v1"></script>
-    <script src="js/valuation.js?v=20260726-resilient-estimates-v1"></script>
-    <script src="js/session_logic.js?v=20260726-resilient-estimates-v1"></script>
+    <script src="js/valuation.js?v=20260728-fop-american-v1"></script>
+    <script src="js/session_logic.js?v=20260728-fop-american-v1"></script>
     <script src="js/session_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
-    <script src="js/control_panel_ui.js?v=20260726-resilient-estimates-v1"></script>
+    <script src="js/control_panel_ui.js?v=20260728-fop-american-v1"></script>
     <script src="js/hedge_editor_ui.js"></script>
-    <script src="js/group_editor_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
+    <script src="js/group_editor_ui.js?v=20260805-edit-revert-recovery-v1"></script>
     <script src="js/hedge_ui.js"></script>
-    <script src="js/group_ui.js?v=20260723-group-cash-flow-v1"></script>
-    <script src="js/global_ui.js?v=20260723-projected-delivery-v3"></script>
+    <script src="js/group_ui.js?v=20260729-live-edit-perf-v1"></script>
+    <script src="js/global_ui.js?v=20260729-live-edit-perf-v1"></script>
     <script src="js/page_capabilities.js"></script>
-    <script src="js/combo_order_transport.js?v=20260711-partial-close"></script>
+    <script src="js/combo_order_transport.js?v=20260805-edit-revert-recovery-v1"></script>
     <script src="js/delta_hedge_transport.js"></script>
-    <script src="js/app.js?v=20260726-resilient-estimates-v1"></script>
-    <script src="js/ws_client.js?v=20260721-auto-future-v1"></script>
+    <script src="js/app.js?v=20260729-live-edit-perf-v1"></script>
+    <script src="js/ws_client.js?v=20260805-edit-revert-recovery-v1"></script>
     <script src="js/chart_lab.js?v=20260726-resilient-estimates-v1"></script>
 </body>
 

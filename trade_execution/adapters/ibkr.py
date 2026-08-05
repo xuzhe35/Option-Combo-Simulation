@@ -95,6 +95,7 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         self.default_price_increment = 0.01
         self.close_plan_confirmation_ttl_seconds = 60.0
         self.close_plan_confirmations = {}
+        self.global_equivalent_close_confirmations = {}
         self.managed_reprice_threshold = float(managed_reprice_threshold)
         self.managed_reprice_interval_seconds = float(managed_reprice_interval_seconds)
         self.managed_reprice_max_updates = int(managed_reprice_max_updates)
@@ -2046,6 +2047,353 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
         )
         return underlying_legs, adjustments, messages
 
+    def _build_global_equivalent_close_plan(self, requests):
+        if not requests:
+            raise ValueError('Global Auto Close needs at least one Active Group.')
+        if not self._portfolio_positions_are_ready():
+            raise ValueError(
+                'TWS portfolio positions are not ready for Global Auto Close. '
+                'Refresh/sync the TWS portfolio snapshot, then preview again.'
+            )
+
+        accounts = {str(request.account or '').strip() for request in requests}
+        if len(accounts) != 1 or not next(iter(accounts), ''):
+            raise ValueError('Global Auto Close requires one selected TWS account for every Group.')
+
+        portfolio_items = self._get_portfolio_position_items()
+        candidates = []
+        unhandled_legs = []
+        position_buckets = {}
+        first_request = requests[0]
+
+        for request in requests:
+            if self._normalize_symbol(request.execution_intent) != 'CLOSE':
+                raise ValueError('Global Auto Close accepts close-intent Group payloads only.')
+            if self._resolve_close_strategy(request) != 'auto':
+                raise ValueError('Global Auto Close uses the conservative Auto classification only.')
+            if self._normalize_symbol(request.underlying_symbol) != self._normalize_symbol(first_request.underlying_symbol):
+                raise ValueError('Global Auto Close cannot mix different Underlyings.')
+
+            for leg_request in request.legs:
+                if int(leg_request.pos or 0) == 0:
+                    continue
+                classification = self._resolve_equivalent_close_classification(
+                    request,
+                    leg_request,
+                    'auto',
+                )
+                if not classification:
+                    unhandled_legs.append({
+                        'groupId': request.group_id,
+                        'groupName': request.group_name,
+                        'legId': leg_request.id,
+                        'label': self._close_leg_request_label(leg_request),
+                        'reason': 'normal_close_unchanged',
+                    })
+                    continue
+
+                self._validate_standard_equity_option_for_equivalent_close(request, leg_request)
+                item = self._find_portfolio_item_for_leg(leg_request, request, portfolio_items)
+                if item is None:
+                    self._raise_uncloseable_tws_position(
+                        request,
+                        leg_request,
+                        int(leg_request.pos or 0),
+                        0,
+                        None,
+                    )
+                key = self._portfolio_item_contract_key(item)
+                bucket = position_buckets.setdefault(key, {
+                    'item': item,
+                    'requestedClosePosition': 0,
+                    'requests': [],
+                })
+                bucket['requestedClosePosition'] += int(leg_request.pos or 0)
+                bucket['requests'].append((request, leg_request))
+                candidates.append({
+                    'request': request,
+                    'leg': leg_request,
+                    'classification': classification,
+                })
+
+        if not candidates:
+            raise ValueError(
+                'Global Auto Close found no clearly worthless OTM or deep ITM one-sided option legs. '
+                'Normal liquid legs were left unchanged.'
+            )
+
+        expiries = {self._to_expiry(item['leg'].exp_date) for item in candidates}
+        if len(expiries) != 1:
+            raise ValueError(
+                'Global Auto Close v1 blocked: equivalent legs span multiple expiries. '
+                'Preview one expiry at a time; cross-expiry netting is intentionally not implemented.'
+            )
+        expiry = next(iter(expiries))
+
+        position_evidence = []
+        for key, bucket in position_buckets.items():
+            requested_position = int(bucket.get('requestedClosePosition') or 0)
+            actual_position = self._portfolio_item_position(bucket.get('item') or {})
+            closeable_position = self._clamp_close_position_to_actual(
+                requested_position,
+                actual_position,
+            )
+            if abs(closeable_position) < abs(requested_position):
+                request, leg_request = bucket['requests'][0]
+                self._raise_uncloseable_tws_position(
+                    request,
+                    leg_request,
+                    requested_position,
+                    actual_position,
+                    bucket.get('item'),
+                )
+            position_evidence.append({
+                'contractKey': list(key),
+                'requestedClosePosition': requested_position,
+                'actualPosition': actual_position,
+            })
+
+        adjustments = []
+        hedge_adjustments = []
+        for item in candidates:
+            request = item['request']
+            leg_request = item['leg']
+            classification = item['classification']
+            original_option_position = -int(leg_request.pos or 0)
+            right = self._normalize_symbol(leg_request.right)
+            multiplier = int(round(float(leg_request.multiplier or 100)))
+            required_underlying = 0
+            if classification == 'itm_hedged':
+                expected_delivery = original_option_position * multiplier
+                if right == 'P':
+                    expected_delivery *= -1
+                required_underlying = -expected_delivery
+
+            adjustment = {
+                'kind': 'equivalent_expiry',
+                'adjustmentId': (
+                    f"global-equivalent:{request.group_id or 'group'}:"
+                    f"{leg_request.id or expiry}"
+                ),
+                'groupId': request.group_id,
+                'groupName': request.group_name,
+                'optionLegId': leg_request.id,
+                'underlyingLegId': f"_global_expiry_hedge_{leg_request.id or len(adjustments) + 1}",
+                'classification': classification,
+                'expiry': expiry,
+                'right': right,
+                'assignmentStrike': float(leg_request.strike),
+                'originalOptionPosition': original_option_position,
+                'requiredUnderlyingQuantity': required_underlying,
+                'executedUnderlyingQuantity': 0,
+                'internallyNettedUnderlyingQuantity': 0,
+                'underlyingSymbol': self._normalize_symbol(
+                    leg_request.underlying_symbol or request.underlying_symbol
+                ),
+                'observedUnderlyingPrice': request.observed_underlying_price,
+                'observedBid': leg_request.observed_bid,
+                'observedAsk': leg_request.observed_ask,
+            }
+            adjustments.append(adjustment)
+            if classification == 'itm_hedged':
+                hedge_adjustments.append(adjustment)
+
+        underlying_legs = []
+        if hedge_adjustments:
+            net_position = self._allocate_equivalent_underlying_net(hedge_adjustments)
+            if net_position:
+                source_item = next(item for item in candidates if item['classification'] == 'itm_hedged')
+                virtual_request = replace(
+                    first_request,
+                    group_id='__global_equivalent__',
+                    group_name='Global Auto Close',
+                )
+                net_leg = self._build_equivalent_underlying_leg(
+                    virtual_request,
+                    source_item['leg'],
+                    expiry,
+                    net_position,
+                )
+                net_leg = replace(net_leg, id=f'_global_equivalent_net_{expiry}')
+                underlying_legs.append(net_leg)
+                for adjustment in hedge_adjustments:
+                    adjustment['netOrderLegId'] = net_leg.id
+
+        ignored_count = sum(1 for item in candidates if item['classification'] == 'otm_ignored')
+        itm_count = sum(1 for item in candidates if item['classification'] == 'itm_hedged')
+        net_underlying = sum(
+            int(item.get('executedUnderlyingQuantity') or 0)
+            for item in hedge_adjustments
+        )
+        messages = [
+            'Global Auto Close v1 handles one expiry only and leaves normally quoted option legs unchanged.',
+            'Equivalent option contracts remain at TWS until expiry; verify exercise and assignment instructions.',
+        ]
+        return {
+            'virtualRequest': replace(
+                first_request,
+                group_id='__global_equivalent__',
+                group_name='Global Auto Close',
+                request_source='global_equivalent_close',
+                close_strategy='auto',
+                legs=[],
+            ),
+            'underlyingLegs': underlying_legs,
+            'assignmentAdjustments': adjustments,
+            'unhandledLegs': unhandled_legs,
+            'messages': messages,
+            'expiry': expiry,
+            'ignoredCount': ignored_count,
+            'itmCount': itm_count,
+            'netUnderlyingQuantity': net_underlying,
+            'account': next(iter(accounts)),
+            'underlyingSymbol': self._normalize_symbol(first_request.underlying_symbol),
+            'positionEvidence': position_evidence,
+        }
+
+    def _global_equivalent_plan_digest(self, requests, close_plan):
+        payload = {
+            'groups': [
+                {
+                    'groupId': request.group_id,
+                    'account': request.account,
+                    'underlyingSymbol': self._normalize_symbol(request.underlying_symbol),
+                    'observedUnderlyingPrice': request.observed_underlying_price,
+                    'legs': [self._close_plan_leg_digest_payload(leg) for leg in request.legs],
+                }
+                for request in requests
+            ],
+            'expiry': close_plan.get('expiry'),
+            'adjustments': [
+                {
+                    key: adjustment.get(key)
+                    for key in (
+                        'groupId', 'optionLegId', 'classification', 'expiry',
+                        'requiredUnderlyingQuantity', 'executedUnderlyingQuantity',
+                        'internallyNettedUnderlyingQuantity', 'netOrderLegId',
+                    )
+                }
+                for adjustment in close_plan.get('assignmentAdjustments') or []
+            ],
+            'underlyingLegs': [
+                self._close_plan_leg_digest_payload(leg)
+                for leg in close_plan.get('underlyingLegs') or []
+            ],
+            'positionEvidence': close_plan.get('positionEvidence') or [],
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+        return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+
+    def _cleanup_global_equivalent_confirmations(self):
+        now = time.monotonic()
+        for token in [
+            token for token, record in self.global_equivalent_close_confirmations.items()
+            if float(record.get('expiresMonotonic') or 0) <= now
+        ]:
+            self.global_equivalent_close_confirmations.pop(token, None)
+
+    async def preview_global_equivalent_close(self, websocket, requests, raw_data):
+        close_plan = self._build_global_equivalent_close_plan(requests)
+        virtual_request = replace(
+            close_plan['virtualRequest'],
+            execution_mode='preview',
+        )
+        planned_orders = []
+        if close_plan.get('underlyingLegs'):
+            stage = await self._build_underlying_first_preview(
+                websocket,
+                virtual_request,
+                close_plan,
+            )
+            planned_orders = [dict(item) for item in (stage['preview'].staged_orders or [])]
+
+        self._cleanup_global_equivalent_confirmations()
+        token = secrets.token_urlsafe(24)
+        plan_id = secrets.token_hex(10)
+        generated_at = datetime.now(timezone.utc)
+        expires_at = generated_at + timedelta(seconds=self.close_plan_confirmation_ttl_seconds)
+        self.global_equivalent_close_confirmations[token] = {
+            'digest': self._global_equivalent_plan_digest(requests, close_plan),
+            'planId': plan_id,
+            'account': close_plan['account'],
+            'plannedOrders': planned_orders,
+            'expiresMonotonic': time.monotonic() + self.close_plan_confirmation_ttl_seconds,
+        }
+        return {
+            'planId': plan_id,
+            'closePlanToken': token,
+            'generatedAt': generated_at.isoformat().replace('+00:00', 'Z'),
+            'expiresAt': expires_at.isoformat().replace('+00:00', 'Z'),
+            'expiry': close_plan['expiry'],
+            'account': close_plan['account'],
+            'underlyingSymbol': close_plan['underlyingSymbol'],
+            'ignoredCount': close_plan['ignoredCount'],
+            'itmCount': close_plan['itmCount'],
+            'netUnderlyingQuantity': close_plan['netUnderlyingQuantity'],
+            'closePlanAdjustments': [dict(item) for item in close_plan['assignmentAdjustments']],
+            'unhandledLegs': [dict(item) for item in close_plan['unhandledLegs']],
+            'plannedOrders': planned_orders,
+            'messages': list(close_plan['messages']),
+        }
+
+    async def submit_global_equivalent_close(self, websocket, requests, raw_data):
+        self._cleanup_global_equivalent_confirmations()
+        token = str((raw_data or {}).get('closePlanToken') or '').strip()
+        record = self.global_equivalent_close_confirmations.get(token)
+        if not record:
+            raise ValueError('Global Auto Close confirmation expired; generate a fresh Preview.')
+
+        close_plan = self._build_global_equivalent_close_plan(requests)
+        digest = self._global_equivalent_plan_digest(requests, close_plan)
+        if digest != record.get('digest'):
+            self.global_equivalent_close_confirmations.pop(token, None)
+            raise ValueError('Global Auto Close plan changed after Preview; no TWS order was sent.')
+        self.global_equivalent_close_confirmations.pop(token, None)
+
+        plan_id = record.get('planId')
+        staged_orders = []
+        if close_plan.get('underlyingLegs'):
+            virtual_request = replace(
+                close_plan['virtualRequest'],
+                execution_mode='submit',
+            )
+            virtual_request._confirmed_close_plan_orders = [
+                dict(item) for item in (record.get('plannedOrders') or [])
+            ]
+            virtual_request._global_equivalent_context = {
+                'planId': plan_id,
+                'adjustments': [dict(item) for item in close_plan['assignmentAdjustments']],
+            }
+            stage = await self._submit_underlying_first_close_plan(
+                websocket,
+                virtual_request,
+                close_plan,
+            )
+            staged_orders = stage.get('stagedOrders') or []
+            if not stage.get('completed'):
+                result = stage['result'].to_payload()
+                result.update({
+                    'planId': plan_id,
+                    'assignmentAdjustments': [],
+                    'message': (
+                        'The net Underlying order is still working. No Group was changed; '
+                        'the Groups will be updated only after a Filled status arrives.'
+                    ),
+                })
+                return result
+
+        adjustments = self._hydrate_equivalent_close_adjustments(close_plan, staged_orders)
+        for adjustment in adjustments:
+            adjustment['globalEquivalentPlanId'] = plan_id
+        return {
+            'planId': plan_id,
+            'status': 'Filled',
+            'expiry': close_plan['expiry'],
+            'assignmentAdjustments': adjustments,
+            'stagedOrders': staged_orders,
+            'message': 'Global Auto Close completed for the equivalent legs in the confirmed one-expiry plan.',
+        }
+
     def _build_assignment_aware_close_plan(self, request):
         if not self._is_assignment_aware_close_request(request):
             return {
@@ -2823,7 +3171,15 @@ class IbkrExecutionAdapter(BrokerExecutionAdapter):
                 'expectedExecutionSide': 'BOT' if int(leg_request.pos or 0) > 0 else 'SLD',
                 'ratio': abs(int(leg_request.pos or 0)),
             }]
-            staged_request = replace(request, request_source='close_group_underlying', legs=[leg_request])
+            staged_source = (
+                'global_equivalent_underlying'
+                if str(getattr(request, 'request_source', '') or '').strip() == 'global_equivalent_close'
+                else 'close_group_underlying'
+            )
+            staged_request = replace(request, request_source=staged_source, legs=[leg_request])
+            global_context = getattr(request, '_global_equivalent_context', None)
+            if isinstance(global_context, dict):
+                staged_request._global_equivalent_context = dict(global_context)
             placement_tracking = None
             if callable(self.on_combo_order_placed):
                 try:

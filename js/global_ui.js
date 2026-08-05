@@ -128,6 +128,7 @@
     }
 
     function applyGlobalDerivedData(derivedData, currencyFormatter, chartApi) {
+        const drawCharts = !chartApi || chartApi.drawCharts !== false;
         document.getElementById('totalCost').textContent = currencyFormatter.format(derivedData.globalTotalCost);
         document.getElementById('simulatedValue').textContent = Number.isFinite(derivedData.globalSimulatedValue)
             ? currencyFormatter.format(derivedData.globalSimulatedValue)
@@ -217,7 +218,7 @@
             }
 
             const globalAmortizedChartContainer = document.getElementById('globalAmortizedChartContainer');
-            if (globalAmortizedChartContainer && globalAmortizedChartContainer.style.display !== 'none'
+            if (drawCharts && globalAmortizedChartContainer && globalAmortizedChartContainer.style.display !== 'none'
                 && globalAmortizedCard.style.display !== 'none') {
                 chartApi.drawGlobalAmortizedChart(globalAmortizedCard);
             }
@@ -225,7 +226,7 @@
 
         const globalCard = document.getElementById('globalChartCard');
         const gcContainer = document.getElementById('globalChartContainer');
-        if (globalCard && gcContainer && gcContainer.style.display !== 'none') {
+        if (drawCharts && globalCard && gcContainer && gcContainer.style.display !== 'none') {
             chartApi.drawGlobalChart(globalCard);
         }
     }

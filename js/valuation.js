@@ -827,7 +827,9 @@
             const modelLabel = processedLeg.pricingModel === 'black76'
                 ? 'Black-76'
                 : (processedLeg.pricingModel === 'american-binomial'
-                    ? 'American binomial'
+                    ? (processedLeg.americanUnderlyingMode === 'futures'
+                        ? 'American futures binomial'
+                        : 'American binomial')
                     : 'BSM');
             ivTitle = processedLeg.simIVSource === 'local-bbo-implied'
                 ? `Fresh two-sided BBO re-inverted with the local ${modelLabel} model at ${processedLeg.quoteAsOf || 'the quote instant'}; future repricing holds this local IV constant.`

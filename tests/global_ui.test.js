@@ -61,5 +61,54 @@ module.exports = {
                 assert.match(elements.projectedOptionDelivery.title, /2026-07-24/);
             },
         },
+        {
+            name: 'updates global numbers without redrawing visible charts when suppressed',
+            run() {
+                const globalChartContainer = { style: { display: 'block' } };
+                const globalChartCard = { style: { display: 'block' } };
+                const elements = {
+                    totalCost: { textContent: '' },
+                    simulatedValue: { textContent: '' },
+                    unrealizedPnL: { innerHTML: '' },
+                    allGroupsNetCashFlowValue: { innerHTML: '' },
+                    optionLegRedundancy: { textContent: '', title: '' },
+                    projectedOptionDelivery: { innerHTML: '', title: '' },
+                    globalChartContainer,
+                    globalChartCard,
+                };
+                const ctx = loadBrowserScripts(['js/global_ui.js'], {
+                    document: {
+                        getElementById(id) {
+                            return elements[id] || null;
+                        },
+                    },
+                });
+                let chartDraws = 0;
+
+                ctx.OptionComboGlobalUI.applyGlobalDerivedData({
+                    globalTotalCost: 10,
+                    globalSimulatedValue: 12,
+                    globalPnL: 2,
+                    globalNetCashFlow: -10,
+                    optionLegRedundancy: null,
+                    projectedOptionDelivery: null,
+                    hasAnyLiveData: false,
+                    hasAnyHedgeLivePnL: false,
+                    combinedAmortizedResult: null,
+                }, new Intl.NumberFormat('en-US', {
+                    style: 'currency',
+                    currency: 'USD',
+                }), {
+                    drawCharts: false,
+                    drawGlobalChart() {
+                        chartDraws += 1;
+                    },
+                });
+
+                assert.equal(elements.totalCost.textContent, '$10.00');
+                assert.equal(elements.simulatedValue.textContent, '$12.00');
+                assert.equal(chartDraws, 0);
+            },
+        },
     ],
 };

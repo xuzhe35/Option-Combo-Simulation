@@ -50,6 +50,13 @@ Current surfaces:
 - `js/pricing_context.js` resolves per-leg discount `r(T)` and the appropriate
   pricing input: INDEX uses expiry carry/forward samples, FOP uses its bound
   Futures Pool quote, and stock/ETF remains spot BSM.
+- Main/Chart Lab keep separate saved exercise-model settings for stock/ETF and
+  FOP. FOP remains European Black-76 by default; selecting American Futures
+  Binomial makes `js/pricing_core.js` use the bound futures price in a CRR tree
+  with `q=r` (zero futures drift) and early-exercise checks. This selection
+  also governs local BBO IV inversion, valuation, charts, and probability
+  grids. It does not change the IV Term Structure page's explicitly European
+  Black-76/BSM lambda methodology.
 - INDEX samples use coherent call/put/spot evidence and
   `F=K+(C-P)/D(T)`. The stored row carries `F`, `r`, `D`, `r-q`, source,
   snapshot time, skew, and quality. Its tenor is the fractional interval from
@@ -137,6 +144,7 @@ Current surfaces:
   - `test_submit`
   - `submit`
 - close-group execution using the same combo-order pipeline
+- Global Auto Close previews one immutable same-expiry plan across globally included Active Groups, aggregates TWS position claims once per contract, nets only conservative Auto-classified ITM Underlying requirements across Groups, leaves normal liquid legs unchanged, and rejects candidate legs spanning more than one expiry
 - `Close Qty` supports proportional partial closes (for example, closing 1 of a 5-lot straddle leaves 4/4) and carries realized P&L forward on the remaining legs
 - Delta Hedge STK / FUT validation, broker preview, submit, cancel, and active-order recovery snapshot
 - optional Delta Hedge auto-preview / auto-submit supervisor behind explicit live hedge-order gate, account selection, LMT-only policy, max quantity / notional / daily count limits, and cooldown checks

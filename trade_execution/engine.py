@@ -267,6 +267,8 @@ class ExecutionEngine:
             "validate_combo_order",
             "preview_combo_order",
             "submit_combo_order",
+            "preview_global_equivalent_close",
+            "submit_global_equivalent_close",
             "resume_managed_combo_order",
             "concede_managed_combo_order",
             "cancel_managed_combo_order",
@@ -320,10 +322,42 @@ class ExecutionEngine:
                 )
                 return payload
 
+            if action in {"preview_global_equivalent_close", "submit_global_equivalent_close"}:
+                group_payloads = raw_data.get("groups") or []
+                if not isinstance(group_payloads, list) or not group_payloads:
+                    raise ValueError("Global Auto Close needs at least one Group payload.")
+                requests = [ComboOrderRequest.from_payload(item) for item in group_payloads]
+                if action == "preview_global_equivalent_close":
+                    plan = await self.adapter.preview_global_equivalent_close(
+                        websocket,
+                        requests,
+                        raw_data,
+                    )
+                    return {
+                        "action": "global_equivalent_close_preview_result",
+                        "plan": plan,
+                    }
+                result = await self.adapter.submit_global_equivalent_close(
+                    websocket,
+                    requests,
+                    raw_data,
+                )
+                return {
+                    "action": "global_equivalent_close_submit_result",
+                    "result": result,
+                }
+
             request = ComboOrderRequest.from_payload(raw_data)
         except Exception as exc:
             if action == "cancel_close_plan":
                 self.logger.exception("Close Plan cancellation failed")
+            elif action in {"preview_global_equivalent_close", "submit_global_equivalent_close"}:
+                self.logger.exception("Global Auto Close failed")
+                return {
+                    "action": "global_equivalent_close_error",
+                    "requestAction": action,
+                    "message": str(exc),
+                }
             else:
                 self.logger.exception("Failed to parse combo order request")
             return self._build_error_payload(

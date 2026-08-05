@@ -7419,6 +7419,234 @@ module.exports = {
             },
         },
         {
+            name: 'rejects an old option quote immediately after the leg contract is edited',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 734,
+                    simulatedDate: '2026-07-29',
+                    baseDate: '2026-07-29',
+                    liveQuoteDate: '2026-07-29',
+                    liveQuoteAsOf: '2026-07-29T14:00:00Z',
+                    greeksEnabled: false,
+                    futuresPool: [],
+                    comboTemplateQuoteRequests: [],
+                    forwardRateSamples: [],
+                    groups: [{
+                        id: 'group_spy',
+                        liveData: true,
+                        legs: [{
+                            id: 'leg_spy_call',
+                            type: 'call',
+                            pos: 1,
+                            strike: 735,
+                            expDate: '2026-08-28',
+                            iv: 0.2,
+                            ivSource: 'live',
+                            ivManualOverride: false,
+                            currentPrice: 14.8,
+                            currentPriceSource: 'live',
+                            liveQuoteIdentityStatus: 'verified',
+                        }],
+                    }],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts([
+                    'js/session_logic.js',
+                    'js/product_registry.js',
+                    'js/ws_client.js',
+                ], {
+                    state,
+                    renderGroups() {},
+                    updateDerivedValues() {},
+                    flashElement() {},
+                    requestAnimationFrame(callback) { callback(); return 1; },
+                    document: {
+                        activeElement: null,
+                        getElementById() { return null; },
+                        querySelector() { return null; },
+                        querySelectorAll() { return []; },
+                    },
+                    localStorage: { getItem() { return null; }, setItem() {} },
+                    location: { protocol: 'file:', hostname: '' },
+                    WebSocket: MockWebSocket,
+                });
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
+
+                const leg = state.groups[0].legs[0];
+                leg.strike = 740;
+                assert.equal(
+                    ctx.OptionComboWsLiveQuotes.invalidateOptionSubscriptionForLeg(
+                        leg.id,
+                        'contract edited'
+                    ),
+                    true
+                );
+                assert.equal(leg.currentPrice, null);
+                assert.equal(leg.currentPriceSource, 'missing');
+                assert.equal(leg.ivSource, 'missing');
+                assert.equal(leg.liveQuoteIdentityStatus, 'pending');
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-29T14:00:01Z',
+                    options: {
+                        [leg.id]: {
+                            bid: 14.7,
+                            ask: 14.9,
+                            mark: 14.8,
+                            iv: 0.165,
+                            quoteAsOf: '2026-07-29T14:00:01Z',
+                            conId: 735001,
+                            localSymbol: 'SPY 260828C00735000',
+                            secType: 'OPT',
+                            symbol: 'SPY',
+                            right: 'C',
+                            strike: 735,
+                            optionExpiry: '20260828',
+                            multiplier: '100',
+                        },
+                    },
+                });
+
+                assert.equal(ctx.OptionComboWsLiveQuotes.getOptionQuote(leg.id), null);
+                assert.equal(leg.currentPrice, null);
+                assert.equal(leg.ivSource, 'missing');
+                assert.equal(leg.liveQuoteIdentityStatus, 'rejected');
+                assert.match(leg.liveQuoteIdentityReason, /pending resubscription/);
+            },
+        },
+        {
+            name: 'recovers quotes after an edited contract is reverted to the subscribed identity',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 734,
+                    simulatedDate: '2026-07-29',
+                    baseDate: '2026-07-29',
+                    liveQuoteDate: '2026-07-29',
+                    liveQuoteAsOf: '2026-07-29T14:00:00Z',
+                    greeksEnabled: false,
+                    futuresPool: [],
+                    comboTemplateQuoteRequests: [],
+                    forwardRateSamples: [],
+                    groups: [{
+                        id: 'group_spy',
+                        liveData: true,
+                        legs: [{
+                            id: 'leg_spy_call',
+                            type: 'call',
+                            pos: 1,
+                            strike: 735,
+                            expDate: '2026-08-28',
+                            iv: 0.2,
+                            ivSource: 'live',
+                            ivManualOverride: false,
+                            currentPrice: 14.8,
+                            currentPriceSource: 'live',
+                            liveQuoteIdentityStatus: 'verified',
+                        }],
+                    }],
+                    hedges: [],
+                };
+
+                class MockWebSocket {
+                    constructor() {
+                        this.sent = [];
+                        MockWebSocket.instance = this;
+                    }
+                    send(message) { this.sent.push(message); }
+                    close() {}
+                }
+
+                const ctx = loadBrowserScripts([
+                    'js/session_logic.js',
+                    'js/product_registry.js',
+                    'js/ws_client.js',
+                ], {
+                    state,
+                    renderGroups() {},
+                    updateDerivedValues() {},
+                    flashElement() {},
+                    requestAnimationFrame(callback) { callback(); return 1; },
+                    document: {
+                        activeElement: null,
+                        getElementById() { return null; },
+                        querySelector() { return null; },
+                        querySelectorAll() { return []; },
+                    },
+                    localStorage: { getItem() { return null; }, setItem() {} },
+                    location: { protocol: 'file:', hostname: '' },
+                    WebSocket: MockWebSocket,
+                });
+
+                ctx.connectWebSocket();
+                MockWebSocket.instance.onopen();
+                completeMainSocketHandshake(MockWebSocket.instance);
+                ctx.handleLiveSubscriptions();
+                const countSubscribes = () => MockWebSocket.instance.sent
+                    .map(message => JSON.parse(message))
+                    .filter(message => message.action === 'subscribe')
+                    .length;
+                const subscribesBeforeEdit = countSubscribes();
+                assert.ok(subscribesBeforeEdit >= 1, 'expected an initial live subscription');
+
+                // Edit the contract and revert before the debounced commit,
+                // so the rebuilt wire payload matches the last subscription.
+                const leg = state.groups[0].legs[0];
+                leg.strike = 740;
+                ctx.OptionComboWsLiveQuotes.invalidateOptionSubscriptionForLeg(
+                    leg.id,
+                    'contract edited'
+                );
+                leg.strike = 735;
+                assert.equal(leg.liveQuoteIdentityStatus, 'pending');
+
+                // The signature-dedupe skip must not strand the invalidated leg:
+                // a same-signature commit resubscribes so quotes flow again.
+                assert.equal(ctx.handleLiveSubscriptions(), true);
+                assert.equal(countSubscribes(), subscribesBeforeEdit + 1);
+
+                ctx.processLiveMarketData({
+                    payloadAsOf: '2026-07-29T14:00:05Z',
+                    options: {
+                        [leg.id]: {
+                            bid: 14.7,
+                            ask: 14.9,
+                            mark: 14.8,
+                            iv: 0.165,
+                            quoteAsOf: '2026-07-29T14:00:05Z',
+                            conId: 735001,
+                            localSymbol: 'SPY 260828C00735000',
+                            secType: 'OPT',
+                            symbol: 'SPY',
+                            right: 'C',
+                            strike: 735,
+                            optionExpiry: '20260828',
+                            multiplier: '100',
+                        },
+                    },
+                });
+
+                assert.equal(leg.currentPrice, 14.8);
+                assert.equal(leg.liveQuoteIdentityStatus, 'verified');
+            },
+        },
+        {
             name: 'accepts an energy future whose last trade date precedes its delivery month',
             run() {
                 const state = {

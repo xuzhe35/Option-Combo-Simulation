@@ -315,7 +315,7 @@ def _record_combo_order_placement(websocket, request, trade, tracking_legs):
     """
     order = getattr(trade, 'order', None)
     order_status = getattr(trade, 'orderStatus', None)
-    return upsert_combo_order_tracking_via_module(
+    tracking = upsert_combo_order_tracking_via_module(
         _build_order_tracking_environment(),
         websocket=websocket,
         group_id=request.group_id,
@@ -329,6 +329,14 @@ def _record_combo_order_placement(websocket, request, trade, tracking_legs):
         status=getattr(order_status, 'status', None),
         legs=tracking_legs,
     )
+    global_context = getattr(request, '_global_equivalent_context', None)
+    if isinstance(global_context, dict):
+        tracking['globalEquivalentPlanId'] = global_context.get('planId')
+        tracking['globalEquivalentAdjustments'] = [
+            dict(item) for item in (global_context.get('adjustments') or [])
+            if isinstance(item, dict)
+        ]
+    return tracking
 
 
 def _record_combo_order_submission(websocket, request, result):
