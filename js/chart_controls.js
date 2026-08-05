@@ -239,7 +239,7 @@ function triggerChartRedraw(inputEl) {
     drawGroupChart(card, group);
 }
 
-function drawGroupChart(card, group) {
+function drawGroupChart(card, group, options = {}) {
     if (!card.chartInstance) return;
 
     const modeBtn = card.querySelector('.range-mode-btn.active');
@@ -266,7 +266,7 @@ function drawGroupChart(card, group) {
     }
 
     _refreshChartAnchorNotes(card);
-    card.chartInstance.draw(group, _getPayoffChartState(card), minS, maxS);
+    card.chartInstance.draw(group, _getPayoffChartState(card), minS, maxS, options);
     _renderPayoffChartQuality(card);
 }
 
@@ -442,7 +442,7 @@ function triggerGlobalChartRedraw() {
     drawGlobalChart(card);
 }
 
-function drawGlobalChart(card) {
+function drawGlobalChart(card, options = {}) {
     if (!card.chartInstance) return;
 
     const modeBtn = card.querySelector('.global-range-mode-btn.active');
@@ -480,7 +480,7 @@ function drawGlobalChart(card) {
     };
 
     _refreshChartAnchorNotes(card);
-    card.chartInstance.draw(virtualGroup, _getPayoffChartState(card), minS, maxS);
+    card.chartInstance.draw(virtualGroup, _getPayoffChartState(card), minS, maxS, options);
     _renderPayoffChartQuality(card);
 }
 

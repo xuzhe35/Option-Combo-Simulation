@@ -58,6 +58,12 @@ module.exports = {
                     'american-binomial'
                 );
                 assert.equal(logic.normalizeEquityOptionPricingModel('black76'), 'bsm-spot');
+                assert.equal(logic.normalizeFopOptionPricingModel(), 'black76');
+                assert.equal(
+                    logic.normalizeFopOptionPricingModel('american-binomial'),
+                    'american-binomial'
+                );
+                assert.equal(logic.normalizeFopOptionPricingModel('bsm-spot'), 'black76');
                 assert.equal(logic.normalizeEquityDividendYield('0.0125'), 0.0125);
                 assert.equal(logic.normalizeEquityDividendYield('bad'), 0);
                 assert.equal(logic.normalizeAmericanBinomialSteps(), 201);
@@ -237,6 +243,7 @@ module.exports = {
                 assert.equal(result.requireExactContractTiming, true);
                 assert.equal(result.projectionConvergenceMode, 'best-effort-input-iv');
                 assert.equal(result.equityOptionPricingModel, 'bsm-spot');
+                assert.equal(result.fopOptionPricingModel, 'black76');
                 assert.equal(result.equityDividendYield, 0);
                 assert.equal(result.americanBinomialSteps, 201);
                 assert.equal(result.hedges[1].id, 'id_3');
@@ -526,6 +533,10 @@ module.exports = {
                     liveQuoteAsOf: '2026-03-19T20:00:00Z',
                     greeksEnabled: true,
                     allowLiveHedgeOrders: true,
+                    globalEquivalentClose: {
+                        status: 'previewed',
+                        closePlanToken: 'do-not-save',
+                    },
                     deltaHedge: {
                         enabled: true,
                         targetDelta: '5',
@@ -629,6 +640,7 @@ module.exports = {
                 assert.equal(snapshot.groups[0].name, 'Changed');
                 assert.equal('liveQuoteDate' in snapshot, false);
                 assert.equal('liveQuoteAsOf' in snapshot, false);
+                assert.equal('globalEquivalentClose' in snapshot, false);
                 assert.equal('expiryAsOf' in snapshot.groups[0].legs[0], false);
                 assert.equal('expiryTimingSource' in snapshot.groups[0].legs[0], false);
                 assert.equal('lastTradeTime' in snapshot.groups[0].legs[0], false);

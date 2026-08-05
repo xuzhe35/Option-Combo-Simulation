@@ -7,6 +7,7 @@ function makeCanvas() {
     const ctx2d = {
         clearRect() {}, scale() {}, fillText() {}, beginPath() {}, moveTo() {},
         lineTo() {}, stroke() {}, fill() {}, closePath() {}, arc() {}, rect() {},
+        clip() {}, drawImage() {}, fillRect() {}, roundRect() {}, strokeRect() {},
         save() {}, restore() {}, setLineDash() {}, measureText: () => ({ width: 10 }),
         createLinearGradient: () => ({ addColorStop() {} }),
     };
@@ -136,6 +137,60 @@ module.exports = {
 
                 assert.equal(note.classList.has('is-error'), true);
                 assert.ok(/lacks usable IV/.test(note.textContent));
+            },
+        },
+        {
+            name: 'uses a reduced point budget only when an interactive redraw requests it',
+            run() {
+                let priceCalls = 0;
+                const ctx = loadBrowserScripts(['js/chart.js'], {
+                    document: { createElement: () => makeCanvas() },
+                    devicePixelRatio: 1,
+                    processLegData(leg) {
+                        return {
+                            type: leg.type,
+                            strike: leg.strike,
+                            isUnderlyingLeg: false,
+                            isExpired: false,
+                            simIV: 0.2,
+                            costBasis: 0,
+                            posMultiplier: 1,
+                            anchorUnderlyingPrice: 100,
+                        };
+                    },
+                    computeSimulatedPrice() {
+                        priceCalls += 1;
+                        return 1;
+                    },
+                });
+                const chart = newPnLChart(ctx);
+                const group = {
+                    viewMode: 'active',
+                    legs: [{
+                        id: 'call_100',
+                        type: 'call',
+                        strike: 100,
+                        expDate: '2026-08-28',
+                        closePrice: null,
+                    }],
+                };
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 100,
+                    simulatedDate: '2026-07-29',
+                    baseDate: '2026-07-29',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    marketDataMode: 'live',
+                };
+
+                chart.draw(group, state, 90, 110, { pointsCount: 40 });
+                const interactiveCalls = priceCalls;
+                assert.ok(interactiveCalls >= 40 && interactiveCalls <= 44);
+
+                chart.draw(group, state, 90, 110);
+                const fullCalls = priceCalls - interactiveCalls;
+                assert.ok(fullCalls >= 500 && fullCalls <= 504);
             },
         },
     ],

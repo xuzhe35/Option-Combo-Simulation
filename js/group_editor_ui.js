@@ -7,6 +7,84 @@
     // bounding how many option quotes one dialog subscribes at once.
     const BUTTERFLY_MAX_WIDTH_STEPS = 12;
     const BUTTERFLY_MAX_QUOTE_SUBSCRIPTIONS = 48;
+    const LEG_CONTRACT_EDIT_DEBOUNCE_MS = 250;
+
+    function _createLegContractEditScheduler(leg, group, state, deps) {
+        let timer = null;
+        let pending = false;
+
+        const clearTimer = () => {
+            if (timer === null) return;
+            if (typeof globalScope.clearTimeout === 'function') {
+                globalScope.clearTimeout(timer);
+            }
+            timer = null;
+        };
+
+        const invalidate = () => {
+            if (!group || group.liveData !== true || state.marketDataMode === 'historical') {
+                return;
+            }
+            if (deps && typeof deps.invalidateLiveOptionSubscriptionForLeg === 'function') {
+                deps.invalidateLiveOptionSubscriptionForLeg(
+                    leg && leg.id,
+                    'Option contract edited; waiting for the replacement subscription.'
+                );
+            }
+        };
+
+        // The debounced timer only refreshes local derived values while the
+        // user may still be typing. Committing the live resubscription here
+        // would subscribe transient contracts (strike "7" on the way to "735"),
+        // so the wire commit waits for an explicit flush (change/blur).
+        const refreshLocal = () => {
+            clearTimer();
+            if (!pending) return false;
+            if (deps && typeof deps.updateDerivedValues === 'function') {
+                deps.updateDerivedValues();
+            }
+            return true;
+        };
+
+        const commit = () => {
+            clearTimer();
+            if (!pending) return false;
+            pending = false;
+            if (group && group.liveData === true
+                && state.marketDataMode !== 'historical'
+                && deps
+                && typeof deps.handleLiveSubscriptions === 'function') {
+                deps.handleLiveSubscriptions();
+            }
+            if (deps && typeof deps.updateDerivedValues === 'function') {
+                deps.updateDerivedValues();
+            }
+            return true;
+        };
+
+        const schedule = () => {
+            pending = true;
+            invalidate();
+            clearTimer();
+            if (typeof globalScope.setTimeout === 'function') {
+                timer = globalScope.setTimeout(refreshLocal, LEG_CONTRACT_EDIT_DEBOUNCE_MS);
+            } else {
+                refreshLocal();
+            }
+        };
+
+        return {
+            schedule,
+            flush: commit,
+            cancel() {
+                pending = false;
+                clearTimer();
+            },
+            isPending() {
+                return pending;
+            },
+        };
+    }
 
     function _getProductRegistryApi() {
         return globalScope.OptionComboProductRegistry && typeof globalScope.OptionComboProductRegistry === 'object'
@@ -3412,6 +3490,12 @@
         const underlyingFutureField = tr.querySelector('.fop-underlying-field');
         const underlyingFutureSelect = tr.querySelector('.fop-underlying-select');
         const underlyingFutureHint = tr.querySelector('.fop-underlying-hint');
+        const contractEditScheduler = _createLegContractEditScheduler(
+            leg,
+            group,
+            state,
+            deps
+        );
 
         if (underlyingFutureField && underlyingFutureSelect) {
             const availableFutures = Array.isArray(state.futuresPool) ? state.futuresPool : [];
@@ -3464,8 +3548,8 @@
 
                 underlyingFutureSelect.addEventListener('change', (e) => {
                     leg.underlyingFutureId = e.target.value || '';
-                    deps.updateDerivedValues();
-                    deps.handleLiveSubscriptions();
+                    contractEditScheduler.schedule();
+                    contractEditScheduler.flush();
                 });
             }
         }
@@ -3481,13 +3565,23 @@
             strikeInput.value = leg.strike;
             strikeInput.addEventListener('input', (e) => {
                 leg.strike = parseFloat(e.target.value) || 0;
-                deps.updateDerivedValues();
+                contractEditScheduler.schedule();
+            });
+            strikeInput.addEventListener('change', () => {
+                contractEditScheduler.flush();
+            });
+            // 'change' does not fire when the value ends where it started
+            // (edit-then-revert in one focus session), but the invalidated
+            // subscription still needs its commit to restore quotes.
+            strikeInput.addEventListener('blur', () => {
+                contractEditScheduler.flush();
             });
 
             dteInput.value = leg.expDate;
             dteInput.addEventListener('change', (e) => {
                 leg.expDate = e.target.value;
-                deps.updateDerivedValues();
+                contractEditScheduler.schedule();
+                contractEditScheduler.flush();
             });
 
             const ivDisplay = _describeLegIvInput(leg);
@@ -3751,6 +3845,7 @@
             chooseButterflyCandidate: _chooseButterflyCandidate,
             startEmFitFromDialog: _startEmFitFromDialog,
             processPendingEmFit: _processPendingEmFit,
+            createLegContractEditScheduler: _createLegContractEditScheduler,
         },
     };
     globalScope.toggleGroupCollapse = toggleGroupCollapse;

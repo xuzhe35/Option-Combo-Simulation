@@ -32,6 +32,12 @@ function buildHarness(options = {}) {
         ],
         {
             state,
+            confirm(message) {
+                if (typeof options.onGlobalConfirm === 'function') {
+                    return options.onGlobalConfirm(message) === true;
+                }
+                return false;
+            },
             document: {
                 getElementById() { return null; },
                 querySelector() { return null; },
@@ -1611,6 +1617,201 @@ module.exports = {
                 assert.deepEqual(Array.from(state.groups[0].closeExecution.lastPreview.closeTargetLegIds), ['leg_put']);
                 assert.equal(state.groups[0].legs[0].closePrice, null);
                 assert.equal(state.groups[0].legs[1].closePrice, 6.74);
+            },
+        },
+        {
+            name: 'previews Global Auto Close for included Active Groups without mutating legs',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 730,
+                    allowLiveComboOrders: true,
+                    selectedLiveComboOrderAccount: 'U1',
+                    groups: [
+                        {
+                            id: 'included_active',
+                            name: 'Included Active',
+                            viewMode: 'active',
+                            includedInGlobal: true,
+                            legs: [
+                                { id: 'deep_call', type: 'call', pos: 1, strike: 700, expDate: '2026-07-17', cost: 31, closePrice: null },
+                            ],
+                        },
+                        {
+                            id: 'excluded_active',
+                            name: 'Excluded Active',
+                            viewMode: 'active',
+                            includedInGlobal: false,
+                            legs: [
+                                { id: 'excluded_call', type: 'call', pos: 1, strike: 700, expDate: '2026-07-17', cost: 31, closePrice: null },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+                const harness = buildHarness({ state });
+
+                assert.equal(harness.api.requestGlobalEquivalentClosePlan(), true);
+                assert.equal(harness.sent.length, 1);
+                assert.equal(harness.sent[0].action, 'preview_global_equivalent_close');
+                assert.equal(harness.sent[0].groups.length, 1);
+                assert.equal(harness.sent[0].groups[0].groupId, 'included_active');
+
+                harness.api.handleMessage({
+                    action: 'global_equivalent_close_preview_result',
+                    plan: {
+                        closePlanToken: 'global-token',
+                        expiry: '20260717',
+                        underlyingSymbol: 'SPY',
+                        itmCount: 1,
+                        ignoredCount: 0,
+                        netUnderlyingQuantity: -100,
+                        unhandledLegs: [],
+                    },
+                });
+                assert.equal(state.groups[0].legs[0].closePrice, null);
+                assert.equal(harness.sent.length, 1);
+                assert.equal(state.globalEquivalentClose.status, 'previewed');
+            },
+        },
+        {
+            name: 'confirms Global Auto Close then attributes filled adjustments back to Groups',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 730,
+                    allowLiveComboOrders: true,
+                    selectedLiveComboOrderAccount: 'U1',
+                    groups: [
+                        {
+                            id: 'group_global_fill',
+                            name: 'Global Fill',
+                            viewMode: 'active',
+                            includedInGlobal: true,
+                            legs: [
+                                { id: 'deep_call', type: 'call', pos: 1, strike: 700, expDate: '2026-07-17', cost: 31, closePrice: null },
+                                { id: 'normal_call', type: 'call', pos: -1, strike: 740, expDate: '2026-07-17', cost: 4, closePrice: null },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+                const harness = buildHarness({
+                    state,
+                    onGlobalConfirm(message) {
+                        assert.match(message, /Net Underlying: SELL 100 SPY/);
+                        return true;
+                    },
+                });
+
+                harness.api.requestGlobalEquivalentClosePlan();
+                harness.api.handleMessage({
+                    action: 'global_equivalent_close_preview_result',
+                    plan: {
+                        closePlanToken: 'global-token',
+                        expiry: '20260717',
+                        underlyingSymbol: 'SPY',
+                        itmCount: 1,
+                        ignoredCount: 0,
+                        netUnderlyingQuantity: -100,
+                        unhandledLegs: [{ legId: 'normal_call' }],
+                    },
+                });
+                assert.equal(harness.sent.length, 2);
+                assert.equal(harness.sent[1].action, 'submit_global_equivalent_close');
+                assert.equal(state.groups[0].legs[0].closePrice, null);
+
+                harness.api.handleMessage({
+                    action: 'global_equivalent_close_submit_result',
+                    result: {
+                        status: 'Filled',
+                        assignmentAdjustments: [
+                            {
+                                kind: 'equivalent_expiry',
+                                adjustmentId: 'global-equivalent:group_global_fill:deep_call',
+                                groupId: 'group_global_fill',
+                                optionLegId: 'deep_call',
+                                underlyingLegId: '_global_expiry_hedge_deep_call',
+                                classification: 'itm_hedged',
+                                expiry: '20260717',
+                                assignmentStrike: 700,
+                                requiredUnderlyingQuantity: -100,
+                                executedUnderlyingQuantity: -100,
+                                internallyNettedUnderlyingQuantity: 0,
+                                underlyingSymbol: 'SPY',
+                                observedUnderlyingPrice: 730,
+                                underlyingAvgFillPrice: 729.95,
+                                hedgeBasisPrice: 729.95,
+                            },
+                        ],
+                    },
+                });
+
+                const group = state.groups[0];
+                assert.equal(group.legs.find((leg) => leg.id === 'deep_call').closePrice, 0);
+                assert.equal(group.legs.find((leg) => leg.id === 'normal_call').closePrice, null);
+                assert.equal(group.legs.find((leg) => leg.id === '_global_expiry_hedge_deep_call').pos, -100);
+                assert.equal(state.globalEquivalentClose.status, 'completed');
+            },
+        },
+        {
+            name: 'applies a Global Auto Close fill replayed through the active orders snapshot',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 730,
+                    allowLiveComboOrders: true,
+                    selectedLiveComboOrderAccount: 'U1',
+                    groups: [
+                        {
+                            id: 'group_snapshot_fill',
+                            name: 'Snapshot Fill',
+                            viewMode: 'active',
+                            includedInGlobal: true,
+                            legs: [
+                                { id: 'deep_call', type: 'call', pos: 1, strike: 700, expDate: '2026-07-17', cost: 31, closePrice: null },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+                const harness = buildHarness({ state });
+
+                // A page reload loses the in-memory runtime; the snapshot replay
+                // must still route the virtual '__global_equivalent__' order to
+                // the global handler instead of the (group-less) default path.
+                harness.api.handleMessage({
+                    action: 'active_combo_orders_snapshot',
+                    orders: [{
+                        groupId: '__global_equivalent__',
+                        requestSource: 'global_equivalent_underlying',
+                        status: 'Filled',
+                        assignmentAdjustments: [
+                            {
+                                kind: 'equivalent_expiry',
+                                adjustmentId: 'global-equivalent:group_snapshot_fill:deep_call',
+                                groupId: 'group_snapshot_fill',
+                                optionLegId: 'deep_call',
+                                underlyingLegId: '_global_expiry_hedge_deep_call',
+                                classification: 'itm_hedged',
+                                expiry: '20260717',
+                                assignmentStrike: 700,
+                                requiredUnderlyingQuantity: -100,
+                                executedUnderlyingQuantity: -100,
+                                internallyNettedUnderlyingQuantity: 0,
+                                underlyingSymbol: 'SPY',
+                                observedUnderlyingPrice: 730,
+                                underlyingAvgFillPrice: 729.95,
+                                hedgeBasisPrice: 729.95,
+                            },
+                        ],
+                    }],
+                });
+
+                const group = state.groups[0];
+                assert.equal(group.legs.find((leg) => leg.id === 'deep_call').closePrice, 0);
+                assert.equal(group.legs.find((leg) => leg.id === '_global_expiry_hedge_deep_call').pos, -100);
+                assert.equal(state.globalEquivalentClose.status, 'completed');
             },
         },
     ],

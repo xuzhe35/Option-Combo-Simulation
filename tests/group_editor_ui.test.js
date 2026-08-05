@@ -104,6 +104,78 @@ module.exports = {
             },
         },
         {
+            name: 'debounces option contract edits, invalidates immediately, and commits once',
+            run() {
+                const timers = new Map();
+                let nextTimerId = 0;
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js'], {
+                    setTimeout(callback, delay) {
+                        nextTimerId += 1;
+                        timers.set(nextTimerId, { callback, delay });
+                        return nextTimerId;
+                    },
+                    clearTimeout(timerId) {
+                        timers.delete(timerId);
+                    },
+                });
+                const leg = { id: 'leg_call', strike: 735, expDate: '2026-08-28' };
+                const group = { id: 'group_1', liveData: true, legs: [leg] };
+                const state = { marketDataMode: 'live' };
+                let invalidations = 0;
+                let subscriptions = 0;
+                let derivedRefreshes = 0;
+                const scheduler = ctx.OptionComboGroupEditorUI._test.createLegContractEditScheduler(
+                    leg,
+                    group,
+                    state,
+                    {
+                        invalidateLiveOptionSubscriptionForLeg(legId) {
+                            assert.equal(legId, 'leg_call');
+                            invalidations += 1;
+                        },
+                        handleLiveSubscriptions() {
+                            subscriptions += 1;
+                        },
+                        updateDerivedValues() {
+                            derivedRefreshes += 1;
+                        },
+                    }
+                );
+
+                scheduler.schedule();
+                scheduler.schedule();
+
+                assert.equal(invalidations, 2);
+                assert.equal(subscriptions, 0);
+                assert.equal(derivedRefreshes, 0);
+                assert.equal(timers.size, 1);
+                const pending = Array.from(timers.values())[0];
+                assert.equal(pending.delay, 250);
+
+                // The debounce timer refreshes local derived values only; it
+                // must NOT commit a live resubscription while the user may
+                // still be typing a transient strike like "7" of "735".
+                pending.callback();
+
+                assert.equal(subscriptions, 0);
+                assert.equal(derivedRefreshes, 1);
+                assert.equal(scheduler.isPending(), true);
+                assert.equal(timers.size, 0);
+
+                // The explicit flush (change/blur) performs the wire commit.
+                scheduler.flush();
+
+                assert.equal(subscriptions, 1);
+                assert.equal(derivedRefreshes, 2);
+                assert.equal(scheduler.isPending(), false);
+
+                // A second flush without a new edit is a no-op.
+                scheduler.flush();
+                assert.equal(subscriptions, 1);
+                assert.equal(derivedRefreshes, 2);
+            },
+        },
+        {
             name: 'builds expected legs for all typical combo strategies',
             run() {
                 const ctx = loadBrowserScripts(['js/group_editor_ui.js'], {

@@ -37,6 +37,7 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
   - preview / test-submit / submit combo requests
   - managed reprice / continue / concede / cancel controls
   - close-group execution using the same combo-order path
+  - one-expiry Global Auto Close for globally included Active Groups: clearly worthless OTM legs are left to expiry, deep ITM one-sided legs are hedged through one cross-Group net Underlying order, and normal liquid legs remain unchanged for the existing Group Close flow
   - partial close by complete strategy units while preserving leg ratios and realized P&L
 - Cost-tracking helpers:
   - per-group portfolio average-cost sync
@@ -695,7 +696,12 @@ Current browser-side behavior:
 - cash-settled index options do not support underlying legs
 - product-specific price decimals and combo increments supported
   - `HG` uses 5 displayed decimals with a `0.0005` combo price increment
-- Black-76 used for FOP and index-style paths
+- FOP defaults to European Black-76, with an independent opt-in American
+  futures CRR switch for early-exercisable contracts such as SI. The American
+  tree uses the leg-bound futures quote with zero risk-neutral futures drift
+  (`q=r` in the generalized CRR implementation); stock/ETF and FOP model
+  choices are saved independently
+- cash-settled index-style paths remain European Black-76
 - amortized mode intentionally disabled for non-equity deliverables
 
 ### Live IBKR backend notes

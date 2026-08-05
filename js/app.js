@@ -111,9 +111,10 @@ const state = {
     // Continuously compounded discount-rate fallback.  A live/historical
     // discount curve overrides this scalar when useMarketDiscountCurve=true.
     interestRate: 0.03,
-    // Incremental opt-in. The existing European BSM path remains the default.
-    // The American model applies only to bsm-spot equity/ETF profiles.
+    // Incremental opt-ins. Existing European BSM / Black-76 paths remain the
+    // defaults; equity and futures options keep independent exercise choices.
     equityOptionPricingModel: 'bsm-spot',
+    fopOptionPricingModel: 'black76',
     equityDividendYield: 0,
     americanBinomialSteps: 201,
     useMarketDiscountCurve: true,
@@ -180,6 +181,14 @@ let _sliderRafPending = false;
 let _latestPortfolioDerivedData = null;
 let _impliedLambdaRefreshPending = false;
 let _impliedLambdaRefreshRequested = false;
+const LIVE_CHART_REFRESH_INTERVAL_MS = 300;
+const LIVE_CHART_IDLE_FULL_REFRESH_MS = 900;
+const LIVE_CHART_INTERACTIVE_POINT_COUNT = 120;
+let _liveChartRefreshTimer = null;
+let _liveChartIdleRefreshTimer = null;
+let _lastLiveChartRefreshAt = 0;
+const _pendingLiveChartGroupIds = new Set();
+const _idleLiveChartGroupIds = new Set();
 function throttledUpdate() {
     if (!_sliderRafPending) {
         _sliderRafPending = true;
@@ -545,6 +554,15 @@ function renderGroups() {
         updateDerivedValues,
         updateProbCharts,
         handleLiveSubscriptions,
+        invalidateLiveOptionSubscriptionForLeg(legId, reason) {
+            const liveQuotes = typeof OptionComboWsLiveQuotes !== 'undefined'
+                ? OptionComboWsLiveQuotes
+                : null;
+            return liveQuotes
+                && typeof liveQuotes.invalidateOptionSubscriptionForLeg === 'function'
+                ? liveQuotes.invalidateOptionSubscriptionForLeg(legId, reason)
+                : false;
+        },
         groupHasDeterministicCost,
         groupHasOpenPosition,
         getRenderableGroupViewMode: OptionComboSessionLogic.getRenderableGroupViewMode,
@@ -633,11 +651,12 @@ function applyHedgeRowDerivedData(row, hedgeResult) {
     }
 }
 
-function applyGroupDerivedData(card, groupResult) {
+function applyGroupDerivedData(card, groupResult, options = {}) {
     _runUiRefreshSafely('groupDerivedData', () => {
         OptionComboGroupUI.applyGroupDerivedData(card, groupResult, currencyFormatter, {
             drawGroupChart,
             drawAmortizationChart,
+            drawCharts: options.drawCharts !== false,
         });
     });
 }
@@ -652,11 +671,12 @@ function applyGroupDeltaSummary(card, groupResult) {
     }
 }
 
-function applyGlobalDerivedData(derivedData) {
+function applyGlobalDerivedData(derivedData, options = {}) {
     _runUiRefreshSafely('globalDerivedData', () => {
         OptionComboGlobalUI.applyGlobalDerivedData(derivedData, currencyFormatter, {
             drawGlobalChart,
             drawGlobalAmortizedChart,
+            drawCharts: options.drawCharts !== false,
         });
     });
 }
@@ -664,6 +684,100 @@ function applyGlobalDerivedData(derivedData) {
 function _cachePortfolioDerivedData(derivedData) {
     _latestPortfolioDerivedData = derivedData || null;
     return derivedData;
+}
+
+function _clearLiveChartRefreshTimers() {
+    if (_liveChartRefreshTimer !== null && typeof clearTimeout === 'function') {
+        clearTimeout(_liveChartRefreshTimer);
+    }
+    if (_liveChartIdleRefreshTimer !== null && typeof clearTimeout === 'function') {
+        clearTimeout(_liveChartIdleRefreshTimer);
+    }
+    _liveChartRefreshTimer = null;
+    _liveChartIdleRefreshTimer = null;
+}
+
+function _drawVisiblePortfolioCharts(groupIds, options = {}) {
+    const requestedIds = Array.isArray(groupIds) ? groupIds.filter(Boolean) : [];
+    requestedIds.forEach((groupId) => {
+        const group = state.groups.find(candidate => candidate && candidate.id === groupId);
+        const card = document.querySelector(`.group-card[data-group-id="${groupId}"]`);
+        if (!group || !card) return;
+        const chartContainer = card.querySelector('.chart-container');
+        if (chartContainer && chartContainer.style.display !== 'none') {
+            drawGroupChart(card, group, options);
+        }
+        const amortContainer = card.querySelector('.amortization-chart-container');
+        if (amortContainer && amortContainer.style.display !== 'none') {
+            const amortCanvas = amortContainer.querySelector('.amortization-canvas');
+            const marginCanvas = amortContainer.querySelector('.margin-canvas');
+            if (amortCanvas) {
+                drawAmortizationChart(card, group, amortCanvas, marginCanvas);
+            }
+        }
+    });
+
+    const affectsGlobal = requestedIds.some((groupId) => {
+        const group = state.groups.find(candidate => candidate && candidate.id === groupId);
+        return group && OptionComboSessionLogic.isGroupIncludedInGlobal(group);
+    });
+    if (!affectsGlobal) return;
+
+    const globalCard = document.getElementById('globalChartCard');
+    const globalChartContainer = document.getElementById('globalChartContainer');
+    if (globalCard && globalChartContainer && globalChartContainer.style.display !== 'none') {
+        drawGlobalChart(globalCard, options);
+    }
+    const globalAmortizedCard = document.getElementById('globalAmortizedCard');
+    const globalAmortizedContainer = document.getElementById('globalAmortizedChartContainer');
+    if (globalAmortizedCard
+        && globalAmortizedContainer
+        && globalAmortizedContainer.style.display !== 'none'
+        && globalAmortizedCard.style.display !== 'none') {
+        drawGlobalAmortizedChart(globalAmortizedCard);
+    }
+}
+
+function _scheduleLiveChartRefresh(groupIds) {
+    const nextIds = (Array.isArray(groupIds) ? groupIds : []).filter(Boolean);
+    nextIds.forEach((groupId) => {
+        _pendingLiveChartGroupIds.add(groupId);
+        _idleLiveChartGroupIds.add(groupId);
+    });
+    if (_pendingLiveChartGroupIds.size === 0 || typeof setTimeout !== 'function') {
+        return false;
+    }
+
+    if (_liveChartRefreshTimer === null) {
+        const elapsed = Date.now() - _lastLiveChartRefreshAt;
+        const delay = Math.max(0, LIVE_CHART_REFRESH_INTERVAL_MS - elapsed);
+        _liveChartRefreshTimer = setTimeout(() => {
+            _liveChartRefreshTimer = null;
+            const pendingIds = Array.from(_pendingLiveChartGroupIds);
+            _pendingLiveChartGroupIds.clear();
+            _lastLiveChartRefreshAt = Date.now();
+            _drawVisiblePortfolioCharts(pendingIds, {
+                pointsCount: LIVE_CHART_INTERACTIVE_POINT_COUNT,
+            });
+        }, delay);
+    }
+
+    if (_liveChartIdleRefreshTimer !== null) {
+        clearTimeout(_liveChartIdleRefreshTimer);
+    }
+    _liveChartIdleRefreshTimer = setTimeout(() => {
+        _liveChartIdleRefreshTimer = null;
+        const idleIds = Array.from(_idleLiveChartGroupIds);
+        _idleLiveChartGroupIds.clear();
+        _pendingLiveChartGroupIds.clear();
+        if (_liveChartRefreshTimer !== null) {
+            clearTimeout(_liveChartRefreshTimer);
+            _liveChartRefreshTimer = null;
+        }
+        _lastLiveChartRefreshAt = Date.now();
+        _drawVisiblePortfolioCharts(idleIds);
+    }, LIVE_CHART_IDLE_FULL_REFRESH_MS);
+    return true;
 }
 
 function _syncWorkspaceChrome() {
@@ -745,6 +859,7 @@ function _applyPortfolioDerivedData(derivedData, options = {}) {
 
     const groupIds = Array.isArray(options.groupIds) ? options.groupIds.filter(Boolean) : null;
     const hedgeIds = Array.isArray(options.hedgeIds) ? options.hedgeIds.filter(Boolean) : null;
+    const drawCharts = options.drawCharts !== false;
 
     if (hedgeIds && hedgeIds.length > 0) {
         hedgeIds.forEach((hedgeId) => {
@@ -762,17 +877,17 @@ function _applyPortfolioDerivedData(derivedData, options = {}) {
             const card = document.querySelector(`.group-card[data-group-id="${groupId}"]`);
             const groupResult = derivedData.groupResultsById.get(groupId);
             if (!card || !groupResult) return;
-            applyGroupDerivedData(card, groupResult);
+            applyGroupDerivedData(card, groupResult, { drawCharts });
         });
     } else {
         document.querySelectorAll('.group-card').forEach(card => {
             const groupResult = derivedData.groupResultsById.get(card.dataset.groupId);
             if (!groupResult) return;
-            applyGroupDerivedData(card, groupResult);
+            applyGroupDerivedData(card, groupResult, { drawCharts });
         });
     }
 
-    applyGlobalDerivedData(derivedData);
+    applyGlobalDerivedData(derivedData, { drawCharts });
     const deltaHedgeUi = _getDeltaHedgeUiApi();
     if (_pageHasFeature('deltaHedgePanel')
         && deltaHedgeUi
@@ -882,6 +997,7 @@ function _syncSimTimeBasisPricingConfig() {
     if (typeof pricingCore.configureEquityOptionPricing === 'function') {
         pricingCore.configureEquityOptionPricing({
             model: state.equityOptionPricingModel,
+            fopModel: state.fopOptionPricingModel,
             dividendYield: state.equityDividendYield,
             steps: state.americanBinomialSteps,
         });
@@ -889,6 +1005,9 @@ function _syncSimTimeBasisPricingConfig() {
 }
 
 function updateDerivedValues() {
+    _clearLiveChartRefreshTimers();
+    _pendingLiveChartGroupIds.clear();
+    _idleLiveChartGroupIds.clear();
     _syncSimTimeBasisPricingConfig();
     const derivedData = _cachePortfolioDerivedData(
         OptionComboValuation.computePortfolioDerivedData(state)
@@ -966,7 +1085,9 @@ function updateLiveQuoteDerivedValues(changeSet = {}) {
     _applyPortfolioDerivedData(derivedData, {
         groupIds,
         hedgeIds,
+        drawCharts: false,
     });
+    _scheduleLiveChartRefresh(groupIds);
     return derivedData;
 }
 
@@ -1477,6 +1598,11 @@ function applyImportedState(normalizedState, importedSessionTitle = '') {
             normalizedState.equityOptionPricingModel
         )
         : 'bsm-spot';
+    state.fopOptionPricingModel = typeof OptionComboSessionLogic.normalizeFopOptionPricingModel === 'function'
+        ? OptionComboSessionLogic.normalizeFopOptionPricingModel(
+            normalizedState.fopOptionPricingModel
+        )
+        : 'black76';
     state.equityDividendYield = typeof OptionComboSessionLogic.normalizeEquityDividendYield === 'function'
         ? OptionComboSessionLogic.normalizeEquityDividendYield(
             normalizedState.equityDividendYield
