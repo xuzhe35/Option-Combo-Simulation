@@ -414,6 +414,288 @@ module.exports = {
             },
         },
         {
+            name: 'routes a theta-only option update through the same lightweight refresh',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    simulatedDate: '2026-03-16',
+                    baseDate: '2026-03-16',
+                    groups: [
+                        {
+                            id: 'group_theta_only',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_put',
+                                    type: 'put',
+                                    pos: 1,
+                                    strike: 600,
+                                    expDate: '2026-04-17',
+                                    iv: 0.2,
+                                    ivSource: 'live',
+                                    currentPrice: 2.2,
+                                    currentPriceSource: 'live',
+                                    cost: 2.2,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                const derivedRefreshes = [];
+                const greeksRefreshes = [];
+                let fullRefreshCalls = 0;
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {
+                            fullRefreshCalls += 1;
+                        },
+                        updateLiveQuoteDerivedValues(changeSet) {
+                            derivedRefreshes.push(changeSet);
+                        },
+                        updateLiveQuoteGroupDeltaValues(changeSet) {
+                            greeksRefreshes.push(changeSet);
+                        },
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                const baseQuote = {
+                    bid: 2.1,
+                    ask: 2.3,
+                    mark: 2.2,
+                    iv: 0.2,
+                    delta: -0.35,
+                    theta: -0.08,
+                };
+
+                ctx.processLiveMarketData({ options: { leg_put: { ...baseQuote } } });
+                assert.equal(derivedRefreshes.length, 1);
+                assert.equal(greeksRefreshes.length, 0);
+
+                // Pricing and delta hold still; only theta moves. Before the
+                // greek fan-out this tick was dropped entirely.
+                ctx.processLiveMarketData({
+                    options: { leg_put: { ...baseQuote, theta: -0.11 } },
+                });
+
+                assert.equal(fullRefreshCalls, 0);
+                assert.equal(derivedRefreshes.length, 1);
+                assert.equal(greeksRefreshes.length, 1);
+                assert.deepEqual(Array.from(greeksRefreshes[0].groupIds), ['group_theta_only']);
+
+                const snapshot = ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_put');
+                assert.equal(snapshot.theta, -0.11);
+                assert.equal(snapshot.delta, -0.35);
+            },
+        },
+        {
+            name: 'drops option theta from the snapshot while greeks are disabled',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    greeksEnabled: false,
+                    liveProjectionFeedConnected: true,
+                    liveProjectionFeedStale: false,
+                    liveProjectionLastReceivedAt: new Date().toISOString(),
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    simulatedDate: '2026-03-16',
+                    baseDate: '2026-03-16',
+                    groups: [
+                        {
+                            id: 'group_greeks_off',
+                            liveData: true,
+                            legs: [
+                                {
+                                    id: 'leg_put',
+                                    type: 'put',
+                                    pos: 1,
+                                    strike: 600,
+                                    expDate: '2026-04-17',
+                                    iv: 0.2,
+                                    ivSource: 'live',
+                                    currentPrice: 2.2,
+                                    currentPriceSource: 'live',
+                                    cost: 2.2,
+                                    closePrice: null,
+                                },
+                            ],
+                        },
+                    ],
+                    hedges: [],
+                };
+
+                const ctx = loadBrowserScripts(
+                    [
+                        'js/session_logic.js',
+                        'js/product_registry.js',
+                        'js/ws_client.js',
+                    ],
+                    {
+                        state,
+                        renderGroups() {},
+                        updateDerivedValues() {},
+                        updateLiveQuoteDerivedValues() {},
+                        updateLiveQuoteGroupDeltaValues() {},
+                        requestAnimationFrame(callback) {
+                            callback();
+                            return 1;
+                        },
+                        flashElement() {},
+                        document: {
+                            getElementById() { return null; },
+                            querySelector() { return null; },
+                        },
+                        localStorage: {
+                            getItem() { return null; },
+                            setItem() {},
+                        },
+                        WebSocket: function MockWebSocket() {},
+                    }
+                );
+
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_put: {
+                            bid: 2.1,
+                            ask: 2.3,
+                            mark: 2.2,
+                            iv: 0.2,
+                            delta: -0.35,
+                            theta: -0.08,
+                        },
+                    },
+                });
+
+                const snapshot = ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_put');
+                assert.equal(snapshot.delta, undefined);
+                assert.equal(snapshot.theta, undefined);
+            },
+        },
+        {
+            name: 'merges a later theta-only group into an already queued refresh',
+            run() {
+                const state = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    simulatedDate: '2026-03-16',
+                    baseDate: '2026-03-16',
+                    groups: [
+                        {
+                            id: 'group_a',
+                            liveData: true,
+                            legs: [{ id: 'leg_a', type: 'call', pos: 1 }],
+                        },
+                        {
+                            id: 'group_b',
+                            liveData: true,
+                            legs: [{ id: 'leg_b', type: 'put', pos: 1 }],
+                        },
+                    ],
+                    hedges: [],
+                };
+                const derivedRefreshes = [];
+                const greekRefreshes = [];
+                let queuedFrame = null;
+                let runFramesImmediately = true;
+
+                const ctx = loadBrowserScripts([
+                    'js/session_logic.js',
+                    'js/product_registry.js',
+                    'js/ws_client.js',
+                ], {
+                    state,
+                    renderGroups() {},
+                    updateDerivedValues() {},
+                    updateLiveQuoteDerivedValues(changeSet) {
+                        derivedRefreshes.push(changeSet);
+                    },
+                    updateLiveQuoteGroupDeltaValues(changeSet) {
+                        greekRefreshes.push(changeSet);
+                    },
+                    requestAnimationFrame(callback) {
+                        if (runFramesImmediately) {
+                            callback();
+                        } else {
+                            queuedFrame = callback;
+                        }
+                        return 1;
+                    },
+                    flashElement() {},
+                    document: {
+                        getElementById() { return null; },
+                        querySelector() { return null; },
+                    },
+                    localStorage: {
+                        getItem() { return null; },
+                        setItem() {},
+                    },
+                    WebSocket: function MockWebSocket() {},
+                });
+
+                const baseB = {
+                    bid: 2.1, ask: 2.3, mark: 2.2, iv: 0.2,
+                    delta: -0.35, theta: -0.08,
+                };
+                ctx.processLiveMarketData({ options: { leg_b: baseB } });
+                derivedRefreshes.length = 0;
+                greekRefreshes.length = 0;
+
+                runFramesImmediately = false;
+                ctx.processLiveMarketData({
+                    options: {
+                        leg_a: {
+                            bid: 3.1, ask: 3.3, mark: 3.2, iv: 0.21,
+                            delta: 0.4, theta: -0.07,
+                        },
+                    },
+                });
+                assert.equal(typeof queuedFrame, 'function');
+
+                // This arrives while Group A's frame is pending. It updates
+                // only Group B's theta and must survive the coalescing gate.
+                ctx.processLiveMarketData({
+                    options: { leg_b: { ...baseB, theta: -0.12 } },
+                });
+                queuedFrame();
+
+                assert.equal(derivedRefreshes.length, 1);
+                assert.deepEqual(Array.from(derivedRefreshes[0].groupIds), ['group_a']);
+                assert.equal(greekRefreshes.length, 1);
+                assert.deepEqual(Array.from(greekRefreshes[0].groupIds), ['group_b']);
+                assert.equal(ctx.OptionComboWsLiveQuotes.getOptionQuote('leg_b').theta, -0.12);
+            },
+        },
+        {
             name: 'ignores option delta when greeks are disabled',
             run() {
                 const state = {

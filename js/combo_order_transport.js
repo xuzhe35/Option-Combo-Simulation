@@ -1426,7 +1426,9 @@
                 ? groupOrderBuilder.resolveGroupCloseQuantity(group)
                 : null;
             const requestedCloseQuantity = parseInt(
-                options.closeQuantity != null ? options.closeQuantity : closeExecution.quantity,
+                options.closeQuantity != null
+                    ? options.closeQuantity
+                    : (closeExecution.quantityMode === 'manual' ? closeExecution.quantity : null),
                 10
             );
             const closeQuantity = !scopedClose
@@ -1544,7 +1546,9 @@
             return _requestCloseComboOrder(group, {
                 legIds: [],
                 closeStrategy: closeExecution && closeExecution.strategy || 'auto',
-                closeQuantity: closeExecution && closeExecution.quantity,
+                closeQuantity: closeExecution && closeExecution.quantityMode === 'manual'
+                    ? closeExecution.quantity
+                    : null,
             });
         }
 

@@ -59,8 +59,11 @@ module.exports = {
 
                 assert.match(indexHtml, /<body[^>]*data-option-combo-page="portfolio"/i);
                 assert.match(chartLabHtml, /<body[^>]*data-option-combo-page="chart-lab"/i);
-                assert.match(indexHtml, /<script src="js\/page_capabilities\.js"><\/script>/i);
-                assert.match(chartLabHtml, /<script src="js\/page_capabilities\.js"><\/script>/i);
+                // The ?v= tag is a content hash maintained by
+                // scripts/stamp_asset_versions.py, so it must not be pinned here.
+                // What matters is that both pages load the shared script at all.
+                assert.match(indexHtml, /<script src="js\/page_capabilities\.js(\?v=[^"]*)?"><\/script>/i);
+                assert.match(chartLabHtml, /<script src="js\/page_capabilities\.js(\?v=[^"]*)?"><\/script>/i);
                 assert.match(indexHtml, /class="group-header-net-cash-flow-item"/i);
                 assert.match(chartLabHtml, /class="group-header-net-cash-flow-item"/i);
                 assert.match(indexHtml, /id="allGroupsNetCashFlowValue"/i);

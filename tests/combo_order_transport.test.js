@@ -449,6 +449,35 @@ module.exports = {
             },
         },
         {
+            name: 'defaults a five-unit group close to the full quantity',
+            run() {
+                const state = {
+                    underlyingSymbol: 'SPY', underlyingPrice: 600,
+                    simulatedDate: '2026-07-11', baseDate: '2026-07-11',
+                    allowLiveComboOrders: true, selectedLiveComboOrderAccount: 'U1',
+                    groups: [{
+                        id: 'full_close_default', viewMode: 'active',
+                        closeExecution: {
+                            executionMode: 'preview', strategy: 'auto', quantity: 1, quantityMode: 'auto',
+                            repriceThreshold: 0.01, timeInForce: 'DAY', pendingRequest: false,
+                        },
+                        legs: [
+                            { id: 'call', type: 'call', pos: 5, strike: 600, expDate: '2026-09-18', cost: 10, closePrice: null },
+                            { id: 'put', type: 'put', pos: 5, strike: 600, expDate: '2026-09-18', cost: 8, closePrice: null },
+                        ],
+                    }], hedges: [],
+                };
+                const harness = buildHarness({ state });
+
+                const result = harness.api.requestCloseGroupComboOrder(state.groups[0]);
+
+                assert.equal(result, true);
+                assert.equal(harness.sent[0].closeQuantity, 5);
+                assert.equal(harness.sent[0].closeMaxQuantity, 5);
+                assert.deepEqual(Array.from(harness.sent[0].legs, (leg) => leg.pos), [-5, -5]);
+            },
+        },
+        {
             name: 'requests a one-unit partial group close and forces combo-only execution',
             run() {
                 const state = {
@@ -458,7 +487,7 @@ module.exports = {
                     groups: [{
                         id: 'partial_close', viewMode: 'active',
                         closeExecution: {
-                            executionMode: 'preview', strategy: 'auto', quantity: 1,
+                            executionMode: 'preview', strategy: 'auto', quantity: 1, quantityMode: 'manual',
                             repriceThreshold: 0.01, timeInForce: 'DAY', pendingRequest: false,
                         },
                         legs: [

@@ -363,108 +363,254 @@
         return position * multiplier * deltaPerUnit;
     }
 
-    function resolveLegLiveDeltaSummary(leg, underlyingProfile, greeksEnabled) {
-        if (!leg) {
-            return {
-                available: false,
-                value: 0,
-                source: '',
-            };
+    // IB publishes all four model greeks off the one generic-tick line, so the
+    // aggregation below is written per greek rather than per delta.  Only Delta
+    // and Theta are surfaced today; Gamma and Vega are aggregated so exposing
+    // them later is a UI change alone.
+    const LIVE_GREEK_NAMES = ['delta', 'gamma', 'vega', 'theta'];
+    const MAX_LIVE_GREEK_AGE_MS = 120 * 1000;
+
+    function greekResultKey(greekName, suffix = '') {
+        return `group${greekName.charAt(0).toUpperCase()}${greekName.slice(1)}${suffix}`;
+    }
+
+    function unavailableLegGreek(reason = '') {
+        return {
+            available: false,
+            value: 0,
+            source: '',
+            reason,
+        };
+    }
+
+    function resolveLiveGreekFeedHealth(globalState) {
+        const liveQuotes = globalScope.OptionComboWsLiveQuotes;
+        let connected = globalState && globalState.liveProjectionFeedConnected;
+        let stale = globalState && globalState.liveProjectionFeedStale;
+        let lastReceivedAt = String(globalState && globalState.liveProjectionLastReceivedAt || '').trim();
+
+        if (liveQuotes && typeof liveQuotes.getProjectionFeedHealth === 'function') {
+            try {
+                const health = liveQuotes.getProjectionFeedHealth();
+                if (health && typeof health.connected === 'boolean') {
+                    connected = health.connected;
+                }
+                if (health && typeof health.stale === 'boolean') {
+                    stale = health.stale;
+                }
+                if (health && String(health.lastReceivedAt || '').trim()) {
+                    lastReceivedAt = String(health.lastReceivedAt).trim();
+                }
+            } catch (_error) {
+                // The state-owned health fields remain the fail-closed source.
+            }
         }
 
-        if (greeksEnabled !== true) {
-            return {
-                available: false,
-                value: 0,
-                source: '',
-            };
+        const hasHealthEvidence = typeof connected === 'boolean' || typeof stale === 'boolean';
+        if (connected === false) {
+            return { usable: false, reason: 'feed_disconnected', lastReceivedAt, hasHealthEvidence };
+        }
+        if (stale === true) {
+            return { usable: false, reason: 'feed_stale', lastReceivedAt, hasHealthEvidence };
+        }
+        return { usable: true, reason: '', lastReceivedAt, hasHealthEvidence };
+    }
+
+    function resolveLiveGreekSnapshotStatus(snapshot, globalState) {
+        const feedHealth = resolveLiveGreekFeedHealth(globalState);
+        if (!feedHealth.usable) {
+            return feedHealth;
+        }
+
+        // Older isolated consumers do not publish feed-health state. Preserve
+        // that compatibility path; the real app always owns these fields and
+        // therefore requires per-Greek receipt evidence.
+        if (!feedHealth.hasHealthEvidence) {
+            return { usable: true, reason: '' };
+        }
+
+        const greekAsOf = String(snapshot && (snapshot.greeksAsOf || snapshot.quoteAsOf) || '').trim();
+        const greekMs = Date.parse(greekAsOf);
+        if (!Number.isFinite(greekMs)) {
+            return { usable: false, reason: 'greek_timestamp_missing' };
+        }
+
+        const lastReceiptMs = Date.parse(feedHealth.lastReceivedAt);
+        const referenceMs = Number.isFinite(lastReceiptMs) ? lastReceiptMs : Date.now();
+        if (!Number.isFinite(referenceMs)
+            || referenceMs - greekMs > MAX_LIVE_GREEK_AGE_MS
+            || greekMs - referenceMs > MAX_LIVE_GREEK_AGE_MS) {
+            return { usable: false, reason: 'greek_stale' };
+        }
+        return { usable: true, reason: '' };
+    }
+
+    function resolveLegLiveGreekSummary(leg, underlyingProfile, greeksEnabled, greekName, globalState) {
+        if (!leg || greeksEnabled !== true) {
+            return unavailableLegGreek();
         }
 
         if (isUnderlyingLeg(leg)) {
+            // An underlying position carries delta only.  Its theta, gamma and
+            // vega are exactly zero, so reporting them as "available: 0" keeps
+            // a stock hedge from marking the whole group's Theta as missing.
             return {
                 available: true,
-                value: normalizeLegPosition(leg.pos) * getUnderlyingLegMultiplier(underlyingProfile),
+                value: greekName === 'delta'
+                    ? normalizeLegPosition(leg.pos) * getUnderlyingLegMultiplier(underlyingProfile)
+                    : 0,
                 source: 'underlying_position',
             };
         }
 
         const snapshot = resolveLiveQuoteSnapshotForLeg(leg);
-        const rawDelta = parseFloat(snapshot && snapshot.delta);
-        if (Number.isFinite(rawDelta)) {
+        const snapshotStatus = resolveLiveGreekSnapshotStatus(snapshot, globalState);
+        if (!snapshotStatus.usable) {
+            return unavailableLegGreek(snapshotStatus.reason);
+        }
+        const rawGreek = parseFloat(snapshot && snapshot[greekName]);
+        if (Number.isFinite(rawGreek)) {
             return {
                 available: true,
-                value: rawDelta * normalizeLegPosition(leg.pos) * getMultiplier(underlyingProfile),
-                source: 'live_option_delta',
+                value: rawGreek * normalizeLegPosition(leg.pos) * getMultiplier(underlyingProfile),
+                source: `live_option_${greekName}`,
+                reason: '',
             };
         }
 
-        return {
-            available: false,
-            value: 0,
-            source: '',
-        };
+        return unavailableLegGreek();
     }
 
-    function resolveLegLiveDelta(leg, underlyingProfile, greeksEnabled) {
-        return resolveLegLiveDeltaSummary(leg, underlyingProfile, greeksEnabled);
+    function resolveLegLiveGreekSummaries(leg, underlyingProfile, greeksEnabled, globalState) {
+        const summaries = {};
+        LIVE_GREEK_NAMES.forEach((greekName) => {
+            summaries[greekName] = resolveLegLiveGreekSummary(
+                leg,
+                underlyingProfile,
+                greeksEnabled,
+                greekName,
+                globalState
+            );
+        });
+        return summaries;
+    }
+
+    function resolveLegLiveDeltaSummary(leg, underlyingProfile, greeksEnabled, globalState) {
+        return resolveLegLiveGreekSummary(leg, underlyingProfile, greeksEnabled, 'delta', globalState);
+    }
+
+    function resolveLegLiveDelta(leg, underlyingProfile, greeksEnabled, globalState) {
+        return resolveLegLiveDeltaSummary(leg, underlyingProfile, greeksEnabled, globalState);
+    }
+
+    function legGreekSummary(legResult, greekName) {
+        const summaries = legResult && legResult.liveGreeks;
+        if (summaries && summaries[greekName]) {
+            return summaries[greekName];
+        }
+        // Leg results built before the greek fan-out still carry delta flatly.
+        if (greekName === 'delta' && legResult) {
+            return {
+                available: legResult.liveDeltaAvailable === true,
+                value: normalizeFiniteNumber(legResult.liveDelta, 0),
+            };
+        }
+        return unavailableLegGreek();
+    }
+
+    function buildGroupGreeksSummary(group, globalState, greekLegResults) {
+        if (!isGreeksEnabled(globalState)) {
+            const disabled = {
+                groupGreekLegCount: 0,
+                groupDeltaLegCount: 0,
+            };
+            LIVE_GREEK_NAMES.forEach((greekName) => {
+                disabled[greekResultKey(greekName, 'Displayable')] = false;
+                disabled[greekResultKey(greekName, 'Available')] = false;
+                disabled[greekResultKey(greekName)] = null;
+                disabled[greekResultKey(greekName, 'MissingLegCount')] = 0;
+                disabled[greekResultKey(greekName, 'StaleLegCount')] = 0;
+            });
+            disabled.groupGreeksStale = false;
+            return disabled;
+        }
+
+        const legResults = Array.isArray(greekLegResults) ? greekLegResults : [];
+        const eligibleLegResults = legResults.filter(legResult => (
+            legResult && legResult.deltaEligible === true
+        ));
+        // Eligibility is a property of the leg, not of the greek, so every
+        // greek shares one leg count and one displayable gate.  Only the
+        // missing count can differ: IB may have published delta but not theta.
+        const groupGreekLegCount = eligibleLegResults.length;
+        const displayable = globalState.marketDataMode === 'live'
+            && group.liveData === true
+            && groupGreekLegCount > 0;
+
+        const summary = {
+            groupGreekLegCount,
+            groupDeltaLegCount: groupGreekLegCount,
+        };
+
+        LIVE_GREEK_NAMES.forEach((greekName) => {
+            let total = 0;
+            let missingLegCount = 0;
+            let staleLegCount = 0;
+            eligibleLegResults.forEach((legResult) => {
+                const greek = legGreekSummary(legResult, greekName);
+                if (greek.available) {
+                    total += normalizeFiniteNumber(greek.value, 0);
+                } else {
+                    missingLegCount += 1;
+                    if (['feed_disconnected', 'feed_stale', 'greek_stale'].includes(greek.reason)) {
+                        staleLegCount += 1;
+                    }
+                }
+            });
+
+            const available = displayable && missingLegCount === 0;
+            summary[greekResultKey(greekName, 'Displayable')] = displayable;
+            summary[greekResultKey(greekName, 'Available')] = available;
+            summary[greekResultKey(greekName)] = available ? total : null;
+            summary[greekResultKey(greekName, 'MissingLegCount')] = missingLegCount;
+            summary[greekResultKey(greekName, 'StaleLegCount')] = staleLegCount;
+        });
+
+        summary.groupGreeksStale = LIVE_GREEK_NAMES.some(
+            greekName => summary[greekResultKey(greekName, 'StaleLegCount')] > 0
+        );
+
+        return summary;
     }
 
     function buildGroupDeltaSummary(group, globalState, deltaLegResults) {
-        if (!isGreeksEnabled(globalState)) {
-            return {
-                groupDeltaDisplayable: false,
-                groupDeltaAvailable: false,
-                groupDelta: null,
-                groupDeltaLegCount: 0,
-                groupDeltaMissingLegCount: 0,
-            };
-        }
-
-        let groupDelta = 0;
-        let groupDeltaLegCount = 0;
-        let groupDeltaMissingLegCount = 0;
-
-        (Array.isArray(deltaLegResults) ? deltaLegResults : []).forEach((legResult) => {
-            if (!legResult || legResult.deltaEligible !== true) {
-                return;
-            }
-
-            groupDeltaLegCount += 1;
-            if (legResult.liveDeltaAvailable) {
-                groupDelta += legResult.liveDelta;
-            } else {
-                groupDeltaMissingLegCount += 1;
-            }
-        });
-
-        const groupDeltaDisplayable = globalState.marketDataMode === 'live'
-            && group.liveData === true
-            && groupDeltaLegCount > 0;
-        const groupDeltaAvailable = groupDeltaDisplayable && groupDeltaMissingLegCount === 0;
-
-        return {
-            groupDeltaDisplayable,
-            groupDeltaAvailable,
-            groupDelta: groupDeltaAvailable ? groupDelta : null,
-            groupDeltaLegCount,
-            groupDeltaMissingLegCount,
-        };
+        return buildGroupGreeksSummary(group, globalState, deltaLegResults);
     }
 
-    function computeGroupDeltaSummary(group, globalState, underlyingProfile = null) {
+    function computeGroupGreeksSummary(group, globalState, underlyingProfile = null) {
         const resolvedProfile = underlyingProfile || (productRegistry
             ? productRegistry.resolveUnderlyingProfile(globalState.underlyingSymbol)
             : null);
         const greeksEnabled = isGreeksEnabled(globalState);
-        const deltaLegResults = (Array.isArray(group && group.legs) ? group.legs : []).map((leg) => {
-            const liveDelta = resolveLegLiveDeltaSummary(leg, resolvedProfile, greeksEnabled);
+        const greekLegResults = (Array.isArray(group && group.legs) ? group.legs : []).map((leg) => {
+            const liveGreeks = resolveLegLiveGreekSummaries(
+                leg,
+                resolvedProfile,
+                greeksEnabled,
+                globalState
+            );
             return {
                 deltaEligible: !isClosedLeg(leg),
-                liveDelta: liveDelta.value,
-                liveDeltaAvailable: liveDelta.available,
+                liveGreeks,
+                liveDelta: liveGreeks.delta.value,
+                liveDeltaAvailable: liveGreeks.delta.available,
             };
         });
-        return buildGroupDeltaSummary(group, globalState, deltaLegResults);
+        return buildGroupGreeksSummary(group, globalState, greekLegResults);
+    }
+
+    function computeGroupDeltaSummary(group, globalState, underlyingProfile = null) {
+        return computeGroupGreeksSummary(group, globalState, underlyingProfile);
     }
 
     function resolveLegSelectedLivePrice(group, leg, globalState = null) {
@@ -782,7 +928,13 @@
             : 0;
         const pnl = simulationAvailable ? (simValue - processedLeg.costBasis + partialCloseRealizedPnl) : null;
         const isClosed = isClosedLeg(leg);
-        const liveDelta = resolveLegLiveDelta(leg, underlyingProfile, greeksEnabled);
+        const liveGreeks = resolveLegLiveGreekSummaries(
+            leg,
+            underlyingProfile,
+            greeksEnabled,
+            globalState
+        );
+        const liveDelta = liveGreeks.delta;
         const hasLivePnl = activeViewMode === 'active'
             && ((livePnlQuote.available && (leg.cost !== 0 || livePnlQuote.price !== 0 || isClosed))
                 || Math.abs(partialCloseRealizedPnl) > 0.0001);
@@ -858,6 +1010,7 @@
             effectiveLivePnL,
             livePnlSource: livePnlQuote.source,
             deltaEligible: !isClosed,
+            liveGreeks,
             liveDelta: liveDelta.value,
             liveDeltaAvailable: liveDelta.available,
             liveDeltaSource: liveDelta.source,
@@ -934,7 +1087,7 @@
 
             return legResult;
         });
-        const groupDeltaSummary = buildGroupDeltaSummary(group, globalState, legResults);
+        const groupGreeksSummary = buildGroupGreeksSummary(group, globalState, legResults);
 
         return {
             id: group.id,
@@ -959,7 +1112,7 @@
             groupLivePnL,
             groupHasLiveData,
             groupUsesPortfolioLivePnl,
-            ...groupDeltaSummary,
+            ...groupGreeksSummary,
             amortizedResult: isAmortizedMode ? calculateAmortizedCost(group, evalUnderlyingPrice, globalState) : null,
         };
     }
@@ -990,7 +1143,7 @@
 
         const globalHedgePnL = hedgeResults.reduce((sum, result) => sum + result.pnl, 0);
         const hasAnyHedgeLivePnL = hedgeResults.some(result => result.hasLivePnl);
-        const portfolioDeltaSummary = buildPortfolioDeltaSummary(globalState, includedGroupResults, hedgeResults);
+        const portfolioGreeksSummary = buildPortfolioGreeksSummary(globalState, includedGroupResults, hedgeResults);
 
         const supportsAmortizedMode = !underlyingProfile || underlyingProfile.supportsAmortizedMode !== false;
         const amortizedGroups = supportsAmortizedMode
@@ -1023,7 +1176,7 @@
             globalHedgePnL,
             hasAnyHedgeLivePnL,
             combinedLivePnL: globalLivePnL + globalHedgePnL,
-            ...portfolioDeltaSummary,
+            ...portfolioGreeksSummary,
             amortizedGroups,
             combinedAmortizedResult: amortizedGroups.length > 0
                 ? calculateCombinedAmortizedCost(amortizedGroups, globalState)
@@ -1031,30 +1184,66 @@
         };
     }
 
-    function buildPortfolioDeltaSummary(globalState, includedGroupResults, hedgeResults) {
-        const deltaGroupResults = (Array.isArray(includedGroupResults) ? includedGroupResults : [])
-            .filter(result => Number(result && result.groupDeltaLegCount || 0) > 0);
-        const portfolioDeltaIncludedGroupCount = deltaGroupResults.length;
-        const portfolioDeltaMissingGroupCount = deltaGroupResults.filter(result => result.groupDeltaAvailable !== true).length;
-        const portfolioDeltaDisplayable = isGreeksEnabled(globalState)
-            && globalState.marketDataMode === 'live'
-            && (portfolioDeltaIncludedGroupCount > 0 || (hedgeResults || []).length > 0);
-        const portfolioDeltaAvailable = portfolioDeltaDisplayable && portfolioDeltaMissingGroupCount === 0;
-        const portfolioHedgeDelta = (Array.isArray(hedgeResults) ? hedgeResults : [])
-            .reduce((sum, result) => sum + normalizeFiniteNumber(result && result.hedgeDelta, 0), 0);
-        const portfolioOptionDelta = portfolioDeltaAvailable
-            ? deltaGroupResults.reduce((sum, result) => sum + normalizeFiniteNumber(result && result.groupDelta, 0), 0)
-            : null;
+    function portfolioGreekKey(greekName, prefix, suffix = '') {
+        return `portfolio${prefix}${greekName.charAt(0).toUpperCase()}${greekName.slice(1)}${suffix}`;
+    }
 
-        return {
-            portfolioOptionDelta,
-            portfolioHedgeDelta,
-            portfolioNetDelta: portfolioDeltaAvailable ? portfolioOptionDelta + portfolioHedgeDelta : null,
-            portfolioDeltaAvailable,
-            portfolioDeltaMissingGroupCount,
-            portfolioDeltaIncludedGroupCount,
-            portfolioDeltaDisplayable,
+    function buildPortfolioGreeksSummary(globalState, includedGroupResults, hedgeResults) {
+        const greekGroupResults = (Array.isArray(includedGroupResults) ? includedGroupResults : [])
+            .filter(result => Number(result && result.groupGreekLegCount || result && result.groupDeltaLegCount || 0) > 0);
+        const resolvedHedgeResults = Array.isArray(hedgeResults) ? hedgeResults : [];
+        const portfolioGreeksIncludedGroupCount = greekGroupResults.length;
+        const displayable = isGreeksEnabled(globalState)
+            && globalState.marketDataMode === 'live'
+            && (portfolioGreeksIncludedGroupCount > 0 || resolvedHedgeResults.length > 0);
+
+        const summary = {
+            portfolioGreeksDisplayable: displayable,
+            portfolioGreeksIncludedGroupCount,
+            // Compatibility aliases for the delta hedge panel, which predates
+            // the greek fan-out and still reads the delta-specific names.
+            portfolioDeltaIncludedGroupCount: portfolioGreeksIncludedGroupCount,
         };
+
+        LIVE_GREEK_NAMES.forEach((greekName) => {
+            const missingGroupCount = greekGroupResults
+                .filter(result => result[greekResultKey(greekName, 'Available')] !== true).length;
+            const staleGroupCount = greekGroupResults
+                .filter(result => Number(result[greekResultKey(greekName, 'StaleLegCount')]) > 0).length;
+            const available = displayable && missingGroupCount === 0;
+            // Underlying hedges carry delta only; their theta, gamma and vega
+            // are zero, so only delta reads a hedge contribution.
+            const hedgeTotal = greekName === 'delta'
+                ? resolvedHedgeResults.reduce(
+                    (sum, result) => sum + normalizeFiniteNumber(result && result.hedgeDelta, 0),
+                    0
+                )
+                : 0;
+            const optionTotal = available
+                ? greekGroupResults.reduce(
+                    (sum, result) => sum + normalizeFiniteNumber(result[greekResultKey(greekName)], 0),
+                    0
+                )
+                : null;
+
+            summary[portfolioGreekKey(greekName, 'Option')] = optionTotal;
+            summary[portfolioGreekKey(greekName, 'Hedge')] = hedgeTotal;
+            summary[portfolioGreekKey(greekName, 'Net')] = available ? optionTotal + hedgeTotal : null;
+            summary[portfolioGreekKey(greekName, '', 'Available')] = available;
+            summary[portfolioGreekKey(greekName, '', 'MissingGroupCount')] = missingGroupCount;
+            summary[portfolioGreekKey(greekName, '', 'StaleGroupCount')] = staleGroupCount;
+            summary[portfolioGreekKey(greekName, '', 'Displayable')] = displayable;
+        });
+
+        summary.portfolioGreeksStale = LIVE_GREEK_NAMES.some(
+            greekName => summary[portfolioGreekKey(greekName, '', 'StaleGroupCount')] > 0
+        );
+
+        return summary;
+    }
+
+    function buildPortfolioDeltaSummary(globalState, includedGroupResults, hedgeResults) {
+        return buildPortfolioGreeksSummary(globalState, includedGroupResults, hedgeResults);
     }
 
     function computePortfolioDerivedData(globalState) {
@@ -1072,8 +1261,11 @@
         computeProjectedOptionDelivery,
         resolveLegSelectedLivePrice,
         computeGroupDeltaSummary,
+        computeGroupGreeksSummary,
         computeGroupDerivedData,
         buildPortfolioDeltaSummary,
+        buildPortfolioGreeksSummary,
+        LIVE_GREEK_NAMES,
         buildPortfolioDerivedDataFromResults,
         computePortfolioDerivedData,
     };

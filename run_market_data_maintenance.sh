@@ -31,7 +31,8 @@ while [ "$#" -gt 0 ]; do
         -h|--help)
             echo 'Usage: ./run_market_data_maintenance.sh [--yield-if-needed] [--nyse-only]'
             echo
-            echo 'Runs yield-curve maintenance first, then exchange-calendar maintenance.'
+            echo 'Runs yield-curve maintenance first, then exchange-calendar maintenance,'
+            echo 'then re-stamps the browser cache-busting tags for whatever was regenerated.'
             echo 'The calendar step is skipped if the yield-curve step fails.'
             finish 0
             ;;
@@ -45,7 +46,7 @@ done
 
 echo 'Option Combo Simulation - market-data maintenance'
 echo
-echo '[1/2] Updating the USD yield curve...'
+echo '[1/3] Updating the USD yield curve...'
 if [ "$YIELD_IF_NEEDED" -eq 1 ]; then
     OPTION_COMBO_NO_PAUSE=1 "$SCRIPT_DIR/update_yield_curve.sh" --if-needed
 else
@@ -60,7 +61,7 @@ if [ "$YIELD_EXIT_CODE" -ne 0 ]; then
 fi
 
 echo
-echo '[2/2] Updating official exchange calendars...'
+echo '[2/3] Updating official exchange calendars...'
 if [ "$NYSE_ONLY" -eq 1 ]; then
     OPTION_COMBO_NO_PAUSE=1 "$SCRIPT_DIR/sync_exchange_calendars.sh" --nyse-only
 else
@@ -71,6 +72,19 @@ if [ "$CALENDAR_EXIT_CODE" -ne 0 ]; then
     echo
     echo "ERROR: exchange-calendar maintenance failed (exit $CALENDAR_EXIT_CODE)." >&2
     finish "$CALENDAR_EXIT_CODE"
+fi
+
+echo
+echo '[3/3] Re-stamping browser cache-busting tags...'
+# The calendar step rewrites js/official_exchange_calendars.generated.js. Without
+# this, browsers keep the previous file under the old ?v= tag -- the exact
+# failure commit 94ed93b had to clean up by hand.
+python3 "$SCRIPT_DIR/scripts/stamp_asset_versions.py"
+STAMP_EXIT_CODE=$?
+if [ "$STAMP_EXIT_CODE" -ne 0 ]; then
+    echo
+    echo "ERROR: asset version stamping failed (exit $STAMP_EXIT_CODE)." >&2
+    finish "$STAMP_EXIT_CODE"
 fi
 
 echo

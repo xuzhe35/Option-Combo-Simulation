@@ -1264,16 +1264,17 @@ if (typeof window !== 'undefined') {
     window.runDeltaHedgeAutoSupervisor = runDeltaHedgeAutoSupervisor;
 }
 
-function _hasGroupDeltaSummaryChanged(currentGroupResult, nextGroupDeltaSummary) {
-    if (!currentGroupResult || !nextGroupDeltaSummary) {
+function _hasGroupDeltaSummaryChanged(currentGroupResult, nextGroupGreeksSummary) {
+    if (!currentGroupResult || !nextGroupGreeksSummary) {
         return true;
     }
 
-    return currentGroupResult.groupDeltaDisplayable !== nextGroupDeltaSummary.groupDeltaDisplayable
-        || currentGroupResult.groupDeltaAvailable !== nextGroupDeltaSummary.groupDeltaAvailable
-        || currentGroupResult.groupDelta !== nextGroupDeltaSummary.groupDelta
-        || currentGroupResult.groupDeltaLegCount !== nextGroupDeltaSummary.groupDeltaLegCount
-        || currentGroupResult.groupDeltaMissingLegCount !== nextGroupDeltaSummary.groupDeltaMissingLegCount;
+    // Compare every key the summary builder produced. Checking only the delta
+    // fields would drop a Theta-only tick, which is exactly what the greek
+    // fan-out made possible: IB can revise theta while delta holds still.
+    return Object.keys(nextGroupGreeksSummary).some(
+        key => currentGroupResult[key] !== nextGroupGreeksSummary[key]
+    );
 }
 
 function updateLiveQuoteGroupDeltaValues(changeSet = {}) {
@@ -1302,14 +1303,14 @@ function updateLiveQuoteGroupDeltaValues(changeSet = {}) {
         }
 
         const currentGroupResult = nextGroupResults[existingIndex];
-        const nextGroupDeltaSummary = valuationApi.computeGroupDeltaSummary(group, state);
-        if (!_hasGroupDeltaSummaryChanged(currentGroupResult, nextGroupDeltaSummary)) {
+        const nextGroupGreeksSummary = valuationApi.computeGroupDeltaSummary(group, state);
+        if (!_hasGroupDeltaSummaryChanged(currentGroupResult, nextGroupGreeksSummary)) {
             return;
         }
 
         nextGroupResults[existingIndex] = {
             ...currentGroupResult,
-            ...nextGroupDeltaSummary,
+            ...nextGroupGreeksSummary,
         };
         changedAny = true;
     });
@@ -1338,6 +1339,16 @@ function updateLiveQuoteGroupDeltaValues(changeSet = {}) {
         if (!card || !groupResult) return;
         applyGroupDeltaSummary(card, groupResult);
     });
+
+    // This path skips the full render, so the sidebar Portfolio Greeks card
+    // would otherwise keep showing the previous tick's Δ/Θ.
+    if (typeof OptionComboGlobalUI !== 'undefined'
+        && OptionComboGlobalUI
+        && typeof OptionComboGlobalUI.applyPortfolioGreeks === 'function') {
+        _runUiRefreshSafely('portfolioGreeks', () => {
+            OptionComboGlobalUI.applyPortfolioGreeks(derivedData, currencyFormatter);
+        });
+    }
 
     const deltaHedgeUi = _getDeltaHedgeUiApi();
     if (_pageHasFeature('deltaHedgePanel')

@@ -702,6 +702,137 @@ module.exports = {
             },
         },
         {
+            name: 'routes the per-expiry discount-curve rate into both r and q for American FOP valuation',
+            run() {
+                const ctx = loadValuationContext();
+                const manualRate = 0.03;
+                const curveRate = 0.07;
+                const futurePrice = 100;
+                const discountCurve = ctx.OptionComboMarketCurves.createDiscountCurveFromSnapshot({
+                    schemaVersion: 2,
+                    kind: 'hybrid_discount_curve',
+                    snapshotId: 'usd-reference:fop-american-integration',
+                    curveAsOf: '2026-07-23',
+                    effectiveDate: '2026-07-23',
+                    availableAsOf: '2026-07-23T21:00:00Z',
+                    source: 'test-usd-discount-curve',
+                    points: [
+                        {
+                            tenorDays: 1,
+                            zeroRate: curveRate,
+                            discountFactor: Math.exp(-curveRate / 365),
+                        },
+                        {
+                            tenorDays: 365,
+                            zeroRate: curveRate,
+                            discountFactor: Math.exp(-curveRate),
+                        },
+                    ],
+                });
+                const leg = {
+                    id: 'es_american_put',
+                    type: 'put',
+                    pos: 1,
+                    strike: 105,
+                    expDate: '2027-07-23',
+                    expiryAsOf: '2027-07-23T20:00:00Z',
+                    iv: 0.20,
+                    ivSource: 'manual',
+                    cost: 8,
+                    currentPrice: 0,
+                    currentPriceSource: 'manual',
+                    closePrice: null,
+                    underlyingFutureId: 'es_sep_2027',
+                };
+                const group = {
+                    id: 'es_american_curve_group',
+                    viewMode: 'active',
+                    includedInGlobal: true,
+                    settleUnderlyingPrice: null,
+                    liveData: false,
+                    legs: [leg],
+                };
+                const state = {
+                    marketDataMode: 'historical',
+                    underlyingSymbol: 'ES',
+                    underlyingPrice: 99,
+                    baseDate: '2026-07-23',
+                    historicalQuoteDate: '2026-07-23',
+                    simulatedDate: '2026-07-23',
+                    interestRate: manualRate,
+                    useMarketDiscountCurve: true,
+                    discountCurve,
+                    ivOffset: 0,
+                    projectionConvergenceMode: 'legacy-input-iv',
+                    futuresPool: [{
+                        id: 'es_sep_2027',
+                        contractMonth: '202709',
+                        mark: futurePrice,
+                    }],
+                    groups: [group],
+                    hedges: [],
+                };
+
+                ctx.OptionComboPricingCore.configureEquityOptionPricing({
+                    model: 'bsm-spot',
+                    fopModel: 'american-binomial',
+                    dividendYield: 0.25,
+                    steps: 401,
+                });
+
+                const resolvedRate = ctx.OptionComboPricingContext.resolveLegInterestRate(
+                    state,
+                    leg,
+                    manualRate
+                );
+                const resolvedFuture = ctx.OptionComboPricingContext.resolveLegCurrentUnderlyingPrice(
+                    state,
+                    leg,
+                    state.underlyingPrice
+                );
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, state);
+                const legResult = result.legResults[0];
+                const processed = legResult.processedLeg;
+
+                almostEqual(resolvedRate, curveRate, 1e-12);
+                assert.equal(resolvedFuture, futurePrice);
+                assert.equal(processed.pricingModel, 'american-binomial');
+                assert.equal(processed.americanUnderlyingMode, 'futures');
+                almostEqual(processed.dividendYield, curveRate, 1e-12);
+
+                const expectedPrice = ctx.OptionComboPricingCore.calculatePrice(
+                    'american-binomial',
+                    leg.type,
+                    futurePrice,
+                    leg.strike,
+                    processed.T,
+                    curveRate,
+                    processed.simIV,
+                    processed.rateT,
+                    curveRate,
+                    processed.binomialSteps
+                );
+                almostEqual(legResult.simPricePerShare, expectedPrice, 1e-9);
+
+                const manualRatePrice = ctx.OptionComboPricingCore.calculatePrice(
+                    'american-binomial',
+                    leg.type,
+                    futurePrice,
+                    leg.strike,
+                    processed.T,
+                    manualRate,
+                    processed.simIV,
+                    processed.rateT,
+                    manualRate,
+                    processed.binomialSteps
+                );
+                assert.ok(
+                    Math.abs(legResult.simPricePerShare - manualRatePrice) > 0.01,
+                    'valuation must not silently fall back to the manual scalar rate'
+                );
+            },
+        },
+        {
             name: 'marks an FOP option projection unavailable instead of using the wrong future',
             run() {
                 const ctx = loadValuationContext();
@@ -1276,6 +1407,420 @@ module.exports = {
                 assert.equal(result.groupDeltaDisplayable, false);
                 assert.equal(result.groupDeltaAvailable, false);
                 assert.equal(result.groupDelta, null);
+            },
+        },
+        {
+            name: 'computes group theta from live option theta alongside delta',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(subId) {
+                            if (subId === 'long_call') {
+                                return { delta: 0.42, theta: -0.09 };
+                            }
+                            if (subId === 'short_put') {
+                                return { delta: -0.18, theta: -0.05 };
+                            }
+                            return null;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_theta',
+                    viewMode: 'active',
+                    liveData: true,
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'long_call',
+                            type: 'call',
+                            pos: 2,
+                            strike: 620,
+                            expDate: '2026-04-17',
+                            iv: 0.2,
+                            cost: 4.2,
+                            currentPrice: 4.4,
+                            closePrice: null,
+                        },
+                        {
+                            id: 'short_put',
+                            type: 'put',
+                            pos: -1,
+                            strike: 590,
+                            expDate: '2026-04-17',
+                            iv: 0.2,
+                            cost: 3.3,
+                            currentPrice: 3.1,
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const greeksSummary = ctx.OptionComboValuation.computeGroupGreeksSummary(group, globalState);
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, globalState);
+
+                // Long 2 calls pay 2 * 100 * -0.09 = -18/day; short 1 put
+                // collects -1 * 100 * -0.05 = +5/day.
+                assert.equal(greeksSummary.groupThetaDisplayable, true);
+                assert.equal(greeksSummary.groupThetaAvailable, true);
+                almostEqual(greeksSummary.groupTheta, -13);
+                almostEqual(greeksSummary.groupDelta, 102);
+                assert.equal(result.groupThetaAvailable, true);
+                almostEqual(result.groupTheta, -13);
+            },
+        },
+        {
+            name: 'reports theta missing while delta is available when IB has not sent theta',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote() {
+                            return { delta: 0.25 };
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_theta_pending',
+                    viewMode: 'active',
+                    liveData: true,
+                    settleUnderlyingPrice: null,
+                    legs: [{
+                        id: 'delta_only',
+                        type: 'call',
+                        pos: 1,
+                        strike: 620,
+                        expDate: '2026-04-17',
+                        iv: 0.2,
+                        cost: 4.2,
+                        currentPrice: 4.4,
+                        closePrice: null,
+                    }],
+                };
+
+                const greeksSummary = ctx.OptionComboValuation.computeGroupGreeksSummary(group, globalState);
+
+                // A greek IB has not published must not drag its neighbours
+                // down: Delta stays readable while Theta reports as pending.
+                assert.equal(greeksSummary.groupDeltaAvailable, true);
+                almostEqual(greeksSummary.groupDelta, 25);
+                assert.equal(greeksSummary.groupThetaDisplayable, true);
+                assert.equal(greeksSummary.groupThetaAvailable, false);
+                assert.equal(greeksSummary.groupTheta, null);
+                assert.equal(greeksSummary.groupThetaMissingLegCount, 1);
+            },
+        },
+        {
+            name: 'hides stale live Greeks and restores them only with fresh receipt evidence',
+            run() {
+                let optionQuote = {
+                    delta: 0.4,
+                    theta: -0.1,
+                    greeksAsOf: '2026-08-06T10:00:00.000Z',
+                };
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote() {
+                            return optionQuote;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    liveProjectionFeedConnected: true,
+                    liveProjectionFeedStale: false,
+                    liveProjectionLastReceivedAt: '2026-08-06T10:03:00.000Z',
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    groups: [],
+                    hedges: [],
+                };
+                const group = {
+                    id: 'g_stale_greeks',
+                    liveData: true,
+                    legs: [{
+                        id: 'stale_call',
+                        type: 'call',
+                        pos: 1,
+                        strike: 620,
+                        expDate: '2026-08-21',
+                        closePrice: null,
+                    }],
+                };
+
+                let summary = ctx.OptionComboValuation.computeGroupGreeksSummary(group, globalState);
+                assert.equal(summary.groupDeltaAvailable, false);
+                assert.equal(summary.groupThetaAvailable, false);
+                assert.equal(summary.groupDeltaStaleLegCount, 1);
+                assert.equal(summary.groupThetaStaleLegCount, 1);
+                assert.equal(summary.groupGreeksStale, true);
+
+                optionQuote = {
+                    ...optionQuote,
+                    greeksAsOf: '2026-08-06T10:02:30.000Z',
+                };
+                summary = ctx.OptionComboValuation.computeGroupGreeksSummary(group, globalState);
+                assert.equal(summary.groupDeltaAvailable, true);
+                assert.equal(summary.groupThetaAvailable, true);
+                almostEqual(summary.groupDelta, 40);
+                almostEqual(summary.groupTheta, -10);
+
+                globalState.liveProjectionFeedStale = true;
+                summary = ctx.OptionComboValuation.computeGroupGreeksSummary(group, globalState);
+                assert.equal(summary.groupDeltaAvailable, false);
+                assert.equal(summary.groupThetaAvailable, false);
+                assert.equal(summary.groupGreeksStale, true);
+            },
+        },
+        {
+            name: 'an underlying leg contributes zero theta without blocking group theta',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(subId) {
+                            if (subId === 'short_call') {
+                                return { delta: -0.5, theta: 0.12 };
+                            }
+                            return null;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [],
+                    hedges: [],
+                };
+
+                const group = {
+                    id: 'g_covered_call',
+                    viewMode: 'active',
+                    liveData: true,
+                    settleUnderlyingPrice: null,
+                    legs: [
+                        {
+                            id: 'stock',
+                            type: 'underlying',
+                            pos: 1,
+                            cost: 600,
+                            currentPrice: 610,
+                            closePrice: null,
+                        },
+                        {
+                            id: 'short_call',
+                            type: 'call',
+                            pos: -1,
+                            strike: 620,
+                            expDate: '2026-04-17',
+                            iv: 0.2,
+                            cost: 4.2,
+                            currentPrice: 4.4,
+                            closePrice: null,
+                        },
+                    ],
+                };
+
+                const greeksSummary = ctx.OptionComboValuation.computeGroupGreeksSummary(group, globalState);
+
+                // Stock has no decay, so it must count as an available zero
+                // rather than as a leg whose theta is still missing.
+                assert.equal(greeksSummary.groupThetaAvailable, true);
+                assert.equal(greeksSummary.groupThetaMissingLegCount, 0);
+                almostEqual(greeksSummary.groupTheta, -12);
+                // 1 share of stock (delta 1) plus a short call at -0.5 * 100.
+                almostEqual(greeksSummary.groupDelta, 51);
+            },
+        },
+        {
+            name: 'computes portfolio net theta with no hedge contribution',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/market_holidays.js',
+                    'js/date_utils.js',
+                    'js/product_registry.js',
+                    'js/index_forward_rate.js',
+                    'js/pricing_context.js',
+                    'js/pricing_core.js',
+                    'js/amortized.js',
+                    'js/valuation.js',
+                ], {
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote(subId) {
+                            if (subId === 'included_call') {
+                                return { delta: 0.4, theta: -0.11 };
+                            }
+                            if (subId === 'excluded_call') {
+                                return { delta: 0.9, theta: -0.75 };
+                            }
+                            return null;
+                        },
+                        getFutureQuote() {
+                            return null;
+                        },
+                        getUnderlyingQuote() {
+                            return null;
+                        },
+                    },
+                });
+
+                const globalState = {
+                    marketDataMode: 'live',
+                    greeksEnabled: true,
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 610,
+                    baseDate: '2026-03-27',
+                    simulatedDate: '2026-03-27',
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    hedges: [
+                        { id: 'h_existing', pos: -25, cost: 600, currentPrice: 610 },
+                    ],
+                    groups: [
+                        {
+                            id: 'g_included_theta',
+                            includedInGlobal: true,
+                            viewMode: 'active',
+                            liveData: true,
+                            settleUnderlyingPrice: null,
+                            legs: [{
+                                id: 'included_call',
+                                type: 'call',
+                                pos: 2,
+                                strike: 620,
+                                expDate: '2026-04-17',
+                                iv: 0.2,
+                                cost: 4.2,
+                                currentPrice: 4.4,
+                                closePrice: null,
+                            }],
+                        },
+                        {
+                            id: 'g_excluded_theta',
+                            includedInGlobal: false,
+                            viewMode: 'active',
+                            liveData: true,
+                            settleUnderlyingPrice: null,
+                            legs: [{
+                                id: 'excluded_call',
+                                type: 'call',
+                                pos: 10,
+                                strike: 620,
+                                expDate: '2026-04-17',
+                                iv: 0.2,
+                                cost: 4.2,
+                                currentPrice: 4.4,
+                                closePrice: null,
+                            }],
+                        },
+                    ],
+                };
+
+                const result = ctx.OptionComboValuation.computePortfolioDerivedData(globalState);
+
+                assert.equal(result.portfolioGreeksDisplayable, true);
+                assert.equal(result.portfolioThetaAvailable, true);
+                almostEqual(result.portfolioOptionTheta, -22);
+                // A stock hedge has no decay, so it must not move net theta the
+                // way it moves net delta.
+                almostEqual(result.portfolioHedgeTheta, 0);
+                almostEqual(result.portfolioNetTheta, -22);
+                almostEqual(result.portfolioNetDelta, 55);
             },
         },
         {

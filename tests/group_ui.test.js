@@ -2,9 +2,169 @@ const assert = require('node:assert/strict');
 
 const { loadBrowserScripts } = require('./helpers/load-browser-scripts');
 
+function makeGreekValueEl() {
+    const classes = new Set();
+    return {
+        textContent: '',
+        classList: {
+            toggle: (name, force) => {
+                if (force) {
+                    classes.add(name);
+                } else {
+                    classes.delete(name);
+                }
+            },
+            has: name => classes.has(name),
+        },
+    };
+}
+
+function makeGreeksCard() {
+    const item = { style: {}, title: '', removeAttribute() { this.title = ''; } };
+    const deltaValue = makeGreekValueEl();
+    const thetaValue = makeGreekValueEl();
+    return {
+        item,
+        deltaValue,
+        thetaValue,
+        card: {
+            querySelector(selector) {
+                if (selector === '.group-header-delta-item') return item;
+                if (selector === '.group-header-delta-value') return deltaValue;
+                if (selector === '.group-header-theta-value') return thetaValue;
+                return null;
+            },
+        },
+    };
+}
+
 module.exports = {
     name: 'group_ui.js',
     tests: [
+        {
+            name: 'renders delta and theta in one group header chip',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_ui.js',
+                ]);
+                const dom = makeGreeksCard();
+
+                ctx.OptionComboGroupUI.applyGroupDeltaSummary(dom.card, {
+                    groupDeltaDisplayable: true,
+                    groupDeltaAvailable: true,
+                    groupDelta: 102.5,
+                    groupDeltaMissingLegCount: 0,
+                    groupThetaDisplayable: true,
+                    groupThetaAvailable: true,
+                    groupTheta: -13.25,
+                    groupThetaMissingLegCount: 0,
+                });
+
+                assert.equal(dom.item.style.display, '');
+                assert.equal(dom.deltaValue.textContent, '+102.5');
+                assert.equal(dom.thetaValue.textContent, '-$13.25');
+                // Paying decay must read as a loss, not as a neutral figure.
+                assert.equal(dom.thetaValue.classList.has('danger-text'), true);
+                assert.equal(dom.thetaValue.classList.has('success-text'), false);
+                assert.match(dom.item.title, /Δ:/);
+                assert.match(dom.item.title, /Θ:/);
+            },
+        },
+        {
+            name: 'colours a decay-collecting group theta as a gain',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_ui.js',
+                ]);
+                const dom = makeGreeksCard();
+
+                ctx.OptionComboGroupUI.applyGroupDeltaSummary(dom.card, {
+                    groupDeltaDisplayable: true,
+                    groupDeltaAvailable: true,
+                    groupDelta: -40,
+                    groupThetaDisplayable: true,
+                    groupThetaAvailable: true,
+                    groupTheta: 220.4,
+                });
+
+                // Above $100/day the cents are dropped, so the chip stays narrow.
+                assert.equal(dom.thetaValue.textContent, '+$220');
+                assert.equal(dom.thetaValue.classList.has('success-text'), true);
+            },
+        },
+        {
+            name: 'shows theta as pending without hiding an available group delta',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_ui.js',
+                ]);
+                const dom = makeGreeksCard();
+
+                ctx.OptionComboGroupUI.applyGroupDeltaSummary(dom.card, {
+                    groupDeltaDisplayable: true,
+                    groupDeltaAvailable: true,
+                    groupDelta: 25,
+                    groupDeltaMissingLegCount: 0,
+                    groupThetaDisplayable: true,
+                    groupThetaAvailable: false,
+                    groupTheta: null,
+                    groupThetaMissingLegCount: 2,
+                });
+
+                assert.equal(dom.deltaValue.textContent, '+25');
+                assert.equal(dom.thetaValue.textContent, 'N/A');
+                assert.equal(dom.thetaValue.classList.has('text-muted'), true);
+                assert.equal(dom.thetaValue.classList.has('danger-text'), false);
+                assert.match(dom.item.title, /Theta is not available yet for 2 legs/);
+            },
+        },
+        {
+            name: 'hides the greeks chip entirely when the group cannot show greeks',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_ui.js',
+                ]);
+                const dom = makeGreeksCard();
+
+                ctx.OptionComboGroupUI.applyGroupDeltaSummary(dom.card, {
+                    groupDeltaDisplayable: false,
+                    groupThetaDisplayable: false,
+                });
+
+                assert.equal(dom.item.style.display, 'none');
+            },
+        },
+        {
+            name: 'labels hidden stale group Greeks instead of presenting cached values',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_ui.js',
+                ]);
+                const dom = makeGreeksCard();
+
+                ctx.OptionComboGroupUI.applyGroupDeltaSummary(dom.card, {
+                    groupDeltaDisplayable: true,
+                    groupDeltaAvailable: false,
+                    groupDelta: null,
+                    groupDeltaMissingLegCount: 1,
+                    groupDeltaStaleLegCount: 1,
+                    groupThetaDisplayable: true,
+                    groupThetaAvailable: false,
+                    groupTheta: null,
+                    groupThetaMissingLegCount: 1,
+                    groupThetaStaleLegCount: 1,
+                });
+
+                assert.equal(dom.deltaValue.textContent, 'N/A');
+                assert.equal(dom.thetaValue.textContent, 'N/A');
+                assert.match(dom.item.title, /stale values are hidden/i);
+            },
+        },
         {
             name: 'formats trigger preview with separate summary and leg detail sections',
             run() {

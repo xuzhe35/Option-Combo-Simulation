@@ -72,6 +72,27 @@ module.exports = {
             },
         },
         {
+            name: 'preserves legacy partial close quantities as manual selections',
+            run() {
+                const logic = loadSessionLogicContext().OptionComboSessionLogic;
+
+                const legacy = logic.normalizeCloseExecution({
+                    executionMode: 'submit',
+                    quantity: 1,
+                });
+                assert.equal(legacy.executionMode, 'submit');
+                assert.equal(legacy.quantityMode, 'manual');
+                assert.equal(legacy.quantity, 1);
+
+                const explicitAuto = logic.normalizeCloseExecution({
+                    quantityMode: 'auto',
+                    quantity: 1,
+                });
+                assert.equal(explicitAuto.quantityMode, 'auto');
+                assert.equal(explicitAuto.quantity, null);
+            },
+        },
+        {
             name: 'forces zero-cost groups into trial for render unless settlement',
             run() {
                 const ctx = loadSessionLogicContext();
@@ -367,6 +388,8 @@ module.exports = {
                 assert.equal(result.groups[0].tradeTrigger.lastError, '');
                 assert.equal(result.groups[0].closeExecution.repriceThreshold, 0.0005);
                 assert.equal(result.groups[0].closeExecution.executionMode, 'preview');
+                assert.equal(result.groups[0].closeExecution.quantity, null);
+                assert.equal(result.groups[0].closeExecution.quantityMode, 'auto');
                 assert.equal(result.groups[0].closeExecution.timeInForce, 'GTC');
                 assert.equal(result.groups[0].closeExecution.isExpanded, false);
                 assert.equal(result.groups[0].closeExecution.status, 'idle');
@@ -664,6 +687,8 @@ module.exports = {
                 assert.equal(snapshot.groups[0].tradeTrigger.lastError, '');
                 assert.equal(snapshot.groups[0].closeExecution.repriceThreshold, 0.0005);
                 assert.equal(snapshot.groups[0].closeExecution.executionMode, 'test_submit');
+                assert.equal(snapshot.groups[0].closeExecution.quantity, null);
+                assert.equal(snapshot.groups[0].closeExecution.quantityMode, 'auto');
                 assert.equal(snapshot.groups[0].closeExecution.timeInForce, 'GTC');
                 assert.equal(snapshot.groups[0].closeExecution.isExpanded, false);
                 assert.equal(snapshot.groups[0].closeExecution.status, 'idle');

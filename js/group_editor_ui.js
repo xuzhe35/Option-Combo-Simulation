@@ -183,6 +183,66 @@
         return raw.replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, '');
     }
 
+    // A control that can put a real order in front of the broker must not look
+    // identical to a preview control. Historical replay never routes, so it is
+    // always styled as safe regardless of the selected mode.
+    function _resolveExecutionRisk(mode, isSimulated) {
+        if (isSimulated) {
+            return 'simulated';
+        }
+        if (mode === 'submit') {
+            return 'live';
+        }
+        if (mode === 'test_submit') {
+            return 'test';
+        }
+        return 'preview';
+    }
+
+    function _applyExecutionModeRisk(select, risk) {
+        if (!select || !select.classList) {
+            return;
+        }
+        select.classList.remove('execution-mode-live', 'execution-mode-test');
+        if (risk === 'live') {
+            select.classList.add('execution-mode-live');
+        } else if (risk === 'test') {
+            select.classList.add('execution-mode-test');
+        }
+    }
+
+    const _EXECUTION_RISK_BADGES = {
+        live: { text: 'Sends real orders', variant: '' },
+        test: { text: 'Test orders to TWS', variant: 'order-live-badge-test' },
+        simulated: { text: 'Simulated (replay)', variant: 'order-live-badge-safe' },
+        preview: { text: 'Preview only', variant: 'order-live-badge-safe' },
+    };
+
+    function _applyExecutionRiskBadge(badge, risk) {
+        if (!badge) {
+            return;
+        }
+        const descriptor = _EXECUTION_RISK_BADGES[risk] || _EXECUTION_RISK_BADGES.preview;
+        badge.textContent = descriptor.text;
+        if (!badge.classList) {
+            return;
+        }
+        // classList, not className: the identifying hook class must survive.
+        badge.classList.add('order-live-badge');
+        badge.classList.remove('order-live-badge-test', 'order-live-badge-safe');
+        if (descriptor.variant) {
+            badge.classList.add(descriptor.variant);
+        }
+    }
+
+    function _applySubmitButtonRisk(button, risk) {
+        if (!button || !button.classList) {
+            return;
+        }
+        button.classList.remove('btn-secondary', 'btn-danger');
+        button.classList.add(risk === 'live' ? 'btn-danger' : 'btn-secondary');
+    }
+
     function getLegAnchorDate(state) {
         const pricingContext = globalScope.OptionComboPricingContext;
         if (pricingContext && typeof pricingContext.resolveQuoteDate === 'function') {
@@ -783,12 +843,14 @@
                 `MaxLoss ${_formatComboNumber(risk.maxLoss, 2)}`,
                 `Ratio ${_formatComboNumber(risk.profitLossRatio, 3)}`,
             ].join(' / ');
-            statusEl.classList.remove('text-danger');
+            // .danger-text, not .text-danger: this is running text, and the
+            // icon red fails the 4.5:1 body-text contrast rule.
+            statusEl.classList.remove('danger-text');
             statusEl.classList.add('text-muted');
             return;
         }
         statusEl.textContent = message || '';
-        statusEl.classList.toggle('text-danger', !!message);
+        statusEl.classList.toggle('danger-text', !!message);
         statusEl.classList.toggle('text-muted', !message);
     }
 
@@ -1493,7 +1555,7 @@
                             </div>
                         </div>
                     </div>
-                    <div class="combo-template-error text-danger small" style="display: none;"></div>
+                    <div class="combo-template-error danger-text small" style="display: none;"></div>
                 </div>
                 <div class="combo-template-footer">
                     <button type="button" class="btn btn-secondary combo-template-cancel-btn">Cancel</button>
@@ -1784,6 +1846,23 @@
             ? sessionLogic.normalizeCloseExecution(group.closeExecution)
             : group.closeExecution || null;
         return group.closeExecution;
+    }
+
+    function _resolveCloseQuantitySelection(closeExecution, maxCloseQuantity) {
+        const maximum = Number.isInteger(maxCloseQuantity) && maxCloseQuantity > 0
+            ? maxCloseQuantity
+            : 0;
+        const configuredQuantity = parseInt(closeExecution && closeExecution.quantity, 10);
+        const usesManualCloseQuantity = closeExecution
+            && closeExecution.quantityMode === 'manual'
+            && Number.isInteger(configuredQuantity)
+            && configuredQuantity >= 1;
+        return {
+            quantity: usesManualCloseQuantity
+                ? Math.min(configuredQuantity, maximum || configuredQuantity)
+                : maximum,
+            usesManualCloseQuantity: usesManualCloseQuantity === true,
+        };
     }
 
     function _ensureHistoricalAutoCloseAtExpiry(group) {
@@ -2394,6 +2473,8 @@
             bindTrialTriggerControls(card, group, state, deps);
             bindCloseGroupControls(card, group, state, deps);
             applyModeLockState(card, group, state, deps);
+            // After applyModeLockState, which can force the group back to Trial.
+            applyGroupModeSummary(card, group, state, deps);
 
             container.appendChild(card);
         });
@@ -2671,6 +2752,7 @@
         const resetBtn = container.querySelector('.trial-trigger-reset-btn');
         const body = container.querySelector('.trial-trigger-body');
         const helpText = container.querySelector('.trial-trigger-help');
+        const modeBadge = container.querySelector('.trial-trigger-mode-badge');
 
         if (!enabledInput || !collapseBtn || !conditionInput || !priceInput || !executionModeInput || !repriceThresholdInput || !concessionInput || !timeInForceInput || !exitEnabledInput || !exitConditionInput || !exitPriceInput || !resetBtn || !body) {
             return;
@@ -2725,6 +2807,13 @@
             : (state.allowLiveComboOrders
                 ? ''
                 : 'Global live combo order switch is OFF. TWS submit modes will not send orders until enabled.');
+
+        const applyTriggerRisk = () => {
+            const risk = _resolveExecutionRisk(trigger.executionMode, isHistoricalMode);
+            _applyExecutionModeRisk(executionModeInput, risk);
+            _applyExecutionRiskBadge(modeBadge, risk);
+        };
+        applyTriggerRisk();
         if (helpText) {
             helpText.textContent = isHistoricalMode
                 ? 'Only works when this group is in Trial mode and Historical Replay is enabled. Preview mode stays local, and submit modes only create a simulated order runtime from replay-day quotes.'
@@ -2762,6 +2851,8 @@
             } else {
                 trigger.executionMode = 'preview';
             }
+            // This handler does not re-render, so the risk styling is refreshed here.
+            applyTriggerRisk();
         });
 
         repriceThresholdInput.addEventListener('change', (e) => {
@@ -3212,6 +3303,7 @@
         const submitBtn = container.querySelector('.close-group-submit-btn');
         const equivalentBtn = container.querySelector('.close-group-equivalent-btn');
         const helpText = container.querySelector('.close-group-help');
+        const modeBadge = container.querySelector('.close-group-mode-badge');
         if (!quantityInput || !strategyInput || !executionModeInput || !thresholdInput || !concessionInput
             || !timeInForceInput || !submitBtn || !equivalentBtn) {
             return;
@@ -3228,10 +3320,10 @@
             && typeof groupOrderBuilder.resolveGroupCloseQuantity === 'function'
             ? groupOrderBuilder.resolveGroupCloseQuantity(group)
             : 0;
-        const configuredQuantity = parseInt(closeExecution.quantity, 10);
-        closeExecution.quantity = Number.isInteger(configuredQuantity) && configuredQuantity >= 1
-            ? Math.min(configuredQuantity, maxCloseQuantity || configuredQuantity)
-            : maxCloseQuantity;
+        const quantitySelection = _resolveCloseQuantitySelection(closeExecution, maxCloseQuantity);
+        const usesManualCloseQuantity = quantitySelection.usesManualCloseQuantity;
+        const selectedCloseQuantity = quantitySelection.quantity;
+        closeExecution.quantity = usesManualCloseQuantity ? selectedCloseQuantity : null;
         const brokerStatus = String(closeExecution.lastPreview && closeExecution.lastPreview.status || '').trim();
         const lastRequestSource = String(closeExecution.lastPreview && closeExecution.lastPreview.requestSource || '').trim();
         const lastPlanStage = String(closeExecution.lastPreview && closeExecution.lastPreview.closePlanStage || '').trim();
@@ -3243,11 +3335,10 @@
 
         if (isHistoricalMode) {
             closeExecution.executionMode = 'preview';
-            closeExecution.quantity = maxCloseQuantity;
         }
         quantityInput.min = '1';
         quantityInput.max = String(maxCloseQuantity || 1);
-        quantityInput.value = String(closeExecution.quantity || maxCloseQuantity || 1);
+        quantityInput.value = String(selectedCloseQuantity || 1);
         quantityInput.title = maxCloseQuantity > 0
             ? `Close 1 to ${maxCloseQuantity} complete strategy unit${maxCloseQuantity === 1 ? '' : 's'}.`
             : 'No complete strategy unit is available to close.';
@@ -3265,11 +3356,11 @@
         timeInForceInput.disabled = isHistoricalMode || closeExecution.pendingRequest === true || isCompleted;
         if (helpText) {
             const quantityText = maxCloseQuantity > 1
-                ? `Close Qty ${closeExecution.quantity} of ${maxCloseQuantity}; the remaining leg positions stay open. `
+                ? `Close Qty ${selectedCloseQuantity} of ${maxCloseQuantity}; ${selectedCloseQuantity < maxCloseQuantity ? 'the remaining leg positions stay open' : 'the full Group is selected'}. `
                 : '';
             helpText.textContent = isHistoricalMode
                 ? 'Snapshots every open leg at the current replay day, writes those prices into Close, and switches the group into Settlement mode.'
-                : quantityText + (closeExecution.quantity < maxCloseQuantity || closeExecution.strategy === 'combo'
+                : quantityText + (selectedCloseQuantity < maxCloseQuantity || closeExecution.strategy === 'combo'
                     ? 'Combo Only always sends the reverse option combo and never substitutes an expiry hedge.'
                     : 'Auto normally sends the reverse combo, but can ignore clearly worthless OTM legs and hedge deep ITM one-sided legs with net Underlying. Expiry Equivalent forces that analysis.');
         }
@@ -3318,7 +3409,7 @@
             } else if (closeExecution.pendingRequest === true) {
                 equivalentBtn.disabled = true;
                 equivalentBtn.title = 'A close-group order request is already in progress.';
-            } else if (closeExecution.quantity < maxCloseQuantity) {
+            } else if (selectedCloseQuantity < maxCloseQuantity) {
                 equivalentBtn.disabled = true;
                 equivalentBtn.title = 'Expiry Equivalent requires closing the full group quantity.';
             } else {
@@ -3336,11 +3427,19 @@
             ? 'Preview Equivalent'
             : (closeExecution.executionMode === 'test_submit' ? 'Test Equivalent' : 'Expiry Equivalent');
 
+        // Preview and "send it for real" must not share the same neutral styling.
+        const closeRisk = _resolveExecutionRisk(closeExecution.executionMode, isHistoricalMode);
+        _applyExecutionModeRisk(executionModeInput, closeRisk);
+        _applyExecutionRiskBadge(modeBadge, closeRisk);
+        _applySubmitButtonRisk(submitBtn, closeRisk);
+        _applySubmitButtonRisk(equivalentBtn, closeRisk);
+
         quantityInput.addEventListener('change', (e) => {
             const parsed = parseInt(e.target.value, 10);
             closeExecution.quantity = Number.isInteger(parsed)
                 ? Math.min(Math.max(parsed, 1), maxCloseQuantity || 1)
                 : (maxCloseQuantity || 1);
+            closeExecution.quantityMode = 'manual';
             if (closeExecution.quantity < maxCloseQuantity) {
                 closeExecution.strategy = 'combo';
             }
@@ -3745,6 +3844,87 @@
         }
     }
 
+    // Valuation mode, data source, quote feed and order routing are set in four
+    // different places. This condenses "what will this group actually do right
+    // now?" into one readable line on the group header.
+    function applyGroupModeSummary(card, group, state, deps) {
+        const host = card.querySelector('.group-mode-summary');
+        if (!host) {
+            return;
+        }
+        const doc = card.ownerDocument || globalScope.document;
+        if (!doc || typeof doc.createElement !== 'function') {
+            return;
+        }
+
+        const isHistoricalMode = !!(state && state.marketDataMode === 'historical');
+        const mode = typeof deps.getRenderableGroupViewMode === 'function'
+            ? deps.getRenderableGroupViewMode(group)
+            : (group.viewMode || 'trial');
+        const modeLabels = {
+            trial: 'Trial · current price',
+            active: 'Active · entry cost',
+            amortized: 'Amortized',
+            settlement: 'Settlement',
+        };
+
+        const chips = [{
+            text: modeLabels[mode] || mode,
+            variant: 'group-mode-chip-mode',
+            title: 'Which cost basis and valuation path this group uses.',
+        }];
+
+        if (isHistoricalMode) {
+            chips.push({
+                text: 'Replay data',
+                variant: '',
+                title: 'Historical Replay quotes. Real orders are blocked in this mode.',
+            });
+        } else {
+            chips.push(group.liveData
+                ? { text: 'Live feed on', variant: 'group-mode-chip-live', title: 'This group is subscribed to IBKR market data.' }
+                : { text: 'Live feed off', variant: '', title: 'No market-data subscription: Price and Live P&L will not update.' });
+        }
+
+        const trigger = group.tradeTrigger && typeof group.tradeTrigger === 'object'
+            ? group.tradeTrigger
+            : null;
+        const closeExecution = group.closeExecution && typeof group.closeExecution === 'object'
+            ? group.closeExecution
+            : null;
+        const routingModes = [];
+        if (trigger && trigger.enabled === true) {
+            routingModes.push(trigger.executionMode);
+        }
+        if (mode === 'active' && closeExecution) {
+            routingModes.push(closeExecution.executionMode);
+        }
+        const routingRisk = isHistoricalMode
+            ? 'simulated'
+            : (routingModes.includes('submit')
+                ? 'live'
+                : (routingModes.includes('test_submit') ? 'test' : 'preview'));
+
+        if (routingRisk === 'live') {
+            chips.push(state && state.allowLiveComboOrders === true
+                ? { text: 'Live orders armed', variant: 'group-mode-chip-danger', title: 'A routing control is set to Send to TWS and the global live-order switch is ON.' }
+                : { text: 'Live orders blocked', variant: 'group-mode-chip-warn', title: 'A routing control is set to Send to TWS, but the global Enable Live Combo Orders switch is OFF.' });
+        } else if (routingRisk === 'test') {
+            chips.push({ text: 'Test orders', variant: 'group-mode-chip-warn', title: 'Routing is set to send test-only orders to TWS.' });
+        }
+
+        host.textContent = '';
+        chips.forEach((chip) => {
+            const span = doc.createElement('span');
+            span.className = `group-mode-chip${chip.variant ? ` ${chip.variant}` : ''}`;
+            span.textContent = chip.text;
+            if (chip.title) {
+                span.title = chip.title;
+            }
+            host.appendChild(span);
+        });
+    }
+
     function applyCollapsedState(card, group) {
         card.classList.toggle('collapsed', !!group.isCollapsed);
         const body = card.querySelector('.group-body');
@@ -3846,6 +4026,7 @@
             startEmFitFromDialog: _startEmFitFromDialog,
             processPendingEmFit: _processPendingEmFit,
             createLegContractEditScheduler: _createLegContractEditScheduler,
+            resolveCloseQuantitySelection: _resolveCloseQuantitySelection,
         },
     };
     globalScope.toggleGroupCollapse = toggleGroupCollapse;
