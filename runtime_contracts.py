@@ -58,7 +58,13 @@ class OptionQuoteSnapshot(QuoteSnapshot, total=False):
     underlyingBindingSource: str
     underlyingBindingStatus: str
     iv: float
+    # Model greeks, published together off the one generic-tick-106 line and
+    # only while the client has Greeks enabled.  A greek IB has not computed
+    # yet is absent rather than 0.  theta is per share per calendar day.
     delta: float
+    gamma: float
+    vega: float
+    theta: float
     expiryAsOf: str
     expiryTimingSource: str
     lastTradeDate: str

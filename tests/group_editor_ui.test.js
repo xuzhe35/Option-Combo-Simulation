@@ -48,6 +48,22 @@ module.exports = {
             },
         },
         {
+            name: 'defaults Close Qty to the full group until the user selects a partial quantity',
+            run() {
+                const ctx = loadBrowserScripts(['js/group_editor_ui.js']);
+                const resolveSelection = ctx.OptionComboGroupEditorUI._test.resolveCloseQuantitySelection;
+
+                assert.deepEqual(
+                    { ...resolveSelection({ quantity: 1, quantityMode: 'auto' }, 5) },
+                    { quantity: 5, usesManualCloseQuantity: false }
+                );
+                assert.deepEqual(
+                    { ...resolveSelection({ quantity: 1, quantityMode: 'manual' }, 5) },
+                    { quantity: 1, usesManualCloseQuantity: true }
+                );
+            },
+        },
+        {
             name: 'uses the selected simulated date as the default expiration for new legs',
             run() {
                 const ctx = loadBrowserScripts(['js/group_editor_ui.js']);

@@ -454,12 +454,67 @@
         }
     }
 
+    function _syncSimulationDialogBackgroundInert(dialog, isOpen) {
+        const doc = globalScope.document;
+        if (!dialog || !doc || !doc.body) {
+            return;
+        }
+
+        if (isOpen) {
+            if (Array.isArray(dialog.__simulationControlsInertSiblings)) {
+                return;
+            }
+            dialog.__simulationControlsInertSiblings = Array.from(doc.body.children || [])
+                .filter(element => element && element !== dialog)
+                .map(element => ({ element, inert: element.inert === true }));
+            dialog.__simulationControlsInertSiblings.forEach(({ element }) => {
+                element.inert = true;
+            });
+            return;
+        }
+
+        (Array.isArray(dialog.__simulationControlsInertSiblings)
+            ? dialog.__simulationControlsInertSiblings
+            : []).forEach(({ element, inert }) => {
+            if (element) {
+                element.inert = inert;
+            }
+        });
+        dialog.__simulationControlsInertSiblings = null;
+    }
+
+    function _getSimulationDialogFocusableElements(dialog) {
+        if (!dialog || typeof dialog.querySelectorAll !== 'function') {
+            return [];
+        }
+        const selector = [
+            'a[href]',
+            'button:not([disabled])',
+            'input:not([disabled])',
+            'select:not([disabled])',
+            'textarea:not([disabled])',
+            '[tabindex]:not([tabindex="-1"])',
+        ].join(',');
+        return Array.from(dialog.querySelectorAll(selector)).filter(element => (
+            element
+            && element.hidden !== true
+            && element.disabled !== true
+            && (!(element.style) || element.style.display !== 'none')
+            && (!(typeof element.getClientRects === 'function')
+                || element.getClientRects().length > 0)
+            && (!(typeof element.getAttribute === 'function')
+                || element.getAttribute('aria-hidden') !== 'true')
+        ));
+    }
+
     function _syncPrimaryControlPanelDialogUi(state) {
         const card = _getElement('primaryControlPanelCard');
         const dialog = _getElement('simulationControlsDialog');
         const toggleBtn = _getElement('togglePrimaryControlPanelBtn');
         const toggleLabel = toggleBtn ? toggleBtn.querySelector('.control-panel-toggle-label') : null;
         const isOpen = !!(_primaryControlPanelDialogOpen && dialog);
+
+        _syncSimulationDialogBackgroundInert(dialog, isOpen);
 
         if (card && card.classList && typeof card.classList.toggle === 'function') {
             card.classList.toggle('is-dialog-open', isOpen);
@@ -1530,14 +1585,139 @@
             toggleBtn.textContent = enabled ? 'Disable Greeks' : 'Enable Greeks';
             toggleBtn.className = enabled ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm';
             toggleBtn.title = enabled
-                ? 'Turn off live Greeks and hide Group Delta to keep the UI lighter.'
-                : 'Turn on live Greeks and show Group Delta in live groups.';
+                ? 'Turn off live Greeks and hide Delta and Theta to keep the UI lighter.'
+                : 'Turn on live Greeks and show Delta and Theta on live groups and on the portfolio.';
         }
 
         if (status) {
             status.textContent = enabled
-                ? 'Greeks enabled. Group Delta will appear in live groups as live option delta arrives.'
-                : 'Off by default to keep the live UI responsive. Enable only when you want Group Delta.';
+                ? 'Greeks enabled. Delta and Theta appear on live groups and in Portfolio Greeks as TWS model greeks arrive.'
+                : 'Off by default to keep the live UI responsive. Enable when you want Delta and Theta on each group and on the portfolio.';
+        }
+    }
+
+    // Internal leg ids ("_47dbxr8kf") are meaningless to the trader looking at
+    // the screen. Resolve them back to the group and contract they belong to.
+    // Returns { count, labels, resolvedCount }: count is always the number of
+    // distinct affected legs, so the "N open legs" phrasing never counts the
+    // "M other legs" placeholder as a single leg.
+    function _describeAffectedLegs(state, legIds) {
+        const wanted = new Set((legIds || []).filter(Boolean).map(id => String(id)));
+        if (wanted.size === 0) {
+            return { count: 0, labels: [], resolvedCount: 0 };
+        }
+        const labels = [];
+        const groups = state && Array.isArray(state.groups) ? state.groups : [];
+        groups.filter(Boolean).forEach((group) => {
+            const groupName = String(group.name || '').trim() || 'Unnamed group';
+            (Array.isArray(group.legs) ? group.legs : []).filter(Boolean).forEach((leg) => {
+                if (!wanted.has(String(leg.id || ''))) {
+                    return;
+                }
+                const type = String(leg.type || '').toLowerCase();
+                const typeLabel = type === 'call' ? 'Call'
+                    : (type === 'put' ? 'Put' : (type === 'stock' ? 'Underlying' : type || '?'));
+                const pos = Number(leg.pos);
+                const posLabel = Number.isFinite(pos)
+                    ? `${pos > 0 ? '+' : ''}${pos}`
+                    : '';
+                const strike = Number(leg.strike);
+                const strikeLabel = Number.isFinite(strike) ? ` ${strike}` : '';
+                const expLabel = leg.expDate ? ` exp ${leg.expDate}` : '';
+                labels.push(`${groupName} · ${posLabel} ${typeLabel}${strikeLabel}${expLabel}`.replace(/\s+/g, ' ').trim());
+            });
+        });
+        return { count: wanted.size, labels, resolvedCount: labels.length };
+    }
+
+    // "Affects 3 open legs." when nothing could be resolved, otherwise the
+    // readable contract list with a tail count for whatever is left over.
+    function _formatAffectedLegs(descriptor, { listPrefix = 'Affected open legs' } = {}) {
+        if (!descriptor || descriptor.count <= 0) {
+            return '';
+        }
+        const { count, labels, resolvedCount } = descriptor;
+        if (resolvedCount === 0) {
+            return ` Affects ${count} open leg${count === 1 ? '' : 's'}.`;
+        }
+        const remainder = count - resolvedCount;
+        const tail = remainder > 0
+            ? `; ${remainder} other leg${remainder === 1 ? '' : 's'}`
+            : '';
+        return ` ${listPrefix}: ${labels.join('; ')}${tail}.`;
+    }
+
+    function _summarizeDateList(dates, maxInline = 3) {
+        const list = (dates || []).filter(Boolean);
+        if (list.length === 0) {
+            return '';
+        }
+        if (list.length <= maxInline) {
+            return list.join(', ');
+        }
+        return `${list.slice(0, maxInline).join(', ')} +${list.length - maxInline} more`;
+    }
+
+    // Pricing-clock degradation affects every number on the page, so it is
+    // surfaced page-level instead of only inside the Simulation Controls dialog.
+    function _syncPricingClockBanner(descriptor) {
+        const banner = _getElement('pricingClockBanner');
+        if (!banner) {
+            return;
+        }
+        const show = !!(descriptor && descriptor.level === 'warn');
+        banner.hidden = !show;
+        if (banner.style) {
+            banner.style.display = show ? '' : 'none';
+        }
+        if (!show) {
+            return;
+        }
+
+        const badge = _getElement('pricingClockBannerBadge');
+        const title = _getElement('pricingClockBannerTitle');
+        const body = _getElement('pricingClockBannerBody');
+        const details = _getElement('pricingClockBannerDetails');
+        const detailsSummary = _getElement('pricingClockBannerDetailsSummary');
+        const detailBody = _getElement('pricingClockBannerDetailBody');
+
+        if (badge) {
+            badge.textContent = descriptor.badge || 'Estimated clock';
+        }
+        if (title) {
+            title.textContent = descriptor.title || '';
+        }
+        if (body) {
+            body.textContent = descriptor.body || '';
+        }
+
+        const rows = Array.isArray(descriptor.details) ? descriptor.details.filter(Boolean) : [];
+        if (details) {
+            const hasRows = rows.length > 0;
+            details.hidden = !hasRows;
+            if (details.style) {
+                details.style.display = hasRows ? '' : 'none';
+            }
+            if (!hasRows && typeof details.removeAttribute === 'function') {
+                details.removeAttribute('open');
+            }
+        }
+        if (detailsSummary) {
+            detailsSummary.textContent = descriptor.detailsSummary || 'Details';
+        }
+        if (detailBody) {
+            detailBody.textContent = '';
+            const doc = globalScope.document;
+            if (doc && typeof doc.createElement === 'function') {
+                rows.forEach((row) => {
+                    const dt = doc.createElement('dt');
+                    dt.textContent = row.term;
+                    const dd = doc.createElement('dd');
+                    dd.textContent = row.value;
+                    detailBody.appendChild(dt);
+                    detailBody.appendChild(dd);
+                });
+            }
         }
     }
 
@@ -1641,6 +1821,10 @@
         if (impliedCheckbox) {
             impliedCheckbox.checked = useImplied;
         }
+        // Built alongside the dialog status line so both surfaces always agree.
+        let clockBanner = null;
+        const affectedLegs = _describeAffectedLegs(state, affectedLegIds);
+
         if (impliedStatus) {
             impliedStatus.style.color = '';
             impliedStatus.style.fontWeight = '';
@@ -1657,12 +1841,22 @@
                 const identity = state && state.underlyingContractMonth
                     ? `${state.underlyingSymbol} ${state.underlyingContractMonth}`
                     : ((state && state.underlyingSymbol) || '--');
-                const legsText = affectedLegIds.length
-                    ? ` Affected open legs: ${affectedLegIds.join(', ')}.`
-                    : '';
+                const legsText = _formatAffectedLegs(affectedLegs);
                 impliedStatus.style.color = '#b45309';
                 impliedStatus.style.fontWeight = '600';
                 impliedStatus.textContent = `Exact IB contract timing is unavailable for ${identity}.${legsText} This timing gate is independent of weekend/holiday λ; closure coverage has not been evaluated yet.`;
+                clockBanner = {
+                    level: 'warn',
+                    badge: 'Timing unverified',
+                    title: `Contract timing is unavailable for ${identity}`,
+                    body: 'Expiry cutoff times could not be confirmed with IB, so weekend/holiday coverage has not been evaluated yet. Prices on this page use estimated timing.',
+                    detailsSummary: affectedLegs.count
+                        ? `Affected legs (${affectedLegs.count})`
+                        : 'Details',
+                    details: affectedLegs.resolvedCount
+                        ? [{ term: 'Affected open legs', value: affectedLegs.labels.join('; ') }]
+                        : [],
+                };
             } else if (impliedActive) {
                 const median = Number.isFinite(impliedEntry.medianLambda)
                     ? impliedEntry.medianLambda.toFixed(2)
@@ -1714,11 +1908,9 @@
                     : ((state && state.underlyingSymbol) || '--');
                 const datesToList = missingDates.length ? missingDates : requiredDates;
                 const datesText = datesToList.length
-                    ? ` Missing non-trading dates: ${datesToList.join(', ')}.`
+                    ? ` ${datesToList.length} non-trading date${datesToList.length === 1 ? '' : 's'} uncovered (${_summarizeDateList(datesToList)}).`
                     : '';
-                const legsText = affectedLegIds.length
-                    ? ` Affected open legs: ${affectedLegIds.join(', ')}.`
-                    : '';
+                const legsText = _formatAffectedLegs(affectedLegs);
                 const reasonByStatus = {
                     incomplete_coverage: 'coverage is incomplete',
                     incomplete: 'coverage is incomplete',
@@ -1746,14 +1938,51 @@
                     && Number.isFinite(impliedEntry.medianLambda)
                     ? impliedEntry.medianLambda
                     : weight;
+                const usesIvtsMedianFallback = hasAcceptedImpliedEntry
+                    && Number.isFinite(impliedEntry.medianLambda);
+                const fallbackDisplay = usesIvtsMedianFallback
+                    ? `IVTS median λ≈${fallback.toFixed(2)}`
+                    : `scalar λ≈${fallback.toFixed(2)}`;
+                const fallbackSource = usesIvtsMedianFallback
+                    ? 'the loaded IVTS curve median'
+                    : 'the scalar λ';
                 const closureTail = closureCoverageRequired
-                    ? ` Projection remains available using λ≈${fallback.toFixed(2)} for uncovered closure dates.`
+                    ? ` Projection remains available using ${fallbackDisplay} for uncovered closure dates.`
                     : '';
                 impliedStatus.style.color = '#b45309';
                 impliedStatus.style.fontWeight = '600';
                 impliedStatus.textContent = `Implied λ is incomplete for ${identity}: ${reason}.${datesText}${legsText}${closureTail}`;
+
+                const details = [];
+                if (datesToList.length) {
+                    details.push({
+                        term: `Uncovered non-trading dates (${datesToList.length})`,
+                        value: datesToList.join(', '),
+                    });
+                }
+                if (affectedLegs.resolvedCount) {
+                    details.push({
+                        term: `Affected open legs (${affectedLegs.count})`,
+                        value: affectedLegs.labels.join('; '),
+                    });
+                }
+                details.push({ term: 'Reason', value: `${reason} (${coverageStatus || 'unvalidated'})` });
+                clockBanner = {
+                    level: 'warn',
+                    badge: 'Estimated clock',
+                    title: closureCoverageRequired
+                        ? `Prices use an estimated weekend clock (${fallbackDisplay})`
+                        : `IVTS implied λ is not available for ${identity}`,
+                    body: closureCoverageRequired
+                        ? `${identity}: ${reason}. ${datesToList.length} non-trading date${datesToList.length === 1 ? '' : 's'} fall back to ${fallbackSource}, so theoretical values and payoff charts are approximations.`
+                        : `${identity}: ${reason}.`,
+                    detailsSummary: 'What is affected',
+                    details,
+                };
             }
         }
+
+        _syncPricingClockBanner(clockBanner);
     }
 
     function _syncHistoricalTimelineUi(state) {
@@ -2490,6 +2719,14 @@
             togglePrimaryControlPanelBtn.addEventListener('click', openSimulationControlsDialog);
         }
 
+        const pricingClockBannerActionBtn = _getElement('pricingClockBannerActionBtn');
+        if (pricingClockBannerActionBtn
+            && typeof pricingClockBannerActionBtn.addEventListener === 'function'
+            && pricingClockBannerActionBtn.__primaryControlPanelBound !== true) {
+            pricingClockBannerActionBtn.__primaryControlPanelBound = true;
+            pricingClockBannerActionBtn.addEventListener('click', openSimulationControlsDialog);
+        }
+
         if (simulationControlsDialog
             && simulationControlsDialog.__simulationControlsDialogBound !== true) {
             simulationControlsDialog.__simulationControlsDialogBound = true;
@@ -2506,12 +2743,46 @@
                 });
             }
             if (doc && typeof doc.addEventListener === 'function'
-                && doc.__simulationControlsEscapeBound !== true) {
-                doc.__simulationControlsEscapeBound = true;
+                && doc.__simulationControlsKeydownBound !== true) {
+                doc.__simulationControlsKeydownBound = true;
                 doc.addEventListener('keydown', (event) => {
-                    if (event && event.key === 'Escape'
-                        && _primaryControlPanelDialogOpen) {
+                    if (!event || !_primaryControlPanelDialogOpen) {
+                        return;
+                    }
+                    if (event.key === 'Escape') {
                         closeSimulationControlsDialog(true);
+                        return;
+                    }
+                    if (event.key !== 'Tab') {
+                        return;
+                    }
+
+                    const focusable = _getSimulationDialogFocusableElements(simulationControlsDialog);
+                    const panel = typeof simulationControlsDialog.querySelector === 'function'
+                        ? simulationControlsDialog.querySelector('.simulation-controls-dialog-panel')
+                        : null;
+                    if (focusable.length === 0) {
+                        if (typeof event.preventDefault === 'function') event.preventDefault();
+                        if (panel && typeof panel.focus === 'function') panel.focus();
+                        return;
+                    }
+
+                    const activeElement = doc.activeElement;
+                    const activeIndex = focusable.indexOf(activeElement);
+                    const movingBackward = event.shiftKey === true;
+                    const shouldWrap = movingBackward
+                        ? activeIndex <= 0
+                        : activeIndex < 0 || activeIndex === focusable.length - 1;
+                    if (!shouldWrap) {
+                        return;
+                    }
+
+                    if (typeof event.preventDefault === 'function') event.preventDefault();
+                    const nextElement = movingBackward
+                        ? focusable[focusable.length - 1]
+                        : focusable[0];
+                    if (nextElement && typeof nextElement.focus === 'function') {
+                        nextElement.focus();
                     }
                 });
             }
@@ -2668,6 +2939,9 @@
                     _boundDeps.requestManagedAccountsSnapshot();
                 }
                 _syncLiveComboOrderAccountUI(state);
+                if (typeof renderGroups === 'function') {
+                    renderGroups();
+                }
             });
         }
 

@@ -8,8 +8,8 @@
     <link rel="icon" href="favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260723-projected-delivery-v1">
-    <link rel="stylesheet" href="chart_lab.css?v=20260323-prototype">
+    <link rel="stylesheet" href="style.css?v=127d758d1cdc">
+    <link rel="stylesheet" href="chart_lab.css?v=438dd73c13b0">
 </head>
 
 <body data-option-combo-page="chart-lab">
@@ -472,7 +472,7 @@
                         </div>
 
                         <div id="globalAmortizedBanner"
-                            style="display: none; margin-top: 1rem; padding: 1rem; border-radius: 0.5rem; color: #856404; background-color: #fff3cd; border: 2px dashed #ffeeba; font-weight: 600; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.05); font-size: 1.05rem;">
+                            class="amortization-banner amortization-banner-global" style="display: none;">
                             <span id="globalAmortizedText"></span>
                         </div>
 
@@ -772,7 +772,10 @@
                                         <span>Trial Trigger</span>
                                         </label>
                                     </div>
-                                    <span class="trial-trigger-status small text-muted">Idle</span>
+                                    <div class="order-status-cluster">
+                                        <span class="trial-trigger-mode-badge order-live-badge order-live-badge-safe">Preview only</span>
+                                        <span class="trial-trigger-status small text-muted">Idle</span>
+                                    </div>
                                 </div>
                                 <div class="trial-trigger-body">
                                 <div class="trial-trigger-order-controls" style="display: grid; grid-template-columns: 176px 96px 150px 120px 120px 92px max-content; gap: 0.5rem; align-items: center; justify-content: start;">
@@ -792,7 +795,7 @@
                                         <option value="0.05">Drift 0.05</option>
                                     </select>
                                     <select class="leg-input trial-trigger-concession" style="width: 120px;" title="Initial concession from the middle price.">
-                                        <option value="0.0">No Concession</option>
+                                        <option value="0.00">No Concession</option>
                                         <option value="0.10">Concede 10%</option>
                                         <option value="0.20">Concede 20%</option>
                                         <option value="0.30">Concede 30%</option>
@@ -827,7 +830,10 @@
                             <div class="close-group-container" style="display: none; margin-bottom: 1rem; padding: 0.75rem; background: rgba(59, 130, 246, 0.07); border: 1px solid rgba(59, 130, 246, 0.22); border-radius: 0.5rem;">
                                 <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.6rem;">
                                     <div style="font-size: 0.9rem; font-weight: 600;">Close Group</div>
-                                    <span class="close-group-status small text-muted">Idle</span>
+                                    <div class="order-status-cluster">
+                                        <span class="close-group-mode-badge order-live-badge order-live-badge-safe">Preview only</span>
+                                        <span class="close-group-status small text-muted">Idle</span>
+                                    </div>
                                 </div>
                                 <div class="close-group-body">
                                     <div class="close-group-order-controls">
@@ -850,7 +856,7 @@
                                             <option value="0.05">Drift 0.05</option>
                                         </select>
                                         <select class="leg-input close-group-concession" style="width: 120px;" title="Initial concession from the middle price.">
-                                            <option value="0.0">No Concession</option>
+                                            <option value="0.00">No Concession</option>
                                             <option value="0.10">Concede 10%</option>
                                             <option value="0.20">Concede 20%</option>
                                             <option value="0.30">Concede 30%</option>
@@ -959,7 +965,7 @@
                             </div>
 
                             <!-- Amortization Banner (Outside flex flow) -->
-                            <div class="amortization-container mt-3" style="display: none; padding: 1rem; border-radius: 0.5rem; color: #856404; background-color: #fff3cd; border: 2px dashed #ffeeba; font-weight: 600; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.05); font-size: 1.15rem;">
+                            <div class="amortization-container amortization-banner mt-3" style="display: none;">
                                 👉 <span class="amortization-text"></span>
                             </div>
 
@@ -969,7 +975,7 @@
 
                                 <h4 class="h4-style m-0 mb-3" style="color: var(--primary-color); display: flex; align-items: center; justify-content: space-between;">
                                     <span>Amortized Cost Basis Simulation</span>
-                                    <button class="btn btn-sm btn-secondary" onclick="toggleAmortizationChart(this.closest('.amortization-chart-container').previousElementSibling.previousElementSibling.querySelector('.btn-simulate-amortized'))">Close</button>
+                                    <button class="btn btn-sm btn-secondary" onclick="toggleAmortizationChart(this.closest('.group-card').querySelector('.btn-simulate-amortized'))">Close</button>
                                 </h4>
 
                                 <div class="chart-controls" style="display: flex; gap: 2rem; margin-bottom: 1rem;">
@@ -1276,44 +1282,44 @@
     </div>
 
     <!-- Scripts -->
-    <script src="js/t_params_db.js"></script>
-    <script src="js/regime_conditional_samples.generated.js?v=20260715-v1"></script>
-    <script src="js/official_exchange_calendars.generated.js?v=20260713-v2"></script>
+    <script src="js/t_params_db.js?v=477c2f77de45"></script>
+    <script src="js/regime_conditional_samples.generated.js?v=0963607e1c2a"></script>
+    <script src="js/official_exchange_calendars.generated.js?v=5ecaf304363a"></script>
     <script src="js/market_holidays.js?v=6da23349c406"></script>
-    <script src="js/date_utils.js?v=20260726-resilient-estimates-v1"></script>
-    <script src="js/implied_lambda_handoff.js?v=20260721-best-effort-lambda-v1"></script>
-    <script src="js/product_registry.js?v=20260720-carry-lambda-cutoff-v3"></script>
-    <script src="js/market_curves.js?v=20260720-carry-lambda-cutoff-v3"></script>
-    <script src="js/index_forward_rate.js?v=20260720-carry-lambda-cutoff-v3"></script>
-    <script src="js/pricing_context.js?v=20260726-resilient-estimates-v1"></script>
-    <script src="js/trade_trigger_logic.js"></script>
-    <script src="js/group_order_builder.js?v=20260713-position-fop-fix"></script>
-    <script src="js/leg_position_check.js?v=20260711-leg-exists"></script>
-    <script src="js/order_safety.js?v=20260711-safe-execution"></script>
-    <script src="js/order_confirmation_ui.js?v=20260711-safe-execution"></script>
-    <script src="js/distribution_proxy_config.js"></script>
-    <script src="js/american_binomial.js?v=20260723-american-binomial-v1"></script>
-    <script src="js/pricing_core.js?v=20260728-fop-american-v1"></script>
-    <script src="js/bsm.js"></script>
-    <script src="js/chart.js?v=20260729-live-edit-perf-v1"></script>
-    <script src="js/prob_charts.js?v=20260726-resilient-estimates-v1"></script>
-    <script src="js/chart_controls.js?v=20260729-live-edit-perf-v1"></script>
-    <script src="js/amortized.js?v=20260726-resilient-estimates-v1"></script>
-    <script src="js/valuation.js?v=20260728-fop-american-v1"></script>
-    <script src="js/session_logic.js?v=20260728-fop-american-v1"></script>
-    <script src="js/session_ui.js?v=20260720-carry-lambda-cutoff-v3"></script>
-    <script src="js/control_panel_ui.js?v=20260728-fop-american-v1"></script>
-    <script src="js/hedge_editor_ui.js"></script>
-    <script src="js/group_editor_ui.js?v=20260805-edit-revert-recovery-v1"></script>
-    <script src="js/hedge_ui.js"></script>
-    <script src="js/group_ui.js?v=20260729-live-edit-perf-v1"></script>
-    <script src="js/global_ui.js?v=20260729-live-edit-perf-v1"></script>
-    <script src="js/page_capabilities.js"></script>
-    <script src="js/combo_order_transport.js?v=20260805-edit-revert-recovery-v1"></script>
-    <script src="js/delta_hedge_transport.js"></script>
-    <script src="js/app.js?v=20260729-live-edit-perf-v1"></script>
-    <script src="js/ws_client.js?v=20260805-edit-revert-recovery-v1"></script>
-    <script src="js/chart_lab.js?v=20260726-resilient-estimates-v1"></script>
+    <script src="js/date_utils.js?v=ac6eea8a38b0"></script>
+    <script src="js/implied_lambda_handoff.js?v=47150cf8fdc8"></script>
+    <script src="js/product_registry.js?v=bf108265f09e"></script>
+    <script src="js/market_curves.js?v=f15898beaf0c"></script>
+    <script src="js/index_forward_rate.js?v=903ab02034e5"></script>
+    <script src="js/pricing_context.js?v=366df21b7a3c"></script>
+    <script src="js/trade_trigger_logic.js?v=03c1b2e51e1c"></script>
+    <script src="js/group_order_builder.js?v=1309685a659f"></script>
+    <script src="js/leg_position_check.js?v=dc27e6fdef4a"></script>
+    <script src="js/order_safety.js?v=09fbb9211080"></script>
+    <script src="js/order_confirmation_ui.js?v=46481b7694fe"></script>
+    <script src="js/distribution_proxy_config.js?v=9cf6495e78d4"></script>
+    <script src="js/american_binomial.js?v=a49313f2567b"></script>
+    <script src="js/pricing_core.js?v=12a66996dcf0"></script>
+    <script src="js/bsm.js?v=0152d896f472"></script>
+    <script src="js/chart.js?v=1af5f4563cc9"></script>
+    <script src="js/prob_charts.js?v=9e5d55699534"></script>
+    <script src="js/chart_controls.js?v=2c59af2b9250"></script>
+    <script src="js/amortized.js?v=addaf65c6c4f"></script>
+    <script src="js/valuation.js?v=8cc8919afad3"></script>
+    <script src="js/session_logic.js?v=c21e1d68a6e0"></script>
+    <script src="js/session_ui.js?v=cd9af1781e9b"></script>
+    <script src="js/control_panel_ui.js?v=51f0f373d273"></script>
+    <script src="js/hedge_editor_ui.js?v=4e0cbca9b0ba"></script>
+    <script src="js/group_editor_ui.js?v=82fb4f4f7e0f"></script>
+    <script src="js/hedge_ui.js?v=19a43a52b8ad"></script>
+    <script src="js/group_ui.js?v=7c652f9906ca"></script>
+    <script src="js/global_ui.js?v=bf6f437d5605"></script>
+    <script src="js/page_capabilities.js?v=ab3b6fe974a0"></script>
+    <script src="js/combo_order_transport.js?v=89314aba4de8"></script>
+    <script src="js/delta_hedge_transport.js?v=07a59f835858"></script>
+    <script src="js/app.js?v=181332e2f9bc"></script>
+    <script src="js/ws_client.js?v=5d8dd06f76e0"></script>
+    <script src="js/chart_lab.js?v=4df4ee512e75"></script>
 </body>
 
 </html>

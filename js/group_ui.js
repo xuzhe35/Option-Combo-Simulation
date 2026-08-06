@@ -452,6 +452,25 @@
         return `${parsed >= 0 ? '+' : ''}${normalized}`;
     }
 
+    // Theta is money per day, not a share count, so it reads as currency.
+    // Cents are noise above $100/day and the chip has no room for them.
+    function formatGroupThetaValue(value) {
+        const parsed = parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return 'N/A';
+        }
+
+        const magnitude = Math.abs(parsed);
+        const digits = magnitude >= 100 ? 0 : 2;
+        // Pinned to en-US to match the workspace currency formatter. The
+        // ambient locale would pair a "$" with European separators.
+        const rendered = magnitude.toLocaleString('en-US', {
+            minimumFractionDigits: digits,
+            maximumFractionDigits: digits,
+        });
+        return `${parsed >= 0 ? '+' : '-'}$${rendered}`;
+    }
+
     function _resolvePositiveLegPrice(leg) {
         if (!leg) {
             return null;
@@ -605,33 +624,64 @@
         return null;
     }
 
+    function _describeMissingGreekLegs(greekLabel, missingLegCount, staleLegCount = 0) {
+        const count = Number(missingLegCount) || 0;
+        const staleCount = Number(staleLegCount) || 0;
+        if (staleCount > 0) {
+            return `${greekLabel} live data is stale for ${staleCount} leg${staleCount === 1 ? '' : 's'}; stale values are hidden.`;
+        }
+        return `${greekLabel} is not available yet for ${count} leg${count === 1 ? '' : 's'}.`;
+    }
+
     function applyGroupDeltaSummary(card, groupResult) {
         if (!card || !groupResult) {
             return;
         }
 
-        const deltaItem = card.querySelector('.group-header-delta-item');
-        if (!deltaItem) {
+        const greeksItem = card.querySelector('.group-header-delta-item');
+        if (!greeksItem) {
             return;
         }
 
-        if (groupResult.groupDeltaDisplayable) {
-            deltaItem.style.display = '';
-            const deltaValueEl = card.querySelector('.group-header-delta-value');
-            if (deltaValueEl) {
-                deltaValueEl.textContent = groupResult.groupDeltaAvailable
-                    ? formatGroupDeltaValue(groupResult.groupDelta)
-                    : 'N/A';
-                deltaValueEl.classList.toggle('text-muted', !groupResult.groupDeltaAvailable);
-            }
-            deltaItem.title = groupResult.groupDeltaAvailable
-                ? 'Best-effort net delta for this group, built from live TWS option delta plus any underlying positions.'
-                : `Delta is not available yet for ${groupResult.groupDeltaMissingLegCount} leg${groupResult.groupDeltaMissingLegCount === 1 ? '' : 's'}.`;
+        if (!groupResult.groupDeltaDisplayable) {
+            greeksItem.style.display = 'none';
+            greeksItem.removeAttribute('title');
             return;
         }
 
-        deltaItem.style.display = 'none';
-        deltaItem.removeAttribute('title');
+        greeksItem.style.display = '';
+
+        const deltaValueEl = card.querySelector('.group-header-delta-value');
+        if (deltaValueEl) {
+            deltaValueEl.textContent = groupResult.groupDeltaAvailable
+                ? formatGroupDeltaValue(groupResult.groupDelta)
+                : 'N/A';
+            deltaValueEl.classList.toggle('text-muted', !groupResult.groupDeltaAvailable);
+        }
+
+        const thetaValueEl = card.querySelector('.group-header-theta-value');
+        if (thetaValueEl) {
+            thetaValueEl.textContent = groupResult.groupThetaAvailable
+                ? formatGroupThetaValue(groupResult.groupTheta)
+                : 'N/A';
+            thetaValueEl.classList.toggle('text-muted', !groupResult.groupThetaAvailable);
+            // Collecting decay and paying for it are opposite positions; the
+            // sign alone is easy to miss on a dense header row.
+            const thetaSign = groupResult.groupThetaAvailable
+                ? Number(groupResult.groupTheta) || 0
+                : 0;
+            thetaValueEl.classList.toggle('success-text', thetaSign > 0);
+            thetaValueEl.classList.toggle('danger-text', thetaSign < 0);
+        }
+
+        const titleParts = [];
+        titleParts.push(groupResult.groupDeltaAvailable
+            ? 'Δ: best-effort net delta for this group, built from live TWS option delta plus any underlying positions.'
+            : `Δ: ${_describeMissingGreekLegs('Delta', groupResult.groupDeltaMissingLegCount, groupResult.groupDeltaStaleLegCount)}`);
+        titleParts.push(groupResult.groupThetaAvailable
+            ? 'Θ: net decay per calendar day from live TWS option theta. IB models one calendar day, so a Friday reading is not a weekend forecast.'
+            : `Θ: ${_describeMissingGreekLegs('Theta', groupResult.groupThetaMissingLegCount, groupResult.groupThetaStaleLegCount)}`);
+        greeksItem.title = titleParts.join('\n');
     }
 
     function buildSimulatedPriceHtml(currencyFormatter, leg, processedLeg, simPricePerShare, usesScenarioUnderlying) {
@@ -1054,6 +1104,8 @@
     globalScope.OptionComboGroupUI = {
         applyGroupDerivedData,
         applyGroupDeltaSummary,
+        formatGroupDeltaValue,
+        formatGroupThetaValue,
         buildTriggerPreviewHtml,
         buildGroupLivePnlHtml,
         formatTriggerStatus,

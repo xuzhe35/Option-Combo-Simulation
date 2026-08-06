@@ -21,6 +21,7 @@ const suites = [
     require('./trade_trigger_logic.test'),
     require('./combo_order_transport.test'),
     require('./page_capabilities.test'),
+    require('./asset_versions.test'),
     require('./delta_hedge_logic.test'),
     require('./delta_hedge_transport.test'),
     require('./delta_hedge_ui.test'),

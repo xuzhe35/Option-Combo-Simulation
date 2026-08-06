@@ -580,15 +580,40 @@ def extract_option_iv(ticker: Any) -> float | None:
     return None
 
 
-def extract_option_delta(ticker: Any) -> float | None:
+# IB fills delta, gamma, vega and theta from the same tickOptionComputation
+# message, so every greek below rides the generic tick 106 line that delta
+# already pays for.  Publishing one greek and dropping the rest would just
+# throw away data the subscription already delivered.
+OPTION_GREEK_FIELDS: tuple[str, ...] = ('delta', 'gamma', 'vega', 'theta')
+
+
+def extract_option_greek(ticker: Any, greek_name: str) -> float | None:
     for attr_name in ('modelGreeks', 'bidGreeks', 'askGreeks', 'lastGreeks'):
         greeks = getattr(ticker, attr_name, None)
         if not greeks:
             continue
-        raw = getattr(greeks, 'delta', None)
+        raw = getattr(greeks, greek_name, None)
         if raw is not None and raw == raw:
             return round(raw, 6)
     return None
+
+
+def extract_option_greeks(ticker: Any) -> dict[str, float]:
+    """Return every finite greek IB published for this ticker, keyed by name.
+
+    A greek IB has not computed yet is omitted rather than sent as 0, so the
+    browser can tell "not available yet" apart from a genuine zero.
+    """
+    greeks: dict[str, float] = {}
+    for greek_name in OPTION_GREEK_FIELDS:
+        value = extract_option_greek(ticker, greek_name)
+        if value is not None:
+            greeks[greek_name] = value
+    return greeks
+
+
+def extract_option_delta(ticker: Any) -> float | None:
+    return extract_option_greek(ticker, 'delta')
 
 
 def log_option_iv_debug_if_needed(
@@ -857,11 +882,10 @@ def build_iv_term_structure_quote_snapshot(
             invalid_contract_identity_ids.append(sub_id)
             continue
         iv = extract_option_iv(ticker)
-        delta = extract_option_delta(ticker) if wants_greeks else None
+        greeks = extract_option_greeks(ticker) if wants_greeks else {}
         if iv is not None and iv == iv and iv > 0:
             option_quote['iv'] = iv
-        if delta is not None:
-            option_quote['delta'] = delta
+        option_quote.update(greeks)
         payload['options'][sub_id] = stamp_quote_as_of(
             option_quote,
             quote_as_of,
@@ -1037,7 +1061,7 @@ def build_pending_tickers_handler(env):
                     quote = stamp_quote_as_of(quote, ticker_quote_as_of(env, ticker))
 
                     iv = extract_option_iv(ticker)
-                    delta = extract_option_delta(ticker) if wants_greeks else None
+                    greeks = extract_option_greeks(ticker) if wants_greeks else {}
                     env['log_option_iv_debug_if_needed'](sub_id, ticker, iv)
 
                     option_quote: OptionQuoteSnapshot = dict(quote)
@@ -1045,8 +1069,7 @@ def build_pending_tickers_handler(env):
                     payload['options'][sub_id] = option_quote
                     if iv and iv == iv and iv > 0:
                         option_quote['iv'] = iv
-                    if delta is not None:
-                        option_quote['delta'] = delta
+                    option_quote.update(greeks)
                     has_data = True
 
             if has_data:

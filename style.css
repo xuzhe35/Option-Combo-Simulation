@@ -13,8 +13,19 @@
     --border-color: #E5E7EB;
     --danger-color: #EF4444;
     --danger-rgb: 239, 68, 68;
+    --success-color: #10B981;
+    /* Emerald 500 — semantic alias used by accent-color on "safe/synced" controls */
+    --success-rgb: 16, 185, 129;
+    --warning-color: #F59E0B;
+    /* Amber 500 — semantic accent for armed-but-not-live controls (Trial Trigger) */
+    --warning-rgb: 245, 158, 11;
+    --text-primary: #111827;
     --success-bg: #ECFDF5;
-    --success-text: #059669;
+    /* Emerald 700, not 600. The pair below carries P&L text at 0.875rem, where
+       WCAG AA wants 4.5:1; emerald-600 (#059669) measured 3.77:1 on white and
+       3.58:1 on --success-bg, so a profit read worse than the loss beside it.
+       #047857 measures 5.48 / 5.21 and now roughly matches --danger-text. */
+    --success-text: #047857;
     --danger-bg: #FEF2F2;
     --danger-text: #DC2626;
     --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
@@ -47,8 +58,32 @@ body {
     font-size: 0.875rem;
 }
 
+/* Two red utilities exist on purpose; pick by contrast requirement, not taste.
+ *
+ *   .text-danger  -> --danger-color #EF4444, 3.76:1 on white.
+ *                    Icons and other non-text graphics (WCAG AA needs 3.0:1).
+ *                    Do NOT use it on running text: it fails the 4.5:1 body rule.
+ *
+ *   .danger-text  -> --danger-text  #DC2626, 4.83:1 on white.
+ *   .success-text -> --success-text #047857, 5.48:1 on white.
+ *                    Text: signed figures, error and status copy.
+ *
+ * The -text pair is the only complete one (there is no .text-success), so any
+ * new signed or message colour belongs there.
+ */
 .text-danger {
     color: var(--danger-color);
+}
+
+/* Signed-value and message colours. The JS writers (net cash flow, live P&L,
+   group Theta, trigger errors) have always emitted these class names; they had
+   no rule until now, so every signed figure rendered in body text colour. */
+.success-text {
+    color: var(--success-text);
+}
+
+.danger-text {
+    color: var(--danger-text);
 }
 
 .font-weight-semibold {
@@ -119,18 +154,103 @@ body {
 
 .layout-grid {
     display: grid;
-    grid-template-columns: 290px 1fr;
+    /* minmax(0, 1fr) + min-width:0 on the items: without both, the wide
+       portfolio header/table min-content blows the track out and the whole
+       page picks up a horizontal scrollbar below ~1400px. */
+    grid-template-columns: 290px minmax(0, 1fr);
     gap: 1.35rem;
     align-items: start;
     transition: grid-template-columns 0.3s ease;
 }
 
-.layout-grid.sidebar-collapsed {
-    grid-template-columns: 1fr;
+.control-panel,
+.portfolio-area {
+    min-width: 0;
 }
 
+.layout-grid.sidebar-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+/* Collapsing the sidebar hands the full width to the tables and charts, but
+   connection state, portfolio totals, the live-order switch and the controls
+   entry point must stay reachable — so the panel becomes a compact strip
+   above the workspace instead of disappearing. */
 .layout-grid.sidebar-collapsed .control-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.9rem;
+    margin-bottom: 0.5rem;
+}
+
+.layout-grid.sidebar-collapsed .control-panel > *:not(.sidebar-essential) {
     display: none;
+}
+
+.layout-grid.sidebar-collapsed .control-panel > .sidebar-essential {
+    margin-bottom: 0;
+    flex: 1 1 240px;
+    min-width: 0;
+}
+
+.layout-grid.sidebar-collapsed .control-panel > .ws-status.sidebar-essential {
+    flex: 0 1 auto;
+    align-self: center;
+    margin-top: 0;
+}
+
+/* The valuation card reads as a row of figures in strip mode. */
+.layout-grid.sidebar-collapsed .summary-card {
+    flex: 3 1 420px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 1.5rem;
+    padding: 0.75rem 1.15rem;
+}
+
+.layout-grid.sidebar-collapsed .summary-card h2 {
+    flex: 0 0 100%;
+    margin-bottom: 0.35rem;
+}
+
+.layout-grid.sidebar-collapsed .summary-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.1rem;
+    padding: 0.25rem 0;
+    border-bottom: none;
+    border-top: none !important;
+    margin-top: 0 !important;
+}
+
+.layout-grid.sidebar-collapsed .summary-item.option-redundancy-summary {
+    display: none;
+}
+
+/* In strip mode the card is one flex item among several, so it drops the
+   explanatory note and keeps only the two figures. */
+.layout-grid.sidebar-collapsed .greeks-summary-card {
+    flex: 1 1 240px;
+    padding: 0.75rem 1.15rem;
+}
+
+.layout-grid.sidebar-collapsed .greeks-summary-header {
+    margin-bottom: 0.45rem;
+}
+
+.layout-grid.sidebar-collapsed .greeks-summary-note {
+    display: none;
+}
+
+.layout-grid.sidebar-collapsed .greeks-tile {
+    padding: 0.4rem 0.55rem;
+}
+
+.layout-grid.sidebar-collapsed .greeks-tile-value {
+    font-size: 1.05rem;
 }
 
 .workspace-banner {
@@ -202,6 +322,124 @@ body {
     color: #1e3a8a;
 }
 
+/* Pricing-clock degradation banner */
+.pricing-clock-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    padding: 0.9rem 1.15rem;
+    border-radius: var(--radius-lg);
+    border: 1px solid rgba(var(--warning-rgb), 0.35);
+    background: linear-gradient(135deg, rgba(255, 251, 235, 1), rgba(254, 243, 199, 0.7));
+    box-shadow: var(--shadow-sm);
+}
+
+.pricing-clock-banner[hidden] {
+    display: none;
+}
+
+.pricing-clock-banner-badge {
+    flex: 0 0 auto;
+    min-width: 120px;
+    text-align: center;
+    padding: 0.45rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: #b45309;
+    color: #fff;
+}
+
+.pricing-clock-banner-copy {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.pricing-clock-banner-copy h2 {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 0.15rem;
+    color: #7c2d12;
+}
+
+.pricing-clock-banner-copy p {
+    font-size: 0.9rem;
+    color: #78350f;
+}
+
+.pricing-clock-banner-details {
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+    color: #78350f;
+}
+
+.pricing-clock-banner-details > summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.pricing-clock-banner-detail-body {
+    margin-top: 0.4rem;
+    display: grid;
+    gap: 0.35rem;
+    overflow-wrap: anywhere;
+}
+
+.pricing-clock-banner-detail-body dt {
+    font-weight: 600;
+}
+
+.pricing-clock-banner-detail-body dd {
+    margin: 0 0 0.35rem 0;
+}
+
+.pricing-clock-banner > .btn {
+    flex: 0 0 auto;
+    align-self: flex-start;
+}
+
+.sim-implied-lambda-control {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.4rem 0.65rem;
+    margin-top: 0.5rem;
+}
+
+.sim-implied-lambda-checkbox {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.4rem;
+    min-width: 0;
+    cursor: pointer;
+    font-size: 0.8rem;
+    line-height: 1.35;
+}
+
+.sim-implied-lambda-checkbox input[type="checkbox"] {
+    flex: 0 0 auto;
+    margin-top: 0.15rem;
+}
+
+/* The dialog-side status line is a sentence, not a value chip: keep it on its
+   own row so a long message never wraps around the "Load λ File…" button. */
+.sim-implied-lambda-status {
+    display: block;
+    grid-column: 1 / -1;
+    max-width: 100%;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.sim-implied-lambda-status:empty {
+    display: none;
+}
+
 /* Cards */
 .panel-card {
     background: var(--card-bg);
@@ -216,6 +454,44 @@ body {
     font-size: 1.125rem;
     font-weight: 600;
     margin-bottom: 0.5rem;
+}
+
+.connection-setup-card {
+    padding: 0.875rem 1rem;
+}
+
+.connection-setup-card > summary {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    cursor: pointer;
+    list-style: none;
+}
+
+.connection-setup-card > summary::-webkit-details-marker {
+    display: none;
+}
+
+.connection-setup-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.connection-setup-title::before {
+    content: '▸ ';
+    color: var(--text-muted);
+}
+
+.connection-setup-card[open] .connection-setup-title::before {
+    content: '▾ ';
+}
+
+.connection-setup-card code {
+    padding: 0.05rem 0.3rem;
+    border-radius: 0.25rem;
+    background: rgba(15, 23, 42, 0.06);
+    font-size: 0.85em;
 }
 
 .simulation-controls-launcher {
@@ -537,6 +813,16 @@ body.simulation-controls-dialog-open {
     margin-bottom: 0.5rem;
 }
 
+/* Secondary field inside a control group (e.g. Underlying Contract Month under
+   Underlying Symbol): reads as subordinate, but is still a real label. */
+.control-group .control-sublabel {
+    margin-top: 0.6rem;
+    margin-bottom: 0.3rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
 .value-display {
     color: var(--primary-color);
     font-weight: 600;
@@ -742,6 +1028,112 @@ input[type=range]:focus {
     white-space: nowrap;
 }
 
+/* Portfolio Greeks
+   Its own card, not more rows in the valuation list: those rows are money,
+   these are rates of change, and a shared column made both harder to read.
+   Two tiles keep each greek's number, symbol and unit as one visual block. */
+.greeks-summary-card {
+    padding: 1rem 1.15rem 1.15rem;
+}
+
+.greeks-summary-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.greeks-summary-card h2 {
+    margin-bottom: 0;
+}
+
+.greeks-summary-scope {
+    flex: 0 0 auto;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.greeks-tile-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
+}
+
+.greeks-tile {
+    min-width: 0;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-color);
+}
+
+.greeks-tile.is-unavailable {
+    border-style: dashed;
+}
+
+.greeks-tile-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    margin-bottom: 0.15rem;
+}
+
+.greeks-tile-symbol {
+    font-size: 0.95rem;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--primary-color);
+}
+
+.greeks-tile-name {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+/* Tabular figures so the two tiles' digits line up and a ticking value does
+   not shuffle its own width on every quote. */
+.greeks-tile-value {
+    font-size: 1.15rem;
+    font-weight: 700;
+    line-height: 1.25;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.greeks-tile-value.greeks-tile-value-positive {
+    color: var(--success-text);
+}
+
+.greeks-tile-value.greeks-tile-value-negative {
+    color: var(--danger-text);
+}
+
+.greeks-tile-value.is-unavailable {
+    font-size: 1rem;
+    color: var(--text-muted);
+}
+
+.greeks-tile-unit {
+    margin-top: 0.1rem;
+    font-size: 0.68rem;
+    line-height: 1.3;
+    color: var(--text-muted);
+}
+
+.greeks-summary-note {
+    margin-top: 0.7rem;
+    padding-top: 0.6rem;
+    border-top: 1px dashed var(--border-color);
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+}
+
 /* Buttons */
 .btn {
     display: inline-flex;
@@ -783,6 +1175,33 @@ input[type=range]:focus {
 .btn-secondary:hover {
     background-color: var(--bg-color);
     border-color: #d1d5db;
+}
+
+/* Buttons already inherit the UA :focus-visible ring; at offset 0 it sits flush
+   against a filled button. Nudge it out so it stays readable on .btn-primary. */
+.btn:focus-visible,
+.icon-btn:focus-visible {
+    outline-offset: 2px;
+}
+
+/* Was referenced by "Place Hedge" (index.html) but never defined, so the single
+   most dangerous button in the app rendered as an unstyled .btn. */
+.btn-danger {
+    background-color: var(--danger-color);
+    color: #fff;
+    border: 1px solid var(--danger-color);
+    box-shadow: var(--shadow-sm);
+}
+
+.btn-danger:hover:not(:disabled) {
+    background-color: var(--danger-text);
+    border-color: var(--danger-text);
+}
+
+.btn-danger:disabled {
+    background-color: rgba(var(--danger-rgb), 0.35);
+    border-color: transparent;
+    cursor: not-allowed;
 }
 
 .btn-sm {
@@ -934,8 +1353,10 @@ input[type=range]:focus {
 /* Portfolio Table & Groups */
 .portfolio-header-global {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
     align-items: center;
+    gap: 0.75rem;
     margin-bottom: 1.5rem;
 }
 
@@ -947,7 +1368,9 @@ input[type=range]:focus {
 
 .portfolio-header-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    justify-content: flex-end;
     gap: 0.6rem;
     min-width: 0;
 }
@@ -984,6 +1407,12 @@ input[type=range]:focus {
     flex-direction: column;
     align-items: stretch;
     gap: 0.4rem;
+}
+
+/* Sidebar width is 290px; the buttons get the full row under the copy so the
+   description is not squeezed into a ~90px column. */
+.greeks-toggle-card .greeks-action-row {
+    margin-top: 0.6rem;
 }
 
 .delta-hedge-global-status {
@@ -1188,9 +1617,33 @@ input[type=range]:focus {
     border-style: solid;
     border-color: rgba(var(--primary-rgb), 0.18);
     background: rgba(var(--primary-rgb), 0.04);
+    gap: 0;
 }
 
-.group-header-delta-item .label,
+/* Δ and Θ share one pill. A hairline keeps them legible as two readings
+   without spending the horizontal room a second pill would cost. */
+.group-header-greek {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.3rem;
+}
+
+.group-header-greek .label {
+    font-weight: 600;
+    color: var(--primary-color);
+}
+
+.group-header-greek .font-weight-semibold {
+    font-variant-numeric: tabular-nums;
+}
+
+.group-header-greek-divider {
+    width: 1px;
+    align-self: stretch;
+    margin: 0 0.55rem;
+    background: rgba(var(--primary-rgb), 0.22);
+}
+
 .group-header-net-cash-flow-item .label,
 .group-header-live-pnl-item .label {
     color: var(--text-muted);
@@ -1254,14 +1707,22 @@ input[type=range]:focus {
     align-items: center;
 }
 
+/* Was nowrap, which made an over-long header push a horizontal scrollbar onto
+   the whole page instead of using the space below it. With the Greeks chip
+   carrying two readings the row can genuinely run out of width at 1280px, and
+   a second header line is the cheaper failure. Nothing moves while the row
+   still fits: flex-wrap only takes effect at overflow. */
 .group-card .group-title-area {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
 }
 
 .group-card .group-name-input {
     flex: 1 1 240px;
     width: auto;
-    min-width: 0;
+    /* min-width: 0 let the name collapse to a few pixels once the mode chips
+       joined the header. Keep it readable and let the row wrap instead. */
+    min-width: 150px;
     max-width: 340px;
 }
 
@@ -1304,6 +1765,47 @@ input[type=range]:focus {
 .group-summary-item .label {
     color: var(--text-muted);
     margin-right: 0.25rem;
+}
+
+/* Amortized cost-basis callout. Was four copies of the same inline style with
+   raw hex (#856404 / #fff3cd / #ffeeba) — the only colours in the app that had
+   escaped the variable system. */
+.amortization-banner {
+    margin-top: 1rem;
+    padding: 1rem;
+    border-radius: var(--radius-md);
+    color: #78350f;
+    background-color: rgba(var(--warning-rgb), 0.12);
+    border: 2px dashed rgba(var(--warning-rgb), 0.45);
+    font-weight: 600;
+    font-size: 1.15rem;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+}
+
+.amortization-banner-global {
+    font-size: 1.05rem;
+}
+
+/* Applied to .pnl-container when a group is in Settlement mode.
+   Previously lived in a <style> tag inside #groupCardTemplate, which cloned
+   an identical stylesheet into the DOM for every group card. */
+.settlement-highlight {
+    background: linear-gradient(135deg, rgba(var(--primary-rgb), 0.1), rgba(var(--primary-rgb), 0.2));
+    border: 2px dashed var(--primary-color);
+    border-radius: 0.5rem;
+    padding: 0.5rem 1rem !important;
+    font-size: 1.1rem;
+    box-shadow: 0 4px 12px rgba(var(--primary-rgb), 0.15);
+    transform: translateY(-2px);
+}
+
+.settlement-highlight .group-pnl-label {
+    color: var(--primary-color);
+}
+
+.settlement-highlight .group-pnl {
+    font-size: 1.5rem;
 }
 
 .group-empty-state {
@@ -1368,6 +1870,20 @@ input[type=range]:focus {
 
 .pnl-cell,
 .simulated-price-cell {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Every figure that re-renders on a live tick. Proportional digits make the
+   text reflow on each update, which reads as flicker on a quote stream. */
+.summary-item .value,
+.group-summary-item .font-weight-semibold,
+.group-summary-item .font-weight-bold,
+#allGroupsNetCashFlowValue,
+.group-header-net-cash-flow-value,
+.group-header-live-pnl,
+.group-header-delta-value,
+.option-redundancy-value,
+.projected-delivery-value {
     font-variant-numeric: tabular-nums;
 }
 
@@ -1511,6 +2027,10 @@ input[type=range]:focus {
         font-size: 0.82rem;
     }
 
+    .group-header-greek-divider {
+        margin: 0 0.4rem;
+    }
+
     .portfolio-table th,
     .portfolio-table td {
         padding-left: 0.7rem;
@@ -1602,10 +2122,194 @@ input[type=range]:focus {
     transition: transform 0.3s ease;
 }
 
+/* Grouped, labelled order controls (index.html). Chart Lab still uses the
+   flat grid variants below, so these rules key off .order-control-sections. */
+.order-control-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.order-control-section {
+    padding: 0.6rem 0.7rem;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.55);
+}
+
+.order-control-section-title {
+    margin: 0 0 0.45rem 0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.order-control-fields {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    column-gap: 0.85rem;
+    row-gap: 0.5rem;
+}
+
+.order-control-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+    margin: 0;
+}
+
+.order-control-field-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.order-control-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-height: 30px;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.order-control-section-note {
+    margin: 0.5rem 0 0 0;
+    line-height: 1.45;
+}
+
+.order-control-section-note strong {
+    color: var(--text-main);
+    font-weight: 600;
+}
+
+.order-control-section-actions .order-control-fields {
+    align-items: center;
+}
+
+/* Anything that can put a real order in front of the broker is styled as a
+   risk action; preview/what-if stays neutral. Applied by the group binders. */
+.execution-mode-live {
+    border-color: var(--danger-color) !important;
+    color: var(--danger-text);
+    background-color: rgba(var(--danger-rgb), 0.06);
+    font-weight: 600;
+}
+
+.execution-mode-test {
+    border-color: var(--warning-color) !important;
+    background-color: rgba(var(--warning-rgb), 0.08);
+    font-weight: 600;
+}
+
+.order-live-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-left: 0.5rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: rgba(var(--danger-rgb), 0.12);
+    color: var(--danger-text);
+}
+
+.order-live-badge.order-live-badge-test {
+    background: rgba(var(--warning-rgb), 0.16);
+    color: #b45309;
+}
+
+.order-live-badge.order-live-badge-safe {
+    background: rgba(15, 23, 42, 0.07);
+    color: var(--text-muted);
+}
+
+.order-status-cluster {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+/* One-line answer to "what will this group actually do right now?" */
+/* Full-width third row of .group-header, after the title area and actions. */
+.group-card .group-header {
+    flex-wrap: wrap;
+    row-gap: 0.5rem;
+}
+
+.group-mode-summary {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    flex: 1 0 100%;
+    order: 1;
+    min-width: 0;
+    gap: 0.3rem;
+    margin: 0;
+}
+
+.group-mode-summary:empty {
+    display: none;
+}
+
+.group-mode-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.12rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
+    background: rgba(15, 23, 42, 0.06);
+    color: var(--text-muted);
+}
+
+.group-mode-chip-mode {
+    background: rgba(var(--primary-rgb), 0.1);
+    color: var(--primary-color);
+}
+
+.group-mode-chip-live {
+    background: rgba(16, 185, 129, 0.14);
+    color: #047857;
+}
+
+.group-mode-chip-warn {
+    background: rgba(var(--warning-rgb), 0.16);
+    color: #b45309;
+}
+
+.group-mode-chip-danger {
+    background: rgba(var(--danger-rgb), 0.12);
+    color: var(--danger-text);
+}
+
 /* The order controls are a shared grid in the main workspace and Chart Lab. */
 .trial-trigger-order-controls {
     column-gap: 0.85rem !important;
     row-gap: 0.5rem !important;
+}
+
+/* Chart Lab keeps the flat grid; the grouped layout owns its own spacing.
+   align-items must be reset — the flat .close-group-order-controls rule centres
+   its children, which would shrink each section to its content width. */
+.trial-trigger-order-controls.order-control-sections,
+.close-group-order-controls.order-control-sections {
+    display: flex !important;
+    flex-direction: column;
+    align-items: stretch;
+    column-gap: 0.75rem !important;
+    row-gap: 0.75rem !important;
 }
 
 .trial-trigger-order-controls .trial-trigger-tif {

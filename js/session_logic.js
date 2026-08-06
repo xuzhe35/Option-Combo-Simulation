@@ -52,6 +52,7 @@
             executionMode: 'preview',
             strategy: 'auto',
             quantity: null,
+            quantityMode: 'auto',
             repriceThreshold: 0.01,
             timeInForce: 'DAY',
             isExpanded: false,
@@ -109,9 +110,12 @@
     }
 
     function _normalizeCloseExecution(closeExecution) {
+        const source = closeExecution && typeof closeExecution === 'object'
+            ? closeExecution
+            : {};
         const next = {
             ..._createDefaultCloseExecution(),
-            ...(closeExecution && typeof closeExecution === 'object' ? closeExecution : {}),
+            ...source,
         };
 
         const normalizedExecutionMode = String(next.executionMode || '').trim();
@@ -125,7 +129,17 @@
             : 'auto';
 
         const parsedQuantity = parseInt(next.quantity, 10);
-        next.quantity = Number.isInteger(parsedQuantity) && parsedQuantity > 0
+        const hasExplicitQuantityMode = Object.prototype.hasOwnProperty.call(source, 'quantityMode');
+        const requestedQuantityMode = String(source.quantityMode || '').trim().toLowerCase();
+        // Close Qty existed before quantityMode. Preserve a valid legacy
+        // quantity as manual; silently converting it to auto could turn a
+        // saved partial close into a full-size live close.
+        next.quantityMode = requestedQuantityMode === 'manual'
+            || (!hasExplicitQuantityMode && Number.isInteger(parsedQuantity) && parsedQuantity > 0)
+            ? 'manual'
+            : 'auto';
+        next.quantity = next.quantityMode === 'manual'
+            && Number.isInteger(parsedQuantity) && parsedQuantity > 0
             ? parsedQuantity
             : null;
 
@@ -473,6 +487,7 @@
             executionMode: normalized.executionMode,
             strategy: normalized.strategy,
             quantity: normalized.quantity,
+            quantityMode: normalized.quantityMode,
             repriceThreshold: normalized.repriceThreshold,
             timeInForce: normalized.timeInForce,
             isExpanded: normalized.isExpanded,

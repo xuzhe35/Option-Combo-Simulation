@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { loadBrowserScripts } = require('./helpers/load-browser-scripts');
 
 function createElement(initial = {}) {
+    const classes = new Set();
     return {
         value: '',
         textContent: '',
@@ -13,10 +14,32 @@ function createElement(initial = {}) {
         checked: false,
         style: {},
         blurCalls: 0,
+        focusCalls: 0,
         children: [],
         listeners: {},
+        attributes: {},
+        classList: {
+            toggle(name, enabled) {
+                if (enabled) classes.add(name);
+                else classes.delete(name);
+            },
+            contains(name) {
+                return classes.has(name);
+            },
+        },
         addEventListener(type, handler) {
             this.listeners[type] = handler;
+        },
+        setAttribute(name, value) {
+            this.attributes[name] = String(value);
+        },
+        getAttribute(name) {
+            return Object.prototype.hasOwnProperty.call(this.attributes, name)
+                ? this.attributes[name]
+                : null;
+        },
+        removeAttribute(name) {
+            delete this.attributes[name];
         },
         appendChild(child) {
             if (child && typeof child === 'object') {
@@ -39,6 +62,15 @@ function createElement(initial = {}) {
         blur() {
             this.blurCalls += 1;
         },
+        focus() {
+            this.focusCalls += 1;
+        },
+        querySelector() {
+            return null;
+        },
+        querySelectorAll() {
+            return [];
+        },
         ...initial,
     };
 }
@@ -49,6 +81,34 @@ module.exports = {
         {
             name: 'binds control panel events and updates session state',
             async run() {
+                const documentListeners = {};
+                const backgroundContent = createElement({ inert: false });
+                const dialogPanel = createElement();
+                const dialogClose = createElement();
+                const dialogDone = createElement();
+                const simulationControlsDialog = createElement({
+                    hidden: true,
+                    querySelector(selector) {
+                        return selector === '.simulation-controls-dialog-panel'
+                            ? dialogPanel
+                            : null;
+                    },
+                    querySelectorAll(selector) {
+                        return selector === '.simulationControlsDialogCloseBtn'
+                            ? [dialogClose, dialogDone]
+                            : [dialogClose, dialogDone];
+                    },
+                });
+                const body = createElement({ children: [backgroundContent, simulationControlsDialog] });
+                simulationControlsDialog.parentNode = body;
+                const controlPanelToggleLabel = createElement({ textContent: '' });
+                const togglePrimaryControlPanelBtn = createElement({
+                    querySelector(selector) {
+                        return selector === '.control-panel-toggle-label'
+                            ? controlPanelToggleLabel
+                            : null;
+                    },
+                });
                 const elements = {
                     marketDataMode: createElement({ value: 'live' }),
                     marketDataModeHint: createElement({ textContent: '' }),
@@ -112,10 +172,19 @@ module.exports = {
                     simImpliedLambdaFileInput: createElement({ value: '' }),
                     toggleGreeksBtn: createElement({ textContent: '' }),
                     greeksStatusText: createElement({ textContent: '' }),
+                    togglePrimaryControlPanelBtn,
+                    simulationControlsDialog,
                     allowLiveComboOrders: createElement({ checked: false }),
                     liveComboOrderAccountControls: createElement({ hidden: true, style: {} }),
                     liveComboOrderAccountSelect: createElement({ value: '', disabled: true }),
                     liveComboOrderAccountHint: createElement({ textContent: '' }),
+                    pricingClockBanner: createElement({ hidden: true, style: {} }),
+                    pricingClockBannerBadge: createElement({ textContent: '' }),
+                    pricingClockBannerTitle: createElement({ textContent: '' }),
+                    pricingClockBannerBody: createElement({ textContent: '' }),
+                    pricingClockBannerDetails: createElement({ hidden: true, style: {} }),
+                    pricingClockBannerDetailsSummary: createElement({ textContent: '' }),
+                    pricingClockBannerDetailBody: createElement({ textContent: '' }),
                 };
 
                 let updateCalls = 0;
@@ -123,6 +192,24 @@ module.exports = {
                 let subscriptionCalls = 0;
                 let settleAllCalls = 0;
                 let managedAccountSnapshotCalls = 0;
+                let renderCalls = 0;
+
+                const testDocument = {
+                    body,
+                    activeElement: togglePrimaryControlPanelBtn,
+                    addEventListener(type, handler) {
+                        documentListeners[type] = handler;
+                    },
+                    getElementById(id) {
+                        return elements[id];
+                    },
+                    querySelector() {
+                        return null;
+                    },
+                    createElement() {
+                        return createElement();
+                    },
+                };
 
                 const ctx = loadBrowserScripts([
                     'js/date_utils.js',
@@ -131,17 +218,7 @@ module.exports = {
                     'js/session_logic.js',
                     'js/control_panel_ui.js',
                 ], {
-                    document: {
-                        getElementById(id) {
-                            return elements[id];
-                        },
-                        querySelector() {
-                            return null;
-                        },
-                        createElement() {
-                            return createElement();
-                        },
-                    },
+                    document: testDocument,
                 });
 
                 const currencyFormatter = new Intl.NumberFormat('en-US', {
@@ -182,7 +259,18 @@ module.exports = {
                     selectedLiveComboOrderAccount: '',
                     forwardRateSamples: [],
                     futuresPool: [],
-                    groups: [],
+                    // Coverage warnings name legs by group and contract rather
+                    // than by internal id, so the resolution source must exist.
+                    groups: [
+                        {
+                            id: 'g1',
+                            name: 'QQQ dc rfly',
+                            legs: [
+                                { id: 'near-leg', type: 'call', pos: 2, strike: 620, expDate: '2026-08-21' },
+                                { id: 'far-leg', type: 'put', pos: -1, strike: 600, expDate: '2026-09-18' },
+                            ],
+                        },
+                    ],
                 };
 
                 let lastAddDaysBase = '';
@@ -202,6 +290,9 @@ module.exports = {
                     settleHistoricalReplayGroups() {
                         settleAllCalls += 1;
                     },
+                    renderGroups() {
+                        renderCalls += 1;
+                    },
                     addDays(baseDate, days) {
                         lastAddDaysBase = baseDate;
                         return `2026-03-${String(16 + days).padStart(2, '0')}`;
@@ -213,6 +304,36 @@ module.exports = {
                         return 0;
                     },
                 });
+
+                assert.equal(simulationControlsDialog.hidden, true);
+                togglePrimaryControlPanelBtn.listeners.click();
+                assert.equal(simulationControlsDialog.hidden, false);
+                assert.equal(backgroundContent.inert, true);
+                assert.equal(dialogPanel.focusCalls, 1);
+
+                testDocument.activeElement = dialogDone;
+                let tabPrevented = false;
+                documentListeners.keydown({
+                    key: 'Tab',
+                    preventDefault() {
+                        tabPrevented = true;
+                    },
+                });
+                assert.equal(tabPrevented, true);
+                assert.equal(dialogClose.focusCalls, 1);
+
+                testDocument.activeElement = dialogClose;
+                documentListeners.keydown({
+                    key: 'Tab',
+                    shiftKey: true,
+                    preventDefault() {},
+                });
+                assert.equal(dialogDone.focusCalls, 1);
+
+                documentListeners.keydown({ key: 'Escape' });
+                assert.equal(simulationControlsDialog.hidden, true);
+                assert.equal(backgroundContent.inert, false);
+                assert.equal(togglePrimaryControlPanelBtn.focusCalls, 1);
 
                 assert.equal(elements.toggleGreeksBtn.textContent, 'Enable Greeks');
                 assert.match(elements.greeksStatusText.textContent, /off by default/i);
@@ -455,8 +576,10 @@ module.exports = {
                 assert.equal(subscriptionCalls, subscriptionCallsBeforeGreeksToggle + 1);
                 assert.equal(updateCalls, updateCallsBeforeGreeksToggle + 1);
 
+                const renderCallsBeforeLiveOrderToggle = renderCalls;
                 elements.allowLiveComboOrders.listeners.change({ target: { checked: true } });
                 assert.equal(state.allowLiveComboOrders, true);
+                assert.equal(renderCalls, renderCallsBeforeLiveOrderToggle + 1);
                 assert.equal(managedAccountSnapshotCalls, 1);
                 assert.equal(elements.liveComboOrderAccountControls.hidden, false);
                 assert.equal(elements.liveComboOrderAccountSelect.disabled, false);
@@ -562,9 +685,18 @@ module.exports = {
                 ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
                 assert.match(elements.simImpliedLambdaStatus.textContent, /coverage is incomplete/i);
                 assert.match(elements.simImpliedLambdaStatus.textContent, new RegExp(coveredDate2));
-                assert.match(elements.simImpliedLambdaStatus.textContent, /near-leg, far-leg/i);
+                // Affected legs are named by group and contract; the internal
+                // leg ids must never reach the trader-facing message.
+                assert.match(
+                    elements.simImpliedLambdaStatus.textContent,
+                    /QQQ dc rfly · \+2 Call 620 exp 2026-08-21; QQQ dc rfly · -1 Put 600 exp 2026-09-18/,
+                );
+                assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /near-leg|far-leg/i);
                 assert.match(elements.simImpliedLambdaStatus.textContent, /Projection remains available/i);
-                assert.match(elements.simImpliedLambdaStatus.textContent, /λ≈0\.11/i);
+                assert.match(elements.simImpliedLambdaStatus.textContent, /IVTS median λ≈0\.11/i);
+                assert.match(elements.pricingClockBannerTitle.textContent, /IVTS median λ≈0\.11/i);
+                assert.match(elements.pricingClockBannerBody.textContent, /loaded IVTS curve median/i);
+                assert.doesNotMatch(elements.pricingClockBannerBody.textContent, /scalar λ/i);
                 assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /cannot bypass/i);
                 assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /automatic fallback/i);
                 assert.equal(elements.simImpliedLambdaStatus.style.color, '#b45309');
@@ -586,6 +718,7 @@ module.exports = {
                 ctx.OptionComboControlPanelUI.refreshSimTimeBasisUi(state);
                 assert.match(elements.simImpliedLambdaStatus.textContent, /no fresh matching V2 curve is loaded/i);
                 assert.match(elements.simImpliedLambdaStatus.textContent, new RegExp(coveredDate1));
+                assert.match(elements.simImpliedLambdaStatus.textContent, /QQQ dc rfly · -1 Put 600 exp 2026-09-18/);
                 assert.equal(elements.simImpliedLambdaStatus.style.color, '#b45309');
 
                 state.simImpliedLambdaCoverage = {
@@ -611,7 +744,10 @@ module.exports = {
                 ctx.OptionComboControlPanelUI.refreshBoundDynamicControls();
                 assert.match(elements.simImpliedLambdaStatus.textContent, /exact IB contract timing/i);
                 assert.match(elements.simImpliedLambdaStatus.textContent, /independent of weekend\/holiday λ/i);
-                assert.match(elements.simImpliedLambdaStatus.textContent, /es-jul22-call/i);
+                // This id matches no leg in state, so the message falls back to
+                // a count instead of leaking the raw id.
+                assert.match(elements.simImpliedLambdaStatus.textContent, /Affects 1 open leg\./);
+                assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /es-jul22-call/i);
                 assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /Implied λ unavailable/i);
                 assert.doesNotMatch(elements.simImpliedLambdaStatus.textContent, /cross a weekend/i);
                 assert.equal(elements.simImpliedLambdaStatus.style.color, '#b45309');

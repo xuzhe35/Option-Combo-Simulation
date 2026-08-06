@@ -127,6 +127,156 @@
         valueEl.title = formatted.title;
     }
 
+    function formatPortfolioDeltaValue(value) {
+        if (!Number.isFinite(value)) {
+            return 'N/A';
+        }
+        const digits = Math.abs(value) >= 100 ? 0 : 2;
+        return `${value >= 0 ? '+' : ''}${value.toLocaleString(undefined, {
+            minimumFractionDigits: digits,
+            maximumFractionDigits: digits,
+        })}`;
+    }
+
+    // Cents on a portfolio-wide decay figure are noise, and at book size they
+    // wrap the tile onto a second line and knock the two tiles out of
+    // alignment. Same threshold as the group header chip.
+    const _thetaFormatterCache = new Map();
+
+    // Derived from the caller's formatter rather than the ambient locale: the
+    // app formats in en-US, but a browser set to another locale renders the
+    // same request as "US$98,765".
+    function resolveThetaFormatter(currencyFormatter, digits) {
+        const options = currencyFormatter && typeof currencyFormatter.resolvedOptions === 'function'
+            ? currencyFormatter.resolvedOptions()
+            : {};
+        const locale = options.locale || 'en-US';
+        const currency = options.currency || 'USD';
+        const key = `${locale}|${currency}|${digits}`;
+        if (!_thetaFormatterCache.has(key)) {
+            _thetaFormatterCache.set(key, new Intl.NumberFormat(locale, {
+                style: 'currency',
+                currency,
+                minimumFractionDigits: digits,
+                maximumFractionDigits: digits,
+            }));
+        }
+        return _thetaFormatterCache.get(key);
+    }
+
+    function formatPortfolioThetaValue(value, currencyFormatter) {
+        if (!Number.isFinite(value)) {
+            return 'N/A';
+        }
+        const magnitude = Math.abs(value);
+        const formatter = resolveThetaFormatter(currencyFormatter, magnitude >= 100 ? 0 : 2);
+        return `${value >= 0 ? '+' : '-'}${formatter.format(magnitude)}`;
+    }
+
+    function applyGreekTileState(tileEl, valueEl, value, available, formatted, signColors) {
+        if (valueEl) {
+            valueEl.textContent = available ? formatted : 'N/A';
+            valueEl.classList.toggle('is-unavailable', !available);
+            const sign = available && Number.isFinite(value) ? Math.sign(value) : 0;
+            valueEl.classList.toggle('greeks-tile-value-positive', signColors && sign > 0);
+            valueEl.classList.toggle('greeks-tile-value-negative', signColors && sign < 0);
+        }
+        if (tileEl) {
+            tileEl.classList.toggle('is-unavailable', !available);
+        }
+    }
+
+    function describePortfolioGreeksScope(derivedData) {
+        const groupCount = Number(derivedData && derivedData.portfolioGreeksIncludedGroupCount) || 0;
+        if (groupCount <= 0) {
+            return 'hedge only';
+        }
+        return `${groupCount} group${groupCount === 1 ? '' : 's'}`;
+    }
+
+    function buildPortfolioGreeksNote(derivedData) {
+        const deltaMissing = Number(derivedData && derivedData.portfolioDeltaMissingGroupCount) || 0;
+        const thetaMissing = Number(derivedData && derivedData.portfolioThetaMissingGroupCount) || 0;
+        const deltaStale = Number(derivedData && derivedData.portfolioDeltaStaleGroupCount) || 0;
+        const thetaStale = Number(derivedData && derivedData.portfolioThetaStaleGroupCount) || 0;
+        const stale = [];
+        if (deltaStale > 0) {
+            stale.push(`Δ in ${deltaStale} group${deltaStale === 1 ? '' : 's'}`);
+        }
+        if (thetaStale > 0) {
+            stale.push(`Θ in ${thetaStale} group${thetaStale === 1 ? '' : 's'}`);
+        }
+        if (stale.length > 0) {
+            return `Live TWS model Greeks are stale for ${stale.join(' and ')}; stale values are hidden.`;
+        }
+        const waiting = [];
+        if (deltaMissing > 0) {
+            waiting.push(`Δ in ${deltaMissing} group${deltaMissing === 1 ? '' : 's'}`);
+        }
+        if (thetaMissing > 0) {
+            waiting.push(`Θ in ${thetaMissing} group${thetaMissing === 1 ? '' : 's'}`);
+        }
+        if (waiting.length > 0) {
+            return `Waiting on TWS model greeks for ${waiting.join(' and ')}.`;
+        }
+        // Theta is IB's one-calendar-day model decay. This book prices weekends
+        // on a weighted clock, so three calendar days over a weekend are not
+        // three thetas; say so rather than let the number imply it.
+        return 'Θ is IB\'s one-calendar-day model decay, not a weekend-weighted projection.';
+    }
+
+    function applyPortfolioGreeks(derivedData, currencyFormatter) {
+        const card = document.getElementById('portfolioGreeksCard');
+        if (!card) {
+            return;
+        }
+
+        if (!derivedData || derivedData.portfolioGreeksDisplayable !== true) {
+            card.style.display = 'none';
+            return;
+        }
+
+        card.style.display = '';
+
+        const scopeEl = document.getElementById('portfolioGreeksScope');
+        if (scopeEl) {
+            scopeEl.textContent = describePortfolioGreeksScope(derivedData);
+        }
+
+        const netDelta = Number(derivedData.portfolioNetDelta);
+        applyGreekTileState(
+            document.getElementById('portfolioDeltaTile'),
+            document.getElementById('portfolioNetDeltaValue'),
+            netDelta,
+            derivedData.portfolioDeltaAvailable === true && Number.isFinite(netDelta),
+            formatPortfolioDeltaValue(netDelta),
+            false
+        );
+
+        const netTheta = Number(derivedData.portfolioNetTheta);
+        applyGreekTileState(
+            document.getElementById('portfolioThetaTile'),
+            document.getElementById('portfolioNetThetaValue'),
+            netTheta,
+            derivedData.portfolioThetaAvailable === true && Number.isFinite(netTheta),
+            formatPortfolioThetaValue(netTheta, currencyFormatter),
+            true
+        );
+
+        const deltaUnitEl = document.getElementById('portfolioDeltaUnit');
+        if (deltaUnitEl) {
+            const hedgeDelta = Number(derivedData.portfolioHedgeDelta) || 0;
+            deltaUnitEl.textContent = Math.abs(hedgeDelta) > 0.000001
+                ? 'share equivalents, incl. hedge'
+                : 'share equivalents';
+        }
+
+        const noteEl = document.getElementById('portfolioGreeksNote');
+        if (noteEl) {
+            noteEl.textContent = buildPortfolioGreeksNote(derivedData);
+        }
+    }
+
     function applyGlobalDerivedData(derivedData, currencyFormatter, chartApi) {
         const drawCharts = !chartApi || chartApi.drawCharts !== false;
         document.getElementById('totalCost').textContent = currencyFormatter.format(derivedData.globalTotalCost);
@@ -148,6 +298,7 @@
         }
         applyOptionLegRedundancy(derivedData);
         applyProjectedOptionDelivery(derivedData);
+        applyPortfolioGreeks(derivedData, currencyFormatter);
 
         const globalLivePnLRow = document.getElementById('globalLivePnLRow');
         if (globalLivePnLRow) {
@@ -233,6 +384,7 @@
 
     globalScope.OptionComboGlobalUI = {
         applyGlobalDerivedData,
+        applyPortfolioGreeks,
         formatProjectedOptionDelivery,
     };
 })(typeof globalThis !== 'undefined' ? globalThis : window);
