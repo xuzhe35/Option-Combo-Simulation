@@ -1,0 +1,19 @@
+# Keep cross-platform source diffs stable and prevent CR characters from being
+# reported as trailing whitespace. Windows launchers retain native CRLF.
+* text=auto
+.gitattributes text eol=lf
+*.css text eol=lf
+*.ini text eol=lf
+*.html text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.command text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
