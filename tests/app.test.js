@@ -1346,6 +1346,7 @@ module.exports = {
                             unknownAttempt = {
                                 documentId: params.documentId,
                                 title: params.title,
+                                operation: params.operation,
                                 expectedRevision: params.expectedRevision,
                                 fingerprint: JSON.stringify(params.payload),
                                 saveToken: 'token-1',
@@ -1402,6 +1403,98 @@ module.exports = {
                 // Same document id resumed, and the user was not re-prompted
                 // for a name on the resuming retry.
                 assert.equal(calls.save.length, 2);
+                assert.equal(calls.save[1].documentId, calls.save[0].documentId);
+                assert.equal(calls.save[1].title, calls.save[0].title);
+                assert.equal(calls.save[0].operation, 'create');
+                assert.equal(calls.save[1].operation, 'create');
+                assert.equal(prompts.length, 1);
+            },
+        },
+        {
+            name: 'unknown Save a Copy cannot fall through to updating the original',
+            async run() {
+                let failNext = true;
+                let unknownAttempt = null;
+                const alerts = [];
+                const prompts = [];
+                const { client: fakeClient, calls } = createFakePersistenceClient({
+                    saveWorkspace(params) {
+                        calls.save.push(params);
+                        if (failNext) {
+                            failNext = false;
+                            unknownAttempt = {
+                                documentId: params.documentId,
+                                title: params.title,
+                                operation: params.operation,
+                                expectedRevision: params.expectedRevision,
+                                fingerprint: JSON.stringify(params.payload),
+                                saveToken: 'copy-token-1',
+                            };
+                            const error = new Error('lost copy ack');
+                            error.code = 'timeout';
+                            return Promise.reject(error);
+                        }
+                        unknownAttempt = null;
+                        return Promise.resolve({
+                            document: {
+                                documentId: params.documentId,
+                                title: params.title,
+                                revision: 1,
+                                updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                            },
+                        });
+                    },
+                });
+                fakeClient.envelope = {
+                    documentId: 'doc-original', title: 'Original', revision: 4,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                fakeClient.getUnknownSaveAttempt = () =>
+                    (unknownAttempt ? { ...unknownAttempt } : null);
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        alert(message) { alerts.push(message); },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'Copy'; },
+                            promptWorkspaceTitle(suggested) {
+                                prompts.push(suggested);
+                                return 'Copy';
+                            },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() { return 'cancel'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                // The copy may commit even though its ACK is lost.
+                assert.equal(await harness.context.saveWorkspaceCopyToStore(), false);
+                assert.equal(calls.save.length, 1);
+                assert.equal(calls.save[0].operation, 'copy');
+                assert.notEqual(calls.save[0].documentId, 'doc-original');
+
+                // A normal Save must not overwrite the original while that
+                // copy result remains unresolved.
+                assert.equal(await harness.context.saveWorkspaceToStore(), false);
+                assert.equal(calls.save.length, 1);
+                assert.match(alerts.join('\n'), /Retry Save a Copy/);
+
+                // Retrying the original operation resumes its identity.
+                assert.equal(await harness.context.saveWorkspaceCopyToStore(), true);
+                assert.equal(calls.save.length, 2);
+                assert.equal(calls.save[1].operation, 'copy');
                 assert.equal(calls.save[1].documentId, calls.save[0].documentId);
                 assert.equal(calls.save[1].title, calls.save[0].title);
                 assert.equal(prompts.length, 1);

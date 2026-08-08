@@ -270,6 +270,7 @@
             return {
                 documentId: saveAttempt.documentId,
                 title: saveAttempt.title,
+                operation: saveAttempt.operation,
                 expectedRevision: saveAttempt.expectedRevision,
                 fingerprint: saveAttempt.fingerprint,
                 saveToken: saveAttempt.saveToken,
@@ -338,6 +339,10 @@
             const title = params.title;
             const payload = params.payload;
             const expectedRevision = params.expectedRevision;
+            const operation = ['create', 'update', 'copy'].includes(params.operation)
+                ? params.operation
+                : (expectedRevision === undefined || expectedRevision === null
+                    ? 'create' : 'update');
 
             const canonical = fingerprintPayload(payload);
             const bytes = byteLength(canonical);
@@ -358,6 +363,7 @@
                 if (inFlightSave.documentId === documentId
                     && inFlightSave.fingerprint === canonical
                     && inFlightSave.title === title
+                    && inFlightSave.operation === operation
                     && inFlightSave.expectedRevision === expectedRevision) {
                     return inFlightSave.promise;
                 }
@@ -374,7 +380,10 @@
             if (saveAttempt
                 && saveAttempt.status === 'unknown'
                 && saveAttempt.documentId === documentId
-                && saveAttempt.fingerprint === canonical) {
+                && saveAttempt.fingerprint === canonical
+                && saveAttempt.title === title
+                && saveAttempt.operation === operation
+                && saveAttempt.expectedRevision === expectedRevision) {
                 saveToken = saveAttempt.saveToken;
             } else {
                 saveToken = generateId();
@@ -383,6 +392,7 @@
                 saveToken,
                 documentId,
                 title,
+                operation,
                 expectedRevision,
                 fingerprint: canonical,
                 status: 'in_flight',
@@ -417,7 +427,7 @@
                 throw error;
             });
             inFlightSave = {
-                promise, documentId, title, expectedRevision,
+                promise, documentId, title, operation, expectedRevision,
                 fingerprint: canonical,
             };
             const clearInFlight = () => {

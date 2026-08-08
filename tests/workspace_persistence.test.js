@@ -511,7 +511,7 @@ module.exports = {
             },
         },
         {
-            name: 'an unknown create exposes its identity for a resuming retry',
+            name: 'an unknown copy exposes its operation and identity for retry',
             async run() {
                 const { client, sent } = createHarness();
                 const documentId = 'doc-aaaaaaaa-1111-4111-8111-111111111111';
@@ -519,6 +519,7 @@ module.exports = {
 
                 const attempt = client.saveWorkspace({
                     documentId, title: 'First book', payload: workspacePayload(),
+                    operation: 'copy',
                 });
                 assert.equal(client.getUnknownSaveAttempt(), null);
                 client.handleSocketClosed();
@@ -527,6 +528,7 @@ module.exports = {
                 const unknown = client.getUnknownSaveAttempt();
                 assert.equal(unknown.documentId, documentId);
                 assert.equal(unknown.title, 'First book');
+                assert.equal(unknown.operation, 'copy');
                 assert.equal(unknown.expectedRevision, undefined);
                 assert.equal(unknown.saveToken, sent[0].saveToken);
 
@@ -534,6 +536,7 @@ module.exports = {
                 // the token; success clears the parked identity.
                 const retry = client.saveWorkspace({
                     documentId, title: 'First book', payload: workspacePayload(),
+                    operation: 'copy',
                 });
                 assert.equal(sent[1].saveToken, sent[0].saveToken);
                 client.handleMessage({

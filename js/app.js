@@ -1857,9 +1857,31 @@ async function _saveWorkspaceToStoreUnlocked(options = {}) {
     const copy = options.copy === true;
     const envelope = client.getEnvelope();
     const writer = client.getWriterState();
+    const requestedOperation = copy ? 'copy' : (envelope ? 'update' : 'create');
+    const unknownAttempt = typeof client.getUnknownSaveAttempt === 'function'
+        ? client.getUnknownSaveAttempt()
+        : null;
+    const unknownOperation = unknownAttempt
+        ? (['create', 'update', 'copy'].includes(unknownAttempt.operation)
+            ? unknownAttempt.operation
+            : (unknownAttempt.expectedRevision === undefined
+                || unknownAttempt.expectedRevision === null
+                ? (envelope ? 'copy' : 'create')
+                : 'update'))
+        : null;
+    if (unknownOperation && unknownOperation !== requestedOperation) {
+        // Never let a different button silently replace an unresolved
+        // operation. In particular, Save must not update the original after
+        // a Save-a-Copy ACK was lost and the copy may already exist.
+        const pendingLabel = unknownOperation === 'copy' ? 'Save a Copy' : 'Save';
+        alert(`The previous ${pendingLabel} result is still unknown. `
+            + `Retry ${pendingLabel} before starting a different save.`);
+        return false;
+    }
+    const operation = unknownOperation || requestedOperation;
     // Allow-list: only an actual writer may update its bound document.
     // idle / readonly / stale / takeover-pending never overwrite in place.
-    if (!copy && envelope && writer.state !== 'writer') {
+    if (operation === 'update' && envelope && writer.state !== 'writer') {
         const eligibility = typeof client.canTakeover === 'function'
             ? client.canTakeover()
             : { allowed: false };
@@ -1900,46 +1922,38 @@ async function _saveWorkspaceToStoreUnlocked(options = {}) {
     let documentId;
     let expectedRevision;
     let title;
-    if (!copy && envelope) {
+    if (unknownAttempt) {
+        // Resume every unknown operation with its complete identity. The
+        // client reuses the token only when all idempotency inputs still
+        // match; a changed payload gets a new token but never a new document.
+        documentId = unknownAttempt.documentId;
+        title = unknownAttempt.title;
+        expectedRevision = unknownAttempt.expectedRevision;
+        state.importedSessionTitle = title;
+    } else if (operation === 'update' && envelope) {
         documentId = envelope.documentId;
         expectedRevision = envelope.revision;
         title = envelope.title;
     } else {
-        // A create/copy whose ACK was lost must resume the SAME document
-        // identity: the server may already hold it, and the reused token
-        // (unchanged content) or create-conflict (changed content) resolves
-        // it deterministically. A fresh UUID per retry forked documents.
-        const unknownAttempt = typeof client.getUnknownSaveAttempt === 'function'
-            ? client.getUnknownSaveAttempt()
-            : null;
-        const resumableCreate = unknownAttempt
-            && (unknownAttempt.expectedRevision === undefined
-                || unknownAttempt.expectedRevision === null);
-        if (resumableCreate) {
-            documentId = unknownAttempt.documentId;
-            title = unknownAttempt.title;
-            state.importedSessionTitle = title;
-        } else {
-            title = OptionComboSessionUI.promptWorkspaceTitle(
-                OptionComboSessionUI.resolveDocumentTitle(state)
-            );
-            if (!title) {
-                return false;
-            }
-            // Set before the snapshot so the saved payload and the
-            // fingerprint both carry the final title.
-            state.importedSessionTitle = title;
-            documentId = _generateWorkspaceUuid();
+        title = OptionComboSessionUI.promptWorkspaceTitle(
+            OptionComboSessionUI.resolveDocumentTitle(state)
+        );
+        if (!title) {
+            return false;
         }
+        // Set before the snapshot so the saved payload and the fingerprint
+        // both carry the final title.
+        state.importedSessionTitle = title;
+        documentId = _generateWorkspaceUuid();
         expectedRevision = undefined;
     }
 
     const payload = _buildPersistencePayload();
     try {
         const response = await client.saveWorkspace({
-            documentId, title, payload, expectedRevision,
+            documentId, title, payload, expectedRevision, operation,
         });
-        if (copy || !envelope) {
+        if (operation !== 'update') {
             await client.acquireWriterLease(documentId);
         }
         // Saved is only shown after the store's commit ACK.
@@ -1972,8 +1986,9 @@ async function _saveWorkspaceToStoreUnlocked(options = {}) {
             return false;
         }
         if (code === 'timeout' || code === 'disconnected') {
+            const retryLabel = operation === 'copy' ? 'Save a Copy' : 'Save';
             alert('The save result is unknown (connection problem). '
-                + 'Retry Save — the retry resumes the same document and '
+                + `Retry ${retryLabel} — the retry resumes the same document and `
                 + 'cannot create a duplicate.');
             return false;
         }
