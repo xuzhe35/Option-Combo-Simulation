@@ -129,8 +129,13 @@ Current surfaces:
 - group modes:
   - `trial`
   - `active`
+  - `liquidation` (entry-cost P&L marked at current intrinsic value)
   - `amortized`
   - `settlement`
+- Liquidation bypasses option BBO/model/IV/time value, but still requires the
+  correct current per-leg spot or bound Futures Pool price. Past-cutoff cached
+  option marks are rejected from Active Live P&L at the shared observable-price
+  boundary.
 - per-group portfolio average-cost sync toggle
 - per-group and global TWS Leg Exists Check with signed quantity comparison
 - assignment / exercise conversion into deliverable underlying legs

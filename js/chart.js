@@ -155,6 +155,13 @@ class PnLChart {
         const activeViewMode = group.viewMode || 'active';
         const pricingContext = _getChartPricingContextApi();
         const pricingCore = _getChartPricingCoreApi();
+        const isLiquidationMode = viewMode => pricingCore
+            && typeof pricingCore.isLiquidationViewMode === 'function'
+            ? pricingCore.isLiquidationViewMode(viewMode)
+            : viewMode === 'liquidation';
+        const allLegsUseLiquidation = group.legs.every(leg =>
+            isLiquidationMode(leg._viewMode || activeViewMode)
+        );
         const convergenceMode = pricingCore
             && typeof pricingCore.normalizeProjectionConvergenceMode === 'function'
             ? pricingCore.normalizeProjectionConvergenceMode(
@@ -178,7 +185,7 @@ class PnLChart {
             && typeof pricingContext.resolveSimulationTiming === 'function'
             ? pricingContext.resolveSimulationTiming(globalState)
             : (globalState && globalState.simulationTiming || null);
-        if (simulationTiming && simulationTiming.available === false) {
+        if (simulationTiming && simulationTiming.available === false && !allLegsUseLiquidation) {
             this.drawEmptyState(`Simulation timing unavailable (${simulationTiming.status}).`);
             this.lastRenderData = null;
             return;
@@ -255,8 +262,9 @@ class PnLChart {
             const value = parseFloat(leg && leg.partialCloseRealizedPnl);
             return sum + (Number.isFinite(value) ? value : 0);
         }, 0);
-        const hasUnavailableSimulation = processedLegs.some(leg =>
-            !leg.isUnderlyingLeg && !leg.isExpired && !Number.isFinite(leg.simIV)
+        const hasUnavailableSimulation = processedLegs.some((leg, index) =>
+            !isLiquidationMode(group.legs[index]._viewMode || activeViewMode)
+            && !leg.isUnderlyingLeg && !leg.isExpired && !Number.isFinite(leg.simIV)
         );
         const fallbackLegs = processedLegs.flatMap((processedLeg, index) => {
             if (!processedLeg || ![
@@ -281,8 +289,9 @@ class PnLChart {
             fallbackLegs,
             fallbackCount: fallbackLegs.length,
         };
-        const lambdaTimingFailure = processedLegs.find(leg =>
-            leg && leg.timingStatus === 'implied_lambda_incomplete'
+        const lambdaTimingFailure = processedLegs.find((leg, index) =>
+            !isLiquidationMode(group.legs[index]._viewMode || activeViewMode)
+            && leg && leg.timingStatus === 'implied_lambda_incomplete'
         );
         if (lambdaTimingFailure) {
             const message = pricingCore
@@ -297,9 +306,16 @@ class PnLChart {
             this.lastRenderData = null;
             return;
         }
-        const convergence = pricingCore
+        const modelLegIndexes = group.legs
+            .map((leg, index) => isLiquidationMode(leg._viewMode || activeViewMode) ? -1 : index)
+            .filter(index => index >= 0);
+        const convergence = pricingCore && modelLegIndexes.length > 0
             && typeof pricingCore.assessProjectionConvergence === 'function'
-            ? pricingCore.assessProjectionConvergence(globalState, group.legs, processedLegs)
+            ? pricingCore.assessProjectionConvergence(
+                globalState,
+                modelLegIndexes.map(index => group.legs[index]),
+                modelLegIndexes.map(index => processedLegs[index])
+            )
             : { ready: true };
         if (convergence.ready === false) {
             const message = pricingCore

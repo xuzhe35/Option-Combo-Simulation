@@ -20,6 +20,7 @@
         assessProjectionConvergence,
         formatProjectionConvergenceFailure,
         formatProjectionTimingFailure,
+        isLiquidationViewMode,
     } = pricingCore;
     const { calculateAmortizedCost, calculateCombinedAmortizedCost } = amortized;
 
@@ -673,9 +674,31 @@
         };
     }
 
-    function buildCurrentPriceDisplayState(leg, activeViewMode, displayUnderlyingPrice, processedLeg, underlyingProfile, selectedLivePrice) {
+    function buildCurrentPriceDisplayState(leg, activeViewMode, displayUnderlyingPrice, processedLeg, underlyingProfile, selectedLivePrice, simulatedPricePerShare = null) {
         const displaySymbol = (underlyingProfile && (underlyingProfile.enteredSymbol || underlyingProfile.underlyingSymbol)) || '';
         const zeroText = formatPriceInputValue(displaySymbol, 0);
+
+        if (isLiquidationViewMode(activeViewMode)) {
+            return {
+                value: Number.isFinite(simulatedPricePerShare)
+                    ? formatPriceInputValue(displaySymbol, simulatedPricePerShare)
+                    : '',
+                placeholder: Number.isFinite(simulatedPricePerShare) ? zeroText : 'N/A',
+                title: processedLeg && processedLeg.isUnderlyingLeg
+                    ? 'Current resolved underlying/futures value used by Liquidation mode.'
+                    : 'Liquidation intrinsic value at the current resolved underlying/futures price. Option quotes, IV and time value are ignored.',
+                readOnly: true,
+            };
+        }
+
+        if (selectedLivePrice && selectedLivePrice.quality === 'expired_contract') {
+            return {
+                value: '',
+                placeholder: 'Expired',
+                title: 'The contract is past its last-trade cutoff. Its cached pre-expiry quote is rejected; select Liquidation to value it at current intrinsic value.',
+                readOnly: false,
+            };
+        }
 
         if ((!selectedLivePrice || !selectedLivePrice.available) && leg && leg.currentPriceSource === 'missing') {
             const identityStatus = leg.liveQuoteIdentityStatus;
@@ -881,6 +904,7 @@
         };
         const simulationTimingAvailable = !simulationTiming
             || simulationTiming.available !== false;
+        const liquidationMode = isLiquidationViewMode(activeViewMode);
         const processedLeg = processLegData(
             leg,
             simulationDate,
@@ -896,11 +920,11 @@
 
         const pricingInputAvailable = Number.isFinite(legUnderlyingPrice)
             && (processedLeg.isUnderlyingLeg || legUnderlyingPrice > 0);
-        const convergence = typeof assessProjectionConvergence === 'function'
+        const convergence = !liquidationMode && typeof assessProjectionConvergence === 'function'
             ? assessProjectionConvergence(globalState, [leg], [processedLeg])
             : { ready: true };
         const convergenceAvailable = convergence.ready !== false;
-        const simPricePerShare = simulationTimingAvailable && pricingInputAvailable
+        const simPricePerShare = (simulationTimingAvailable || liquidationMode) && pricingInputAvailable
             && convergenceAvailable
             ? computeSimulatedPrice(
                 processedLeg,
@@ -936,6 +960,7 @@
         );
         const liveDelta = liveGreeks.delta;
         const hasLivePnl = activeViewMode === 'active'
+            && livePnlQuote.quality !== 'expired_contract'
             && ((livePnlQuote.available && (leg.cost !== 0 || livePnlQuote.price !== 0 || isClosed))
                 || Math.abs(partialCloseRealizedPnl) > 0.0001);
         const liveLegPnL = livePnlQuote.available
@@ -945,7 +970,9 @@
         const lambdaTimingFailure = processedLeg.timingStatus === 'implied_lambda_incomplete';
         let ivText = '';
         if (!processedLeg.isUnderlyingLeg) {
-            if (lambdaTimingFailure) {
+            if (liquidationMode) {
+                ivText = 'Sim IV: not used (intrinsic)';
+            } else if (lambdaTimingFailure) {
                 ivText = 'Sim IV: N/A (implied λ coverage missing)';
             } else if (!convergenceAvailable) {
                 ivText = 'Sim IV: N/A (strict live BBO required)';
@@ -967,7 +994,9 @@
         }
         const dteDisplay = buildLegDteDisplay(processedLeg);
         let ivTitle;
-        if (lambdaTimingFailure && typeof formatProjectionTimingFailure === 'function') {
+        if (liquidationMode) {
+            ivTitle = 'Liquidation mode ignores option IV, model time value and option quotes.';
+        } else if (lambdaTimingFailure && typeof formatProjectionTimingFailure === 'function') {
             ivTitle = formatProjectionTimingFailure(
                 processedLeg.timingStatus,
                 'Valuation',
@@ -1024,7 +1053,8 @@
                 legUnderlyingPrice,
                 processedLeg,
                 underlyingProfile,
-                livePnlQuote
+                livePnlQuote,
+                simPricePerShare
             ),
         };
     }
@@ -1035,6 +1065,7 @@
             : null;
         const activeViewMode = group.viewMode || 'active';
         const usesScenarioUnderlying = isSettlementScenarioMode(activeViewMode);
+        const isLiquidationMode = isLiquidationViewMode(activeViewMode);
         const supportsAmortizedMode = !underlyingProfile || underlyingProfile.supportsAmortizedMode !== false;
         const isAmortizedMode = activeViewMode === 'amortized' && supportsAmortizedMode;
         const liveAnchorUnderlyingPrice = pricingContext
@@ -1097,6 +1128,7 @@
             underlyingProfile,
             activeViewMode,
             usesScenarioUnderlying,
+            isLiquidationMode,
             isAmortizedMode,
             evalUnderlyingPrice,
             legResults,

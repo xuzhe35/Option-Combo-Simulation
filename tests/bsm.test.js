@@ -324,6 +324,39 @@ module.exports = {
             },
         },
         {
+            name: 'liquidation mode forces current intrinsic value before expiry',
+            run() {
+                const ctx = loadPricingContext();
+                const processedLeg = {
+                    type: 'call',
+                    isExpired: false,
+                    strike: 76,
+                    T: 2 / 365,
+                    simIV: 0.90,
+                    anchorUnderlyingPrice: 77.01,
+                };
+                const rawLeg = {
+                    currentPrice: 2.21,
+                    currentPriceSource: 'live',
+                    closePrice: null,
+                };
+
+                const price = ctx.computeSimulatedPrice(
+                    processedLeg,
+                    rawLeg,
+                    77.01,
+                    0.03,
+                    'liquidation',
+                    '2026-08-07',
+                    '2026-08-07',
+                    0
+                );
+
+                assert.ok(Math.abs(price - 1.01) < 1e-9);
+                assert.equal(ctx.isLiquidationViewMode('liquidation'), true);
+            },
+        },
+        {
             name: 'prices benchmark Black-76 futures option call and put values',
             run() {
                 const ctx = loadPricingContext();

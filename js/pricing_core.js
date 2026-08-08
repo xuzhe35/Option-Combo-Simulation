@@ -1540,6 +1540,29 @@
         );
     }
 
+    function isLiquidationViewMode(viewMode) {
+        return String(viewMode || '').trim().toLowerCase() === 'liquidation';
+    }
+
+    function computeIntrinsicPrice(processedLeg, underlyingPrice) {
+        if (!processedLeg) return null;
+        if (processedLeg.isUnderlyingLeg || isUnderlyingLeg(processedLeg.type)) {
+            return Number.isFinite(underlyingPrice) && underlyingPrice > 0
+                ? underlyingPrice
+                : null;
+        }
+        if (!Number.isFinite(underlyingPrice) || underlyingPrice <= 0) {
+            return null;
+        }
+        if (processedLeg.type === 'call') {
+            return Math.max(0, underlyingPrice - processedLeg.strike);
+        }
+        if (processedLeg.type === 'put') {
+            return Math.max(0, processedLeg.strike - underlyingPrice);
+        }
+        return null;
+    }
+
     function computeSimulatedPrice(processedLeg, rawLeg, underlyingPrice, interestRate, viewMode, simulatedDate, baseDate, ivOffset) {
         if (rawLeg.closePrice !== null && rawLeg.closePrice !== '') {
             const parsedClose = parseFloat(rawLeg.closePrice);
@@ -1563,6 +1586,14 @@
 
         if (processedLeg.isUnderlyingLeg || isUnderlyingLeg(processedLeg.type)) {
             return underlyingPrice;
+        }
+
+        // Liquidation is an explicit Group accounting view for contracts at or
+        // very near expiry. It deliberately ignores option quotes, model IV and
+        // remaining time value, and marks every open option at current
+        // intrinsic value against its own resolved spot/futures input.
+        if (isLiquidationViewMode(viewMode)) {
+            return computeIntrinsicPrice(processedLeg, underlyingPrice);
         }
 
         // Once the contract cutoff has been reached, an old non-zero mark is
@@ -1841,6 +1872,8 @@
         processLegData,
         computeLegPrice,
         computeSimulatedPrice,
+        computeIntrinsicPrice,
+        isLiquidationViewMode,
         normalizeProjectionConvergenceMode,
         assessProjectionConvergence,
         formatProjectionConvergenceFailure,

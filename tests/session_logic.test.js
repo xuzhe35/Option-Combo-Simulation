@@ -150,6 +150,22 @@ module.exports = {
                     ),
                     'amortized'
                 );
+
+                assert.equal(
+                    ctx.OptionComboSessionLogic.resolveGroupViewModeChange(
+                        { viewMode: 'trial', legs: [{ cost: 0 }] },
+                        'liquidation'
+                    ),
+                    'trial'
+                );
+
+                assert.equal(
+                    ctx.OptionComboSessionLogic.resolveGroupViewModeChange(
+                        { viewMode: 'trial', legs: [{ cost: 1.25 }] },
+                        'liquidation'
+                    ),
+                    'liquidation'
+                );
             },
         },
         {

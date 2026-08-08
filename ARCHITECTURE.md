@@ -318,6 +318,11 @@ Responsibilities:
   quote or its ContractDetails timing may enter pricing
 - observable live-mark anchoring at the exact current underlier/no-IV-shock
   point; neighboring scenario points stay model-priced
+- explicit Group `liquidation` view: preserves entry cost while valuing open
+  options at current intrinsic value, bypassing option quote/IV/time-value
+  convergence gates across valuation, main/global charts, Chart Lab, and
+  probability paths. The required spot or bound futures input still fails
+  closed, and cached option marks are no longer observable after last trade
 - underlying-leg handling
 - amortized-cost math
 

@@ -378,6 +378,15 @@
         }
         const pricingContext = globalScope.OptionComboPricingContext;
         const registry = globalScope.OptionComboProductRegistry;
+        const pricingCore = globalScope.OptionComboPricingCore;
+        const viewMode = group.viewMode || 'active';
+        const isLiquidationMode = mode => pricingCore
+            && typeof pricingCore.isLiquidationViewMode === 'function'
+            ? pricingCore.isLiquidationViewMode(mode)
+            : mode === 'liquidation';
+        const allLegsUseLiquidation = group.legs.every(leg =>
+            isLiquidationMode(leg._viewMode || viewMode)
+        );
         const projectionDate = groupProjectionDate(group, state);
         const workingState = { ...state, simulatedDate: projectionDate || state.simulatedDate };
         const simulationDate = pricingContext && typeof pricingContext.resolveSimulationDate === 'function'
@@ -389,7 +398,7 @@
         const simulationTiming = pricingContext && typeof pricingContext.resolveSimulationTiming === 'function'
             ? pricingContext.resolveSimulationTiming(workingState)
             : null;
-        if (simulationTiming && simulationTiming.available === false) {
+        if (simulationTiming && simulationTiming.available === false && !allLegsUseLiquidation) {
             return {
                 points: [],
                 breakEvens: [],
@@ -403,7 +412,6 @@
         const profile = registry && typeof registry.resolveUnderlyingProfile === 'function'
             ? registry.resolveUnderlyingProfile(state.underlyingSymbol)
             : null;
-        const viewMode = group.viewMode || 'active';
         const currentUnderlyingByLeg = [];
         const timingContexts = [];
         const processed = group.legs.map((leg) => {
@@ -465,9 +473,9 @@
                 timingContext
             );
         });
-        const pricingCore = globalScope.OptionComboPricingCore;
-        const lambdaTimingFailure = processed.find(leg =>
+        const lambdaTimingFailure = processed.find((leg, index) =>
             leg && leg.timingStatus === 'implied_lambda_incomplete'
+                && !isLiquidationMode(group.legs[index]._viewMode || viewMode)
         );
         if (lambdaTimingFailure) {
             const error = pricingCore
@@ -480,9 +488,16 @@
                 : 'Chart Lab projection unavailable: required weekend/holiday implied λ data is missing.';
             return { points: [], breakEvens: [], projectionDate, error };
         }
-        const convergence = pricingCore
+        const modelLegIndexes = group.legs
+            .map((leg, index) => isLiquidationMode(leg._viewMode || viewMode) ? -1 : index)
+            .filter(index => index >= 0);
+        const convergence = pricingCore && modelLegIndexes.length > 0
             && typeof pricingCore.assessProjectionConvergence === 'function'
-            ? pricingCore.assessProjectionConvergence(workingState, group.legs, processed)
+            ? pricingCore.assessProjectionConvergence(
+                workingState,
+                modelLegIndexes.map(index => group.legs[index]),
+                modelLegIndexes.map(index => processed[index])
+            )
             : { ready: true };
         if (convergence.ready === false) {
             const error = pricingCore
@@ -494,7 +509,10 @@
                 : 'Chart Lab projection unavailable: strict live BBO convergence inputs are missing.';
             return { points: [], breakEvens: [], projectionDate, error };
         }
-        if (processed.some((leg) => !leg.isUnderlyingLeg && !leg.isExpired && !Number.isFinite(leg.simIV))) {
+        if (processed.some((leg, index) =>
+            !isLiquidationMode(group.legs[index]._viewMode || viewMode)
+            && !leg.isUnderlyingLeg && !leg.isExpired && !Number.isFinite(leg.simIV)
+        )) {
             return { points: [], breakEvens: [], projectionDate, error: 'Missing IV on one or more option legs.' };
         }
         if (group.legs.some((leg, index) => !hasFixedProjectionPrice(leg)

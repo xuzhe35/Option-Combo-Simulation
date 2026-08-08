@@ -55,6 +55,47 @@ module.exports = {
             },
         },
         {
+            name: 'rejects cached option marks after the contract cutoff',
+            run() {
+                const ctx = loadPricingContext({
+                    OptionComboWsLiveQuotes: {
+                        getOptionQuote() {
+                            return {
+                                bid: 2.20,
+                                ask: 2.22,
+                                bidPresent: true,
+                                askPresent: true,
+                                bidAskValid: true,
+                                markSource: 'bid_ask_mid',
+                                quoteAsOf: '2026-08-07T19:59:00Z',
+                            };
+                        },
+                    },
+                });
+                const observable = ctx.OptionComboPricingContext.resolveObservableLegPrice(
+                    {
+                        marketDataMode: 'live',
+                        underlyingSymbol: 'SPY',
+                        liveQuoteAsOf: '2026-08-07T20:01:00Z',
+                        liveProjectionFeedConnected: true,
+                        liveProjectionFeedStale: false,
+                    },
+                    { livePriceMode: 'midpoint' },
+                    {
+                        id: 'expired-call',
+                        type: 'call',
+                        expDate: '2026-08-07',
+                        expiryAsOf: '2026-08-07T20:00:00Z',
+                        currentPrice: 2.21,
+                        currentPriceSource: 'live',
+                    }
+                );
+
+                assert.equal(observable.available, false);
+                assert.equal(observable.quality, 'expired_contract');
+            },
+        },
+        {
             name: 'maps anchor-price shocks onto bound FOP legs by percentage move',
             run() {
                 const ctx = loadBrowserScripts([

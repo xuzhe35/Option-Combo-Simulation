@@ -674,6 +674,10 @@ function _computePortfolioPnLAtPrice(price) {
         ? productRegistry.resolveUnderlyingProfile(state.underlyingSymbol)
         : null;
     const pricingCore = _getProbabilityPricingCoreApi();
+    const isLiquidationMode = mode => pricingCore
+        && typeof pricingCore.isLiquidationViewMode === 'function'
+        ? pricingCore.isLiquidationViewMode(mode)
+        : mode === 'liquidation';
 
     for (const group of state.groups.filter(_isGroupIncludedInGlobal)) {
         const activeViewMode = group.viewMode || 'active';
@@ -722,7 +726,7 @@ function _computePortfolioPnLAtPrice(price) {
             };
             // Use processLegData to handle unified BSM formatting (Exp, Implied Vol offset, T)
             const pLeg = processLegData(leg, simulationDate, state.ivOffset, quoteDate, legCurrentUnderlying, legInterestRate, activeViewMode, underlyingProfile, state.marketDataMode, timingContext);
-            const convergence = pricingCore
+            const convergence = !isLiquidationMode(activeViewMode) && pricingCore
                 && typeof pricingCore.assessProjectionConvergence === 'function'
                 ? pricingCore.assessProjectionConvergence(state, [leg], [pLeg])
                 : { ready: true };
@@ -1760,6 +1764,10 @@ function updateProbCharts() {
         group.legs.forEach(leg => {
             if (workerPricingFailure) return;
             const activeViewMode = group.viewMode || 'active';
+            const liquidationMode = pricingCore
+                && typeof pricingCore.isLiquidationViewMode === 'function'
+                ? pricingCore.isLiquidationViewMode(activeViewMode)
+                : activeViewMode === 'liquidation';
             const legCurrentUnderlying = pricingContext
                 && typeof pricingContext.resolveLegCurrentUnderlyingPrice === 'function'
                 ? pricingContext.resolveLegCurrentUnderlyingPrice(state, leg, anchorPrice)
@@ -1814,7 +1822,7 @@ function updateProbCharts() {
                 state.marketDataMode,
                 timingContext
             );
-            if (pLeg.timingStatus === 'implied_lambda_incomplete') {
+            if (!liquidationMode && pLeg.timingStatus === 'implied_lambda_incomplete') {
                 workerPricingFailure = pricingCore
                     && typeof pricingCore.formatProjectionTimingFailure === 'function'
                     ? pricingCore.formatProjectionTimingFailure(
@@ -1825,7 +1833,7 @@ function updateProbCharts() {
                     : 'Probability simulation unavailable: required weekend/holiday implied λ data is missing.';
                 return;
             }
-            const convergence = pricingCore
+            const convergence = !liquidationMode && pricingCore
                 && typeof pricingCore.assessProjectionConvergence === 'function'
                 ? pricingCore.assessProjectionConvergence(state, [leg], [pLeg])
                 : { ready: true };
@@ -1839,7 +1847,7 @@ function updateProbCharts() {
                     : 'Probability simulation unavailable: strict live BBO convergence inputs are missing.';
                 return;
             }
-            if (!pLeg.isUnderlyingLeg && !pLeg.isExpired
+            if (!liquidationMode && !pLeg.isUnderlyingLeg && !pLeg.isExpired
                 && (!Number.isFinite(pLeg.T) || pLeg.T <= 0
                     || !Number.isFinite(pLeg.rateT) || pLeg.rateT < 0
                     || !Number.isFinite(pLeg.simIV) || pLeg.simIV <= 0)) {
@@ -1865,7 +1873,10 @@ function updateProbCharts() {
                 id: String(leg.id || ''),
                 type: pLeg.type,
                 isUnderlyingLeg: !!pLeg.isUnderlyingLeg,
-                isExpired: !!pLeg.isExpired,
+                // The worker's expired branch is exactly intrinsic payoff at
+                // each sampled underlying. Liquidation uses that deterministic
+                // branch even when a small amount of clock time remains.
+                isExpired: !!pLeg.isExpired || liquidationMode,
                 pricingModel: pLeg.pricingModel,
                 strike: pLeg.strike,
                 rate: legInterestRate,
@@ -1906,7 +1917,7 @@ function updateProbCharts() {
                     : 0;
                 workerLeg.binomialSteps = _americanCurveStepCap(pLeg.binomialSteps);
             }
-            if (Number.isFinite(pLeg.expiryUnderlyingPrice)) {
+            if (!liquidationMode && Number.isFinite(pLeg.expiryUnderlyingPrice)) {
                 workerLeg.expiryUnderlyingPrice = pLeg.expiryUnderlyingPrice;
             }
             if (fixedPrice !== undefined) {
