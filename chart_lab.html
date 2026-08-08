@@ -31,6 +31,31 @@
                     </div>
                 </div>
                 <div class="header-actions">
+                    <button id="openWorkspaceBtn" class="btn btn-secondary" onclick="openWorkspaceFromStore()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        Open
+                    </button>
+                    <button id="saveBtn" class="btn btn-primary" onclick="saveWorkspaceToStore()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                            <polyline points="7 3 7 8 15 8"></polyline>
+                        </svg>
+                        Save
+                    </button>
+                    <button id="saveCopyBtn" class="btn btn-secondary" onclick="saveWorkspaceCopyToStore()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                            <line x1="7" y1="8" x2="15" y2="8"></line>
+                        </svg>
+                        Save a Copy
+                    </button>
                     <button id="importBtn" class="btn btn-secondary"
                         onclick="handleImportBtnClick()">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -43,23 +68,14 @@
                     </button>
                     <input type="file" id="importFile" accept=".json" style="display: none;"
                         onchange="importFromJSON(event)">
-                    <button id="saveBtn" class="btn btn-primary" onclick="saveToJSON()">
+                    <button id="exportJsonBtn" class="btn btn-secondary" onclick="exportSessionToJSON()">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
-                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
-                            <polyline points="7 3 7 8 15 8"></polyline>
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
                         </svg>
-                        Save
-                    </button>
-                    <button id="saveAsBtn" class="btn btn-secondary" style="display: none;" onclick="saveAsJSON()">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
-                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
-                            <line x1="7" y1="8" x2="15" y2="8"></line>
-                        </svg>
-                        Save As
+                        Export JSON
                     </button>
                 </div>
             </div>
@@ -1314,7 +1330,7 @@
     <script src="js/valuation.js?v=30c55b71f0e4"></script>
     <script src="js/session_logic.js?v=cf6b2d7eaada"></script>
     <script src="js/workspace_persistence.js?v=56ac91367086"></script>
-    <script src="js/session_ui.js?v=cd9af1781e9b"></script>
+    <script src="js/session_ui.js?v=bb3cdc19cb74"></script>
     <script src="js/control_panel_ui.js?v=51f0f373d273"></script>
     <script src="js/hedge_editor_ui.js?v=4e0cbca9b0ba"></script>
     <script src="js/group_editor_ui.js?v=f57e171a1d55"></script>
@@ -1324,7 +1340,7 @@
     <script src="js/page_capabilities.js?v=ab3b6fe974a0"></script>
     <script src="js/combo_order_transport.js?v=920fac6c25bf"></script>
     <script src="js/delta_hedge_transport.js?v=07a59f835858"></script>
-    <script src="js/app.js?v=b52e90b4c6dd"></script>
+    <script src="js/app.js?v=09accd032c94"></script>
     <script src="js/ws_client.js?v=4ed7c128d179"></script>
     <script src="js/chart_lab.js?v=29f87c0e1608"></script>
 </body>

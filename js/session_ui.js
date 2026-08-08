@@ -410,10 +410,201 @@
         }
     }
 
+    // ------------------------------------------------------------------
+    // Workspace store dialogs
+    //
+    // Interaction primitives (prompt/confirm) are injectable via `hooks`
+    // so the decision logic stays testable without a DOM. Only the
+    // workspace list is a real <dialog>; every three-way decision is a
+    // two-step confirm chain, which keeps Save/Discard/Cancel and the
+    // conflict resolution available in any browser.
+    // ------------------------------------------------------------------
+
+    function _hookPrompt(hooks) {
+        if (hooks && typeof hooks.prompt === 'function') return hooks.prompt;
+        return typeof globalScope.prompt === 'function'
+            ? globalScope.prompt.bind(globalScope)
+            : null;
+    }
+
+    function _hookConfirm(hooks) {
+        if (hooks && typeof hooks.confirm === 'function') return hooks.confirm;
+        return typeof globalScope.confirm === 'function'
+            ? globalScope.confirm.bind(globalScope)
+            : () => false;
+    }
+
+    function _hookAlert(hooks) {
+        if (hooks && typeof hooks.alert === 'function') return hooks.alert;
+        return typeof globalScope.alert === 'function'
+            ? globalScope.alert.bind(globalScope)
+            : () => {};
+    }
+
+    function promptWorkspaceTitle(defaultTitle, hooks) {
+        const promptFn = _hookPrompt(hooks);
+        if (!promptFn) return null;
+        const raw = promptFn('Workspace name:', defaultTitle || '');
+        if (raw === null || raw === undefined) return null;
+        const trimmed = String(raw).trim().slice(0, 120);
+        return trimmed || null;
+    }
+
+    function confirmUnsavedChanges(hooks) {
+        const confirmFn = _hookConfirm(hooks);
+        if (confirmFn('You have unsaved changes. Save them to the workspace database first?')) {
+            return 'save';
+        }
+        if (confirmFn('Discard the unsaved changes?')) {
+            return 'discard';
+        }
+        return 'cancel';
+    }
+
+    function chooseConflictResolution(details, hooks) {
+        const confirmFn = _hookConfirm(hooks);
+        const revision = details && Number.isInteger(details.currentRevision)
+            ? ` (now at revision ${details.currentRevision})`
+            : '';
+        if (confirmFn(
+            `This workspace was changed elsewhere${revision}. `
+            + 'Open the latest version? Your local edits will be discarded.'
+        )) {
+            return 'open-latest';
+        }
+        if (confirmFn('Keep your edits by saving them as a new copy?')) {
+            return 'save-copy';
+        }
+        return 'cancel';
+    }
+
+    function confirmWorkspaceDelete(title, hooks) {
+        const confirmFn = _hookConfirm(hooks);
+        return confirmFn(
+            `Delete workspace "${title}"? It disappears from the list; `
+            + 'its revision history stays recoverable in the database.'
+        );
+    }
+
+    function showWorkspaceStoreUnavailable(reason, hooks) {
+        const alertFn = _hookAlert(hooks);
+        alertFn(
+            'The workspace database is unavailable'
+            + (reason ? ` (${reason})` : '')
+            + '. Market data keeps working; use Export/Import JSON in the meantime.'
+        );
+    }
+
+    function formatWorkspaceListRow(doc) {
+        const title = String(doc && doc.title || 'Untitled');
+        const symbol = String(doc && doc.symbol || '').toUpperCase();
+        const mode = doc && doc.marketDataMode === 'historical' ? 'historical' : 'live';
+        const revision = Number.isInteger(doc && doc.revision) ? `rev ${doc.revision}` : '';
+        const updated = String(doc && doc.updatedAtUtc || '').replace('T', ' ').slice(0, 16);
+        return [title, symbol, mode, revision, updated].filter(Boolean).join(' · ');
+    }
+
+    function showWorkspaceListDialog(documents, hooks) {
+        const doc = (hooks && hooks.documentRef) || (typeof document !== 'undefined' ? document : null);
+        const rows = Array.isArray(documents) ? documents : [];
+        if (!doc || typeof doc.createElement !== 'function' || !doc.body
+            || typeof doc.body.appendChild !== 'function') {
+            return Promise.resolve(_promptFallbackSelection(rows, hooks));
+        }
+        return new Promise((resolve) => {
+            const dialog = doc.createElement('dialog');
+            dialog.style.cssText = 'min-width:420px;max-width:640px;max-height:70vh;'
+                + 'overflow:auto;border:1px solid #888;border-radius:8px;padding:1rem;';
+            let settled = false;
+            const finish = (result) => {
+                if (settled) return;
+                settled = true;
+                if (typeof dialog.close === 'function') {
+                    try { dialog.close(); } catch (error) { /* already closed */ }
+                }
+                if (typeof dialog.remove === 'function') dialog.remove();
+                resolve(result);
+            };
+
+            const heading = doc.createElement('h3');
+            heading.textContent = 'Open workspace';
+            heading.style.cssText = 'margin:0 0 .75rem 0;';
+            dialog.appendChild(heading);
+
+            if (rows.length === 0) {
+                const empty = doc.createElement('p');
+                empty.textContent = 'No saved workspaces yet. Save creates the first one.';
+                dialog.appendChild(empty);
+            }
+
+            for (const row of rows) {
+                const line = doc.createElement('div');
+                line.style.cssText = 'display:flex;align-items:center;gap:.5rem;'
+                    + 'padding:.3rem 0;border-bottom:1px solid rgba(128,128,128,.25);';
+                const label = doc.createElement('span');
+                label.textContent = formatWorkspaceListRow(row);
+                label.style.cssText = 'flex:1;';
+                const openBtn = doc.createElement('button');
+                openBtn.textContent = 'Open';
+                openBtn.className = 'btn btn-primary btn-sm';
+                openBtn.addEventListener('click', () => finish({
+                    action: 'open', documentId: row.documentId,
+                }));
+                const deleteBtn = doc.createElement('button');
+                deleteBtn.textContent = 'Delete';
+                deleteBtn.className = 'btn btn-secondary btn-sm';
+                deleteBtn.addEventListener('click', () => finish({
+                    action: 'delete', documentId: row.documentId,
+                }));
+                line.appendChild(label);
+                line.appendChild(openBtn);
+                line.appendChild(deleteBtn);
+                dialog.appendChild(line);
+            }
+
+            const cancelBtn = doc.createElement('button');
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.className = 'btn btn-secondary btn-sm';
+            cancelBtn.style.cssText = 'margin-top:.75rem;';
+            cancelBtn.addEventListener('click', () => finish(null));
+            dialog.appendChild(cancelBtn);
+            if (typeof dialog.addEventListener === 'function') {
+                dialog.addEventListener('close', () => finish(null));
+            }
+
+            doc.body.appendChild(dialog);
+            if (typeof dialog.showModal === 'function') {
+                dialog.showModal();
+            } else {
+                // No <dialog> support: fall back to the numbered prompt.
+                finish(_promptFallbackSelection(rows, hooks));
+            }
+        });
+    }
+
+    function _promptFallbackSelection(rows, hooks) {
+        const promptFn = _hookPrompt(hooks);
+        if (!promptFn || rows.length === 0) return null;
+        const listing = rows
+            .map((row, index) => `${index + 1}. ${formatWorkspaceListRow(row)}`)
+            .join('\n');
+        const answer = promptFn(`Open workspace — enter a number:\n${listing}`, '');
+        const index = parseInt(answer, 10);
+        if (!Number.isInteger(index) || index < 1 || index > rows.length) return null;
+        return { action: 'open', documentId: rows[index - 1].documentId };
+    }
+
     globalScope.OptionComboSessionUI = {
         syncControlPanel,
         syncWorkspaceChrome,
         resolveDocumentTitle,
         resolveWorkspaceDescriptor,
+        promptWorkspaceTitle,
+        confirmUnsavedChanges,
+        chooseConflictResolution,
+        confirmWorkspaceDelete,
+        showWorkspaceStoreUnavailable,
+        formatWorkspaceListRow,
+        showWorkspaceListDialog,
     };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

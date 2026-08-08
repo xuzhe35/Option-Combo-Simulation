@@ -1713,6 +1713,13 @@ function processImportedFile(file, options = {}) {
 
                 applyImportedState(normalizedState, file && typeof file.name === 'string' ? file.name : '');
                 _setSessionFileTarget(options.fileHandle || null, file && typeof file.name === 'string' ? file.name : '');
+                // A JSON import is a new, database-unbound workspace: the
+                // next Save names it and creates revision 1.
+                const persistenceClient = _getPersistenceClient();
+                if (persistenceClient) {
+                    persistenceClient.clearDocument();
+                    persistenceClient.releaseWriterLease();
+                }
                 OptionComboSessionUI.syncControlPanel(state, currencyFormatter, {
                     diffDays,
                     calendarToTradingDays,
@@ -1730,6 +1737,287 @@ function processImportedFile(file, options = {}) {
         }
     };
     reader.readAsText(file);
+}
+
+// ---------------------------------------------------------------------------
+// Database workspace orchestration.
+//
+// app.js hands snapshots to the persistence client and applies load results;
+// the request state machine lives in js/workspace_persistence.js and the
+// transport in js/ws_client.js. A failed database save is reported as a
+// failure — it is never silently downgraded to a file write.
+// ---------------------------------------------------------------------------
+
+function _getPersistenceClient() {
+    return typeof getWorkspacePersistenceClient === 'function'
+        ? getWorkspacePersistenceClient()
+        : null;
+}
+
+function _generateWorkspaceUuid() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+    return `doc-${generateId()}-${Date.now().toString(16)}`;
+}
+
+function _buildPersistencePayload() {
+    return OptionComboSessionLogic.buildPersistenceState(state);
+}
+
+function _workspaceIsDirty() {
+    const client = _getPersistenceClient();
+    if (!client || !client.getEnvelope()) {
+        return false;
+    }
+    return client.isDirty(_buildPersistencePayload());
+}
+
+async function saveWorkspaceToStore(options = {}) {
+    const client = _getPersistenceClient();
+    if (!client) {
+        OptionComboSessionUI.showWorkspaceStoreUnavailable();
+        return false;
+    }
+    const copy = options.copy === true;
+    const envelope = client.getEnvelope();
+    const writer = client.getWriterState();
+    if (!copy && envelope
+        && (writer.state === 'readonly' || writer.state === 'stale')) {
+        // A read-only tab may branch, never overwrite the writer's document.
+        const branch = typeof confirm === 'function' && confirm(
+            'Another tab is editing this workspace, so this tab is read-only. '
+            + 'Save your edits as a new copy instead?'
+        );
+        return branch ? saveWorkspaceToStore({ copy: true }) : false;
+    }
+
+    let documentId;
+    let expectedRevision;
+    let title;
+    if (!copy && envelope) {
+        documentId = envelope.documentId;
+        expectedRevision = envelope.revision;
+        title = envelope.title;
+    } else {
+        title = OptionComboSessionUI.promptWorkspaceTitle(
+            OptionComboSessionUI.resolveDocumentTitle(state)
+        );
+        if (!title) {
+            return false;
+        }
+        // Set before the snapshot so the saved payload and the fingerprint
+        // both carry the final title.
+        state.importedSessionTitle = title;
+        documentId = _generateWorkspaceUuid();
+        expectedRevision = undefined;
+    }
+
+    const payload = _buildPersistencePayload();
+    try {
+        const response = await client.saveWorkspace({
+            documentId, title, payload, expectedRevision,
+        });
+        if (copy || !envelope) {
+            await client.acquireWriterLease(documentId);
+        }
+        // Saved is only shown after the store's commit ACK.
+        _markSaveButtonSaved(document.getElementById('saveBtn'));
+        OptionComboSessionUI.syncWorkspaceChrome(state);
+        return response !== undefined;
+    } catch (error) {
+        const code = error && error.code ? error.code : 'internal_store_error';
+        if (code === 'revision_conflict') {
+            const currentRevision = error.response
+                && Number.isInteger(error.response.currentRevision)
+                ? error.response.currentRevision
+                : null;
+            const choice = OptionComboSessionUI.chooseConflictResolution({
+                currentRevision,
+            });
+            if (choice === 'open-latest') {
+                return _openWorkspaceDocument(documentId, { skipDirtyCheck: true });
+            }
+            if (choice === 'save-copy') {
+                return saveWorkspaceToStore({ copy: true });
+            }
+            return false;
+        }
+        if (code === 'timeout' || code === 'disconnected') {
+            alert('The save result is unknown (connection problem). '
+                + 'Retry Save — an identical retry is safe and will not create a duplicate.');
+            return false;
+        }
+        if (code === 'payload_too_large_local' || code === 'payload_too_large') {
+            alert('This workspace exceeds the 5 MiB save limit. '
+                + 'Trim unused groups or export it as JSON.');
+            return false;
+        }
+        if (code === 'store_unavailable' || code === 'remote_access_disabled') {
+            OptionComboSessionUI.showWorkspaceStoreUnavailable(code);
+            return false;
+        }
+        console.error('Workspace save failed:', error);
+        alert(`Save failed: ${code}`);
+        return false;
+    }
+}
+
+function saveWorkspaceCopyToStore() {
+    return saveWorkspaceToStore({ copy: true });
+}
+
+async function openWorkspaceFromStore() {
+    const client = _getPersistenceClient();
+    if (!client) {
+        OptionComboSessionUI.showWorkspaceStoreUnavailable();
+        return false;
+    }
+    let listing;
+    try {
+        listing = await client.listWorkspaces();
+    } catch (error) {
+        OptionComboSessionUI.showWorkspaceStoreUnavailable(error && error.code);
+        return false;
+    }
+    const documents = Array.isArray(listing.documents) ? listing.documents : [];
+    const selection = await OptionComboSessionUI.showWorkspaceListDialog(documents);
+    if (!selection || !selection.documentId) {
+        return false;
+    }
+    if (selection.action === 'delete') {
+        const target = documents.find(doc => doc.documentId === selection.documentId);
+        if (!target || !OptionComboSessionUI.confirmWorkspaceDelete(target.title)) {
+            return false;
+        }
+        try {
+            await client.deleteWorkspace(target.documentId, target.revision);
+            const envelope = client.getEnvelope();
+            if (envelope && envelope.documentId === target.documentId) {
+                client.clearDocument();
+                client.releaseWriterLease();
+            }
+        } catch (error) {
+            alert(`Delete failed: ${error && error.code ? error.code : 'unknown error'}`);
+        }
+        return openWorkspaceFromStore();
+    }
+    return _openWorkspaceDocument(selection.documentId);
+}
+
+async function _openWorkspaceDocument(documentId, options = {}) {
+    const client = _getPersistenceClient();
+    if (!client) {
+        return false;
+    }
+    if (options.skipDirtyCheck !== true && _workspaceIsDirty()) {
+        const choice = OptionComboSessionUI.confirmUnsavedChanges();
+        if (choice === 'cancel') {
+            return false;
+        }
+        if (choice === 'save') {
+            const saved = await saveWorkspaceToStore();
+            if (!saved) {
+                return false;
+            }
+        }
+    }
+    let loaded;
+    try {
+        loaded = await client.loadWorkspace(documentId);
+    } catch (error) {
+        alert(`Open failed: ${error && error.code ? error.code : 'unknown error'}`);
+        return false;
+    }
+    // Normalize in a pure function first: a rejected payload leaves the
+    // current workspace untouched — no partially-applied state.
+    let normalizedState;
+    try {
+        normalizedState = OptionComboSessionLogic.normalizeImportedState(
+            state,
+            loaded.payload,
+            initialDateStr,
+            generateId,
+            addDays,
+            { mode: 'replace' }
+        );
+    } catch (error) {
+        console.error('Stored workspace payload rejected:', error);
+        alert('The stored workspace could not be loaded. The current workspace is unchanged.');
+        return false;
+    }
+    applyImportedState(normalizedState, loaded.document.title);
+    _setSessionFileTarget(null, '');
+    OptionComboSessionUI.syncControlPanel(state, currencyFormatter, {
+        diffDays,
+        calendarToTradingDays,
+    });
+    renderGroups();
+    renderHedges();
+    // Market/replay subscriptions only; the load path never produces order
+    // previews or submissions (the snapshot contract loads disarmed).
+    handleLiveSubscriptions();
+    // The fingerprint is taken from the applied state (ids were regenerated
+    // by the import), so an untouched workspace reads as clean.
+    const fingerprint = client.fingerprintPayload(_buildPersistencePayload());
+    client.bindDocument(loaded.document, fingerprint);
+    const lease = await client.acquireWriterLease(documentId);
+    if (lease === 'readonly') {
+        alert('This workspace is being edited in another tab, so this tab is '
+            + 'read-only. Reload later or use Save a Copy to branch.');
+    }
+    return true;
+}
+
+function _downloadSessionJsonFallback(dataStr) {
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = _resolveSuggestedSessionFileName({ copy: false });
+    if (document.body && typeof document.body.appendChild === 'function') {
+        document.body.appendChild(anchor);
+    }
+    anchor.click();
+    if (typeof anchor.remove === 'function') {
+        anchor.remove();
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportSessionToJSON() {
+    // Export never changes the database document identity or revision.
+    const dataStr = JSON.stringify(
+        OptionComboSessionLogic.buildPersistenceState(state), null, 2
+    );
+    if (window.showSaveFilePicker) {
+        try {
+            const fileHandle = await window.showSaveFilePicker({
+                suggestedName: _resolveSuggestedSessionFileName({ copy: false }),
+                types: _getJsonFilePickerTypes(),
+            });
+            const writable = await fileHandle.createWritable();
+            await writable.write(dataStr);
+            await writable.close();
+            return true;
+        } catch (error) {
+            if (error && error.name === 'AbortError') {
+                return false;
+            }
+            console.error('Export via file picker failed, falling back to download:', error);
+        }
+    }
+    _downloadSessionJsonFallback(dataStr);
+    return true;
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('beforeunload', (event) => {
+        if (_workspaceIsDirty()) {
+            event.preventDefault();
+            event.returnValue = '';
+        }
+    });
 }
 
 // WebSocket & Live Data Integration -> see ws_client.js
