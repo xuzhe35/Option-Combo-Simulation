@@ -478,11 +478,51 @@
         return 'cancel';
     }
 
+    function chooseStaleResolution(details, hooks) {
+        const confirmFn = _hookConfirm(hooks);
+        const revision = details && Number.isInteger(details.revision)
+            ? ` (revision ${details.revision})`
+            : '';
+        if (confirmFn(
+            `This workspace was just saved in another tab${revision}. `
+            + "Reload the latest version now? This read-only tab's view will be replaced."
+        )) {
+            return 'reload';
+        }
+        if (confirmFn("Keep this tab's local view by saving it as a new copy?")) {
+            return 'save-copy';
+        }
+        return 'cancel';
+    }
+
+    function chooseTakeoverResolution(hooks) {
+        const confirmFn = _hookConfirm(hooks);
+        if (confirmFn(
+            'The tab that was editing this workspace is gone. Take over now? '
+            + 'The latest saved revision is loaded first, replacing this '
+            + "tab's local edits."
+        )) {
+            return 'take-over';
+        }
+        if (confirmFn('Keep the local edits by saving them as a new copy?')) {
+            return 'save-copy';
+        }
+        return 'cancel';
+    }
+
     function confirmWorkspaceDelete(title, hooks) {
         const confirmFn = _hookConfirm(hooks);
         return confirmFn(
-            `Delete workspace "${title}"? It disappears from the list; `
-            + 'its revision history stays recoverable in the database.'
+            `Delete workspace "${title}"? It moves to Recently Deleted `
+            + '(Open → Recently Deleted), where you can restore it.'
+        );
+    }
+
+    function confirmWorkspaceUndelete(title, hooks) {
+        const confirmFn = _hookConfirm(hooks);
+        return confirmFn(
+            `Restore workspace "${title}"? It reappears in the Open list at `
+            + 'its previous revision.'
         );
     }
 
@@ -501,7 +541,10 @@
         const mode = doc && doc.marketDataMode === 'historical' ? 'historical' : 'live';
         const revision = Number.isInteger(doc && doc.revision) ? `rev ${doc.revision}` : '';
         const updated = String(doc && doc.updatedAtUtc || '').replace('T', ' ').slice(0, 16);
-        return [title, symbol, mode, revision, updated].filter(Boolean).join(' · ');
+        const deleted = doc && doc.deletedAtUtc
+            ? `deleted ${String(doc.deletedAtUtc).replace('T', ' ').slice(0, 16)}`
+            : '';
+        return [title, symbol, mode, revision, updated, deleted].filter(Boolean).join(' · ');
     }
 
     function showWorkspaceListDialog(documents, hooks) {
@@ -526,14 +569,17 @@
                 resolve(result);
             };
 
+            const deletedView = hooks && hooks.view === 'deleted';
             const heading = doc.createElement('h3');
-            heading.textContent = 'Open workspace';
+            heading.textContent = deletedView ? 'Recently deleted' : 'Open workspace';
             heading.style.cssText = 'margin:0 0 .75rem 0;';
             dialog.appendChild(heading);
 
             if (rows.length === 0) {
                 const empty = doc.createElement('p');
-                empty.textContent = 'No saved workspaces yet. Save creates the first one.';
+                empty.textContent = deletedView
+                    ? 'Nothing in Recently Deleted.'
+                    : 'No saved workspaces yet. Save creates the first one.';
                 dialog.appendChild(empty);
             }
 
@@ -544,30 +590,53 @@
                 const label = doc.createElement('span');
                 label.textContent = formatWorkspaceListRow(row);
                 label.style.cssText = 'flex:1;';
-                const openBtn = doc.createElement('button');
-                openBtn.textContent = 'Open';
-                openBtn.className = 'btn btn-primary btn-sm';
-                openBtn.addEventListener('click', () => finish({
-                    action: 'open', documentId: row.documentId,
-                }));
-                const deleteBtn = doc.createElement('button');
-                deleteBtn.textContent = 'Delete';
-                deleteBtn.className = 'btn btn-secondary btn-sm';
-                deleteBtn.addEventListener('click', () => finish({
-                    action: 'delete', documentId: row.documentId,
-                }));
                 line.appendChild(label);
-                line.appendChild(openBtn);
-                line.appendChild(deleteBtn);
+                if (row.deletedAtUtc) {
+                    const restoreBtn = doc.createElement('button');
+                    restoreBtn.textContent = 'Restore';
+                    restoreBtn.className = 'btn btn-primary btn-sm';
+                    restoreBtn.addEventListener('click', () => finish({
+                        action: 'undelete', documentId: row.documentId,
+                    }));
+                    line.appendChild(restoreBtn);
+                } else {
+                    const openBtn = doc.createElement('button');
+                    openBtn.textContent = 'Open';
+                    openBtn.className = 'btn btn-primary btn-sm';
+                    openBtn.addEventListener('click', () => finish({
+                        action: 'open', documentId: row.documentId,
+                    }));
+                    const deleteBtn = doc.createElement('button');
+                    deleteBtn.textContent = 'Delete';
+                    deleteBtn.className = 'btn btn-secondary btn-sm';
+                    deleteBtn.addEventListener('click', () => finish({
+                        action: 'delete', documentId: row.documentId,
+                    }));
+                    line.appendChild(openBtn);
+                    line.appendChild(deleteBtn);
+                }
                 dialog.appendChild(line);
             }
 
+            const footer = doc.createElement('div');
+            footer.style.cssText = 'display:flex;gap:.5rem;margin-top:.75rem;';
+            if (!deletedView) {
+                const deletedBtn = doc.createElement('button');
+                deletedBtn.textContent = 'Recently Deleted…';
+                deletedBtn.className = 'btn btn-secondary btn-sm';
+                deletedBtn.addEventListener('click', () => finish({
+                    action: 'show-deleted',
+                }));
+                footer.appendChild(deletedBtn);
+            }
             const cancelBtn = doc.createElement('button');
-            cancelBtn.textContent = 'Cancel';
+            cancelBtn.textContent = deletedView ? 'Back' : 'Cancel';
             cancelBtn.className = 'btn btn-secondary btn-sm';
-            cancelBtn.style.cssText = 'margin-top:.75rem;';
-            cancelBtn.addEventListener('click', () => finish(null));
-            dialog.appendChild(cancelBtn);
+            cancelBtn.addEventListener('click', () => finish(
+                deletedView ? { action: 'show-active' } : null
+            ));
+            footer.appendChild(cancelBtn);
+            dialog.appendChild(footer);
             if (typeof dialog.addEventListener === 'function') {
                 dialog.addEventListener('close', () => finish(null));
             }
@@ -602,7 +671,10 @@
         promptWorkspaceTitle,
         confirmUnsavedChanges,
         chooseConflictResolution,
+        chooseStaleResolution,
+        chooseTakeoverResolution,
         confirmWorkspaceDelete,
+        confirmWorkspaceUndelete,
         showWorkspaceStoreUnavailable,
         formatWorkspaceListRow,
         showWorkspaceListDialog,

@@ -20,6 +20,7 @@
         load_saved_workspace: 'saved_workspace_loaded',
         save_saved_workspace: 'workspace_saved',
         delete_saved_workspace: 'workspace_deleted',
+        undelete_saved_workspace: 'workspace_undeleted',
         list_workspace_revisions: 'workspace_revisions_list',
         restore_workspace_revision: 'workspace_revision_restored',
     };
@@ -126,6 +127,14 @@
         let lastStatus = null;
         let envelope = null;
         let saveAttempt = null;
+        // At most one save may await its ACK; identical duplicates coalesce
+        // onto the same promise, anything else is refused (P1: parallel
+        // saves created duplicate documents and self-inflicted conflicts).
+        let inFlightSave = null;
+        // Dirty reference for database-unbound workspaces (pristine startup,
+        // post-import, post-delete). A sentinel marks "unbound and dirty".
+        const UNBOUND_DIRTY_SENTINEL = '__unbound-dirty__';
+        let unboundBaselineFingerprint = null;
         let onStaleRevision = typeof options.onStaleRevision === 'function'
             ? options.onStaleRevision
             : null;
@@ -227,6 +236,8 @@
                 updatedAtUtc: document.updatedAtUtc || '',
                 lastSavedPayloadFingerprint: fingerprint || '',
             };
+            // The bound fingerprint supersedes any unbound baseline.
+            unboundBaselineFingerprint = null;
             return getEnvelope();
         }
 
@@ -238,17 +249,43 @@
             return envelope ? { ...envelope } : null;
         }
 
+        function setUnboundBaseline(payload) {
+            unboundBaselineFingerprint = payload === null || payload === undefined
+                ? null
+                : fingerprintPayload(payload);
+        }
+
+        function markUnboundDirty() {
+            unboundBaselineFingerprint = UNBOUND_DIRTY_SENTINEL;
+        }
+
         function isDirty(payload) {
-            if (!envelope || !envelope.lastSavedPayloadFingerprint) {
-                return true;
+            if (envelope && envelope.lastSavedPayloadFingerprint) {
+                return fingerprintPayload(payload) !== envelope.lastSavedPayloadFingerprint;
             }
-            return fingerprintPayload(payload) !== envelope.lastSavedPayloadFingerprint;
+            if (unboundBaselineFingerprint !== null) {
+                return fingerprintPayload(payload) !== unboundBaselineFingerprint;
+            }
+            // No reference at all (before bootstrap seeds the baseline):
+            // never nag about a workspace nobody has touched.
+            return false;
         }
 
         // ---------------- store operations ----------------
 
-        function listWorkspaces() {
-            return request('list_saved_workspaces', {});
+        function listWorkspaces(listOptions) {
+            const fields = {};
+            if (listOptions && listOptions.includeDeleted === true) {
+                fields.includeDeleted = true;
+            }
+            return request('list_saved_workspaces', fields);
+        }
+
+        function undeleteWorkspace(documentId, expectedRevision) {
+            return request('undelete_saved_workspace', {
+                documentId,
+                expectedRevision,
+            });
         }
 
         function loadWorkspace(documentId) {
@@ -296,6 +333,23 @@
                 ));
             }
 
+            if (inFlightSave) {
+                // A byte-identical duplicate (double-click) rides the same
+                // promise; anything else must wait for the pending ACK —
+                // interleaved saves forked documents and clobbered the
+                // unknown-outcome token bookkeeping.
+                if (inFlightSave.documentId === documentId
+                    && inFlightSave.fingerprint === canonical
+                    && inFlightSave.title === title
+                    && inFlightSave.expectedRevision === expectedRevision) {
+                    return inFlightSave.promise;
+                }
+                return Promise.reject(_makeError(
+                    'save_in_progress',
+                    'a save is already awaiting its ACK; retry when it settles'
+                ));
+            }
+
             // An unknown-outcome save retried with identical content reuses
             // its token so the server can replay instead of double-writing.
             // Different content always gets a fresh token.
@@ -319,8 +373,11 @@
             if (expectedRevision !== undefined && expectedRevision !== null) {
                 fields.expectedRevision = expectedRevision;
             }
-            return request('save_saved_workspace', fields).then((response) => {
-                saveAttempt = null;
+            const promise = request('save_saved_workspace', fields).then((response) => {
+                // Only this attempt's own bookkeeping may be touched here.
+                if (saveAttempt && saveAttempt.saveToken === saveToken) {
+                    saveAttempt = null;
+                }
                 bindDocument(response.document, canonical);
                 _broadcast({
                     type: 'revision_saved',
@@ -335,11 +392,22 @@
                     if (saveAttempt && saveAttempt.saveToken === saveToken) {
                         saveAttempt.status = 'unknown';
                     }
-                } else {
+                } else if (saveAttempt && saveAttempt.saveToken === saveToken) {
                     saveAttempt = null;
                 }
                 throw error;
             });
+            inFlightSave = {
+                promise, documentId, title, expectedRevision,
+                fingerprint: canonical,
+            };
+            const clearInFlight = () => {
+                if (inFlightSave && inFlightSave.promise === promise) {
+                    inFlightSave = null;
+                }
+            };
+            promise.then(clearInFlight, clearInFlight);
+            return promise;
         }
 
         // ---------------- writer lease (same-browser advisory) ----------------
@@ -557,12 +625,15 @@
             bindDocument,
             clearDocument,
             getEnvelope,
+            setUnboundBaseline,
+            markUnboundDirty,
             isDirty,
             // operations
             listWorkspaces,
             loadWorkspace,
             listRevisions,
             deleteWorkspace,
+            undeleteWorkspace,
             restoreRevision,
             saveWorkspace,
             // writer lease
@@ -576,6 +647,7 @@
             _test: {
                 pendingCount: () => pending.size,
                 getSaveAttempt: () => (saveAttempt ? { ...saveAttempt } : null),
+                hasInFlightSave: () => inFlightSave !== null,
                 tabId,
             },
         };

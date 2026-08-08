@@ -7,6 +7,7 @@ corruption/unwritable-path containment, path resolution, and backup.
 """
 
 import configparser
+import gc
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import warnings
 from datetime import datetime, timedelta, timezone
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -379,6 +381,44 @@ class SoftDeleteAndRestoreTest(PortfolioStoreTestBase):
                 expected_revision=1,
             )
 
+    def test_undelete_round_trip_preserves_identity(self):
+        self._create_doc()
+        sha_before = self.store.load_workspace(DOC_A)['payloadSha256']
+        self.store.delete_document(DOC_A, expected_revision=1)
+        self.assertEqual(self.store.list_documents(), [])
+
+        result = self.store.undelete_document(DOC_A, expected_revision=1)
+        self.assertEqual(result['revision'], 1)
+        docs = self.store.list_documents()
+        self.assertEqual([d['documentId'] for d in docs], [DOC_A])
+        self.assertIsNone(docs[0]['deletedAtUtc'])
+        loaded = self.store.load_workspace(DOC_A)
+        self.assertEqual(loaded['revision'], 1)
+        self.assertEqual(loaded['payloadSha256'], sha_before)
+
+    def test_undelete_requires_current_revision_and_deleted_state(self):
+        self._create_doc()
+        with self.assertRaises(InvalidRequestError):
+            self.store.undelete_document(DOC_A, expected_revision=1)
+        self.store.delete_document(DOC_A, expected_revision=1)
+        with self.assertRaises(RevisionConflictError):
+            self.store.undelete_document(DOC_A, expected_revision=9)
+        # Still deleted after the failed attempt.
+        self.assertEqual(self.store.list_documents(), [])
+
+    def test_prune_never_touches_soft_deleted_documents(self):
+        self._create_doc()
+        for i in range(2, 6):
+            self.store.save_workspace(
+                document_id=DOC_A, title='SPY workspace',
+                payload=_payload(baseDate=f'rev-{i}'),
+                save_token=_token(200 + i), expected_revision=i - 1,
+            )
+        self.store.delete_document(DOC_A, expected_revision=5)
+        deleted = self.store.prune_revisions(keep_recent=1, keep_daily_days=0)
+        self.assertEqual(deleted, 0)
+        self.assertEqual(len(self.store.list_revisions(DOC_A)), 5)
+
 
 class ValidationTest(PortfolioStoreTestBase):
     def _assert_rejected(self, exc_type, **kwargs):
@@ -553,8 +593,17 @@ class FailureContainmentTest(unittest.TestCase):
         corrupt = self.base / 'corrupt.db'
         garbage = b'this is definitely not a sqlite database file' * 8
         corrupt.write_bytes(garbage)
-        with self.assertRaises(StoreUnavailableError):
-            PortfolioStore(corrupt).initialize()
+        # The failure path must also be leak-free: a half-configured
+        # connection that survived a failed PRAGMA pins the file handle.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            with self.assertRaises(StoreUnavailableError):
+                PortfolioStore(corrupt).initialize()
+            gc.collect()
+        resource_warnings = [
+            w for w in caught if issubclass(w.category, ResourceWarning)
+        ]
+        self.assertEqual(resource_warnings, [])
         self.assertEqual(corrupt.read_bytes(), garbage)
 
     @unittest.skipIf(os.geteuid() == 0, 'permission checks are void as root')

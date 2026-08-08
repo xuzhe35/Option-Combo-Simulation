@@ -323,10 +323,17 @@ as a failure, never silently downgraded to a file write.
   `backup_interval_hours`) and top up on clean exit, into
   `[portfolio_store] backup_dir` — point it at a OneDrive-synced folder for
   cross-machine disaster recovery — or `<app-data>/backups` by default.
-  Manual backup: `scripts/backup_portfolio_store.py`. Restore (backends
-  stopped): `scripts/restore_portfolio_store.py <backup.db> --yes`. This is
-  backup, not multi-master sync: two machines editing their own local
-  databases fork and cannot be merged automatically.
+  Manual backup: `scripts/backup_portfolio_store.py` (add
+  `--prune-revisions` to also apply revision retention after the verified
+  publish). Restore (backends stopped):
+  `scripts/restore_portfolio_store.py <backup.db> --yes`. This is backup,
+  not multi-master sync: two machines editing their own local databases
+  fork and cannot be merged automatically.
+- Revision retention (`revision_keep_recent` / `revision_keep_daily_days`)
+  runs inside the scheduled maintenance pass immediately after a verified
+  backup publish — never on the save path, and never without a backup.
+- Deleting a workspace is a soft delete: restore it yourself from
+  Open → Recently Deleted. Revision history is never rewritten.
 
 ## Runtime Log Cleanup
 

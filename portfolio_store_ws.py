@@ -25,6 +25,8 @@ from portfolio_store import (
     DEFAULT_BACKUP_KEEP_DAILY,
     DEFAULT_BACKUP_KEEP_WEEKLY,
     DEFAULT_MAX_PAYLOAD_BYTES,
+    DEFAULT_REVISION_KEEP_DAILY_DAYS,
+    DEFAULT_REVISION_KEEP_RECENT,
     PortfolioStore,
     PortfolioStoreError,
     InvalidRequestError,
@@ -34,6 +36,9 @@ from portfolio_store import (
     resolve_backup_dir,
     resolve_db_path,
 )
+
+DEFAULT_VACUUM_FREELIST_PAGES = 256
+DEFAULT_VACUUM_MAX_PAGES = 512
 
 logger = logging.getLogger('portfolio_store.ws')
 
@@ -45,6 +50,7 @@ SERVER_ACTIONS = {
     'load_saved_workspace': 'saved_workspace_loaded',
     'save_saved_workspace': 'workspace_saved',
     'delete_saved_workspace': 'workspace_deleted',
+    'undelete_saved_workspace': 'workspace_undeleted',
     'list_workspace_revisions': 'workspace_revisions_list',
     'restore_workspace_revision': 'workspace_revision_restored',
 }
@@ -104,6 +110,30 @@ def create_store_env(config=None):
     backup_interval_hours = 24.0
     backup_keep_daily = DEFAULT_BACKUP_KEEP_DAILY
     backup_keep_weekly = DEFAULT_BACKUP_KEEP_WEEKLY
+    revision_keep_recent = DEFAULT_REVISION_KEEP_RECENT
+    revision_keep_daily_days = DEFAULT_REVISION_KEEP_DAILY_DAYS
+    vacuum_freelist_pages = DEFAULT_VACUUM_FREELIST_PAGES
+    vacuum_max_pages = DEFAULT_VACUUM_MAX_PAGES
+    if config is not None:
+        try:
+            revision_keep_recent = max(1, config.getint(
+                'portfolio_store', 'revision_keep_recent',
+                fallback=DEFAULT_REVISION_KEEP_RECENT,
+            ))
+            revision_keep_daily_days = max(0, config.getint(
+                'portfolio_store', 'revision_keep_daily_days',
+                fallback=DEFAULT_REVISION_KEEP_DAILY_DAYS,
+            ))
+            vacuum_freelist_pages = max(0, config.getint(
+                'portfolio_store', 'vacuum_freelist_pages',
+                fallback=DEFAULT_VACUUM_FREELIST_PAGES,
+            ))
+            vacuum_max_pages = max(1, config.getint(
+                'portfolio_store', 'vacuum_max_pages',
+                fallback=DEFAULT_VACUUM_MAX_PAGES,
+            ))
+        except ValueError:
+            pass
     if config is not None:
         try:
             backup_interval_hours = config.getfloat(
@@ -137,6 +167,10 @@ def create_store_env(config=None):
         '_backup_keep_daily': backup_keep_daily,
         '_backup_keep_weekly': backup_keep_weekly,
         '_backup_inflight': False,
+        '_revision_keep_recent': revision_keep_recent,
+        '_revision_keep_daily_days': revision_keep_daily_days,
+        '_vacuum_freelist_pages': vacuum_freelist_pages,
+        '_vacuum_max_pages': vacuum_max_pages,
     }
 
 
@@ -352,6 +386,33 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
             keep_weekly=store_env.get('_backup_keep_weekly', DEFAULT_BACKUP_KEEP_WEEKLY),
         )
         logger.info('published scheduled workspace backup: %s', published)
+        # A freshly verified backup is the precondition for destructive
+        # retention: prune revisions, then reclaim space in a bounded pass
+        # only when the freelist justifies it. Failures here never touch
+        # the just-published backup or affect saves.
+        try:
+            deleted = store.prune_revisions(
+                keep_recent=store_env.get(
+                    '_revision_keep_recent', DEFAULT_REVISION_KEEP_RECENT
+                ),
+                keep_daily_days=store_env.get(
+                    '_revision_keep_daily_days', DEFAULT_REVISION_KEEP_DAILY_DAYS
+                ),
+            )
+            if deleted:
+                logger.info(
+                    'pruned %d workspace revisions after verified backup', deleted
+                )
+            threshold = store_env.get(
+                '_vacuum_freelist_pages', DEFAULT_VACUUM_FREELIST_PAGES
+            )
+            if threshold > 0 and store.freelist_count() >= threshold:
+                store.incremental_vacuum(
+                    max_pages=store_env.get('_vacuum_max_pages', DEFAULT_VACUUM_MAX_PAGES)
+                )
+                logger.info('reclaimed freelist pages with bounded incremental vacuum')
+        except Exception:
+            logger.exception('post-backup retention maintenance failed; data intact')
         return True
     except Exception:
         logger.exception('scheduled workspace backup failed; saves are unaffected')
@@ -371,7 +432,12 @@ def publish_backup_best_effort(store_env):
 
 async def _dispatch_store_call(store, action, data):
     if action == 'list_saved_workspaces':
-        documents = await asyncio.to_thread(store.list_documents)
+        include_deleted = data.get('includeDeleted') is True
+        documents = await asyncio.to_thread(
+            lambda: store.list_documents(include_deleted=include_deleted)
+        )
+        if include_deleted:
+            return {'documents': documents}
         for meta in documents:
             meta.pop('deletedAtUtc', None)
         return {'documents': documents}
@@ -400,6 +466,13 @@ async def _dispatch_store_call(store, action, data):
     if action == 'delete_saved_workspace':
         return await asyncio.to_thread(
             store.delete_document,
+            _required_str(data, 'documentId'),
+            _required_int(data, 'expectedRevision'),
+        )
+
+    if action == 'undelete_saved_workspace':
+        return await asyncio.to_thread(
+            store.undelete_document,
             _required_str(data, 'documentId'),
             _required_int(data, 'expectedRevision'),
         )

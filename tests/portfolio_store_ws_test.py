@@ -389,6 +389,140 @@ class EventLoopIsolationTest(unittest.TestCase):
             self.assertGreater(ticks, 10)
 
 
+class UndeleteProtocolTest(unittest.TestCase):
+    def test_delete_recently_deleted_and_undelete_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = create_store_env(_config(tmp))
+            ws = FakeWebSocket()
+            saved = _one_response(env, ws, _save_request())
+            sha = saved['document']['payloadSha256']
+
+            deleted = _one_response(env, ws, {
+                'action': 'delete_saved_workspace', 'requestId': 'del-1',
+                'documentId': DOC, 'expectedRevision': 1,
+            })
+            self.assertTrue(deleted['success'])
+
+            # Default list hides it; includeDeleted surfaces it with its
+            # deletion time for the Recently Deleted view.
+            hidden = _one_response(env, ws, {
+                'action': 'list_saved_workspaces', 'requestId': 'list-1',
+            })
+            self.assertEqual(hidden['documents'], [])
+            visible = _one_response(env, ws, {
+                'action': 'list_saved_workspaces', 'requestId': 'list-2',
+                'includeDeleted': True,
+            })
+            self.assertEqual(len(visible['documents']), 1)
+            self.assertIsNotNone(visible['documents'][0]['deletedAtUtc'])
+
+            restored = _one_response(env, ws, {
+                'action': 'undelete_saved_workspace', 'requestId': 'undel-1',
+                'documentId': DOC, 'expectedRevision': 1,
+            })
+            self.assertEqual(restored['action'], 'workspace_undeleted')
+            self.assertTrue(restored['success'])
+
+            back = _one_response(env, ws, {
+                'action': 'load_saved_workspace', 'requestId': 'load-1',
+                'documentId': DOC,
+            })
+            self.assertEqual(back['document']['revision'], 1)
+            self.assertEqual(back['document']['payloadSha256'], sha)
+
+    def test_undelete_conflicts_use_stable_codes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = create_store_env(_config(tmp))
+            ws = FakeWebSocket()
+            _one_response(env, ws, _save_request())
+            not_deleted = _one_response(env, ws, {
+                'action': 'undelete_saved_workspace', 'requestId': 'u-1',
+                'documentId': DOC, 'expectedRevision': 1,
+            })
+            self.assertEqual(not_deleted['code'], 'invalid_request')
+            _one_response(env, ws, {
+                'action': 'delete_saved_workspace', 'requestId': 'd-1',
+                'documentId': DOC, 'expectedRevision': 1,
+            })
+            stale = _one_response(env, ws, {
+                'action': 'undelete_saved_workspace', 'requestId': 'u-2',
+                'documentId': DOC, 'expectedRevision': 9,
+            })
+            self.assertEqual(stale['code'], 'revision_conflict')
+
+
+class RetentionMaintenanceTest(unittest.TestCase):
+    def test_verified_backup_gates_prune_and_vacuum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backup_dir = pathlib.Path(tmp) / 'backups'
+            config = _config(
+                tmp,
+                backup_dir=str(backup_dir),
+                backup_interval_hours='24',
+                revision_keep_recent='2',
+                revision_keep_daily_days='0',
+            )
+            env = create_store_env(config)
+            portfolio_store_ws.ensure_store_initialized(env)
+            store = env['store']
+            store.save_workspace(
+                document_id=DOC, title='SPY workspace', payload=_payload(),
+                save_token='save-0000001-4000-8000-000000000000',
+            )
+            for i in range(2, 8):
+                store.save_workspace(
+                    document_id=DOC, title='SPY workspace',
+                    payload=_payload(baseDate=f'rev-{i}'),
+                    save_token=f'save-{i:07d}-4000-8000-000000000000',
+                    expected_revision=i - 1,
+                )
+            self.assertEqual(len(store.list_revisions(DOC, limit=50)), 7)
+
+            # The maintenance pass publishes a verified backup FIRST, then
+            # applies the configured retention.
+            self.assertTrue(portfolio_store_ws.maybe_publish_scheduled_backup(env))
+            self.assertEqual(len(list(backup_dir.iterdir())), 1)
+            remaining = [r['revision'] for r in store.list_revisions(DOC, limit=50)]
+            # keep_recent=2 keeps {7,6}; the daily window (0 days = today)
+            # additionally anchors today's last older revision, 5.
+            self.assertEqual(remaining, [7, 6, 5])
+            self.assertEqual(store.load_workspace(DOC)['revision'], 7)
+            self.assertEqual(store.quick_check(), 'ok')
+
+            # The backup snapshot was taken before pruning: a restore drill
+            # from it still holds the full pre-prune history.
+            from portfolio_store import PortfolioStore, restore_database
+            restored_db = pathlib.Path(tmp) / 'restored' / 'portfolio.db'
+            restore_database(next(backup_dir.iterdir()), restored_db)
+            restored = PortfolioStore(restored_db).initialize()
+            self.assertEqual(len(restored.list_revisions(DOC, limit=50)), 7)
+
+    def test_failed_backup_blocks_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(tmp, backup_interval_hours='1',
+                             revision_keep_recent='1',
+                             revision_keep_daily_days='0')
+            env = create_store_env(config)
+            portfolio_store_ws.ensure_store_initialized(env)
+            store = env['store']
+            store.save_workspace(
+                document_id=DOC, title='SPY workspace', payload=_payload(),
+                save_token='save-0000001-4000-8000-000000000000',
+            )
+            store.save_workspace(
+                document_id=DOC, title='SPY workspace',
+                payload=_payload(baseDate='rev-2'),
+                save_token='save-0000002-4000-8000-000000000000',
+                expected_revision=1,
+            )
+            store.publish_backup = lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError('backup target offline')
+            )
+            self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(env))
+            # No verified backup, no pruning: both revisions survive.
+            self.assertEqual(len(store.list_revisions(DOC, limit=50)), 2)
+
+
 class ScheduledBackupTest(unittest.TestCase):
     def test_stale_interval_publishes_once_then_suppresses(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -481,6 +615,7 @@ class LiveHistoricalParityTest(unittest.TestCase):
             'load_saved_workspace',
             'save_saved_workspace',
             'delete_saved_workspace',
+            'undelete_saved_workspace',
             'list_workspace_revisions',
             'restore_workspace_revision',
         })

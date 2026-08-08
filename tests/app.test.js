@@ -1083,6 +1083,239 @@ module.exports = {
             },
         },
         {
+            name: 'bootstrap seeds the unbound dirty baseline',
+            run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+                assert.equal(calls.baseline.length, 1);
+                // The stale-revision handler is registered exactly once.
+                assert.equal(calls.staleHandlers.length, 1);
+            },
+        },
+        {
+            name: 'JSON import re-seeds the unbound baseline after unbinding',
+            run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+                const seededAtBoot = calls.baseline.length;
+                harness.context.processImportedFile({
+                    name: 'SPY Session.json',
+                    __text: JSON.stringify(createImportedSession()),
+                });
+                assert.equal(fakeClient.envelope, null);
+                assert.equal(calls.baseline.length, seededAtBoot + 1);
+            },
+        },
+        {
+            name: 'deleting the bound document marks the draft dirty',
+            async run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                fakeClient.listWorkspaces = () => Promise.resolve({
+                    documents: [{
+                        documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    }],
+                });
+                fakeClient.deleteWorkspace = () => Promise.resolve({});
+                const dialogResults = [
+                    { action: 'delete', documentId: 'doc-bound-1' },
+                    null,
+                ];
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'T'; },
+                            promptWorkspaceTitle() { return 'T'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() { return 'cancel'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() {
+                                return Promise.resolve(dialogResults.shift());
+                            },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+                await harness.context.openWorkspaceFromStore();
+                assert.equal(fakeClient.envelope, null);
+                assert.equal(calls.markedDirty, 1);
+                assert.equal(calls.released, 1);
+            },
+        },
+        {
+            name: 'rapid Save clicks collapse into a single client save',
+            async run() {
+                const elements = createSaveButtonElements();
+                elements.saveCopyBtn = { style: {}, innerHTML: 'Save a Copy' };
+                let resolveSave;
+                const { client: fakeClient, calls } = createFakePersistenceClient({
+                    saveWorkspace(params) {
+                        calls.save.push(params);
+                        return new Promise((resolve) => { resolveSave = resolve; });
+                    },
+                });
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                const harness = loadAppContext({
+                    elements,
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const attempts = [];
+                for (let i = 0; i < 10; i += 1) {
+                    attempts.push(harness.context.saveWorkspaceToStore());
+                }
+                // The lock spans the whole ACK wait: buttons disabled and
+                // exactly one client call.
+                assert.equal(calls.save.length, 1);
+                assert.equal(elements.saveBtn.disabled, true);
+                assert.equal(elements.saveCopyBtn.disabled, true);
+
+                resolveSave({
+                    document: {
+                        documentId: 'doc-bound-1', title: 'Bound', revision: 4,
+                        updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                    },
+                });
+                const results = await Promise.all(attempts);
+                assert.equal(results.filter(Boolean).length, 1);
+                assert.equal(calls.save.length, 1);
+                assert.equal(elements.saveBtn.disabled, false);
+                assert.equal(elements.saveCopyBtn.disabled, false);
+            },
+        },
+        {
+            name: 'readonly save offers takeover once the writer is gone',
+            async run() {
+                const loads = [];
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                fakeClient.getWriterState = () => ({ state: 'readonly' });
+                fakeClient.requestTakeover = () => {
+                    calls.takeoverRequests += 1;
+                    return { allowed: true, mustReloadFirst: true };
+                };
+                fakeClient.loadWorkspace = (documentId) => {
+                    loads.push(documentId);
+                    return Promise.resolve({
+                        document: {
+                            documentId, title: 'Bound', revision: 9,
+                            updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                        },
+                        payload: createImportedSession(),
+                    });
+                };
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'T'; },
+                            promptWorkspaceTitle() { return 'T'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() { return 'take-over'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const saved = await harness.context.saveWorkspaceToStore();
+                // Takeover replaces local edits with the latest revision; it
+                // is not a save, so the call reports false.
+                assert.equal(saved, false);
+                assert.equal(calls.takeoverRequests, 1);
+                assert.deepEqual(loads, ['doc-bound-1']);
+                assert.equal(calls.takeoverCompleted, 1);
+                assert.equal(calls.save.length, 0);
+            },
+        },
+        {
+            name: 'stale notifications can branch into Save a Copy',
+            async run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'Copy'; },
+                            promptWorkspaceTitle() { return 'Copy'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'save-copy'; },
+                            chooseTakeoverResolution() { return 'cancel'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+                assert.equal(calls.staleHandlers.length, 1);
+                calls.staleHandlers[0]({ documentId: 'doc-bound-1', revision: 7 });
+                // Give the async save-copy a microtask turn.
+                await Promise.resolve();
+                await Promise.resolve();
+                assert.equal(calls.save.length, 1);
+                assert.equal(calls.save[0].expectedRevision, undefined);
+            },
+        },
+        {
             name: 'read-only tabs cannot overwrite the writer document',
             async run() {
                 const confirms = [];
@@ -1112,13 +1345,29 @@ module.exports = {
 };
 
 function createFakePersistenceClient(overrides = {}) {
-    const calls = { save: [], lease: [], released: 0 };
+    const calls = {
+        save: [], lease: [], released: 0,
+        baseline: [], markedDirty: 0, staleHandlers: [],
+        takeoverRequests: 0, takeoverCompleted: 0, undelete: [],
+    };
     const client = {
         envelope: null,
         getEnvelope() { return this.envelope ? { ...this.envelope } : null; },
         getWriterState() { return { state: 'idle' }; },
         fingerprintPayload(payload) { return JSON.stringify(payload); },
         isDirty() { return false; },
+        setUnboundBaseline(payload) { calls.baseline.push(payload); },
+        markUnboundDirty() { calls.markedDirty += 1; },
+        setStaleRevisionHandler(handler) { calls.staleHandlers.push(handler); },
+        requestTakeover() {
+            calls.takeoverRequests += 1;
+            return { allowed: false, reason: 'writer_active' };
+        },
+        completeTakeover() { calls.takeoverCompleted += 1; return true; },
+        undeleteWorkspace(documentId, expectedRevision) {
+            calls.undelete.push({ documentId, expectedRevision });
+            return Promise.resolve({});
+        },
         bindDocument(document, fingerprint) {
             this.envelope = {
                 documentId: document.documentId,

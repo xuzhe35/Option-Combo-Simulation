@@ -359,6 +359,10 @@ class PortfolioStore:
         return self
 
     def _connect(self, for_init=False):
+        # A PRAGMA can fail after connect() succeeded (corrupt file, I/O
+        # error); the half-configured connection must be closed or it leaks
+        # a file descriptor and pins the database file on Windows.
+        conn = None
         try:
             conn = sqlite3.connect(self._db_path, isolation_level=None)
             conn.row_factory = sqlite3.Row
@@ -369,6 +373,11 @@ class PortfolioStore:
             conn.execute('PRAGMA busy_timeout = 5000')
             return conn
         except sqlite3.Error as exc:
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass  # keep the original error as the cause
             raise self._map_sqlite_error(exc) from exc
 
     def _migrate(self, conn):
@@ -687,6 +696,53 @@ class PortfolioStore:
                     conn.execute('ROLLBACK')
                 raise
             return {'documentId': document_id, 'deletedAtUtc': now_iso}
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def undelete_document(self, document_id, expected_revision):
+        """Reverse a soft delete. History is untouched; the document simply
+        reappears in the default listing at its previous current revision."""
+        _validate_token('documentId', document_id)
+        expected_revision = int(expected_revision)
+        conn = self._connect()
+        try:
+            now_iso = self._utc_now_iso()
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                doc = conn.execute(
+                    'SELECT * FROM workspace_documents WHERE document_id = ?',
+                    (document_id,),
+                ).fetchone()
+                if doc is None:
+                    raise DocumentNotFoundError(f'document {document_id} not found')
+                if doc['deleted_at_utc'] is None:
+                    raise InvalidRequestError(
+                        f'document {document_id} is not deleted'
+                    )
+                if doc['current_revision'] != expected_revision:
+                    raise RevisionConflictError(
+                        f'document {document_id} is at revision '
+                        f'{doc["current_revision"]}, expected {expected_revision}',
+                        current_revision=doc['current_revision'],
+                        updated_at_utc=doc['updated_at_utc'],
+                    )
+                conn.execute(
+                    'UPDATE workspace_documents SET deleted_at_utc = NULL, '
+                    'updated_at_utc = ? WHERE document_id = ?',
+                    (now_iso, document_id),
+                )
+                conn.execute('COMMIT')
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute('ROLLBACK')
+                raise
+            return {
+                'documentId': document_id,
+                'revision': expected_revision,
+                'undeletedAtUtc': now_iso,
+            }
         except sqlite3.Error as exc:
             raise self._map_sqlite_error(exc) from exc
         finally:

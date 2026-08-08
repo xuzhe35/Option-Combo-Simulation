@@ -299,6 +299,8 @@ module.exports = {
                 const { client, sent } = createHarness();
                 const documentId = 'doc-aaaaaaaa-1111-4111-8111-111111111111';
                 const payload = workspacePayload();
+                // Unbound with a differing baseline: protected as dirty.
+                client.setUnboundBaseline(workspacePayload('1999-01-01'));
                 assert.equal(client.isDirty(payload), true);
 
                 const promise = client.saveWorkspace({
@@ -326,6 +328,104 @@ module.exports = {
                     reordered[key] = payload[key];
                 }
                 assert.equal(client.isDirty(reordered), false);
+            },
+        },
+        {
+            name: 'unbound workspaces are guarded by the baseline fingerprint',
+            run() {
+                const { client } = createHarness();
+                const pristine = workspacePayload();
+
+                // Before bootstrap seeds a baseline: never nag.
+                assert.equal(client.isDirty(pristine), false);
+
+                // Pristine baseline: untouched stays clean, edits turn dirty.
+                client.setUnboundBaseline(pristine);
+                assert.equal(client.isDirty(workspacePayload()), false);
+                assert.equal(client.isDirty(workspacePayload('2026-08-09')), true);
+
+                // Deleting the bound home marks the draft explicitly dirty.
+                client.markUnboundDirty();
+                assert.equal(client.isDirty(workspacePayload()), true);
+
+                // Binding a document supersedes the unbound baseline.
+                client.bindDocument(
+                    { documentId: 'doc-aaaaaaaa-1111-4111-8111-111111111111',
+                      title: 'T', revision: 1, updatedAtUtc: '' },
+                    client.fingerprintPayload(pristine)
+                );
+                assert.equal(client.isDirty(pristine), false);
+            },
+        },
+        {
+            name: 'an identical duplicate save rides the in-flight promise',
+            async run() {
+                const { client, sent } = createHarness();
+                const documentId = 'doc-aaaaaaaa-1111-4111-8111-111111111111';
+                const payload = workspacePayload();
+
+                const first = client.saveWorkspace({
+                    documentId, title: 'SPY workspace', payload,
+                });
+                const duplicate = client.saveWorkspace({
+                    documentId, title: 'SPY workspace', payload,
+                });
+                assert.equal(first, duplicate);
+                assert.equal(sent.length, 1);
+
+                client.handleMessage({
+                    action: 'workspace_saved',
+                    requestId: sent[0].requestId,
+                    success: true,
+                    document: { documentId, title: 'SPY workspace', revision: 1 },
+                });
+                const [a, b] = await Promise.all([first, duplicate]);
+                assert.equal(a.document.revision, 1);
+                assert.equal(b.document.revision, 1);
+                assert.equal(client._test.hasInFlightSave(), false);
+            },
+        },
+        {
+            name: 'a different save while one is in flight is refused, not interleaved',
+            async run() {
+                const { client, sent } = createHarness();
+                const documentId = 'doc-aaaaaaaa-1111-4111-8111-111111111111';
+
+                const first = client.saveWorkspace({
+                    documentId, title: 'SPY workspace', payload: workspacePayload(),
+                });
+                const refused = await rejection(client.saveWorkspace({
+                    documentId, title: 'SPY workspace',
+                    payload: workspacePayload('2026-08-09'),
+                }));
+                assert.equal(refused.code, 'save_in_progress');
+                assert.equal(sent.length, 1);
+                // The refused call never touched the first attempt's token.
+                assert.equal(
+                    client._test.getSaveAttempt().saveToken, sent[0].saveToken
+                );
+
+                client.handleMessage({
+                    action: 'workspace_saved',
+                    requestId: sent[0].requestId,
+                    success: true,
+                    document: { documentId, title: 'SPY workspace', revision: 1 },
+                });
+                await first;
+                // After settling, a new save proceeds normally.
+                const next = client.saveWorkspace({
+                    documentId, title: 'SPY workspace',
+                    payload: workspacePayload('2026-08-09'),
+                    expectedRevision: 1,
+                });
+                assert.equal(sent.length, 2);
+                client.handleMessage({
+                    action: 'workspace_saved',
+                    requestId: sent[1].requestId,
+                    success: true,
+                    document: { documentId, title: 'SPY workspace', revision: 2 },
+                });
+                await next;
             },
         },
         {

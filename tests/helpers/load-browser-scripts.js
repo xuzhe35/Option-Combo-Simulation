@@ -416,7 +416,16 @@ function loadAppContext(options = {}) {
             chooseConflictResolution() {
                 return 'cancel';
             },
+            chooseStaleResolution() {
+                return 'cancel';
+            },
+            chooseTakeoverResolution() {
+                return 'cancel';
+            },
             confirmWorkspaceDelete() {
+                return true;
+            },
+            confirmWorkspaceUndelete() {
                 return true;
             },
             showWorkspaceStoreUnavailable() {},
