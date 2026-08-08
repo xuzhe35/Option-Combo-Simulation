@@ -293,6 +293,41 @@ Important PowerShell entry points:
 
 The macOS/POSIX launchers prefer `OPTION_COMBO_PYTHON`, `config.local.ini`, `.venv`, and `venv`, then fall back to versioned `python3` commands.
 
+## Workspace Persistence (SQLite)
+
+Save / Open / Save a Copy in `index.html` and `chart_lab.html` write
+workspace documents to a local SQLite database owned by the Python backends
+(`portfolio_store.py`, served over the existing WebSocket by
+`portfolio_store_ws.py` in both `ib_server.py` and `historical_server.py`).
+Routine saves need no browser file-system permission; JSON stays as the
+Import/Export and migration format, and a failed database save is reported
+as a failure, never silently downgraded to a file write.
+
+- The active database lives in the platform application-data directory
+  (macOS: `~/Library/Application Support/Option Combo Simulator/portfolio.db`),
+  never inside this OneDrive-synced repo. Overrides:
+  `OPTION_COMBO_PORTFOLIO_DB_PATH` env or `config.ini`
+  `[portfolio_store] db_path`.
+- Documents are UUID-identified with dense revisions. Saves carry an
+  expected revision (conflicts offer open-latest / save-a-copy, never a
+  silent overwrite) and a save token, so a retry after a lost ACK cannot
+  create a duplicate revision.
+- Every load path — database Open or JSON Import — reopens disarmed:
+  live-order authorization, auto-submit, account selections, and pending
+  broker state never survive a snapshot (`sessionSchemaVersion` 1).
+- v1 persistence answers loopback clients only; remote browsers get
+  `store_unavailable` until an authenticated remote mode exists.
+- Same-browser tabs coordinate a single writer per document over
+  BroadcastChannel; the server's revision check remains the real guard.
+- Scheduled static backups publish atomically after saves (at most once per
+  `backup_interval_hours`) and top up on clean exit, into
+  `[portfolio_store] backup_dir` — point it at a OneDrive-synced folder for
+  cross-machine disaster recovery — or `<app-data>/backups` by default.
+  Manual backup: `scripts/backup_portfolio_store.py`. Restore (backends
+  stopped): `scripts/restore_portfolio_store.py <backup.db> --yes`. This is
+  backup, not multi-master sync: two machines editing their own local
+  databases fork and cannot be merged automatically.
+
 ## Runtime Log Cleanup
 
 Launcher logs and pid files now live under `logs/` and are ignored by Git.

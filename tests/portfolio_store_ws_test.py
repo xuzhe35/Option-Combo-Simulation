@@ -54,7 +54,13 @@ def _payload(**overrides):
 
 
 def _config(tmpdir, **portfolio_overrides):
-    values = {'db_path': str(pathlib.Path(tmpdir) / 'portfolio.db')}
+    values = {
+        'db_path': str(pathlib.Path(tmpdir) / 'portfolio.db'),
+        # Keep the fire-and-forget scheduled backup fully disabled unless a
+        # test opts in: with no backup_dir configured it would otherwise
+        # publish into the real user application-data directory.
+        'backup_interval_hours': '0',
+    }
     values.update(portfolio_overrides)
     lines = '\n'.join(f'{key} = {value}' for key, value in values.items())
     config = configparser.ConfigParser()
@@ -381,6 +387,51 @@ class EventLoopIsolationTest(unittest.TestCase):
                 store.save_workspace = original
             # A blocked event loop would leave the ticker near zero.
             self.assertGreater(ticks, 10)
+
+
+class ScheduledBackupTest(unittest.TestCase):
+    def test_stale_interval_publishes_once_then_suppresses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backup_dir = pathlib.Path(tmp) / 'backups'
+            config = _config(tmp, backup_dir=str(backup_dir),
+                             backup_interval_hours='24')
+            env = create_store_env(config)
+            # Populate through the store directly so no background task
+            # races the assertions below.
+            portfolio_store_ws.ensure_store_initialized(env)
+            env['store'].save_workspace(
+                document_id=DOC, title='SPY workspace', payload=_payload(),
+                save_token='save-0000001-4000-8000-000000000000',
+            )
+            self.assertTrue(portfolio_store_ws.maybe_publish_scheduled_backup(env))
+            names = [p.name for p in backup_dir.iterdir()]
+            self.assertEqual(len(names), 1)
+            self.assertRegex(names[0], r'^portfolio-\d{8}T\d{6}Z-schema1-')
+            # A fresh backup suppresses the next publish inside the interval.
+            self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(env))
+            self.assertTrue(portfolio_store_ws.maybe_publish_scheduled_backup(
+                env, force=True
+            ))
+
+    def test_backup_failure_never_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = create_store_env(_config(tmp))
+            _one_response(env, FakeWebSocket(), _save_request())
+            # Re-enable scheduling after the save so the manual call below
+            # deterministically reaches the (failing) publish.
+            env['_backup_interval_seconds'] = 3600.0
+            env['store'].publish_backup = lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError('disk full')
+            )
+            self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(env))
+            portfolio_store_ws.publish_backup_best_effort(env)  # must not raise
+
+    def test_uninitialized_env_skips_quietly(self):
+        self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(None))
+        with tempfile.TemporaryDirectory() as tmp:
+            env = create_store_env(_config(tmp))
+            # Store not lazily initialized yet: nothing to back up.
+            self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(env))
 
 
 class LiveHistoricalParityTest(unittest.TestCase):

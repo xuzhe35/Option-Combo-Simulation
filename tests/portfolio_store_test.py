@@ -509,6 +509,40 @@ class RevisionListingAndPruneTest(PortfolioStoreTestBase):
         self.assertGreaterEqual(self.store.freelist_count(), 0)
 
 
+class LongRunTest(PortfolioStoreTestBase):
+    def test_hundred_save_restart_load_cycles_stay_consistent(self):
+        """Phase-6 endurance: every save reopens the store (a restart), the
+        revision chain stays dense, and quick_check stays ok throughout."""
+        self._create_doc(payload=_payload(baseDate='day-1'))
+        for i in range(2, 101):
+            self.clock.advance(minutes=7)
+            store = PortfolioStore(self.db_path, now=self.clock).initialize()
+            result = store.save_workspace(
+                document_id=DOC_A, title='SPY workspace',
+                payload=_payload(baseDate=f'day-{i}'),
+                save_token=_token(1000 + i), expected_revision=i - 1,
+            )
+            self.assertEqual(result['revision'], i)
+
+        final = PortfolioStore(self.db_path).initialize()
+        self.assertEqual(final.quick_check(), 'ok')
+        loaded = final.load_workspace(DOC_A)
+        self.assertEqual(loaded['revision'], 100)
+        self.assertEqual(loaded['payload']['baseDate'], 'day-100')
+        revisions = final.list_revisions(DOC_A, limit=200)
+        self.assertEqual([r['revision'] for r in revisions], list(range(100, 0, -1)))
+
+        # Retention + bounded vacuum after the marathon still verifies clean.
+        final_with_clock = PortfolioStore(self.db_path, now=self.clock)
+        deleted = final_with_clock.prune_revisions(keep_recent=10, keep_daily_days=0)
+        self.assertGreater(deleted, 0)
+        final_with_clock.incremental_vacuum(max_pages=1024)
+        self.assertEqual(final_with_clock.quick_check(), 'ok')
+        self.assertEqual(
+            final_with_clock.load_workspace(DOC_A)['payload']['baseDate'], 'day-100'
+        )
+
+
 class FailureContainmentTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -551,6 +585,90 @@ class BackupTest(PortfolioStoreTestBase):
         self.assertEqual(
             loaded['payloadSha256'],
             self.store.load_workspace(DOC_A)['payloadSha256'],
+        )
+
+
+class PublishBackupTest(PortfolioStoreTestBase):
+    def setUp(self):
+        super().setUp()
+        self.backup_dir = pathlib.Path(self._tmp.name) / 'synced-backups'
+
+    def test_publish_creates_verified_timestamped_snapshot(self):
+        from portfolio_store import restore_database
+
+        self._create_doc()
+        published = self.store.publish_backup(self.backup_dir)
+        self.assertTrue(published.exists())
+        self.assertRegex(
+            published.name, r'^portfolio-\d{8}T\d{6}Z-schema1-[0-9a-f]{16}\.db$'
+        )
+        # No partials, no WAL/SHM ever land in the synced folder.
+        leftovers = [p.name for p in self.backup_dir.iterdir() if p != published]
+        self.assertEqual(leftovers, [])
+        # The published file restores into a working database elsewhere.
+        new_machine_db = pathlib.Path(self._tmp.name) / 'new-machine' / 'portfolio.db'
+        restore_database(published, new_machine_db)
+        restored = PortfolioStore(new_machine_db).initialize()
+        self.assertEqual(
+            restored.load_workspace(DOC_A)['payloadSha256'],
+            self.store.load_workspace(DOC_A)['payloadSha256'],
+        )
+
+    def test_install_id_is_stable_and_scopes_retention(self):
+        self._create_doc()
+        install_id = self.store.ensure_install_id()
+        self.assertEqual(PortfolioStore(self.db_path).ensure_install_id(), install_id)
+
+        # A foreign machine's backups must never be pruned by this one.
+        self.backup_dir.mkdir(parents=True)
+        foreign = self.backup_dir / 'portfolio-20200101T000000Z-schema1-feedfacefeedface.db'
+        foreign.write_bytes(b'foreign machine backup')
+
+        for _ in range(20):
+            self.clock.advance(days=1)
+            self.store.publish_backup(self.backup_dir, keep_daily=3, keep_weekly=2)
+
+        self.assertTrue(foreign.exists())
+        own = [
+            p.name for p in self.backup_dir.iterdir()
+            if install_id in p.name
+        ]
+        # 3 dailies plus up to 2 older weekly anchors.
+        self.assertLessEqual(len(own), 5)
+        self.assertGreaterEqual(len(own), 3)
+        newest_stamp = self.store.latest_own_backup_stamp(self.backup_dir)
+        self.assertIsNotNone(newest_stamp)
+        self.assertIn(newest_stamp, ''.join(own))
+
+    def test_restore_refuses_partials_and_preserves_old_database(self):
+        from portfolio_store import restore_database
+
+        self._create_doc()
+        published = self.store.publish_backup(self.backup_dir)
+        partial = self.backup_dir / (published.name + '.partial')
+        partial.write_bytes(b'half written')
+        with self.assertRaises(StoreUnavailableError):
+            restore_database(partial, pathlib.Path(self._tmp.name) / 'x.db')
+
+        # Restoring over an existing database displaces it, never deletes it.
+        target_dir = pathlib.Path(self._tmp.name) / 'existing'
+        target_db = target_dir / 'portfolio.db'
+        existing = PortfolioStore(target_db, now=self.clock).initialize()
+        existing.save_workspace(
+            document_id=DOC_B, title='existing book', payload=_payload(),
+            save_token=_token(70),
+        )
+        result = restore_database(published, target_db)
+        self.assertIsNotNone(result['displaced_to'])
+        displaced = pathlib.Path(result['displaced_to'])
+        self.assertTrue(displaced.exists())
+        self.assertEqual(
+            [d['documentId'] for d in PortfolioStore(target_db).initialize().list_documents()],
+            [DOC_A],
+        )
+        self.assertEqual(
+            [d['documentId'] for d in PortfolioStore(displaced).initialize().list_documents()],
+            [DOC_B],
         )
 
 

@@ -18,14 +18,20 @@ import logging
 import threading
 import time
 
+from datetime import datetime, timezone
+
 from portfolio_store import (
     ACCEPTED_PAYLOAD_SCHEMA_VERSIONS,
+    DEFAULT_BACKUP_KEEP_DAILY,
+    DEFAULT_BACKUP_KEEP_WEEKLY,
     DEFAULT_MAX_PAYLOAD_BYTES,
     PortfolioStore,
     PortfolioStoreError,
     InvalidRequestError,
     RevisionConflictError,
     SCHEMA_USER_VERSION,
+    default_app_data_dir,
+    resolve_backup_dir,
     resolve_db_path,
 )
 
@@ -95,6 +101,28 @@ def create_store_env(config=None):
         except ValueError:
             pass
 
+    backup_interval_hours = 24.0
+    backup_keep_daily = DEFAULT_BACKUP_KEEP_DAILY
+    backup_keep_weekly = DEFAULT_BACKUP_KEEP_WEEKLY
+    if config is not None:
+        try:
+            backup_interval_hours = config.getfloat(
+                'portfolio_store', 'backup_interval_hours', fallback=24.0
+            )
+        except ValueError:
+            backup_interval_hours = 24.0
+        try:
+            backup_keep_daily = config.getint(
+                'portfolio_store', 'backup_keep_daily',
+                fallback=DEFAULT_BACKUP_KEEP_DAILY,
+            )
+            backup_keep_weekly = config.getint(
+                'portfolio_store', 'backup_keep_weekly',
+                fallback=DEFAULT_BACKUP_KEEP_WEEKLY,
+            )
+        except ValueError:
+            pass
+
     return {
         'store': None,
         'available': False,
@@ -105,6 +133,10 @@ def create_store_env(config=None):
         '_config': config,
         '_initialized': False,
         '_init_lock': threading.Lock(),
+        '_backup_interval_seconds': max(0.0, backup_interval_hours) * 3600.0,
+        '_backup_keep_daily': backup_keep_daily,
+        '_backup_keep_weekly': backup_keep_weekly,
+        '_backup_inflight': False,
     }
 
 
@@ -272,7 +304,69 @@ async def build_persistence_response(store_env, websocket, data, *,
     response = {'action': server_action, 'requestId': request_id, 'success': True}
     response.update(result)
     _log_result(action, request_id, data, started, result=result)
+    if action == 'save_saved_workspace':
+        # Committed data is the trigger for the scheduled static backup.
+        # Fire-and-forget off the event loop; a backup failure only logs.
+        try:
+            asyncio.get_running_loop().create_task(
+                asyncio.to_thread(maybe_publish_scheduled_backup, store_env)
+            )
+        except RuntimeError:
+            pass
     return response
+
+
+def _resolve_effective_backup_dir(store_env):
+    configured = resolve_backup_dir(config=store_env.get('_config'))
+    if configured is not None:
+        return configured
+    # Local safety net until the user points backups at a synced folder.
+    return default_app_data_dir() / 'backups'
+
+
+def maybe_publish_scheduled_backup(store_env, *, force=False):
+    """Publish a static snapshot when the newest own backup is older than the
+    configured interval. Runs on a worker thread; never raises."""
+    if store_env is None:
+        return False
+    store = store_env.get('store')
+    interval = store_env.get('_backup_interval_seconds', 24 * 3600.0)
+    if store is None or interval <= 0:
+        return False
+    if store_env.get('_backup_inflight'):
+        return False
+    store_env['_backup_inflight'] = True
+    try:
+        backup_dir = _resolve_effective_backup_dir(store_env)
+        newest = store.latest_own_backup_stamp(backup_dir)
+        if newest is not None and not force:
+            newest_at = datetime.strptime(newest, '%Y%m%dT%H%M%SZ').replace(
+                tzinfo=timezone.utc
+            )
+            age = (datetime.now(timezone.utc) - newest_at).total_seconds()
+            if age < interval:
+                return False
+        published = store.publish_backup(
+            backup_dir,
+            keep_daily=store_env.get('_backup_keep_daily', DEFAULT_BACKUP_KEEP_DAILY),
+            keep_weekly=store_env.get('_backup_keep_weekly', DEFAULT_BACKUP_KEEP_WEEKLY),
+        )
+        logger.info('published scheduled workspace backup: %s', published)
+        return True
+    except Exception:
+        logger.exception('scheduled workspace backup failed; saves are unaffected')
+        return False
+    finally:
+        store_env['_backup_inflight'] = False
+
+
+def publish_backup_best_effort(store_env):
+    """Shutdown hook: top up the scheduled backup if it is due. Never raises
+    and never blocks shutdown on failure."""
+    try:
+        maybe_publish_scheduled_backup(store_env)
+    except Exception:
+        pass
 
 
 async def _dispatch_store_call(store, action, data):

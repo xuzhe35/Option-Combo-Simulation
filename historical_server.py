@@ -229,3 +229,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Historical replay server stopped by user.")
+    finally:
+        # Best-effort scheduled-backup top-up on clean exit.
+        portfolio_store_ws.publish_backup_best_effort(portfolio_store_env)

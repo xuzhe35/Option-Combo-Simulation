@@ -632,6 +632,20 @@ Not implemented there today:
 - `syncAvgCostFromPortfolio` defaults to enabled for newly created trial groups.
 - `livePriceMode` affects displayed price and live P&L, but combo-order pricing still uses the existing midpoint-based order-preview/submit flow.
 - Shared backend runtime payload contracts now live in `runtime_contracts.py`; shared combo/hedge tracking shape lives in `trade_execution/order_tracking.py`.
+- Workspace Save/Open is SQLite-backed (`portfolio_store.py` +
+  `portfolio_store_ws.py` on both backends, `js/workspace_persistence.js` +
+  `js/app.js` orchestration in the browser). The active database lives in
+  the platform app-data dir, never in this repo; tests must always point
+  stores at temp dirs (`create_store_env` is lazy precisely so importing
+  `ib_server` cannot touch the user database). The snapshot contract is
+  `buildPersistenceState()` (`sessionSchemaVersion` 1): every load path
+  reopens with live-order authorization off. JSON Import/Export remains the
+  migration path; `scripts/backup_portfolio_store.py` /
+  `scripts/restore_portfolio_store.py` handle static backups and recovery.
+- Both `websockets.serve` calls must keep the same explicit `max_size`
+  (`[server] max_ws_message_bytes`, 8 MiB): the library default of 1 MiB
+  would close the live socket — and drop order supervision — on a large
+  workspace save.
 
 ## 8. Tests
 

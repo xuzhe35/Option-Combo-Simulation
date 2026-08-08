@@ -2241,3 +2241,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Server stopped by user.")
+    finally:
+        # Best-effort scheduled-backup top-up on clean exit; never blocks
+        # shutdown and never the only backup trigger (saves also schedule it).
+        portfolio_store_ws.publish_backup_best_effort(portfolio_store_env)

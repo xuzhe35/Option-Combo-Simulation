@@ -760,6 +760,24 @@ The split is intentional:
 
 Any other message to `historical_server.py` returns a historical replay error.
 
+### Workspace persistence (shared by both backends)
+
+`portfolio_store.py` is the pure SQLite store (schema v1: workspace
+documents + full-JSON revisions, canonical-JSON validation and SHA-256
+before any write transaction, BEGIN IMMEDIATE saves with optimistic
+revision locking and save-token idempotency, soft delete, restore,
+retention pruning, verified backup publishing). `portfolio_store_ws.py`
+serves the same seven persistence actions on both sockets via
+`asyncio.to_thread`, enforces loopback-only access before lazily opening
+the database, and schedules the static backup after committed saves. On
+the browser side `js/workspace_persistence.js` owns request correlation,
+the document envelope, the canonical fingerprint for dirty detection, the
+5 MiB pre-send check, and the BroadcastChannel writer lease; `js/app.js`
+only hands snapshots in and applies load results atomically through the
+replace-mode normalizer. Both `websockets.serve` calls share an explicit
+`max_size` (`[server] max_ws_message_bytes`) because the library's 1 MiB
+default would 1009-close a socket that also carries order supervision.
+
 ## 8. Historical Replay Architecture
 
 Historical replay is implemented as a first-class runtime mode in the main workspace.

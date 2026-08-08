@@ -23,8 +23,10 @@ import json
 import hashlib
 import os
 import re
+import shutil
 import sqlite3
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -35,6 +37,15 @@ MAX_JSON_DEPTH = 64
 ACCEPTED_PAYLOAD_SCHEMA_VERSIONS = (0, 1)
 DEFAULT_REVISION_KEEP_RECENT = 50
 DEFAULT_REVISION_KEEP_DAILY_DAYS = 90
+DEFAULT_BACKUP_KEEP_DAILY = 14
+DEFAULT_BACKUP_KEEP_WEEKLY = 8
+
+# portfolio-<UTC stamp>-schema<user_version>-<install id>.db — the install id
+# keeps two machines publishing into one synced folder from colliding, and
+# retention only ever touches this machine's own matching files.
+_BACKUP_FILE_RE = re.compile(
+    r'^portfolio-(\d{8}T\d{6}Z)-schema(\d+)-([A-Za-z0-9][A-Za-z0-9-]{7,63})\.db$'
+)
 
 # UUIDs pass; so do project-style tokens. Anything shorter than 8 chars or
 # carrying separators/exotic characters is rejected before touching SQL.
@@ -128,6 +139,63 @@ def resolve_db_path(config=None, env=None, platform=None):
         if configured:
             return Path(configured)
     return default_app_data_dir(platform=platform, env=env) / 'portfolio.db'
+
+
+def resolve_backup_dir(config=None, env=None):
+    """OPTION_COMBO_PORTFOLIO_BACKUP_DIR > config backup_dir > None (off).
+
+    This is the static-snapshot publish target (typically a OneDrive folder).
+    Only completed, verified copies land here — never the live WAL/SHM."""
+    env = env if env is not None else os.environ
+    explicit = (env.get('OPTION_COMBO_PORTFOLIO_BACKUP_DIR') or '').strip()
+    if explicit:
+        return Path(explicit)
+    if config is not None:
+        configured = (config.get('portfolio_store', 'backup_dir', fallback='') or '').strip()
+        if configured:
+            return Path(configured)
+    return None
+
+
+def restore_database(backup_path, db_path, *, now=None):
+    """Install a verified backup as the active database (backends stopped).
+
+    The candidate is copied to a temp name and quick_check-verified first; an
+    existing database (with WAL/SHM) is moved aside as a timestamped
+    recoverable copy, never overwritten in place. Returns a dict describing
+    what happened."""
+    backup_path = Path(backup_path)
+    db_path = Path(db_path)
+    if not backup_path.is_file():
+        raise StoreUnavailableError(f'backup not found: {backup_path}')
+    if backup_path.name.endswith('.partial'):
+        raise StoreUnavailableError('refusing to restore a partial backup file')
+
+    stamp = (now or datetime.now(timezone.utc)).strftime('%Y%m%dT%H%M%SZ')
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    staging = db_path.parent / f'{db_path.name}.restore-{stamp}.tmp'
+    shutil.copyfile(backup_path, staging)
+    try:
+        PortfolioStore(staging).initialize().quick_check()
+    except PortfolioStoreError:
+        staging.unlink(missing_ok=True)
+        raise
+
+    displaced = None
+    if db_path.exists():
+        displaced = db_path.parent / f'{db_path.name}.pre-restore-{stamp}'
+        os.replace(db_path, displaced)
+        for suffix in ('-wal', '-shm'):
+            sidecar = Path(str(db_path) + suffix)
+            if sidecar.exists():
+                os.replace(sidecar, Path(str(displaced) + suffix))
+    os.replace(staging, db_path)
+    PortfolioStore(db_path).initialize().quick_check()
+    return {
+        'restored_from': str(backup_path),
+        'db_path': str(db_path),
+        'displaced_to': str(displaced) if displaced else None,
+    }
 
 
 def canonicalize_payload(payload, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES):
@@ -791,6 +859,105 @@ class PortfolioStore:
         backup_store = PortfolioStore(dest, max_payload_bytes=self._max_payload_bytes)
         backup_store.quick_check()
         return dest
+
+    def ensure_install_id(self):
+        """Stable per-machine id stored next to the active database, used in
+        published backup names so two machines never overwrite each other."""
+        marker = self._db_path.parent / 'install_id'
+        try:
+            existing = marker.read_text(encoding='utf-8').strip()
+        except OSError:
+            existing = ''
+        if existing and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{7,63}', existing):
+            return existing
+        install_id = uuid.uuid4().hex[:16]
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(install_id + '\n', encoding='utf-8')
+        except OSError as exc:
+            raise StoreUnavailableError(f'cannot persist install id: {exc}') from exc
+        return install_id
+
+    def latest_own_backup_stamp(self, backup_dir):
+        """Newest publish stamp for this install in backup_dir, or None."""
+        install_id = self.ensure_install_id()
+        newest = None
+        try:
+            entries = list(Path(backup_dir).iterdir())
+        except OSError:
+            return None
+        for entry in entries:
+            match = _BACKUP_FILE_RE.match(entry.name)
+            if match and match.group(3) == install_id:
+                if newest is None or match.group(1) > newest:
+                    newest = match.group(1)
+        return newest
+
+    def publish_backup(self, backup_dir, *, keep_daily=DEFAULT_BACKUP_KEEP_DAILY,
+                       keep_weekly=DEFAULT_BACKUP_KEEP_WEEKLY):
+        """Publish one verified static snapshot into a synced folder.
+
+        The snapshot is produced with the SQLite backup API into a local temp
+        file, quick_check-verified, copied to the target as an explicit
+        .partial name, flushed, then atomically renamed — sync software never
+        sees a half-written final file and never touches the live WAL/SHM.
+        Retention prunes only this install's own completed files."""
+        backup_dir = Path(backup_dir)
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise StoreUnavailableError(f'cannot create backup dir: {exc}') from exc
+
+        install_id = self.ensure_install_id()
+        now = self._now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        stamp = now.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        name = f'portfolio-{stamp}-schema{SCHEMA_USER_VERSION}-{install_id}.db'
+
+        local_snapshot = self._db_path.parent / f'.backup-staging-{stamp}.db'
+        try:
+            self.backup_to(local_snapshot)  # includes quick_check
+            partial = backup_dir / (name + '.partial')
+            with open(local_snapshot, 'rb') as src, open(partial, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+                dst.flush()
+                os.fsync(dst.fileno())
+            os.replace(partial, backup_dir / name)
+        finally:
+            local_snapshot.unlink(missing_ok=True)
+            Path(str(local_snapshot) + '-wal').unlink(missing_ok=True)
+            Path(str(local_snapshot) + '-shm').unlink(missing_ok=True)
+
+        self._apply_backup_retention(backup_dir, install_id, keep_daily, keep_weekly)
+        return backup_dir / name
+
+    @staticmethod
+    def _apply_backup_retention(backup_dir, install_id, keep_daily, keep_weekly):
+        own = []
+        for entry in Path(backup_dir).iterdir():
+            match = _BACKUP_FILE_RE.match(entry.name)
+            if match and match.group(3) == install_id:
+                own.append((match.group(1), entry))
+        own.sort(reverse=True)
+
+        newest_per_day = {}
+        newest_per_week = {}
+        for stamp, entry in own:
+            day = stamp[:8]
+            if day not in newest_per_day:
+                newest_per_day[day] = entry
+            week = datetime.strptime(stamp[:8], '%Y%m%d').isocalendar()[:2]
+            if week not in newest_per_week:
+                newest_per_week[week] = entry
+        keep = set()
+        for day in sorted(newest_per_day, reverse=True)[:max(0, int(keep_daily))]:
+            keep.add(newest_per_day[day])
+        for week in sorted(newest_per_week, reverse=True)[:max(0, int(keep_weekly))]:
+            keep.add(newest_per_week[week])
+        for _stamp, entry in own:
+            if entry not in keep:
+                entry.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Helpers
