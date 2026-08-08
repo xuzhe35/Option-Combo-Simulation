@@ -545,6 +545,7 @@ class PortfolioStore:
                 'revision': next_revision,
                 'updatedAtUtc': now_iso,
                 'payloadSha256': sha256,
+                'payloadBytes': len(encoded),
                 'idempotentReplay': False,
             }
         except sqlite3.Error as exc:
@@ -554,7 +555,8 @@ class PortfolioStore:
 
     def _find_save_token_replay(self, conn, document_id, save_token, sha256):
         row = conn.execute(
-            'SELECT document_id, revision, payload_sha256, saved_at_utc '
+            'SELECT document_id, revision, payload_sha256, saved_at_utc, '
+            'length(payload_json) AS payload_bytes '
             'FROM workspace_revisions WHERE save_token = ?',
             (save_token,),
         ).fetchone()
@@ -579,6 +581,7 @@ class PortfolioStore:
             'revision': row['revision'],
             'updatedAtUtc': row['saved_at_utc'],
             'payloadSha256': row['payload_sha256'],
+            'payloadBytes': row['payload_bytes'],
             'idempotentReplay': True,
         }
 

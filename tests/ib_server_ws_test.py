@@ -2001,5 +2001,47 @@ class MarketReferenceContractMetadataTests(unittest.TestCase):
         self.assertEqual(metadata['contractMonth'], '202608')
 
 
+class PersistenceRoutingTests(unittest.TestCase):
+    """dispatch_client_message must answer persistence actions itself and
+    never let them fall through to the execution dispatcher."""
+
+    @staticmethod
+    def _env():
+        async def send_message_safe(ws, message):
+            ws.sent.append(message)
+
+        engine = _ExecutionEngineStub()
+        return {
+            'send_message_safe': send_message_safe,
+            'execution_engine': engine,
+        }, engine
+
+    def test_persistence_action_without_store_env_reports_unavailable(self):
+        websocket = _FakeWebSocket()
+        env, engine = self._env()
+        asyncio.run(dispatch_client_message(env, websocket, {
+            'action': 'request_workspace_store_status',
+            'requestId': 'probe-1',
+        }, client_ip='127.0.0.1'))
+        self.assertEqual(len(websocket.sent), 1)
+        response = json.loads(websocket.sent[0])
+        self.assertEqual(response['action'], 'workspace_store_status')
+        self.assertEqual(response['requestId'], 'probe-1')
+        self.assertFalse(response['available'])
+        # The action never reached the execution dispatcher.
+        self.assertEqual(engine.calls, [])
+
+    def test_persistence_error_keeps_dispatch_usable(self):
+        websocket = _FakeWebSocket()
+        env, engine = self._env()
+        asyncio.run(dispatch_client_message(env, websocket, {
+            'action': 'save_saved_workspace',
+            'requestId': 'save-1',
+        }, client_ip='127.0.0.1'))
+        response = json.loads(websocket.sent[0])
+        self.assertFalse(response['success'])
+        self.assertEqual(response['code'], 'store_unavailable')
+
+
 if __name__ == '__main__':
     unittest.main()

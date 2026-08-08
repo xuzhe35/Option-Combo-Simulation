@@ -85,6 +85,7 @@ from ib_server_ws import (
     purge_combo_order_tracking_for_websocket as purge_combo_order_tracking_for_websocket,
     purge_hedge_order_tracking_for_websocket as purge_hedge_order_tracking_for_websocket,
 )
+import portfolio_store_ws
 from iv_term_structure_service import (
     DEFAULT_BUCKET_DEFINITIONS as IV_TERM_STRUCTURE_BUCKET_DEFINITIONS,
     DEFAULT_MAX_DTE as IV_TERM_STRUCTURE_DEFAULT_MAX_DTE,
@@ -115,6 +116,9 @@ TWS_CLIENT_ID = config.getint('tws', 'client_id', fallback=999)
 
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
+MAX_WS_MESSAGE_BYTES = portfolio_store_ws.read_max_ws_message_bytes(config)
+# Workspace persistence store: failure only disables persistence, never IB.
+portfolio_store_env = portfolio_store_ws.create_store_env(config)
 MANAGED_REPRICE_THRESHOLD_DEFAULT = config.getfloat('execution', 'managed_reprice_threshold_default', fallback=0.01)
 MANAGED_REPRICE_INTERVAL_SECONDS = config.getfloat('execution', 'managed_reprice_interval_seconds', fallback=2.0)
 MANAGED_REPRICE_MAX_UPDATES = config.getint('execution', 'managed_reprice_max_updates', fallback=12)
@@ -2134,6 +2138,7 @@ def _build_ws_handler_environment():
         'is_terminal_hedge_tracking': _is_terminal_hedge_tracking,
         'is_terminal_combo_tracking': _is_terminal_combo_tracking,
         'extract_market_price': _extract_market_price,
+        'portfolio_store_env': portfolio_store_env,
         'ib': ib,
     }
 
@@ -2188,7 +2193,13 @@ async def main():
         try:
             for ws_host in WS_HOSTS:
                 logging.info(f"Starting WebSocket server on ws://{ws_host}:{WS_PORT}")
-                ws_servers.append(await websockets.serve(handle_ws_client, ws_host, WS_PORT))
+                # Explicit max_size: the library's 1 MiB default would close
+                # the socket (1009) on a large workspace save, tearing down
+                # order supervision with it. Must match historical_server.py.
+                ws_servers.append(await websockets.serve(
+                    handle_ws_client, ws_host, WS_PORT,
+                    max_size=MAX_WS_MESSAGE_BYTES,
+                ))
         except OSError as e:
             for ws_server in ws_servers:
                 ws_server.close()
