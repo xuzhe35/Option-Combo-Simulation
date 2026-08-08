@@ -1935,6 +1935,39 @@ function _handleIbConnectionStatusMessage(data, sourceSocket = ws) {
     return true;
 }
 
+let _workspacePersistenceClient = null;
+
+// Lazy singleton: created on first use so pages that never touch persistence
+// (and tests that stub the module away) pay nothing.
+function getWorkspacePersistenceClient() {
+    if (_workspacePersistenceClient) {
+        return _workspacePersistenceClient;
+    }
+    if (typeof OptionComboWorkspacePersistence === 'undefined'
+        || typeof OptionComboWorkspacePersistence.createClient !== 'function') {
+        return null;
+    }
+    _workspacePersistenceClient = OptionComboWorkspacePersistence.createClient({
+        send: (message) => {
+            if (!ws || ws.readyState !== 1) {
+                return false;
+            }
+            try {
+                ws.send(message);
+                return true;
+            } catch (error) {
+                return false;
+            }
+        },
+    });
+    return _workspacePersistenceClient;
+}
+
+function _handleWorkspacePersistenceMessage(data) {
+    return _workspacePersistenceClient !== null
+        && _workspacePersistenceClient.handleMessage(data) === true;
+}
+
 function connectWebSocket() {
     _clearWsReconnectTimer();
 
@@ -1978,11 +2011,20 @@ function connectWebSocket() {
         }
         requestActiveHedgeOrdersSnapshot();
         requestActiveComboOrdersSnapshot();
+        // Capability re-probe only — an unknown save outcome is never
+        // replayed automatically; the user retries with the same token.
+        const persistenceClient = getWorkspacePersistenceClient();
+        if (persistenceClient) {
+            persistenceClient.handleSocketOpen();
+        }
     };
 
     connectionSocket.onclose = () => {
         if (ws !== connectionSocket) return;
         isWsConnected = false;
+        if (_workspacePersistenceClient) {
+            _workspacePersistenceClient.handleSocketClosed();
+        }
         _lastLiveSubscriptionSignature = '';
         _lastLiveSubscriptionSocket = null;
         if (_automaticLiveSubscriptionSocket === connectionSocket) {
@@ -2022,6 +2064,9 @@ function connectWebSocket() {
         if (ws !== connectionSocket) return;
         try {
             const data = JSON.parse(event.data);
+            if (_handleWorkspacePersistenceMessage(data)) {
+                return;
+            }
             if (_handleManagedAccountsMessage(data)) {
                 return;
             }
