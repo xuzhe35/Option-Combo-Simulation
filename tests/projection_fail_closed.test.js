@@ -262,6 +262,89 @@ module.exports = {
             },
         },
         {
+            name: 'liquidation charts use intrinsic payoff without option timing or IV',
+            run() {
+                const canvasContext = new Proxy({
+                    clearRect() {},
+                    scale() {},
+                    fillText() {},
+                    measureText(value) { return { width: String(value || '').length * 7 }; },
+                    createLinearGradient() { return { addColorStop() {} }; },
+                }, {
+                    get(target, key) {
+                        if (key in target) return target[key];
+                        return () => {};
+                    },
+                });
+                const canvas = {
+                    getContext: () => canvasContext,
+                    addEventListener() {},
+                    parentElement: {
+                        getBoundingClientRect: () => ({ width: 800, height: 400 }),
+                    },
+                    style: {},
+                };
+                const group = {
+                    id: 'liquidation-chart',
+                    viewMode: 'liquidation',
+                    legs: [{
+                        id: 'call', type: 'call', pos: -1, strike: 100,
+                        expDate: '2026-07-11', iv: null, ivSource: 'missing',
+                        cost: 2, currentPrice: 9, currentPriceSource: 'live',
+                        closePrice: null,
+                    }],
+                };
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 100,
+                    baseDate: '2026-07-10',
+                    liveQuoteDate: '2026-07-10',
+                    liveQuoteAsOf: '2026-07-10T19:00:00Z',
+                    simulatedDate: '2026-07-10',
+                    marketDataMode: 'live',
+                    projectionConvergenceMode: 'strict-bbo',
+                    simulationTiming: {
+                        available: false,
+                        status: 'exact_contract_timing_missing',
+                    },
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    groups: [group],
+                };
+                const ctx = loadBrowserScripts(
+                    [...pricingScripts, 'js/chart.js', 'js/chart_lab.js'],
+                    {
+                        devicePixelRatio: 1,
+                        document: {
+                            readyState: 'loading',
+                            addEventListener() {},
+                            getElementById: () => null,
+                            createElement() {
+                                return {
+                                    width: 0,
+                                    height: 0,
+                                    getContext: () => canvasContext,
+                                };
+                            },
+                        },
+                    }
+                );
+
+                const PnLChart = new vm.Script('PnLChart').runInContext(ctx);
+                const chart = new PnLChart(canvas);
+                chart.draw(group, state, 80, 120);
+                assert.ok(chart.lastRenderData);
+                const atStrike = chart.lastRenderData.data.find(point => point.x === 100);
+                assert.ok(atStrike);
+                assert.equal(atStrike.y, 200);
+
+                const curve = ctx.OptionComboChartLab._test.projectionCurve(group, state, 80, 120);
+                assert.ok(curve.points.length > 0);
+                assert.equal(curve.error, undefined);
+                assert.equal(curve.points.find(point => point.price === 100).pnl, 200);
+            },
+        },
+        {
             name: 'shared simulated-price boundary rejects null underlyings',
             run() {
                 const ctx = loadBrowserScripts(pricingScripts);

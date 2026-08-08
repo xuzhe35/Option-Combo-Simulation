@@ -3805,12 +3805,13 @@
         const toggleActiveBtn = card.querySelector('.toggle-view-active');
         const toggleTrialBtn = card.querySelector('.toggle-view-trial');
         const toggleAmortizedBtn = card.querySelector('.toggle-view-amortized');
+        const toggleLiquidationBtn = card.querySelector('.toggle-view-liquidation');
         const toggleSettlementBtn = card.querySelector('.toggle-view-settlement');
         const settlementControls = card.querySelector('.settlement-controls');
 
         group.viewMode = currentMode;
 
-        [toggleActiveBtn, toggleTrialBtn, toggleAmortizedBtn, toggleSettlementBtn].forEach(btn => {
+        [toggleActiveBtn, toggleTrialBtn, toggleAmortizedBtn, toggleLiquidationBtn, toggleSettlementBtn].forEach(btn => {
             if (!btn) return;
             btn.classList.remove('active', 'btn-primary');
             btn.classList.add('btn-secondary');
@@ -3827,6 +3828,13 @@
             toggleAmortizedBtn.classList.remove('btn-secondary');
             toggleAmortizedBtn.classList.add('active', 'btn-primary');
             if (settlementControls) settlementControls.style.display = 'flex';
+            return;
+        }
+
+        if (currentMode === 'liquidation' && toggleLiquidationBtn) {
+            toggleLiquidationBtn.classList.remove('btn-secondary');
+            toggleLiquidationBtn.classList.add('active', 'btn-primary');
+            if (settlementControls) settlementControls.style.display = 'none';
             return;
         }
 
@@ -3865,6 +3873,7 @@
             trial: 'Trial · current price',
             active: 'Active · entry cost',
             amortized: 'Amortized',
+            liquidation: 'Liquidation · intrinsic',
             settlement: 'Settlement',
         };
 
@@ -3945,9 +3954,10 @@
         const toggleActiveBtn = card.querySelector('.toggle-view-active');
         const toggleTrialBtn = card.querySelector('.toggle-view-trial');
         const toggleAmortizedBtn = card.querySelector('.toggle-view-amortized');
+        const toggleLiquidationBtn = card.querySelector('.toggle-view-liquidation');
         const toggleSettlementBtn = card.querySelector('.toggle-view-settlement');
 
-        [toggleActiveBtn, toggleTrialBtn, toggleAmortizedBtn, toggleSettlementBtn].forEach(btn => {
+        [toggleActiveBtn, toggleTrialBtn, toggleAmortizedBtn, toggleLiquidationBtn, toggleSettlementBtn].forEach(btn => {
             if (!btn) return;
             btn.disabled = false;
             btn.title = '';
@@ -3986,6 +3996,13 @@
         toggleActiveBtn.classList.add('btn-secondary');
         toggleAmortizedBtn.classList.remove('active', 'btn-primary');
         toggleAmortizedBtn.classList.add('btn-secondary');
+        if (toggleLiquidationBtn) {
+            toggleLiquidationBtn.disabled = true;
+            toggleLiquidationBtn.title = 'Add a Cost to unlock Liquidation analysis.';
+            toggleLiquidationBtn.classList.add('text-muted', 'btn-secondary');
+            toggleLiquidationBtn.classList.remove('active', 'btn-primary');
+            toggleLiquidationBtn.style.opacity = '0.5';
+        }
     }
 
     globalScope.OptionComboGroupEditorUI = {

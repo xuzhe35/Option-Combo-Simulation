@@ -1253,6 +1253,33 @@ class IbServerMicroFamilyDefaultsTests(unittest.TestCase):
         self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['SI']['multiplier'], '5000')
         self.assertEqual(ib_server.SUPPORTED_LIVE_FAMILIES['SI']['trading_class'], 'S3T')
 
+    def test_supported_live_families_cover_every_registry_futures_option_family(self):
+        """The browser registry and this table must name the same FOP families.
+
+        A family the registry offers but this table omits resolves no defaults,
+        so its live market data and orders fall through the family-specific
+        paths entirely.  GC and HG shipped in js/product_registry.js while this
+        table still stopped at SI.
+        """
+        for symbol, exchange, multiplier, trading_class in (
+            ('GC', 'COMEX', '100', 'G3T'),
+            ('HG', 'COMEX', '25000', 'H3T'),
+        ):
+            defaults = ib_server.SUPPORTED_LIVE_FAMILIES[symbol]
+            self.assertEqual(defaults['underlying_sec_type'], 'FUT')
+            self.assertEqual(defaults['option_sec_type'], 'FOP')
+            self.assertEqual(defaults['underlying_symbol'], symbol)
+            self.assertEqual(defaults['option_symbol'], symbol)
+            self.assertEqual(defaults['exchange'], exchange)
+            self.assertEqual(defaults['multiplier'], multiplier)
+            self.assertEqual(defaults['trading_class'], trading_class)
+            # The seed is recorded for reference only: it names one
+            # weekday-and-week listing, so it must never reach IB as a hint.
+            self.assertEqual(
+                ib_server._resolve_weekly_fop_trading_class(symbol, '20260804', ''),
+                '',
+            )
+
     def test_build_underlying_request_uses_micro_family_multipliers(self):
         mes_request = ib_server._build_underlying_request('MES', [{'contractMonth': '202606'}])
         self.assertEqual(mes_request['secType'], 'FUT')

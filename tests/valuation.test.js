@@ -2357,5 +2357,63 @@ module.exports = {
                 assert.ok(down < flat && flat < up, 'long-call value must rise with the settlement price');
             },
         },
+        {
+            name: 'liquidation group ignores a stale option mark and reports intrinsic value',
+            run() {
+                const ctx = loadValuationContext();
+                const group = {
+                    id: 'near-expiry',
+                    viewMode: 'liquidation',
+                    livePriceMode: 'midpoint',
+                    settleUnderlyingPrice: null,
+                    legs: [{
+                        id: 'short-call',
+                        type: 'call',
+                        pos: -5,
+                        strike: 76,
+                        expDate: '2026-08-07',
+                        expiryAsOf: '2026-08-07T20:00:00Z',
+                        iv: 0.90,
+                        ivSource: 'live',
+                        cost: 1.71,
+                        currentPrice: 2.21,
+                        currentPriceSource: 'live',
+                        closePrice: null,
+                    }],
+                };
+                const state = {
+                    underlyingSymbol: 'SPY',
+                    underlyingPrice: 77.01,
+                    baseDate: '2026-08-07',
+                    simulatedDate: '2026-08-07',
+                    liveQuoteDate: '2026-08-07',
+                    liveQuoteAsOf: '2026-08-07T19:59:00Z',
+                    marketDataMode: 'live',
+                    projectionConvergenceMode: 'strict-bbo',
+                    liveProjectionFeedConnected: true,
+                    liveProjectionFeedStale: false,
+                    simulationTiming: {
+                        available: true,
+                        status: 'ok',
+                        simulationDate: '2026-08-07',
+                        targetAsOf: '2026-08-07T19:59:00Z',
+                    },
+                    interestRate: 0.03,
+                    ivOffset: 0,
+                    hedges: [],
+                    groups: [group],
+                };
+
+                const result = ctx.OptionComboValuation.computeGroupDerivedData(group, state);
+
+                assert.equal(result.isLiquidationMode, true);
+                assert.equal(result.groupSimulationAvailable, true);
+                almostEqual(result.legResults[0].simPricePerShare, 1.01);
+                almostEqual(result.groupSimValue, -505);
+                assert.equal(result.groupHasLiveData, false);
+                assert.equal(result.legResults[0].currentPriceDisplay.readOnly, true);
+                assert.equal(result.legResults[0].currentPriceDisplay.value, '1.01');
+            },
+        },
     ],
 };

@@ -300,5 +300,61 @@ module.exports = {
                 ), true);
             },
         },
+        {
+            name: 'holds back AM-settled futures quarterlies when no trading class is qualified',
+            run() {
+                const ctx = loadBrowserScripts(PRODUCT_REGISTRY_CONTEXT_FILES);
+                const registry = ctx.OptionComboProductRegistry;
+
+                // resolveTradingClass returns null for every FOP family, and a
+                // leg carries qualifiedOptionTradingClass only while it is live,
+                // so "no trading class" is the ordinary state of an ES leg. It
+                // must not be read as proof of a PM-settled weekly: these
+                // quarterlies fix on a SOQ that is unknown at the last-trade
+                // cutoff, and reporting them eligible draws a false
+                // intrinsic-value line.
+                assert.equal(registry.resolveTradingClass('ES', '2026-09-18'), null);
+                for (const family of ['ES', 'NQ', 'MES', 'MNQ']) {
+                    assert.equal(
+                        registry.isDeferredSettlementOption(family, '2026-09-18'),
+                        true,
+                        `${family} third-Friday quarterly must fail closed`
+                    );
+                    assert.equal(
+                        registry.isDeferredSettlementOption(family, '2026-12-18'),
+                        true,
+                        `${family} December quarterly must fail closed`
+                    );
+                }
+
+                // Everything that is provably not the AM-settled quarterly stays
+                // eligible: weeklies, serial months and non-third-Friday dates.
+                assert.equal(registry.isDeferredSettlementOption('ES', '2026-09-11'), false);
+                assert.equal(registry.isDeferredSettlementOption('ES', '2026-09-25'), false);
+                assert.equal(registry.isDeferredSettlementOption('ES', '2026-11-20'), false);
+                assert.equal(registry.isDeferredSettlementOption('ES', '2026-10-16'), false);
+
+                // Families with no AM-settled listing never defer.
+                for (const family of ['CL', 'GC', 'SI', 'HG', 'SPY']) {
+                    assert.equal(
+                        registry.isDeferredSettlementOption(family, '2026-09-18'),
+                        false,
+                        `${family} has no AM-settled listing`
+                    );
+                }
+
+                // An unreadable expiry rules nothing out, so it stays held back.
+                // (A wholly absent expiry is not covered here: resolveTradingClass
+                // short-circuits on falsy expDate and hands back the raw E3A seed
+                // before its FOP branch runs, so that path never reaches this
+                // fallback.)
+                assert.equal(registry.isDeferredSettlementOption('ES', 'not-a-date'), true);
+
+                // A qualified class still wins over the expiry fallback.
+                assert.equal(registry.isDeferredSettlementOption(
+                    'ES', '2026-09-18', { qualifiedOptionTradingClass: 'EW3' }
+                ), false);
+            },
+        },
     ],
 };

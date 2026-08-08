@@ -92,6 +92,16 @@ from iv_term_structure_service import (
 )
 from trade_execution.engine import ExecutionEngine
 from trade_execution.adapters.ibkr import IbkrExecutionAdapter
+from trade_execution.ib_contracts_common import (
+    build_contract_from_spec,
+    normalize_symbol,
+    resolve_family_defaults,
+    resolve_index_exchange_candidates,
+    resolve_weekly_fop_trading_class,
+    spec_from_mapping,
+    to_contract_month,
+    to_expiry,
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -288,6 +298,16 @@ SUPPORTED_LIVE_FAMILIES = {
         'multiplier': '1000',
         'trading_class': 'ML3',
     },
+    'GC': {
+        'underlying_sec_type': 'FUT',
+        'option_sec_type': 'FOP',
+        'underlying_symbol': 'GC',
+        'option_symbol': 'GC',
+        'exchange': 'COMEX',
+        'currency': 'USD',
+        'multiplier': '100',
+        'trading_class': 'G3T',
+    },
     'SI': {
         'underlying_sec_type': 'FUT',
         'option_sec_type': 'FOP',
@@ -297,6 +317,16 @@ SUPPORTED_LIVE_FAMILIES = {
         'currency': 'USD',
         'multiplier': '5000',
         'trading_class': 'S3T',
+    },
+    'HG': {
+        'underlying_sec_type': 'FUT',
+        'option_sec_type': 'FOP',
+        'underlying_symbol': 'HG',
+        'option_symbol': 'HG',
+        'exchange': 'COMEX',
+        'currency': 'USD',
+        'multiplier': '25000',
+        'trading_class': 'H3T',
     },
 }
 
@@ -1301,15 +1331,9 @@ def _extract_market_price(ticker):
             return None
     return price
 
-def _normalize_symbol(value):
-    return str(value or '').strip().upper()
-
-def _to_contract_month(value):
-    cleaned = str(value or '').replace('-', '')
-    return cleaned[:6]
-
-def _to_expiry(value):
-    return str(value or '').replace('-', '')
+_normalize_symbol = normalize_symbol
+_to_contract_month = to_contract_month
+_to_expiry = to_expiry
 
 def _to_strike(value):
     try:
@@ -1318,42 +1342,17 @@ def _to_strike(value):
         return None
 
 def _resolve_family_defaults(symbol):
-    normalized = _normalize_symbol(symbol)
-    return SUPPORTED_LIVE_FAMILIES.get(normalized)
+    return resolve_family_defaults(SUPPORTED_LIVE_FAMILIES, symbol)
 
 def _resolve_index_exchange_candidates(symbol, requested_exchange):
-    normalized_symbol = _normalize_symbol(symbol)
-    requested = str(requested_exchange or '').strip()
-    candidates = []
-
-    if requested:
-        candidates.append(requested)
-
-    for exchange in INDEX_EXCHANGE_FALLBACKS.get(normalized_symbol, ()):
-        if exchange not in candidates:
-            candidates.append(exchange)
-
-    if '' not in candidates:
-        candidates.append('')
-
-    return candidates
+    return resolve_index_exchange_candidates(
+        INDEX_EXCHANGE_FALLBACKS, symbol, requested_exchange
+    )
 
 def _resolve_weekly_fop_trading_class(symbol, expiry, current_trading_class):
-    defaults = _resolve_family_defaults(symbol)
-    if not defaults:
-        return current_trading_class
-
-    base_trading_class = current_trading_class or defaults.get('trading_class') or ''
-    if not base_trading_class or len(base_trading_class) < 2:
-        return base_trading_class
-    if _normalize_symbol(defaults.get('option_sec_type')) == 'FOP':
-        # Weekly futures-option classes are listing-specific on every exchange.
-        # The per-family defaults (E3A/Q3A/ML3/G3T/S3T/H3T) each name one
-        # weekday-and-week listing, so they are wrong for most expiries and have
-        # produced valid-expiry IB 200 errors.  Always qualify FOPs from their
-        # exact contract fields and let IB name the class.
-        return ''
-    return base_trading_class
+    return resolve_weekly_fop_trading_class(
+        SUPPORTED_LIVE_FAMILIES, symbol, current_trading_class
+    )
 
 def _extract_contract_expiry(contract):
     raw_value = str(getattr(contract, 'lastTradeDateOrContractMonth', '') or '').strip()
@@ -1628,48 +1627,10 @@ def _build_contract_from_request(contract_data):
         symbol = _normalize_symbol(contract_data)
         return Stock(symbol, 'SMART', 'USD')
 
-    sec_type = _normalize_symbol(contract_data.get('secType') or contract_data.get('sec_type'))
-    symbol = _normalize_symbol(contract_data.get('symbol'))
-    exchange = contract_data.get('exchange') or ''
-    currency = contract_data.get('currency') or 'USD'
-    multiplier = str(contract_data.get('multiplier') or '')
-    trading_class = contract_data.get('tradingClass') or contract_data.get('trading_class') or ''
-    strike = contract_data.get('strike')
-    right = _normalize_symbol(contract_data.get('right'))
-    expiry = _to_expiry(contract_data.get('expDate') or contract_data.get('expiry'))
-    contract_month = _to_contract_month(contract_data.get('contractMonth'))
-    trading_class = _resolve_weekly_fop_trading_class(symbol, expiry, trading_class)
-
-    if sec_type == 'STK':
-        return Stock(symbol, exchange or 'SMART', currency)
-
-    if sec_type == 'IND':
-        return Contract(secType='IND', symbol=symbol, exchange=exchange, currency=currency)
-
-    if sec_type == 'FUT':
-        return Contract(
-            secType='FUT',
-            symbol=symbol,
-            lastTradeDateOrContractMonth=contract_month,
-            exchange=exchange,
-            currency=currency,
-            multiplier=multiplier,
-        )
-
-    if sec_type in ('OPT', 'FOP'):
-        return Contract(
-            secType=sec_type,
-            symbol=symbol,
-            lastTradeDateOrContractMonth=expiry or contract_month,
-            strike=float(strike),
-            right=right,
-            exchange=exchange,
-            currency=currency,
-            multiplier=multiplier,
-            tradingClass=trading_class,
-        )
-
-    raise ValueError(f"Unsupported secType in request: {sec_type!r}")
+    return build_contract_from_spec(
+        SUPPORTED_LIVE_FAMILIES,
+        spec_from_mapping(contract_data),
+    )
 
 async def _qualify_one(contract, contract_request=None):
     sec_type = _normalize_symbol(getattr(contract, 'secType', ''))

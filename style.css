@@ -1679,6 +1679,21 @@ input[type=range]:focus {
     box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.16);
 }
 
+.group-header-live-pnl-item[data-summary-type="liquidation"] {
+    border-style: solid;
+    border-color: rgba(124, 58, 237, 0.28);
+    background: rgba(124, 58, 237, 0.07);
+}
+
+.group-header-live-pnl-item[data-summary-type="liquidation"] .label {
+    color: #6d28d9;
+}
+
+.group-header-live-pnl-item[data-summary-type="liquidation"] .group-header-live-pnl-dot {
+    background: radial-gradient(circle at 30% 30%, #c4b5fd, #8b5cf6 62%, #6d28d9 100%);
+    box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.16);
+}
+
 .group-header-live-pnl-dot {
     width: 0.75rem;
     height: 0.75rem;
@@ -1806,6 +1821,16 @@ input[type=range]:focus {
 
 .settlement-highlight .group-pnl {
     font-size: 1.5rem;
+}
+
+.settlement-highlight.liquidation-highlight {
+    background: linear-gradient(135deg, rgba(124, 58, 237, 0.08), rgba(124, 58, 237, 0.16));
+    border-color: #7c3aed;
+    box-shadow: 0 4px 12px rgba(124, 58, 237, 0.14);
+}
+
+.settlement-highlight.liquidation-highlight .group-pnl-label {
+    color: #6d28d9;
 }
 
 .group-empty-state {

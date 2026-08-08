@@ -614,6 +614,25 @@
         };
     }
 
+    // With no qualified trading class the expiry date is the only evidence left.
+    // The AM-settled listings are exactly the SPX standard monthly and the
+    // ES/NQ/MES/MNQ quarterlies, which expire on the third Friday of March,
+    // June, September and December alongside the future they settle against.
+    // Any other expiry is provably a weekly, serial or EOM listing and fixes PM,
+    // so those stay eligible; an expiry that cannot be read rules nothing out.
+    function _expiryCouldBeDeferredSettlement(profile, expDate) {
+        const parts = _parseIsoDateParts(expDate);
+        if (!parts) return true;
+        const isoDate = `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
+        if (profile.family === 'SPX') {
+            return _getSpxStandardMonthlyLastTradingDate(
+                parts.year, parts.month, profile.calendarId
+            ) === isoDate;
+        }
+        if (![3, 6, 9, 12].includes(parts.month)) return false;
+        return _formatUtcDate(_getThirdFridayUtc(parts.year, parts.month)) === isoDate;
+    }
+
     /**
      * AM-settled index contracts can stop trading before their special
      * opening quotation is known. Their payoff is therefore not a
@@ -622,22 +641,39 @@
      * clock so projection callers can fail closed instead of drawing a false
      * intrinsic-value line.
      *
-     * Qualified tradingClass is required for the futures-option cases:
-     * weekly/EOM/quarterly-PM classes intentionally remain eligible.
+     * A qualified tradingClass decides the futures-option cases outright, so
+     * weekly/EOM/quarterly-PM classes remain eligible. Absent one, the expiry
+     * decides: only a listing that could be the AM-settled quarterly is held
+     * back, because reporting "not deferred" on no evidence is what draws the
+     * false line this exists to prevent.
      */
     function isDeferredSettlementOption(symbol, expDate, contract = null) {
         const profile = resolveUnderlyingProfile(symbol);
-        const explicitTradingClass = String(contract && (
-            contract.qualifiedOptionTradingClass || contract.tradingClass
-        ) || '').trim().toUpperCase();
-        const tradingClass = explicitTradingClass || String(resolveTradingClass(symbol, expDate) || '').toUpperCase();
-        if (profile.family === 'SPX') return tradingClass === 'SPX';
-        return {
+        const deferredTradingClass = {
+            SPX: 'SPX',
             ES: 'ES',
             NQ: 'NQ',
             MES: 'MES',
             MNQ: 'MNQ',
-        }[profile.family] === tradingClass;
+        }[profile.family];
+        // Families with no AM-settled listing can never defer their fixing.
+        if (!deferredTradingClass) return false;
+
+        const explicitTradingClass = String(contract && (
+            contract.qualifiedOptionTradingClass || contract.tradingClass
+        ) || '').trim().toUpperCase();
+        const tradingClass = explicitTradingClass || String(resolveTradingClass(symbol, expDate) || '').toUpperCase();
+        // A qualified trading class is authoritative whenever one exists.
+        if (tradingClass) return deferredTradingClass === tradingClass;
+        // Otherwise fall back to the expiry date rather than reporting "not
+        // deferred". resolveTradingClass returns null for every FOP family, and
+        // qualifiedOptionTradingClass is written only for live legs then dropped
+        // on each resubscribe and session import, so "no trading class" is the
+        // ordinary state of an ES/NQ leg rather than proof it is a PM-settled
+        // weekly. Reading that absence as eligible prints a deterministic
+        // intrinsic-value line against the last-trade cutoff for an AM-settled
+        // quarterly whose SOQ is not yet known.
+        return _expiryCouldBeDeferredSettlement(profile, expDate);
     }
 
     function supportsAmortizedMode(symbol) {

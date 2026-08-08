@@ -537,6 +537,27 @@ module.exports = {
             },
         },
         {
+            name: 'uses liquidation summary instead of a stale live pnl',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/product_registry.js',
+                    'js/group_ui.js',
+                ]);
+
+                const summary = ctx.OptionComboGroupUI.resolveGroupHeaderSummaryState({
+                    activeViewMode: 'liquidation',
+                    isAmortizedMode: false,
+                    groupPnL: -2500,
+                    groupHasLiveData: true,
+                    groupLivePnL: 6850,
+                });
+
+                assert.equal(summary.type, 'liquidation');
+                assert.equal(summary.label, 'Liquidation P&L:');
+                assert.equal(summary.value, -2500);
+            },
+        },
+        {
             name: 'keeps live summary only for non-scenario groups with live data',
             run() {
                 const ctx = loadBrowserScripts([

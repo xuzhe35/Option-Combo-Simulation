@@ -724,6 +724,26 @@
             };
         }
 
+        // IB may stop publishing an option immediately after its last-trade
+        // cutoff while the browser still holds the final pre-expiry mark. That
+        // cached number is no longer a live liquidation value. Reject it at the
+        // shared observable-price boundary so Active Live P&L cannot silently
+        // keep using a pre-expiry quote. A deliberate manual override remains
+        // available above for exceptional settlement workflows.
+        if (globalState && globalState.marketDataMode === 'live'
+            && !_isUnderlyingLeg(leg)
+            && dateUtils
+            && typeof dateUtils.resolveExpiryCutoffAsOf === 'function') {
+            const profile = _resolveUnderlyingProfile(globalState);
+            const expiry = dateUtils.resolveExpiryCutoffAsOf(leg, profile);
+            const referenceMs = Date.parse(String(globalState.liveQuoteAsOf || '').trim());
+            if (expiry && Number.isFinite(expiry.cutoffMs)
+                && Number.isFinite(referenceMs)
+                && referenceMs >= expiry.cutoffMs) {
+                return unavailable('expired_contract');
+            }
+        }
+
         const snapshot = _resolveLiveQuoteSnapshotForLeg(leg);
         const quoteAsOf = String(snapshot && snapshot.quoteAsOf || '').trim() || null;
         const freshness = _quoteFreshness(globalState, quoteAsOf);

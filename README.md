@@ -30,6 +30,7 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
 - Group modes:
   - `trial`
   - `active`
+  - `liquidation` (current intrinsic value; ignores option quotes, IV, and time value)
   - `amortized`
   - `settlement`
 - Group-level execution workflows:
@@ -912,6 +913,15 @@ metadata. At or after a supported same-session settlement cutoff the expiring
 leg is intrinsic; before it, a same-day 0DTE leg retains fractional hours. A far
 leg is valued at that same target instant with its remaining fractional/
 calendar/variance clocks.
+
+For an open Group approaching expiry, select **Liquidation** to keep the entry
+cost basis while marking every open option at current intrinsic value against
+its own resolved spot or bound Futures Pool contract. This view ignores option
+BBO/model marks, IV, and time value, and carries the same intrinsic payoff into
+the Group/global charts and probability analysis. Once a live contract is past
+its last-trade cutoff, cached pre-expiry option marks are rejected from Active
+Live P&L instead of being presented as current quotes.
+
 This is why a 7/10 forecast for a 7/15 close should select 7/15 as the date;
 the runtime supplies the precise close/cutoff hour automatically.
 

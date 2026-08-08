@@ -1,57 +1,40 @@
 import asyncio
 
-from ib_async import Contract, Stock
+from ib_async import Contract
+
+from trade_execution.ib_contracts_common import (
+    build_contract_from_spec,
+    resolve_family_defaults,
+    resolve_index_exchange_candidates,
+    resolve_weekly_fop_trading_class,
+    spec_from_leg_request,
+    to_contract_month,
+    to_expiry,
+)
 
 
 def _to_contract_month(self, value):
-    cleaned = str(value or '').replace('-', '')
-    return cleaned[:6]
+    return to_contract_month(value)
 
 
 def _to_expiry(self, value):
-    return str(value or '').replace('-', '')
+    return to_expiry(value)
 
 
 def _resolve_family_defaults(self, symbol):
-    return self.supported_live_families.get(self._normalize_symbol(symbol))
+    return resolve_family_defaults(self.supported_live_families, symbol)
 
 
 def _resolve_index_exchange_candidates(self, symbol, requested_exchange):
-    normalized_symbol = self._normalize_symbol(symbol)
-    requested = str(requested_exchange or '').strip()
-    candidates = []
-
-    if requested:
-        candidates.append(requested)
-
-    for exchange in self.index_exchange_fallbacks.get(normalized_symbol, ()):
-        if exchange not in candidates:
-            candidates.append(exchange)
-
-    if '' not in candidates:
-        candidates.append('')
-
-    return candidates
+    return resolve_index_exchange_candidates(
+        self.index_exchange_fallbacks, symbol, requested_exchange
+    )
 
 
 def _resolve_weekly_fop_trading_class(self, symbol, expiry, current_trading_class):
-    defaults = self._resolve_family_defaults(symbol)
-    if not defaults:
-        return current_trading_class
-
-    base_trading_class = current_trading_class or defaults.get('trading_class') or ''
-    if not base_trading_class or len(base_trading_class) < 2:
-        return base_trading_class
-    if self._normalize_symbol(defaults.get('option_sec_type')) == 'FOP':
-        # Let IB resolve the listing-specific daily/weekly class.  Every family
-        # default here (E3A/Q3A/ML3/S3T) names one weekday-and-week listing, so
-        # asserting it makes a valid contract fail on every other expiry.  This
-        # must stay in step with ib_server._resolve_weekly_fop_trading_class:
-        # the order path re-injects the family default even when the browser
-        # correctly sends none, so fixing only the market-data copy would still
-        # send ML3 on a CL order.
-        return ''
-    return base_trading_class
+    return resolve_weekly_fop_trading_class(
+        self.supported_live_families, symbol, current_trading_class
+    )
 
 
 async def _qualify_underlying_future(self, symbol, contract_month, exchange, currency, multiplier):
@@ -82,48 +65,10 @@ async def _qualify_underlying_future(self, symbol, contract_month, exchange, cur
 
 
 def _build_contract_from_request(self, leg_request):
-    sec_type = self._normalize_symbol(leg_request.sec_type)
-    symbol = self._normalize_symbol(leg_request.symbol)
-    exchange = leg_request.exchange or ''
-    currency = leg_request.currency or 'USD'
-    multiplier = str(leg_request.multiplier or '')
-    trading_class = leg_request.trading_class or ''
-    strike = leg_request.strike
-    right = self._normalize_symbol(leg_request.right)
-    expiry = self._to_expiry(leg_request.exp_date)
-    contract_month = self._to_contract_month(leg_request.contract_month)
-    trading_class = self._resolve_weekly_fop_trading_class(symbol, expiry, trading_class)
-
-    if sec_type == 'STK':
-        return Stock(symbol, exchange or 'SMART', currency)
-
-    if sec_type == 'IND':
-        return Contract(secType='IND', symbol=symbol, exchange=exchange, currency=currency)
-
-    if sec_type == 'FUT':
-        return Contract(
-            secType='FUT',
-            symbol=symbol,
-            lastTradeDateOrContractMonth=contract_month,
-            exchange=exchange,
-            currency=currency,
-            multiplier=multiplier,
-        )
-
-    if sec_type in ('OPT', 'FOP'):
-        return Contract(
-            secType=sec_type,
-            symbol=symbol,
-            lastTradeDateOrContractMonth=expiry or contract_month,
-            strike=float(strike),
-            right=right,
-            exchange=exchange,
-            currency=currency,
-            multiplier=multiplier,
-            tradingClass=trading_class,
-        )
-
-    raise ValueError(f"Unsupported secType in request: {sec_type!r}")
+    return build_contract_from_spec(
+        self.supported_live_families,
+        spec_from_leg_request(leg_request),
+    )
 
 
 def _describe_contract_request(self, leg_request):

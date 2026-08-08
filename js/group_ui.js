@@ -597,6 +597,14 @@
     }
 
     function resolveGroupHeaderSummaryState(groupResult) {
+        if (groupResult.activeViewMode === 'liquidation' && Number.isFinite(groupResult.groupPnL)) {
+            return {
+                type: 'liquidation',
+                label: 'Liquidation P&L:',
+                value: groupResult.groupPnL,
+            };
+        }
+
         if (groupResult.activeViewMode === 'settlement' && Number.isFinite(groupResult.groupPnL)) {
             return {
                 type: 'settlement',
@@ -684,7 +692,7 @@
         greeksItem.title = titleParts.join('\n');
     }
 
-    function buildSimulatedPriceHtml(currencyFormatter, leg, processedLeg, simPricePerShare, usesScenarioUnderlying) {
+    function buildSimulatedPriceHtml(currencyFormatter, leg, processedLeg, simPricePerShare, usesScenarioUnderlying, isLiquidationMode = false) {
         if (!Number.isFinite(simPricePerShare)) {
             return `<span class="text-muted">N/A</span> <span class="badge bg-secondary" style="font-size: 0.65rem; vertical-align: middle;">IV N/A</span>`;
         }
@@ -723,6 +731,8 @@
                         : (closeSource === 'equivalent_expiry_offset' ? 'Expiry Offset' : 'Closed'));
                 simPriceHtml += ` <span class="badge" style="background: var(--primary-color); font-size: 0.65rem; vertical-align: middle;">${closeBadgeText}</span>`;
             }
+        } else if (isLiquidationMode && !processedLeg.isUnderlyingLeg) {
+            simPriceHtml += ' <span class="badge" style="background: #7c3aed; font-size: 0.65rem; vertical-align: middle;" title="Current intrinsic value; option quote, IV and time value are ignored.">Intrinsic</span>';
         } else if (usesScenarioUnderlying) {
             if (processedLeg.isExpired) {
                 if (simPricePerShare > 0) {
@@ -771,6 +781,7 @@
                 currentPriceInput.value = legResult.currentPriceDisplay.value;
                 currentPriceInput.placeholder = legResult.currentPriceDisplay.placeholder;
                 currentPriceInput.title = legResult.currentPriceDisplay.title;
+                currentPriceInput.readOnly = legResult.currentPriceDisplay.readOnly === true;
             }
 
             const simulatedPriceCell = tr.querySelector('.simulated-price-cell');
@@ -780,7 +791,8 @@
                     legResult.leg,
                     legResult.processedLeg,
                     legResult.simPricePerShare,
-                    groupResult.usesScenarioUnderlying
+                    groupResult.usesScenarioUnderlying,
+                    groupResult.isLiquidationMode
                 );
             }
 
@@ -972,6 +984,33 @@
             : 'N/A';
         card.querySelector('.group-pnl').innerHTML = formatSignedCurrencyValue(currencyFormatter, groupResult.groupPnL, 'success-text', 'danger-text');
 
+        const simValueLabel = card.querySelector('.group-sim-value-label');
+        if (simValueLabel) {
+            simValueLabel.textContent = groupResult.isLiquidationMode
+                ? 'Liquidation Value:'
+                : 'Sim Value:';
+        }
+
+        const simulatedColumnHeader = card.querySelector('.simulated-column-header');
+        if (simulatedColumnHeader) {
+            simulatedColumnHeader.textContent = groupResult.isLiquidationMode
+                ? 'Liquidation'
+                : 'Simulated';
+        }
+
+        const livePriceModeSelect = card.querySelector('.group-live-price-mode-select');
+        if (livePriceModeSelect) {
+            livePriceModeSelect.disabled = groupResult.isLiquidationMode;
+            livePriceModeSelect.value = groupResult.isLiquidationMode
+                ? 'liquidation'
+                : (String(groupResult.group && groupResult.group.livePriceMode || '').trim().toLowerCase() === 'mark'
+                    ? 'mark'
+                    : 'midpoint');
+            livePriceModeSelect.title = groupResult.isLiquidationMode
+                ? 'Liquidation mode uses current intrinsic value, not an option quote source.'
+                : 'Controls the Price column and Live P&L display only. Order pricing still uses the existing midpoint-based execution flow.';
+        }
+
         const netCashFlowItem = card.querySelector('.group-header-net-cash-flow-item');
         const netCashFlowValue = card.querySelector('.group-header-net-cash-flow-value');
         if (netCashFlowItem && netCashFlowValue) {
@@ -1036,12 +1075,16 @@
         const pnlContainer = card.querySelector('.pnl-container');
         const pnlLabel = card.querySelector('.group-pnl-label');
         if (pnlContainer && pnlLabel) {
-            if (groupResult.activeViewMode === 'settlement') {
-                pnlLabel.textContent = 'Settlement P&L:';
+            if (groupResult.activeViewMode === 'settlement' || groupResult.isLiquidationMode) {
+                pnlLabel.textContent = groupResult.isLiquidationMode
+                    ? 'Liquidation P&L:'
+                    : 'Settlement P&L:';
                 pnlContainer.classList.add('settlement-highlight');
+                pnlContainer.classList.toggle('liquidation-highlight', groupResult.isLiquidationMode);
             } else {
                 pnlLabel.textContent = 'Theo P&L:';
                 pnlContainer.classList.remove('settlement-highlight');
+                pnlContainer.classList.remove('liquidation-highlight');
             }
         }
 
@@ -1049,7 +1092,11 @@
         const livePnlHeader = card.querySelector('.live-pnl-header-text');
         const showChartBtn = card.querySelector('.toggle-chart-btn');
         if (simPnlHeader && livePnlHeader) {
-            if (groupResult.usesScenarioUnderlying) {
+            if (groupResult.isLiquidationMode) {
+                simPnlHeader.textContent = 'LIQUIDATION P&L';
+                livePnlHeader.style.display = 'none';
+                if (showChartBtn) showChartBtn.style.display = 'inline-block';
+            } else if (groupResult.usesScenarioUnderlying) {
                 simPnlHeader.textContent = groupResult.isAmortizedMode ? 'AMORTIZED P&L' : 'SETTLEMENT P&L';
                 livePnlHeader.style.display = 'none';
                 if (showChartBtn) showChartBtn.style.display = 'none';

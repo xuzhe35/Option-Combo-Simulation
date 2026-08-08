@@ -782,7 +782,8 @@
     }
 
     function resolveGroupViewModeChange(group, requestedMode) {
-        if (requestedMode === 'amortized' && !groupHasDeterministicCost(group)) {
+        if ((requestedMode === 'amortized' || requestedMode === 'liquidation')
+            && !groupHasDeterministicCost(group)) {
             return group.viewMode || 'active';
         }
         return requestedMode;
