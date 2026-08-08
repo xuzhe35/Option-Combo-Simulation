@@ -4059,11 +4059,10 @@ function _getTradeTrigger(group) {
 function _getCloseExecution(group) {
     if (!group) return null;
     const sessionLogic = _getSessionLogicApi();
-    if (!sessionLogic || typeof sessionLogic.normalizeCloseExecution !== 'function') {
+    if (!sessionLogic || typeof sessionLogic.ensureGroupCloseExecution !== 'function') {
         return group.closeExecution || null;
     }
-    group.closeExecution = sessionLogic.normalizeCloseExecution(group.closeExecution);
-    return group.closeExecution;
+    return sessionLogic.ensureGroupCloseExecution(group);
 }
 
 function _getExecutionRuntimeByKind(group, runtimeKind) {
@@ -4205,6 +4204,16 @@ function _requestTrialGroupComboOrder(group) {
         return;
     }
     transportApi.requestTrialGroupComboOrder(group);
+}
+
+// Manual "Send now" entry point: the same request path a fired trigger takes,
+// so validation, the confirmation dialog and the managed re-pricing runtime
+// all still apply.
+function requestTrialGroupComboOrder(group) {
+    if (!group) {
+        return;
+    }
+    _requestTrialGroupComboOrder(group);
 }
 
 function _applyComboOrderValidationResult(data) {

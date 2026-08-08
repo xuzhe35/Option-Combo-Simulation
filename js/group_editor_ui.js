@@ -1841,11 +1841,10 @@
             return null;
         }
         const sessionLogic = _getSessionLogicApi();
-        group.closeExecution = sessionLogic
-            && typeof sessionLogic.normalizeCloseExecution === 'function'
-            ? sessionLogic.normalizeCloseExecution(group.closeExecution)
-            : group.closeExecution || null;
-        return group.closeExecution;
+        if (sessionLogic && typeof sessionLogic.ensureGroupCloseExecution === 'function') {
+            return sessionLogic.ensureGroupCloseExecution(group);
+        }
+        return group.closeExecution || null;
     }
 
     function _resolveCloseQuantitySelection(closeExecution, maxCloseQuantity) {
@@ -2750,6 +2749,7 @@
         const exitConditionInput = container.querySelector('.trial-trigger-exit-condition');
         const exitPriceInput = container.querySelector('.trial-trigger-exit-price');
         const resetBtn = container.querySelector('.trial-trigger-reset-btn');
+        const submitBtn = container.querySelector('.trial-trigger-submit-btn');
         const body = container.querySelector('.trial-trigger-body');
         const helpText = container.querySelector('.trial-trigger-help');
         const modeBadge = container.querySelector('.trial-trigger-mode-badge');
@@ -2808,10 +2808,57 @@
                 ? ''
                 : 'Global live combo order switch is OFF. TWS submit modes will not send orders until enabled.');
 
+        const renderMode = typeof deps.getRenderableGroupViewMode === 'function'
+            ? deps.getRenderableGroupViewMode(group)
+            : (group.viewMode || 'trial');
+        const hasOpenPosition = typeof deps.groupHasOpenPosition === 'function'
+            ? deps.groupHasOpenPosition(group)
+            : (group.legs || []).some(leg => Math.abs(parseFloat(leg && leg.pos) || 0) > 0.0001);
+
+        // "Send now" reuses the fired-trigger request path, so live and test
+        // modes still go through validation and the confirmation dialog.
+        const applySendNowState = () => {
+            if (!submitBtn) {
+                return;
+            }
+            const isSubmitMode = trigger.executionMode === 'submit' || trigger.executionMode === 'test_submit';
+            submitBtn.textContent = isHistoricalMode
+                ? (trigger.executionMode === 'preview' ? 'Preview Order' : 'Simulate Order')
+                : (trigger.executionMode === 'preview'
+                    ? 'Preview Order'
+                    : (trigger.executionMode === 'test_submit' ? 'Send Test Order' : 'Send Order Now'));
+
+            if (renderMode !== 'trial') {
+                submitBtn.disabled = true;
+                submitBtn.title = 'Send now is only available while this group is in Trial mode.';
+            } else if (!hasOpenPosition) {
+                submitBtn.disabled = true;
+                submitBtn.title = 'This group has no leg with a non-zero position to trade.';
+            } else if (!isHistoricalMode && group.liveData !== true) {
+                submitBtn.disabled = true;
+                submitBtn.title = 'Enable Live Market Data for this group before sending an order.';
+            } else if (trigger.pendingRequest === true) {
+                submitBtn.disabled = true;
+                submitBtn.title = 'An order request is already in progress for this group.';
+            } else if (isSubmitMode && !isHistoricalMode && state.allowLiveComboOrders !== true) {
+                submitBtn.disabled = true;
+                submitBtn.title = 'Global Enable Live Combo Orders switch is OFF.';
+            } else {
+                submitBtn.disabled = false;
+                submitBtn.title = isHistoricalMode
+                    ? 'Build a simulated order from the current replay-day quotes.'
+                    : (trigger.executionMode === 'preview'
+                        ? 'Preview this combo now without sending anything to TWS.'
+                        : 'Send this combo to TWS now, ignoring the entry condition. Validation and confirmation still apply.');
+            }
+        };
+
         const applyTriggerRisk = () => {
             const risk = _resolveExecutionRisk(trigger.executionMode, isHistoricalMode);
             _applyExecutionModeRisk(executionModeInput, risk);
             _applyExecutionRiskBadge(modeBadge, risk);
+            _applySubmitButtonRisk(submitBtn, risk);
+            applySendNowState();
         };
         applyTriggerRisk();
         if (helpText) {
@@ -2846,10 +2893,15 @@
         });
 
         executionModeInput.addEventListener('change', (e) => {
-            if (e.target.value === 'submit' || e.target.value === 'test_submit') {
-                trigger.executionMode = e.target.value;
-            } else {
-                trigger.executionMode = 'preview';
+            const nextMode = e.target.value === 'submit' || e.target.value === 'test_submit'
+                ? e.target.value
+                : 'preview';
+            trigger.executionMode = nextMode;
+            // A control that can route real orders must not depend on the
+            // captured reference still being the live runtime object.
+            const liveTrigger = _ensureTradeTrigger(group);
+            if (liveTrigger) {
+                liveTrigger.executionMode = nextMode;
             }
             // This handler does not re-render, so the risk styling is refreshed here.
             applyTriggerRisk();
@@ -2893,6 +2945,17 @@
             const parsed = parseFloat(e.target.value);
             trigger.exitPrice = Number.isFinite(parsed) ? parsed : null;
         });
+
+        if (submitBtn) {
+            submitBtn.addEventListener('click', () => {
+                if (submitBtn.disabled === true) {
+                    return;
+                }
+                if (typeof deps.requestTrialGroupComboOrder === 'function') {
+                    deps.requestTrialGroupComboOrder(group);
+                }
+            });
+        }
 
         resetBtn.addEventListener('click', () => {
             trigger.pendingRequest = false;
@@ -3902,7 +3965,9 @@
             ? group.closeExecution
             : null;
         const routingModes = [];
-        if (trigger && trigger.enabled === true) {
+        // Trial mode alone is enough: the routing select also drives the manual
+        // "Send now" button, which never waits for an armed entry condition.
+        if (trigger && (trigger.enabled === true || mode === 'trial')) {
             routingModes.push(trigger.executionMode);
         }
         if (mode === 'active' && closeExecution) {

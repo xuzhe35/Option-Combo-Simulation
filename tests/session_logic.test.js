@@ -72,6 +72,22 @@ module.exports = {
             },
         },
         {
+            name: 'keeps the close execution object identity across ensure calls',
+            run() {
+                const logic = loadSessionLogicContext().OptionComboSessionLogic;
+
+                const group = { closeExecution: { executionMode: 'submit' } };
+                const first = logic.ensureGroupCloseExecution(group);
+                first.executionMode = 'test_submit';
+                const second = logic.ensureGroupCloseExecution(group);
+
+                assert.equal(second, first);
+                assert.equal(group.closeExecution, first);
+                assert.equal(group.closeExecution.executionMode, 'test_submit');
+                assert.equal(first.strategy, 'auto');
+            },
+        },
+        {
             name: 'preserves legacy partial close quantities as manual selections',
             run() {
                 const logic = loadSessionLogicContext().OptionComboSessionLogic;

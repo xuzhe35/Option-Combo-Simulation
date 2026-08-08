@@ -1241,6 +1241,190 @@ module.exports = {
             },
         },
         {
+            name: 'keeps a routing change and sends now without an entry condition',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/session_logic.js',
+                    'js/group_order_builder.js',
+                    'js/trade_trigger_logic.js',
+                    'js/group_editor_ui.js',
+                ]);
+
+                const noop = () => {};
+                const handlers = {};
+                const bind = (key) => (type, handler) => {
+                    handlers[`${key}:${type}`] = handler;
+                };
+                const container = {
+                    querySelector(selector) {
+                        return {
+                            '.trial-trigger-enabled': enabledInput,
+                            '.trial-trigger-collapse-btn': collapseBtn,
+                            '.trial-trigger-condition': conditionInput,
+                            '.trial-trigger-price': priceInput,
+                            '.trial-trigger-execution-mode': executionModeInput,
+                            '.trial-trigger-reprice-threshold': repriceThresholdInput,
+                            '.trial-trigger-concession': concessionInput,
+                            '.trial-trigger-tif': timeInForceInput,
+                            '.trial-trigger-exit-enabled': exitEnabledInput,
+                            '.trial-trigger-exit-condition': exitConditionInput,
+                            '.trial-trigger-exit-price': exitPriceInput,
+                            '.trial-trigger-reset-btn': resetBtn,
+                            '.trial-trigger-submit-btn': submitBtn,
+                            '.trial-trigger-body': body,
+                        }[selector] || null;
+                    },
+                    addEventListener: noop,
+                };
+                const enabledInput = { checked: false, addEventListener: noop };
+                const collapseBtn = { title: '', setAttribute: noop, addEventListener: noop };
+                const conditionInput = { value: '', addEventListener: noop };
+                const priceInput = { value: '', disabled: false, title: '', addEventListener: noop };
+                const executionModeInput = {
+                    value: '',
+                    title: '',
+                    options: [],
+                    addEventListener: bind('mode'),
+                };
+                const repriceThresholdInput = { value: '', addEventListener: noop };
+                const concessionInput = { value: '', addEventListener: noop };
+                const timeInForceInput = { value: '', addEventListener: noop };
+                const exitEnabledInput = { checked: false, disabled: false, addEventListener: noop };
+                const exitConditionInput = { value: '', disabled: false, addEventListener: noop };
+                const exitPriceInput = { value: '', disabled: false, title: '', addEventListener: noop };
+                const resetBtn = { addEventListener: noop };
+                const submitBtn = {
+                    textContent: '',
+                    title: '',
+                    disabled: true,
+                    classList: { add() {}, remove() {} },
+                    addEventListener: bind('submit'),
+                };
+                const body = { style: {} };
+                const card = {
+                    querySelector(selector) {
+                        return selector === '.trial-trigger-container' ? container : null;
+                    },
+                };
+                const group = {
+                    id: 'group_send_now',
+                    viewMode: 'trial',
+                    liveData: true,
+                    legs: [{ id: 'leg_1', type: 'call', pos: 1 }],
+                    tradeTrigger: { enabled: false, price: null, executionMode: 'preview' },
+                };
+                const sent = [];
+
+                ctx.OptionComboGroupEditorUI.bindTrialTriggerControls(card, group, {
+                    allowLiveComboOrders: true,
+                }, {
+                    renderGroups() {},
+                    getRenderableGroupViewMode() { return 'trial'; },
+                    requestTrialGroupComboOrder(target) { sent.push(target); },
+                });
+
+                // No trigger price is armed, but the group is tradeable now.
+                assert.equal(submitBtn.disabled, false);
+                assert.equal(submitBtn.textContent, 'Preview Order');
+
+                // The runtime object is re-normalized between the render and
+                // the user's selection, exactly as a portfolio snapshot does.
+                ctx.OptionComboTradeTriggerLogic.ensureGroupTradeTrigger(group);
+                handlers['mode:change']({ target: { value: 'submit' } });
+
+                assert.equal(group.tradeTrigger.executionMode, 'submit');
+                assert.equal(submitBtn.textContent, 'Send Order Now');
+
+                handlers['submit:click']();
+                assert.deepEqual(sent, [group]);
+            },
+        },
+        {
+            name: 'blocks send now outside trial mode and without live data',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/session_logic.js',
+                    'js/group_order_builder.js',
+                    'js/trade_trigger_logic.js',
+                    'js/group_editor_ui.js',
+                ]);
+
+                const noop = () => {};
+                const buildCard = (submitBtn) => {
+                    const enabledInput = { checked: false, addEventListener: noop };
+                    const container = {
+                        querySelector(selector) {
+                            return {
+                                '.trial-trigger-enabled': enabledInput,
+                                '.trial-trigger-collapse-btn': { title: '', setAttribute: noop, addEventListener: noop },
+                                '.trial-trigger-condition': { value: '', addEventListener: noop },
+                                '.trial-trigger-price': { value: '', disabled: false, title: '', addEventListener: noop },
+                                '.trial-trigger-execution-mode': { value: '', title: '', options: [], addEventListener: noop },
+                                '.trial-trigger-reprice-threshold': { value: '', addEventListener: noop },
+                                '.trial-trigger-concession': { value: '', addEventListener: noop },
+                                '.trial-trigger-tif': { value: '', addEventListener: noop },
+                                '.trial-trigger-exit-enabled': { checked: false, disabled: false, addEventListener: noop },
+                                '.trial-trigger-exit-condition': { value: '', disabled: false, addEventListener: noop },
+                                '.trial-trigger-exit-price': { value: '', disabled: false, title: '', addEventListener: noop },
+                                '.trial-trigger-reset-btn': { addEventListener: noop },
+                                '.trial-trigger-submit-btn': submitBtn,
+                                '.trial-trigger-body': { style: {} },
+                            }[selector] || null;
+                        },
+                        addEventListener: noop,
+                    };
+                    return {
+                        querySelector(selector) {
+                            return selector === '.trial-trigger-container' ? container : null;
+                        },
+                    };
+                };
+                const newButton = () => ({
+                    textContent: '',
+                    title: '',
+                    disabled: false,
+                    classList: { add() {}, remove() {} },
+                    addEventListener: noop,
+                });
+
+                const activeButton = newButton();
+                ctx.OptionComboGroupEditorUI.bindTrialTriggerControls(
+                    buildCard(activeButton),
+                    { id: 'g1', viewMode: 'active', liveData: true, legs: [{ pos: 1 }], tradeTrigger: {} },
+                    { allowLiveComboOrders: true },
+                    { renderGroups() {}, getRenderableGroupViewMode() { return 'active'; } }
+                );
+                assert.equal(activeButton.disabled, true);
+                assert.match(activeButton.title, /trial mode/i);
+
+                const offlineButton = newButton();
+                ctx.OptionComboGroupEditorUI.bindTrialTriggerControls(
+                    buildCard(offlineButton),
+                    { id: 'g2', viewMode: 'trial', liveData: false, legs: [{ pos: 1 }], tradeTrigger: {} },
+                    { allowLiveComboOrders: true },
+                    { renderGroups() {}, getRenderableGroupViewMode() { return 'trial'; } }
+                );
+                assert.equal(offlineButton.disabled, true);
+                assert.match(offlineButton.title, /live market data/i);
+
+                const blockedButton = newButton();
+                ctx.OptionComboGroupEditorUI.bindTrialTriggerControls(
+                    buildCard(blockedButton),
+                    {
+                        id: 'g3',
+                        viewMode: 'trial',
+                        liveData: true,
+                        legs: [{ pos: 1 }],
+                        tradeTrigger: { executionMode: 'submit' },
+                    },
+                    { allowLiveComboOrders: false },
+                    { renderGroups() {}, getRenderableGroupViewMode() { return 'trial'; } }
+                );
+                assert.equal(blockedButton.disabled, true);
+                assert.match(blockedButton.title, /live combo orders/i);
+            },
+        },
+        {
             name: 'retitles trigger execution modes for historical replay',
             run() {
                 const ctx = loadBrowserScripts([

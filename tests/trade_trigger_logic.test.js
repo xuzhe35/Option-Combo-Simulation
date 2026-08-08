@@ -6,6 +6,33 @@ module.exports = {
     name: 'trade_trigger_logic.js',
     tests: [
         {
+            name: 'keeps the trade trigger object identity across ensure calls',
+            run() {
+                const ctx = loadBrowserScripts([
+                    'js/session_logic.js',
+                    'js/group_order_builder.js',
+                    'js/trade_trigger_logic.js',
+                ]);
+                const logic = ctx.OptionComboTradeTriggerLogic;
+
+                const group = { tradeTrigger: { enabled: true, price: 500 } };
+                const first = logic.ensureGroupTradeTrigger(group);
+                first.executionMode = 'submit';
+
+                // A portfolio snapshot or an order status update calls ensure
+                // again; a bound control still holding `first` must keep
+                // writing into the group's live runtime object.
+                const second = logic.ensureGroupTradeTrigger(group);
+
+                assert.equal(second, first);
+                assert.equal(group.tradeTrigger, first);
+                assert.equal(group.tradeTrigger.executionMode, 'submit');
+
+                first.executionMode = 'test_submit';
+                assert.equal(logic.ensureGroupTradeTrigger(group).executionMode, 'test_submit');
+            },
+        },
+        {
             name: 'normalizes default trigger state and trigger firing rules',
             run() {
                 const ctx = loadBrowserScripts([

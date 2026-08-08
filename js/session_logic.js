@@ -168,6 +168,23 @@
         return next;
     }
 
+    // Same in-place contract as ensureGroupTradeTrigger: the close-group
+    // controls bind handlers to this object, so its identity must survive
+    // every normalization pass.
+    function _ensureGroupCloseExecution(group) {
+        if (!group || typeof group !== 'object') {
+            return _normalizeCloseExecution(null);
+        }
+
+        const normalized = _normalizeCloseExecution(group.closeExecution);
+        if (group.closeExecution && typeof group.closeExecution === 'object') {
+            Object.assign(group.closeExecution, normalized);
+        } else {
+            group.closeExecution = normalized;
+        }
+        return group.closeExecution;
+    }
+
     function _toFiniteNumberOrNull(value) {
         const parsed = parseFloat(value);
         return Number.isFinite(parsed) ? parsed : null;
@@ -1108,6 +1125,7 @@
         buildArchivableDeltaHedgeConfig: _buildArchivableDeltaHedgeConfig,
         createDefaultCloseExecution: _createDefaultCloseExecution,
         normalizeCloseExecution: _normalizeCloseExecution,
+        ensureGroupCloseExecution: _ensureGroupCloseExecution,
         buildArchivableCloseExecution: _buildArchivableCloseExecution,
         groupHasOpenPosition,
     };

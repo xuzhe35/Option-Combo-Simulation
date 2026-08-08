@@ -583,6 +583,9 @@ function renderGroups() {
         requestLegExistsCheck: typeof requestLegExistsCheck === 'function'
             ? requestLegExistsCheck
             : null,
+        requestTrialGroupComboOrder: typeof requestTrialGroupComboOrder === 'function'
+            ? requestTrialGroupComboOrder
+            : null,
         requestContinueManagedComboOrder,
         requestConcedeManagedComboOrder,
         requestManualConcedeManagedComboOrder: typeof requestManualConcedeManagedComboOrder === 'function'

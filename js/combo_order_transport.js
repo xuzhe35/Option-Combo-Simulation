@@ -527,11 +527,10 @@
         function _getCloseExecution(group) {
             if (!group) return null;
             const sessionLogic = _getSessionLogicApi();
-            if (!sessionLogic || typeof sessionLogic.normalizeCloseExecution !== 'function') {
+            if (!sessionLogic || typeof sessionLogic.ensureGroupCloseExecution !== 'function') {
                 return group.closeExecution || null;
             }
-            group.closeExecution = sessionLogic.normalizeCloseExecution(group.closeExecution);
-            return group.closeExecution;
+            return sessionLogic.ensureGroupCloseExecution(group);
         }
 
         function _getExecutionRuntimeByKind(group, runtimeKind) {
