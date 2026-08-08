@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 
-const { loadAppContext } = require('./helpers/load-browser-scripts');
+const { loadAppContext, loadBrowserScripts } = require('./helpers/load-browser-scripts');
 
 function createSaveButtonElements() {
     return {
@@ -1231,8 +1231,8 @@ module.exports = {
                     updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
                 };
                 fakeClient.getWriterState = () => ({ state: 'readonly' });
-                fakeClient.requestTakeover = () => {
-                    calls.takeoverRequests += 1;
+                fakeClient.canTakeover = () => {
+                    calls.takeoverQueries += 1;
                     return { allowed: true, mustReloadFirst: true };
                 };
                 fakeClient.loadWorkspace = (documentId) => {
@@ -1273,10 +1273,303 @@ module.exports = {
                 // Takeover replaces local edits with the latest revision; it
                 // is not a save, so the call reports false.
                 assert.equal(saved, false);
-                assert.equal(calls.takeoverRequests, 1);
+                assert.equal(calls.takeoverQueries, 1);
+                assert.equal(calls.takeoverBegun, 1);
                 assert.deepEqual(loads, ['doc-bound-1']);
                 assert.equal(calls.takeoverCompleted, 1);
+                assert.equal(calls.takeoverCancelled, 0);
+                // The takeover reload claims the lease via completeTakeover,
+                // never via a plain acquire (which would drop pending state).
+                assert.equal(calls.lease.length, 0);
                 assert.equal(calls.save.length, 0);
+            },
+        },
+        {
+            name: 'a failed takeover reload rolls the state back',
+            async run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                fakeClient.getWriterState = () => ({ state: 'readonly' });
+                fakeClient.canTakeover = () => ({ allowed: true, mustReloadFirst: true });
+                fakeClient.loadWorkspace = () => {
+                    const error = new Error('gone');
+                    error.code = 'document_not_found';
+                    return Promise.reject(error);
+                };
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        alert() {},
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'T'; },
+                            promptWorkspaceTitle() { return 'T'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() { return 'take-over'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const saved = await harness.context.saveWorkspaceToStore();
+                assert.equal(saved, false);
+                assert.equal(calls.takeoverBegun, 1);
+                assert.equal(calls.takeoverCompleted, 0);
+                assert.equal(calls.takeoverCancelled, 1);
+                assert.equal(calls.save.length, 0);
+            },
+        },
+        {
+            name: 'an unknown first-save retry resumes the same document id',
+            async run() {
+                let failNext = true;
+                let unknownAttempt = null;
+                const prompts = [];
+                const { client: fakeClient, calls } = createFakePersistenceClient({
+                    saveWorkspace(params) {
+                        calls.save.push(params);
+                        if (failNext) {
+                            failNext = false;
+                            unknownAttempt = {
+                                documentId: params.documentId,
+                                title: params.title,
+                                expectedRevision: params.expectedRevision,
+                                fingerprint: JSON.stringify(params.payload),
+                                saveToken: 'token-1',
+                            };
+                            const error = new Error('lost ack');
+                            error.code = 'timeout';
+                            return Promise.reject(error);
+                        }
+                        unknownAttempt = null;
+                        return Promise.resolve({
+                            document: {
+                                documentId: params.documentId,
+                                title: params.title,
+                                revision: 1,
+                                updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                            },
+                        });
+                    },
+                });
+                fakeClient.getUnknownSaveAttempt = () =>
+                    (unknownAttempt ? { ...unknownAttempt } : null);
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        alert() {},
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'My Book'; },
+                            promptWorkspaceTitle(suggested) {
+                                prompts.push(suggested);
+                                return 'My Book';
+                            },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() { return 'cancel'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const first = await harness.context.saveWorkspaceToStore();
+                assert.equal(first, false);
+                const retried = await harness.context.saveWorkspaceToStore();
+                assert.equal(retried, true);
+                // Same document id resumed, and the user was not re-prompted
+                // for a name on the resuming retry.
+                assert.equal(calls.save.length, 2);
+                assert.equal(calls.save[1].documentId, calls.save[0].documentId);
+                assert.equal(calls.save[1].title, calls.save[0].title);
+                assert.equal(prompts.length, 1);
+            },
+        },
+        {
+            name: 'takeover cancel and reload failure keep read-only protection (real state machine)',
+            async run() {
+                // Two REAL persistence clients on a shared channel bus; the
+                // app drives client B. No fake takeover methods: every state
+                // transition below is the production state machine.
+                const persistenceCtx = loadBrowserScripts(['js/workspace_persistence.js']);
+                const channels = [];
+                const busFactory = () => {
+                    const channel = {
+                        onmessage: null,
+                        postMessage(message) {
+                            for (const other of channels) {
+                                if (other !== channel
+                                    && typeof other.onmessage === 'function') {
+                                    other.onmessage({ data: message });
+                                }
+                            }
+                        },
+                        close() {},
+                    };
+                    channels.push(channel);
+                    return channel;
+                };
+                let idCounter = 0;
+                const clock = { t: 1_000_000 };
+                const makeRealClient = (sent) => {
+                    const timers = [];
+                    const client = persistenceCtx.OptionComboWorkspacePersistence.createClient({
+                        send: (message) => { sent.push(JSON.parse(message)); return true; },
+                        setTimeoutFn: (fn) => { timers.push(fn); return timers.length; },
+                        clearTimeoutFn: () => {},
+                        setIntervalFn: () => 1,
+                        clearIntervalFn: () => {},
+                        generateId: () => `real-${++idCounter}`,
+                        now: () => clock.t,
+                        channelFactory: busFactory,
+                    });
+                    return {
+                        client,
+                        fireTimers: () => timers.splice(0).forEach(fn => fn()),
+                    };
+                };
+                const sentA = [];
+                const sentB = [];
+                const a = makeRealClient(sentA);
+                const b = makeRealClient(sentB);
+                const documentId = 'doc-aaaaaaaa-1111-4111-8111-111111111111';
+
+                const aLease = a.client.acquireWriterLease(documentId);
+                a.fireTimers(); // grace expires unopposed: A is the writer
+                assert.equal(await aLease, 'writer');
+                b.client.bindDocument(
+                    { documentId, title: 'Bound', revision: 3, updatedAtUtc: '' },
+                    'fp'
+                );
+                assert.equal(await b.client.acquireWriterLease(documentId), 'readonly');
+
+                const takeoverChoices = ['cancel', 'take-over'];
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => b.client,
+                        setTimeout() { return 1; },
+                        alert() {},
+                        confirm() { return false; },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'T'; },
+                            promptWorkspaceTitle() { return 'T'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() {
+                                return takeoverChoices.shift();
+                            },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                // 1. Writer alive: not eligible, save refused, still readonly.
+                assert.equal(await harness.context.saveWorkspaceToStore(), false);
+                assert.equal(b.client.getWriterState().state, 'readonly');
+
+                // 2. Writer ages out; the user cancels the takeover offer.
+                //    The pure eligibility query left the state untouched.
+                clock.t += 60_000;
+                assert.equal(await harness.context.saveWorkspaceToStore(), false);
+                assert.equal(b.client.getWriterState().state, 'readonly');
+
+                // 3. Take over, but the reload fails: full rollback.
+                const savePromise = harness.context.saveWorkspaceToStore();
+                const loadRequest = sentB.find(
+                    message => message.action === 'load_saved_workspace'
+                );
+                assert.ok(loadRequest, 'takeover must reload before claiming');
+                b.client.handleMessage({
+                    action: 'saved_workspace_loaded',
+                    requestId: loadRequest.requestId,
+                    success: false,
+                    code: 'document_not_found',
+                    message: 'gone',
+                });
+                assert.equal(await savePromise, false);
+                assert.equal(b.client.getWriterState().state, 'readonly');
+
+                // 4. takeover-pending itself never saves the bound document.
+                assert.equal(b.client.beginTakeover(), true);
+                assert.equal(b.client.getWriterState().state, 'takeover-pending');
+                assert.equal(await harness.context.saveWorkspaceToStore(), false);
+                assert.equal(
+                    sentB.filter(m => m.action === 'save_saved_workspace').length, 0
+                );
+                assert.equal(b.client.cancelTakeover(), true);
+                assert.equal(b.client.getWriterState().state, 'readonly');
+            },
+        },
+        {
+            name: 'a consumed calendar handoff starts dirty; a plain boot stays clean',
+            run() {
+                const plain = createFakePersistenceClient();
+                const plainHarness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => plain.client,
+                        setTimeout() { return 1; },
+                    },
+                });
+                plainHarness.triggerDomReady();
+                assert.equal(plain.calls.baseline.length, 1);
+                assert.equal(plain.calls.markedDirty, 0);
+
+                const handoff = createFakePersistenceClient();
+                const handoffHarness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => handoff.client,
+                        setTimeout() { return 1; },
+                        OptionComboCalendarHandoff: {
+                            takeHandoffPayload() {
+                                return {
+                                    symbol: 'ES',
+                                    underlyingContractMonth: '202606',
+                                    underlyingPrice: 6000,
+                                };
+                            },
+                            buildGroupName() { return 'ES calendar'; },
+                            buildCalendarLegs() { return []; },
+                        },
+                    },
+                });
+                handoffHarness.triggerDomReady();
+                // Baseline is still the pristine reference, and the one-shot
+                // handoff content is explicitly protected as unsaved work.
+                assert.equal(handoff.calls.baseline.length, 1);
+                assert.equal(handoff.calls.markedDirty, 1);
             },
         },
         {
@@ -1348,21 +1641,25 @@ function createFakePersistenceClient(overrides = {}) {
     const calls = {
         save: [], lease: [], released: 0,
         baseline: [], markedDirty: 0, staleHandlers: [],
-        takeoverRequests: 0, takeoverCompleted: 0, undelete: [],
+        takeoverQueries: 0, takeoverBegun: 0, takeoverCancelled: 0,
+        takeoverCompleted: 0, undelete: [],
     };
     const client = {
         envelope: null,
         getEnvelope() { return this.envelope ? { ...this.envelope } : null; },
-        getWriterState() { return { state: 'idle' }; },
+        getWriterState() { return { state: 'writer' }; },
         fingerprintPayload(payload) { return JSON.stringify(payload); },
         isDirty() { return false; },
         setUnboundBaseline(payload) { calls.baseline.push(payload); },
         markUnboundDirty() { calls.markedDirty += 1; },
         setStaleRevisionHandler(handler) { calls.staleHandlers.push(handler); },
-        requestTakeover() {
-            calls.takeoverRequests += 1;
+        getUnknownSaveAttempt() { return null; },
+        canTakeover() {
+            calls.takeoverQueries += 1;
             return { allowed: false, reason: 'writer_active' };
         },
+        beginTakeover() { calls.takeoverBegun += 1; return true; },
+        cancelTakeover() { calls.takeoverCancelled += 1; return true; },
         completeTakeover() { calls.takeoverCompleted += 1; return true; },
         undeleteWorkspace(documentId, expectedRevision) {
             calls.undelete.push({ documentId, expectedRevision });

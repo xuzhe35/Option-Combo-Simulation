@@ -468,7 +468,7 @@ module.exports = {
             },
         },
         {
-            name: 'takeover waits for heartbeat expiry and forces a reload first',
+            name: 'takeover is query, begin, cancel-or-complete — with rollback',
             async run() {
                 const bus = createChannelBus();
                 const a = createHarness({ channelFactory: () => bus.create() });
@@ -481,19 +481,69 @@ module.exports = {
                 const bLease = b.client.acquireWriterLease(documentId);
                 assert.equal(await bLease, 'readonly');
 
-                // Writer still fresh: takeover denied.
-                const denied = b.client.requestTakeover();
+                // Writer still fresh: not eligible, and the query itself
+                // never mutates state.
+                const denied = b.client.canTakeover();
                 assert.equal(denied.allowed, false);
                 assert.equal(denied.reason, 'writer_active');
+                assert.equal(b.client.getWriterState().state, 'readonly');
+                assert.equal(b.client.beginTakeover(), false);
 
-                // Writer tab dies silently; its heartbeat ages out.
+                // Writer tab dies silently; its heartbeat ages out. The
+                // eligibility query still changes nothing.
                 b.clock.t += 60_000;
-                const granted = b.client.requestTakeover();
+                const granted = b.client.canTakeover();
                 assert.equal(granted.allowed, true);
                 assert.equal(granted.mustReloadFirst, true);
+                assert.equal(b.client.getWriterState().state, 'readonly');
+
+                // Begin then cancel: the prior protection is restored.
+                assert.equal(b.client.beginTakeover(), true);
                 assert.equal(b.client.getWriterState().state, 'takeover-pending');
+                assert.equal(b.client.cancelTakeover(), true);
+                assert.equal(b.client.getWriterState().state, 'readonly');
+
+                // Begin then complete: writer only via the pending state.
+                assert.equal(b.client.completeTakeover(), false);
+                assert.equal(b.client.beginTakeover(), true);
                 assert.equal(b.client.completeTakeover(), true);
                 assert.equal(b.client.getWriterState().state, 'writer');
+            },
+        },
+        {
+            name: 'an unknown create exposes its identity for a resuming retry',
+            async run() {
+                const { client, sent } = createHarness();
+                const documentId = 'doc-aaaaaaaa-1111-4111-8111-111111111111';
+                assert.equal(client.getUnknownSaveAttempt(), null);
+
+                const attempt = client.saveWorkspace({
+                    documentId, title: 'First book', payload: workspacePayload(),
+                });
+                assert.equal(client.getUnknownSaveAttempt(), null);
+                client.handleSocketClosed();
+                await rejection(attempt);
+
+                const unknown = client.getUnknownSaveAttempt();
+                assert.equal(unknown.documentId, documentId);
+                assert.equal(unknown.title, 'First book');
+                assert.equal(unknown.expectedRevision, undefined);
+                assert.equal(unknown.saveToken, sent[0].saveToken);
+
+                // A resumed retry with the same identity and content reuses
+                // the token; success clears the parked identity.
+                const retry = client.saveWorkspace({
+                    documentId, title: 'First book', payload: workspacePayload(),
+                });
+                assert.equal(sent[1].saveToken, sent[0].saveToken);
+                client.handleMessage({
+                    action: 'workspace_saved',
+                    requestId: sent[1].requestId,
+                    success: true,
+                    document: { documentId, title: 'First book', revision: 1 },
+                });
+                await retry;
+                assert.equal(client.getUnknownSaveAttempt(), null);
             },
         },
         {

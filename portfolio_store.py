@@ -971,10 +971,15 @@ class PortfolioStore:
         stamp = now.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
         name = f'portfolio-{stamp}-schema{SCHEMA_USER_VERSION}-{install_id}.db'
 
-        local_snapshot = self._db_path.parent / f'.backup-staging-{stamp}.db'
+        # Unique staging/partial names are a second line of defense behind
+        # the caller's maintenance lock: even two same-second publishes can
+        # never share intermediate files. Partials keep the .partial suffix
+        # so restore tooling and retention both ignore them.
+        nonce = uuid.uuid4().hex[:8]
+        local_snapshot = self._db_path.parent / f'.backup-staging-{stamp}-{nonce}.db'
         try:
             self.backup_to(local_snapshot)  # includes quick_check
-            partial = backup_dir / (name + '.partial')
+            partial = backup_dir / f'{name}.{nonce}.partial'
             with open(local_snapshot, 'rb') as src, open(partial, 'wb') as dst:
                 shutil.copyfileobj(src, dst)
                 dst.flush()

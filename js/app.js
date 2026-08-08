@@ -309,7 +309,7 @@ function consumePendingCalendarHandoff() {
 document.addEventListener('DOMContentLoaded', () => {
     _syncSessionFileActionButtons();
     bindControlPanelEvents();
-    consumePendingCalendarHandoff();
+    const handoffConsumed = consumePendingCalendarHandoff() === true;
     renderGroups();
     renderHedges();
     updateDerivedValues();
@@ -320,6 +320,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (persistenceClient
         && typeof persistenceClient.setUnboundBaseline === 'function') {
         persistenceClient.setUnboundBaseline(_buildPersistencePayload());
+        if (handoffConsumed
+            && typeof persistenceClient.markUnboundDirty === 'function') {
+            // A consumed calendar handoff is one-shot: the new combo exists
+            // only in this tab's memory until the first Save, so it must be
+            // protected as unsaved work from the very start.
+            persistenceClient.markUnboundDirty();
+        }
     }
     setInterval(() => {
         runDeltaHedgeAutoSupervisor();
@@ -1850,21 +1857,29 @@ async function _saveWorkspaceToStoreUnlocked(options = {}) {
     const copy = options.copy === true;
     const envelope = client.getEnvelope();
     const writer = client.getWriterState();
-    if (!copy && envelope
-        && (writer.state === 'readonly' || writer.state === 'stale')) {
-        // A read-only tab may never overwrite the writer's document. If the
-        // writer released or its heartbeat expired, offer an explicit
-        // takeover (which always reloads the latest revision first).
-        const takeover = client.requestTakeover();
-        if (takeover.allowed === true) {
+    // Allow-list: only an actual writer may update its bound document.
+    // idle / readonly / stale / takeover-pending never overwrite in place.
+    if (!copy && envelope && writer.state !== 'writer') {
+        const eligibility = typeof client.canTakeover === 'function'
+            ? client.canTakeover()
+            : { allowed: false };
+        if (eligibility.allowed === true) {
             const choice = OptionComboSessionUI.chooseTakeoverResolution();
             if (choice === 'take-over') {
+                // Eligibility was a pure query; state only changes now that
+                // the user has confirmed — and rolls back on any failure.
+                if (client.beginTakeover() !== true) {
+                    return false;
+                }
                 const reloaded = await _openWorkspaceDocument(envelope.documentId, {
                     skipDirtyCheck: true,
                     allowDuringSave: true,
+                    preserveTakeover: true,
                 });
                 if (reloaded) {
                     client.completeTakeover();
+                } else {
+                    client.cancelTakeover();
                 }
                 // The local edits were replaced by the latest revision; the
                 // user explicitly chose that over Save a Copy.
@@ -1890,16 +1905,32 @@ async function _saveWorkspaceToStoreUnlocked(options = {}) {
         expectedRevision = envelope.revision;
         title = envelope.title;
     } else {
-        title = OptionComboSessionUI.promptWorkspaceTitle(
-            OptionComboSessionUI.resolveDocumentTitle(state)
-        );
-        if (!title) {
-            return false;
+        // A create/copy whose ACK was lost must resume the SAME document
+        // identity: the server may already hold it, and the reused token
+        // (unchanged content) or create-conflict (changed content) resolves
+        // it deterministically. A fresh UUID per retry forked documents.
+        const unknownAttempt = typeof client.getUnknownSaveAttempt === 'function'
+            ? client.getUnknownSaveAttempt()
+            : null;
+        const resumableCreate = unknownAttempt
+            && (unknownAttempt.expectedRevision === undefined
+                || unknownAttempt.expectedRevision === null);
+        if (resumableCreate) {
+            documentId = unknownAttempt.documentId;
+            title = unknownAttempt.title;
+            state.importedSessionTitle = title;
+        } else {
+            title = OptionComboSessionUI.promptWorkspaceTitle(
+                OptionComboSessionUI.resolveDocumentTitle(state)
+            );
+            if (!title) {
+                return false;
+            }
+            // Set before the snapshot so the saved payload and the
+            // fingerprint both carry the final title.
+            state.importedSessionTitle = title;
+            documentId = _generateWorkspaceUuid();
         }
-        // Set before the snapshot so the saved payload and the fingerprint
-        // both carry the final title.
-        state.importedSessionTitle = title;
-        documentId = _generateWorkspaceUuid();
         expectedRevision = undefined;
     }
 
@@ -1942,7 +1973,8 @@ async function _saveWorkspaceToStoreUnlocked(options = {}) {
         }
         if (code === 'timeout' || code === 'disconnected') {
             alert('The save result is unknown (connection problem). '
-                + 'Retry Save — an identical retry is safe and will not create a duplicate.');
+                + 'Retry Save — the retry resumes the same document and '
+                + 'cannot create a duplicate.');
             return false;
         }
         if (code === 'payload_too_large_local' || code === 'payload_too_large') {
@@ -2104,6 +2136,12 @@ async function _openWorkspaceDocument(documentId, options = {}) {
     // by the import), so an untouched workspace reads as clean.
     const fingerprint = client.fingerprintPayload(_buildPersistencePayload());
     client.bindDocument(loaded.document, fingerprint);
+    if (options.preserveTakeover === true) {
+        // Takeover path: completeTakeover() claims the lease after this
+        // reload. A normal acquire would release the pending state first,
+        // which is exactly the rollback hazard this option exists to avoid.
+        return true;
+    }
     const lease = await client.acquireWriterLease(documentId);
     if (lease === 'readonly') {
         alert('This workspace is being edited in another tab, so this tab is '

@@ -11,6 +11,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -547,18 +548,58 @@ class ScheduledBackupTest(unittest.TestCase):
                 env, force=True
             ))
 
-    def test_backup_failure_never_raises(self):
+    def test_backup_failure_never_raises_and_releases_the_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
-            env = create_store_env(_config(tmp))
+            backup_dir = pathlib.Path(tmp) / 'backups'
+            env = create_store_env(_config(tmp, backup_dir=str(backup_dir)))
             _one_response(env, FakeWebSocket(), _save_request())
             # Re-enable scheduling after the save so the manual call below
             # deterministically reaches the (failing) publish.
             env['_backup_interval_seconds'] = 3600.0
+            original_publish = env['store'].publish_backup
             env['store'].publish_backup = lambda *a, **k: (_ for _ in ()).throw(
                 RuntimeError('disk full')
             )
             self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(env))
             portfolio_store_ws.publish_backup_best_effort(env)  # must not raise
+            # The maintenance lock is released after the failure: the next
+            # attempt runs and succeeds.
+            env['store'].publish_backup = original_publish
+            self.assertTrue(portfolio_store_ws.maybe_publish_scheduled_backup(
+                env, force=True
+            ))
+
+    def test_concurrent_maintenance_runs_exactly_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backup_dir = pathlib.Path(tmp) / 'backups'
+            config = _config(tmp, backup_dir=str(backup_dir),
+                             backup_interval_hours='24')
+            env = create_store_env(config)
+            portfolio_store_ws.ensure_store_initialized(env)
+            env['store'].save_workspace(
+                document_id=DOC, title='SPY workspace', payload=_payload(),
+                save_token='save-0000001-4000-8000-000000000000',
+            )
+            barrier = threading.Barrier(20)
+            results = []
+            results_lock = threading.Lock()
+
+            def worker():
+                barrier.wait()
+                outcome = portfolio_store_ws.maybe_publish_scheduled_backup(env)
+                with results_lock:
+                    results.append(outcome)
+
+            threads = [threading.Thread(target=worker) for _ in range(20)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+            # Exactly one thread performed the publish/prune/vacuum chain;
+            # the rest returned fast without queueing behind it.
+            self.assertEqual(sum(1 for outcome in results if outcome), 1)
+            self.assertEqual(len(results), 20)
+            self.assertEqual(len(list(backup_dir.iterdir())), 1)
 
     def test_uninitialized_env_skips_quietly(self):
         self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(None))

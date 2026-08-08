@@ -259,6 +259,23 @@
             unboundBaselineFingerprint = UNBOUND_DIRTY_SENTINEL;
         }
 
+        function getUnknownSaveAttempt() {
+            // The full identity of a save whose ACK was lost. A create/copy
+            // retry MUST reuse this document id (and token when the content
+            // is unchanged) — minting a fresh UUID per retry forked the
+            // document when the server had in fact committed the first one.
+            if (!saveAttempt || saveAttempt.status !== 'unknown') {
+                return null;
+            }
+            return {
+                documentId: saveAttempt.documentId,
+                title: saveAttempt.title,
+                expectedRevision: saveAttempt.expectedRevision,
+                fingerprint: saveAttempt.fingerprint,
+                saveToken: saveAttempt.saveToken,
+            };
+        }
+
         function isDirty(payload) {
             if (envelope && envelope.lastSavedPayloadFingerprint) {
                 return fingerprintPayload(payload) !== envelope.lastSavedPayloadFingerprint;
@@ -365,6 +382,8 @@
             saveAttempt = {
                 saveToken,
                 documentId,
+                title,
+                expectedRevision,
                 fingerprint: canonical,
                 status: 'in_flight',
             };
@@ -564,11 +583,17 @@
             writerState = 'idle';
             writerDocumentId = null;
             otherWriter = null;
+            takeoverPriorState = null;
         }
 
-        function requestTakeover() {
-            if (writerState === 'writer') {
-                return { allowed: false, reason: 'already_writer' };
+        let takeoverPriorState = null;
+
+        function canTakeover() {
+            // Pure eligibility query: never changes state, so a user Cancel
+            // after seeing the offer leaves the read-only protection intact.
+            if (writerState !== 'readonly' && writerState !== 'stale') {
+                return { allowed: false, reason: writerState === 'writer'
+                    ? 'already_writer' : 'not_reading_a_document' };
             }
             if (!writerDocumentId) {
                 return { allowed: false, reason: 'no_document' };
@@ -576,16 +601,33 @@
             if (otherWriter && (now() - otherWriter.lastSeenAt) < writerTimeoutMs) {
                 return { allowed: false, reason: 'writer_active' };
             }
-            // Takeover is only permitted through a fresh server load: the
-            // caller must reload the latest revision, then completeTakeover().
-            writerState = 'takeover-pending';
             return { allowed: true, mustReloadFirst: true };
+        }
+
+        function beginTakeover() {
+            if (!canTakeover().allowed) {
+                return false;
+            }
+            takeoverPriorState = writerState;
+            writerState = 'takeover-pending';
+            return true;
+        }
+
+        function cancelTakeover() {
+            if (writerState !== 'takeover-pending') {
+                return false;
+            }
+            // Restore the exact protection that was in force before.
+            writerState = takeoverPriorState || 'readonly';
+            takeoverPriorState = null;
+            return true;
         }
 
         function completeTakeover() {
             if (writerState !== 'takeover-pending') {
                 return false;
             }
+            takeoverPriorState = null;
             writerState = 'writer';
             otherWriter = null;
             _broadcast({
@@ -639,10 +681,13 @@
             // writer lease
             acquireWriterLease,
             releaseWriterLease,
-            requestTakeover,
+            canTakeover,
+            beginTakeover,
+            cancelTakeover,
             completeTakeover,
             getWriterState,
             setStaleRevisionHandler,
+            getUnknownSaveAttempt,
             // introspection for tests
             _test: {
                 pendingCount: () => pending.size,
