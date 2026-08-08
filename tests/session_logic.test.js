@@ -291,7 +291,10 @@ module.exports = {
                 assert.equal(Array.isArray(result.liveComboOrderAccounts), true);
                 assert.equal(result.liveComboOrderAccounts.length, 0);
                 assert.equal(result.liveComboOrderAccountsConnected, false);
-                assert.equal(result.selectedLiveComboOrderAccount, 'F7654321');
+                // sessionSchemaVersion 1 contract: a saved file may never
+                // pre-select a real trading account or re-arm live orders.
+                assert.equal(result.selectedLiveComboOrderAccount, '');
+                assert.equal(result.allowLiveComboOrders, false);
                 assert.equal(result.allowLiveHedgeOrders, false);
                 assert.equal(result.requireExactContractTiming, true);
                 assert.equal(result.projectionConvergenceMode, 'best-effort-input-iv');
@@ -394,7 +397,8 @@ module.exports = {
                 assert.equal(result.liveQuoteAsOf, '');
                 assert.equal(result.requireExactContractTiming, true);
                 assert.equal(result.projectionConvergenceMode, 'best-effort-input-iv');
-                assert.equal(result.selectedLiveComboOrderAccount, 'DU12345');
+                // sessionSchemaVersion 1 contract: no saved account survives a load.
+                assert.equal(result.selectedLiveComboOrderAccount, '');
                 assert.equal(result.groups.length, 1);
                 assert.equal(result.groups[0].id, 'gid_1');
                 assert.equal(result.groups[0].includedInGlobal, false);
@@ -741,13 +745,301 @@ module.exports = {
                 assert.equal(snapshot.deltaHedge.autoPreviewMaxAgeSeconds, 15);
                 assert.equal('pendingOrder' in snapshot.deltaHedge, false);
                 assert.equal('lastError' in snapshot.deltaHedge, false);
-                assert.equal(snapshot.forwardRateSamples[0].dailyCarry, 0.00042);
-                assert.equal(snapshot.forwardRateSamples[0].lastComputedAt, '2026-03-01T12:00:00Z');
+                // sessionSchemaVersion 1 contract: computed carry evidence is
+                // live-derived and never survives a snapshot; only the user's
+                // sample configuration (tenor, expiry, strike) persists.
+                assert.equal(snapshot.forwardRateSamples[0].daysToExpiry, 30);
+                assert.equal(snapshot.forwardRateSamples[0].expDate, '2026-03-31');
+                assert.equal(snapshot.forwardRateSamples[0].strike, 5750);
+                assert.equal(snapshot.forwardRateSamples[0].dailyCarry, null);
+                assert.equal(snapshot.forwardRateSamples[0].lastComputedAt, null);
+                assert.equal(snapshot.forwardRateSamples[0].quoteAsOf, '');
                 assert.equal(snapshot.futuresPool[0].contractMonth, '202604');
                 assert.equal(snapshot.groups[0].legs[0].underlyingFutureId, 'future_1');
                 assert.equal(snapshot.futuresPool[0].bid, null);
                 assert.equal(snapshot.futuresPool[0].ask, null);
                 assert.equal(snapshot.futuresPool[0].mark, null);
+            },
+        },
+        {
+            name: 'persistence snapshot is canonical, versioned, and deterministic',
+            run() {
+                const ctx = loadSessionLogicContext();
+                const logic = ctx.OptionComboSessionLogic;
+                const { complexWorkspaceState } = require('./helpers/workspace_fixtures');
+
+                assert.equal(logic.SESSION_SCHEMA_VERSION, 1);
+
+                const state = complexWorkspaceState();
+                const first = logic.buildPersistencePayloadJson(state);
+                const second = logic.buildPersistencePayloadJson(state);
+                assert.equal(first, second);
+                assert.equal(JSON.parse(first).sessionSchemaVersion, 1);
+
+                // Property insertion order must not leak into the payload.
+                const reordered = {};
+                for (const key of Object.keys(state).sort().reverse()) {
+                    reordered[key] = state[key];
+                }
+                assert.equal(logic.buildPersistencePayloadJson(reordered), first);
+
+                // buildExportState stays a strict alias of the same contract.
+                assert.deepStrictEqual(
+                    logic.buildExportState(complexWorkspaceState()),
+                    logic.buildPersistenceState(complexWorkspaceState())
+                );
+            },
+        },
+        {
+            name: 'live market churn does not change the persistence payload',
+            run() {
+                const ctx = loadSessionLogicContext();
+                const logic = ctx.OptionComboSessionLogic;
+                const { complexWorkspaceState } = require('./helpers/workspace_fixtures');
+
+                const baseline = logic.buildPersistencePayloadJson(complexWorkspaceState());
+
+                const state = complexWorkspaceState();
+                // Live option tick on the live-sourced leg.
+                state.groups[0].legs[1].currentPrice = 2.55;
+                state.groups[0].legs[1].iv = 0.215;
+                // TWS portfolio sync touches every leg.
+                state.groups[0].legs.forEach((leg) => {
+                    leg.portfolioMarketPrice = 9.87;
+                    leg.portfolioMarketPriceSource = 'tws';
+                    leg.portfolioMarketPriceAsOf = '2026-08-05T14:30:00Z';
+                    leg.portfolioUnrealizedPnl = 123;
+                });
+                // Futures quotes, forward-rate recompute, projection feed.
+                Object.assign(state.futuresPool[0], {
+                    bid: 6340, ask: 6340.5, mark: 6340.25, lastQuotedAt: '2026-08-05T14:30:01Z',
+                });
+                Object.assign(state.forwardRateSamples[0], {
+                    dailyCarry: 0.00055, carryRate: 0.2, impliedRate: 0.055,
+                    quoteAsOf: '2026-08-05T14:30:02Z', lastComputedAt: '2026-08-05T14:30:02Z',
+                });
+                state.liveQuoteDate = '2026-08-05';
+                state.liveQuoteAsOf = '2026-08-05T14:30:03Z';
+                state.liveProjectionLastReceivedAt = '2026-08-05T14:30:03Z';
+                state.liveProjectionFeedStale = true;
+                // Broker/session runtime.
+                state.portfolioPositions.push({ account: 'U1111111', conId: 999, position: 1 });
+                state.portfolioPositionsConnected = false;
+                state.liveComboOrderAccounts.push('U00000001');
+                state.liveComboOrderAccountsConnected = false;
+                state.discountCurveLastLoadedAt = '2026-08-05T14:30:04Z';
+                state.discountCurveRequestPending = false;
+                state.historicalTradingDates.push('2026-08-02');
+                state.liveFuturesRequestGeneration = 18;
+                state.pendingLegExistsCheckGroupId = 'group_other';
+                // Order-workflow runtime on trigger/close/delta hedge.
+                Object.assign(state.groups[0].tradeTrigger, {
+                    status: 'submitted',
+                    pendingRequest: false,
+                    lastTriggeredAt: '2026-08-05T14:30:05Z',
+                    lastTriggerPrice: 641.2,
+                    lastPreview: { orderId: 7000 },
+                    lastError: 'newer error',
+                });
+                Object.assign(state.groups[0].closeExecution, {
+                    status: 'idle', pendingRequest: false, lastPreview: null,
+                });
+                state.deltaHedge.pendingOrder = { orderId: 7001 };
+                state.deltaHedge.autoLastDecision = { action: 'skip' };
+
+                assert.equal(logic.buildPersistencePayloadJson(state), baseline);
+            },
+        },
+        {
+            name: 'user edits change the persistence payload',
+            run() {
+                const ctx = loadSessionLogicContext();
+                const logic = ctx.OptionComboSessionLogic;
+                const { complexWorkspaceState } = require('./helpers/workspace_fixtures');
+
+                const baseline = logic.buildPersistencePayloadJson(complexWorkspaceState());
+                const edits = [
+                    ['leg position', (s) => { s.groups[0].legs[0].pos = -3; }],
+                    ['leg cost', (s) => { s.groups[0].legs[0].cost = 9.99; }],
+                    ['leg expiry', (s) => { s.groups[0].legs[0].expDate = '2026-10-16'; }],
+                    ['manual current price', (s) => { s.groups[0].legs[0].currentPrice = 4.5; }],
+                    ['manual IV', (s) => { s.groups[0].legs[0].iv = 0.3; }],
+                    ['group name', (s) => { s.groups[0].name = 'Renamed'; }],
+                    ['trigger price', (s) => { s.groups[0].tradeTrigger.price = 655; }],
+                    ['close routing', (s) => { s.groups[0].closeExecution.executionMode = 'preview'; }],
+                    ['simulated date', (s) => { s.simulatedDate = '2026-08-06'; }],
+                    ['forward sample strike', (s) => { s.forwardRateSamples[0].strike = 640; }],
+                ];
+                for (const [label, mutate] of edits) {
+                    const state = complexWorkspaceState();
+                    mutate(state);
+                    assert.notEqual(
+                        logic.buildPersistencePayloadJson(state),
+                        baseline,
+                        `expected edit to change payload: ${label}`
+                    );
+                }
+            },
+        },
+        {
+            name: 'persistence snapshot strips broker runtime and live evidence',
+            run() {
+                const ctx = loadSessionLogicContext();
+                const logic = ctx.OptionComboSessionLogic;
+                const { complexWorkspaceState } = require('./helpers/workspace_fixtures');
+
+                const snapshot = logic.buildPersistenceState(complexWorkspaceState());
+
+                assert.equal(snapshot.sessionSchemaVersion, 1);
+                assert.equal(snapshot.allowLiveComboOrders, false);
+                assert.equal(snapshot.allowLiveHedgeOrders, false);
+                assert.equal(snapshot.selectedLiveComboOrderAccount, '');
+                assert.equal(Array.isArray(snapshot.liveComboOrderAccounts), true);
+                assert.equal(snapshot.liveComboOrderAccounts.length, 0);
+                assert.equal('portfolioPositions' in snapshot, false);
+                assert.equal('portfolioPositionsConnected' in snapshot, false);
+                assert.equal('marketDataModeLocked' in snapshot, false);
+                assert.equal('historicalTradingDates' in snapshot, false);
+                assert.equal('historicalAvailableStartDate' in snapshot, false);
+                assert.equal('discountCurveRequestPending' in snapshot, false);
+                assert.equal('discountCurveLastLoadedAt' in snapshot, false);
+                assert.equal('liveFuturesRequestGeneration' in snapshot, false);
+                assert.equal('pendingLegExistsCheckGroupId' in snapshot, false);
+                assert.equal('simImpliedLambdaCoverage' in snapshot, false);
+                // The discount curve itself is user-facing configuration.
+                assert.equal(snapshot.discountCurve.curveDate, '2026-08-04');
+                assert.equal(snapshot.viewMode, 'combined');
+
+                const [manualLeg, liveLeg, closedLeg] = snapshot.groups[0].legs;
+                // Manual provenance survives untouched.
+                assert.equal(manualLeg.currentPrice, 4.1);
+                assert.equal(manualLeg.currentPriceSource, 'manual');
+                assert.equal(manualLeg.iv, 0.24);
+                assert.equal(manualLeg.executionReportOrderId, 6001);
+                assert.equal('portfolioMarketPrice' in manualLeg, false);
+                assert.equal('portfolioMarketPriceAsOf' in manualLeg, false);
+                assert.equal('portfolioUnrealizedPnl' in manualLeg, false);
+                // Live provenance is scrubbed, not re-labeled.
+                assert.equal(liveLeg.currentPrice, 0);
+                assert.equal(liveLeg.currentPriceSource, '');
+                assert.equal(liveLeg.iv, null);
+                assert.equal(liveLeg.ivSource, 'live');
+                assert.equal('portfolioMarketPrice' in liveLeg, false);
+                assert.equal('qualifiedOptionConId' in liveLeg, false);
+                assert.equal('expiryAsOf' in liveLeg, false);
+                // Closed-leg economics persist.
+                assert.equal(closedLeg.closePrice, 5.05);
+
+                const trigger = snapshot.groups[0].tradeTrigger;
+                assert.equal(trigger.enabled, false);
+                assert.equal(trigger.pendingRequest, false);
+                assert.equal(trigger.status, 'idle');
+                assert.equal(trigger.price, 640);
+                assert.equal(trigger.executionMode, 'submit');
+                assert.equal(snapshot.groups[0].closeExecution.pendingRequest, false);
+                assert.equal(snapshot.deltaHedge.autoSubmitEnabled, false);
+                assert.equal('pendingOrder' in snapshot.deltaHedge, false);
+            },
+        },
+        {
+            name: 'replace mode drops the current workspace while merge appends',
+            run() {
+                const ctx = loadSessionLogicContext();
+                const logic = ctx.OptionComboSessionLogic;
+                const { complexWorkspaceState } = require('./helpers/workspace_fixtures');
+
+                let idCounter = 0;
+                const nextId = () => `id_${++idCounter}`;
+                const addDays = (dateStr, days) => {
+                    const d = new Date(`${dateStr}T00:00:00Z`);
+                    d.setUTCDate(d.getUTCDate() + days);
+                    return d.toISOString().slice(0, 10);
+                };
+                const currentState = {
+                    groups: [{ id: 'existing_group', name: 'Old' }],
+                    hedges: [{ id: 'existing_hedge' }],
+                };
+
+                const merged = logic.normalizeImportedState(
+                    currentState, complexWorkspaceState(), '2026-08-01', nextId, addDays
+                );
+                assert.equal(merged.groups.length, 2);
+                assert.equal(merged.groups[0].name, 'Old');
+                assert.equal(merged.hedges.length, 2);
+
+                const replaced = logic.normalizeImportedState(
+                    currentState, complexWorkspaceState(), '2026-08-01', nextId, addDays,
+                    { mode: 'replace' }
+                );
+                assert.equal(replaced.groups.length, 1);
+                assert.equal(replaced.groups[0].name, 'Aug dc rfly');
+                assert.equal(replaced.hedges.length, 1);
+                // The caller's state object is never mutated by either mode.
+                assert.equal(currentState.groups.length, 1);
+                assert.equal(currentState.hedges.length, 1);
+            },
+        },
+        {
+            name: 'every fixture loads with execution authority fully disarmed',
+            run() {
+                const ctx = loadSessionLogicContext();
+                const logic = ctx.OptionComboSessionLogic;
+                const {
+                    minimalWorkspaceState,
+                    complexWorkspaceState,
+                    legacyV0ImportPayload,
+                } = require('./helpers/workspace_fixtures');
+
+                let idCounter = 0;
+                const nextId = () => `id_${++idCounter}`;
+                const addDays = (dateStr, days) => {
+                    const d = new Date(`${dateStr}T00:00:00Z`);
+                    d.setUTCDate(d.getUTCDate() + days);
+                    return d.toISOString().slice(0, 10);
+                };
+
+                const fixtures = [
+                    ['minimal', minimalWorkspaceState()],
+                    ['complex', complexWorkspaceState()],
+                    ['legacy v0', legacyV0ImportPayload()],
+                    // A round-tripped schema-1 payload must load just as safely.
+                    ['schema-1 snapshot', logic.buildPersistenceState(complexWorkspaceState())],
+                ];
+
+                for (const [label, payload] of fixtures) {
+                    const result = logic.normalizeImportedState(
+                        { groups: [], hedges: [] }, payload, '2026-08-01', nextId, addDays,
+                        { mode: 'replace' }
+                    );
+                    assert.equal(result.allowLiveComboOrders, false, `${label}: combo auth`);
+                    assert.equal(result.allowLiveHedgeOrders, false, `${label}: hedge auth`);
+                    assert.equal(result.deltaHedge.autoSubmitEnabled, false, `${label}: auto submit`);
+                    assert.equal(result.selectedLiveComboOrderAccount, '', `${label}: account`);
+                    assert.equal(result.liveComboOrderAccountsConnected, false, `${label}: connected`);
+                    assert.equal(result.liveComboOrderAccounts.length, 0, `${label}: accounts`);
+                    assert.equal('globalEquivalentClose' in result, false, `${label}: close token`);
+                    assert.equal('comboTemplateQuoteRequests' in result, false, `${label}: quote requests`);
+                    for (const group of result.groups) {
+                        assert.equal(group.tradeTrigger.enabled, false, `${label}: trigger armed`);
+                        assert.equal(group.tradeTrigger.pendingRequest, false, `${label}: trigger pending`);
+                        assert.equal(group.tradeTrigger.status, 'idle', `${label}: trigger status`);
+                        assert.equal(group.tradeTrigger.lastPreview, null, `${label}: trigger preview`);
+                        assert.equal(group.closeExecution.pendingRequest, false, `${label}: close pending`);
+                        assert.equal(group.closeExecution.status, 'idle', `${label}: close status`);
+                    }
+                }
+
+                // Legacy v0 files still migrate structurally: top-level legs
+                // become the Legacy Combo group and dte becomes expDate.
+                const legacy = logic.normalizeImportedState(
+                    { groups: [], hedges: [] }, legacyV0ImportPayload(), '2026-08-01', nextId, addDays,
+                    { mode: 'replace' }
+                );
+                assert.equal(legacy.groups.length, 1);
+                assert.equal(legacy.groups[0].name, 'Legacy Combo');
+                assert.equal(legacy.groups[0].legs.length, 2);
+                assert.equal(legacy.groups[0].legs[0].expDate, '2026-07-31');
+                assert.equal(legacy.hedges.length, 1);
             },
         },
         {
