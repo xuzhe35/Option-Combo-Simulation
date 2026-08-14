@@ -30,7 +30,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_USER_VERSION = 1
+SCHEMA_USER_VERSION = 2
 DEFAULT_MAX_PAYLOAD_BYTES = 5 * 1024 * 1024
 MAX_TITLE_CHARS = 120
 MAX_JSON_DEPTH = 64
@@ -39,6 +39,20 @@ DEFAULT_REVISION_KEEP_RECENT = 50
 DEFAULT_REVISION_KEEP_DAILY_DAYS = 90
 DEFAULT_BACKUP_KEEP_DAILY = 14
 DEFAULT_BACKUP_KEEP_WEEKLY = 8
+
+# Reserved save-operation labels for workspace_save_receipts.operation. The
+# client-side operation typing (commit 99b2895) is not sent over the wire
+# yet; until the protocol carries it, saves record NULL and the server never
+# infers a value (plan section 3.1).
+RECEIPT_OPERATIONS = ('create', 'update', 'copy')
+
+MAINTENANCE_BACKUP_DIRNAME = 'maintenance-backups'
+
+# v1 -> v2 receipt/bytes backfill runs in bounded, journaled batches so a
+# large database never migrates inside one giant startup transaction and an
+# interrupted migration resumes from committed work (plan section 3.1).
+DEFAULT_MIGRATION_BATCH_ROWS = 500
+DEFAULT_MIGRATION_BATCH_PAYLOAD_BYTES = 32 * 1024 * 1024
 
 # portfolio-<UTC stamp>-schema<user_version>-<install id>.db — the install id
 # keeps two machines publishing into one synced folder from colliding, and
@@ -261,6 +275,14 @@ def _payload_sha256(encoded):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _encode_result_json(ack):
+    """Compact canonical encoding for workspace_save_receipts.result_json.
+    Holds only the small ACK metadata — never the business payload, never
+    the idempotentReplay flag (stamped at read time)."""
+    return json.dumps(ack, ensure_ascii=False, sort_keys=True,
+                      separators=(',', ':'))
+
+
 def _validate_token(name, value):
     if not isinstance(value, str) or not _TOKEN_RE.match(value):
         raise InvalidRequestError(f'{name} must match the restricted token format')
@@ -287,6 +309,112 @@ def _derive_market_mode(payload):
     return 'historical' if payload.get('marketDataMode') == 'historical' else 'live'
 
 
+# Schema v2 tables shared by the fresh-create path and the v1 -> v2
+# migration. Deliberately NO foreign keys onto workspace_documents /
+# workspace_revisions: receipts, archive entries, tombstones, and the
+# registry must survive document deletion and payload archival — a cascade
+# here would destroy the idempotency ledger and the audit trail.
+_V2_TABLE_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS workspace_save_receipts (
+        save_token      TEXT PRIMARY KEY,
+        document_id     TEXT NOT NULL,
+        revision        INTEGER NOT NULL,
+        payload_sha256  TEXT NOT NULL,
+        payload_bytes   INTEGER NOT NULL,
+        saved_at_utc    TEXT NOT NULL,
+        operation       TEXT CHECK (operation IN ('create', 'update', 'copy')),
+        result_json     TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workspace_archive_entries (
+        document_id       TEXT NOT NULL,
+        revision          INTEGER NOT NULL,
+        archive_id        TEXT NOT NULL,
+        archive_batch_id  TEXT NOT NULL,
+        payload_sha256    TEXT NOT NULL,
+        payload_bytes     INTEGER NOT NULL,
+        saved_at_utc      TEXT NOT NULL,
+        archived_at_utc   TEXT NOT NULL,
+        PRIMARY KEY (document_id, revision)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_workspace_archive_entries_batch
+        ON workspace_archive_entries(archive_batch_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workspace_archive_tombstones (
+        document_id       TEXT PRIMARY KEY,
+        title             TEXT NOT NULL,
+        symbol            TEXT NOT NULL,
+        market_data_mode  TEXT NOT NULL,
+        last_revision     INTEGER NOT NULL,
+        deleted_at_utc    TEXT NOT NULL,
+        archived_at_utc   TEXT NOT NULL,
+        archive_id        TEXT NOT NULL,
+        archive_batch_id  TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workspace_archives (
+        archive_id              TEXT PRIMARY KEY,
+        archive_schema_version  INTEGER NOT NULL,
+        status                  TEXT NOT NULL,
+        created_at_utc          TEXT NOT NULL,
+        sealed_at_utc           TEXT,
+        last_verified_at_utc    TEXT,
+        last_verify_status      TEXT,
+        file_bytes              INTEGER NOT NULL,
+        logical_payload_bytes   INTEGER NOT NULL,
+        revision_count          INTEGER NOT NULL,
+        missing_since_utc       TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workspace_maintenance_jobs (
+        job_id                    TEXT PRIMARY KEY,
+        job_type                  TEXT NOT NULL,
+        status                    TEXT NOT NULL,
+        owner_server_instance_id  TEXT,
+        owner_pid                 INTEGER,
+        lease_fencing_token       INTEGER,
+        created_at_utc            TEXT NOT NULL,
+        started_at_utc            TEXT,
+        finished_at_utc           TEXT,
+        requested_policy_json     TEXT,
+        summary_json              TEXT,
+        error_code                TEXT,
+        error_message             TEXT,
+        cancel_requested          INTEGER NOT NULL DEFAULT 0,
+        archive_batch_id          TEXT,
+        superseded_by_job_id      TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workspace_maintenance_lease (
+        lease_name          TEXT PRIMARY KEY,
+        holder_instance_id  TEXT NOT NULL,
+        holder_pid          INTEGER NOT NULL,
+        fencing_token       INTEGER NOT NULL,
+        acquired_at_utc     TEXT NOT NULL,
+        heartbeat_at_utc    TEXT NOT NULL,
+        expires_at_utc      TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workspace_migration_journal (
+        step             TEXT NOT NULL,
+        batch_seq        INTEGER NOT NULL,
+        rows_processed   INTEGER NOT NULL,
+        payload_bytes    INTEGER NOT NULL,
+        completed_at_utc TEXT NOT NULL,
+        PRIMARY KEY (step, batch_seq)
+    )
+    """,
+)
+
 _SCHEMA_STATEMENTS = (
     """
     CREATE TABLE workspace_documents (
@@ -310,6 +438,7 @@ _SCHEMA_STATEMENTS = (
         payload_sha256         TEXT NOT NULL,
         payload_json           TEXT NOT NULL,
         saved_at_utc           TEXT NOT NULL,
+        payload_bytes          INTEGER NOT NULL,
         PRIMARY KEY (document_id, revision),
         FOREIGN KEY (document_id)
             REFERENCES workspace_documents(document_id)
@@ -320,14 +449,18 @@ _SCHEMA_STATEMENTS = (
     CREATE INDEX idx_workspace_documents_updated
         ON workspace_documents(deleted_at_utc, updated_at_utc DESC)
     """,
-)
+) + _V2_TABLE_STATEMENTS
 
 
 class PortfolioStore:
-    def __init__(self, db_path, *, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES, now=None):
+    def __init__(self, db_path, *, max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES, now=None,
+                 migration_batch_rows=DEFAULT_MIGRATION_BATCH_ROWS,
+                 migration_batch_payload_bytes=DEFAULT_MIGRATION_BATCH_PAYLOAD_BYTES):
         self._db_path = Path(db_path)
         self._max_payload_bytes = int(max_payload_bytes)
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._migration_batch_rows = max(1, int(migration_batch_rows))
+        self._migration_batch_payload_bytes = max(1, int(migration_batch_payload_bytes))
 
     @property
     def db_path(self):
@@ -358,10 +491,17 @@ class PortfolioStore:
             conn.close()
         return self
 
-    def _connect(self, for_init=False):
+    def _connect(self, for_init=False, verify_schema=None):
         # A PRAGMA can fail after connect() succeeded (corrupt file, I/O
         # error); the half-configured connection must be closed or it leaks
         # a file descriptor and pins the database file on Windows.
+        #
+        # verify_schema (default: on for every non-init connection) makes an
+        # interrupted v1 -> v2 migration observable as StoreUnavailableError:
+        # the store never serves data operations against a half-migrated
+        # database. Diagnostics (quick_check, backup_to) opt out because
+        # they must run against pre-migration snapshots too.
+        verify = (not for_init) if verify_schema is None else verify_schema
         conn = None
         try:
             conn = sqlite3.connect(self._db_path, isolation_level=None)
@@ -371,6 +511,14 @@ class PortfolioStore:
                 conn.execute('PRAGMA journal_mode = WAL')
             conn.execute('PRAGMA synchronous = FULL')
             conn.execute('PRAGMA busy_timeout = 5000')
+            if verify:
+                version = conn.execute('PRAGMA user_version').fetchone()[0]
+                if version != SCHEMA_USER_VERSION:
+                    conn.close()
+                    raise StoreUnavailableError(
+                        f'database schema is at version {version}, expected '
+                        f'{SCHEMA_USER_VERSION}; run initialize() to migrate'
+                    )
             return conn
         except sqlite3.Error as exc:
             if conn is not None:
@@ -388,6 +536,14 @@ class PortfolioStore:
                 f'{SCHEMA_USER_VERSION}'
             )
         if version == SCHEMA_USER_VERSION:
+            # Top up stragglers: a rolled-back v1 writer that committed
+            # between final validation and the version bump could leave a
+            # revision without receipt/bytes. Cheap count checks; the
+            # backfills only run when something is actually missing.
+            self._ensure_v2_completeness(conn)
+            return
+        if version == 1:
+            self._migrate_v1_to_v2(conn)
             return
         object_count = conn.execute('SELECT count(*) FROM sqlite_master').fetchone()[0]
         if object_count > 0:
@@ -409,6 +565,218 @@ class PortfolioStore:
         except BaseException:
             conn.execute('ROLLBACK')
             raise
+
+    # ------------------------------------------------------------------
+    # v1 -> v2 migration (plan sections 3.1 / 3.2, phase 1)
+    # ------------------------------------------------------------------
+
+    def _migrate_v1_to_v2(self, conn):
+        """Resumable in-place upgrade. Structure changes and every backfill
+        batch commit independently; user_version stays 1 until the final
+        validation passes, so an interrupted migration is indistinguishable
+        from a not-yet-started one to data operations (both refuse)."""
+        tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if 'workspace_documents' not in tables or 'workspace_revisions' not in tables:
+            raise StoreUnavailableError(
+                'database claims schema v1 but lacks the v1 tables; '
+                'refusing to migrate'
+            )
+        if 'workspace_migration_journal' not in tables:
+            # First attempt (not a resume): verified safety snapshot before
+            # any structural change. Failure aborts with the original file
+            # untouched.
+            self._create_pre_migration_backup()
+
+        columns = {
+            row[1] for row in conn.execute('PRAGMA table_info(workspace_revisions)')
+        }
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            if 'payload_bytes' not in columns:
+                # -1 marks "not backfilled yet"; a real canonical payload is
+                # at least 2 bytes, so the sentinel can never collide.
+                conn.execute(
+                    'ALTER TABLE workspace_revisions '
+                    'ADD COLUMN payload_bytes INTEGER NOT NULL DEFAULT -1'
+                )
+            for statement in _V2_TABLE_STATEMENTS:
+                conn.execute(statement)
+            conn.execute('COMMIT')
+        except BaseException:
+            conn.execute('ROLLBACK')
+            raise
+
+        self._backfill_payload_bytes(conn)
+        self._backfill_receipts(conn)
+
+        # Validation and the version bump share one write transaction, so a
+        # concurrent v1-code writer can never slip an unvalidated row
+        # between the check and the bump.
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            self._validate_v2_backfill(conn)
+            conn.execute(f'PRAGMA user_version = {SCHEMA_USER_VERSION}')
+            conn.execute('COMMIT')
+        except BaseException:
+            conn.execute('ROLLBACK')
+            raise
+
+    def _ensure_v2_completeness(self, conn):
+        missing_receipts = conn.execute(
+            'SELECT count(*) FROM workspace_revisions r '
+            'LEFT JOIN workspace_save_receipts s ON s.save_token = r.save_token '
+            'WHERE s.save_token IS NULL'
+        ).fetchone()[0]
+        unfilled_bytes = conn.execute(
+            'SELECT count(*) FROM workspace_revisions WHERE payload_bytes < 0'
+        ).fetchone()[0]
+        if unfilled_bytes:
+            self._backfill_payload_bytes(conn)
+        if missing_receipts:
+            self._backfill_receipts(conn)
+
+    def _create_pre_migration_backup(self):
+        stamp = self._utc_now_iso().replace('-', '').replace(':', '')[:15] + 'Z'
+        backup_dir = self._db_path.parent / MAINTENANCE_BACKUP_DIRNAME
+        dest = backup_dir / f'pre-migration-v1-to-v2-{stamp}.db'
+        self.backup_to(dest)  # backup API + quick_check; raises on failure
+
+    def _backfill_payload_bytes(self, conn):
+        """Set payload_bytes = canonical UTF-8 byte count in bounded batches.
+        length() on TEXT counts characters; the BLOB cast forces bytes."""
+        while True:
+            rows = conn.execute(
+                'SELECT rowid, length(CAST(payload_json AS BLOB)) AS byte_len '
+                'FROM workspace_revisions WHERE payload_bytes < 0 '
+                'ORDER BY rowid LIMIT ?',
+                (self._migration_batch_rows,),
+            ).fetchall()
+            if not rows:
+                return
+            picked, total = [], 0
+            for row in rows:
+                if picked and total + row['byte_len'] > self._migration_batch_payload_bytes:
+                    break
+                picked.append(row['rowid'])
+                total += row['byte_len']
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                conn.executemany(
+                    'UPDATE workspace_revisions '
+                    'SET payload_bytes = length(CAST(payload_json AS BLOB)) '
+                    'WHERE rowid = ?',
+                    [(rowid,) for rowid in picked],
+                )
+                self._journal_batch(conn, 'payload_bytes', len(picked), total)
+                conn.execute('COMMIT')
+            except BaseException:
+                conn.execute('ROLLBACK')
+                raise
+
+    def _backfill_receipts(self, conn):
+        """Synthesize receipts for pre-receipt revisions in bounded batches.
+
+        result_json mirrors the save_workspace success ACK field-for-field:
+        revision/saved time/hash/bytes come from the revision row, symbol and
+        market mode are derived from the payload, and the title falls back to
+        the CURRENT document title — the same semantics the pre-receipt
+        replay path had (it read current document metadata). idempotentReplay
+        is stamped at read time, never stored as historical fact."""
+        while True:
+            rows = conn.execute(
+                'SELECT r.document_id, r.revision, r.save_token, '
+                'r.payload_sha256, r.saved_at_utc, r.payload_json, d.title '
+                'FROM workspace_revisions r '
+                'JOIN workspace_documents d ON d.document_id = r.document_id '
+                'LEFT JOIN workspace_save_receipts s ON s.save_token = r.save_token '
+                'WHERE s.save_token IS NULL '
+                'ORDER BY r.document_id, r.revision LIMIT ?',
+                (self._migration_batch_rows,),
+            ).fetchall()
+            if not rows:
+                return
+            picked, total = [], 0
+            for row in rows:
+                size = len(row['payload_json'].encode('utf-8'))
+                if picked and total + size > self._migration_batch_payload_bytes:
+                    break
+                try:
+                    payload = json.loads(row['payload_json'])
+                except ValueError as exc:
+                    raise StoreUnavailableError(
+                        f'revision {row["revision"]} of {row["document_id"]} '
+                        f'holds invalid JSON; migration fails closed: {exc}'
+                    ) from exc
+                ack = {
+                    'documentId': row['document_id'],
+                    'title': row['title'],
+                    'symbol': _derive_symbol(payload),
+                    'marketDataMode': _derive_market_mode(payload),
+                    'revision': row['revision'],
+                    'updatedAtUtc': row['saved_at_utc'],
+                    'payloadSha256': row['payload_sha256'],
+                    'payloadBytes': size,
+                }
+                picked.append((
+                    row['save_token'], row['document_id'], row['revision'],
+                    row['payload_sha256'], size, row['saved_at_utc'],
+                    _encode_result_json(ack),
+                ))
+                total += size
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                conn.executemany(
+                    'INSERT INTO workspace_save_receipts (save_token, '
+                    'document_id, revision, payload_sha256, payload_bytes, '
+                    'saved_at_utc, operation, result_json) '
+                    'VALUES (?, ?, ?, ?, ?, ?, NULL, ?)',
+                    picked,
+                )
+                self._journal_batch(conn, 'save_receipts', len(picked), total)
+                conn.execute('COMMIT')
+            except BaseException:
+                conn.execute('ROLLBACK')
+                raise
+
+    def _journal_batch(self, conn, step, rows_processed, payload_bytes):
+        seq = conn.execute(
+            'SELECT COALESCE(MAX(batch_seq), 0) + 1 '
+            'FROM workspace_migration_journal WHERE step = ?',
+            (step,),
+        ).fetchone()[0]
+        conn.execute(
+            'INSERT INTO workspace_migration_journal '
+            '(step, batch_seq, rows_processed, payload_bytes, completed_at_utc) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (step, seq, rows_processed, payload_bytes, self._utc_now_iso()),
+        )
+
+    @staticmethod
+    def _validate_v2_backfill(conn):
+        unfilled = conn.execute(
+            'SELECT count(*) FROM workspace_revisions WHERE payload_bytes < 0'
+        ).fetchone()[0]
+        missing = conn.execute(
+            'SELECT count(*) FROM workspace_revisions r '
+            'LEFT JOIN workspace_save_receipts s ON s.save_token = r.save_token '
+            'WHERE s.save_token IS NULL'
+        ).fetchone()[0]
+        mismatched = conn.execute(
+            'SELECT count(*) FROM workspace_revisions r '
+            'JOIN workspace_save_receipts s ON s.save_token = r.save_token '
+            'WHERE s.document_id != r.document_id OR s.revision != r.revision '
+            'OR s.payload_sha256 != r.payload_sha256'
+        ).fetchone()[0]
+        if unfilled or missing or mismatched:
+            raise StoreUnavailableError(
+                'migration validation failed: '
+                f'{unfilled} revisions without payload_bytes, '
+                f'{missing} without receipts, {mismatched} mismatched receipts'
+            )
 
     @staticmethod
     def _map_sqlite_error(exc):
@@ -488,7 +856,7 @@ class PortfolioStore:
                 params.append(int(before_revision))
             rows = conn.execute(
                 'SELECT revision, payload_schema_version, payload_sha256, saved_at_utc, '
-                'length(payload_json) AS payload_bytes '
+                'payload_bytes '
                 f'FROM workspace_revisions {where} ORDER BY revision DESC LIMIT ?',
                 (*params, limit),
             ).fetchall()
@@ -512,15 +880,21 @@ class PortfolioStore:
     # ------------------------------------------------------------------
 
     def save_workspace(self, *, document_id, title, payload, save_token,
-                       expected_revision=None):
+                       expected_revision=None, operation=None):
         """Create (expected_revision None) or update a document.
 
-        Idempotent per save_token: an exact retry returns the original
-        result; the same token with different content is rejected.
+        Idempotent per save_token: an exact retry returns the original ACK
+        from workspace_save_receipts; the same token with different content
+        is rejected. `operation` is recorded verbatim when the protocol
+        supplies it and NULL otherwise — the server never infers it.
         """
         _validate_token('documentId', document_id)
         _validate_token('saveToken', save_token)
         title = _validate_title(title)
+        if operation is not None and operation not in RECEIPT_OPERATIONS:
+            raise InvalidRequestError(
+                f'operation must be one of {RECEIPT_OPERATIONS}'
+            )
         if expected_revision is not None:
             expected_revision = int(expected_revision)
             if expected_revision < 1:
@@ -588,17 +962,40 @@ class PortfolioStore:
                         (title, symbol, market_mode, next_revision, now_iso, document_id),
                     )
 
+                ack = {
+                    'documentId': document_id,
+                    'title': title,
+                    'symbol': symbol,
+                    'marketDataMode': market_mode,
+                    'revision': next_revision,
+                    'updatedAtUtc': now_iso,
+                    'payloadSha256': sha256,
+                    'payloadBytes': len(encoded),
+                }
                 try:
                     conn.execute(
                         'INSERT INTO workspace_revisions (document_id, revision, '
                         'save_token, payload_schema_version, payload_sha256, '
-                        'payload_json, saved_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                        'payload_json, saved_at_utc, payload_bytes) '
+                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                         (document_id, next_revision, save_token, schema_version,
-                         sha256, encoded.decode('utf-8'), now_iso),
+                         sha256, encoded.decode('utf-8'), now_iso, len(encoded)),
+                    )
+                    # Receipt and revision commit or roll back together:
+                    # the receipt is the durable idempotency ledger that
+                    # outlives the payload once it is archived.
+                    conn.execute(
+                        'INSERT INTO workspace_save_receipts (save_token, '
+                        'document_id, revision, payload_sha256, payload_bytes, '
+                        'saved_at_utc, operation, result_json) '
+                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                        (save_token, document_id, next_revision, sha256,
+                         len(encoded), now_iso, operation,
+                         _encode_result_json(ack)),
                     )
                 except sqlite3.IntegrityError:
                     # Unreachable while BEGIN IMMEDIATE serializes writers,
-                    # but the UNIQUE constraint stays the last line of defense.
+                    # but the UNIQUE constraints stay the last line of defense.
                     conn.execute('ROLLBACK')
                     replay = self._find_save_token_replay(
                         conn, document_id, save_token, sha256
@@ -614,27 +1011,18 @@ class PortfolioStore:
                     conn.execute('ROLLBACK')
                 raise
 
-            return {
-                'documentId': document_id,
-                'title': title,
-                'symbol': symbol,
-                'marketDataMode': market_mode,
-                'revision': next_revision,
-                'updatedAtUtc': now_iso,
-                'payloadSha256': sha256,
-                'payloadBytes': len(encoded),
-                'idempotentReplay': False,
-            }
+            return {**ack, 'idempotentReplay': False}
         except sqlite3.Error as exc:
             raise self._map_sqlite_error(exc) from exc
         finally:
             conn.close()
 
     def _find_save_token_replay(self, conn, document_id, save_token, sha256):
+        # Receipts, not revisions: the original ACK must replay even after
+        # the revision payload has been pruned or archived away.
         row = conn.execute(
-            'SELECT document_id, revision, payload_sha256, saved_at_utc, '
-            'length(payload_json) AS payload_bytes '
-            'FROM workspace_revisions WHERE save_token = ?',
+            'SELECT document_id, payload_sha256, result_json '
+            'FROM workspace_save_receipts WHERE save_token = ?',
             (save_token,),
         ).fetchone()
         if row is None:
@@ -643,24 +1031,9 @@ class PortfolioStore:
             raise DuplicateSaveTokenError(
                 'saveToken already used with different content'
             )
-        doc = conn.execute(
-            'SELECT * FROM workspace_documents WHERE document_id = ?',
-            (document_id,),
-        ).fetchone()
-        meta = self._document_row_to_meta(doc) if doc is not None else {
-            'documentId': document_id,
-        }
-        return {
-            'documentId': document_id,
-            'title': meta.get('title', ''),
-            'symbol': meta.get('symbol', ''),
-            'marketDataMode': meta.get('marketDataMode', 'live'),
-            'revision': row['revision'],
-            'updatedAtUtc': row['saved_at_utc'],
-            'payloadSha256': row['payload_sha256'],
-            'payloadBytes': row['payload_bytes'],
-            'idempotentReplay': True,
-        }
+        result = json.loads(row['result_json'])
+        result['idempotentReplay'] = True
+        return result
 
     def delete_document(self, document_id, expected_revision):
         _validate_token('documentId', document_id)
@@ -880,7 +1253,9 @@ class PortfolioStore:
             conn.close()
 
     def quick_check(self):
-        conn = self._connect()
+        # verify_schema off: quick_check must also validate pre-migration
+        # snapshots and foreign schema versions without claiming them.
+        conn = self._connect(verify_schema=False)
         try:
             row = conn.execute('PRAGMA quick_check').fetchone()
             if row is None or row[0] != 'ok':
@@ -901,7 +1276,9 @@ class PortfolioStore:
             dest.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise StoreUnavailableError(f'cannot create backup directory: {exc}') from exc
-        src = self._connect()
+        # verify_schema off: the pre-migration safety snapshot backs up a
+        # database that is still at the previous schema version.
+        src = self._connect(verify_schema=False)
         try:
             dst = sqlite3.connect(dest)
             try:

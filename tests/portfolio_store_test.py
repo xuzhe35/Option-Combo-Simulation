@@ -649,7 +649,8 @@ class PublishBackupTest(PortfolioStoreTestBase):
         published = self.store.publish_backup(self.backup_dir)
         self.assertTrue(published.exists())
         self.assertRegex(
-            published.name, r'^portfolio-\d{8}T\d{6}Z-schema1-[0-9a-f]{16}\.db$'
+            published.name,
+            rf'^portfolio-\d{{8}}T\d{{6}}Z-schema{SCHEMA_USER_VERSION}-[0-9a-f]{{16}}\.db$',
         )
         # No partials, no WAL/SHM ever land in the synced folder.
         leftovers = [p.name for p in self.backup_dir.iterdir() if p != published]

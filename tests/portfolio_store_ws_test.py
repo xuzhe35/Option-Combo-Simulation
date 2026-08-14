@@ -541,7 +541,11 @@ class ScheduledBackupTest(unittest.TestCase):
             self.assertTrue(portfolio_store_ws.maybe_publish_scheduled_backup(env))
             names = [p.name for p in backup_dir.iterdir()]
             self.assertEqual(len(names), 1)
-            self.assertRegex(names[0], r'^portfolio-\d{8}T\d{6}Z-schema1-')
+            from portfolio_store import SCHEMA_USER_VERSION
+            self.assertRegex(
+                names[0],
+                rf'^portfolio-\d{{8}}T\d{{6}}Z-schema{SCHEMA_USER_VERSION}-',
+            )
             # A fresh backup suppresses the next publish inside the interval.
             self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(env))
             self.assertTrue(portfolio_store_ws.maybe_publish_scheduled_backup(
