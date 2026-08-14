@@ -114,7 +114,14 @@ def create_store_env(config=None):
     revision_keep_daily_days = DEFAULT_REVISION_KEEP_DAILY_DAYS
     vacuum_freelist_pages = DEFAULT_VACUUM_FREELIST_PAGES
     vacuum_max_pages = DEFAULT_VACUUM_MAX_PAGES
+    archive_deleted_after_days = 30
     if config is not None:
+        try:
+            archive_deleted_after_days = max(0, config.getint(
+                'portfolio_store', 'archive_deleted_after_days', fallback=30,
+            ))
+        except ValueError:
+            pass
         try:
             revision_keep_recent = max(1, config.getint(
                 'portfolio_store', 'revision_keep_recent',
@@ -174,6 +181,7 @@ def create_store_env(config=None):
         '_revision_keep_daily_days': revision_keep_daily_days,
         '_vacuum_freelist_pages': vacuum_freelist_pages,
         '_vacuum_max_pages': vacuum_max_pages,
+        '_archive_deleted_after_days': archive_deleted_after_days,
     }
 
 

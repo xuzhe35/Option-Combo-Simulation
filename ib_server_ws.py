@@ -8,6 +8,7 @@ from typing import Any
 from ib_async import Stock
 from websockets.exceptions import ConnectionClosed
 
+import portfolio_admin_ws
 import portfolio_store_ws
 from ib_server_iv_term_structure import build_iv_term_structure_payload_evidence
 from ib_server_market_data import (
@@ -905,6 +906,14 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
         )
     elif action in portfolio_store_ws.PERSISTENCE_CLIENT_ACTIONS:
         await portfolio_store_ws.handle_persistence_action(
+            env.get('portfolio_store_env'),
+            websocket,
+            data,
+            client_ip=client_ip,
+            send=env['send_message_safe'],
+        )
+    elif action in portfolio_admin_ws.ADMIN_CLIENT_ACTIONS:
+        await portfolio_admin_ws.handle_admin_action(
             env.get('portfolio_store_env'),
             websocket,
             data,

@@ -7,6 +7,7 @@ import signal
 
 import websockets
 
+import portfolio_admin_ws
 import portfolio_store_ws
 from chain_service_config import resolve_chain_service_url
 from historical_replay_service import (
@@ -125,6 +126,12 @@ async def handle_ws_client(websocket):
             # Shared persistence protocol first; unhandled actions fall
             # through to the historical-only branches below.
             if await portfolio_store_ws.handle_persistence_action(
+                portfolio_store_env, websocket, data,
+                client_ip=client_ip, send=send_message_safe,
+            ):
+                continue
+
+            if await portfolio_admin_ws.handle_admin_action(
                 portfolio_store_env, websocket, data,
                 client_ip=client_ip, send=send_message_safe,
             ):

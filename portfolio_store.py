@@ -790,6 +790,15 @@ class PortfolioStore:
         wrapped = PortfolioStoreError(message)
         return wrapped
 
+    def now_utc(self):
+        """The store's injected clock as an aware UTC datetime. Admin-layer
+        candidate math must use this, not the wall clock, so fixtures with a
+        fake clock stay deterministic."""
+        now = self._now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return now.astimezone(timezone.utc)
+
     def _utc_now_iso(self):
         now = self._now()
         if now.tzinfo is None:
@@ -1396,6 +1405,298 @@ class PortfolioStore:
         for _stamp, entry in own:
             if entry not in keep:
                 entry.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Read-only statistics (admin page phase 2)
+    # ------------------------------------------------------------------
+
+    def storage_stats(self):
+        """Fast overview numbers: counters, PRAGMAs, and file sizes only —
+        no payload scans. Field names follow the frozen storage-metric
+        vocabulary in portfolio_archive.STORAGE_METRIC_FORMULAS."""
+        conn = self._connect()
+        try:
+            counts = conn.execute(
+                'SELECT '
+                '(SELECT count(*) FROM workspace_documents '
+                ' WHERE deleted_at_utc IS NULL) AS active_documents, '
+                '(SELECT count(*) FROM workspace_documents '
+                ' WHERE deleted_at_utc IS NOT NULL) AS deleted_documents, '
+                '(SELECT count(*) FROM workspace_revisions) AS revision_count, '
+                '(SELECT COALESCE(SUM(payload_bytes), 0) '
+                ' FROM workspace_revisions) AS logical_payload_bytes, '
+                '(SELECT count(*) FROM workspace_save_receipts) AS receipt_count, '
+                '(SELECT COALESCE(SUM(length(CAST(result_json AS BLOB))), 0) '
+                ' FROM workspace_save_receipts) AS receipt_bytes'
+            ).fetchone()
+            page_count = conn.execute('PRAGMA page_count').fetchone()[0]
+            page_size = conn.execute('PRAGMA page_size').fetchone()[0]
+            freelist_count = conn.execute('PRAGMA freelist_count').fetchone()[0]
+
+            now = self._now()
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            recent = {}
+            for label, days in (('last7Days', 7), ('last30Days', 30)):
+                cutoff = (now - timedelta(days=days)).astimezone(timezone.utc)
+                cutoff_iso = cutoff.isoformat(timespec='milliseconds').replace(
+                    '+00:00', 'Z'
+                )
+                row = conn.execute(
+                    'SELECT count(*), COALESCE(SUM(payload_bytes), 0) '
+                    'FROM workspace_revisions WHERE saved_at_utc >= ?',
+                    (cutoff_iso,),
+                ).fetchone()
+                recent[label] = {'revisions': row[0], 'payloadBytes': row[1]}
+
+            archive = conn.execute(
+                'SELECT count(*) AS archive_count, '
+                "COALESCE(SUM(status = 'sealed'), 0) AS sealed_count, "
+                'COALESCE(SUM(missing_since_utc IS NOT NULL), 0) AS missing_count, '
+                'COALESCE(SUM(file_bytes), 0) AS file_bytes, '
+                'COALESCE(SUM(logical_payload_bytes), 0) AS logical_payload_bytes, '
+                'COALESCE(SUM(revision_count), 0) AS revision_count, '
+                'MAX(last_verified_at_utc) AS last_verified_at_utc '
+                'FROM workspace_archives'
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+        def _file_size(path):
+            try:
+                return os.stat(path).st_size
+            except OSError:
+                return 0
+
+        return {
+            'activeDocuments': counts['active_documents'],
+            'deletedDocuments': counts['deleted_documents'],
+            'revisionCount': counts['revision_count'],
+            'logicalPayloadBytes': counts['logical_payload_bytes'],
+            'receiptCount': counts['receipt_count'],
+            'receiptBytesEstimate': counts['receipt_bytes'],
+            'pageCount': page_count,
+            'pageSize': page_size,
+            'freelistCount': freelist_count,
+            'dbFileBytes': _file_size(self._db_path),
+            'walBytes': _file_size(Path(str(self._db_path) + '-wal')),
+            'shmBytes': _file_size(Path(str(self._db_path) + '-shm')),
+            'recent': recent,
+            'archive': {
+                'archiveCount': archive['archive_count'],
+                'sealedCount': archive['sealed_count'],
+                'missingCount': archive['missing_count'],
+                'fileBytes': archive['file_bytes'],
+                'logicalPayloadBytes': archive['logical_payload_bytes'],
+                'revisionCount': archive['revision_count'],
+                'lastVerifiedAtUtc': archive['last_verified_at_utc'],
+            },
+        }
+
+    def retention_snapshot(self):
+        """Per-document revision metadata for candidate computation. Never
+        includes payload content."""
+        conn = self._connect()
+        try:
+            live_docs = {
+                row['document_id']: {
+                    'documentId': row['document_id'],
+                    'currentRevision': row['current_revision'],
+                    'revisions': [],
+                }
+                for row in conn.execute(
+                    'SELECT document_id, current_revision '
+                    'FROM workspace_documents WHERE deleted_at_utc IS NULL'
+                )
+            }
+            for row in conn.execute(
+                'SELECT document_id, revision, saved_at_utc, payload_bytes '
+                'FROM workspace_revisions ORDER BY document_id, revision'
+            ):
+                doc = live_docs.get(row['document_id'])
+                if doc is not None:
+                    doc['revisions'].append({
+                        'revision': row['revision'],
+                        'savedAtUtc': row['saved_at_utc'],
+                        'payloadBytes': row['payload_bytes'],
+                    })
+            deleted = [
+                {
+                    'documentId': row['document_id'],
+                    'deletedAtUtc': row['deleted_at_utc'],
+                    'revisionCount': row['revision_count'],
+                    'payloadBytes': row['payload_bytes'],
+                }
+                for row in conn.execute(
+                    'SELECT d.document_id, d.deleted_at_utc, '
+                    'count(r.revision) AS revision_count, '
+                    'COALESCE(SUM(r.payload_bytes), 0) AS payload_bytes '
+                    'FROM workspace_documents d '
+                    'LEFT JOIN workspace_revisions r '
+                    'ON r.document_id = d.document_id '
+                    'WHERE d.deleted_at_utc IS NOT NULL '
+                    'GROUP BY d.document_id'
+                )
+            ]
+            return {
+                'liveDocuments': list(live_docs.values()),
+                'deletedDocuments': deleted,
+            }
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def exact_storage_scan(self):
+        """Exact verification scan for the background stats job: recompute
+        canonical UTF-8 byte totals across every payload and cross-check the
+        stored payload_bytes and receipt coverage."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                'SELECT count(*) AS revision_count, '
+                'COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0) '
+                '  AS logical_payload_bytes, '
+                'COALESCE(SUM(payload_bytes '
+                '  != length(CAST(payload_json AS BLOB))), 0) AS byte_mismatches '
+                'FROM workspace_revisions'
+            ).fetchone()
+            missing_receipts = conn.execute(
+                'SELECT count(*) FROM workspace_revisions r '
+                'LEFT JOIN workspace_save_receipts s '
+                'ON s.save_token = r.save_token WHERE s.save_token IS NULL'
+            ).fetchone()[0]
+            return {
+                'revisionCount': row['revision_count'],
+                'logicalPayloadBytes': row['logical_payload_bytes'],
+                'payloadBytesMismatches': row['byte_mismatches'],
+                'revisionsMissingReceipts': missing_receipts,
+            }
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Maintenance jobs (admin page; summaries only, never candidate lists)
+    # ------------------------------------------------------------------
+
+    def create_maintenance_job(self, *, job_type, requested_policy=None):
+        job_id = f'job-{uuid.uuid4().hex[:20]}'
+        now_iso = self._utc_now_iso()
+        conn = self._connect()
+        try:
+            conn.execute(
+                'INSERT INTO workspace_maintenance_jobs (job_id, job_type, '
+                'status, created_at_utc, requested_policy_json) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (job_id, job_type, 'queued', now_iso,
+                 json.dumps(requested_policy) if requested_policy else None),
+            )
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+        return {'jobId': job_id, 'jobType': job_type, 'status': 'queued',
+                'createdAtUtc': now_iso}
+
+    def start_maintenance_job(self, job_id):
+        _validate_token('jobId', job_id)
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                'UPDATE workspace_maintenance_jobs SET status = ?, '
+                "started_at_utc = ? WHERE job_id = ? AND status = 'queued'",
+                ('running', self._utc_now_iso(), job_id),
+            )
+            if cursor.rowcount != 1:
+                raise InvalidRequestError(
+                    f'job {job_id} is not queued; cannot start'
+                )
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def finish_maintenance_job(self, job_id, *, status, summary=None,
+                               error_code=None, error_message=None):
+        _validate_token('jobId', job_id)
+        if status not in ('completed', 'failed', 'interrupted', 'canceled'):
+            raise InvalidRequestError(f'invalid terminal job status {status!r}')
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                'UPDATE workspace_maintenance_jobs SET status = ?, '
+                'finished_at_utc = ?, summary_json = ?, error_code = ?, '
+                'error_message = ? '
+                "WHERE job_id = ? AND status IN ('queued', 'running')",
+                (status, self._utc_now_iso(),
+                 json.dumps(summary) if summary is not None else None,
+                 error_code, error_message, job_id),
+            )
+            if cursor.rowcount != 1:
+                raise InvalidRequestError(
+                    f'job {job_id} is not active; cannot finish'
+                )
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def get_maintenance_job(self, job_id):
+        _validate_token('jobId', job_id)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                'SELECT * FROM workspace_maintenance_jobs WHERE job_id = ?',
+                (job_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return self._job_row_to_meta(row)
+
+    def latest_active_maintenance_job(self):
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                'SELECT * FROM workspace_maintenance_jobs '
+                "WHERE status IN ('queued', 'running') "
+                'ORDER BY created_at_utc DESC LIMIT 1'
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+        return self._job_row_to_meta(row) if row is not None else None
+
+    @staticmethod
+    def _job_row_to_meta(row):
+        summary = None
+        if row['summary_json']:
+            try:
+                summary = json.loads(row['summary_json'])
+            except ValueError:
+                summary = None
+        return {
+            'jobId': row['job_id'],
+            'jobType': row['job_type'],
+            'status': row['status'],
+            'createdAtUtc': row['created_at_utc'],
+            'startedAtUtc': row['started_at_utc'],
+            'finishedAtUtc': row['finished_at_utc'],
+            'summary': summary,
+            'errorCode': row['error_code'],
+            'errorMessage': row['error_message'],
+            'cancelRequested': bool(row['cancel_requested']),
+            'archiveBatchId': row['archive_batch_id'],
+            'supersededByJobId': row['superseded_by_job_id'],
+        }
 
     # ------------------------------------------------------------------
     # Helpers

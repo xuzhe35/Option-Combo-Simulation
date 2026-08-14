@@ -8,7 +8,12 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 // Mirrors scripts/stamp_asset_versions.py. Kept as an independent
 // reimplementation on purpose: if the two ever disagree the test fails, which
 // is what we want from a guard.
-const PAGES = ['index.html', 'chart_lab.html', 'iv_term_structure.html'];
+const PAGES = [
+    'index.html',
+    'chart_lab.html',
+    'iv_term_structure.html',
+    'workspace_db_admin.html',
+];
 const HASH_LENGTH = 12;
 const ASSET_REFERENCE = /\b(?:src|href)="([A-Za-z0-9_./-]+\.(?:js|css))(?:\?v=([^"]*))?"/g;
 
@@ -70,10 +75,15 @@ module.exports = {
         {
             name: 'pages actually reference assets, so the guard cannot pass vacuously',
             run() {
+                // The admin page's manifest is deliberately tiny (its exact
+                // three-asset content is asserted in
+                // workspace_db_admin_page.test.js); trading pages carry many.
+                const minimumReferences = { 'workspace_db_admin.html': 3 };
                 PAGES.forEach((pageName) => {
                     const references = collectReferences(pageName);
+                    const minimum = minimumReferences[pageName] || 6;
                     assert.ok(
-                        references.length > 5,
+                        references.length >= minimum,
                         `${pageName} resolved only ${references.length} asset references; `
                         + 'the reference pattern probably stopped matching.'
                     );

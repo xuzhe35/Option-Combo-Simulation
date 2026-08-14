@@ -32,6 +32,8 @@ const suites = [
     require('./valuation.test'),
     require('./session_logic.test'),
     require('./workspace_persistence.test'),
+    require('./workspace_db_admin_core.test'),
+    require('./workspace_db_admin_page.test'),
     require('./session_ui.test'),
     require('./app.test'),
     require('./control_panel_ui.test'),

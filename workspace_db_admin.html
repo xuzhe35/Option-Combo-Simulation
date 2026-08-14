@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Workspace DB Admin — Option Combo Simulator</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="workspace_db_admin.css?v=6473f1470182">
+</head>
+<body data-option-combo-page="workspace-db-admin">
+    <header class="admin-header">
+        <h1>Workspace Database Admin</h1>
+        <p class="readonly-note">Read-only phase: this page inspects the
+            workspace database. Archive and restore actions are not enabled.</p>
+        <div id="connection-banner" data-state="disconnected">Disconnected</div>
+        <dl class="status-line">
+            <dt>Store schema</dt><dd id="admin-schema-version">unavailable</dd>
+            <dt>Retention policy</dt><dd id="admin-policy">unavailable</dd>
+            <dt>Stats generated</dt><dd id="stats-generated-at">unavailable</dd>
+        </dl>
+    </header>
+
+    <main>
+        <section class="cards" aria-labelledby="overview-title">
+            <h2 id="overview-title">Active database</h2>
+            <div class="card-grid">
+                <div class="card"><span class="card-label">Active workspaces</span>
+                    <span class="card-value" id="stat-active-documents">unavailable</span></div>
+                <div class="card"><span class="card-label">Recently deleted</span>
+                    <span class="card-value" id="stat-deleted-documents">unavailable</span></div>
+                <div class="card"><span class="card-label">Revisions</span>
+                    <span class="card-value" id="stat-revision-count">unavailable</span></div>
+                <div class="card"><span class="card-label">Logical payload</span>
+                    <span class="card-value" id="stat-logical-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Allocated DB size</span>
+                    <span class="card-value" id="stat-allocated-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Reclaimable</span>
+                    <span class="card-value" id="stat-reclaimable-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">WAL size</span>
+                    <span class="card-value" id="stat-wal-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">DB file on disk</span>
+                    <span class="card-value" id="stat-db-file-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Save receipts</span>
+                    <span class="card-value" id="stat-receipt-count">unavailable</span>
+                    <span class="card-detail">permanent idempotency ledger,
+                        <span id="stat-receipt-bytes">unavailable</span></span></div>
+            </div>
+            <h3>Recent activity</h3>
+            <div class="card-grid">
+                <div class="card"><span class="card-label">Last 7 days</span>
+                    <span class="card-value"><span id="stat-recent7-revisions">unavailable</span> revisions</span>
+                    <span class="card-detail" id="stat-recent7-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Last 30 days</span>
+                    <span class="card-value"><span id="stat-recent30-revisions">unavailable</span> revisions</span>
+                    <span class="card-detail" id="stat-recent30-bytes">unavailable</span></div>
+            </div>
+        </section>
+
+        <section class="cards" aria-labelledby="candidates-title">
+            <h2 id="candidates-title">Archive candidates (preview only)</h2>
+            <p class="section-note">Computed by the server from the retention
+                policy. Nothing is moved or deleted from this page in the
+                current phase.</p>
+            <div class="card-grid">
+                <div class="card"><span class="card-label">Old revisions beyond retention</span>
+                    <span class="card-value" id="candidate-old-revisions">unavailable</span>
+                    <span class="card-detail" id="candidate-old-revision-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Soft-deleted past 30-day grace</span>
+                    <span class="card-value" id="candidate-deleted-documents">unavailable</span>
+                    <span class="card-detail" id="candidate-deleted-bytes">unavailable</span></div>
+            </div>
+        </section>
+
+        <section class="cards" aria-labelledby="archive-title">
+            <h2 id="archive-title">Archive shards</h2>
+            <div class="card-grid">
+                <div class="card"><span class="card-label">Registered shards</span>
+                    <span class="card-value" id="stat-archive-count">unavailable</span></div>
+                <div class="card"><span class="card-label">Missing files</span>
+                    <span class="card-value" id="stat-archive-missing">unavailable</span></div>
+                <div class="card"><span class="card-label">Shard files on disk</span>
+                    <span class="card-value" id="stat-archive-file-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Archived revisions</span>
+                    <span class="card-value" id="stat-archive-revisions">unavailable</span></div>
+            </div>
+        </section>
+
+        <section class="cards" aria-labelledby="maintenance-title">
+            <h2 id="maintenance-title">Maintenance</h2>
+            <p id="job-status">No maintenance job running</p>
+            <div class="controls">
+                <button id="btn-refresh-stats" type="button" disabled>Refresh stats</button>
+                <button id="btn-exact-stats" type="button" disabled>Exact recount (background)</button>
+            </div>
+        </section>
+    </main>
+
+    <script src="js/workspace_db_admin_core.js?v=4f12f203ea3c"></script>
+    <script src="js/workspace_db_admin.js?v=9dec76018cbc"></script>
+</body>
+</html>
