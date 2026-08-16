@@ -237,3 +237,23 @@ td[data-status="running"], td[data-status="queued"] { color: var(--warn); }
     color: var(--muted);
     align-self: center;
 }
+
+.restore-cell {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+}
+
+.restore-cell button {
+    padding: 0.2rem 0.6rem;
+    font-size: 0.8rem;
+}
+
+.rev-input {
+    width: 4.5rem;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.2rem 0.4rem;
+}

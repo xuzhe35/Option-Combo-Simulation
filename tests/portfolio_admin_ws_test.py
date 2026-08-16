@@ -143,7 +143,8 @@ class AdminStatusTest(AdminWsTestBase):
         self.assertEqual(response['schemaVersion'], 2)
         self.assertTrue(response['capability']['readOnly'])
         self.assertTrue(response['capability']['archiveExecute'])
-        self.assertFalse(response['capability']['restore'])
+        self.assertTrue(response['capability']['restore'])
+        self.assertFalse(response['capability']['rehydrateOriginal'])
         self.assertEqual(response['policy']['revisionKeepRecent'], 50)
         self.assertEqual(response['policy']['archiveDeletedAfterDays'], 30)
         self.assertFalse(response['policy']['archiveAutoRun'])
@@ -577,6 +578,60 @@ class ArchivePlanProtocolTest(AdminWsTestBase):
         })
         self.assertTrue(response['success'])
         self.assertTrue(response['cancelRequested'])
+
+
+class RestoreProtocolTest(AdminWsTestBase):
+    def _restore(self, **fields):
+        return _one_response(self.env, self.ws, {
+            'action': 'restore_archived_workspace',
+            'requestId': 'req-0030-4000-8000-000000000000',
+            **fields,
+        })
+
+    def test_mode_and_id_validation(self):
+        self._seed()
+        for bad in ({'mode': 'rehydrate', 'documentId': DOC},
+                    {'mode': 'copy', 'documentId': '../evil'},
+                    {'mode': 'revision', 'documentId': DOC},
+                    {'mode': 'revision', 'documentId': DOC, 'revision': 0},
+                    {'mode': 'revision', 'documentId': DOC, 'revision': True}):
+            response = self._restore(**bad)
+            self.assertFalse(response['success'])
+            self.assertEqual(response['code'], 'invalid_request')
+
+    def test_restore_copy_end_to_end(self):
+        self._seed()
+        # Archive the expired deleted document first.
+        token = _one_response(self.env, self.ws, {
+            'action': 'preview_workspace_archive',
+            'requestId': 'req-0031-4000-8000-000000000000',
+        })['planToken']
+        started = _one_response(self.env, self.ws, {
+            'action': 'execute_workspace_archive',
+            'requestId': 'req-0032-4000-8000-000000000000',
+            'planToken': token,
+        })
+        archive_job = _wait_for_job(self.env, self.ws, started['job']['jobId'])
+        self.assertEqual(archive_job['status'], 'completed')
+
+        response = self._restore(mode='copy', documentId=DOC_DELETED)
+        self.assertTrue(response['success'])
+        job = _wait_for_job(self.env, self.ws, response['job']['jobId'])
+        self.assertEqual(job['status'], 'completed')
+        summary = job['summary']
+        self.assertEqual(summary['mode'], 'copy')
+        self.assertTrue(summary['newDocumentId'].startswith('doc-restored-'))
+        loaded = self.env['store'].load_workspace(summary['newDocumentId'])
+        self.assertEqual(loaded['revision'], 1)
+
+        # Restoring an unknown document fails with the stable code.
+        response = self._restore(
+            mode='copy',
+            documentId='doc-nonexist-0000-4000-8000-000000000000',
+        )
+        job = _wait_for_job(self.env, self.ws, response['job']['jobId'])
+        self.assertEqual(job['status'], 'failed')
+        self.assertEqual(job['errorCode'], 'archive_not_found')
 
 
 class BackendParityTest(AdminWsTestBase):

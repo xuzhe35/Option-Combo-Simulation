@@ -854,6 +854,25 @@ class ArchiveShard:
         finally:
             conn.close()
 
+    def fetch_revision(self, document_id, revision):
+        """One archived revision row (payload included), or None. Only rows
+        belonging to GOOD batches are served — dead-batch remnants are
+        invisible to restore."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                'SELECT r.* FROM archived_revisions r '
+                'JOIN archive_batches b ON b.batch_id = r.archive_batch_id '
+                'WHERE r.document_id = ? AND r.revision = ? '
+                'AND b.status IN (?, ?, ?)',
+                (document_id, int(revision), *_GOOD_BATCH_STATES),
+            ).fetchone()
+            return dict(row) if row is not None else None
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
     def stats(self):
         """Counts and logical bytes over GOOD batches only."""
         conn = self._connect()
@@ -1045,6 +1064,145 @@ def split_into_batches(manifest, *, max_rows, max_payload_bytes):
             _flush()
     _flush()
     return batches
+
+
+# ---------------------------------------------------------------------------
+# Restore (plan section 13; phase 6)
+# ---------------------------------------------------------------------------
+
+class RestoreConflictError(ArchiveError):
+    code = 'restore_conflict'
+
+
+def _open_verified_shard(store_env, archive_id):
+    """Locate a registered shard by id, quick-check it, return the shard.
+    Every restore read passes through here — a corrupt or missing shard
+    fails closed before any payload is trusted."""
+    store = store_env['store']
+    registry = {
+        row['archive_id']: row for row in store.list_archive_registry()
+    }
+    if archive_id not in registry:
+        raise ArchiveNotFoundError('archive shard is not registered')
+    archive_dir = resolve_archive_dir(
+        Path(store.db_path), config=store_env.get('_config')
+    )
+    path = archive_path_for_id(archive_dir, archive_id)
+    if not path.exists():
+        raise ArchiveNotFoundError('archive shard file is missing')
+    shard = ArchiveShard(path, now=store.now_utc)
+    shard.quick_check()
+    return shard
+
+
+def _verified_payload(row, *, expected_sha, expected_bytes):
+    """Decode an archived payload only after hash, bytes, and schema all
+    check out against BOTH the shard row and the main-DB expectation."""
+    encoded = row['payload_json'].encode('utf-8')
+    recomputed = hashlib.sha256(encoded).hexdigest()
+    if (recomputed != expected_sha
+            or row['payload_sha256'] != expected_sha
+            or len(encoded) != expected_bytes
+            or row['payload_bytes'] != expected_bytes):
+        raise ArchiveVerificationError(
+            'archived payload failed hash/bytes verification; refusing restore'
+        )
+    from portfolio_store import ACCEPTED_PAYLOAD_SCHEMA_VERSIONS
+    if row['payload_schema_version'] not in ACCEPTED_PAYLOAD_SCHEMA_VERSIONS:
+        raise ArchiveVerificationError(
+            'archived payload schema version is not accepted; refusing restore'
+        )
+    try:
+        return json.loads(row['payload_json'])
+    except ValueError as exc:
+        raise ArchiveVerificationError(
+            'archived payload is not valid JSON; refusing restore'
+        ) from exc
+
+
+def restore_archived_revision(store_env, *, document_id, revision):
+    """Copy an archived old revision forward as a NEW head revision of its
+    live document, through the normal save path — optimistic concurrency,
+    payload validation, and receipts all apply. History is never rewritten
+    and the current pointer never moves backward."""
+    from portfolio_store import RevisionConflictError
+
+    store = store_env['store']
+    entry = store.get_archive_entry(document_id, revision)
+    if entry is None:
+        raise ArchiveNotFoundError('no archive entry for that revision')
+    shard = _open_verified_shard(store_env, entry['archive_id'])
+    row = shard.fetch_revision(document_id, revision)
+    if row is None:
+        raise ArchiveNotFoundError('archived revision missing from its shard')
+    payload = _verified_payload(
+        row, expected_sha=entry['payload_sha256'],
+        expected_bytes=entry['payload_bytes'],
+    )
+
+    meta = store.load_workspace(document_id)  # raises if deleted/missing
+    save_token = f'restore-{uuid.uuid4().hex}'
+    try:
+        result = store.save_workspace(
+            document_id=document_id,
+            title=meta['title'],
+            payload=payload,
+            save_token=save_token,
+            expected_revision=meta['revision'],
+        )
+    except RevisionConflictError as exc:
+        raise RestoreConflictError(
+            f'document changed while restoring: {exc}'
+        ) from exc
+    return {
+        'mode': 'revision',
+        'documentId': document_id,
+        'sourceRevision': revision,
+        'sourceArchiveId': entry['archive_id'],
+        'restoredRevision': result['revision'],
+        'payloadSha256': result['payloadSha256'],
+    }
+
+
+def restore_archived_document_as_copy(store_env, *, document_id):
+    """Restore a whole archived (tombstoned) document as a NEW document:
+    fresh document id, revision 1 from the archived last revision, title
+    marked as a restore. The tombstone stays — the original identity
+    remains reserved (Rehydrate Original is a later, stricter feature)."""
+    store = store_env['store']
+    tombstone = store.get_archive_tombstone(document_id)
+    if tombstone is None:
+        raise ArchiveNotFoundError('no tombstone for that document')
+    shard = _open_verified_shard(store_env, tombstone['archive_id'])
+    row = shard.fetch_revision(document_id, tombstone['last_revision'])
+    if row is None:
+        raise ArchiveNotFoundError('archived document missing from its shard')
+    payload = _verified_payload(
+        row, expected_sha=row['payload_sha256'],
+        expected_bytes=row['payload_bytes'],
+    )
+
+    new_document_id = f'doc-restored-{uuid.uuid4().hex[:24]}'
+    suffix = ' (restored)'
+    title = tombstone['title'][:120 - len(suffix)] + suffix
+    save_token = f'restore-{uuid.uuid4().hex}'
+    result = store.save_workspace(
+        document_id=new_document_id,
+        title=title,
+        payload=payload,
+        save_token=save_token,
+        expected_revision=None,
+    )
+    return {
+        'mode': 'copy',
+        'sourceDocumentId': document_id,
+        'sourceRevision': tombstone['last_revision'],
+        'sourceArchiveId': tombstone['archive_id'],
+        'newDocumentId': new_document_id,
+        'restoredRevision': result['revision'],
+        'title': result['title'],
+        'payloadSha256': result['payloadSha256'],
+    }
 
 
 # ---------------------------------------------------------------------------

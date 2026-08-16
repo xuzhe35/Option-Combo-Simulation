@@ -134,10 +134,14 @@ module.exports = {
                     ...base, capability: {}, planReady: true,
                     confirmationValid: true,
                 }).executeArchive, false);
-                // Restore stays off until plan phase 6.
+                // Restore follows its own capability flag.
                 assert.equal(core.buttonAvailability({
-                    ...base, planReady: true, confirmationValid: true,
+                    ...base, capability: { restore: true },
+                }).restore, true);
+                assert.equal(core.buttonAvailability({
+                    ...base, capability: { restore: true }, jobRunning: true,
                 }).restore, false);
+                assert.equal(core.buttonAvailability(base).restore, false);
 
                 const offline = core.buttonAvailability({
                     connection: 'disconnected', storeAvailable: true,
@@ -227,6 +231,7 @@ module.exports = {
                     'request_workspace_admin_status',
                     'request_workspace_space_reclaim',
                     'request_workspace_storage_stats',
+                    'restore_archived_workspace',
                 ]);
             },
         },

@@ -5,15 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Workspace DB Admin — Option Combo Simulator</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="workspace_db_admin.css?v=71b69e91832c">
+    <link rel="stylesheet" href="workspace_db_admin.css?v=f8cd2c04f3fe">
 </head>
 <body data-option-combo-page="workspace-db-admin">
     <header class="admin-header">
         <h1>Workspace Database Admin</h1>
         <p class="readonly-note">Archiving copies old revisions and expired
             deleted workspaces into verified archive shards before anything
-            leaves the active database. Restore actions arrive in a later
-            phase; nothing here can trade, subscribe, or touch orders.</p>
+            leaves the active database. Archived data can be restored as new
+            revisions or copies; nothing here can trade, subscribe, or touch
+            orders.</p>
         <div id="connection-banner" data-state="disconnected">Disconnected</div>
         <dl class="status-line">
             <dt>Store schema</dt><dd id="admin-schema-version">unavailable</dd>
@@ -125,9 +126,10 @@
             <div class="table-wrap">
                 <table aria-label="Archived workspaces">
                     <thead><tr><th>Title</th><th>Symbol</th><th>Kind</th>
-                        <th>Revisions</th><th>Shard</th><th>Archived</th></tr></thead>
+                        <th>Revisions</th><th>Shard</th><th>Archived</th>
+                        <th>Restore</th></tr></thead>
                     <tbody id="archived-docs-body">
-                        <tr><td colspan="6" class="empty">No archived workspaces</td></tr>
+                        <tr><td colspan="7" class="empty">No archived workspaces</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -159,7 +161,7 @@
         </section>
     </main>
 
-    <script src="js/workspace_db_admin_core.js?v=e2855686b91e"></script>
-    <script src="js/workspace_db_admin.js?v=f6e5e1d330b4"></script>
+    <script src="js/workspace_db_admin_core.js?v=9e5eafb63ef5"></script>
+    <script src="js/workspace_db_admin.js?v=a8d250b61e90"></script>
 </body>
 </html>

@@ -1596,6 +1596,35 @@ class PortfolioStore:
         finally:
             conn.close()
 
+    def get_archive_entry(self, document_id, revision):
+        _validate_token('documentId', document_id)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                'SELECT * FROM workspace_archive_entries '
+                'WHERE document_id = ? AND revision = ?',
+                (document_id, int(revision)),
+            ).fetchone()
+            return dict(row) if row is not None else None
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def get_archive_tombstone(self, document_id):
+        _validate_token('documentId', document_id)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                'SELECT * FROM workspace_archive_tombstones '
+                'WHERE document_id = ?', (document_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
     def has_archive_evidence(self, *, partial_keys=(), tombstone_doc_ids=()):
         """True only when EVERY given partial (doc, revision) pair has an
         archive entry and EVERY given document id has a tombstone. The
@@ -1873,6 +1902,7 @@ class PortfolioStore:
                     'title': row['title'],
                     'symbol': row['symbol'],
                     'lastRevision': row['last_revision'],
+                    'lastArchivedRevision': row['last_revision'],
                     'revisionCount': None,
                     'payloadBytes': None,
                     'archiveId': row['archive_id'],
@@ -1890,6 +1920,7 @@ class PortfolioStore:
                     'title': row['title'] or '',
                     'symbol': row['symbol'] or '',
                     'lastRevision': None,
+                    'lastArchivedRevision': row['last_archived_revision'],
                     'revisionCount': row['revision_count'],
                     'payloadBytes': row['payload_bytes'],
                     'archiveId': row['archive_id'],
@@ -1899,6 +1930,7 @@ class PortfolioStore:
                 for row in conn.execute(
                     'SELECT e.document_id, count(*) AS revision_count, '
                     'SUM(e.payload_bytes) AS payload_bytes, '
+                    'MAX(e.revision) AS last_archived_revision, '
                     'MAX(e.archive_id) AS archive_id, '
                     'MAX(e.archived_at_utc) AS archived_at_utc, '
                     'd.title AS title, d.symbol AS symbol '

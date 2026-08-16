@@ -33,6 +33,7 @@
         'list_workspace_archive_batches',
         'list_archived_workspaces',
         'request_workspace_space_reclaim',
+        'restore_archived_workspace',
     ]);
 
     function _isCount(value) {
@@ -252,7 +253,7 @@
             cancelJob: ctx.jobRunning === true
                 && ctx.jobStage !== 'committing',
             reclaim: idle,
-            restore: false,  // plan phase 6
+            restore: idle && capability.restore === true,
         };
     }
 
@@ -305,6 +306,15 @@
             'Archiving is disabled in the configuration.',
         job_not_found:
             'That task is unknown to this backend; refresh the task list.',
+        restore_conflict:
+            'The document changed while restoring. Nothing was overwritten; '
+            + 'retry the restore.',
+        archive_not_found:
+            'That archived record (or its shard) was not found. Verify the '
+            + 'shard files and the registry.',
+        revision_conflict:
+            'The document changed while restoring. Nothing was overwritten; '
+            + 'retry the restore.',
     });
 
     function errorGuidance(code) {

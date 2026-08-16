@@ -108,7 +108,7 @@ function statusFrame(overrides = {}) {
         schemaVersion: 2,
         capability: {
             readOnly: true, statsFast: true, statsExact: true,
-            archivePreview: true, archiveExecute: true, restore: false,
+            archivePreview: true, archiveExecute: true, restore: true,
         },
         policy: {
             revisionKeepRecent: 50, revisionKeepDailyDays: 90,
@@ -415,6 +415,91 @@ module.exports = {
                 assert.match(
                     document.getElementById('jobs-table-body').innerHTML,
                     /No tasks yet/
+                );
+            },
+        },
+        {
+            name: 'restore buttons send the right mode, id, and revision',
+            run() {
+                const { document, sockets } = connectAndStatus();
+                const socket = sockets[0];
+                socket.emit('message', {
+                    data: JSON.stringify({
+                        action: 'archived_workspaces_list', requestId: 'x',
+                        success: true, page: 1, pageSize: 10, total: 2,
+                        documents: [
+                            {
+                                documentId: 'doc-whole-1111-4111-8111-111111111111',
+                                kind: 'deleted_document', title: 'Old one',
+                                symbol: 'QQQ', revisionCount: null,
+                                payloadBytes: null, lastArchivedRevision: 2,
+                                archiveId: 'portfolio-archive-2026-001',
+                                archivedAtUtc: '2026-08-16T00:00:00.000Z',
+                            },
+                            {
+                                documentId: 'doc-part-2222-4222-8222-222222222222',
+                                kind: 'partial_history', title: 'Live one',
+                                symbol: 'SPY', revisionCount: 6,
+                                payloadBytes: 4096, lastArchivedRevision: 6,
+                                archiveId: 'portfolio-archive-2026-001',
+                                archivedAtUtc: '2026-08-16T00:00:00.000Z',
+                            },
+                        ],
+                    }),
+                });
+                socket.sent.length = 0;
+
+                document.getElementById('restore-doc-0').click();
+                let request = JSON.parse(socket.sent.shift());
+                assert.equal(request.action, 'restore_archived_workspace');
+                assert.equal(request.mode, 'copy');
+                assert.equal(request.documentId,
+                    'doc-whole-1111-4111-8111-111111111111');
+
+                // The rendered row pre-fills the revision input with the
+                // last archived revision (mock DOM does not parse
+                // innerHTML, so the pre-fill is asserted on the markup).
+                assert.match(
+                    document.getElementById('archived-docs-body').innerHTML,
+                    /id="restore-rev-1"[^>]*value="6"/
+                );
+                const input = document.getElementById('restore-rev-1');
+                input.value = '3';
+                document.getElementById('restore-doc-1').click();
+                request = JSON.parse(socket.sent.shift());
+                assert.equal(request.mode, 'revision');
+                assert.equal(request.revision, 3);
+                assert.equal(request.documentId,
+                    'doc-part-2222-4222-8222-222222222222');
+
+                // A completed restore job renders its provenance.
+                socket.emit('message', {
+                    data: JSON.stringify({
+                        action: 'workspace_archive_restore_started',
+                        requestId: 'x', success: true,
+                        job: { jobId: 'job-44444444444444444444',
+                               jobType: 'archive_restore', status: 'queued' },
+                    }),
+                });
+                socket.emit('message', {
+                    data: JSON.stringify({
+                        action: 'workspace_maintenance_job', requestId: 'x',
+                        success: true,
+                        job: {
+                            jobId: 'job-44444444444444444444',
+                            jobType: 'archive_restore', status: 'completed',
+                            summary: {
+                                mode: 'revision',
+                                documentId: 'doc-part-2222-4222-8222-222222222222',
+                                sourceRevision: 3, restoredRevision: 9,
+                                sourceArchiveId: 'portfolio-archive-2026-001',
+                            },
+                        },
+                    }),
+                });
+                assert.match(
+                    document.getElementById('job-status').textContent,
+                    /restored revision 3 .* as new revision 9/
                 );
             },
         },

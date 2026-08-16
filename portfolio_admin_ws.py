@@ -44,7 +44,10 @@ ADMIN_SERVER_ACTIONS = {
     'list_workspace_archive_batches': 'workspace_archive_batches_list',
     'list_archived_workspaces': 'archived_workspaces_list',
     'request_workspace_space_reclaim': 'workspace_space_reclaim_started',
+    'restore_archived_workspace': 'workspace_archive_restore_started',
 }
+
+RESTORE_MODES = ('revision', 'copy')
 
 MAX_PAGE_SIZE = 100
 
@@ -128,10 +131,13 @@ async def _build_admin_response(store_env, websocket, data, *, client_ip):
                 'statsExact': True,
                 'archivePreview': archive_enabled,
                 # Full archive: copy + verify, then verified removal from
-                # the active database in bounded chunk transactions. The
-                # page UI enables its write buttons in plan phase 5.
+                # the active database in bounded chunk transactions.
                 'archiveExecute': archive_enabled,
-                'restore': False,
+                # Restore: archived revision -> new head, whole document ->
+                # copy with a fresh id. Rehydrate Original stays absent
+                # until its re-archive semantics are implemented and tested.
+                'restore': archive_enabled,
+                'rehydrateOriginal': False,
             },
             'policy': _policy(store_env),
             'currentJob': current_job,
@@ -319,6 +325,39 @@ async def _build_admin_response(store_env, websocket, data, *, client_ip):
             return {
                 'action': server_action, 'requestId': request_id,
                 'success': True, 'job': result['job'],
+            }
+
+        if action == 'restore_archived_workspace':
+            mode = data.get('mode')
+            if mode not in RESTORE_MODES:
+                return _error_response(
+                    server_action, request_id, 'invalid_request',
+                    f'mode must be one of {RESTORE_MODES} '
+                    '(rehydrate is not available in this version)',
+                )
+            document_id = data.get('documentId')
+            if not isinstance(document_id, str) or not _TOKEN_RE.match(document_id):
+                return _error_response(
+                    server_action, request_id, 'invalid_request',
+                    'documentId must match the restricted token format',
+                )
+            revision = data.get('revision')
+            if mode == 'revision' and (
+                    isinstance(revision, bool) or not isinstance(revision, int)
+                    or revision < 1):
+                return _error_response(
+                    server_action, request_id, 'invalid_request',
+                    'revision must be a positive integer for mode "revision"',
+                )
+            job = await asyncio.to_thread(
+                _start_restore_job, store_env, mode, document_id, revision,
+            )
+            _log(action, request_id, started)
+            return {
+                'action': server_action,
+                'requestId': request_id,
+                'success': True,
+                'job': job,
             }
 
         if action == 'cancel_workspace_maintenance_job':
@@ -776,6 +815,73 @@ def _run_reclaim_job(store_env, job_id):
             )
         except Exception:
             logger.exception('failed to record reclaim failure')
+    finally:
+        guard.release()
+
+
+def _start_restore_job(store_env, mode, document_id, revision):
+    import os as _os
+    store = store_env['store']
+    job = store.create_maintenance_job(
+        job_type='archive_restore',
+        requested_policy={'mode': mode, 'documentId': document_id,
+                          'revision': revision},
+        owner_instance_id=store_env.get('_server_instance_id'),
+        owner_pid=_os.getpid(),
+    )
+    thread = threading.Thread(
+        target=_run_restore_job,
+        args=(store_env, job['jobId'], mode, document_id, revision),
+        name=f'archive-restore-{job["jobId"]}', daemon=True,
+    )
+    thread.start()
+    return job
+
+
+def _run_restore_job(store_env, job_id, mode, document_id, revision):
+    store = store_env.get('store')
+    if store is None:
+        return
+    guard = portfolio_maintenance.acquire_maintenance(store_env)
+    if guard is None:
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code='maintenance_busy',
+                error_message='another maintenance task is running',
+            )
+        except Exception:
+            logger.exception('failed to mark restore job busy')
+        return
+    try:
+        store.start_maintenance_job(job_id, fencing_token=guard.fencing_token)
+        if mode == 'revision':
+            summary = portfolio_archive.restore_archived_revision(
+                store_env, document_id=document_id, revision=revision,
+            )
+        else:
+            summary = portfolio_archive.restore_archived_document_as_copy(
+                store_env, document_id=document_id,
+            )
+        store.finish_maintenance_job(job_id, status='completed',
+                                     summary=summary)
+    except PortfolioStoreError as exc:
+        logger.warning('restore job %s failed: %s (%s)', job_id, exc, exc.code)
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code=exc.code,
+                error_message='restore failed; see server log',
+            )
+        except Exception:
+            logger.exception('failed to record restore failure')
+    except Exception:
+        logger.exception('restore job %s crashed', job_id)
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code='internal_store_error',
+                error_message='restore failed; see server log',
+            )
+        except Exception:
+            logger.exception('failed to record restore failure')
     finally:
         guard.release()
 

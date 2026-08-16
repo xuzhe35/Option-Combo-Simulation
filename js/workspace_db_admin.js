@@ -289,6 +289,16 @@
                 line += ` — ${summary.payloadBytesMismatches} byte mismatches, `
                     + `${summary.revisionsMissingReceipts} missing receipts`;
             } else if (job.status === 'completed'
+                       && summary.mode === 'copy') {
+                line += ` — restored "${summary.title}" as a new workspace `
+                    + `(from ${summary.sourceDocumentId} rev `
+                    + `${summary.sourceRevision}, shard ${summary.sourceArchiveId})`;
+            } else if (job.status === 'completed'
+                       && summary.mode === 'revision') {
+                line += ` — restored revision ${summary.sourceRevision} of `
+                    + `${summary.documentId} as new revision `
+                    + `${summary.restoredRevision} (shard ${summary.sourceArchiveId})`;
+            } else if (job.status === 'completed'
                        && summary.freelistPagesBefore !== undefined) {
                 line += ` — freelist ${summary.freelistPagesBefore}`
                     + `→${summary.freelistPagesAfter} pages`;
@@ -336,17 +346,25 @@
         }
         if (!listing || listing.items.length === 0) {
             body.innerHTML =
-                '<tr><td colspan="6" class="empty">No archived workspaces</td></tr>';
+                '<tr><td colspan="7" class="empty">No archived workspaces</td></tr>';
             _setText('docs-page-label', '');
             return;
         }
         state.docsTotal = listing.total;
-        body.innerHTML = listing.items.map((doc) => {
-            const kind = doc.kind === 'deleted_document'
-                ? 'whole document' : 'old revisions';
+        const restoreEnabled = _availability().restore;
+        body.innerHTML = listing.items.map((doc, index) => {
+            const whole = doc.kind === 'deleted_document';
+            const kind = whole ? 'whole document' : 'old revisions';
             const count = doc.revisionCount !== null
                 && doc.revisionCount !== undefined
                 ? String(doc.revisionCount) : '—';
+            const restoreCell = whole
+                ? `<button id="restore-doc-${index}" type="button"`
+                  + `${restoreEnabled ? '' : ' disabled'}>Restore as copy</button>`
+                : `<input id="restore-rev-${index}" type="number" min="1" `
+                  + `class="rev-input" value="${_escapeHtml(doc.lastArchivedRevision)}">`
+                  + `<button id="restore-doc-${index}" type="button"`
+                  + `${restoreEnabled ? '' : ' disabled'}>Restore revision</button>`;
             return '<tr>'
                 + `<td>${_escapeHtml(doc.title)}</td>`
                 + `<td>${_escapeHtml(doc.symbol)}</td>`
@@ -354,8 +372,39 @@
                 + `<td>${_escapeHtml(count)}</td>`
                 + `<td>${_escapeHtml(doc.archiveId)}</td>`
                 + `<td>${_escapeHtml(doc.archivedAtUtc)}</td>`
+                + `<td class="restore-cell">${restoreCell}</td>`
                 + '</tr>';
         }).join('');
+        listing.items.forEach((doc, index) => {
+            const button = _element(`restore-doc-${index}`);
+            if (!button || typeof button.addEventListener !== 'function') {
+                return;
+            }
+            button.addEventListener('click', () => {
+                if (!_availability().restore) {
+                    return;
+                }
+                if (doc.kind === 'deleted_document') {
+                    _send('restore_archived_workspace', {
+                        mode: 'copy', documentId: doc.documentId,
+                    });
+                } else {
+                    const input = _element(`restore-rev-${index}`);
+                    const revision = input
+                        ? parseInt(input.value, 10) : NaN;
+                    if (!Number.isInteger(revision) || revision < 1) {
+                        _renderGuidance(
+                            'Enter the archived revision number to restore.'
+                        );
+                        return;
+                    }
+                    _send('restore_archived_workspace', {
+                        mode: 'revision', documentId: doc.documentId,
+                        revision,
+                    });
+                }
+            });
+        });
         const pages = Math.max(1, Math.ceil(listing.total / listing.pageSize));
         _setText('docs-page-label', `page ${listing.page} / ${pages}`);
     }
@@ -488,6 +537,14 @@
             _renderJob();
         } else if (action === 'workspace_maintenance_cancel_requested') {
             if (data.success !== true) {
+                _renderGuidance(core.errorGuidance(data.code));
+            }
+        } else if (action === 'workspace_archive_restore_started') {
+            if (data.success === true) {
+                state.activeJob = core.normalizeJob(data.job);
+                _scheduleJobPoll();
+                _renderJob();
+            } else {
                 _renderGuidance(core.errorGuidance(data.code));
             }
         } else if (action === 'workspace_space_reclaim_started') {
