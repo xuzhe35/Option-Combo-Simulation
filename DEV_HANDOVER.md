@@ -646,6 +646,29 @@ Not implemented there today:
   (`[server] max_ws_message_bytes`, 8 MiB): the library default of 1 MiB
   would close the live socket — and drop order supervision — on a large
   workspace save.
+- The archive layer (`portfolio_maintenance.py`, `portfolio_archive.py`,
+  `portfolio_admin_ws.py`, `workspace_db_admin.html`) has hard invariants
+  a future change must not weaken:
+  - the ONLY removal path for revisions is archive-then-remove; nothing
+    deletes on a schedule, and `prune_revisions` has no scheduled call
+    site (a structural test enforces this);
+  - every maintenance path (backup, archive, vacuum, exact stats, restore)
+    runs under `portfolio_maintenance.acquire_maintenance` — thread lock,
+    OS flock, DB lease with fencing. Never add a maintenance entry point
+    that only takes the thread lock; both backends share one database;
+  - commit chunks re-check the lease INSIDE the write transaction and
+    write the archive entry/tombstone in the SAME transaction as the
+    delete; `workspace_save_receipts` is a permanent idempotency ledger
+    with no cascade — never "clean it up";
+  - server stats fields must also be added to
+    `js/workspace_db_admin_core.js`'s normalizers, which rebuild nested
+    objects and silently drop unknown keys otherwise;
+  - new pages must be registered in `scripts/stamp_asset_versions.py` AND
+    `tests/asset_versions.test.js`, and new JS suites in `tests/run.js`;
+  - `archive_auto_run` stays `false` until the manual flow has survived a
+    release cycle; the Windows leg of the manual end-to-end matrix (paths,
+    `msvcrt` file locking, launcher Python resolution) still needs a run
+    on a real Windows machine.
 
 ## 8. Tests
 

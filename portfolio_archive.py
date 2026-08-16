@@ -1067,6 +1067,88 @@ def split_into_batches(manifest, *, max_rows, max_payload_bytes):
 
 
 # ---------------------------------------------------------------------------
+# Optional low-frequency auto-archive (plan section 8.4 / phase 7)
+# ---------------------------------------------------------------------------
+
+# After a failed auto run, no further auto attempt for this long. Manual
+# archiving from the admin page is unaffected by the backoff.
+AUTO_ARCHIVE_FAILURE_BACKOFF_SECONDS = 6 * 3600.0
+
+
+def run_auto_archive(store_env, guard, *, now_monotonic):
+    """One guarded auto-archive cycle, called from the scheduled maintenance
+    pass while the guard is already held. Strictly opt-in
+    (archive_auto_run=false by default), and defensive by construction:
+
+    - a previous failure backs off further attempts for hours;
+    - zero candidates is a silent no-op;
+    - the executor's own disk-space precheck (copy + snapshot + margin) is
+      the low-water protection — refusal fails the job, never a save;
+    - a restart resumes copied/verified batches through the normal
+      resume + reconciler path.
+
+    Returns a small outcome dict for logging; never raises."""
+    store = store_env.get('store')
+    if store is None or store_env.get('_archive_enabled', True) is not True:
+        return {'ran': False, 'reason': 'disabled'}
+    if store_env.get('_archive_auto_run', False) is not True:
+        return {'ran': False, 'reason': 'auto_run_off'}
+    backoff_until = store_env.get('_auto_archive_backoff_until', 0.0)
+    if now_monotonic < backoff_until:
+        return {'ran': False, 'reason': 'backoff'}
+
+    policy = {
+        'revisionKeepRecent': store_env.get('_revision_keep_recent', 50),
+        'revisionKeepDailyDays': store_env.get('_revision_keep_daily_days', 90),
+        'archiveDeletedAfterDays': store_env.get(
+            '_archive_deleted_after_days', 30),
+    }
+    job = None
+    try:
+        preview = build_archive_preview(store, policy=policy)
+        if preview['totals']['revisionCount'] == 0:
+            return {'ran': False, 'reason': 'no_candidates'}
+        created_at = _iso(store.now_utc())
+        preview['fingerprint'] = compute_generation_fingerprint(
+            preview, install_id=store.ensure_install_id(),
+            created_at_utc=created_at, nonce=uuid.uuid4().hex,
+        )
+        job = store.create_maintenance_job(
+            job_type='archive_auto',
+            requested_policy=policy,
+            owner_instance_id=store_env.get('_server_instance_id'),
+            owner_pid=os.getpid(),
+        )
+        store.start_maintenance_job(
+            job['jobId'], fencing_token=guard.fencing_token
+        )
+        summary = run_archive_job(store_env, guard, job['jobId'], preview)
+        store.finish_maintenance_job(
+            job['jobId'], status='completed', summary=summary
+        )
+        return {'ran': True, 'jobId': job['jobId'],
+                'removed': summary['commit']['removedRevisions']}
+    except PortfolioStoreError as exc:
+        store_env['_auto_archive_backoff_until'] = (
+            now_monotonic + AUTO_ARCHIVE_FAILURE_BACKOFF_SECONDS
+        )
+        if job is not None:
+            try:
+                store.finish_maintenance_job(
+                    job['jobId'], status='failed', error_code=exc.code,
+                    error_message='auto archive failed; see server log',
+                )
+            except Exception:
+                pass  # the backoff alone suffices
+        return {'ran': False, 'reason': 'failed', 'errorCode': exc.code}
+    except Exception:
+        store_env['_auto_archive_backoff_until'] = (
+            now_monotonic + AUTO_ARCHIVE_FAILURE_BACKOFF_SECONDS
+        )
+        return {'ran': False, 'reason': 'crashed'}
+
+
+# ---------------------------------------------------------------------------
 # Restore (plan section 13; phase 6)
 # ---------------------------------------------------------------------------
 

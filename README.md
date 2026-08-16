@@ -330,10 +330,45 @@ as a failure, never silently downgraded to a file write.
   not multi-master sync: two machines editing their own local databases
   fork and cannot be merged automatically.
 - Revision retention (`revision_keep_recent` / `revision_keep_daily_days`)
-  runs inside the scheduled maintenance pass immediately after a verified
-  backup publish — never on the save path, and never without a backup.
+  only defines ARCHIVE CANDIDATES. Nothing is deleted on a schedule:
+  revisions beyond the policy leave the active database solely through the
+  admin page's archive flow below, after a verified copy exists.
 - Deleting a workspace is a soft delete: restore it yourself from
-  Open → Recently Deleted. Revision history is never rewritten.
+  Open → Recently Deleted. Revision history is never rewritten. After the
+  30-day grace (`archive_deleted_after_days`) a deleted workspace becomes a
+  whole-document archive candidate.
+
+## Workspace Database Admin & Archive (`workspace_db_admin.html`)
+
+A standalone page (own minimal WebSocket client; it loads none of the
+trading scripts and can never trade, subscribe, or touch orders) for
+inspecting and archiving the workspace database. Works against either
+backend.
+
+- Overview: active/deleted documents, revisions, logical payload bytes vs
+  allocated/reclaimable/WAL/file bytes (never conflated), save-receipt
+  ledger size, 7/30-day growth, archive shard registry, and the current
+  candidate counts. Exact recount runs as a background job.
+- Archive flow: `Preview archive` computes a server-side plan; you must
+  type the exact phrase `ARCHIVE <N> REVISIONS`; Execute then copies the
+  candidates into `<app-data>/archives/portfolio-archive-<year>-<nnn>.db`,
+  verifies every payload hash byte-for-byte, takes a verified recovery
+  snapshot (`<app-data>/maintenance-backups/`), and only then removes the
+  verified copies from the active database in small chunk transactions.
+  Anything that changed since the preview is skipped, never force-deleted.
+  Cancel exists during the copy stage only.
+- Restore: an archived old revision restores as a NEW head revision of its
+  document (normal save path, conflict-checked); an archived deleted
+  workspace restores as a copy under a new id. Every restored payload is
+  re-verified against its recorded hash first.
+- Both backends may run at once: maintenance (backup / archive / vacuum /
+  restore) is serialized by an OS file lock plus a database lease with
+  fencing tokens; the loser reports "maintenance busy" and retries later.
+- `archive_auto_run` stays `false`: archiving is manual until the manual
+  flow has proven itself. The opt-in auto pass runs after a verified
+  backup, backs off for hours after any failure, and refuses on low disk.
+- Archive shards live next to the active DB and must never sit in a synced
+  folder; publish static shard backups the same way as database backups.
 
 ## Runtime Log Cleanup
 

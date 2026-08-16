@@ -184,6 +184,9 @@ def create_store_env(config=None):
         '_vacuum_max_pages': vacuum_max_pages,
         '_archive_deleted_after_days': archive_deleted_after_days,
         '_archive_enabled': _read_bool(config, 'archive_enabled', True),
+        # Strictly opt-in; stays false until the manual flow has survived a
+        # release cycle (plan sections 8.4 / 19.1).
+        '_archive_auto_run': _read_bool(config, 'archive_auto_run', False),
         '_archive_max_rows_per_batch': _read_int(
             config, 'archive_max_rows_per_batch', 500, minimum=1),
         '_archive_max_payload_bytes_per_batch': _read_int(
@@ -455,10 +458,23 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
             keep_weekly=store_env.get('_backup_keep_weekly', DEFAULT_BACKUP_KEEP_WEEKLY),
         )
         logger.info('published scheduled workspace backup: %s', published)
-        # Scheduled maintenance NEVER deletes revisions any more: the only
-        # removal path is the admin page's archive flow (copy, verify, then
-        # commit — plan phase 4), which keeps a verified archive copy of
-        # every removed payload. Bounded space reclamation stays here.
+        # Scheduled maintenance NEVER deletes revisions directly: the only
+        # removal paths are the admin page's archive flow and, when the
+        # user explicitly opted in (archive_auto_run=true, default false),
+        # the guarded auto-archive below — both keep a verified archive
+        # copy of every removed payload. Bounded reclamation stays here.
+        try:
+            import portfolio_archive
+            outcome = portfolio_archive.run_auto_archive(
+                store_env, guard, now_monotonic=time.monotonic()
+            )
+            if outcome.get('ran'):
+                logger.info('auto archive removed %s revisions (job %s)',
+                            outcome.get('removed'), outcome.get('jobId'))
+            elif outcome.get('reason') not in ('auto_run_off', 'no_candidates'):
+                logger.warning('auto archive skipped: %s', outcome)
+        except Exception:
+            logger.exception('auto archive pass failed; data intact')
         try:
             threshold = store_env.get(
                 '_vacuum_freelist_pages', DEFAULT_VACUUM_FREELIST_PAGES
