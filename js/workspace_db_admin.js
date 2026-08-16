@@ -3,9 +3,14 @@
  *
  * Dedicated minimal WebSocket client: this page never loads ws_client.js,
  * app.js, or any order/market/valuation script, and every outbound message
- * is routed through the core module's ALLOWED_CLIENT_ACTIONS list. One
- * request timeout is never rendered as a failed archive: the page only shows
- * what the backend reports and re-queries jobs by id after reconnect.
+ * is routed through the core module's ALLOWED_CLIENT_ACTIONS list.
+ *
+ * Write flow (plan sections 10.3 / 11): Preview -> review server totals ->
+ * type the exact confirmation phrase -> Execute -> poll the job by id. The
+ * plan token lives ONLY in this closure's state — never in the URL,
+ * localStorage, or logs. A request timeout is never rendered as a failed
+ * archive: the page only shows what job polling reports, and after a
+ * reconnect it re-discovers the active job from the admin status.
  */
 
 (function bootWorkspaceDbAdmin(globalScope) {
@@ -23,17 +28,25 @@
     const RECONNECT_BASE_DELAY_MS = 5000;
     const RECONNECT_MAX_DELAY_MS = 60000;
     const JOB_POLL_INTERVAL_MS = 1000;
+    const DOCS_PAGE_SIZE = 10;
+    const JOBS_PAGE_SIZE = 10;
+    const BATCHES_PAGE_SIZE = 10;
 
     const state = {
         ws: null,
         connection: 'disconnected',
         status: null,
         stats: null,
+        plan: null,               // in-memory only; cleared on use/stale
+        confirmationValid: false,
         activeJob: null,
         reconnectDelay: RECONNECT_BASE_DELAY_MS,
         reconnectTimer: null,
         jobPollTimer: null,
         requestCounter: 0,
+        docsPage: 1,
+        docsTotal: null,
+        batchesArchiveId: '',
     };
 
     function _readStorage(key, fallback) {
@@ -74,6 +87,12 @@
         );
         state.ws.send(JSON.stringify(request));
         return request.requestId;
+    }
+
+    function _escapeHtml(value) {
+        return String(value === null || value === undefined ? '' : value)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
     // ------------------------------------------------------------------
@@ -125,19 +144,33 @@
         _renderButtons();
     }
 
-    function _renderButtons() {
-        const availability = core.buttonAvailability({
+    function _availability() {
+        return core.buttonAvailability({
             connection: state.connection,
             storeAvailable: !!(state.status && state.status.available),
+            capability: state.status ? state.status.capability : {},
             jobRunning: !!(state.activeJob && !state.activeJob.isTerminal),
+            jobStage: core.jobStage(state.activeJob),
+            planReady: !!state.plan,
+            confirmationValid: state.confirmationValid,
         });
-        const refresh = _element('btn-refresh-stats');
-        if (refresh) {
-            refresh.disabled = !availability.refreshStats;
-        }
-        const exact = _element('btn-exact-stats');
-        if (exact) {
-            exact.disabled = !availability.exactStats;
+    }
+
+    function _renderButtons() {
+        const availability = _availability();
+        const buttons = {
+            'btn-refresh-stats': availability.refreshStats,
+            'btn-exact-stats': availability.exactStats,
+            'btn-preview-archive': availability.previewArchive,
+            'btn-execute-archive': availability.executeArchive,
+            'btn-cancel-job': availability.cancelJob,
+            'btn-reclaim': availability.reclaim,
+        };
+        for (const id of Object.keys(buttons)) {
+            const element = _element(id);
+            if (element) {
+                element.disabled = !buttons[id];
+            }
         }
     }
 
@@ -188,6 +221,53 @@
         _renderBytes('candidate-deleted-bytes', s.candidates.expiredDeletedDocuments.payloadBytes);
         _setText('stats-generated-at', stats && stats.generatedAtUtc
             ? stats.generatedAtUtc : 'unavailable');
+        _renderArchiveSelect();
+    }
+
+    function _renderArchiveSelect() {
+        const select = _element('batch-archive-select');
+        if (!select) {
+            return;
+        }
+        const ids = (state.stats && state.stats.archive
+            && Array.isArray(state.stats.archive.archiveIds))
+            ? state.stats.archive.archiveIds : [];
+        select.innerHTML = ['<option value="">— select shard —</option>']
+            .concat(ids.map((id) =>
+                `<option value="${_escapeHtml(id)}"${id === state.batchesArchiveId ? ' selected' : ''}>${_escapeHtml(id)}</option>`))
+            .join('');
+        select.disabled = ids.length === 0;
+    }
+
+    function _renderPlan() {
+        const panel = _element('preview-summary');
+        const hint = _element('confirm-hint');
+        if (!state.plan) {
+            if (panel) panel.textContent = 'No preview yet.';
+            if (hint) hint.textContent = '';
+            _renderButtons();
+            return;
+        }
+        const totals = state.plan.totals;
+        const bytes = core.formatBytes(totals.payloadBytes);
+        if (panel) {
+            panel.textContent =
+                `Server plan: ${core.formatCount(totals.revisionCount).human} `
+                + `revisions (${core.formatCount(totals.oldRevisionCount).human} old, `
+                + `${core.formatCount(totals.deletedDocumentCount).human} deleted `
+                + `documents) — ${bytes.human} would leave the active database `
+                + `after a verified archive copy. Manifest ${state.plan.manifestHashPrefix}…, `
+                + `expires in ${state.plan.expiresInSeconds}s.`;
+        }
+        if (hint) {
+            hint.textContent =
+                `Type exactly: ${core.confirmationTemplate(totals)}`;
+        }
+        _renderButtons();
+    }
+
+    function _renderGuidance(text) {
+        _setText('guidance-line', text || '');
     }
 
     function _renderJob() {
@@ -197,16 +277,131 @@
         } else if (job.isTerminal) {
             const suffix = job.errorCode ? ` (${job.errorCode})` : '';
             let line = `${job.jobType || 'job'} ${job.status}${suffix}`;
-            if (job.status === 'completed' && job.summary
-                && job.summary.payloadBytesMismatches !== undefined) {
-                line += ` — ${job.summary.payloadBytesMismatches} byte mismatches, `
-                    + `${job.summary.revisionsMissingReceipts} missing receipts`;
+            const summary = job.summary || {};
+            if (job.status === 'completed' && summary.commit) {
+                const space = summary.space || {};
+                line += ` — removed ${summary.commit.removedRevisions} revisions`
+                    + ` (${core.formatBytes(space.logicalRemovedBytes).human} logical)`
+                    + `; freelist ${space.freelistPagesBefore}→${space.freelistPagesAfter} pages`
+                    + `; file ${core.formatBytes(space.dbFileBytesAfter).human}`;
+            } else if (job.status === 'completed'
+                       && summary.payloadBytesMismatches !== undefined) {
+                line += ` — ${summary.payloadBytesMismatches} byte mismatches, `
+                    + `${summary.revisionsMissingReceipts} missing receipts`;
+            } else if (job.status === 'completed'
+                       && summary.freelistPagesBefore !== undefined) {
+                line += ` — freelist ${summary.freelistPagesBefore}`
+                    + `→${summary.freelistPagesAfter} pages`;
             }
             _setText('job-status', line);
+            if (job.status === 'failed' && job.errorCode) {
+                _renderGuidance(core.errorGuidance(job.errorCode));
+            }
         } else {
-            _setText('job-status', `${job.jobType || 'job'} ${job.status}…`);
+            const stage = core.jobStage(job);
+            const stageNote = stage === 'committing'
+                ? ' — committing to the active database (cannot cancel)'
+                : (stage ? ` — ${stage}` : '');
+            _setText('job-status', `${job.jobType || 'job'} ${job.status}${stageNote}…`);
         }
         _renderButtons();
+    }
+
+    function _renderJobsTable(listing) {
+        const body = _element('jobs-table-body');
+        if (!body) {
+            return;
+        }
+        if (!listing || listing.items.length === 0) {
+            body.innerHTML =
+                '<tr><td colspan="5" class="empty">No tasks yet</td></tr>';
+            return;
+        }
+        body.innerHTML = listing.items.map((job) => {
+            const error = job.errorCode ? ` (${_escapeHtml(job.errorCode)})` : '';
+            return '<tr>'
+                + `<td>${_escapeHtml(job.jobType)}</td>`
+                + `<td data-status="${_escapeHtml(job.status)}">${_escapeHtml(job.status)}${error}</td>`
+                + `<td>${_escapeHtml(job.createdAtUtc)}</td>`
+                + `<td>${_escapeHtml(job.finishedAtUtc || '—')}</td>`
+                + `<td>${_escapeHtml(job.jobId)}</td>`
+                + '</tr>';
+        }).join('');
+    }
+
+    function _renderDocsTable(listing) {
+        const body = _element('archived-docs-body');
+        if (!body) {
+            return;
+        }
+        if (!listing || listing.items.length === 0) {
+            body.innerHTML =
+                '<tr><td colspan="6" class="empty">No archived workspaces</td></tr>';
+            _setText('docs-page-label', '');
+            return;
+        }
+        state.docsTotal = listing.total;
+        body.innerHTML = listing.items.map((doc) => {
+            const kind = doc.kind === 'deleted_document'
+                ? 'whole document' : 'old revisions';
+            const count = doc.revisionCount !== null
+                && doc.revisionCount !== undefined
+                ? String(doc.revisionCount) : '—';
+            return '<tr>'
+                + `<td>${_escapeHtml(doc.title)}</td>`
+                + `<td>${_escapeHtml(doc.symbol)}</td>`
+                + `<td>${_escapeHtml(kind)}</td>`
+                + `<td>${_escapeHtml(count)}</td>`
+                + `<td>${_escapeHtml(doc.archiveId)}</td>`
+                + `<td>${_escapeHtml(doc.archivedAtUtc)}</td>`
+                + '</tr>';
+        }).join('');
+        const pages = Math.max(1, Math.ceil(listing.total / listing.pageSize));
+        _setText('docs-page-label', `page ${listing.page} / ${pages}`);
+    }
+
+    function _renderBatchesTable(listing) {
+        const body = _element('batches-table-body');
+        if (!body) {
+            return;
+        }
+        if (!listing || listing.items.length === 0) {
+            body.innerHTML =
+                '<tr><td colspan="6" class="empty">No batches</td></tr>';
+            return;
+        }
+        body.innerHTML = listing.items.map((batch) =>
+            '<tr>'
+            + `<td>${_escapeHtml(batch.batchId)}</td>`
+            + `<td data-status="${_escapeHtml(batch.status)}">${_escapeHtml(batch.status)}</td>`
+            + `<td>${_escapeHtml(batch.revisionCount)}</td>`
+            + `<td>${core.formatBytes(batch.payloadBytes).human}</td>`
+            + `<td>${_escapeHtml(batch.manifestShaPrefix)}…</td>`
+            + `<td>${_escapeHtml(batch.createdAtUtc)}</td>`
+            + '</tr>').join('');
+    }
+
+    // ------------------------------------------------------------------
+    // Data refresh
+    // ------------------------------------------------------------------
+
+    function _refreshLists() {
+        _send('list_workspace_maintenance_jobs',
+            { page: 1, pageSize: JOBS_PAGE_SIZE });
+        _send('list_archived_workspaces',
+            { page: state.docsPage, pageSize: DOCS_PAGE_SIZE });
+        if (state.batchesArchiveId) {
+            _send('list_workspace_archive_batches', {
+                archiveId: state.batchesArchiveId,
+                page: 1, pageSize: BATCHES_PAGE_SIZE,
+            });
+        }
+    }
+
+    function _refreshAll() {
+        _send('request_workspace_admin_status');
+        _send('request_workspace_storage_stats', { mode: 'fast' });
+        _refreshLists();
     }
 
     // ------------------------------------------------------------------
@@ -223,7 +418,8 @@
         if (!data || typeof data !== 'object') {
             return;
         }
-        if (data.action === 'workspace_admin_status') {
+        const action = data.action;
+        if (action === 'workspace_admin_status') {
             state.status = core.normalizeAdminStatus(data);
             state.connection = core.connectionReducer(
                 state.connection,
@@ -232,30 +428,86 @@
             _renderConnection();
             _renderStatus();
             if (state.status.currentJob && !state.status.currentJob.isTerminal) {
+                // Reconnect recovery: an active job discovered from status
+                // is re-polled by id; a lost execute ACK never creates a
+                // second batch because the plan token is single-use.
                 state.activeJob = state.status.currentJob;
                 _scheduleJobPoll();
                 _renderJob();
             }
-        } else if (data.action === 'workspace_storage_stats') {
+        } else if (action === 'workspace_storage_stats') {
             if (data.success === true && data.mode === 'exact') {
                 state.activeJob = core.normalizeJob(data.job);
                 _scheduleJobPoll();
                 _renderJob();
-            } else {
+            } else if (data.success === true) {
                 state.stats = core.normalizeStorageStats(data);
                 _renderStats();
+            } else {
+                _renderGuidance(core.errorGuidance(data.code));
             }
-        } else if (data.action === 'workspace_maintenance_job') {
+        } else if (action === 'workspace_archive_previewed') {
+            if (data.success === true) {
+                state.plan = core.normalizeArchivePreview(data);
+                state.confirmationValid = false;
+                const input = _element('confirm-input');
+                if (input) {
+                    input.value = '';
+                }
+                _renderGuidance('');
+            } else {
+                state.plan = null;
+                _renderGuidance(core.errorGuidance(data.code));
+            }
+            _renderPlan();
+        } else if (action === 'workspace_archive_started') {
+            if (data.success === true) {
+                state.plan = null;  // token consumed; require a new preview
+                state.confirmationValid = false;
+                state.activeJob = core.normalizeJob(data.job);
+                _scheduleJobPoll();
+                _renderPlan();
+                _renderJob();
+            } else {
+                if (data.code === 'archive_plan_stale'
+                    || data.code === 'archive_plan_expired') {
+                    state.plan = null;
+                    _renderPlan();
+                }
+                _renderGuidance(core.errorGuidance(data.code));
+            }
+        } else if (action === 'workspace_maintenance_job') {
             if (data.success === true) {
                 state.activeJob = core.normalizeJob(data.job);
             }
             if (state.activeJob && !state.activeJob.isTerminal) {
                 _scheduleJobPoll();
             } else if (state.activeJob && state.activeJob.isTerminal) {
-                // A finished exact-stats job refreshes the fast overview.
-                _send('request_workspace_storage_stats', { mode: 'fast' });
+                _refreshAll();
             }
             _renderJob();
+        } else if (action === 'workspace_maintenance_cancel_requested') {
+            if (data.success !== true) {
+                _renderGuidance(core.errorGuidance(data.code));
+            }
+        } else if (action === 'workspace_space_reclaim_started') {
+            if (data.success === true) {
+                state.activeJob = core.normalizeJob(data.job);
+                _scheduleJobPoll();
+                _renderJob();
+            } else {
+                _renderGuidance(core.errorGuidance(data.code));
+            }
+        } else if (action === 'workspace_maintenance_jobs_list') {
+            _renderJobsTable(core.normalizePagedList(data, 'jobs'));
+        } else if (action === 'archived_workspaces_list') {
+            _renderDocsTable(core.normalizePagedList(data, 'documents'));
+        } else if (action === 'workspace_archive_batches_list') {
+            if (data.success === true) {
+                _renderBatchesTable(core.normalizePagedList(data, 'batches'));
+            } else {
+                _renderGuidance(core.errorGuidance(data.code));
+            }
         }
     }
 
@@ -297,16 +549,20 @@
             state.reconnectDelay = RECONNECT_BASE_DELAY_MS;
             state.connection = core.connectionReducer(state.connection, 'socket-open');
             _renderConnection();
-            _send('request_workspace_admin_status');
-            _send('request_workspace_storage_stats', { mode: 'fast' });
+            _refreshAll();
         });
         ws.addEventListener('message', (event) => {
             _handleMessage(event.data);
         });
         ws.addEventListener('close', () => {
             state.ws = null;
+            // A dropped socket voids the preview (the server may have moved
+            // on); the job, if any, is re-discovered after reconnecting.
+            state.plan = null;
+            state.confirmationValid = false;
             state.connection = core.connectionReducer(state.connection, 'socket-closed');
             _renderConnection();
+            _renderPlan();
             _scheduleReconnect();
         });
         ws.addEventListener('error', () => {
@@ -327,20 +583,77 @@
         );
     }
 
+    function _on(id, event, handler) {
+        const element = _element(id);
+        if (element && typeof element.addEventListener === 'function') {
+            element.addEventListener(event, handler);
+        }
+    }
+
     function _bindControls() {
-        const refresh = _element('btn-refresh-stats');
-        if (refresh && typeof refresh.addEventListener === 'function') {
-            refresh.addEventListener('click', () => {
-                _send('request_workspace_admin_status');
-                _send('request_workspace_storage_stats', { mode: 'fast' });
+        _on('btn-refresh-stats', 'click', () => {
+            _refreshAll();
+        });
+        _on('btn-exact-stats', 'click', () => {
+            _send('request_workspace_storage_stats', { mode: 'exact' });
+        });
+        _on('btn-preview-archive', 'click', () => {
+            _send('preview_workspace_archive');
+        });
+        _on('confirm-input', 'input', (event) => {
+            const value = event && event.target ? event.target.value : '';
+            state.confirmationValid = !!(state.plan
+                && core.validateConfirmation(value, state.plan.totals));
+            _renderButtons();
+        });
+        _on('btn-execute-archive', 'click', () => {
+            // The availability rule already required plan + confirmation;
+            // re-check here so a stale DOM state can never execute.
+            if (!state.plan || !_availability().executeArchive) {
+                return;
+            }
+            _send('execute_workspace_archive', {
+                planToken: state.plan.planToken,
             });
-        }
-        const exact = _element('btn-exact-stats');
-        if (exact && typeof exact.addEventListener === 'function') {
-            exact.addEventListener('click', () => {
-                _send('request_workspace_storage_stats', { mode: 'exact' });
-            });
-        }
+        });
+        _on('btn-cancel-job', 'click', () => {
+            if (state.activeJob && !state.activeJob.isTerminal) {
+                _send('cancel_workspace_maintenance_job', {
+                    jobId: state.activeJob.jobId,
+                });
+            }
+        });
+        _on('btn-reclaim', 'click', () => {
+            _send('request_workspace_space_reclaim');
+        });
+        _on('batch-archive-select', 'change', (event) => {
+            state.batchesArchiveId = event && event.target
+                ? String(event.target.value || '') : '';
+            if (state.batchesArchiveId) {
+                _send('list_workspace_archive_batches', {
+                    archiveId: state.batchesArchiveId,
+                    page: 1, pageSize: BATCHES_PAGE_SIZE,
+                });
+            } else {
+                _renderBatchesTable(null);
+            }
+        });
+        _on('docs-prev', 'click', () => {
+            if (state.docsPage > 1) {
+                state.docsPage -= 1;
+                _send('list_archived_workspaces',
+                    { page: state.docsPage, pageSize: DOCS_PAGE_SIZE });
+            }
+        });
+        _on('docs-next', 'click', () => {
+            const pages = state.docsTotal === null ? 1
+                : Math.max(1, Math.ceil(state.docsTotal / DOCS_PAGE_SIZE));
+            if (state.docsPage < pages) {
+                state.docsPage += 1;
+                _send('list_archived_workspaces',
+                    { page: state.docsPage, pageSize: DOCS_PAGE_SIZE });
+            }
+        });
     }
 
     function _boot() {
@@ -348,6 +661,7 @@
         _renderConnection();
         _renderStatus();
         _renderStats();
+        _renderPlan();
         _renderJob();
         _connect();
     }

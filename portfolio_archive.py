@@ -1546,6 +1546,9 @@ def run_archive_job(store_env, guard, job_id, plan):
     store = store_env['store']
     stats_before = store.storage_stats()
 
+    # Stage markers let the page disable Cancel once the un-cancelable
+    # main-DB commit begins (plan section 11).
+    store.update_maintenance_job_progress(job_id, {'stage': 'copying'})
     copy_summary = run_copy_job(store_env, guard, job_id, plan)
     if copy_summary['canceled']:
         return {**copy_summary, 'copyOnly': True, 'commit': None,
@@ -1558,6 +1561,10 @@ def run_archive_job(store_env, guard, job_id, plan):
         archive_path_for_id(archive_dir, copy_summary['archiveId']),
         now=store.now_utc,
     )
+    store.update_maintenance_job_progress(job_id, {
+        'stage': 'committing',
+        'copiedRevisions': copy_summary['copiedRevisions'],
+    })
     commit_summary = commit_verified_batches(
         store_env, guard, job_id, shard, copy_summary['archiveId']
     )
@@ -1574,6 +1581,7 @@ def run_archive_job(store_env, guard, job_id, plan):
 
     return {
         **copy_summary,
+        'stage': 'done',
         'copyOnly': False,
         'commit': commit_summary,
         'space': {

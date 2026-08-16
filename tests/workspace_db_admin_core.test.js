@@ -110,42 +110,122 @@ module.exports = {
             },
         },
         {
-            name: 'write actions stay disabled no matter what the context claims',
+            name: 'archive buttons need capability, preview, and confirmation',
             run() {
                 const core = loadCore();
-                const availability = core.buttonAvailability({
+                const base = {
                     connection: 'connected',
                     storeAvailable: true,
                     jobRunning: false,
-                    archiveExecute: true, // hostile caller
-                });
-                assert.equal(availability.refreshStats, true);
-                assert.equal(availability.exactStats, true);
-                assert.equal(availability.previewArchive, false);
-                assert.equal(availability.executeArchive, false);
-                assert.equal(availability.restore, false);
-                assert.equal(availability.cancelJob, false);
+                    capability: { archivePreview: true, archiveExecute: true },
+                };
+                // Preview is enough for previewArchive…
+                assert.equal(core.buttonAvailability(base).previewArchive, true);
+                // …but execute additionally needs plan + typed confirmation.
+                assert.equal(core.buttonAvailability(base).executeArchive, false);
+                assert.equal(core.buttonAvailability({
+                    ...base, planReady: true,
+                }).executeArchive, false);
+                assert.equal(core.buttonAvailability({
+                    ...base, planReady: true, confirmationValid: true,
+                }).executeArchive, true);
+                // No capability, no buttons, whatever the page claims.
+                assert.equal(core.buttonAvailability({
+                    ...base, capability: {}, planReady: true,
+                    confirmationValid: true,
+                }).executeArchive, false);
+                // Restore stays off until plan phase 6.
+                assert.equal(core.buttonAvailability({
+                    ...base, planReady: true, confirmationValid: true,
+                }).restore, false);
 
                 const offline = core.buttonAvailability({
                     connection: 'disconnected', storeAvailable: true,
                 });
                 assert.equal(offline.refreshStats, false);
-                assert.equal(offline.exactStats, false);
+                assert.equal(offline.previewArchive, false);
 
                 const busy = core.buttonAvailability({
                     connection: 'connected', storeAvailable: true, jobRunning: true,
+                    capability: { archivePreview: true, archiveExecute: true },
+                    planReady: true, confirmationValid: true,
                 });
                 assert.equal(busy.refreshStats, true);
                 assert.equal(busy.exactStats, false);
+                assert.equal(busy.executeArchive, false);
             },
         },
         {
-            name: 'the page protocol surface is frozen to three read actions',
+            name: 'cancel is withdrawn once the commit stage begins',
+            run() {
+                const core = loadCore();
+                const running = {
+                    connection: 'connected', storeAvailable: true,
+                    jobRunning: true,
+                };
+                assert.equal(core.buttonAvailability({
+                    ...running, jobStage: 'copying',
+                }).cancelJob, true);
+                assert.equal(core.buttonAvailability({
+                    ...running, jobStage: null,
+                }).cancelJob, true);
+                assert.equal(core.buttonAvailability({
+                    ...running, jobStage: 'committing',
+                }).cancelJob, false);
+                assert.equal(core.buttonAvailability({
+                    ...running, jobRunning: false,
+                }).cancelJob, false);
+            },
+        },
+        {
+            name: 'confirmation phrase must match the server totals exactly',
+            run() {
+                const core = loadCore();
+                const totals = { revisionCount: 128 };
+                assert.equal(core.confirmationTemplate(totals),
+                    'ARCHIVE 128 REVISIONS');
+                assert.equal(core.validateConfirmation(
+                    'ARCHIVE 128 REVISIONS', totals), true);
+                assert.equal(core.validateConfirmation(
+                    '  ARCHIVE 128 REVISIONS  ', totals), true);
+                assert.equal(core.validateConfirmation(
+                    'archive 128 revisions', totals), false);
+                assert.equal(core.validateConfirmation(
+                    'ARCHIVE 127 REVISIONS', totals), false);
+                assert.equal(core.validateConfirmation(
+                    'ARCHIVE 128 REVISIONS', { revisionCount: null }), false);
+            },
+        },
+        {
+            name: 'every stable error code maps to actionable guidance',
+            run() {
+                const core = loadCore();
+                for (const code of ['archive_plan_stale', 'maintenance_busy',
+                                    'insufficient_disk_space',
+                                    'archive_verification_failed',
+                                    'unsafe_reclaim_refused']) {
+                    const text = core.errorGuidance(code);
+                    assert.equal(typeof text, 'string');
+                    assert.ok(text.length > 10, `${code} guidance too short`);
+                }
+                assert.match(core.errorGuidance('archive_plan_stale'), /[Pp]review/);
+                assert.match(core.errorGuidance('something_unknown'), /server log/);
+            },
+        },
+        {
+            name: 'the page protocol surface is frozen to the admin actions',
             run() {
                 const core = loadCore();
                 assert.deepEqual([...core.ALLOWED_CLIENT_ACTIONS].sort(), [
+                    'cancel_workspace_maintenance_job',
+                    'execute_workspace_archive',
                     'get_workspace_maintenance_job',
+                    'list_archived_workspaces',
+                    'list_workspace_archive_batches',
+                    'list_workspace_maintenance_jobs',
+                    'preview_workspace_archive',
                     'request_workspace_admin_status',
+                    'request_workspace_space_reclaim',
                     'request_workspace_storage_stats',
                 ]);
             },

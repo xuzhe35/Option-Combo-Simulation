@@ -1820,6 +1820,106 @@ class PortfolioStore:
             return None
         return self._job_row_to_meta(row)
 
+    def list_maintenance_jobs(self, *, limit=25, offset=0):
+        """Task history, newest first, with the total for pagination."""
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+        conn = self._connect()
+        try:
+            total = conn.execute(
+                'SELECT count(*) FROM workspace_maintenance_jobs'
+            ).fetchone()[0]
+            rows = conn.execute(
+                'SELECT * FROM workspace_maintenance_jobs '
+                'ORDER BY created_at_utc DESC, job_id LIMIT ? OFFSET ?',
+                (limit, offset),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+        return {'total': total,
+                'jobs': [self._job_row_to_meta(row) for row in rows]}
+
+    def update_maintenance_job_progress(self, job_id, progress):
+        """Live progress for a RUNNING job (stage, counts). Stored in
+        summary_json; the terminal summary overwrites it on finish."""
+        _validate_token('jobId', job_id)
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                'UPDATE workspace_maintenance_jobs SET summary_json = ? '
+                "WHERE job_id = ? AND status = 'running'",
+                (json.dumps(progress), job_id),
+            )
+            return cursor.rowcount == 1
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def list_archived_documents_summary(self, *, limit=25, offset=0):
+        """Paginated archived-document summaries from MAIN-DB index tables
+        only (tombstones + entries) — no shard files are opened and no
+        payloads are read."""
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+        conn = self._connect()
+        try:
+            whole = [
+                {
+                    'documentId': row['document_id'],
+                    'kind': 'deleted_document',
+                    'title': row['title'],
+                    'symbol': row['symbol'],
+                    'lastRevision': row['last_revision'],
+                    'revisionCount': None,
+                    'payloadBytes': None,
+                    'archiveId': row['archive_id'],
+                    'archivedAtUtc': row['archived_at_utc'],
+                    'deletedAtUtc': row['deleted_at_utc'],
+                }
+                for row in conn.execute(
+                    'SELECT * FROM workspace_archive_tombstones'
+                )
+            ]
+            partial = [
+                {
+                    'documentId': row['document_id'],
+                    'kind': 'partial_history',
+                    'title': row['title'] or '',
+                    'symbol': row['symbol'] or '',
+                    'lastRevision': None,
+                    'revisionCount': row['revision_count'],
+                    'payloadBytes': row['payload_bytes'],
+                    'archiveId': row['archive_id'],
+                    'archivedAtUtc': row['archived_at_utc'],
+                    'deletedAtUtc': None,
+                }
+                for row in conn.execute(
+                    'SELECT e.document_id, count(*) AS revision_count, '
+                    'SUM(e.payload_bytes) AS payload_bytes, '
+                    'MAX(e.archive_id) AS archive_id, '
+                    'MAX(e.archived_at_utc) AS archived_at_utc, '
+                    'd.title AS title, d.symbol AS symbol '
+                    'FROM workspace_archive_entries e '
+                    'LEFT JOIN workspace_documents d '
+                    'ON d.document_id = e.document_id '
+                    'GROUP BY e.document_id'
+                )
+            ]
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+        merged = sorted(
+            whole + partial,
+            key=lambda item: (item['archivedAtUtc'] or '', item['documentId']),
+            reverse=True,
+        )
+        return {'total': len(merged),
+                'documents': merged[offset:offset + limit]}
+
     def latest_active_maintenance_job(self):
         conn = self._connect()
         try:

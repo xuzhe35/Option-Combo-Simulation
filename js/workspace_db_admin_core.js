@@ -26,6 +26,13 @@
         'request_workspace_admin_status',
         'request_workspace_storage_stats',
         'get_workspace_maintenance_job',
+        'preview_workspace_archive',
+        'execute_workspace_archive',
+        'cancel_workspace_maintenance_job',
+        'list_workspace_maintenance_jobs',
+        'list_workspace_archive_batches',
+        'list_archived_workspaces',
+        'request_workspace_space_reclaim',
     ]);
 
     function _isCount(value) {
@@ -164,6 +171,10 @@
                 revisionCount: _intOrNull(archive.revisionCount),
                 lastVerifiedAtUtc: typeof archive.lastVerifiedAtUtc === 'string'
                     ? archive.lastVerifiedAtUtc : null,
+                archiveIds: Array.isArray(archive.archiveIds)
+                    ? archive.archiveIds.filter(
+                        (id) => typeof id === 'string')
+                    : [],
             },
             candidates: {
                 oldRevisions: {
@@ -222,16 +233,118 @@
 
     function buttonAvailability(context) {
         const ctx = context || {};
+        const capability = ctx.capability || {};
         const online = ctx.connection === 'connected'
             && ctx.storeAvailable === true;
+        const idle = online && ctx.jobRunning !== true;
         return {
             refreshStats: online,
-            exactStats: online && ctx.jobRunning !== true,
-            // Read-only phase: never enabled, whatever the caller claims.
-            previewArchive: false,
-            executeArchive: false,
-            restore: false,
-            cancelJob: false,
+            exactStats: idle,
+            previewArchive: idle && capability.archivePreview === true,
+            // Execute needs the full chain: server capability, a live
+            // preview, AND the exact confirmation phrase typed.
+            executeArchive: idle
+                && capability.archiveExecute === true
+                && ctx.planReady === true
+                && ctx.confirmationValid === true,
+            // Cancel exists only in the safe copy/verify stage; once the
+            // main-DB commit begins it is withdrawn (plan section 11).
+            cancelJob: ctx.jobRunning === true
+                && ctx.jobStage !== 'committing',
+            reclaim: idle,
+            restore: false,  // plan phase 6
+        };
+    }
+
+    function confirmationTemplate(totals) {
+        const count = totals && _isCount(totals.revisionCount)
+            ? totals.revisionCount : null;
+        return count === null ? null : `ARCHIVE ${count} REVISIONS`;
+    }
+
+    function validateConfirmation(input, totals) {
+        const expected = confirmationTemplate(totals);
+        return expected !== null && typeof input === 'string'
+            && input.trim() === expected;
+    }
+
+    function jobStage(job) {
+        if (!job || job.isTerminal) {
+            return null;
+        }
+        const summary = job.summary;
+        return summary && typeof summary.stage === 'string'
+            ? summary.stage : null;
+    }
+
+    const ERROR_GUIDANCE = Object.freeze({
+        archive_plan_stale:
+            'The workspace changed since the preview. Run Preview again.',
+        archive_plan_expired:
+            'The preview expired. Run Preview again.',
+        archive_plan_already_consumed:
+            'This preview was already executed; check the task list.',
+        maintenance_busy:
+            'Another maintenance task is running. Wait for it, then retry.',
+        insufficient_disk_space:
+            'Not enough free disk space for the archive copy plus the '
+            + 'recovery snapshot. Free space, then retry.',
+        archive_verification_failed:
+            'The archive copy failed verification. Nothing was removed. '
+            + 'Do not retry until the server log has been checked.',
+        archive_conflict:
+            'An existing archived copy conflicts with the current data. '
+            + 'Nothing was removed; check the server log.',
+        archive_corrupt:
+            'An archive shard failed its integrity check. Nothing was '
+            + 'removed; restore the shard from its static backup.',
+        unsafe_reclaim_refused:
+            'The freelist is below the reclaim threshold; there is nothing '
+            + 'worth reclaiming yet.',
+        archive_disabled:
+            'Archiving is disabled in the configuration.',
+        job_not_found:
+            'That task is unknown to this backend; refresh the task list.',
+    });
+
+    function errorGuidance(code) {
+        return ERROR_GUIDANCE[code]
+            || 'The request failed; see the server log for details.';
+    }
+
+    function normalizeArchivePreview(response) {
+        if (!response || typeof response !== 'object'
+            || response.success !== true
+            || typeof response.planToken !== 'string') {
+            return null;
+        }
+        const totals = response.totals || {};
+        return {
+            planToken: response.planToken,
+            expiresInSeconds: _intOrNull(response.expiresInSeconds),
+            totals: {
+                revisionCount: _intOrNull(totals.revisionCount),
+                payloadBytes: _intOrNull(totals.payloadBytes),
+                oldRevisionCount: _intOrNull(totals.oldRevisionCount),
+                deletedDocumentCount: _intOrNull(totals.deletedDocumentCount),
+            },
+            manifestHashPrefix:
+                typeof response.manifestHashPrefix === 'string'
+                    ? response.manifestHashPrefix : '',
+        };
+    }
+
+    function normalizePagedList(response, itemsKey) {
+        if (!response || typeof response !== 'object'
+            || response.success !== true
+            || !Array.isArray(response[itemsKey])) {
+            return null;
+        }
+        return {
+            page: _intOrNull(response.page) || 1,
+            pageSize: _intOrNull(response.pageSize) || 25,
+            total: _intOrNull(response.total),
+            items: response[itemsKey],
         };
     }
 
@@ -243,7 +356,13 @@
         normalizeAdminStatus,
         normalizeStorageStats,
         normalizeJob,
+        normalizeArchivePreview,
+        normalizePagedList,
         connectionReducer,
         buttonAvailability,
+        confirmationTemplate,
+        validateConfirmation,
+        jobStage,
+        errorGuidance,
     };
 })(typeof window !== 'undefined' ? window : globalThis);

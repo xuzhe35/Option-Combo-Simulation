@@ -143,3 +143,97 @@ button:not(:disabled):hover {
     color: var(--muted);
     margin: 0.25rem 0;
 }
+
+.archive-flow {
+    margin-top: 0.9rem;
+    border-top: 1px dashed var(--border);
+    padding-top: 0.7rem;
+}
+
+#preview-summary {
+    color: var(--text);
+    margin: 0.5rem 0;
+}
+
+.confirm-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0.4rem 0;
+}
+
+#confirm-hint {
+    color: var(--warn);
+    font-variant-numeric: tabular-nums;
+}
+
+#confirm-input {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.35rem 0.6rem;
+    min-width: 16rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+#confirm-input:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.guidance {
+    color: var(--warn);
+    min-height: 1.2em;
+    margin: 0.4rem 0 0;
+}
+
+select {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.35rem 0.5rem;
+}
+
+.table-wrap {
+    overflow-x: auto;
+    margin-top: 0.4rem;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.85rem;
+}
+
+th, td {
+    text-align: left;
+    padding: 0.35rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+th {
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+}
+
+td.empty {
+    color: var(--muted);
+    font-style: italic;
+}
+
+td[data-status="failed"], td[data-status="interrupted"] { color: var(--bad); }
+td[data-status="completed"], td[data-status="main_committed"],
+td[data-status="verified"] { color: var(--ok); }
+td[data-status="running"], td[data-status="queued"] { color: var(--warn); }
+
+#docs-page-label {
+    color: var(--muted);
+    align-self: center;
+}

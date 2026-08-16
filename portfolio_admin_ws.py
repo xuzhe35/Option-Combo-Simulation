@@ -40,7 +40,13 @@ ADMIN_SERVER_ACTIONS = {
     'preview_workspace_archive': 'workspace_archive_previewed',
     'execute_workspace_archive': 'workspace_archive_started',
     'cancel_workspace_maintenance_job': 'workspace_maintenance_cancel_requested',
+    'list_workspace_maintenance_jobs': 'workspace_maintenance_jobs_list',
+    'list_workspace_archive_batches': 'workspace_archive_batches_list',
+    'list_archived_workspaces': 'archived_workspaces_list',
+    'request_workspace_space_reclaim': 'workspace_space_reclaim_started',
 }
+
+MAX_PAGE_SIZE = 100
 
 ADMIN_CLIENT_ACTIONS = frozenset(ADMIN_SERVER_ACTIONS)
 
@@ -239,6 +245,82 @@ async def _build_admin_response(store_env, websocket, data, *, client_ip):
                 'copyOnly': True,
             }
 
+        if action == 'list_workspace_maintenance_jobs':
+            page, page_size = _page_params(data)
+            if page is None:
+                return _error_response(
+                    server_action, request_id, 'invalid_request',
+                    f'page must be >= 1 and pageSize 1..{MAX_PAGE_SIZE}',
+                )
+            listing = await asyncio.to_thread(
+                lambda: store.list_maintenance_jobs(
+                    limit=page_size, offset=(page - 1) * page_size,
+                )
+            )
+            _log(action, request_id, started)
+            return {
+                'action': server_action, 'requestId': request_id,
+                'success': True, 'page': page, 'pageSize': page_size,
+                'total': listing['total'], 'jobs': listing['jobs'],
+            }
+
+        if action == 'list_archived_workspaces':
+            page, page_size = _page_params(data)
+            if page is None:
+                return _error_response(
+                    server_action, request_id, 'invalid_request',
+                    f'page must be >= 1 and pageSize 1..{MAX_PAGE_SIZE}',
+                )
+            listing = await asyncio.to_thread(
+                lambda: store.list_archived_documents_summary(
+                    limit=page_size, offset=(page - 1) * page_size,
+                )
+            )
+            _log(action, request_id, started)
+            return {
+                'action': server_action, 'requestId': request_id,
+                'success': True, 'page': page, 'pageSize': page_size,
+                'total': listing['total'],
+                'documents': listing['documents'],
+            }
+
+        if action == 'list_workspace_archive_batches':
+            page, page_size = _page_params(data)
+            if page is None:
+                return _error_response(
+                    server_action, request_id, 'invalid_request',
+                    f'page must be >= 1 and pageSize 1..{MAX_PAGE_SIZE}',
+                )
+            archive_id = data.get('archiveId')
+            result = await asyncio.to_thread(
+                _list_shard_batches, store_env, archive_id, page, page_size,
+            )
+            if 'errorCode' in result:
+                return _error_response(
+                    server_action, request_id, result['errorCode'],
+                    result['message'],
+                )
+            _log(action, request_id, started)
+            return {
+                'action': server_action, 'requestId': request_id,
+                'success': True, 'archiveId': archive_id,
+                'page': page, 'pageSize': page_size,
+                'total': result['total'], 'batches': result['batches'],
+            }
+
+        if action == 'request_workspace_space_reclaim':
+            result = await asyncio.to_thread(_start_reclaim_job, store_env)
+            if 'errorCode' in result:
+                return _error_response(
+                    server_action, request_id, result['errorCode'],
+                    result['message'],
+                )
+            _log(action, request_id, started)
+            return {
+                'action': server_action, 'requestId': request_id,
+                'success': True, 'job': result['job'],
+            }
+
         if action == 'cancel_workspace_maintenance_job':
             job_id = data.get('jobId')
             if not isinstance(job_id, str) or not _TOKEN_RE.match(job_id):
@@ -353,7 +435,12 @@ def _fast_stats(store, store_env):
         },
         'storage': metrics,
         'recent': raw['recent'],
-        'archive': raw['archive'],
+        'archive': {
+            **raw['archive'],
+            'archiveIds': [
+                row['archive_id'] for row in store.list_archive_registry()
+            ],
+        },
         'candidates': {
             'oldRevisions': {
                 'candidateCount': old_candidates,
@@ -556,6 +643,139 @@ def _run_exact_stats_job(store_env, job_id):
             )
         except Exception:
             logger.exception('failed to record exact-stats failure')
+    finally:
+        guard.release()
+
+
+def _page_params(data):
+    """Validated (page, pageSize) or (None, None) on any violation."""
+    page = data.get('page', 1)
+    page_size = data.get('pageSize', 25)
+    if (isinstance(page, bool) or not isinstance(page, int) or page < 1
+            or isinstance(page_size, bool) or not isinstance(page_size, int)
+            or not 1 <= page_size <= MAX_PAGE_SIZE):
+        return None, None
+    return page, page_size
+
+
+def _list_shard_batches(store_env, archive_id, page, page_size):
+    """Read one registered shard's batch list. The archive id must be
+    registered and its file present; ids never reach the filesystem
+    without the strict pattern + containment check."""
+    store = store_env['store']
+    registry = {
+        row['archive_id']: row for row in store.list_archive_registry()
+    }
+    row = registry.get(archive_id) if isinstance(archive_id, str) else None
+    if row is None:
+        return {'errorCode': 'archive_not_found',
+                'message': 'unknown archive id'}
+    archive_dir = portfolio_archive.resolve_archive_dir(
+        store.db_path, config=store_env.get('_config')
+    )
+    try:
+        path = portfolio_archive.archive_path_for_id(archive_dir, archive_id)
+    except PortfolioStoreError as exc:
+        return {'errorCode': exc.code, 'message': 'unknown archive id'}
+    if not path.exists():
+        return {'errorCode': 'archive_not_found',
+                'message': 'archive shard file is missing'}
+    shard = portfolio_archive.ArchiveShard(path, now=store.now_utc)
+    batches = shard.list_batches((
+        'copying', 'copied', 'verified', 'main_committed',
+        'cancel_requested', 'cleanup_pending', 'canceled', 'failed',
+    ))
+    batches.sort(key=lambda b: (b['created_at_utc'], b['batch_id']),
+                 reverse=True)
+    window = batches[(page - 1) * page_size:page * page_size]
+    return {
+        'total': len(batches),
+        'batches': [
+            {
+                'batchId': b['batch_id'],
+                'status': b['status'],
+                'documentCount': b['document_count'],
+                'revisionCount': b['revision_count'],
+                'payloadBytes': b['payload_bytes'],
+                'manifestShaPrefix': (b['manifest_sha256'] or '')[:16],
+                'createdAtUtc': b['created_at_utc'],
+                'verifiedAtUtc': b['verified_at_utc'],
+                'committedAtUtc': b['committed_at_utc'],
+            }
+            for b in window
+        ],
+    }
+
+
+def _start_reclaim_job(store_env):
+    """Bounded incremental vacuum as a background job. Refused when the
+    freelist is below the configured threshold — reclaiming then would be
+    churn with nothing to reclaim."""
+    store = store_env['store']
+    threshold = store_env.get('_vacuum_freelist_pages', 256)
+    freelist = store.freelist_count()
+    if threshold <= 0 or freelist < threshold:
+        return {'errorCode': 'unsafe_reclaim_refused',
+                'message': f'freelist has {freelist} pages; '
+                           f'threshold is {threshold}'}
+    import os as _os
+    job = store.create_maintenance_job(
+        job_type='space_reclaim',
+        owner_instance_id=store_env.get('_server_instance_id'),
+        owner_pid=_os.getpid(),
+    )
+    thread = threading.Thread(
+        target=_run_reclaim_job, args=(store_env, job['jobId']),
+        name=f'space-reclaim-{job["jobId"]}', daemon=True,
+    )
+    thread.start()
+    return {'job': job}
+
+
+def _run_reclaim_job(store_env, job_id):
+    store = store_env.get('store')
+    if store is None:
+        return
+    guard = portfolio_maintenance.acquire_maintenance(store_env)
+    if guard is None:
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code='maintenance_busy',
+                error_message='another maintenance task is running',
+            )
+        except Exception:
+            logger.exception('failed to mark reclaim job busy')
+        return
+    try:
+        store.start_maintenance_job(job_id, fencing_token=guard.fencing_token)
+        before = store.freelist_count()
+        store.incremental_vacuum(
+            max_pages=store_env.get('_vacuum_max_pages', 512)
+        )
+        store.quick_check()
+        store.finish_maintenance_job(job_id, status='completed', summary={
+            'freelistPagesBefore': before,
+            'freelistPagesAfter': store.freelist_count(),
+            'maxPages': store_env.get('_vacuum_max_pages', 512),
+        })
+    except PortfolioStoreError as exc:
+        logger.warning('space reclaim job %s failed: %s', job_id, exc)
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code=exc.code,
+                error_message='space reclaim failed; see server log',
+            )
+        except Exception:
+            logger.exception('failed to record reclaim failure')
+    except Exception:
+        logger.exception('space reclaim job %s crashed', job_id)
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code='internal_store_error',
+                error_message='space reclaim failed; see server log',
+            )
+        except Exception:
+            logger.exception('failed to record reclaim failure')
     finally:
         guard.release()
 
