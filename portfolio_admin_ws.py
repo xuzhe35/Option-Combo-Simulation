@@ -121,11 +121,10 @@ async def _build_admin_response(store_env, websocket, data, *, client_ip):
                 'statsFast': True,
                 'statsExact': True,
                 'archivePreview': archive_enabled,
-                # Copy-only shadow mode: batches copy and verify, the main
-                # database is never modified. Full archive (with removal)
-                # stays off until plan phase 4.
-                'archiveCopyShadow': archive_enabled,
-                'archiveExecute': False,
+                # Full archive: copy + verify, then verified removal from
+                # the active database in bounded chunk transactions. The
+                # page UI enables its write buttons in plan phase 5.
+                'archiveExecute': archive_enabled,
                 'restore': False,
             },
             'policy': _policy(store_env),
@@ -440,9 +439,12 @@ def _consume_plan_and_start_job(store_env, token):
         return {'errorCode': 'archive_plan_stale',
                 'message': 'plan token belongs to another backend instance'}
 
+    import os as _os
     job = store.create_maintenance_job(
         job_type='archive_copy',
         requested_policy=plan['policy'],
+        owner_instance_id=store_env.get('_server_instance_id'),
+        owner_pid=_os.getpid(),
     )
     plan['consumedByJobId'] = job['jobId']
     thread = threading.Thread(
@@ -470,8 +472,8 @@ def _run_archive_copy_job(store_env, job_id, plan):
             logger.exception('failed to mark archive job busy')
         return
     try:
-        store.start_maintenance_job(job_id)
-        summary = portfolio_archive.run_copy_job(store_env, guard, job_id, plan)
+        store.start_maintenance_job(job_id, fencing_token=guard.fencing_token)
+        summary = portfolio_archive.run_archive_job(store_env, guard, job_id, plan)
         status = 'canceled' if summary.get('canceled') else 'completed'
         store.finish_maintenance_job(job_id, status=status, summary=summary)
     except PortfolioStoreError as exc:
@@ -502,7 +504,12 @@ def _start_exact_stats_job(store_env):
     shared maintenance lock. The creation ACK and the job outcome are two
     distinct states; the page polls get_workspace_maintenance_job."""
     store = store_env['store']
-    job = store.create_maintenance_job(job_type='exact_stats')
+    import os as _os
+    job = store.create_maintenance_job(
+        job_type='exact_stats',
+        owner_instance_id=store_env.get('_server_instance_id'),
+        owner_pid=_os.getpid(),
+    )
     thread = threading.Thread(
         target=_run_exact_stats_job,
         args=(store_env, job['jobId']),
@@ -528,7 +535,7 @@ def _run_exact_stats_job(store_env, job_id):
             logger.exception('failed to mark exact-stats job busy')
         return
     try:
-        store.start_maintenance_job(job_id)
+        store.start_maintenance_job(job_id, fencing_token=guard.fencing_token)
         summary = store.exact_storage_scan()
         store.finish_maintenance_job(job_id, status='completed', summary=summary)
     except PortfolioStoreError as exc:

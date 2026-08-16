@@ -189,6 +189,11 @@ def create_store_env(config=None):
         '_archive_max_payload_bytes_per_batch': _read_int(
             config, 'archive_max_payload_bytes_per_batch', 64 * 1024 * 1024,
             minimum=1024),
+        '_archive_commit_max_rows': _read_int(
+            config, 'archive_commit_max_rows', 25, minimum=1),
+        '_archive_commit_max_payload_bytes': _read_int(
+            config, 'archive_commit_max_payload_bytes', 32 * 1024 * 1024,
+            minimum=1024),
         '_archive_rollover_bytes': _read_int(
             config, 'archive_rollover_bytes', 2 * 1024 * 1024 * 1024,
             minimum=1024 * 1024),
@@ -450,23 +455,11 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
             keep_weekly=store_env.get('_backup_keep_weekly', DEFAULT_BACKUP_KEEP_WEEKLY),
         )
         logger.info('published scheduled workspace backup: %s', published)
-        # A freshly verified backup is the precondition for destructive
-        # retention: prune revisions, then reclaim space in a bounded pass
-        # only when the freelist justifies it. Failures here never touch
-        # the just-published backup or affect saves.
+        # Scheduled maintenance NEVER deletes revisions any more: the only
+        # removal path is the admin page's archive flow (copy, verify, then
+        # commit — plan phase 4), which keeps a verified archive copy of
+        # every removed payload. Bounded space reclamation stays here.
         try:
-            deleted = store.prune_revisions(
-                keep_recent=store_env.get(
-                    '_revision_keep_recent', DEFAULT_REVISION_KEEP_RECENT
-                ),
-                keep_daily_days=store_env.get(
-                    '_revision_keep_daily_days', DEFAULT_REVISION_KEEP_DAILY_DAYS
-                ),
-            )
-            if deleted:
-                logger.info(
-                    'pruned %d workspace revisions after verified backup', deleted
-                )
             threshold = store_env.get(
                 '_vacuum_freelist_pages', DEFAULT_VACUUM_FREELIST_PAGES
             )
@@ -476,7 +469,7 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
                 )
                 logger.info('reclaimed freelist pages with bounded incremental vacuum')
         except Exception:
-            logger.exception('post-backup retention maintenance failed; data intact')
+            logger.exception('post-backup reclamation failed; data intact')
         return True
     except Exception:
         logger.exception('scheduled workspace backup failed; saves are unaffected')

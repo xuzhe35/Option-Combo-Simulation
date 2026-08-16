@@ -453,7 +453,12 @@ class UndeleteProtocolTest(unittest.TestCase):
 
 
 class RetentionMaintenanceTest(unittest.TestCase):
-    def test_verified_backup_gates_prune_and_vacuum(self):
+    def test_scheduled_maintenance_never_deletes_revisions(self):
+        """Since the archive flow landed (plan phase 4), the ONLY removal
+        path is archive-then-remove on the admin protocol. The scheduled
+        pass publishes backups and reclaims freelist pages — revisions
+        beyond the retention policy become archive candidates and survive
+        here untouched."""
         with tempfile.TemporaryDirectory() as tmp:
             backup_dir = pathlib.Path(tmp) / 'backups'
             config = _config(
@@ -479,49 +484,21 @@ class RetentionMaintenanceTest(unittest.TestCase):
                 )
             self.assertEqual(len(store.list_revisions(DOC, limit=50)), 7)
 
-            # The maintenance pass publishes a verified backup FIRST, then
-            # applies the configured retention.
             self.assertTrue(portfolio_store_ws.maybe_publish_scheduled_backup(env))
             self.assertEqual(len(list(backup_dir.iterdir())), 1)
+            # Retention policy says keep {7,6}+anchor — but the scheduled
+            # pass must NOT delete: all seven revisions survive.
             remaining = [r['revision'] for r in store.list_revisions(DOC, limit=50)]
-            # keep_recent=2 keeps {7,6}; the daily window (0 days = today)
-            # additionally anchors today's last older revision, 5.
-            self.assertEqual(remaining, [7, 6, 5])
-            self.assertEqual(store.load_workspace(DOC)['revision'], 7)
+            self.assertEqual(remaining, [7, 6, 5, 4, 3, 2, 1])
             self.assertEqual(store.quick_check(), 'ok')
 
-            # The backup snapshot was taken before pruning: a restore drill
-            # from it still holds the full pre-prune history.
-            from portfolio_store import PortfolioStore, restore_database
-            restored_db = pathlib.Path(tmp) / 'restored' / 'portfolio.db'
-            restore_database(next(backup_dir.iterdir()), restored_db)
-            restored = PortfolioStore(restored_db).initialize()
-            self.assertEqual(len(restored.list_revisions(DOC, limit=50)), 7)
-
-    def test_failed_backup_blocks_pruning(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            config = _config(tmp, backup_interval_hours='1',
-                             revision_keep_recent='1',
-                             revision_keep_daily_days='0')
-            env = create_store_env(config)
-            portfolio_store_ws.ensure_store_initialized(env)
-            store = env['store']
-            store.save_workspace(
-                document_id=DOC, title='SPY workspace', payload=_payload(),
-                save_token='save-0000001-4000-8000-000000000000',
-            )
-            store.save_workspace(
-                document_id=DOC, title='SPY workspace',
-                payload=_payload(baseDate='rev-2'),
-                save_token='save-0000002-4000-8000-000000000000',
-                expected_revision=1,
-            )
-            store.publish_backup = lambda *a, **k: (_ for _ in ()).throw(
-                RuntimeError('backup target offline')
-            )
-            self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(env))
-            # No verified backup, no pruning: both revisions survive.
-            self.assertEqual(len(store.list_revisions(DOC, limit=50)), 2)
+    def test_no_scheduled_call_site_bypasses_archival(self):
+        """Structural gate: prune_revisions must not be invoked from the
+        scheduled maintenance module at all."""
+        source = pathlib.Path(
+            portfolio_store_ws.__file__
+        ).read_text(encoding='utf-8')
+        self.assertNotIn('prune_revisions(', source)
 
 
 class ScheduledBackupTest(unittest.TestCase):

@@ -142,7 +142,8 @@ class AdminStatusTest(AdminWsTestBase):
         self.assertTrue(response['available'])
         self.assertEqual(response['schemaVersion'], 2)
         self.assertTrue(response['capability']['readOnly'])
-        self.assertFalse(response['capability']['archiveExecute'])
+        self.assertTrue(response['capability']['archiveExecute'])
+        self.assertFalse(response['capability']['restore'])
         self.assertEqual(response['policy']['revisionKeepRecent'], 50)
         self.assertEqual(response['policy']['archiveDeletedAfterDays'], 30)
         self.assertFalse(response['policy']['archiveAutoRun'])
@@ -477,7 +478,7 @@ class ArchivePlanProtocolTest(AdminWsTestBase):
         self.assertNotIn(self.tmpdir, text)
         self.assertNotIn('组合一', text)
 
-    def test_execute_copy_only_end_to_end_and_token_single_use(self):
+    def test_execute_full_archive_end_to_end_and_token_single_use(self):
         self._seed()
         revisions_before = self._revision_count()
         token = self._preview()['planToken']
@@ -486,10 +487,23 @@ class ArchivePlanProtocolTest(AdminWsTestBase):
         self.assertFalse(started['alreadyStarted'])
         job = _wait_for_job(self.env, self.ws, started['job']['jobId'])
         self.assertEqual(job['status'], 'completed')
-        self.assertTrue(job['summary']['copyOnly'])
-        self.assertGreater(job['summary']['copiedRevisions'], 0)
-        # Copy-only: the active database lost nothing.
-        self.assertEqual(self._revision_count(), revisions_before)
+        summary = job['summary']
+        self.assertFalse(summary['copyOnly'])
+        self.assertGreater(summary['copiedRevisions'], 0)
+        # Full archive: exactly the copied candidates left the active DB,
+        # and the removal is reported in all three space classes.
+        self.assertEqual(
+            summary['commit']['removedRevisions'], summary['copiedRevisions']
+        )
+        self.assertEqual(
+            self._revision_count(),
+            revisions_before - summary['commit']['removedRevisions'],
+        )
+        self.assertEqual(
+            summary['space']['logicalPayloadBytesBefore']
+            - summary['space']['logicalPayloadBytesAfter'],
+            summary['space']['logicalRemovedBytes'],
+        )
 
         # Same token again: the original job comes back, no second batch.
         replay = self._execute(token)

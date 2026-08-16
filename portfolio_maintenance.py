@@ -182,6 +182,17 @@ def acquire_maintenance(store_env):
             thread_lock.release()
             return None
 
+        # Owning the lease also means owning job stewardship: queued or
+        # running jobs whose server instance is gone have no executor —
+        # mark them interrupted so the page never stares at a ghost.
+        try:
+            orphaned = store.mark_orphan_maintenance_jobs(instance_id)
+            if orphaned:
+                logger.info('marked %d orphan maintenance jobs interrupted',
+                            orphaned)
+        except Exception:
+            logger.exception('orphan job sweep failed; guard still held')
+
         return MaintenanceGuard(
             store=store,
             thread_lock=thread_lock,

@@ -118,6 +118,13 @@ class DatabaseBusyError(PortfolioStoreError):
     code = 'database_busy'
 
 
+class LeaseLostError(PortfolioStoreError):
+    """The cross-process maintenance lease no longer belongs to the caller;
+    whatever maintenance work was underway must stop immediately."""
+
+    code = 'maintenance_busy'
+
+
 class DatabaseCorruptError(PortfolioStoreError):
     code = 'database_corrupt'
 
@@ -1589,6 +1596,33 @@ class PortfolioStore:
         finally:
             conn.close()
 
+    def has_archive_evidence(self, *, partial_keys=(), tombstone_doc_ids=()):
+        """True only when EVERY given partial (doc, revision) pair has an
+        archive entry and EVERY given document id has a tombstone. The
+        reconciler's proof that a verified batch was fully committed."""
+        conn = self._connect()
+        try:
+            for document_id, revision in partial_keys:
+                row = conn.execute(
+                    'SELECT 1 FROM workspace_archive_entries '
+                    'WHERE document_id = ? AND revision = ?',
+                    (document_id, int(revision)),
+                ).fetchone()
+                if row is None:
+                    return False
+            for document_id in tombstone_doc_ids:
+                row = conn.execute(
+                    'SELECT 1 FROM workspace_archive_tombstones '
+                    'WHERE document_id = ?', (document_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+            return True
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------------
     # Archive shard registry (main-DB index of shards; no payloads)
     # ------------------------------------------------------------------
@@ -1676,17 +1710,24 @@ class PortfolioStore:
     # Maintenance jobs (admin page; summaries only, never candidate lists)
     # ------------------------------------------------------------------
 
-    def create_maintenance_job(self, *, job_type, requested_policy=None):
+    def create_maintenance_job(self, *, job_type, requested_policy=None,
+                               owner_instance_id=None, owner_pid=None):
+        """Jobs record their owning server instance at creation so a later
+        orphan sweep (owner gone) can mark them interrupted instead of
+        leaving the page staring at a running job with no executor."""
         job_id = f'job-{uuid.uuid4().hex[:20]}'
         now_iso = self._utc_now_iso()
         conn = self._connect()
         try:
             conn.execute(
                 'INSERT INTO workspace_maintenance_jobs (job_id, job_type, '
-                'status, created_at_utc, requested_policy_json) '
-                'VALUES (?, ?, ?, ?, ?)',
+                'status, created_at_utc, requested_policy_json, '
+                'owner_server_instance_id, owner_pid) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)',
                 (job_id, job_type, 'queued', now_iso,
-                 json.dumps(requested_policy) if requested_policy else None),
+                 json.dumps(requested_policy) if requested_policy else None,
+                 owner_instance_id,
+                 int(owner_pid) if owner_pid is not None else None),
             )
         except sqlite3.Error as exc:
             raise self._map_sqlite_error(exc) from exc
@@ -1695,19 +1736,44 @@ class PortfolioStore:
         return {'jobId': job_id, 'jobType': job_type, 'status': 'queued',
                 'createdAtUtc': now_iso}
 
-    def start_maintenance_job(self, job_id):
+    def start_maintenance_job(self, job_id, *, fencing_token=None):
         _validate_token('jobId', job_id)
         conn = self._connect()
         try:
             cursor = conn.execute(
                 'UPDATE workspace_maintenance_jobs SET status = ?, '
-                "started_at_utc = ? WHERE job_id = ? AND status = 'queued'",
-                ('running', self._utc_now_iso(), job_id),
+                'started_at_utc = ?, lease_fencing_token = ? '
+                "WHERE job_id = ? AND status = 'queued'",
+                ('running', self._utc_now_iso(),
+                 int(fencing_token) if fencing_token is not None else None,
+                 job_id),
             )
             if cursor.rowcount != 1:
                 raise InvalidRequestError(
                     f'job {job_id} is not queued; cannot start'
                 )
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def mark_orphan_maintenance_jobs(self, current_instance_id):
+        """Mark queued/running jobs owned by OTHER server instances (or by
+        nobody) as interrupted. Called after each successful maintenance
+        lease acquisition; a job created by this process is untouched."""
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                'UPDATE workspace_maintenance_jobs SET status = ?, '
+                'finished_at_utc = ?, error_code = ?, error_message = ? '
+                "WHERE status IN ('queued', 'running') "
+                'AND (owner_server_instance_id IS NULL '
+                'OR owner_server_instance_id != ?)',
+                ('interrupted', self._utc_now_iso(), 'interrupted',
+                 'owning server instance is no longer running',
+                 current_instance_id),
+            )
+            return cursor.rowcount
         except sqlite3.Error as exc:
             raise self._map_sqlite_error(exc) from exc
         finally:
@@ -1784,6 +1850,214 @@ class PortfolioStore:
             raise self._map_sqlite_error(exc) from exc
         finally:
             conn.close()
+
+    def commit_archive_removal_chunk(self, *, partial_rows=(),
+                                     whole_document=None, archive_id,
+                                     archive_batch_id, lease_name,
+                                     holder_instance_id, fencing_token,
+                                     grace_days=30):
+        """One short BEGIN IMMEDIATE removal chunk (plan section 9.6).
+
+        INTERNAL to the archive commit stage: callers must have a VERIFIED
+        archive batch and a verified recovery snapshot before invoking this
+        — portfolio_archive.commit_verified_batches is the only sanctioned
+        caller. Every row is re-validated inside the write transaction; the
+        archive entry / tombstone insert and the delete share that
+        transaction; anything that changed since preview is skipped, never
+        force-deleted. The current revision of a live document is
+        structurally undeletable here."""
+        now = self.now_utc()
+        now_iso = self._utc_now_iso()
+        removed, already_removed, skipped = [], [], []
+        removed_bytes = 0
+        tombstone_written = False
+        conn = self._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                lease = conn.execute(
+                    'SELECT holder_instance_id, fencing_token, expires_at_utc '
+                    'FROM workspace_maintenance_lease WHERE lease_name = ?',
+                    (lease_name,),
+                ).fetchone()
+                if (lease is None
+                        or lease['holder_instance_id'] != holder_instance_id
+                        or lease['fencing_token'] != int(fencing_token)
+                        or lease['expires_at_utc'] <= now_iso):
+                    raise LeaseLostError(
+                        'maintenance lease lost inside removal transaction'
+                    )
+
+                if whole_document is not None:
+                    result = self._commit_whole_document(
+                        conn, whole_document, archive_id, archive_batch_id,
+                        now, now_iso, grace_days,
+                    )
+                    removed.extend(result['removed'])
+                    already_removed.extend(result['alreadyRemoved'])
+                    skipped.extend(result['skipped'])
+                    removed_bytes += result['removedBytes']
+                    tombstone_written = result['tombstoneWritten']
+
+                for row in partial_rows:
+                    outcome = self._commit_partial_row(
+                        conn, row, archive_id, archive_batch_id, now_iso,
+                    )
+                    if outcome == 'removed':
+                        removed.append({'documentId': row['documentId'],
+                                        'revision': row['revision']})
+                        removed_bytes += row['payloadBytes']
+                    elif outcome == 'already_removed':
+                        already_removed.append({
+                            'documentId': row['documentId'],
+                            'revision': row['revision'],
+                        })
+                    else:
+                        skipped.append({'documentId': row['documentId'],
+                                        'revision': row['revision'],
+                                        'reason': outcome})
+                conn.execute('COMMIT')
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute('ROLLBACK')
+                raise
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+        return {'removed': removed, 'alreadyRemoved': already_removed,
+                'skipped': skipped, 'removedBytes': removed_bytes,
+                'tombstoneWritten': tombstone_written}
+
+    @staticmethod
+    def _commit_partial_row(conn, row, archive_id, archive_batch_id, now_iso):
+        active = conn.execute(
+            'SELECT r.save_token, r.payload_sha256, r.payload_bytes, '
+            'r.saved_at_utc, d.current_revision '
+            'FROM workspace_revisions r '
+            'JOIN workspace_documents d ON d.document_id = r.document_id '
+            'WHERE r.document_id = ? AND r.revision = ?',
+            (row['documentId'], row['revision']),
+        ).fetchone()
+        if active is None:
+            entry = conn.execute(
+                'SELECT payload_sha256 FROM workspace_archive_entries '
+                'WHERE document_id = ? AND revision = ?',
+                (row['documentId'], row['revision']),
+            ).fetchone()
+            if entry is not None and entry['payload_sha256'] == row['payloadSha256']:
+                return 'already_removed'
+            return 'skipped_changed'
+        if active['current_revision'] == row['revision']:
+            return 'skipped_current'
+        if (active['payload_sha256'] != row['payloadSha256']
+                or active['payload_bytes'] != row['payloadBytes']
+                or active['saved_at_utc'] != row['savedAtUtc']):
+            return 'skipped_changed'
+        receipt = conn.execute(
+            'SELECT 1 FROM workspace_save_receipts WHERE save_token = ?',
+            (active['save_token'],),
+        ).fetchone()
+        if receipt is None:
+            return 'skipped_missing_receipt'
+        conn.execute(
+            'INSERT INTO workspace_archive_entries (document_id, revision, '
+            'archive_id, archive_batch_id, payload_sha256, payload_bytes, '
+            'saved_at_utc, archived_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (row['documentId'], row['revision'], archive_id,
+             archive_batch_id, row['payloadSha256'], row['payloadBytes'],
+             row['savedAtUtc'], now_iso),
+        )
+        conn.execute(
+            'DELETE FROM workspace_revisions '
+            'WHERE document_id = ? AND revision = ?',
+            (row['documentId'], row['revision']),
+        )
+        return 'removed'
+
+    @staticmethod
+    def _commit_whole_document(conn, doc, archive_id, archive_batch_id,
+                               now, now_iso, grace_days):
+        """Tombstone + delete of one soft-deleted document, atomic within
+        the caller's transaction. Any inconsistency skips the WHOLE
+        document — a document is never archived half-way."""
+        empty = {'removed': [], 'alreadyRemoved': [], 'skipped': [],
+                 'removedBytes': 0, 'tombstoneWritten': False}
+        document_id = doc['documentId']
+        active = conn.execute(
+            'SELECT * FROM workspace_documents WHERE document_id = ?',
+            (document_id,),
+        ).fetchone()
+        if active is None:
+            tombstone = conn.execute(
+                'SELECT 1 FROM workspace_archive_tombstones '
+                'WHERE document_id = ?', (document_id,),
+            ).fetchone()
+            if tombstone is not None:
+                return {**empty, 'alreadyRemoved': [{'documentId': document_id}]}
+            return {**empty, 'skipped': [{'documentId': document_id,
+                                          'reason': 'skipped_changed'}]}
+        if active['deleted_at_utc'] is None:
+            return {**empty, 'skipped': [{'documentId': document_id,
+                                          'reason': 'skipped_undeleted'}]}
+        deleted_at = datetime.fromisoformat(
+            active['deleted_at_utc'].replace('Z', '+00:00')
+        )
+        if now - deleted_at <= timedelta(days=max(0, int(grace_days))):
+            return {**empty, 'skipped': [{'documentId': document_id,
+                                          'reason': 'skipped_grace_period'}]}
+
+        manifest = {
+            (row['revision']): row for row in doc['revisions']
+        }
+        stored = conn.execute(
+            'SELECT revision, save_token, payload_sha256, payload_bytes, '
+            'saved_at_utc FROM workspace_revisions WHERE document_id = ?',
+            (document_id,),
+        ).fetchall()
+        if {row['revision'] for row in stored} != set(manifest):
+            return {**empty, 'skipped': [{'documentId': document_id,
+                                          'reason': 'skipped_changed'}]}
+        for row in stored:
+            expected = manifest[row['revision']]
+            if (row['payload_sha256'] != expected['payloadSha256']
+                    or row['payload_bytes'] != expected['payloadBytes']):
+                return {**empty, 'skipped': [{'documentId': document_id,
+                                              'reason': 'skipped_changed'}]}
+            receipt = conn.execute(
+                'SELECT 1 FROM workspace_save_receipts WHERE save_token = ?',
+                (row['save_token'],),
+            ).fetchone()
+            if receipt is None:
+                return {**empty, 'skipped': [{
+                    'documentId': document_id,
+                    'reason': 'skipped_missing_receipt'}]}
+
+        conn.execute(
+            'INSERT INTO workspace_archive_tombstones (document_id, title, '
+            'symbol, market_data_mode, last_revision, deleted_at_utc, '
+            'archived_at_utc, archive_id, archive_batch_id) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (document_id, active['title'], active['symbol'],
+             active['market_data_mode'], active['current_revision'],
+             active['deleted_at_utc'], now_iso, archive_id, archive_batch_id),
+        )
+        conn.execute(
+            'DELETE FROM workspace_revisions WHERE document_id = ?',
+            (document_id,),
+        )
+        conn.execute(
+            'DELETE FROM workspace_documents WHERE document_id = ?',
+            (document_id,),
+        )
+        return {
+            'removed': [{'documentId': document_id, 'revision': row['revision']}
+                        for row in stored],
+            'alreadyRemoved': [],
+            'skipped': [],
+            'removedBytes': sum(row['payload_bytes'] for row in stored),
+            'tombstoneWritten': True,
+        }
 
     # ------------------------------------------------------------------
     # Cross-process maintenance lease (storage half; the OS file lock and

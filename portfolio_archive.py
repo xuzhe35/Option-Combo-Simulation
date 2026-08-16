@@ -617,8 +617,7 @@ class ArchiveShard:
             conn.execute('BEGIN IMMEDIATE')
             try:
                 self._check_fence(conn, instance_id, fencing_token)
-                inserted_rows = 0
-                inserted_bytes = 0
+                to_insert = []
                 for row in kind_rows:
                     existing = conn.execute(
                         'SELECT r.payload_sha256, r.payload_bytes, b.status '
@@ -636,6 +635,15 @@ class ArchiveShard:
                             f'archived revision {row["documentId"]}#'
                             f'{row["revision"]} conflicts with an existing copy'
                         )
+                    to_insert.append(row)
+                if not to_insert:
+                    # Every row already lives in a good batch: no new batch
+                    # row — a batch only ever describes rows it physically
+                    # owns, which is what commit and cleanup operate on.
+                    conn.execute('ROLLBACK')
+                    return {'insertedRows': 0, 'insertedBytes': 0,
+                            'batchCreated': False}
+                for row in to_insert:
                     try:
                         conn.execute(
                             'INSERT INTO archived_revisions (document_id, '
@@ -653,9 +661,12 @@ class ArchiveShard:
                         raise ArchiveConflictError(
                             f'archive uniqueness violated: {exc}'
                         ) from exc
-                    inserted_rows += 1
-                    inserted_bytes += row['payloadBytes']
-                for doc in documents:
+                inserted_docs = {row['documentId'] for row in to_insert}
+                batch_documents = [
+                    doc for doc in documents
+                    if doc['documentId'] in inserted_docs
+                ]
+                for doc in batch_documents:
                     conn.execute(
                         'INSERT OR REPLACE INTO archived_documents '
                         '(document_id, archive_batch_id, archive_kind, title, '
@@ -665,7 +676,7 @@ class ArchiveShard:
                          doc['title'], doc['symbol'], doc['marketDataMode'],
                          doc.get('lastRevision'), doc.get('deletedAtUtc')),
                     )
-                manifest_sha = _manifest_hash(kind_rows)
+                manifest_sha = _manifest_hash(to_insert)
                 conn.execute(
                     'INSERT INTO archive_batches (batch_id, status, '
                     'owner_server_instance_id, lease_fencing_token, '
@@ -675,8 +686,8 @@ class ArchiveShard:
                     "VALUES (?, 'copied', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (batch_id, instance_id, int(fencing_token),
                      json.dumps(policy, sort_keys=True), fingerprint,
-                     len(documents), len(kind_rows),
-                     sum(row['payloadBytes'] for row in kind_rows),
+                     len(batch_documents), len(to_insert),
+                     sum(row['payloadBytes'] for row in to_insert),
                      manifest_sha, int(source_schema_version), now_iso),
                 )
                 conn.execute('COMMIT')
@@ -684,8 +695,11 @@ class ArchiveShard:
                 if conn.in_transaction:
                     conn.execute('ROLLBACK')
                 raise
-            return {'insertedRows': inserted_rows,
-                    'insertedBytes': inserted_bytes}
+            return {
+                'insertedRows': len(to_insert),
+                'insertedBytes': sum(row['payloadBytes'] for row in to_insert),
+                'batchCreated': True,
+            }
         except sqlite3.Error as exc:
             raise ArchiveError(str(exc)) from exc
         finally:
@@ -763,6 +777,76 @@ class ArchiveShard:
             conn.execute(
                 "UPDATE archive_batches SET status = 'verified', "
                 'verified_at_utc = ? WHERE batch_id = ?',
+                (self._now_iso(), batch_id),
+            )
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    def list_batches(self, statuses):
+        conn = self._connect()
+        try:
+            placeholders = ','.join('?' for _ in statuses)
+            return [
+                dict(row) for row in conn.execute(
+                    f'SELECT * FROM archive_batches WHERE status IN '
+                    f'({placeholders}) ORDER BY created_at_utc',
+                    tuple(statuses),
+                )
+            ]
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    def batch_rows(self, batch_id):
+        """Row metadata (no payloads) plus document kinds for one batch."""
+        conn = self._connect()
+        try:
+            rows = [
+                {
+                    'documentId': row['document_id'],
+                    'revision': row['revision'],
+                    'saveToken': row['save_token'],
+                    'payloadSha256': row['payload_sha256'],
+                    'payloadBytes': row['payload_bytes'],
+                    'savedAtUtc': row['saved_at_utc'],
+                }
+                for row in conn.execute(
+                    'SELECT document_id, revision, save_token, '
+                    'payload_sha256, payload_bytes, saved_at_utc '
+                    'FROM archived_revisions WHERE archive_batch_id = ? '
+                    'ORDER BY document_id, revision', (batch_id,),
+                )
+            ]
+            documents = {
+                row['document_id']: {
+                    'archiveKind': row['archive_kind'],
+                    'title': row['title'],
+                    'symbol': row['symbol'],
+                    'marketDataMode': row['market_data_mode'],
+                    'lastRevision': row['last_revision'],
+                    'deletedAtUtc': row['deleted_at_utc'],
+                }
+                for row in conn.execute(
+                    'SELECT * FROM archived_documents '
+                    'WHERE archive_batch_id = ?', (batch_id,),
+                )
+            }
+            return {'rows': rows, 'documents': documents}
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    def mark_batch_committed(self, batch_id):
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE archive_batches SET status = 'main_committed', "
+                'committed_at_utc = ? '
+                "WHERE batch_id = ? AND status = 'verified'",
                 (self._now_iso(), batch_id),
             )
         except sqlite3.Error as exc:
@@ -1128,6 +1212,16 @@ def run_copy_job(store_env, guard, job_id, plan):
     )
     cleaned = shard.cleanup_dead_batches()
 
+    # Resume semantics (plan section 6.5): a `copied` batch left behind by a
+    # dead run holds real, committed rows. Verify them now — integrity
+    # re-checked payload by payload — so they either graduate to `verified`
+    # or fail loudly; they are never silently stranded.
+    resumed = []
+    for stale in shard.list_batches(('copied',)):
+        content = shard.batch_rows(stale['batch_id'])
+        shard.verify_batch(stale['batch_id'], content['rows'])
+        resumed.append(stale['batch_id'])
+
     fingerprint = plan['fingerprint']
     batches = split_into_batches(
         plan['manifest'],
@@ -1217,14 +1311,17 @@ def run_copy_job(store_env, guard, job_id, plan):
             })
 
         batch_id = f'batch-{uuid.uuid4().hex[:20]}'
-        shard.copy_batch(
+        result = shard.copy_batch(
             batch_id=batch_id, kind_rows=copy_rows, documents=documents,
             policy=policy, fingerprint=fingerprint,
             instance_id=guard.instance_id,
             fencing_token=guard.fencing_token,
         )
-        shard.verify_batch(batch_id, copy_rows)
-        batch_ids.append(batch_id)
+        if result['batchCreated']:
+            shard.verify_batch(batch_id, copy_rows)
+            batch_ids.append(batch_id)
+        # Rows satisfied by safe replay live in earlier good batches and
+        # still count as ensured-archived for this job.
         copied_rows += len(copy_rows)
         copied_bytes += sum(row['payloadBytes'] for row in copy_rows)
 
@@ -1258,8 +1355,237 @@ def run_copy_job(store_env, guard, job_id, plan):
         'copiedBytes': copied_bytes,
         'skipped': skipped,
         'cleanedDeadBatches': cleaned,
+        'resumedBatches': resumed,
         'canceled': canceled,
         'recoverySnapshot': snapshot_path.name,
         'copyOnly': True,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: verified main-DB removal, reconciler, and bounded reclamation
+# ---------------------------------------------------------------------------
+
+# Hard online-commit ceiling for a single soft-deleted document (whole-doc
+# atomicity cannot be chunked). Documents beyond this are refused online and
+# reported; they need an offline maintenance window.
+COMMIT_DOC_HARD_MAX_ROWS = 2000
+COMMIT_DOC_HARD_MAX_BYTES = 256 * 1024 * 1024
+
+DEFAULT_COMMIT_MAX_ROWS = DEFAULT_ARCHIVE_COMMIT_MAX_ROWS
+DEFAULT_COMMIT_MAX_BYTES = DEFAULT_ARCHIVE_COMMIT_MAX_PAYLOAD_BYTES
+
+
+def reconcile_verified_batches(store, shard):
+    """Crash reconciler (plan section 9.8): a batch whose every row already
+    has main-DB evidence (archive entry, tombstone, or the row is gone with
+    matching evidence) was committed before the crash — flip it to
+    main_committed. Batches with partial or no evidence stay `verified` and
+    are simply committed again (the chunk commit is idempotent)."""
+    flipped = []
+    for batch in shard.list_batches(('verified',)):
+        content = shard.batch_rows(batch['batch_id'])
+        rows = content['rows']
+        if not rows:
+            continue
+        doc_kinds = {
+            doc_id: meta['archiveKind']
+            for doc_id, meta in content['documents'].items()
+        }
+        keys = [(row['documentId'], row['revision']) for row in rows]
+        if store.fetch_revisions_for_archive(keys):
+            continue  # at least one row still active: resumable, not done
+        tombstone_ids = sorted({
+            doc_id for doc_id, kind in doc_kinds.items()
+            if kind == 'deleted_document'
+        })
+        # A tombstoned document must have no document row left at all.
+        if store.document_deleted_states(tombstone_ids):
+            continue
+        partial_keys = [
+            (row['documentId'], row['revision']) for row in rows
+            if doc_kinds.get(row['documentId']) != 'deleted_document'
+        ]
+        if store.has_archive_evidence(
+            partial_keys=partial_keys, tombstone_doc_ids=tombstone_ids,
+        ):
+            shard.mark_batch_committed(batch['batch_id'])
+            flipped.append(batch['batch_id'])
+    return flipped
+
+
+def commit_verified_batches(store_env, guard, job_id, shard, archive_id):
+    """The removal stage (plan section 9.6): commit every VERIFIED batch of
+    the shard against the active database in short chunk transactions.
+
+    Preconditions enforced here — the main-DB DELETE path is unreachable
+    without them: the shard batch is `verified` (only such batches are
+    listed) and this job's recovery snapshot exists and quick-checks.
+    Cancel is NOT honored in this stage (plan section 11)."""
+    store = store_env['store']
+    snapshot_path = (Path(store.db_path).parent / MAINTENANCE_BACKUP_DIRNAME
+                     / f'pre-archive-{job_id}.db')
+    if not snapshot_path.exists():
+        raise ArchiveError(
+            'recovery snapshot missing; refusing to remove active rows'
+        )
+    # Re-verify the snapshot right before the destructive stage.
+    from portfolio_store import PortfolioStore as _Store
+    _Store(snapshot_path).quick_check()
+
+    reconciled = reconcile_verified_batches(store, shard)
+
+    max_rows = store_env.get('_archive_commit_max_rows',
+                             DEFAULT_COMMIT_MAX_ROWS)
+    max_bytes = store_env.get('_archive_commit_max_payload_bytes',
+                              DEFAULT_COMMIT_MAX_BYTES)
+    grace_days = store_env.get('_archive_deleted_after_days', 30)
+    lease_kwargs = {
+        'lease_name': portfolio_maintenance_lease_name(),
+        'holder_instance_id': guard.instance_id,
+        'fencing_token': guard.fencing_token,
+    }
+
+    removed = []
+    already_removed = []
+    skipped = []
+    removed_bytes = 0
+    tombstones_written = 0
+    commit_chunks = 0
+
+    for batch in shard.list_batches(('verified',)):
+        content = shard.batch_rows(batch['batch_id'])
+        rows = content['rows']
+        documents = content['documents']
+
+        whole_docs = {
+            doc_id: meta for doc_id, meta in documents.items()
+            if meta['archiveKind'] == 'deleted_document'
+        }
+        partial_rows = [
+            row for row in rows if row['documentId'] not in whole_docs
+        ]
+
+        # Whole documents: one atomic chunk each, hard-capped.
+        for doc_id, meta in whole_docs.items():
+            doc_rows = [row for row in rows if row['documentId'] == doc_id]
+            doc_bytes = sum(row['payloadBytes'] for row in doc_rows)
+            if (len(doc_rows) > COMMIT_DOC_HARD_MAX_ROWS
+                    or doc_bytes > COMMIT_DOC_HARD_MAX_BYTES):
+                skipped.append({'documentId': doc_id,
+                                'reason': 'skipped_oversized_document'})
+                continue
+            if not guard.verify():
+                raise MaintenanceLeaseLostError(
+                    'maintenance lease lost during removal'
+                )
+            result = store.commit_archive_removal_chunk(
+                whole_document={'documentId': doc_id, 'revisions': doc_rows},
+                archive_id=archive_id, archive_batch_id=batch['batch_id'],
+                grace_days=grace_days, **lease_kwargs,
+            )
+            commit_chunks += 1
+            removed.extend(result['removed'])
+            already_removed.extend(result['alreadyRemoved'])
+            skipped.extend(result['skipped'])
+            removed_bytes += result['removedBytes']
+            tombstones_written += 1 if result['tombstoneWritten'] else 0
+
+        # Partial-history rows: bounded chunks.
+        chunk, chunk_bytes = [], 0
+        chunks = []
+        for row in partial_rows:
+            if chunk and (len(chunk) + 1 > max_rows
+                          or chunk_bytes + row['payloadBytes'] > max_bytes):
+                chunks.append(chunk)
+                chunk, chunk_bytes = [], 0
+            chunk.append(row)
+            chunk_bytes += row['payloadBytes']
+        if chunk:
+            chunks.append(chunk)
+        for chunk in chunks:
+            if not guard.verify():
+                raise MaintenanceLeaseLostError(
+                    'maintenance lease lost during removal'
+                )
+            result = store.commit_archive_removal_chunk(
+                partial_rows=chunk, archive_id=archive_id,
+                archive_batch_id=batch['batch_id'],
+                grace_days=grace_days, **lease_kwargs,
+            )
+            commit_chunks += 1
+            removed.extend(result['removed'])
+            already_removed.extend(result['alreadyRemoved'])
+            skipped.extend(result['skipped'])
+            removed_bytes += result['removedBytes']
+
+        shard.mark_batch_committed(batch['batch_id'])
+
+    return {
+        'removedRevisions': len(removed),
+        'alreadyRemoved': len(already_removed),
+        'skipped': skipped,
+        'removedBytes': removed_bytes,
+        'tombstonesWritten': tombstones_written,
+        'commitChunks': commit_chunks,
+        'reconciledBatches': reconciled,
+    }
+
+
+def portfolio_maintenance_lease_name():
+    # Late import avoids a maintenance <-> archive import cycle.
+    import portfolio_maintenance
+    return portfolio_maintenance.LEASE_NAME
+
+
+def run_archive_job(store_env, guard, job_id, plan):
+    """Full archive job: copy + verify (phase 3 executor), then the removal
+    stage, then bounded space reclamation. Reports the three space results
+    separately (plan section 9.7): logical bytes removed from active
+    tables, freelist growth, and actual file-size change."""
+    store = store_env['store']
+    stats_before = store.storage_stats()
+
+    copy_summary = run_copy_job(store_env, guard, job_id, plan)
+    if copy_summary['canceled']:
+        return {**copy_summary, 'copyOnly': True, 'commit': None,
+                'space': None}
+
+    archive_dir = resolve_archive_dir(
+        Path(store.db_path), config=store_env.get('_config')
+    )
+    shard = ArchiveShard(
+        archive_path_for_id(archive_dir, copy_summary['archiveId']),
+        now=store.now_utc,
+    )
+    commit_summary = commit_verified_batches(
+        store_env, guard, job_id, shard, copy_summary['archiveId']
+    )
+
+    freelist_before = store.freelist_count()
+    vacuum_ran = False
+    threshold = store_env.get('_vacuum_freelist_pages', 256)
+    if threshold > 0 and freelist_before >= threshold:
+        store.incremental_vacuum(
+            max_pages=store_env.get('_vacuum_max_pages', 512)
+        )
+        vacuum_ran = True
+    stats_after = store.storage_stats()
+
+    return {
+        **copy_summary,
+        'copyOnly': False,
+        'commit': commit_summary,
+        'space': {
+            'logicalRemovedBytes': commit_summary['removedBytes'],
+            'logicalPayloadBytesBefore': stats_before['logicalPayloadBytes'],
+            'logicalPayloadBytesAfter': stats_after['logicalPayloadBytes'],
+            'freelistPagesBefore': freelist_before,
+            'freelistPagesAfter': store.freelist_count(),
+            'pageSize': stats_after['pageSize'],
+            'dbFileBytesBefore': stats_before['dbFileBytes'],
+            'dbFileBytesAfter': stats_after['dbFileBytes'],
+            'vacuumRan': vacuum_ran,
+        },
     }
 

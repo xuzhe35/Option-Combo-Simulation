@@ -444,9 +444,12 @@ def make_archive_env(tmpdir, *, now=NOW):
     seeder = PortfolioStore(db_path, now=clock).initialize()
     revision = None
     for n in range(1, 9):
+        # Payloads span multiple DB pages so removals later free whole
+        # pages (the bounded-vacuum test needs a real freelist).
         result = seeder.save_workspace(
             document_id=DOC_A, title='SPY workspace',
-            payload=_payload(note=f'第{n}版' if n % 2 else f'rev {n}'),
+            payload=_payload(note=f'第{n}版' if n % 2 else f'rev {n}',
+                             filler='F' * 8192),
             save_token=_token(n), expected_revision=revision,
         )
         revision = result['revision']
@@ -492,7 +495,10 @@ def make_plan(env, policy=None):
 
 def run_job(env, plan):
     store = env['store']
-    job = store.create_maintenance_job(job_type='archive_copy')
+    job = store.create_maintenance_job(
+        job_type='archive_copy',
+        owner_instance_id=env.get('_server_instance_id'),
+    )
     guard = portfolio_maintenance.acquire_maintenance(env)
     assert guard is not None
     try:
@@ -662,7 +668,10 @@ class CopyOnlyJobTest(unittest.TestCase):
         self.env['_archive_max_rows_per_batch'] = 2  # force several batches
         plan = make_plan(self.env)
         store = self.store
-        job = store.create_maintenance_job(job_type='archive_copy')
+        job = store.create_maintenance_job(
+            job_type='archive_copy',
+            owner_instance_id=self.env.get('_server_instance_id'),
+        )
         store.start_maintenance_job(job['jobId'])
         store.request_job_cancel(job['jobId'])
         guard = portfolio_maintenance.acquire_maintenance(self.env)

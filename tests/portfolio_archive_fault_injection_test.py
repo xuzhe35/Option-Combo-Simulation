@@ -154,7 +154,10 @@ class LeaseLossTest(FaultInjectionTestBase):
         self.env['_archive_max_rows_per_batch'] = 3
         plan = make_plan(self.env)
         store = self.store
-        job = store.create_maintenance_job(job_type='archive_copy')
+        job = store.create_maintenance_job(
+            job_type='archive_copy',
+            owner_instance_id=self.env.get('_server_instance_id'),
+        )
         store.start_maintenance_job(job['jobId'])
         guard = portfolio_maintenance.acquire_maintenance(self.env)
         self.assertIsNotNone(guard)
