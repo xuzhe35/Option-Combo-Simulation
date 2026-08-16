@@ -1496,54 +1496,147 @@ class PortfolioStore:
         }
 
     def retention_snapshot(self):
-        """Per-document revision metadata for candidate computation. Never
-        includes payload content."""
+        """Per-document revision metadata for candidate computation and
+        archive manifests. Never includes payload content."""
         conn = self._connect()
         try:
-            live_docs = {
-                row['document_id']: {
+            live_docs = {}
+            deleted_docs = {}
+            for row in conn.execute(
+                'SELECT document_id, title, symbol, market_data_mode, '
+                'current_revision, deleted_at_utc FROM workspace_documents'
+            ):
+                entry = {
                     'documentId': row['document_id'],
+                    'title': row['title'],
+                    'symbol': row['symbol'],
+                    'marketDataMode': row['market_data_mode'],
                     'currentRevision': row['current_revision'],
+                    'deletedAtUtc': row['deleted_at_utc'],
                     'revisions': [],
                 }
-                for row in conn.execute(
-                    'SELECT document_id, current_revision '
-                    'FROM workspace_documents WHERE deleted_at_utc IS NULL'
-                )
-            }
+                if row['deleted_at_utc'] is None:
+                    live_docs[row['document_id']] = entry
+                else:
+                    deleted_docs[row['document_id']] = entry
             for row in conn.execute(
-                'SELECT document_id, revision, saved_at_utc, payload_bytes '
-                'FROM workspace_revisions ORDER BY document_id, revision'
+                'SELECT document_id, revision, saved_at_utc, payload_bytes, '
+                'payload_sha256 FROM workspace_revisions '
+                'ORDER BY document_id, revision'
             ):
-                doc = live_docs.get(row['document_id'])
+                doc = live_docs.get(row['document_id']) \
+                    or deleted_docs.get(row['document_id'])
                 if doc is not None:
                     doc['revisions'].append({
                         'revision': row['revision'],
                         'savedAtUtc': row['saved_at_utc'],
                         'payloadBytes': row['payload_bytes'],
+                        'payloadSha256': row['payload_sha256'],
                     })
-            deleted = [
-                {
-                    'documentId': row['document_id'],
-                    'deletedAtUtc': row['deleted_at_utc'],
-                    'revisionCount': row['revision_count'],
-                    'payloadBytes': row['payload_bytes'],
-                }
-                for row in conn.execute(
-                    'SELECT d.document_id, d.deleted_at_utc, '
-                    'count(r.revision) AS revision_count, '
-                    'COALESCE(SUM(r.payload_bytes), 0) AS payload_bytes '
-                    'FROM workspace_documents d '
-                    'LEFT JOIN workspace_revisions r '
-                    'ON r.document_id = d.document_id '
-                    'WHERE d.deleted_at_utc IS NOT NULL '
-                    'GROUP BY d.document_id'
+            for doc in deleted_docs.values():
+                doc['revisionCount'] = len(doc['revisions'])
+                doc['payloadBytes'] = sum(
+                    revision['payloadBytes'] for revision in doc['revisions']
                 )
-            ]
             return {
                 'liveDocuments': list(live_docs.values()),
-                'deletedDocuments': deleted,
+                'deletedDocuments': list(deleted_docs.values()),
             }
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def fetch_revisions_for_archive(self, keys):
+        """Full revision rows (payload included) for (document_id, revision)
+        pairs, keyed by pair. Missing pairs are simply absent — the archive
+        copier records them as skipped, never fails on them."""
+        conn = self._connect()
+        try:
+            result = {}
+            for document_id, revision in keys:
+                row = conn.execute(
+                    'SELECT document_id, revision, save_token, '
+                    'payload_schema_version, payload_sha256, payload_json, '
+                    'saved_at_utc, payload_bytes FROM workspace_revisions '
+                    'WHERE document_id = ? AND revision = ?',
+                    (document_id, int(revision)),
+                ).fetchone()
+                if row is not None:
+                    result[(document_id, int(revision))] = dict(row)
+            return result
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def document_deleted_states(self, document_ids):
+        """deleted_at_utc per document id (None when live, absent when the
+        document row no longer exists)."""
+        conn = self._connect()
+        try:
+            result = {}
+            for document_id in document_ids:
+                row = conn.execute(
+                    'SELECT deleted_at_utc FROM workspace_documents '
+                    'WHERE document_id = ?', (document_id,),
+                ).fetchone()
+                if row is not None:
+                    result[document_id] = row['deleted_at_utc']
+            return result
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Archive shard registry (main-DB index of shards; no payloads)
+    # ------------------------------------------------------------------
+
+    def list_archive_registry(self):
+        conn = self._connect()
+        try:
+            return [
+                dict(row) for row in conn.execute(
+                    'SELECT * FROM workspace_archives ORDER BY archive_id'
+                )
+            ]
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def upsert_archive_registry(self, *, archive_id, archive_schema_version,
+                                status, created_at_utc, sealed_at_utc=None,
+                                last_verified_at_utc=None,
+                                last_verify_status=None, file_bytes=0,
+                                logical_payload_bytes=0, revision_count=0,
+                                missing_since_utc=None):
+        _validate_token('archiveId', archive_id)
+        conn = self._connect()
+        try:
+            conn.execute(
+                'INSERT INTO workspace_archives (archive_id, '
+                'archive_schema_version, status, created_at_utc, '
+                'sealed_at_utc, last_verified_at_utc, last_verify_status, '
+                'file_bytes, logical_payload_bytes, revision_count, '
+                'missing_since_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(archive_id) DO UPDATE SET '
+                'archive_schema_version = excluded.archive_schema_version, '
+                'status = excluded.status, '
+                'sealed_at_utc = excluded.sealed_at_utc, '
+                'last_verified_at_utc = excluded.last_verified_at_utc, '
+                'last_verify_status = excluded.last_verify_status, '
+                'file_bytes = excluded.file_bytes, '
+                'logical_payload_bytes = excluded.logical_payload_bytes, '
+                'revision_count = excluded.revision_count, '
+                'missing_since_utc = excluded.missing_since_utc',
+                (archive_id, int(archive_schema_version), status,
+                 created_at_utc, sealed_at_utc, last_verified_at_utc,
+                 last_verify_status, int(file_bytes),
+                 int(logical_payload_bytes), int(revision_count),
+                 missing_since_utc),
+            )
         except sqlite3.Error as exc:
             raise self._map_sqlite_error(exc) from exc
         finally:
@@ -1674,6 +1767,155 @@ class PortfolioStore:
         finally:
             conn.close()
         return self._job_row_to_meta(row) if row is not None else None
+
+    def request_job_cancel(self, job_id):
+        """Best-effort cancel flag; the running worker honors it only in
+        safe phases (copy/verify), never during a main-DB commit."""
+        _validate_token('jobId', job_id)
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                'UPDATE workspace_maintenance_jobs SET cancel_requested = 1 '
+                "WHERE job_id = ? AND status IN ('queued', 'running')",
+                (job_id,),
+            )
+            return cursor.rowcount == 1
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Cross-process maintenance lease (storage half; the OS file lock and
+    # acquisition ordering live in portfolio_maintenance.py)
+    # ------------------------------------------------------------------
+
+    def maintenance_lease_acquire(self, *, lease_name, holder_instance_id,
+                                  holder_pid, ttl_seconds):
+        """Atomically acquire or renew the lease. Returns the lease dict on
+        success, None when another live holder owns it. The fencing token
+        increments only on takeover, never on renewal.
+
+        Callers MUST already hold the OS advisory file lock: an expired
+        lease alone never authorizes takeover while another process is
+        alive (its OS lock is still held, so we would not be here)."""
+        _validate_token('leaseName', lease_name)
+        _validate_token('holderInstanceId', holder_instance_id)
+        ttl_seconds = max(1, int(ttl_seconds))
+        conn = self._connect()
+        try:
+            now = self.now_utc()
+            now_iso = self._utc_now_iso()
+            expires_iso = (now + timedelta(seconds=ttl_seconds)).isoformat(
+                timespec='milliseconds'
+            ).replace('+00:00', 'Z')
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                row = conn.execute(
+                    'SELECT * FROM workspace_maintenance_lease '
+                    'WHERE lease_name = ?', (lease_name,),
+                ).fetchone()
+                if row is not None:
+                    held_by_me = row['holder_instance_id'] == holder_instance_id
+                    expired = row['expires_at_utc'] <= now_iso
+                    if not held_by_me and not expired:
+                        conn.execute('ROLLBACK')
+                        return None
+                    token = row['fencing_token'] if held_by_me \
+                        else row['fencing_token'] + 1
+                else:
+                    token = 1
+                conn.execute(
+                    'INSERT INTO workspace_maintenance_lease (lease_name, '
+                    'holder_instance_id, holder_pid, fencing_token, '
+                    'acquired_at_utc, heartbeat_at_utc, expires_at_utc) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?) '
+                    'ON CONFLICT(lease_name) DO UPDATE SET '
+                    'holder_instance_id = excluded.holder_instance_id, '
+                    'holder_pid = excluded.holder_pid, '
+                    'fencing_token = excluded.fencing_token, '
+                    'acquired_at_utc = excluded.acquired_at_utc, '
+                    'heartbeat_at_utc = excluded.heartbeat_at_utc, '
+                    'expires_at_utc = excluded.expires_at_utc',
+                    (lease_name, holder_instance_id, int(holder_pid), token,
+                     now_iso, now_iso, expires_iso),
+                )
+                conn.execute('COMMIT')
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute('ROLLBACK')
+                raise
+            return {
+                'leaseName': lease_name,
+                'holderInstanceId': holder_instance_id,
+                'fencingToken': token,
+                'expiresAtUtc': expires_iso,
+            }
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def maintenance_lease_heartbeat(self, *, lease_name, holder_instance_id,
+                                    fencing_token, ttl_seconds):
+        """Extend the lease. Returns False when the lease was lost (other
+        holder, other token, or row gone) — the caller must stop."""
+        ttl_seconds = max(1, int(ttl_seconds))
+        conn = self._connect()
+        try:
+            now = self.now_utc()
+            now_iso = self._utc_now_iso()
+            expires_iso = (now + timedelta(seconds=ttl_seconds)).isoformat(
+                timespec='milliseconds'
+            ).replace('+00:00', 'Z')
+            cursor = conn.execute(
+                'UPDATE workspace_maintenance_lease SET heartbeat_at_utc = ?, '
+                'expires_at_utc = ? WHERE lease_name = ? '
+                'AND holder_instance_id = ? AND fencing_token = ?',
+                (now_iso, expires_iso, lease_name, holder_instance_id,
+                 int(fencing_token)),
+            )
+            return cursor.rowcount == 1
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def maintenance_lease_verify(self, *, lease_name, holder_instance_id,
+                                 fencing_token):
+        """True while this holder+token owns an unexpired lease."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                'SELECT holder_instance_id, fencing_token, expires_at_utc '
+                'FROM workspace_maintenance_lease WHERE lease_name = ?',
+                (lease_name,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+        if row is None:
+            return False
+        return (row['holder_instance_id'] == holder_instance_id
+                and row['fencing_token'] == int(fencing_token)
+                and row['expires_at_utc'] > self._utc_now_iso())
+
+    def maintenance_lease_release(self, *, lease_name, holder_instance_id,
+                                  fencing_token):
+        """Guarded delete: only the current holder+token can release."""
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                'DELETE FROM workspace_maintenance_lease WHERE lease_name = ? '
+                'AND holder_instance_id = ? AND fencing_token = ?',
+                (lease_name, holder_instance_id, int(fencing_token)),
+            )
+            return cursor.rowcount == 1
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
 
     @staticmethod
     def _job_row_to_meta(row):

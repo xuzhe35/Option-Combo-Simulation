@@ -20,6 +20,7 @@ import time
 
 from datetime import datetime, timezone
 
+import portfolio_maintenance
 from portfolio_store import (
     ACCEPTED_PAYLOAD_SCHEMA_VERSIONS,
     DEFAULT_BACKUP_KEEP_DAILY,
@@ -182,7 +183,54 @@ def create_store_env(config=None):
         '_vacuum_freelist_pages': vacuum_freelist_pages,
         '_vacuum_max_pages': vacuum_max_pages,
         '_archive_deleted_after_days': archive_deleted_after_days,
+        '_archive_enabled': _read_bool(config, 'archive_enabled', True),
+        '_archive_max_rows_per_batch': _read_int(
+            config, 'archive_max_rows_per_batch', 500, minimum=1),
+        '_archive_max_payload_bytes_per_batch': _read_int(
+            config, 'archive_max_payload_bytes_per_batch', 64 * 1024 * 1024,
+            minimum=1024),
+        '_archive_rollover_bytes': _read_int(
+            config, 'archive_rollover_bytes', 2 * 1024 * 1024 * 1024,
+            minimum=1024 * 1024),
+        '_archive_plan_ttl_seconds': _read_int(
+            config, 'archive_plan_ttl_seconds', 900, minimum=60),
+        '_archive_recovery_snapshot_keep': _read_int(
+            config, 'archive_recovery_snapshot_keep', 5, minimum=1),
+        '_archive_recovery_snapshot_keep_days': _read_int(
+            config, 'archive_recovery_snapshot_keep_days', 14, minimum=0),
+        # Per-process-boot identity for the cross-process maintenance lease
+        # and archive fencing. Never reused across restarts.
+        '_server_instance_id': portfolio_maintenance.new_server_instance_id(),
+        '_maintenance_lease_ttl_seconds': _read_int(
+            config, 'maintenance_lease_ttl_seconds',
+            portfolio_maintenance.DEFAULT_LEASE_TTL_SECONDS, minimum=5,
+        ),
+        '_maintenance_lease_heartbeat_seconds': _read_int(
+            config, 'maintenance_lease_heartbeat_seconds',
+            portfolio_maintenance.DEFAULT_LEASE_HEARTBEAT_SECONDS, minimum=1,
+        ),
     }
+
+
+def _read_int(config, key, fallback, *, minimum=None):
+    value = fallback
+    if config is not None:
+        try:
+            value = config.getint('portfolio_store', key, fallback=fallback)
+        except ValueError:
+            value = fallback
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def _read_bool(config, key, fallback):
+    if config is None:
+        return fallback
+    try:
+        return config.getboolean('portfolio_store', key, fallback=fallback)
+    except ValueError:
+        return fallback
 
 
 def ensure_store_initialized(store_env):
@@ -378,13 +426,13 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
     interval = store_env.get('_backup_interval_seconds', 24 * 3600.0)
     if store is None or interval <= 0:
         return False
-    lock = store_env.get('_maintenance_lock')
-    if lock is None:
-        return False
-    # Non-blocking: concurrent save-triggered maintenance returns fast and
-    # never queues behind a running backup. The staleness check happens
-    # INSIDE the lock so two threads cannot both deem the backup overdue.
-    if not lock.acquire(blocking=False):
+    # Non-blocking full maintenance guard: thread lock, OS file lock, and
+    # the cross-process DB lease (portfolio_maintenance). Concurrent
+    # save-triggered maintenance — in this process or the other backend —
+    # returns fast instead of queueing. The staleness check happens INSIDE
+    # the guard so two paths cannot both deem the backup overdue.
+    guard = portfolio_maintenance.acquire_maintenance(store_env)
+    if guard is None:
         return False
     try:
         backup_dir = _resolve_effective_backup_dir(store_env)
@@ -434,7 +482,7 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
         logger.exception('scheduled workspace backup failed; saves are unaffected')
         return False
     finally:
-        lock.release()
+        guard.release()
 
 
 def publish_backup_best_effort(store_env):

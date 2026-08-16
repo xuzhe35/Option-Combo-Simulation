@@ -443,6 +443,128 @@ class ArchiveRegistrySummaryTest(AdminWsTestBase):
         self.assertEqual(archive['revisionCount'], 15)
 
 
+class ArchivePlanProtocolTest(AdminWsTestBase):
+    def _preview(self):
+        return _one_response(self.env, self.ws, {
+            'action': 'preview_workspace_archive',
+            'requestId': 'req-0020-4000-8000-000000000000',
+        })
+
+    def _execute(self, token):
+        return _one_response(self.env, self.ws, {
+            'action': 'execute_workspace_archive',
+            'requestId': 'req-0021-4000-8000-000000000000',
+            'planToken': token,
+        })
+
+    def _revision_count(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return conn.execute(
+                'SELECT count(*) FROM workspace_revisions'
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_preview_returns_token_and_totals_without_payloads(self):
+        self._seed()
+        response = self._preview()
+        self.assertTrue(response['success'])
+        self.assertTrue(response['planToken'].startswith('plan-'))
+        self.assertTrue(response['copyOnly'])
+        self.assertIn('revisionCount', response['totals'])
+        text = json.dumps(response)
+        self.assertNotIn(self.tmpdir, text)
+        self.assertNotIn('组合一', text)
+
+    def test_execute_copy_only_end_to_end_and_token_single_use(self):
+        self._seed()
+        revisions_before = self._revision_count()
+        token = self._preview()['planToken']
+        started = self._execute(token)
+        self.assertTrue(started['success'])
+        self.assertFalse(started['alreadyStarted'])
+        job = _wait_for_job(self.env, self.ws, started['job']['jobId'])
+        self.assertEqual(job['status'], 'completed')
+        self.assertTrue(job['summary']['copyOnly'])
+        self.assertGreater(job['summary']['copiedRevisions'], 0)
+        # Copy-only: the active database lost nothing.
+        self.assertEqual(self._revision_count(), revisions_before)
+
+        # Same token again: the original job comes back, no second batch.
+        replay = self._execute(token)
+        self.assertTrue(replay['success'])
+        self.assertTrue(replay['alreadyStarted'])
+        self.assertEqual(replay['job']['jobId'], started['job']['jobId'])
+
+    def test_expired_token_rejected(self):
+        self._seed()
+        token = self._preview()['planToken']
+        self.env['_archive_plans'][token]['expiresAtMonotonic'] = 0.0
+        response = self._execute(token)
+        self.assertFalse(response['success'])
+        self.assertEqual(response['code'], 'archive_plan_expired')
+
+    def test_unknown_and_malformed_tokens_rejected(self):
+        self._seed()
+        response = self._execute('plan-00000000000000000000000000000000')
+        self.assertEqual(response['code'], 'archive_plan_expired')
+        response = self._execute('../nope')
+        self.assertEqual(response['code'], 'invalid_request')
+
+    def test_token_bound_to_server_instance(self):
+        self._seed()
+        token = self._preview()['planToken']
+        # Simulated restart / other backend: the instance id differs.
+        self.env['_server_instance_id'] = 'srv-other0000000'
+        response = self._execute(token)
+        self.assertFalse(response['success'])
+        self.assertEqual(response['code'], 'archive_plan_stale')
+
+    def test_save_after_preview_fails_job_stale(self):
+        self._seed()
+        token = self._preview()['planToken']
+        self.env['store'].save_workspace(
+            document_id=DOC, title='SPY workspace',
+            payload=_payload(note='between preview and execute'),
+            save_token='save-race001-4000-8000-000000000000',
+            expected_revision=3,
+        )
+        started = self._execute(token)
+        self.assertTrue(started['success'])
+        job = _wait_for_job(self.env, self.ws, started['job']['jobId'])
+        self.assertEqual(job['status'], 'failed')
+        self.assertEqual(job['errorCode'], 'archive_plan_stale')
+
+    def test_archive_disabled_rejects_preview_and_execute(self):
+        self._seed()
+        self.env['_archive_enabled'] = False
+        response = self._preview()
+        self.assertFalse(response['success'])
+        self.assertEqual(response['code'], 'archive_disabled')
+        response = self._execute('plan-00000000000000000000000000000000')
+        self.assertEqual(response['code'], 'archive_disabled')
+
+    def test_cancel_unknown_job_and_active_job(self):
+        self._seed()
+        response = _one_response(self.env, self.ws, {
+            'action': 'cancel_workspace_maintenance_job',
+            'requestId': 'req-0022-4000-8000-000000000000',
+            'jobId': 'job-00000000000000000000',
+        })
+        self.assertFalse(response['success'])
+        self.assertEqual(response['code'], 'job_not_found')
+
+        job = self.env['store'].create_maintenance_job(job_type='archive_copy')
+        response = _one_response(self.env, self.ws, {
+            'action': 'cancel_workspace_maintenance_job',
+            'requestId': 'req-0023-4000-8000-000000000000',
+            'jobId': job['jobId'],
+        })
+        self.assertTrue(response['success'])
+        self.assertTrue(response['cancelRequested'])
+
+
 class BackendParityTest(AdminWsTestBase):
     """Both backends route the same module; this guards the wiring."""
 

@@ -19,8 +19,10 @@ import logging
 import re
 import threading
 import time
+import uuid
 
 import portfolio_archive
+import portfolio_maintenance
 import portfolio_store_ws
 from portfolio_store import (
     DEFAULT_REVISION_KEEP_DAILY_DAYS,
@@ -35,6 +37,9 @@ ADMIN_SERVER_ACTIONS = {
     'request_workspace_admin_status': 'workspace_admin_status',
     'request_workspace_storage_stats': 'workspace_storage_stats',
     'get_workspace_maintenance_job': 'workspace_maintenance_job',
+    'preview_workspace_archive': 'workspace_archive_previewed',
+    'execute_workspace_archive': 'workspace_archive_started',
+    'cancel_workspace_maintenance_job': 'workspace_maintenance_cancel_requested',
 }
 
 ADMIN_CLIENT_ACTIONS = frozenset(ADMIN_SERVER_ACTIONS)
@@ -108,13 +113,18 @@ async def _build_admin_response(store_env, websocket, data, *, client_ip):
             response['reason'] = store_env.get('reason') or 'admin_unavailable'
             return response
         current_job = await asyncio.to_thread(store.latest_active_maintenance_job)
+        archive_enabled = store_env.get('_archive_enabled', True) is True
         response.update({
             'schemaVersion': SCHEMA_USER_VERSION,
             'capability': {
                 'readOnly': True,
                 'statsFast': True,
                 'statsExact': True,
-                'archivePreview': False,
+                'archivePreview': archive_enabled,
+                # Copy-only shadow mode: batches copy and verify, the main
+                # database is never modified. Full archive (with removal)
+                # stays off until plan phase 4.
+                'archiveCopyShadow': archive_enabled,
                 'archiveExecute': False,
                 'restore': False,
             },
@@ -178,6 +188,80 @@ async def _build_admin_response(store_env, websocket, data, *, client_ip):
                 'requestId': request_id,
                 'success': True,
                 'job': job,
+            }
+
+        if action == 'preview_workspace_archive':
+            if store_env.get('_archive_enabled', True) is not True:
+                return _error_response(
+                    server_action, request_id, 'archive_disabled',
+                    'archiving is disabled by configuration',
+                )
+            plan = await asyncio.to_thread(_create_archive_plan, store_env)
+            _log(action, request_id, started)
+            return {
+                'action': server_action,
+                'requestId': request_id,
+                'success': True,
+                'planToken': plan['planToken'],
+                'expiresInSeconds': plan['ttlSeconds'],
+                'policy': plan['policy'],
+                'totals': plan['totals'],
+                'manifestHashPrefix': plan['manifestHash'][:16],
+                'copyOnly': True,
+            }
+
+        if action == 'execute_workspace_archive':
+            if store_env.get('_archive_enabled', True) is not True:
+                return _error_response(
+                    server_action, request_id, 'archive_disabled',
+                    'archiving is disabled by configuration',
+                )
+            token = data.get('planToken')
+            if not isinstance(token, str) or not _TOKEN_RE.match(token):
+                return _error_response(
+                    server_action, request_id, 'invalid_request',
+                    'planToken must match the restricted token format',
+                )
+            result = await asyncio.to_thread(
+                _consume_plan_and_start_job, store_env, token
+            )
+            if 'errorCode' in result:
+                return _error_response(
+                    server_action, request_id, result['errorCode'],
+                    result['message'],
+                )
+            _log(action, request_id, started)
+            return {
+                'action': server_action,
+                'requestId': request_id,
+                'success': True,
+                'job': result['job'],
+                'alreadyStarted': result['alreadyStarted'],
+                'copyOnly': True,
+            }
+
+        if action == 'cancel_workspace_maintenance_job':
+            job_id = data.get('jobId')
+            if not isinstance(job_id, str) or not _TOKEN_RE.match(job_id):
+                return _error_response(
+                    server_action, request_id, 'invalid_request',
+                    'jobId must match the restricted token format',
+                )
+            job = await asyncio.to_thread(store.get_maintenance_job, job_id)
+            if job is None:
+                return _error_response(
+                    server_action, request_id, 'job_not_found',
+                    'no such maintenance job',
+                )
+            accepted = await asyncio.to_thread(store.request_job_cancel, job_id)
+            _log(action, request_id, started)
+            return {
+                'action': server_action,
+                'requestId': request_id,
+                'success': True,
+                'jobId': job_id,
+                'cancelRequested': bool(accepted),
+                'jobStatus': job['status'],
             }
     except PortfolioStoreError as exc:
         # Stable code only; details (which may contain paths) go to the log.
@@ -290,6 +374,129 @@ def _fast_stats(store, store_env):
     }
 
 
+def _create_archive_plan(store_env):
+    """Build the preview manifest server-side and register a single-use
+    planToken. The full manifest never leaves the server; the page only
+    receives totals. Tokens are process-local: a backend restart or the
+    other backend cannot execute them (plan section 9.1)."""
+    store = store_env['store']
+    policy = _policy(store_env)
+    preview = portfolio_archive.build_archive_preview(store, policy={
+        'revisionKeepRecent': policy['revisionKeepRecent'],
+        'revisionKeepDailyDays': policy['revisionKeepDailyDays'],
+        'archiveDeletedAfterDays': policy['archiveDeletedAfterDays'],
+    })
+    ttl_seconds = store_env.get('_archive_plan_ttl_seconds', 900)
+    created_at = store.now_utc().isoformat(
+        timespec='milliseconds'
+    ).replace('+00:00', 'Z')
+    nonce = uuid.uuid4().hex
+    token = f'plan-{uuid.uuid4().hex}'
+    plan = dict(preview)
+    plan.update({
+        'planToken': token,
+        'ttlSeconds': ttl_seconds,
+        'createdAtUtc': created_at,
+        'expiresAtMonotonic': time.monotonic() + ttl_seconds,
+        'serverInstanceId': store_env.get('_server_instance_id'),
+        'fingerprint': portfolio_archive.compute_generation_fingerprint(
+            preview, install_id=store.ensure_install_id(),
+            created_at_utc=created_at, nonce=nonce,
+        ),
+        'consumedByJobId': None,
+    })
+    plans = store_env.setdefault('_archive_plans', {})
+    # Prune expired plans so the registry cannot grow unbounded.
+    now_monotonic = time.monotonic()
+    for stale_token in [
+        key for key, value in plans.items()
+        if value['expiresAtMonotonic'] <= now_monotonic
+        and value['consumedByJobId'] is None
+    ]:
+        del plans[stale_token]
+    plans[token] = plan
+    return plan
+
+
+def _consume_plan_and_start_job(store_env, token):
+    """Validate + consume the plan token, create the job, start the worker.
+    Runs on a worker thread; returns either {'job': ..} or an error dict."""
+    store = store_env['store']
+    plans = store_env.get('_archive_plans') or {}
+    plan = plans.get(token)
+    if plan is None:
+        return {'errorCode': 'archive_plan_expired',
+                'message': 'unknown or expired plan token; run a new preview'}
+    if plan['consumedByJobId'] is not None:
+        job = store.get_maintenance_job(plan['consumedByJobId'])
+        if job is not None:
+            return {'job': job, 'alreadyStarted': True}
+        return {'errorCode': 'archive_plan_already_consumed',
+                'message': 'plan token was already executed'}
+    if plan['expiresAtMonotonic'] <= time.monotonic():
+        return {'errorCode': 'archive_plan_expired',
+                'message': 'plan token expired; run a new preview'}
+    if plan['serverInstanceId'] != store_env.get('_server_instance_id'):
+        return {'errorCode': 'archive_plan_stale',
+                'message': 'plan token belongs to another backend instance'}
+
+    job = store.create_maintenance_job(
+        job_type='archive_copy',
+        requested_policy=plan['policy'],
+    )
+    plan['consumedByJobId'] = job['jobId']
+    thread = threading.Thread(
+        target=_run_archive_copy_job,
+        args=(store_env, job['jobId'], plan),
+        name=f'archive-copy-{job["jobId"]}',
+        daemon=True,
+    )
+    thread.start()
+    return {'job': job, 'alreadyStarted': False}
+
+
+def _run_archive_copy_job(store_env, job_id, plan):
+    store = store_env.get('store')
+    if store is None:
+        return
+    guard = portfolio_maintenance.acquire_maintenance(store_env)
+    if guard is None:
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code='maintenance_busy',
+                error_message='another maintenance task is running',
+            )
+        except Exception:
+            logger.exception('failed to mark archive job busy')
+        return
+    try:
+        store.start_maintenance_job(job_id)
+        summary = portfolio_archive.run_copy_job(store_env, guard, job_id, plan)
+        status = 'canceled' if summary.get('canceled') else 'completed'
+        store.finish_maintenance_job(job_id, status=status, summary=summary)
+    except PortfolioStoreError as exc:
+        logger.warning('archive copy job %s failed: %s (%s)',
+                       job_id, exc, exc.code)
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code=exc.code,
+                error_message='archive copy failed; see server log',
+            )
+        except Exception:
+            logger.exception('failed to record archive-copy failure')
+    except Exception:
+        logger.exception('archive copy job %s crashed', job_id)
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code='internal_store_error',
+                error_message='archive copy failed; see server log',
+            )
+        except Exception:
+            logger.exception('failed to record archive-copy failure')
+    finally:
+        guard.release()
+
+
 def _start_exact_stats_job(store_env):
     """Create the job row, then run the scan on a daemon thread under the
     shared maintenance lock. The creation ACK and the job outcome are two
@@ -308,10 +515,10 @@ def _start_exact_stats_job(store_env):
 
 def _run_exact_stats_job(store_env, job_id):
     store = store_env.get('store')
-    lock = store_env.get('_maintenance_lock')
-    if store is None or lock is None:
+    if store is None:
         return
-    if not lock.acquire(blocking=False):
+    guard = portfolio_maintenance.acquire_maintenance(store_env)
+    if guard is None:
         try:
             store.finish_maintenance_job(
                 job_id, status='failed', error_code='maintenance_busy',
@@ -343,7 +550,7 @@ def _run_exact_stats_job(store_env, job_id):
         except Exception:
             logger.exception('failed to record exact-stats failure')
     finally:
-        lock.release()
+        guard.release()
 
 
 def _request_id(data):

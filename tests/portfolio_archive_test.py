@@ -6,6 +6,8 @@ through the pure candidate rule and through PortfolioStore.prune_revisions to
 prove the rule matches today's retention behavior exactly.
 """
 
+import configparser
+import hashlib
 import pathlib
 import sqlite3
 import sys
@@ -342,6 +344,406 @@ class StorageMetricVocabularyTest(unittest.TestCase):
         self.assertEqual(byte_len, len(encoded))
         # The v1 formula (character count) demonstrably under-reports.
         self.assertLess(char_len, byte_len)
+
+
+class BatchSplitTest(unittest.TestCase):
+    def _manifest(self, old=(), deleted=()):
+        return {'oldRevisions': list(old), 'deletedDocuments': list(deleted)}
+
+    def _row(self, doc, revision, size=10):
+        return {'documentId': doc, 'revision': revision,
+                'savedAtUtc': _iso(NOW), 'payloadBytes': size,
+                'payloadSha256': 'x' * 64}
+
+    def test_old_revisions_pack_to_caps(self):
+        rows = [self._row('doc-a', n) for n in range(1, 8)]
+        batches = portfolio_archive.split_into_batches(
+            self._manifest(old=rows), max_rows=3, max_payload_bytes=10_000,
+        )
+        self.assertEqual([len(b['rows']) for b in batches], [3, 3, 1])
+
+    def test_byte_cap_flushes_before_overflow(self):
+        rows = [self._row('doc-a', n, size=60) for n in range(1, 5)]
+        batches = portfolio_archive.split_into_batches(
+            self._manifest(old=rows), max_rows=100, max_payload_bytes=150,
+        )
+        self.assertEqual([len(b['rows']) for b in batches], [2, 2])
+
+    def test_deleted_document_never_splits(self):
+        doc = {
+            'documentId': DOC_A, 'revisions': [
+                self._row(DOC_A, n) for n in range(1, 6)
+            ],
+        }
+        filler = [self._row('doc-fill', n) for n in range(1, 3)]
+        batches = portfolio_archive.split_into_batches(
+            self._manifest(old=filler, deleted=[doc]),
+            max_rows=4, max_payload_bytes=10_000,
+        )
+        # The 5-revision document exceeds max_rows: it gets its own
+        # oversized batch instead of splitting.
+        doc_batches = [
+            b for b in batches
+            if any(row['documentId'] == DOC_A for row in b['rows'])
+        ]
+        self.assertEqual(len(doc_batches), 1)
+        self.assertEqual(len(doc_batches[0]['rows']), 5)
+        self.assertTrue(doc_batches[0]['oversized'])
+
+
+class ArchivePathSafetyTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.archive_dir = pathlib.Path(self._tmp.name) / 'archives'
+        self.archive_dir.mkdir()
+
+    def test_valid_id_resolves_inside_dir(self):
+        path = portfolio_archive.archive_path_for_id(
+            self.archive_dir, 'portfolio-archive-2026-001'
+        )
+        self.assertEqual(path.parent, self.archive_dir)
+
+    def test_malformed_ids_rejected(self):
+        for bad in ('../evil', 'portfolio-archive-2026-001/../x',
+                    '/etc/passwd', 'portfolio-archive-26-1', '',
+                    'portfolio-archive-2026-0001', None, 123):
+            with self.assertRaises(portfolio_archive.ArchiveNotFoundError):
+                portfolio_archive.archive_path_for_id(self.archive_dir, bad)
+
+    def test_symlink_escape_rejected(self):
+        outside = pathlib.Path(self._tmp.name) / 'outside.db'
+        outside.write_bytes(b'x')
+        link = self.archive_dir / 'portfolio-archive-2026-002.db'
+        link.symlink_to(outside)
+        with self.assertRaises(portfolio_archive.ArchiveNotFoundError):
+            portfolio_archive.archive_path_for_id(
+                self.archive_dir, 'portfolio-archive-2026-002'
+            )
+
+
+import portfolio_archive
+import portfolio_maintenance
+import portfolio_store_ws
+
+
+def make_archive_env(tmpdir, *, now=NOW):
+    """Store env over a temp DB with a fixed clock, seeded with one live
+    document (8 revisions across days, Chinese payloads mixed in) and one
+    soft-deleted document past the 30-day grace."""
+    config = configparser.ConfigParser()
+    config.read_string(
+        '[portfolio_store]\n'
+        f'db_path = {pathlib.Path(tmpdir) / "portfolio.db"}\n'
+        'backup_interval_hours = 0\n'
+    )
+    env = portfolio_store_ws.create_store_env(config)
+    db_path = pathlib.Path(tmpdir) / 'portfolio.db'
+
+    clock = FakeClock(now - timedelta(days=60))
+    seeder = PortfolioStore(db_path, now=clock).initialize()
+    revision = None
+    for n in range(1, 9):
+        result = seeder.save_workspace(
+            document_id=DOC_A, title='SPY workspace',
+            payload=_payload(note=f'第{n}版' if n % 2 else f'rev {n}'),
+            save_token=_token(n), expected_revision=revision,
+        )
+        revision = result['revision']
+        clock.advance(days=1)
+    clock.current = now - timedelta(days=45)
+    seeder.save_workspace(
+        document_id='doc-deleted-1111-4111-8111-111111111111',
+        title='已删除工作区', payload=_payload(underlyingSymbol='QQQ'),
+        save_token=_token(901),
+    )
+    seeder.save_workspace(
+        document_id='doc-deleted-1111-4111-8111-111111111111',
+        title='已删除工作区', payload=_payload(underlyingSymbol='QQQ', note='二'),
+        save_token=_token(902), expected_revision=1,
+    )
+    seeder.delete_document('doc-deleted-1111-4111-8111-111111111111', 2)
+
+    env['store'] = PortfolioStore(db_path, now=lambda: now)
+    env['store'].initialize()
+    env['available'] = True
+    env['_initialized'] = True
+    return env
+
+
+ARCHIVE_POLICY = {
+    'revisionKeepRecent': 2,
+    'revisionKeepDailyDays': 0,
+    'archiveDeletedAfterDays': 30,
+}
+
+
+def make_plan(env, policy=None):
+    store = env['store']
+    preview = portfolio_archive.build_archive_preview(
+        store, policy=dict(policy or ARCHIVE_POLICY)
+    )
+    preview['fingerprint'] = portfolio_archive.compute_generation_fingerprint(
+        preview, install_id=store.ensure_install_id(),
+        created_at_utc='2026-08-15T00:00:00.000Z', nonce='test-nonce',
+    )
+    return preview
+
+
+def run_job(env, plan):
+    store = env['store']
+    job = store.create_maintenance_job(job_type='archive_copy')
+    guard = portfolio_maintenance.acquire_maintenance(env)
+    assert guard is not None
+    try:
+        store.start_maintenance_job(job['jobId'])
+        summary = portfolio_archive.run_copy_job(
+            env, guard, job['jobId'], plan
+        )
+        store.finish_maintenance_job(
+            job['jobId'], status='completed', summary=summary
+        )
+        return summary
+    finally:
+        guard.release()
+
+
+def active_tables_digest(db_path):
+    """Stable digest of every workspace table's contents — the copy-only
+    invariant is that this NEVER changes."""
+    conn = sqlite3.connect(db_path)
+    try:
+        digest = []
+        for table in ('workspace_documents', 'workspace_revisions',
+                      'workspace_save_receipts', 'workspace_archive_entries',
+                      'workspace_archive_tombstones'):
+            rows = conn.execute(
+                f'SELECT * FROM {table} ORDER BY 1, 2'
+            ).fetchall()
+            digest.append((table, rows))
+        return repr(digest)
+    finally:
+        conn.close()
+
+
+class CopyOnlyJobTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmpdir = self._tmp.name
+        self.env = make_archive_env(self.tmpdir)
+        self.store = self.env['store']
+        self.db_path = pathlib.Path(self.store.db_path)
+        self.archive_dir = self.db_path.parent / 'archives'
+
+    def _shard_conn(self, archive_id='portfolio-archive-2026-001'):
+        return sqlite3.connect(self.archive_dir / f'{archive_id}.db')
+
+    def test_copy_job_copies_verifies_and_never_touches_active(self):
+        before = active_tables_digest(self.db_path)
+        plan = make_plan(self.env)
+        self.assertEqual(plan['totals']['oldRevisionCount'], 6)  # 8 revisions minus kept {7,8}
+        self.assertEqual(plan['totals']['deletedDocumentCount'], 1)
+        self.assertEqual(plan['totals']['revisionCount'], 8)
+
+        summary = run_job(self.env, plan)
+        self.assertEqual(summary['copiedRevisions'], 8)
+        self.assertTrue(summary['copyOnly'])
+        self.assertEqual(summary['skipped'], [])
+        self.assertEqual(active_tables_digest(self.db_path), before)
+
+        conn = self._shard_conn(summary['archiveId'])
+        try:
+            statuses = {row[0] for row in conn.execute(
+                'SELECT status FROM archive_batches'
+            )}
+            self.assertEqual(statuses, {'verified'})
+            archived = conn.execute(
+                'SELECT count(*) FROM archived_revisions'
+            ).fetchone()[0]
+            self.assertEqual(archived, 8)
+            # Byte-for-byte payload parity with the active database.
+            for doc_id, revision, sha, payload in conn.execute(
+                'SELECT document_id, revision, payload_sha256, payload_json '
+                'FROM archived_revisions'
+            ):
+                active = sqlite3.connect(self.db_path)
+                try:
+                    row = active.execute(
+                        'SELECT payload_sha256, payload_json '
+                        'FROM workspace_revisions '
+                        'WHERE document_id = ? AND revision = ?',
+                        (doc_id, revision),
+                    ).fetchone()
+                finally:
+                    active.close()
+                self.assertIsNotNone(row)
+                self.assertEqual(row[0], sha)
+                self.assertEqual(row[1], payload)
+                self.assertEqual(
+                    hashlib.sha256(payload.encode('utf-8')).hexdigest(), sha
+                )
+        finally:
+            conn.close()
+
+        registry = self.store.list_archive_registry()
+        self.assertEqual(len(registry), 1)
+        self.assertEqual(registry[0]['status'], 'active')
+        self.assertEqual(registry[0]['revision_count'], 8)
+        self.assertEqual(registry[0]['last_verify_status'], 'ok')
+
+        # Recovery snapshot exists, is verified, and restores.
+        from portfolio_store import restore_database
+        snapshots = list(
+            (self.db_path.parent / 'maintenance-backups').glob(
+                'pre-archive-*.db'
+            )
+        )
+        self.assertEqual(len(snapshots), 1)
+        restored_path = pathlib.Path(self.tmpdir) / 'restored.db'
+        restore_database(snapshots[0], restored_path)
+        PortfolioStore(restored_path).initialize().quick_check()
+
+    def test_second_run_is_idempotent_no_duplicates(self):
+        first = run_job(self.env, make_plan(self.env))
+        before = active_tables_digest(self.db_path)
+        second = run_job(self.env, make_plan(self.env))
+        self.assertEqual(active_tables_digest(self.db_path), before)
+        conn = self._shard_conn(first['archiveId'])
+        try:
+            archived = conn.execute(
+                'SELECT count(*) FROM archived_revisions'
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(archived, 8)  # replays skipped, nothing duplicated
+
+    def test_conflicting_existing_row_aborts_batch(self):
+        run_job(self.env, make_plan(self.env))
+        conn = self._shard_conn()
+        try:
+            # Forge a conflicting copy of a row the next run will touch:
+            # same PK, different hash.
+            conn.execute(
+                'UPDATE archived_revisions SET payload_sha256 = ? '
+                'WHERE revision = 1', ('f' * 64,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        before = active_tables_digest(self.db_path)
+        with self.assertRaises(portfolio_archive.ArchiveConflictError):
+            run_job(self.env, make_plan(self.env))
+        self.assertEqual(active_tables_digest(self.db_path), before)
+
+    def test_save_after_preview_makes_plan_stale(self):
+        plan = make_plan(self.env)
+        self.store.save_workspace(
+            document_id=DOC_A, title='SPY workspace',
+            payload=_payload(note='post-preview'), save_token=_token(500),
+            expected_revision=8,
+        )
+        before = active_tables_digest(self.db_path)
+        with self.assertRaises(portfolio_archive.ArchivePlanStaleError):
+            run_job(self.env, plan)
+        self.assertEqual(active_tables_digest(self.db_path), before)
+        self.assertEqual(list(self.archive_dir.glob('*.db')), [])
+
+    def test_undelete_after_preview_makes_plan_stale(self):
+        plan = make_plan(self.env)
+        self.store.undelete_document(
+            'doc-deleted-1111-4111-8111-111111111111', 2
+        )
+        with self.assertRaises(portfolio_archive.ArchivePlanStaleError):
+            run_job(self.env, plan)
+        self.assertEqual(list(self.archive_dir.glob('*.db')), [])
+
+    def test_cancel_between_batches_stops_cleanly(self):
+        self.env['_archive_max_rows_per_batch'] = 2  # force several batches
+        plan = make_plan(self.env)
+        store = self.store
+        job = store.create_maintenance_job(job_type='archive_copy')
+        store.start_maintenance_job(job['jobId'])
+        store.request_job_cancel(job['jobId'])
+        guard = portfolio_maintenance.acquire_maintenance(self.env)
+        try:
+            summary = portfolio_archive.run_copy_job(
+                self.env, guard, job['jobId'], plan
+            )
+        finally:
+            guard.release()
+        self.assertTrue(summary['canceled'])
+        self.assertEqual(summary['copiedRevisions'], 0)
+
+    def test_dead_batch_rows_are_cleaned_and_not_reused(self):
+        first = run_job(self.env, make_plan(self.env))
+        conn = self._shard_conn(first['archiveId'])
+        try:
+            # Simulate a dead foreign writer: a failed batch that still
+            # holds payload rows.
+            conn.execute(
+                "INSERT INTO archive_batches (batch_id, status, policy_json, "
+                "preview_fingerprint, source_schema_version, created_at_utc) "
+                "VALUES ('batch-dead000000000000000000', 'failed', '{}', 'x', "
+                "2, '2026-08-01T00:00:00.000Z')"
+            )
+            conn.execute(
+                'INSERT INTO archived_revisions (document_id, revision, '
+                'save_token, payload_schema_version, payload_sha256, '
+                'payload_json, saved_at_utc, payload_bytes, '
+                'archive_batch_id, archived_at_utc) VALUES '
+                "('doc-ghost-9999-4999-8999-999999999999', 1, "
+                "'save-ghost01-4000-8000-000000000000', 1, 'a1', '{}', "
+                "'2026-08-01T00:00:00.000Z', 2, "
+                "'batch-dead000000000000000000', '2026-08-01T00:00:00.000Z')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        summary = run_job(self.env, make_plan(self.env))
+        self.assertIn('batch-dead000000000000000000',
+                      summary['cleanedDeadBatches'])
+        conn = self._shard_conn(first['archiveId'])
+        try:
+            ghost = conn.execute(
+                'SELECT count(*) FROM archived_revisions '
+                "WHERE archive_batch_id = 'batch-dead000000000000000000'"
+            ).fetchone()[0]
+            dead_status = conn.execute(
+                'SELECT status FROM archive_batches '
+                "WHERE batch_id = 'batch-dead000000000000000000'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(ghost, 0)
+        self.assertEqual(dead_status, 'failed')
+        # Registry stats exclude the dead batch's rows.
+        registry = self.store.list_archive_registry()
+        self.assertEqual(registry[0]['revision_count'], 8)
+
+    def test_rollover_seals_full_shard_and_creates_next(self):
+        run_job(self.env, make_plan(self.env))
+        # Force rollover: any real file exceeds a 1-byte cap.
+        self.env['_archive_rollover_bytes'] = 1
+        shard, archive_id, _ = portfolio_archive.select_writable_shard(
+            self.store, self.archive_dir, rollover_bytes=1,
+        )
+        self.assertEqual(archive_id, 'portfolio-archive-2026-002')
+        registry = {
+            row['archive_id']: row for row in self.store.list_archive_registry()
+        }
+        self.assertEqual(
+            registry['portfolio-archive-2026-001']['status'], 'sealed'
+        )
+        self.assertEqual(
+            registry['portfolio-archive-2026-002']['status'], 'active'
+        )
+        # Sealed shards carry the sealed stamp inside the file too.
+        meta = portfolio_archive.ArchiveShard(
+            self.archive_dir / 'portfolio-archive-2026-001.db'
+        ).meta()
+        self.assertIsNotNone(meta['sealed_at_utc'])
 
 
 if __name__ == '__main__':

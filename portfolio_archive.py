@@ -1,23 +1,38 @@
-"""Archive policy layer for the workspace database admin page.
+"""Archive layer for the workspace database admin page.
 
-Phase 0 scope (see CODE PLAN/PORTFOLIO_DATABASE_ADMIN_PAGE_PLAN.md): pure,
-deterministic candidate rules and the frozen storage-metric vocabulary. No
-SQLite, no I/O, no clock reads — callers inject `now`. The batch state
-machine, shard schema, and manifest plumbing arrive in later phases and must
-build on these exact rules rather than reimplementing them.
+Two halves (see CODE PLAN/PORTFOLIO_DATABASE_ADMIN_PAGE_PLAN.md):
 
-Candidate semantics are storage-lifecycle only. Nothing in this module reads
-business payload fields: an expired option inside a payload never makes its
-document a candidate. The only two candidate classes are
+1. Pure, deterministic candidate rules and the frozen storage-metric
+   vocabulary (phase 0). These take injected clocks and never read payload
+   business fields: an expired option inside a payload never makes its
+   document a candidate.
+2. The archive shard machinery (phase 3): shard schema and rollover, safe
+   archive-id -> path resolution, preview manifests with generation
+   fingerprints, the copy-only batch executor with writer fencing and
+   verification, and dead-batch cleanup. In this phase NOTHING is ever
+   deleted from the active database — the executor stops at `verified`.
 
-1. non-current revisions of a live document that fall outside the retention
-   rule (current + most recent N + last-save-per-UTC-day inside the daily
-   window) — the same rule `PortfolioStore.prune_revisions` applies today;
-2. whole soft-deleted documents whose recovery grace period has elapsed
-   (strictly more than `archive_deleted_after_days` days since deletion).
+Copy jobs run on worker threads under the cross-process maintenance guard
+(portfolio_maintenance.py); every shard write transaction re-checks the
+writer fence so a superseded process cannot keep writing.
 """
 
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from portfolio_store import (
+    DatabaseCorruptError,
+    MAINTENANCE_BACKUP_DIRNAME,
+    PortfolioStoreError,
+    SCHEMA_USER_VERSION,
+)
 
 # ---------------------------------------------------------------------------
 # Defaults (config keys live under [portfolio_store]; the retention and
@@ -219,8 +234,6 @@ def compute_deleted_document_candidates(documents, *,
 
 
 def _default_keep_recent():
-    # Late import keeps this module free of a hard dependency cycle while
-    # still sourcing the single existing retention default.
     from portfolio_store import DEFAULT_REVISION_KEEP_RECENT
     return DEFAULT_REVISION_KEEP_RECENT
 
@@ -228,3 +241,1025 @@ def _default_keep_recent():
 def _default_keep_daily_days():
     from portfolio_store import DEFAULT_REVISION_KEEP_DAILY_DAYS
     return DEFAULT_REVISION_KEEP_DAILY_DAYS
+
+
+# ===========================================================================
+# Phase 3: archive shards and the copy-only batch executor
+# ===========================================================================
+
+ARCHIVE_SCHEMA_VERSION = 1
+ARCHIVE_DIRNAME = 'archives'
+ARCHIVE_ID_RE = re.compile(r'^portfolio-archive-(\d{4})-(\d{3})$')
+_WRITER_FENCE_NAME = 'writer'
+
+# Free-space precheck margin on top of "archive copy + recovery snapshot".
+DISK_SPACE_MARGIN_BYTES = 64 * 1024 * 1024
+
+# Test seam: fault-injection tests replace this to simulate a full disk.
+_disk_usage = shutil.disk_usage
+
+
+class ArchiveError(PortfolioStoreError):
+    code = 'archive_copy_failed'
+
+
+class ArchiveConflictError(ArchiveError):
+    code = 'archive_conflict'
+
+
+class ArchivePlanStaleError(ArchiveError):
+    code = 'archive_plan_stale'
+
+
+class ArchiveVerificationError(ArchiveError):
+    code = 'archive_verification_failed'
+
+
+class ArchiveNotFoundError(ArchiveError):
+    code = 'archive_not_found'
+
+
+class InsufficientDiskSpaceError(ArchiveError):
+    code = 'insufficient_disk_space'
+
+
+class MaintenanceLeaseLostError(ArchiveError):
+    code = 'maintenance_busy'
+
+
+_ARCHIVE_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE archive_meta (
+        archive_id              TEXT NOT NULL,
+        archive_schema_version  INTEGER NOT NULL,
+        source_install_id       TEXT NOT NULL,
+        created_at_utc          TEXT NOT NULL,
+        sealed_at_utc           TEXT,
+        part_year               INTEGER NOT NULL,
+        part_number             INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE archive_batches (
+        batch_id                  TEXT PRIMARY KEY,
+        status                    TEXT NOT NULL CHECK (status IN (
+            'copying', 'copied', 'verified', 'main_committed',
+            'cancel_requested', 'cleanup_pending', 'canceled', 'failed')),
+        owner_server_instance_id  TEXT,
+        lease_fencing_token       INTEGER,
+        policy_json               TEXT NOT NULL,
+        preview_fingerprint       TEXT NOT NULL,
+        document_count            INTEGER NOT NULL DEFAULT 0,
+        revision_count            INTEGER NOT NULL DEFAULT 0,
+        payload_bytes             INTEGER NOT NULL DEFAULT 0,
+        manifest_sha256           TEXT,
+        source_schema_version     INTEGER NOT NULL,
+        created_at_utc            TEXT NOT NULL,
+        verified_at_utc           TEXT,
+        committed_at_utc          TEXT
+    )
+    """,
+    """
+    CREATE TABLE archived_documents (
+        document_id       TEXT NOT NULL,
+        archive_batch_id  TEXT NOT NULL,
+        archive_kind      TEXT NOT NULL CHECK (archive_kind IN (
+            'partial_history', 'deleted_document')),
+        title             TEXT NOT NULL,
+        symbol            TEXT NOT NULL,
+        market_data_mode  TEXT NOT NULL,
+        last_revision     INTEGER,
+        deleted_at_utc    TEXT,
+        PRIMARY KEY (document_id, archive_batch_id)
+    )
+    """,
+    """
+    CREATE TABLE archived_revisions (
+        document_id             TEXT NOT NULL,
+        revision                INTEGER NOT NULL,
+        save_token              TEXT NOT NULL UNIQUE,
+        payload_schema_version  INTEGER NOT NULL,
+        payload_sha256          TEXT NOT NULL,
+        payload_json            TEXT NOT NULL,
+        saved_at_utc            TEXT NOT NULL,
+        payload_bytes           INTEGER NOT NULL,
+        archive_batch_id        TEXT NOT NULL,
+        archived_at_utc         TEXT NOT NULL,
+        PRIMARY KEY (document_id, revision)
+    )
+    """,
+    """
+    CREATE INDEX idx_archived_revisions_batch
+        ON archived_revisions(archive_batch_id)
+    """,
+    """
+    CREATE TABLE archive_writer_fence (
+        fence_name          TEXT PRIMARY KEY,
+        main_fencing_token  INTEGER NOT NULL,
+        server_instance_id  TEXT NOT NULL,
+        updated_at_utc      TEXT NOT NULL
+    )
+    """,
+)
+
+# Batch states whose rows are trustworthy: safe replay may only reuse rows
+# belonging to these batches; everything else is dead weight to clean up.
+_GOOD_BATCH_STATES = ('copied', 'verified', 'main_committed')
+
+
+def resolve_archive_dir(db_path, config=None, env=None):
+    """OPTION_COMBO_PORTFOLIO_ARCHIVE_DIR > config archive_dir > sibling
+    `archives/` next to the active database (same local app-data volume)."""
+    env = env if env is not None else os.environ
+    explicit = (env.get('OPTION_COMBO_PORTFOLIO_ARCHIVE_DIR') or '').strip()
+    if explicit:
+        return Path(explicit)
+    if config is not None:
+        configured = (config.get('portfolio_store', 'archive_dir',
+                                 fallback='') or '').strip()
+        if configured:
+            return Path(configured)
+    return Path(db_path).parent / ARCHIVE_DIRNAME
+
+
+def archive_path_for_id(archive_dir, archive_id):
+    """Resolve an archive id to its shard path. The id must match the strict
+    pattern and the resolved path must stay inside archive_dir — `..`,
+    absolute paths, and symlink escapes are structurally impossible."""
+    if not isinstance(archive_id, str) or not ARCHIVE_ID_RE.match(archive_id):
+        raise ArchiveNotFoundError('unknown archive id format')
+    base = Path(archive_dir)
+    candidate = base / f'{archive_id}.db'
+    # Compare fully-resolved forms so symlinked shard files cannot escape,
+    # while the returned path keeps the caller's directory spelling.
+    if candidate.resolve().parent != base.resolve():
+        raise ArchiveNotFoundError('archive path escapes the archive directory')
+    return candidate
+
+
+class ArchiveShard:
+    """One archive shard database. Mirrors PortfolioStore's connection
+    hygiene; every operation opens and closes its own connection."""
+
+    def __init__(self, path, *, now=None):
+        self._path = Path(path)
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    @property
+    def path(self):
+        return self._path
+
+    def _now_iso(self):
+        now = self._now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return now.astimezone(timezone.utc).isoformat(
+            timespec='milliseconds'
+        ).replace('+00:00', 'Z')
+
+    def _connect(self):
+        conn = None
+        try:
+            conn = sqlite3.connect(self._path, isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            conn.execute('PRAGMA journal_mode = WAL')
+            conn.execute('PRAGMA synchronous = FULL')
+            conn.execute('PRAGMA busy_timeout = 5000')
+            return conn
+        except sqlite3.Error as exc:
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            raise ArchiveError(f'cannot open archive shard: {exc}') from exc
+
+    def create(self, *, archive_id, source_install_id, part_year, part_number):
+        if self._path.exists():
+            raise ArchiveError('archive shard already exists; refusing to recreate')
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        conn = None
+        try:
+            conn = sqlite3.connect(self._path, isolation_level=None)
+            conn.execute('PRAGMA auto_vacuum = INCREMENTAL')
+            conn.execute('PRAGMA journal_mode = WAL')
+            conn.execute('PRAGMA synchronous = FULL')
+            conn.execute('BEGIN IMMEDIATE')
+            for statement in _ARCHIVE_SCHEMA_STATEMENTS:
+                conn.execute(statement)
+            conn.execute(
+                'INSERT INTO archive_meta (archive_id, archive_schema_version, '
+                'source_install_id, created_at_utc, sealed_at_utc, part_year, '
+                'part_number) VALUES (?, ?, ?, ?, NULL, ?, ?)',
+                (archive_id, ARCHIVE_SCHEMA_VERSION, source_install_id,
+                 self._now_iso(), int(part_year), int(part_number)),
+            )
+            conn.execute(f'PRAGMA user_version = {ARCHIVE_SCHEMA_VERSION}')
+            conn.execute('COMMIT')
+        except sqlite3.Error as exc:
+            if conn is not None and conn.in_transaction:
+                conn.execute('ROLLBACK')
+            raise ArchiveError(f'archive shard creation failed: {exc}') from exc
+        finally:
+            if conn is not None:
+                conn.close()
+        return self
+
+    def quick_check(self):
+        conn = self._connect()
+        try:
+            row = conn.execute('PRAGMA quick_check').fetchone()
+            if row is None or row[0] != 'ok':
+                raise DatabaseCorruptError(
+                    f'archive quick_check reported: {row[0] if row else "none"}'
+                )
+            return 'ok'
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    def meta(self):
+        conn = self._connect()
+        try:
+            row = conn.execute('SELECT * FROM archive_meta').fetchone()
+            if row is None:
+                raise DatabaseCorruptError('archive shard has no meta row')
+            return dict(row)
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    def seal(self):
+        conn = self._connect()
+        try:
+            conn.execute(
+                'UPDATE archive_meta SET sealed_at_utc = ? '
+                'WHERE sealed_at_utc IS NULL', (self._now_iso(),),
+            )
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    def raise_writer_fence(self, *, instance_id, fencing_token):
+        """Claim write access for this main-DB fencing token. A holder with
+        a NEWER token has already superseded us: refuse."""
+        conn = self._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                row = conn.execute(
+                    'SELECT main_fencing_token FROM archive_writer_fence '
+                    'WHERE fence_name = ?', (_WRITER_FENCE_NAME,),
+                ).fetchone()
+                if row is not None and row['main_fencing_token'] > int(fencing_token):
+                    raise MaintenanceLeaseLostError(
+                        'archive shard is fenced by a newer maintenance holder'
+                    )
+                conn.execute(
+                    'INSERT INTO archive_writer_fence (fence_name, '
+                    'main_fencing_token, server_instance_id, updated_at_utc) '
+                    'VALUES (?, ?, ?, ?) '
+                    'ON CONFLICT(fence_name) DO UPDATE SET '
+                    'main_fencing_token = excluded.main_fencing_token, '
+                    'server_instance_id = excluded.server_instance_id, '
+                    'updated_at_utc = excluded.updated_at_utc',
+                    (_WRITER_FENCE_NAME, int(fencing_token), instance_id,
+                     self._now_iso()),
+                )
+                conn.execute('COMMIT')
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute('ROLLBACK')
+                raise
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _check_fence(conn, instance_id, fencing_token):
+        row = conn.execute(
+            'SELECT main_fencing_token, server_instance_id '
+            'FROM archive_writer_fence WHERE fence_name = ?',
+            (_WRITER_FENCE_NAME,),
+        ).fetchone()
+        if row is None or row['main_fencing_token'] != int(fencing_token) \
+                or row['server_instance_id'] != instance_id:
+            raise MaintenanceLeaseLostError(
+                'archive writer fence no longer belongs to this worker'
+            )
+
+    def cleanup_dead_batches(self):
+        """Purge payload rows of every batch that is not in a good state.
+        The batch row survives as an audit stub (status failed/canceled);
+        its rows never count in stats and are never reused by safe replay.
+        Only callable before sealing."""
+        conn = self._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                sealed = conn.execute(
+                    'SELECT sealed_at_utc FROM archive_meta'
+                ).fetchone()
+                if sealed is not None and sealed['sealed_at_utc'] is not None:
+                    raise ArchiveError('cannot clean a sealed archive shard')
+                dead = [
+                    row['batch_id'] for row in conn.execute(
+                        'SELECT batch_id FROM archive_batches '
+                        'WHERE status NOT IN (?, ?, ?)', _GOOD_BATCH_STATES,
+                    )
+                ]
+                for batch_id in dead:
+                    conn.execute(
+                        "UPDATE archive_batches SET status = 'cleanup_pending' "
+                        'WHERE batch_id = ?', (batch_id,),
+                    )
+                    conn.execute(
+                        'DELETE FROM archived_revisions '
+                        'WHERE archive_batch_id = ?', (batch_id,),
+                    )
+                    conn.execute(
+                        'DELETE FROM archived_documents '
+                        'WHERE archive_batch_id = ?', (batch_id,),
+                    )
+                    conn.execute(
+                        "UPDATE archive_batches SET status = 'failed', "
+                        'document_count = 0, revision_count = 0, '
+                        'payload_bytes = 0 WHERE batch_id = ?', (batch_id,),
+                    )
+                conn.execute('COMMIT')
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute('ROLLBACK')
+                raise
+            return dead
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    def copy_batch(self, *, batch_id, kind_rows, documents, policy,
+                   fingerprint, instance_id, fencing_token,
+                   source_schema_version=SCHEMA_USER_VERSION):
+        """Insert one batch atomically: batch row, documents, revisions.
+
+        `kind_rows` is a list of dicts with documentId, revision, saveToken,
+        payloadSchemaVersion, payloadSha256, payloadJson, savedAtUtc,
+        payloadBytes. Idempotent replay: an existing (document, revision)
+        with identical sha+bytes in a GOOD batch is skipped; any mismatch
+        aborts the whole batch with archive_conflict."""
+        now_iso = self._now_iso()
+        conn = self._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                self._check_fence(conn, instance_id, fencing_token)
+                inserted_rows = 0
+                inserted_bytes = 0
+                for row in kind_rows:
+                    existing = conn.execute(
+                        'SELECT r.payload_sha256, r.payload_bytes, b.status '
+                        'FROM archived_revisions r '
+                        'JOIN archive_batches b ON b.batch_id = r.archive_batch_id '
+                        'WHERE r.document_id = ? AND r.revision = ?',
+                        (row['documentId'], row['revision']),
+                    ).fetchone()
+                    if existing is not None:
+                        if (existing['payload_sha256'] == row['payloadSha256']
+                                and existing['payload_bytes'] == row['payloadBytes']
+                                and existing['status'] in _GOOD_BATCH_STATES):
+                            continue  # safe replay of an earlier good copy
+                        raise ArchiveConflictError(
+                            f'archived revision {row["documentId"]}#'
+                            f'{row["revision"]} conflicts with an existing copy'
+                        )
+                    try:
+                        conn.execute(
+                            'INSERT INTO archived_revisions (document_id, '
+                            'revision, save_token, payload_schema_version, '
+                            'payload_sha256, payload_json, saved_at_utc, '
+                            'payload_bytes, archive_batch_id, archived_at_utc) '
+                            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                            (row['documentId'], row['revision'],
+                             row['saveToken'], row['payloadSchemaVersion'],
+                             row['payloadSha256'], row['payloadJson'],
+                             row['savedAtUtc'], row['payloadBytes'],
+                             batch_id, now_iso),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        raise ArchiveConflictError(
+                            f'archive uniqueness violated: {exc}'
+                        ) from exc
+                    inserted_rows += 1
+                    inserted_bytes += row['payloadBytes']
+                for doc in documents:
+                    conn.execute(
+                        'INSERT OR REPLACE INTO archived_documents '
+                        '(document_id, archive_batch_id, archive_kind, title, '
+                        'symbol, market_data_mode, last_revision, '
+                        'deleted_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                        (doc['documentId'], batch_id, doc['archiveKind'],
+                         doc['title'], doc['symbol'], doc['marketDataMode'],
+                         doc.get('lastRevision'), doc.get('deletedAtUtc')),
+                    )
+                manifest_sha = _manifest_hash(kind_rows)
+                conn.execute(
+                    'INSERT INTO archive_batches (batch_id, status, '
+                    'owner_server_instance_id, lease_fencing_token, '
+                    'policy_json, preview_fingerprint, document_count, '
+                    'revision_count, payload_bytes, manifest_sha256, '
+                    'source_schema_version, created_at_utc) '
+                    "VALUES (?, 'copied', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (batch_id, instance_id, int(fencing_token),
+                     json.dumps(policy, sort_keys=True), fingerprint,
+                     len(documents), len(kind_rows),
+                     sum(row['payloadBytes'] for row in kind_rows),
+                     manifest_sha, int(source_schema_version), now_iso),
+                )
+                conn.execute('COMMIT')
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute('ROLLBACK')
+                raise
+            return {'insertedRows': inserted_rows,
+                    'insertedBytes': inserted_bytes}
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    def verify_batch(self, batch_id, expected_rows):
+        """Re-read every batch row and verify sha/bytes/counts against the
+        expected manifest rows, then mark the batch verified."""
+        expected_by_key = {
+            (row['documentId'], row['revision']): row for row in expected_rows
+        }
+        conn = self._connect()
+        try:
+            batch = conn.execute(
+                'SELECT * FROM archive_batches WHERE batch_id = ?', (batch_id,),
+            ).fetchone()
+            if batch is None:
+                raise ArchiveVerificationError(f'batch {batch_id} missing')
+            stored = conn.execute(
+                'SELECT document_id, revision, payload_sha256, payload_json, '
+                'payload_bytes FROM archived_revisions '
+                'WHERE archive_batch_id = ?', (batch_id,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+        seen = set()
+        for row in stored:
+            key = (row['document_id'], row['revision'])
+            expected = expected_by_key.get(key)
+            if expected is None:
+                raise ArchiveVerificationError(
+                    f'unexpected archived row {key} in batch {batch_id}'
+                )
+            recomputed = hashlib.sha256(
+                row['payload_json'].encode('utf-8')
+            ).hexdigest()
+            byte_len = len(row['payload_json'].encode('utf-8'))
+            if (recomputed != expected['payloadSha256']
+                    or row['payload_sha256'] != expected['payloadSha256']
+                    or byte_len != expected['payloadBytes']
+                    or row['payload_bytes'] != expected['payloadBytes']):
+                raise ArchiveVerificationError(
+                    f'payload mismatch for archived row {key}'
+                )
+            seen.add(key)
+        # Rows satisfied by safe replay live in an earlier good batch; check
+        # them there rather than assuming this batch holds every row.
+        missing = set(expected_by_key) - seen
+        if missing:
+            conn = self._connect()
+            try:
+                for key in missing:
+                    other = conn.execute(
+                        'SELECT payload_sha256, payload_bytes '
+                        'FROM archived_revisions '
+                        'WHERE document_id = ? AND revision = ?', key,
+                    ).fetchone()
+                    expected = expected_by_key[key]
+                    if (other is None
+                            or other['payload_sha256'] != expected['payloadSha256']
+                            or other['payload_bytes'] != expected['payloadBytes']):
+                        raise ArchiveVerificationError(
+                            f'archived row {key} absent after copy'
+                        )
+            except sqlite3.Error as exc:
+                raise ArchiveError(str(exc)) from exc
+            finally:
+                conn.close()
+
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE archive_batches SET status = 'verified', "
+                'verified_at_utc = ? WHERE batch_id = ?',
+                (self._now_iso(), batch_id),
+            )
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    def stats(self):
+        """Counts and logical bytes over GOOD batches only."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                'SELECT count(*) AS revision_count, '
+                'COALESCE(SUM(r.payload_bytes), 0) AS payload_bytes '
+                'FROM archived_revisions r '
+                'JOIN archive_batches b ON b.batch_id = r.archive_batch_id '
+                'WHERE b.status IN (?, ?, ?)', _GOOD_BATCH_STATES,
+            ).fetchone()
+            return {
+                'revisionCount': row['revision_count'],
+                'logicalPayloadBytes': row['payload_bytes'],
+            }
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+
+def _manifest_hash(rows):
+    canonical = json.dumps(
+        sorted(
+            [
+                [row['documentId'], row['revision'], row['payloadSha256'],
+                 row['payloadBytes'], row['savedAtUtc']]
+                for row in rows
+            ],
+        ),
+        sort_keys=True, separators=(',', ':'),
+    )
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Preview manifests and generation fingerprints
+# ---------------------------------------------------------------------------
+
+def build_archive_preview(store, *, policy, now=None):
+    """Compute the full candidate manifest plus the generation fingerprint
+    inputs. Deterministic given the database contents and `now`."""
+    now = now if now is not None else store.now_utc()
+    snapshot = store.retention_snapshot()
+
+    old_revision_rows = []
+    document_states = {}
+    for doc in snapshot['liveDocuments']:
+        document_states[doc['documentId']] = {
+            'currentRevision': doc['currentRevision'],
+            'deletedAtUtc': None,
+        }
+        if not doc['revisions']:
+            continue
+        result = compute_revision_candidates(
+            doc['revisions'],
+            current_revision=doc['currentRevision'],
+            keep_recent=policy['revisionKeepRecent'],
+            keep_daily_days=policy['revisionKeepDailyDays'],
+            now=now,
+        )
+        for row in result['candidates']:
+            old_revision_rows.append({
+                'documentId': doc['documentId'],
+                'revision': row['revision'],
+                'savedAtUtc': row['savedAtUtc'],
+                'payloadBytes': row['payloadBytes'],
+                'payloadSha256': row['payloadSha256'],
+                'reason': row['reason'],
+            })
+
+    deleted_result = compute_deleted_document_candidates(
+        snapshot['deletedDocuments'],
+        archive_deleted_after_days=policy['archiveDeletedAfterDays'],
+        now=now,
+    )
+    deleted_documents = []
+    for doc in snapshot['deletedDocuments']:
+        document_states[doc['documentId']] = {
+            'currentRevision': doc['currentRevision'],
+            'deletedAtUtc': doc['deletedAtUtc'],
+        }
+    for doc in deleted_result['candidates']:
+        deleted_documents.append({
+            'documentId': doc['documentId'],
+            'title': doc['title'],
+            'symbol': doc['symbol'],
+            'marketDataMode': doc['marketDataMode'],
+            'deletedAtUtc': doc['deletedAtUtc'],
+            'lastRevision': doc['currentRevision'],
+            'revisions': [
+                {
+                    'documentId': doc['documentId'],
+                    'revision': row['revision'],
+                    'savedAtUtc': row['savedAtUtc'],
+                    'payloadBytes': row['payloadBytes'],
+                    'payloadSha256': row['payloadSha256'],
+                    'reason': 'deleted_document',
+                }
+                for row in doc['revisions']
+            ],
+        })
+
+    document_meta = {}
+    for doc in snapshot['liveDocuments'] + snapshot['deletedDocuments']:
+        document_meta[doc['documentId']] = {
+            'title': doc['title'],
+            'symbol': doc['symbol'],
+            'marketDataMode': doc['marketDataMode'],
+            'currentRevision': doc['currentRevision'],
+            'deletedAtUtc': doc['deletedAtUtc'],
+        }
+
+    all_rows = list(old_revision_rows)
+    for doc in deleted_documents:
+        all_rows.extend(doc['revisions'])
+    manifest_hash = _manifest_hash(all_rows)
+    return {
+        'policy': dict(policy),
+        'manifest': {
+            'oldRevisions': old_revision_rows,
+            'deletedDocuments': deleted_documents,
+        },
+        'manifestHash': manifest_hash,
+        'documentStates': document_states,
+        'documentMeta': document_meta,
+        'totals': {
+            'revisionCount': len(all_rows),
+            'payloadBytes': sum(row['payloadBytes'] for row in all_rows),
+            'oldRevisionCount': len(old_revision_rows),
+            'deletedDocumentCount': len(deleted_documents),
+        },
+    }
+
+
+def compute_generation_fingerprint(preview, *, install_id, created_at_utc,
+                                   nonce):
+    canonical = json.dumps({
+        'installId': install_id,
+        'schemaVersion': SCHEMA_USER_VERSION,
+        'manifestHash': preview['manifestHash'],
+        'documentStates': preview['documentStates'],
+        'policy': preview['policy'],
+        'createdAtUtc': created_at_utc,
+        'nonce': nonce,
+    }, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def split_into_batches(manifest, *, max_rows, max_payload_bytes):
+    """Split the manifest into copy batches. Old revisions pack up to the
+    caps; a whole deleted document never splits across batches — an
+    oversized document gets its own batch (flagged oversized)."""
+    max_rows = max(1, int(max_rows))
+    max_payload_bytes = max(1, int(max_payload_bytes))
+    batches = []
+    current = {'rows': [], 'documents': {}, 'bytes': 0, 'oversized': False}
+
+    def _flush():
+        nonlocal current
+        if current['rows']:
+            batches.append(current)
+        current = {'rows': [], 'documents': {}, 'bytes': 0, 'oversized': False}
+
+    for row in manifest['oldRevisions']:
+        row_cost = row['payloadBytes']
+        if current['rows'] and (
+                len(current['rows']) + 1 > max_rows
+                or current['bytes'] + row_cost > max_payload_bytes):
+            _flush()
+        current['rows'].append(row)
+        current['bytes'] += row_cost
+        current['documents'].setdefault(row['documentId'], 'partial_history')
+
+    for doc in manifest['deletedDocuments']:
+        doc_rows = doc['revisions']
+        doc_bytes = sum(row['payloadBytes'] for row in doc_rows)
+        oversized = len(doc_rows) > max_rows or doc_bytes > max_payload_bytes
+        fits = (not current['rows']) or (
+            len(current['rows']) + len(doc_rows) <= max_rows
+            and current['bytes'] + doc_bytes <= max_payload_bytes)
+        if oversized or not fits:
+            _flush()
+        current['rows'].extend(doc_rows)
+        current['bytes'] += doc_bytes
+        current['documents'][doc['documentId']] = 'deleted_document'
+        if oversized:
+            current['oversized'] = True
+            _flush()
+    _flush()
+    return batches
+
+
+# ---------------------------------------------------------------------------
+# Shard selection / rollover and the copy-only job executor
+# ---------------------------------------------------------------------------
+
+def _iso(now):
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(timezone.utc).isoformat(
+        timespec='milliseconds'
+    ).replace('+00:00', 'Z')
+
+
+def select_writable_shard(store, archive_dir, *, rollover_bytes):
+    """Pick (or create) the shard new batches write into. Rollover uses the
+    ACTUAL allocated file bytes — cleaned-up dead pages still occupy the
+    file, so a shard over the cap seals and rolls even when its logical
+    bytes look small. Returns (shard, archive_id, registry_row)."""
+    now = store.now_utc()
+    now_iso = _iso(now)
+    registry = store.list_archive_registry()
+
+    for row in sorted(registry, key=lambda r: r['archive_id'], reverse=True):
+        if row['status'] != 'active':
+            continue
+        path = archive_path_for_id(archive_dir, row['archive_id'])
+        if not path.exists():
+            store.upsert_archive_registry(
+                archive_id=row['archive_id'],
+                archive_schema_version=row['archive_schema_version'],
+                status=row['status'], created_at_utc=row['created_at_utc'],
+                sealed_at_utc=row['sealed_at_utc'],
+                last_verified_at_utc=row['last_verified_at_utc'],
+                last_verify_status=row['last_verify_status'],
+                file_bytes=row['file_bytes'],
+                logical_payload_bytes=row['logical_payload_bytes'],
+                revision_count=row['revision_count'],
+                missing_since_utc=row['missing_since_utc'] or now_iso,
+            )
+            continue
+        file_bytes = os.stat(path).st_size
+        if file_bytes >= rollover_bytes:
+            shard = ArchiveShard(path, now=store.now_utc)
+            shard.seal()
+            store.upsert_archive_registry(
+                archive_id=row['archive_id'],
+                archive_schema_version=row['archive_schema_version'],
+                status='sealed', created_at_utc=row['created_at_utc'],
+                sealed_at_utc=now_iso,
+                last_verified_at_utc=row['last_verified_at_utc'],
+                last_verify_status=row['last_verify_status'],
+                file_bytes=file_bytes,
+                logical_payload_bytes=row['logical_payload_bytes'],
+                revision_count=row['revision_count'],
+            )
+            continue
+        return ArchiveShard(path, now=store.now_utc), row['archive_id'], row
+
+    year = now.year
+    next_part = 1
+    for row in registry:
+        match = ARCHIVE_ID_RE.match(row['archive_id'])
+        if match and int(match.group(1)) == year:
+            next_part = max(next_part, int(match.group(2)) + 1)
+    archive_id = f'portfolio-archive-{year}-{next_part:03d}'
+    path = archive_path_for_id(archive_dir, archive_id)
+    shard = ArchiveShard(path, now=store.now_utc).create(
+        archive_id=archive_id,
+        source_install_id=store.ensure_install_id(),
+        part_year=year, part_number=next_part,
+    )
+    store.upsert_archive_registry(
+        archive_id=archive_id,
+        archive_schema_version=ARCHIVE_SCHEMA_VERSION,
+        status='active', created_at_utc=now_iso,
+        file_bytes=os.stat(path).st_size,
+    )
+    return shard, archive_id, None
+
+
+def apply_recovery_snapshot_retention(db_dir, *, now, keep=None, keep_days=None):
+    """Precise OR rule: a snapshot survives when it is among the newest
+    `keep` OR its age is at most `keep_days` days. Only files failing BOTH
+    conditions are deleted. Runs while the maintenance guard is held, so no
+    other job's snapshot can be mid-use."""
+    keep = DEFAULT_RECOVERY_SNAPSHOT_KEEP if keep is None else max(0, int(keep))
+    keep_days = DEFAULT_RECOVERY_SNAPSHOT_KEEP_DAYS if keep_days is None \
+        else max(0, int(keep_days))
+    backups_dir = Path(db_dir)
+    try:
+        snapshots = sorted(
+            backups_dir.glob('pre-archive-*.db'),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+    except OSError:
+        return []
+    newest = set(snapshots[:keep])
+    cutoff = (now - timedelta(days=keep_days)).timestamp()
+    removed = []
+    for snapshot in snapshots:
+        if snapshot in newest:
+            continue
+        try:
+            if snapshot.stat().st_mtime > cutoff:
+                continue
+            snapshot.unlink()
+            Path(str(snapshot) + '-wal').unlink(missing_ok=True)
+            Path(str(snapshot) + '-shm').unlink(missing_ok=True)
+            removed.append(snapshot.name)
+        except OSError:
+            continue
+    return removed
+
+
+def run_copy_job(store_env, guard, job_id, plan):
+    """Execute one copy-only archive job under the held maintenance guard.
+
+    Steps (plan sections 9.2-9.5, copy-only): revalidate the generation
+    fingerprint, quick-check the active DB, precheck disk space, take the
+    per-job recovery snapshot, select/create the shard, raise the writer
+    fence, clean dead batches, copy+verify every batch, quick-check the
+    shard, refresh the registry. The active database is never written."""
+    store = store_env['store']
+    policy = plan['policy']
+
+    # 1. Execution-time revalidation: any relevant save/delete/undelete or
+    # policy change since preview makes the whole plan stale.
+    current = build_archive_preview(store, policy=policy)
+    if (current['manifestHash'] != plan['manifestHash']
+            or current['documentStates'] != plan['documentStates']):
+        raise ArchivePlanStaleError(
+            'workspace changed since preview; run a new preview'
+        )
+
+    store.quick_check()
+
+    db_path = Path(store.db_path)
+    archive_dir = resolve_archive_dir(db_path, config=store_env.get('_config'))
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    needed = (plan['totals']['payloadBytes']
+              + os.stat(db_path).st_size
+              + DISK_SPACE_MARGIN_BYTES)
+    free = _disk_usage(archive_dir).free
+    if free < needed:
+        raise InsufficientDiskSpaceError(
+            f'need {needed} bytes free for copy + snapshot + margin'
+        )
+
+    # 2. Per-job recovery snapshot (verified by backup_to's quick_check).
+    snapshot_dir = db_path.parent / MAINTENANCE_BACKUP_DIRNAME
+    snapshot_path = snapshot_dir / f'pre-archive-{job_id}.db'
+    if not snapshot_path.exists():
+        store.backup_to(snapshot_path)
+
+    rollover = store_env.get(
+        '_archive_rollover_bytes', DEFAULT_ARCHIVE_ROLLOVER_BYTES
+    )
+    shard, archive_id, registry_row = select_writable_shard(
+        store, archive_dir, rollover_bytes=rollover
+    )
+    shard.quick_check()
+    shard.raise_writer_fence(
+        instance_id=guard.instance_id, fencing_token=guard.fencing_token
+    )
+    cleaned = shard.cleanup_dead_batches()
+
+    fingerprint = plan['fingerprint']
+    batches = split_into_batches(
+        plan['manifest'],
+        max_rows=store_env.get('_archive_max_rows_per_batch',
+                               DEFAULT_ARCHIVE_MAX_ROWS_PER_BATCH),
+        max_payload_bytes=store_env.get(
+            '_archive_max_payload_bytes_per_batch',
+            DEFAULT_ARCHIVE_MAX_PAYLOAD_BYTES_PER_BATCH),
+    )
+
+    copied_rows = 0
+    copied_bytes = 0
+    skipped = []
+    batch_ids = []
+    canceled = False
+
+    for batch in batches:
+        job = store.get_maintenance_job(job_id)
+        if job is not None and job['cancelRequested']:
+            canceled = True
+            break
+        if not guard.verify():
+            raise MaintenanceLeaseLostError(
+                'maintenance lease lost during archive copy'
+            )
+
+        # Re-check deleted state for whole-document candidates: an undelete
+        # since preview drops the ENTIRE document from this batch.
+        deleted_doc_ids = [
+            doc_id for doc_id, kind in batch['documents'].items()
+            if kind == 'deleted_document'
+        ]
+        undeleted = set()
+        if deleted_doc_ids:
+            states = store.document_deleted_states(deleted_doc_ids)
+            for doc_id in deleted_doc_ids:
+                if states.get(doc_id) is None:
+                    undeleted.add(doc_id)
+
+        keys = [
+            (row['documentId'], row['revision'])
+            for row in batch['rows'] if row['documentId'] not in undeleted
+        ]
+        for doc_id in sorted(undeleted):
+            skipped.append({'documentId': doc_id,
+                            'reason': 'skipped_undeleted'})
+        stored = store.fetch_revisions_for_archive(keys)
+
+        copy_rows = []
+        for row in batch['rows']:
+            if row['documentId'] in undeleted:
+                continue
+            source = stored.get((row['documentId'], row['revision']))
+            if source is None or source['payload_sha256'] != row['payloadSha256']:
+                skipped.append({
+                    'documentId': row['documentId'],
+                    'revision': row['revision'],
+                    'reason': 'skipped_changed',
+                })
+                continue
+            copy_rows.append({
+                'documentId': source['document_id'],
+                'revision': source['revision'],
+                'saveToken': source['save_token'],
+                'payloadSchemaVersion': source['payload_schema_version'],
+                'payloadSha256': source['payload_sha256'],
+                'payloadJson': source['payload_json'],
+                'savedAtUtc': source['saved_at_utc'],
+                'payloadBytes': source['payload_bytes'],
+            })
+        if not copy_rows:
+            continue
+
+        documents = []
+        for doc_id, kind in batch['documents'].items():
+            if doc_id in undeleted:
+                continue
+            meta = plan['documentMeta'].get(doc_id, {})
+            documents.append({
+                'documentId': doc_id,
+                'archiveKind': kind,
+                'title': meta.get('title', ''),
+                'symbol': meta.get('symbol', ''),
+                'marketDataMode': meta.get('marketDataMode', 'live'),
+                'lastRevision': meta.get('currentRevision'),
+                'deletedAtUtc': meta.get('deletedAtUtc'),
+            })
+
+        batch_id = f'batch-{uuid.uuid4().hex[:20]}'
+        shard.copy_batch(
+            batch_id=batch_id, kind_rows=copy_rows, documents=documents,
+            policy=policy, fingerprint=fingerprint,
+            instance_id=guard.instance_id,
+            fencing_token=guard.fencing_token,
+        )
+        shard.verify_batch(batch_id, copy_rows)
+        batch_ids.append(batch_id)
+        copied_rows += len(copy_rows)
+        copied_bytes += sum(row['payloadBytes'] for row in copy_rows)
+
+    shard.quick_check()
+    shard_stats = shard.stats()
+    meta = shard.meta()
+    now_iso = _iso(store.now_utc())
+    store.upsert_archive_registry(
+        archive_id=archive_id,
+        archive_schema_version=ARCHIVE_SCHEMA_VERSION,
+        status='sealed' if meta['sealed_at_utc'] else 'active',
+        created_at_utc=(registry_row or {}).get('created_at_utc') or now_iso,
+        sealed_at_utc=meta['sealed_at_utc'],
+        last_verified_at_utc=now_iso,
+        last_verify_status='ok',
+        file_bytes=os.stat(shard.path).st_size,
+        logical_payload_bytes=shard_stats['logicalPayloadBytes'],
+        revision_count=shard_stats['revisionCount'],
+    )
+
+    apply_recovery_snapshot_retention(
+        snapshot_dir, now=store.now_utc(),
+        keep=store_env.get('_archive_recovery_snapshot_keep'),
+        keep_days=store_env.get('_archive_recovery_snapshot_keep_days'),
+    )
+
+    return {
+        'archiveId': archive_id,
+        'batchIds': batch_ids,
+        'copiedRevisions': copied_rows,
+        'copiedBytes': copied_bytes,
+        'skipped': skipped,
+        'cleanedDeadBatches': cleaned,
+        'canceled': canceled,
+        'recoverySnapshot': snapshot_path.name,
+        'copyOnly': True,
+    }
+
