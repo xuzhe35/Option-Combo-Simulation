@@ -101,6 +101,14 @@ class DocumentDeletedError(PortfolioStoreError):
     code = 'document_deleted'
 
 
+class DocumentArchivedError(PortfolioStoreError):
+    """The document id belongs to a fully archived (tombstoned) workspace.
+    The identity stays reserved: restore it as a copy from the admin page
+    instead of silently reusing the id."""
+
+    code = 'document_id_archived'
+
+
 class RevisionConflictError(PortfolioStoreError):
     code = 'revision_conflict'
 
@@ -949,6 +957,22 @@ class PortfolioStore:
                             f'document {document_id} already exists',
                             current_revision=doc['current_revision'],
                             updated_at_utc=doc['updated_at_utc'],
+                        )
+                    # A tombstone reserves the id of a fully archived
+                    # document (plan section 6.4): a create against it must
+                    # fail closed, in the same write transaction, or the
+                    # archived identity would be silently reused and the
+                    # next whole-document archive would collide on the
+                    # tombstone primary key.
+                    tombstone = conn.execute(
+                        'SELECT 1 FROM workspace_archive_tombstones '
+                        'WHERE document_id = ?', (document_id,),
+                    ).fetchone()
+                    if tombstone is not None:
+                        raise DocumentArchivedError(
+                            f'document id {document_id} belongs to an '
+                            'archived workspace; restore it as a copy '
+                            'instead of reusing the id'
                         )
                     next_revision = 1
                     conn.execute(

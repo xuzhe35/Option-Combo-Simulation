@@ -303,6 +303,43 @@ class OversizedDocumentTest(CommitTestBase):
         self.assertEqual(tombstones, 0)
         self._assert_no_payload_lost()
 
+    def test_skipped_batch_stays_resumable_and_converges(self):
+        """Review 3 P1: a batch with skipped rows must NOT be marked
+        main_committed — otherwise safe replay treats those rows as done
+        and the still-active candidates can never converge."""
+        with mock.patch.object(
+            portfolio_archive, 'COMMIT_DOC_HARD_MAX_ROWS', 1
+        ):
+            first = run_full_job(self.env, make_plan(self.env))
+        self.assertGreater(len(first['commit']['resumableBatches']), 0)
+
+        # The batch holding the skipped document is still `verified`.
+        shard_path = next(self.archive_dir.glob('*.db'))
+        shard = portfolio_archive.ArchiveShard(shard_path)
+        self.assertGreater(len(shard.list_batches(('verified',))), 0)
+        # The skipped document is still an archive candidate.
+        self.assertGreater(
+            make_plan(self.env)['totals']['deletedDocumentCount'], 0
+        )
+
+        # With the ceiling back to normal, the next job commits the
+        # remainder out of the SAME verified batch and converges.
+        second = run_full_job(self.env, make_plan(self.env))
+        self.assertGreater(second['commit']['removedRevisions'], 0)
+        self.assertEqual(second['commit']['resumableBatches'], [])
+        self.assertEqual(shard.list_batches(('verified',)), [])
+        final = make_plan(self.env)
+        self.assertEqual(final['totals']['revisionCount'], 0)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            tombstones = conn.execute(
+                'SELECT count(*) FROM workspace_archive_tombstones'
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(tombstones, 1)
+        self._assert_no_payload_lost()
+
 
 class CrashMatrixTest(CommitTestBase):
     """Plan section 16 phase 4: crash at every boundary, then converge."""

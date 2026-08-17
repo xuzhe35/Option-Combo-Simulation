@@ -35,11 +35,11 @@ def main(argv=None):
                         'else <app-data>/backups)')
     parser.add_argument('--keep-daily', type=int, default=DEFAULT_BACKUP_KEEP_DAILY)
     parser.add_argument('--keep-weekly', type=int, default=DEFAULT_BACKUP_KEEP_WEEKLY)
-    parser.add_argument('--prune-revisions', action='store_true',
-                        help='after a successful verified backup, apply the '
-                             'revision retention policy and a bounded vacuum')
-    parser.add_argument('--revision-keep-recent', type=int, default=50)
-    parser.add_argument('--revision-keep-daily-days', type=int, default=90)
+    # NOTE: this tool is backup-only by design. The former --prune-revisions
+    # flag was removed: the ONLY path that removes revisions is the admin
+    # page's archive flow (copy, verify, then remove under the cross-process
+    # maintenance guard). A direct prune here would bypass archival and race
+    # the running backends.
     args = parser.parse_args(argv)
 
     config = configparser.ConfigParser()
@@ -60,18 +60,6 @@ def main(argv=None):
         print(f'backup failed ({exc.code}): {exc}', file=sys.stderr)
         return 1
     print(f'published {published}')
-
-    if args.prune_revisions:
-        # The verified backup above is the precondition for destructive
-        # retention; a failed publish already returned before this point.
-        deleted = store.prune_revisions(
-            keep_recent=args.revision_keep_recent,
-            keep_daily_days=args.revision_keep_daily_days,
-        )
-        print(f'pruned {deleted} revision(s)')
-        if store.freelist_count() > 0:
-            store.incremental_vacuum(max_pages=512)
-        print(f'quick_check: {store.quick_check()}')
     return 0
 
 

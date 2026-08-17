@@ -385,26 +385,45 @@ class DisasterRecoveryDrillTest(unittest.TestCase):
             store = env['store']
             run_full_job(env, make_plan(env))
 
-            # Publish the static snapshot into the "OneDrive" folder.
+            # Publish the static snapshots into the "OneDrive" folder: the
+            # active database AND every archive shard, through the real
+            # publish flow (backup API + verify + atomic rename) — a main
+            # backup alone would point at shards a dead disk no longer has.
             synced_dir = pathlib.Path(tmp) / 'synced'
             published = store.publish_backup(synced_dir)
-            # Purity: only completed .db snapshots, never WAL/SHM/partial.
+            shard_backups = portfolio_archive.publish_archive_backups(
+                env, synced_dir
+            )
+            self.assertEqual(len(shard_backups), 1)
+            install_id = store.ensure_install_id()
+            self.assertTrue(shard_backups[0].endswith(f'-{install_id}.db'))
+            # Freshness: an unchanged shard is not republished.
+            self.assertEqual(
+                portfolio_archive.publish_archive_backups(env, synced_dir),
+                [],
+            )
+            # Purity, recursively: only completed .db snapshots ever land
+            # in the synced folder — never WAL/SHM/partial files.
             leftovers = [
-                p.name for p in synced_dir.iterdir()
-                if not p.name.endswith('.db')
+                p.name for p in synced_dir.rglob('*')
+                if p.is_file() and not p.name.endswith('.db')
             ]
             self.assertEqual(leftovers, [])
 
             # "Clean machine": restore the active DB from the snapshot and
-            # copy the shard files (their own static backups) alongside.
+            # reinstall the shards from their published static backups.
             machine = pathlib.Path(tmp) / 'clean-machine'
             machine.mkdir()
             new_db = machine / 'portfolio.db'
             restore_database(published, new_db)
-            shutil.copytree(
-                pathlib.Path(store.db_path).parent / 'archives',
-                machine / 'archives',
-            )
+            (machine / 'archives').mkdir()
+            for backup_name in shard_backups:
+                # Strip the trailing "-<install_id>.db" to recover the id.
+                archive_id = backup_name[:-(len(install_id) + len('-.db'))]
+                shutil.copyfile(
+                    synced_dir / 'archives' / backup_name,
+                    machine / 'archives' / f'{archive_id}.db',
+                )
 
             new_env = portfolio_store_ws.create_store_env(
                 _config(str(machine))

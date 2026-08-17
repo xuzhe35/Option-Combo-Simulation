@@ -45,6 +45,7 @@ ADMIN_SERVER_ACTIONS = {
     'list_archived_workspaces': 'archived_workspaces_list',
     'request_workspace_space_reclaim': 'workspace_space_reclaim_started',
     'restore_archived_workspace': 'workspace_archive_restore_started',
+    'verify_workspace_archive': 'workspace_archive_verify_started',
 }
 
 RESTORE_MODES = ('revision', 'copy')
@@ -218,7 +219,7 @@ async def _build_admin_response(store_env, websocket, data, *, client_ip):
                 'policy': plan['policy'],
                 'totals': plan['totals'],
                 'manifestHashPrefix': plan['manifestHash'][:16],
-                'copyOnly': True,
+                'confirmationPhrase': _confirmation_phrase(plan),
             }
 
         if action == 'execute_workspace_archive':
@@ -234,7 +235,8 @@ async def _build_admin_response(store_env, websocket, data, *, client_ip):
                     'planToken must match the restricted token format',
                 )
             result = await asyncio.to_thread(
-                _consume_plan_and_start_job, store_env, token
+                _consume_plan_and_start_job, store_env, token,
+                data.get('confirmation'),
             )
             if 'errorCode' in result:
                 return _error_response(
@@ -248,7 +250,6 @@ async def _build_admin_response(store_env, websocket, data, *, client_ip):
                 'success': True,
                 'job': result['job'],
                 'alreadyStarted': result['alreadyStarted'],
-                'copyOnly': True,
             }
 
         if action == 'list_workspace_maintenance_jobs':
@@ -351,6 +352,24 @@ async def _build_admin_response(store_env, websocket, data, *, client_ip):
                 )
             job = await asyncio.to_thread(
                 _start_restore_job, store_env, mode, document_id, revision,
+            )
+            _log(action, request_id, started)
+            return {
+                'action': server_action,
+                'requestId': request_id,
+                'success': True,
+                'job': job,
+            }
+
+        if action == 'verify_workspace_archive':
+            archive_id = data.get('archiveId')
+            if not isinstance(archive_id, str) or not _TOKEN_RE.match(archive_id):
+                return _error_response(
+                    server_action, request_id, 'invalid_request',
+                    'archiveId must match the restricted token format',
+                )
+            job = await asyncio.to_thread(
+                _start_verify_job, store_env, archive_id,
             )
             _log(action, request_id, started)
             return {
@@ -530,49 +549,73 @@ def _create_archive_plan(store_env):
         ),
         'consumedByJobId': None,
     })
-    plans = store_env.setdefault('_archive_plans', {})
-    # Prune expired plans so the registry cannot grow unbounded.
-    now_monotonic = time.monotonic()
-    for stale_token in [
-        key for key, value in plans.items()
-        if value['expiresAtMonotonic'] <= now_monotonic
-        and value['consumedByJobId'] is None
-    ]:
-        del plans[stale_token]
-    plans[token] = plan
+    with _plans_lock(store_env):
+        plans = store_env.setdefault('_archive_plans', {})
+        # Prune expired plans so the registry cannot grow unbounded.
+        now_monotonic = time.monotonic()
+        for stale_token in [
+            key for key, value in plans.items()
+            if value['expiresAtMonotonic'] <= now_monotonic
+            and value['consumedByJobId'] is None
+        ]:
+            del plans[stale_token]
+        plans[token] = plan
     return plan
 
 
-def _consume_plan_and_start_job(store_env, token):
-    """Validate + consume the plan token, create the job, start the worker.
-    Runs on a worker thread; returns either {'job': ..} or an error dict."""
-    store = store_env['store']
-    plans = store_env.get('_archive_plans') or {}
-    plan = plans.get(token)
-    if plan is None:
-        return {'errorCode': 'archive_plan_expired',
-                'message': 'unknown or expired plan token; run a new preview'}
-    if plan['consumedByJobId'] is not None:
-        job = store.get_maintenance_job(plan['consumedByJobId'])
-        if job is not None:
-            return {'job': job, 'alreadyStarted': True}
-        return {'errorCode': 'archive_plan_already_consumed',
-                'message': 'plan token was already executed'}
-    if plan['expiresAtMonotonic'] <= time.monotonic():
-        return {'errorCode': 'archive_plan_expired',
-                'message': 'plan token expired; run a new preview'}
-    if plan['serverInstanceId'] != store_env.get('_server_instance_id'):
-        return {'errorCode': 'archive_plan_stale',
-                'message': 'plan token belongs to another backend instance'}
+def _confirmation_phrase(plan):
+    """The exact destructive-confirmation phrase for a plan, derived from
+    SERVER totals — the page renders it, the user types it, and execute
+    validates it here. Frontend state is never the security boundary."""
+    return f"ARCHIVE {plan['totals']['revisionCount']} REVISIONS"
 
-    import os as _os
-    job = store.create_maintenance_job(
-        job_type='archive_copy',
-        requested_policy=plan['policy'],
-        owner_instance_id=store_env.get('_server_instance_id'),
-        owner_pid=_os.getpid(),
-    )
-    plan['consumedByJobId'] = job['jobId']
+
+def _plans_lock(store_env):
+    # dict.setdefault is atomic under the GIL, so concurrent callers always
+    # converge on one lock instance for this store environment.
+    return store_env.setdefault('_archive_plans_lock', threading.Lock())
+
+
+def _consume_plan_and_start_job(store_env, token, confirmation):
+    """Validate the confirmation phrase, then atomically consume the plan
+    token and create the job. The whole lookup-check-create-consume
+    sequence holds the per-environment plans lock: two concurrent execute
+    requests can never both pass the unconsumed check — the loser gets the
+    winner's job back (lost-ACK replay semantics)."""
+    store = store_env['store']
+    with _plans_lock(store_env):
+        plans = store_env.get('_archive_plans') or {}
+        plan = plans.get(token)
+        if plan is None:
+            return {'errorCode': 'archive_plan_expired',
+                    'message': 'unknown or expired plan token; run a new preview'}
+        if plan['consumedByJobId'] is not None:
+            job = store.get_maintenance_job(plan['consumedByJobId'])
+            if job is not None:
+                return {'job': job, 'alreadyStarted': True}
+            return {'errorCode': 'archive_plan_already_consumed',
+                    'message': 'plan token was already executed'}
+        if plan['expiresAtMonotonic'] <= time.monotonic():
+            return {'errorCode': 'archive_plan_expired',
+                    'message': 'plan token expired; run a new preview'}
+        if plan['serverInstanceId'] != store_env.get('_server_instance_id'):
+            return {'errorCode': 'archive_plan_stale',
+                    'message': 'plan token belongs to another backend instance'}
+        expected = _confirmation_phrase(plan)
+        if not isinstance(confirmation, str) \
+                or confirmation.strip() != expected:
+            # A wrong phrase does NOT consume the token: retype and retry.
+            return {'errorCode': 'confirmation_mismatch',
+                    'message': 'confirmation text does not match the plan'}
+
+        import os as _os
+        job = store.create_maintenance_job(
+            job_type='archive_copy',
+            requested_policy=plan['policy'],
+            owner_instance_id=store_env.get('_server_instance_id'),
+            owner_pid=_os.getpid(),
+        )
+        plan['consumedByJobId'] = job['jobId']
     thread = threading.Thread(
         target=_run_archive_copy_job,
         args=(store_env, job['jobId'], plan),
@@ -815,6 +858,67 @@ def _run_reclaim_job(store_env, job_id):
             )
         except Exception:
             logger.exception('failed to record reclaim failure')
+    finally:
+        guard.release()
+
+
+def _start_verify_job(store_env, archive_id):
+    import os as _os
+    store = store_env['store']
+    job = store.create_maintenance_job(
+        job_type='archive_verify',
+        requested_policy={'archiveId': archive_id},
+        owner_instance_id=store_env.get('_server_instance_id'),
+        owner_pid=_os.getpid(),
+    )
+    thread = threading.Thread(
+        target=_run_verify_job, args=(store_env, job['jobId'], archive_id),
+        name=f'archive-verify-{job["jobId"]}', daemon=True,
+    )
+    thread.start()
+    return job
+
+
+def _run_verify_job(store_env, job_id, archive_id):
+    store = store_env.get('store')
+    if store is None:
+        return
+    guard = portfolio_maintenance.acquire_maintenance(store_env)
+    if guard is None:
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code='maintenance_busy',
+                error_message='another maintenance task is running',
+            )
+        except Exception:
+            logger.exception('failed to mark verify job busy')
+        return
+    try:
+        store.start_maintenance_job(job_id, fencing_token=guard.fencing_token)
+        summary = portfolio_archive.run_verify_job(
+            store_env, guard, archive_id=archive_id,
+        )
+        store.finish_maintenance_job(job_id, status='completed',
+                                     summary=summary)
+    except PortfolioStoreError as exc:
+        logger.warning('archive verify job %s failed: %s (%s)',
+                       job_id, exc, exc.code)
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code=exc.code,
+                error_message='archive verification failed; see server log',
+            )
+        except Exception:
+            logger.exception('failed to record verify failure')
+    except Exception:
+        logger.exception('archive verify job %s crashed', job_id)
+        try:
+            store.finish_maintenance_job(
+                job_id, status='failed', error_code='internal_store_error',
+                error_message='archive verification failed; see server log',
+            )
+        except Exception:
+            logger.exception('failed to record verify failure')
     finally:
         guard.release()
 

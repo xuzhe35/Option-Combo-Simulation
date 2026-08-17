@@ -39,6 +39,7 @@
         stats: null,
         plan: null,               // in-memory only; cleared on use/stale
         confirmationValid: false,
+        confirmationText: '',
         activeJob: null,
         reconnectDelay: RECONNECT_BASE_DELAY_MS,
         reconnectTimer: null,
@@ -165,6 +166,8 @@
             'btn-execute-archive': availability.executeArchive,
             'btn-cancel-job': availability.cancelJob,
             'btn-reclaim': availability.reclaim,
+            'btn-verify-archive': availability.reclaim
+                && !!state.batchesArchiveId,
         };
         for (const id of Object.keys(buttons)) {
             const element = _element(id);
@@ -298,6 +301,16 @@
                 line += ` — restored revision ${summary.sourceRevision} of `
                     + `${summary.documentId} as new revision `
                     + `${summary.restoredRevision} (shard ${summary.sourceArchiveId})`;
+            } else if (job.status === 'completed'
+                       && summary.verifiedRevisions !== undefined) {
+                line += ` — ${summary.archiveId} ${summary.status}: `
+                    + `${summary.verifiedRevisions} revisions verified`
+                    + (summary.orphanFiles && summary.orphanFiles.length
+                        ? `; orphan files: ${summary.orphanFiles.join(', ')}`
+                        : '');
+            } else if (job.status === 'completed'
+                       && summary.status === 'missing') {
+                line += ` — ${summary.archiveId} is MISSING its shard file`;
             } else if (job.status === 'completed'
                        && summary.freelistPagesBefore !== undefined) {
                 line += ` — freelist ${summary.freelistPagesBefore}`
@@ -539,6 +552,14 @@
             if (data.success !== true) {
                 _renderGuidance(core.errorGuidance(data.code));
             }
+        } else if (action === 'workspace_archive_verify_started') {
+            if (data.success === true) {
+                state.activeJob = core.normalizeJob(data.job);
+                _scheduleJobPoll();
+                _renderJob();
+            } else {
+                _renderGuidance(core.errorGuidance(data.code));
+            }
         } else if (action === 'workspace_archive_restore_started') {
             if (data.success === true) {
                 state.activeJob = core.normalizeJob(data.job);
@@ -659,6 +680,7 @@
         });
         _on('confirm-input', 'input', (event) => {
             const value = event && event.target ? event.target.value : '';
+            state.confirmationText = value;
             state.confirmationValid = !!(state.plan
                 && core.validateConfirmation(value, state.plan.totals));
             _renderButtons();
@@ -671,6 +693,7 @@
             }
             _send('execute_workspace_archive', {
                 planToken: state.plan.planToken,
+                confirmation: state.confirmationText,
             });
         });
         _on('btn-cancel-job', 'click', () => {
@@ -683,9 +706,17 @@
         _on('btn-reclaim', 'click', () => {
             _send('request_workspace_space_reclaim');
         });
+        _on('btn-verify-archive', 'click', () => {
+            if (state.batchesArchiveId) {
+                _send('verify_workspace_archive', {
+                    archiveId: state.batchesArchiveId,
+                });
+            }
+        });
         _on('batch-archive-select', 'change', (event) => {
             state.batchesArchiveId = event && event.target
                 ? String(event.target.value || '') : '';
+            _renderButtons();  // the Verify button follows the selection
             if (state.batchesArchiveId) {
                 _send('list_workspace_archive_batches', {
                     archiveId: state.batchesArchiveId,

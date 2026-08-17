@@ -34,6 +34,7 @@
         'list_archived_workspaces',
         'request_workspace_space_reclaim',
         'restore_archived_workspace',
+        'verify_workspace_archive',
     ]);
 
     function _isCount(value) {
@@ -309,6 +310,9 @@
         restore_conflict:
             'The document changed while restoring. Nothing was overwritten; '
             + 'retry the restore.',
+        confirmation_mismatch:
+            'The confirmation text did not match the server plan. Retype '
+            + 'it exactly; the preview is still valid.',
         archive_not_found:
             'That archived record (or its shard) was not found. Verify the '
             + 'shard files and the registry.',

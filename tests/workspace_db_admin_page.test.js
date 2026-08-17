@@ -267,6 +267,9 @@ module.exports = {
                 assert.equal(request.action, 'execute_workspace_archive');
                 assert.equal(request.planToken,
                     'plan-feedfacefeedfacefeedfacefeedface');
+                // The typed phrase travels with the request: the SERVER
+                // validates it — the button state is only UX.
+                assert.equal(request.confirmation, 'ARCHIVE 8 REVISIONS');
 
                 // The token never touched localStorage.
                 assert.deepEqual(storageWrites, []);
@@ -500,6 +503,58 @@ module.exports = {
                 assert.match(
                     document.getElementById('job-status').textContent,
                     /restored revision 3 .* as new revision 9/
+                );
+            },
+        },
+        {
+            name: 'verify shard button runs a polled verification job',
+            run() {
+                const { document, sockets } = connectAndStatus();
+                const socket = sockets[0];
+                const verifyButton = document.getElementById('btn-verify-archive');
+                assert.equal(verifyButton.disabled, true);  // no shard yet
+                const select = document.getElementById('batch-archive-select');
+                select.value = 'portfolio-archive-2026-001';
+                (select.listeners.change || []).forEach((handler) =>
+                    handler({ target: select }));
+                // Selecting a shard re-renders the buttons: Verify enables
+                // without waiting for any other event (regression: it once
+                // stayed disabled until an unrelated render).
+                assert.equal(verifyButton.disabled, false);
+                socket.sent.length = 0;
+                verifyButton.click();
+                const requests = socket.sent.map((raw) => JSON.parse(raw));
+                const verify = requests.find(
+                    (r) => r.action === 'verify_workspace_archive');
+                assert.ok(verify, 'verify request not sent');
+                assert.equal(verify.archiveId, 'portfolio-archive-2026-001');
+
+                socket.emit('message', {
+                    data: JSON.stringify({
+                        action: 'workspace_archive_verify_started',
+                        requestId: 'x', success: true,
+                        job: { jobId: 'job-55555555555555555555',
+                               jobType: 'archive_verify', status: 'queued' },
+                    }),
+                });
+                socket.emit('message', {
+                    data: JSON.stringify({
+                        action: 'workspace_maintenance_job', requestId: 'x',
+                        success: true,
+                        job: {
+                            jobId: 'job-55555555555555555555',
+                            jobType: 'archive_verify', status: 'completed',
+                            summary: {
+                                archiveId: 'portfolio-archive-2026-001',
+                                status: 'ok', verifiedRevisions: 8,
+                                verifiedBytes: 70000, orphanFiles: [],
+                            },
+                        },
+                    }),
+                });
+                assert.match(
+                    document.getElementById('job-status').textContent,
+                    /8 revisions verified/
                 );
             },
         },

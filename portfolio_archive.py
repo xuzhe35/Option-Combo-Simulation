@@ -479,6 +479,25 @@ class ArchiveShard:
         finally:
             conn.close()
 
+    def backup_to(self, dest_path):
+        """Consistent online snapshot via the SQLite backup API, then
+        quick_check the copy. Never a raw file copy of a live WAL shard."""
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src = self._connect()
+        try:
+            dst = sqlite3.connect(dest)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        except sqlite3.Error as exc:
+            raise ArchiveError(f'archive backup failed: {exc}') from exc
+        finally:
+            src.close()
+        ArchiveShard(dest).quick_check()
+        return dest
+
     def meta(self):
         conn = self._connect()
         try:
@@ -1064,6 +1083,189 @@ def split_into_batches(manifest, *, max_rows, max_payload_bytes):
             _flush()
     _flush()
     return batches
+
+
+# ---------------------------------------------------------------------------
+# Static shard backups (plan section 15)
+# ---------------------------------------------------------------------------
+
+def publish_archive_backups(store_env, backup_dir):
+    """Publish verified static snapshots of every registered, present shard
+    into `<backup_dir>/archives/`. File names carry the archive id AND the
+    install id so two machines publishing into one synced folder never
+    overwrite each other. Snapshots are produced with the SQLite backup
+    API, quick-check verified locally, copied as an explicit `.partial`
+    name, fsynced, then atomically renamed — sync software never sees a
+    half-written file and the live shard WAL/SHM never leave this machine.
+
+    Freshness: a shard republishes when no snapshot exists or when the
+    shard (main file or its WAL) changed since the last publish. Must be
+    called while holding the maintenance guard."""
+    store = store_env['store']
+    install_id = store.ensure_install_id()
+    archive_dir = resolve_archive_dir(
+        Path(store.db_path), config=store_env.get('_config')
+    )
+    target_dir = Path(backup_dir) / 'archives'
+    published = []
+    for row in store.list_archive_registry():
+        try:
+            path = archive_path_for_id(archive_dir, row['archive_id'])
+        except ArchiveNotFoundError:
+            continue
+        if not path.exists():
+            continue
+        dest = target_dir / f"{row['archive_id']}-{install_id}.db"
+        shard_mtime = path.stat().st_mtime
+        wal = Path(str(path) + '-wal')
+        if wal.exists():
+            shard_mtime = max(shard_mtime, wal.stat().st_mtime)
+        if dest.exists() and dest.stat().st_mtime >= shard_mtime:
+            continue  # snapshot already covers the shard's current state
+
+        shard = ArchiveShard(path, now=store.now_utc)
+        nonce = uuid.uuid4().hex[:8]
+        staging = path.parent / f'.archive-backup-{nonce}.db'
+        try:
+            shard.backup_to(staging)  # includes quick_check
+            target_dir.mkdir(parents=True, exist_ok=True)
+            partial = target_dir / f'{dest.name}.{nonce}.partial'
+            with open(staging, 'rb') as src, open(partial, 'wb') as out:
+                shutil.copyfileobj(src, out)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(partial, dest)
+        finally:
+            staging.unlink(missing_ok=True)
+            Path(str(staging) + '-wal').unlink(missing_ok=True)
+            Path(str(staging) + '-shm').unlink(missing_ok=True)
+        published.append(dest.name)
+    return published
+
+
+# ---------------------------------------------------------------------------
+# Standalone shard verification (plan sections 10.4 / 12)
+# ---------------------------------------------------------------------------
+
+def run_verify_job(store_env, guard, *, archive_id):
+    """Full integrity verification of one registered shard, refreshing the
+    registry either way: a missing file stamps missing_since_utc (so the
+    overview's Missing count is active, not restore-time luck), a failed
+    verification records last_verify_status='failed' before raising, and a
+    clean pass refreshes sizes, counts, and the verified stamp. Unregistered
+    files in the archive directory are reported as orphan candidates only —
+    never adopted, never deleted."""
+    store = store_env['store']
+    registry = {
+        row['archive_id']: row for row in store.list_archive_registry()
+    }
+    row = registry.get(archive_id)
+    if row is None:
+        raise ArchiveNotFoundError('archive shard is not registered')
+    archive_dir = resolve_archive_dir(
+        Path(store.db_path), config=store_env.get('_config')
+    )
+    path = archive_path_for_id(archive_dir, archive_id)
+    now_iso = _iso(store.now_utc())
+
+    def _registry_update(**overrides):
+        store.upsert_archive_registry(
+            archive_id=archive_id,
+            archive_schema_version=row['archive_schema_version'],
+            status=overrides.get('status', row['status']),
+            created_at_utc=row['created_at_utc'],
+            sealed_at_utc=overrides.get('sealed_at_utc', row['sealed_at_utc']),
+            last_verified_at_utc=overrides.get('last_verified_at_utc',
+                                               row['last_verified_at_utc']),
+            last_verify_status=overrides.get('last_verify_status',
+                                             row['last_verify_status']),
+            file_bytes=overrides.get('file_bytes', row['file_bytes']),
+            logical_payload_bytes=overrides.get('logical_payload_bytes',
+                                                row['logical_payload_bytes']),
+            revision_count=overrides.get('revision_count',
+                                         row['revision_count']),
+            missing_since_utc=overrides.get('missing_since_utc'),
+        )
+
+    orphans = sorted(
+        candidate.name for candidate in archive_dir.glob('*.db')
+        if candidate.stem not in registry
+    ) if archive_dir.exists() else []
+
+    if not path.exists():
+        _registry_update(missing_since_utc=row['missing_since_utc'] or now_iso,
+                         last_verify_status='missing')
+        return {'archiveId': archive_id, 'status': 'missing',
+                'orphanFiles': orphans}
+
+    shard = ArchiveShard(path, now=store.now_utc)
+    try:
+        shard.quick_check()
+        meta = shard.meta()
+        if (meta['archive_schema_version'] != ARCHIVE_SCHEMA_VERSION
+                or meta['archive_id'] != archive_id):
+            raise ArchiveVerificationError(
+                'archive meta does not match the registry entry'
+            )
+        verified_rows = 0
+        verified_bytes = 0
+        conn = shard._connect()
+        try:
+            for batch in conn.execute(
+                'SELECT batch_id, revision_count, payload_bytes '
+                'FROM archive_batches WHERE status IN (?, ?, ?)',
+                _GOOD_BATCH_STATES,
+            ).fetchall():
+                actual = conn.execute(
+                    'SELECT count(*) AS n, '
+                    'COALESCE(SUM(payload_bytes), 0) AS b '
+                    'FROM archived_revisions WHERE archive_batch_id = ?',
+                    (batch['batch_id'],),
+                ).fetchone()
+                if (actual['n'] != batch['revision_count']
+                        or actual['b'] != batch['payload_bytes']):
+                    raise ArchiveVerificationError(
+                        f'batch {batch["batch_id"]} counts do not match '
+                        'its rows'
+                    )
+            for record in conn.execute(
+                'SELECT r.document_id, r.revision, r.payload_sha256, '
+                'r.payload_bytes, r.payload_json FROM archived_revisions r '
+                'JOIN archive_batches b ON b.batch_id = r.archive_batch_id '
+                'WHERE b.status IN (?, ?, ?)', _GOOD_BATCH_STATES,
+            ):
+                encoded = record['payload_json'].encode('utf-8')
+                if (hashlib.sha256(encoded).hexdigest()
+                        != record['payload_sha256']
+                        or len(encoded) != record['payload_bytes']):
+                    raise ArchiveVerificationError(
+                        f'payload hash mismatch for '
+                        f'{record["document_id"]}#{record["revision"]}'
+                    )
+                verified_rows += 1
+                verified_bytes += record['payload_bytes']
+        finally:
+            conn.close()
+    except PortfolioStoreError:
+        _registry_update(last_verify_status='failed',
+                         last_verified_at_utc=now_iso,
+                         missing_since_utc=None)
+        raise
+
+    _registry_update(
+        last_verify_status='ok', last_verified_at_utc=now_iso,
+        file_bytes=os.stat(path).st_size,
+        logical_payload_bytes=verified_bytes,
+        revision_count=verified_rows,
+        missing_since_utc=None,
+    )
+    return {
+        'archiveId': archive_id,
+        'status': 'ok',
+        'verifiedRevisions': verified_rows,
+        'verifiedBytes': verified_bytes,
+        'orphanFiles': orphans,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1692,11 +1894,13 @@ def commit_verified_batches(store_env, guard, job_id, shard, archive_id):
     removed_bytes = 0
     tombstones_written = 0
     commit_chunks = 0
+    resumable_batches = []
 
     for batch in shard.list_batches(('verified',)):
         content = shard.batch_rows(batch['batch_id'])
         rows = content['rows']
         documents = content['documents']
+        batch_skipped = []
 
         whole_docs = {
             doc_id: meta for doc_id, meta in documents.items()
@@ -1712,8 +1916,8 @@ def commit_verified_batches(store_env, guard, job_id, shard, archive_id):
             doc_bytes = sum(row['payloadBytes'] for row in doc_rows)
             if (len(doc_rows) > COMMIT_DOC_HARD_MAX_ROWS
                     or doc_bytes > COMMIT_DOC_HARD_MAX_BYTES):
-                skipped.append({'documentId': doc_id,
-                                'reason': 'skipped_oversized_document'})
+                batch_skipped.append({'documentId': doc_id,
+                                      'reason': 'skipped_oversized_document'})
                 continue
             if not guard.verify():
                 raise MaintenanceLeaseLostError(
@@ -1727,7 +1931,7 @@ def commit_verified_batches(store_env, guard, job_id, shard, archive_id):
             commit_chunks += 1
             removed.extend(result['removed'])
             already_removed.extend(result['alreadyRemoved'])
-            skipped.extend(result['skipped'])
+            batch_skipped.extend(result['skipped'])
             removed_bytes += result['removedBytes']
             tombstones_written += 1 if result['tombstoneWritten'] else 0
 
@@ -1756,10 +1960,19 @@ def commit_verified_batches(store_env, guard, job_id, shard, archive_id):
             commit_chunks += 1
             removed.extend(result['removed'])
             already_removed.extend(result['alreadyRemoved'])
-            skipped.extend(result['skipped'])
+            batch_skipped.extend(result['skipped'])
             removed_bytes += result['removedBytes']
 
-        shard.mark_batch_committed(batch['batch_id'])
+        # main_committed only when EVERY row of this batch has removal
+        # evidence. Skipped rows (oversized, undeleted, changed, missing
+        # receipt) are still active candidates: the batch stays `verified`
+        # so a later job re-commits the remainder — otherwise safe replay
+        # would treat those rows as done and they could never converge.
+        if batch_skipped:
+            resumable_batches.append(batch['batch_id'])
+            skipped.extend(batch_skipped)
+        else:
+            shard.mark_batch_committed(batch['batch_id'])
 
     return {
         'removedRevisions': len(removed),
@@ -1769,6 +1982,7 @@ def commit_verified_batches(store_env, guard, job_id, shard, archive_id):
         'tombstonesWritten': tombstones_written,
         'commitChunks': commit_chunks,
         'reconciledBatches': reconciled,
+        'resumableBatches': resumable_batches,
     }
 
 
@@ -1836,4 +2050,3 @@ def run_archive_job(store_env, guard, job_id, plan):
             'vacuumRan': vacuum_ran,
         },
     }
-

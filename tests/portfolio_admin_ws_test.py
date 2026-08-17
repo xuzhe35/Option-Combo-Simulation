@@ -452,11 +452,12 @@ class ArchivePlanProtocolTest(AdminWsTestBase):
             'requestId': 'req-0020-4000-8000-000000000000',
         })
 
-    def _execute(self, token):
+    def _execute(self, token, confirmation='ARCHIVE 1 REVISIONS'):
         return _one_response(self.env, self.ws, {
             'action': 'execute_workspace_archive',
             'requestId': 'req-0021-4000-8000-000000000000',
             'planToken': token,
+            'confirmation': confirmation,
         })
 
     def _revision_count(self):
@@ -468,16 +469,60 @@ class ArchivePlanProtocolTest(AdminWsTestBase):
         finally:
             conn.close()
 
-    def test_preview_returns_token_and_totals_without_payloads(self):
+    def test_preview_returns_token_totals_and_confirmation_phrase(self):
         self._seed()
         response = self._preview()
         self.assertTrue(response['success'])
         self.assertTrue(response['planToken'].startswith('plan-'))
-        self.assertTrue(response['copyOnly'])
+        self.assertNotIn('copyOnly', response)  # stale phase-3 field is gone
         self.assertIn('revisionCount', response['totals'])
+        self.assertEqual(
+            response['confirmationPhrase'],
+            f"ARCHIVE {response['totals']['revisionCount']} REVISIONS",
+        )
         text = json.dumps(response)
         self.assertNotIn(self.tmpdir, text)
         self.assertNotIn('组合一', text)
+
+    def test_wrong_confirmation_rejected_without_consuming_token(self):
+        self._seed()
+        preview = self._preview()
+        token = preview['planToken']
+        for bad in ('archive 1 revisions', 'ARCHIVE 2 REVISIONS', '', None):
+            response = _one_response(self.env, self.ws, {
+                'action': 'execute_workspace_archive',
+                'requestId': 'req-0025-4000-8000-000000000000',
+                'planToken': token,
+                **({'confirmation': bad} if bad is not None else {}),
+            })
+            self.assertFalse(response['success'])
+            self.assertEqual(response['code'], 'confirmation_mismatch')
+        # The token survives a mistyped phrase: the correct retry works.
+        started = self._execute(token, preview['confirmationPhrase'])
+        self.assertTrue(started['success'])
+        self.assertFalse(started['alreadyStarted'])
+        _wait_for_job(self.env, self.ws, started['job']['jobId'])
+
+    def test_concurrent_execute_consumes_token_exactly_once(self):
+        import concurrent.futures
+        import portfolio_admin_ws as admin
+
+        self._seed()
+        preview = self._preview()
+        token = preview['planToken']
+        phrase = preview['confirmationPhrase']
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(
+                lambda _: admin._consume_plan_and_start_job(
+                    self.env, token, phrase,
+                ),
+                range(2),
+            ))
+        job_ids = {result['job']['jobId'] for result in results}
+        self.assertEqual(len(job_ids), 1)  # one job, the loser replays it
+        already = sorted(result['alreadyStarted'] for result in results)
+        self.assertEqual(already, [False, True])
+        _wait_for_job(self.env, self.ws, job_ids.pop())
 
     def test_execute_full_archive_end_to_end_and_token_single_use(self):
         self._seed()
@@ -602,14 +647,15 @@ class RestoreProtocolTest(AdminWsTestBase):
     def test_restore_copy_end_to_end(self):
         self._seed()
         # Archive the expired deleted document first.
-        token = _one_response(self.env, self.ws, {
+        preview = _one_response(self.env, self.ws, {
             'action': 'preview_workspace_archive',
             'requestId': 'req-0031-4000-8000-000000000000',
-        })['planToken']
+        })
         started = _one_response(self.env, self.ws, {
             'action': 'execute_workspace_archive',
             'requestId': 'req-0032-4000-8000-000000000000',
-            'planToken': token,
+            'planToken': preview['planToken'],
+            'confirmation': preview['confirmationPhrase'],
         })
         archive_job = _wait_for_job(self.env, self.ws, started['job']['jobId'])
         self.assertEqual(archive_job['status'], 'completed')
@@ -632,6 +678,124 @@ class RestoreProtocolTest(AdminWsTestBase):
         job = _wait_for_job(self.env, self.ws, response['job']['jobId'])
         self.assertEqual(job['status'], 'failed')
         self.assertEqual(job['errorCode'], 'archive_not_found')
+
+
+class VerifyArchiveProtocolTest(AdminWsTestBase):
+    def _archive_everything(self):
+        preview = _one_response(self.env, self.ws, {
+            'action': 'preview_workspace_archive',
+            'requestId': 'req-0040-4000-8000-000000000000',
+        })
+        started = _one_response(self.env, self.ws, {
+            'action': 'execute_workspace_archive',
+            'requestId': 'req-0041-4000-8000-000000000000',
+            'planToken': preview['planToken'],
+            'confirmation': preview['confirmationPhrase'],
+        })
+        job = _wait_for_job(self.env, self.ws, started['job']['jobId'])
+        assert job['status'] == 'completed'
+        return job['summary']['archiveId']
+
+    def _verify(self, archive_id):
+        response = _one_response(self.env, self.ws, {
+            'action': 'verify_workspace_archive',
+            'requestId': 'req-0042-4000-8000-000000000000',
+            'archiveId': archive_id,
+        })
+        self.assertTrue(response['success'])
+        return _wait_for_job(self.env, self.ws, response['job']['jobId'])
+
+    def test_verify_refreshes_registry_and_detects_missing_shard(self):
+        self._seed()
+        archive_id = self._archive_everything()
+
+        job = self._verify(archive_id)
+        self.assertEqual(job['status'], 'completed')
+        self.assertEqual(job['summary']['status'], 'ok')
+        self.assertGreater(job['summary']['verifiedRevisions'], 0)
+        registry = self.env['store'].list_archive_registry()[0]
+        self.assertEqual(registry['last_verify_status'], 'ok')
+        self.assertIsNone(registry['missing_since_utc'])
+
+        # Move the shard away: verify stamps missing_since_utc so the
+        # overview's Missing count turns active, not restore-time luck.
+        archive_dir = pathlib.Path(
+            self.env['store'].db_path
+        ).parent / 'archives'
+        shard = archive_dir / f'{archive_id}.db'
+        shard.rename(archive_dir / 'parked.bin')
+        job = self._verify(archive_id)
+        self.assertEqual(job['status'], 'completed')
+        self.assertEqual(job['summary']['status'], 'missing')
+        registry = self.env['store'].list_archive_registry()[0]
+        self.assertIsNotNone(registry['missing_since_utc'])
+        stats = _one_response(self.env, self.ws, {
+            'action': 'request_workspace_storage_stats',
+            'requestId': 'req-0043-4000-8000-000000000000',
+            'mode': 'fast',
+        })
+        self.assertEqual(stats['archive']['missingCount'], 1)
+
+    def test_verify_detects_tampered_payload(self):
+        self._seed()
+        archive_id = self._archive_everything()
+        archive_dir = pathlib.Path(
+            self.env['store'].db_path
+        ).parent / 'archives'
+        conn = sqlite3.connect(archive_dir / f'{archive_id}.db')
+        try:
+            conn.execute(
+                "UPDATE archived_revisions SET payload_json = '{}'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        job = self._verify(archive_id)
+        self.assertEqual(job['status'], 'failed')
+        self.assertEqual(job['errorCode'], 'archive_verification_failed')
+        registry = self.env['store'].list_archive_registry()[0]
+        self.assertEqual(registry['last_verify_status'], 'failed')
+
+    def test_unregistered_archive_id_rejected(self):
+        self._seed()
+        response = _one_response(self.env, self.ws, {
+            'action': 'verify_workspace_archive',
+            'requestId': 'req-0044-4000-8000-000000000000',
+            'archiveId': 'portfolio-archive-2099-001',
+        })
+        job = _wait_for_job(self.env, self.ws, response['job']['jobId'])
+        self.assertEqual(job['status'], 'failed')
+        self.assertEqual(job['errorCode'], 'archive_not_found')
+
+
+class TombstoneIdentityTest(AdminWsTestBase):
+    def test_archived_document_id_cannot_be_recreated(self):
+        from portfolio_store import DocumentArchivedError
+
+        self._seed()
+        preview = _one_response(self.env, self.ws, {
+            'action': 'preview_workspace_archive',
+            'requestId': 'req-0050-4000-8000-000000000000',
+        })
+        started = _one_response(self.env, self.ws, {
+            'action': 'execute_workspace_archive',
+            'requestId': 'req-0051-4000-8000-000000000000',
+            'planToken': preview['planToken'],
+            'confirmation': preview['confirmationPhrase'],
+        })
+        job = _wait_for_job(self.env, self.ws, started['job']['jobId'])
+        self.assertEqual(job['status'], 'completed')
+
+        # The archived document id is reserved by its tombstone: a fresh
+        # create against it fails closed with the stable code.
+        with self.assertRaises(DocumentArchivedError):
+            self.env['store'].save_workspace(
+                document_id=DOC_DELETED, title='reused id',
+                payload=_payload(), save_token='save-reuse01-4000-8000-000000000000',
+            )
+        self.assertIsNotNone(
+            self.env['store'].get_archive_tombstone(DOC_DELETED)
+        )
 
 
 class BackendParityTest(AdminWsTestBase):

@@ -458,6 +458,20 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
             keep_weekly=store_env.get('_backup_keep_weekly', DEFAULT_BACKUP_KEEP_WEEKLY),
         )
         logger.info('published scheduled workspace backup: %s', published)
+        # Archive shards get static snapshots too: after removal the shard
+        # is the ONLY holder of archived payloads, so a main-DB backup
+        # alone would point at files a dead disk no longer has.
+        try:
+            import portfolio_archive
+            shard_backups = portfolio_archive.publish_archive_backups(
+                store_env, backup_dir
+            )
+            if shard_backups:
+                logger.info('published archive shard backups: %s',
+                            shard_backups)
+        except Exception:
+            logger.exception('archive shard backup publish failed; '
+                             'main backup unaffected')
         # Scheduled maintenance NEVER deletes revisions directly: the only
         # removal paths are the admin page's archive flow and, when the
         # user explicitly opted in (archive_auto_run=true, default false),

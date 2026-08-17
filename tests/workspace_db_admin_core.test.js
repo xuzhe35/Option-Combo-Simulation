@@ -232,6 +232,7 @@ module.exports = {
                     'request_workspace_space_reclaim',
                     'request_workspace_storage_stats',
                     'restore_archived_workspace',
+                    'verify_workspace_archive',
                 ]);
             },
         },
