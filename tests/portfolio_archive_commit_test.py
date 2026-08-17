@@ -500,6 +500,75 @@ class RolloverAndSweepTest(CommitTestBase):
             portfolio_archive.ArchiveShard(shard_path).meta()['sealed_at_utc']
         )
 
+    def test_copied_batch_survives_rollover_and_converges(self):
+        """Review 0edf86e P2-5: a `copied` batch left by a crash before
+        verify must be resumed even after rollover moves new writes to a
+        different shard — the pre-rollover reconciler covers ALL active
+        shards, not just the next write target."""
+        with mock.patch.object(
+            portfolio_archive.ArchiveShard, 'verify_batch',
+            side_effect=portfolio_archive.ArchiveError('simulated crash'),
+        ):
+            with self.assertRaises(portfolio_archive.ArchiveError):
+                run_full_job(self.env, make_plan(self.env))
+        first_shard_path = self.archive_dir / 'portfolio-archive-2026-001.db'
+        first_shard = portfolio_archive.ArchiveShard(first_shard_path)
+        self.assertEqual(len(first_shard.list_batches(('copied',))), 1)
+
+        # Rollover: new copies go to part 002 while the crashed batch
+        # still sits `copied` in part 001.
+        self.env['_archive_rollover_bytes'] = 1
+        summary = run_full_job(self.env, make_plan(self.env))
+        self.assertNotEqual(summary['archiveId'],
+                            'portfolio-archive-2026-001')
+        # The old shard's batch was resumed (verified) and then swept into
+        # its terminal state; nothing is stranded as `copied`.
+        self.assertEqual(first_shard.list_batches(('copied',)), [])
+        self.assertEqual(first_shard.list_batches(('verified',)), [])
+        self.assertEqual(
+            make_plan(self.env)['totals']['revisionCount'], 0
+        )
+        self._assert_no_payload_lost()
+
+    def test_registry_stats_refresh_after_trim_without_manual_verify(self):
+        """Review 0edf86e P2-6: registry statistics must match the shard
+        right after a job that trimmed rows — no manual verify needed."""
+        policy = {'revisionKeepRecent': 1, 'revisionKeepDailyDays': 0,
+                  'archiveDeletedAfterDays': 30}
+        store = self.store
+        plan = make_plan(self.env, policy)
+        job = store.create_maintenance_job(
+            job_type='archive_copy',
+            owner_instance_id=self.env.get('_server_instance_id'),
+        )
+        guard = portfolio_maintenance.acquire_maintenance(self.env)
+        try:
+            store.start_maintenance_job(job['jobId'])
+            portfolio_archive.run_copy_job(self.env, guard, job['jobId'], plan)
+            store.finish_maintenance_job(job['jobId'], status='completed')
+        finally:
+            guard.release()
+        store.undelete_document(DOC_DELETED, 2)
+        run_full_job(self.env, make_plan(self.env, policy))  # trims rev 2
+
+        shard_path = next(self.archive_dir.glob('*.db'))
+        conn = sqlite3.connect(shard_path)
+        try:
+            actual_rows, actual_bytes = conn.execute(
+                'SELECT count(*), COALESCE(SUM(r.payload_bytes), 0) '
+                'FROM archived_revisions r '
+                'JOIN archive_batches b ON b.batch_id = r.archive_batch_id '
+                "WHERE b.status IN ('copied', 'verified', 'main_committed')"
+            ).fetchone()
+        finally:
+            conn.close()
+        registry = self.store.list_archive_registry()[0]
+        self.assertEqual(registry['revision_count'], actual_rows)
+        self.assertEqual(registry['logical_payload_bytes'], actual_bytes)
+        self.assertEqual(
+            registry['file_bytes'], shard_path.stat().st_size
+        )
+
 
 class CrashMatrixTest(CommitTestBase):
     """Plan section 16 phase 4: crash at every boundary, then converge."""

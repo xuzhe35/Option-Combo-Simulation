@@ -36,6 +36,11 @@ LEASE_NAME = 'maintenance-primary'
 DEFAULT_LEASE_TTL_SECONDS = 60
 DEFAULT_LEASE_HEARTBEAT_SECONDS = 15
 
+RUNTIME_LOCK_FILE_NAME = 'portfolio.runtime.lock'
+# Windows shared-lock emulation: each backend exclusively locks ONE byte in
+# [1, _RUNTIME_SLOTS]; an exclusive taker must win byte 0 AND every slot.
+_RUNTIME_SLOTS = 64
+
 if sys.platform.startswith('win'):
     import msvcrt
 
@@ -50,6 +55,42 @@ if sys.platform.startswith('win'):
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         except OSError:
             pass
+
+    def _lock_shared(fd):
+        # Probe slots until one is free; raises OSError when all are taken.
+        for slot in range(1, _RUNTIME_SLOTS + 1):
+            os.lseek(fd, slot, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return slot
+            except OSError:
+                continue
+        raise OSError('no free runtime lock slot')
+
+    def _lock_exclusive_all(fd):
+        held = []
+        try:
+            for slot in range(0, _RUNTIME_SLOTS + 1):
+                os.lseek(fd, slot, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                held.append(slot)
+        except OSError:
+            for slot in held:
+                try:
+                    os.lseek(fd, slot, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            raise
+        return held
+
+    def _unlock_slots(fd, slots):
+        for slot in slots if isinstance(slots, list) else [slots]:
+            try:
+                os.lseek(fd, slot, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
 else:
     import fcntl
 
@@ -62,10 +103,70 @@ else:
         except OSError:
             pass
 
+    def _lock_shared(fd):
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return 'shared'
+
+    def _lock_exclusive_all(fd):
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return 'exclusive'
+
+    def _unlock_slots(fd, slots):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+
 
 def new_server_instance_id():
     """Non-reusable per-process-boot identity."""
     return f'srv-{uuid.uuid4().hex[:16]}'
+
+
+class BackendRuntimeLock:
+    """Shared runtime-liveness lock a backend holds for its whole process
+    life once it opens the workspace store. Restore takes the EXCLUSIVE
+    side: a running backend — even one currently doing no maintenance —
+    therefore blocks a database replacement, and a replacement in progress
+    blocks a backend from opening the store. This is what the short-lived
+    maintenance lock cannot provide: ordinary saves never take that one."""
+
+    def __init__(self, db_path):
+        self._lock_path = Path(db_path).parent / RUNTIME_LOCK_FILE_NAME
+        self._fd = None
+        self._slots = None
+
+    def acquire_shared(self):
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            self._slots = _lock_shared(fd)
+        except OSError:
+            os.close(fd)
+            return False
+        self._fd = fd
+        return True
+
+    def acquire_exclusive(self):
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            self._slots = _lock_exclusive_all(fd)
+        except OSError:
+            os.close(fd)
+            return False
+        self._fd = fd
+        return True
+
+    def release(self):
+        if self._fd is not None:
+            _unlock_slots(self._fd, self._slots)
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+            self._slots = None
 
 
 class OsMaintenanceLock:

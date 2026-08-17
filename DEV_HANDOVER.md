@@ -656,6 +656,12 @@ Not implemented there today:
     runs under `portfolio_maintenance.acquire_maintenance` — thread lock,
     OS flock, DB lease with fencing. Never add a maintenance entry point
     that only takes the thread lock; both backends share one database;
+  - backends hold the SHARED `portfolio.runtime.lock` for their whole
+    process life (acquired in `ensure_store_initialized`); restore takes
+    it EXCLUSIVELY. Backups are only restorable as manifest-complete
+    generations (`recovery-manifest-*.json`, written last, hash-binding
+    main + shards); retention must never retire the manifest's main file
+    (`publish_backup(preserve_names=…)`);
   - commit chunks re-check the lease INSIDE the write transaction and
     write the archive entry/tombstone in the SAME transaction as the
     delete; `workspace_save_receipts` is a permanent idempotency ledger

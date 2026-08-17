@@ -77,8 +77,13 @@ def main(argv=None):
               'right now; retry in a moment', file=sys.stderr)
         return 1
     try:
+        preserved = portfolio_archive.manifest_preserved_main(
+            store, backup_dir
+        )
         published = store.publish_backup(
-            backup_dir, keep_daily=args.keep_daily, keep_weekly=args.keep_weekly,
+            backup_dir, keep_daily=args.keep_daily,
+            keep_weekly=args.keep_weekly,
+            preserve_names=[preserved] if preserved else (),
         )
         shard_backups = portfolio_archive.publish_archive_backups(
             env, backup_dir
@@ -103,10 +108,23 @@ def main(argv=None):
     if shard_backups['missing'] or unconfirmed:
         broken = sorted(set(shard_backups['missing']) | set(unconfirmed))
         print('backup INCOMPLETE: registered archive shard(s) '
-              f'{", ".join(broken)} have no snapshot in the target — the '
-              'published main database references payloads this set cannot '
-              'restore', file=sys.stderr)
+              f'{", ".join(broken)} have no snapshot in the target — no '
+              'recovery manifest was written, so restore will refuse this '
+              'main file', file=sys.stderr)
         return 1
+    # The generation is complete: publish the manifest LAST. Restore only
+    # accepts main files a manifest names, so a failed publish can never
+    # masquerade as a recovery set.
+    try:
+        env['store'] = store  # unchanged; manifest reads registry + files
+        manifest_path = portfolio_archive.write_recovery_manifest(
+            env, backup_dir, published
+        )
+    except PortfolioStoreError as exc:
+        print(f'backup failed writing recovery manifest ({exc.code}): {exc}',
+              file=sys.stderr)
+        return 1
+    print(f'published recovery manifest {manifest_path.name}')
     if not shard_backups['published'] and store.list_archive_registry():
         print('archive shard snapshot(s) already up to date')
     return 0

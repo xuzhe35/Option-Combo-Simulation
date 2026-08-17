@@ -1163,6 +1163,133 @@ def split_into_batches(manifest, *, max_rows, max_payload_bytes):
 
 
 # ---------------------------------------------------------------------------
+# Recovery-set generation manifest (review 0edf86e P1-1 / P1-2)
+# ---------------------------------------------------------------------------
+
+RECOVERY_MANIFEST_FORMAT = 1
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_recovery_manifest(store_env, backup_dir, main_path):
+    """Atomically publish the COMPLETION marker for one backup generation.
+
+    Written strictly LAST: only after the main snapshot and every
+    registered shard's snapshot for this publisher exist in the target.
+    It pins the exact file name, sha256, and byte size of each member, so
+    restore can only assemble sets that were published together — a failed
+    publish leaves no manifest, and its stray main file can never pair
+    with older shard snapshots (that combination has no manifest). The
+    publisher install id is THIS machine's identity; each shard's
+    archive_meta.source_install_id stays untouched origin metadata."""
+    store = store_env['store']
+    install_id = store.ensure_install_id()
+    backup_dir = Path(backup_dir)
+    main_path = Path(main_path)
+    shards = []
+    for row in store.list_archive_registry():
+        snapshot = backup_dir / 'archives' / f"{row['archive_id']}-{install_id}.db"
+        if not snapshot.exists():
+            raise ArchiveError(
+                f'cannot complete recovery manifest: shard snapshot '
+                f'{snapshot.name} is missing'
+            )
+        shards.append({
+            'archiveId': row['archive_id'],
+            'name': snapshot.name,
+            'sha256': _sha256_file(snapshot),
+            'bytes': snapshot.stat().st_size,
+        })
+    manifest = {
+        'format': RECOVERY_MANIFEST_FORMAT,
+        'publisherInstallId': install_id,
+        'createdAtUtc': _iso(store.now_utc()),
+        'main': {
+            'name': main_path.name,
+            'sha256': _sha256_file(main_path),
+            'bytes': main_path.stat().st_size,
+        },
+        'shards': shards,
+    }
+    dest = backup_dir / f'recovery-manifest-{install_id}.json'
+    partial = backup_dir / f'{dest.name}.{uuid.uuid4().hex[:8]}.partial'
+    with open(partial, 'w', encoding='utf-8') as handle:
+        json.dump(manifest, handle, indent=1, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(partial, dest)
+    return dest
+
+
+def manifest_preserved_main(store, backup_dir):
+    """The main-file name the current recovery manifest depends on (or
+    None). Backup retention must never retire it — a later failed publish
+    would otherwise destroy the last complete generation."""
+    manifest_path = (Path(backup_dir)
+                     / f'recovery-manifest-{store.ensure_install_id()}.json')
+    try:
+        data = json.loads(manifest_path.read_text(encoding='utf-8'))
+        return data['main']['name']
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def load_recovery_manifest_for(main_path):
+    """The manifest in main_path's folder whose main entry names exactly
+    this file, or None. A main backup no manifest references was part of a
+    publish that never completed — restore must refuse it."""
+    main_path = Path(main_path)
+    for candidate in sorted(main_path.parent.glob('recovery-manifest-*.json')):
+        try:
+            data = json.loads(candidate.read_text(encoding='utf-8'))
+        except (ValueError, OSError):
+            continue
+        if (isinstance(data, dict)
+                and data.get('format') == RECOVERY_MANIFEST_FORMAT
+                and isinstance(data.get('main'), dict)
+                and data['main'].get('name') == main_path.name):
+            return data
+    return None
+
+
+def refresh_registry_stats(store, archive_dir, archive_id):
+    """Recompute one shard's registry statistics from the shard itself.
+    Must run after anything that changes shard contents (commit marks,
+    trims, cleanups) — a stale registry misleads the admin overview."""
+    registry = {
+        row['archive_id']: row for row in store.list_archive_registry()
+    }
+    row = registry.get(archive_id)
+    if row is None:
+        return
+    path = archive_path_for_id(archive_dir, archive_id)
+    if not path.exists():
+        return
+    shard = ArchiveShard(path, now=store.now_utc)
+    stats = shard.stats()
+    meta = shard.meta()
+    store.upsert_archive_registry(
+        archive_id=archive_id,
+        archive_schema_version=row['archive_schema_version'],
+        status='sealed' if meta['sealed_at_utc'] else row['status'],
+        created_at_utc=row['created_at_utc'],
+        sealed_at_utc=meta['sealed_at_utc'],
+        last_verified_at_utc=row['last_verified_at_utc'],
+        last_verify_status=row['last_verify_status'],
+        file_bytes=os.stat(path).st_size,
+        logical_payload_bytes=stats['logicalPayloadBytes'],
+        revision_count=stats['revisionCount'],
+        missing_since_utc=row['missing_since_utc'],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Static shard backups (plan section 15)
 # ---------------------------------------------------------------------------
 
@@ -1765,6 +1892,34 @@ def run_copy_job(store_env, guard, job_id, plan):
     if not snapshot_path.exists():
         store.backup_to(snapshot_path)
 
+    # Pre-rollover reconciler across EVERY active shard, not just the one
+    # we are about to write (review 0edf86e P2-5): clean dead batches and
+    # resume-verify `copied` leftovers everywhere, so a crash before verify
+    # followed by a rollover can never strand a batch in a skipped shard.
+    cleaned = []
+    resumed = []
+    for row in store.list_archive_registry():
+        if row['status'] != 'active' or row['missing_since_utc']:
+            continue
+        other_path = archive_path_for_id(archive_dir, row['archive_id'])
+        if not other_path.exists():
+            continue
+        other = ArchiveShard(other_path, now=store.now_utc)
+        needs_work = other.list_batches((
+            'copying', 'copied', 'cancel_requested', 'cleanup_pending',
+            'canceled', 'failed',
+        ))
+        if not needs_work:
+            continue
+        other.raise_writer_fence(
+            instance_id=guard.instance_id, fencing_token=guard.fencing_token
+        )
+        cleaned.extend(other.cleanup_dead_batches())
+        for stale in other.list_batches(('copied',)):
+            content = other.batch_rows(stale['batch_id'])
+            other.verify_batch(stale['batch_id'], content['rows'])
+            resumed.append(stale['batch_id'])
+
     rollover = store_env.get(
         '_archive_rollover_bytes', DEFAULT_ARCHIVE_ROLLOVER_BYTES
     )
@@ -1775,17 +1930,6 @@ def run_copy_job(store_env, guard, job_id, plan):
     shard.raise_writer_fence(
         instance_id=guard.instance_id, fencing_token=guard.fencing_token
     )
-    cleaned = shard.cleanup_dead_batches()
-
-    # Resume semantics (plan section 6.5): a `copied` batch left behind by a
-    # dead run holds real, committed rows. Verify them now — integrity
-    # re-checked payload by payload — so they either graduate to `verified`
-    # or fail loudly; they are never silently stranded.
-    resumed = []
-    for stale in shard.list_batches(('copied',)):
-        content = shard.batch_rows(stale['batch_id'])
-        shard.verify_batch(stale['batch_id'], content['rows'])
-        resumed.append(stale['batch_id'])
 
     fingerprint = plan['fingerprint']
     batches = split_into_batches(
@@ -2218,6 +2362,13 @@ def run_archive_job(store_env, guard, job_id, plan):
         commit_summary['skipped'].extend(sweep['skipped'])
         commit_summary['resumableBatches'].extend(sweep['resumableBatches'])
     commit_summary['sweptShards'] = swept
+
+    # The commit stage (and any trims inside it) changed shard contents:
+    # refresh the registry statistics NOW, under the held guard, so the
+    # admin overview never shows stale counts until a manual verify
+    # (review 0edf86e P2-6).
+    for changed_id in [copy_summary['archiveId']] + swept:
+        refresh_registry_stats(store, archive_dir, changed_id)
 
     freelist_before = store.freelist_count()
     vacuum_ran = False

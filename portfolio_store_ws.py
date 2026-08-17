@@ -258,6 +258,19 @@ def ensure_store_initialized(store_env):
             return store_env
         try:
             db_path = resolve_db_path(config=store_env.get('_config'))
+            # Hold the SHARED runtime lock for the rest of this process's
+            # life: a restore (exclusive taker) then fails closed while any
+            # backend is alive, and a backend opening mid-restore fails
+            # here instead of watching its database get swapped underneath.
+            runtime_lock = portfolio_maintenance.BackendRuntimeLock(db_path)
+            if not runtime_lock.acquire_shared():
+                logger.error(
+                    'workspace persistence unavailable: a database restore '
+                    'holds the runtime lock; retry after it completes.'
+                )
+                store_env['reason'] = 'store_unavailable'
+                return store_env
+            store_env['_runtime_lock'] = runtime_lock
             store = PortfolioStore(
                 db_path, max_payload_bytes=store_env['max_payload_bytes']
             ).initialize()
@@ -452,10 +465,15 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
             age = (datetime.now(timezone.utc) - newest_at).total_seconds()
             if age < interval:
                 return False
+        import portfolio_archive
+        preserved = portfolio_archive.manifest_preserved_main(
+            store, backup_dir
+        )
         published = store.publish_backup(
             backup_dir,
             keep_daily=store_env.get('_backup_keep_daily', DEFAULT_BACKUP_KEEP_DAILY),
             keep_weekly=store_env.get('_backup_keep_weekly', DEFAULT_BACKUP_KEEP_WEEKLY),
+            preserve_names=[preserved] if preserved else (),
         )
         logger.info('published scheduled workspace backup: %s', published)
         # Archive shards get static snapshots too: after removal the shard
@@ -472,9 +490,17 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
             if shard_backups['missing']:
                 logger.error(
                     'recovery set INCOMPLETE: registered archive shard(s) '
-                    '%s have no local file to back up',
+                    '%s have no local file to back up — no recovery '
+                    'manifest written; restore will refuse this main file',
                     shard_backups['missing'],
                 )
+            else:
+                # Complete generation: the manifest is the atomic
+                # completion marker restore requires.
+                manifest = portfolio_archive.write_recovery_manifest(
+                    store_env, backup_dir, published
+                )
+                logger.info('published recovery manifest %s', manifest.name)
         except Exception:
             logger.exception('archive shard backup publish failed; '
                              'main backup unaffected')

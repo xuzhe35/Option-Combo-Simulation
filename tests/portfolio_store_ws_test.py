@@ -485,7 +485,7 @@ class RetentionMaintenanceTest(unittest.TestCase):
             self.assertEqual(len(store.list_revisions(DOC, limit=50)), 7)
 
             self.assertTrue(portfolio_store_ws.maybe_publish_scheduled_backup(env))
-            self.assertEqual(len(list(backup_dir.iterdir())), 1)
+            self.assertEqual(len(list(backup_dir.glob('portfolio-*.db'))), 1)
             # Retention policy says keep {7,6}+anchor — but the scheduled
             # pass must NOT delete: all seven revisions survive.
             remaining = [r['revision'] for r in store.list_revisions(DOC, limit=50)]
@@ -516,7 +516,11 @@ class ScheduledBackupTest(unittest.TestCase):
                 save_token='save-0000001-4000-8000-000000000000',
             )
             self.assertTrue(portfolio_store_ws.maybe_publish_scheduled_backup(env))
-            names = [p.name for p in backup_dir.iterdir()]
+            names = [p.name for p in backup_dir.glob('portfolio-*.db')]
+            # A complete generation also publishes its recovery manifest.
+            self.assertEqual(
+                len(list(backup_dir.glob('recovery-manifest-*.json'))), 1
+            )
             self.assertEqual(len(names), 1)
             from portfolio_store import SCHEMA_USER_VERSION
             self.assertRegex(
@@ -580,7 +584,7 @@ class ScheduledBackupTest(unittest.TestCase):
             # the rest returned fast without queueing behind it.
             self.assertEqual(sum(1 for outcome in results if outcome), 1)
             self.assertEqual(len(results), 20)
-            self.assertEqual(len(list(backup_dir.iterdir())), 1)
+            self.assertEqual(len(list(backup_dir.glob('portfolio-*.db'))), 1)
 
     def test_uninitialized_env_skips_quietly(self):
         self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(None))

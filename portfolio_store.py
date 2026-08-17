@@ -1367,7 +1367,8 @@ class PortfolioStore:
         return newest
 
     def publish_backup(self, backup_dir, *, keep_daily=DEFAULT_BACKUP_KEEP_DAILY,
-                       keep_weekly=DEFAULT_BACKUP_KEEP_WEEKLY):
+                       keep_weekly=DEFAULT_BACKUP_KEEP_WEEKLY,
+                       preserve_names=()):
         """Publish one verified static snapshot into a synced folder.
 
         The snapshot is produced with the SQLite backup API into a local temp
@@ -1407,15 +1408,23 @@ class PortfolioStore:
             Path(str(local_snapshot) + '-wal').unlink(missing_ok=True)
             Path(str(local_snapshot) + '-shm').unlink(missing_ok=True)
 
-        self._apply_backup_retention(backup_dir, install_id, keep_daily, keep_weekly)
+        self._apply_backup_retention(backup_dir, install_id, keep_daily,
+                                     keep_weekly, preserve_names)
         return backup_dir / name
 
     @staticmethod
-    def _apply_backup_retention(backup_dir, install_id, keep_daily, keep_weekly):
+    def _apply_backup_retention(backup_dir, install_id, keep_daily,
+                                keep_weekly, preserve_names=()):
+        """Retire old snapshots — but NEVER one in preserve_names: the
+        recovery manifest's main file must survive even when a same-day
+        publish fails halfway, or the last complete generation dies with
+        it."""
+        preserve = set(preserve_names)
         own = []
         for entry in Path(backup_dir).iterdir():
             match = _BACKUP_FILE_RE.match(entry.name)
-            if match and match.group(3) == install_id:
+            if (match and match.group(3) == install_id
+                    and entry.name not in preserve):
                 own.append((match.group(1), entry))
         own.sort(reverse=True)
 
