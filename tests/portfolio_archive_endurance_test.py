@@ -453,6 +453,110 @@ class DisasterRecoveryDrillTest(unittest.TestCase):
             self.assertEqual(result['restoredRevision'], 1)
 
 
+class ManualBackupRestoreCliTest(unittest.TestCase):
+    """Review 09c0370 P1-2: the documented manual CLIs must produce and
+    consume a COMPLETE recovery set (main DB + shards) under the guard —
+    these tests drive the real entry points, not internal helpers."""
+
+    @staticmethod
+    def _cli_modules():
+        scripts_dir = REPO_ROOT / 'scripts'
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+        import backup_portfolio_store
+        import restore_portfolio_store
+        return backup_portfolio_store, restore_portfolio_store
+
+    def test_cli_backup_and_restore_full_recovery_set(self):
+        backup_cli, restore_cli = self._cli_modules()
+        from tests.portfolio_archive_test import make_archive_env, make_plan
+        from tests.portfolio_archive_commit_test import (
+            DOC_DELETED, run_full_job,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            env = make_archive_env(tmp)
+            run_full_job(env, make_plan(env))
+            db_path = str(env['store'].db_path)
+            synced = pathlib.Path(tmp) / 'synced'
+
+            rc = backup_cli.main(
+                ['--db-path', db_path, '--backup-dir', str(synced)]
+            )
+            self.assertEqual(rc, 0)
+            main_backups = sorted(synced.glob('portfolio-*.db'))
+            shard_backups = sorted((synced / 'archives').glob('*.db'))
+            self.assertEqual(len(main_backups), 1)
+            self.assertEqual(len(shard_backups), 1)
+
+            machine = pathlib.Path(tmp) / 'machine'
+            machine.mkdir()
+            new_db = machine / 'portfolio.db'
+            rc = restore_cli.main(
+                [str(main_backups[0]), '--yes', '--db-path', str(new_db)]
+            )
+            self.assertEqual(rc, 0)
+            # Active documents open AND archived payloads restore: the CLI
+            # installed the shard set, not just the main database.
+            new_env = portfolio_store_ws.create_store_env(
+                _config(str(machine))
+            )
+            new_env['store'] = PortfolioStore(new_db, now=lambda: NOW)
+            new_env['store'].initialize()
+            new_env['available'] = True
+            new_env['_initialized'] = True
+            self.assertEqual(
+                new_env['store'].load_workspace(
+                    'doc-aaaaaaaa-1111-4111-8111-111111111111'
+                )['revision'], 8,
+            )
+            result = portfolio_archive.restore_archived_document_as_copy(
+                new_env, document_id=DOC_DELETED,
+            )
+            self.assertEqual(result['restoredRevision'], 1)
+
+    def test_cli_restore_fails_closed_without_shard_snapshots(self):
+        backup_cli, restore_cli = self._cli_modules()
+        from tests.portfolio_archive_test import make_archive_env, make_plan
+        from tests.portfolio_archive_commit_test import run_full_job
+        with tempfile.TemporaryDirectory() as tmp:
+            env = make_archive_env(tmp)
+            run_full_job(env, make_plan(env))
+            synced = pathlib.Path(tmp) / 'synced'
+            rc = backup_cli.main([
+                '--db-path', str(env['store'].db_path),
+                '--backup-dir', str(synced),
+            ])
+            self.assertEqual(rc, 0)
+            for snapshot in (synced / 'archives').glob('*.db'):
+                snapshot.unlink()
+
+            machine = pathlib.Path(tmp) / 'machine'
+            machine.mkdir()
+            new_db = machine / 'portfolio.db'
+            rc = restore_cli.main([
+                str(next(synced.glob('portfolio-*.db'))), '--yes',
+                '--db-path', str(new_db),
+            ])
+            self.assertEqual(rc, 1)  # refuse: entries would point nowhere
+            self.assertFalse(new_db.exists())  # nothing was installed
+
+    def test_cli_backup_reports_busy_while_guard_is_held(self):
+        backup_cli, _ = self._cli_modules()
+        from tests.portfolio_archive_test import make_archive_env
+        with tempfile.TemporaryDirectory() as tmp:
+            env = make_archive_env(tmp)
+            guard = portfolio_maintenance.acquire_maintenance(env)
+            self.assertIsNotNone(guard)
+            try:
+                rc = backup_cli.main([
+                    '--db-path', str(env['store'].db_path),
+                    '--backup-dir', str(pathlib.Path(tmp) / 'synced'),
+                ])
+            finally:
+                guard.release()
+            self.assertEqual(rc, 1)  # maintenance busy, never a race
+
+
 class AutoArchiveGuardTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

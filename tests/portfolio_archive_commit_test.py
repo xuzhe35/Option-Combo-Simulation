@@ -341,6 +341,65 @@ class OversizedDocumentTest(CommitTestBase):
         self._assert_no_payload_lost()
 
 
+class UndeleteReclassificationTest(CommitTestBase):
+    """Review 09c0370 P1-1: a document undeleted between copy/verify and
+    commit must not freeze its batch (and the active candidates) forever —
+    at commit time its rows reclassify to ordinary partial history."""
+
+    POLICY = {'revisionKeepRecent': 1, 'revisionKeepDailyDays': 0,
+              'archiveDeletedAfterDays': 30}
+
+    def test_undeleted_document_reclassifies_and_candidates_converge(self):
+        store = self.store
+        # Copy + verify the whole-document candidate…
+        plan = make_plan(self.env, self.POLICY)
+        job = store.create_maintenance_job(
+            job_type='archive_copy',
+            owner_instance_id=self.env.get('_server_instance_id'),
+        )
+        guard = portfolio_maintenance.acquire_maintenance(self.env)
+        try:
+            store.start_maintenance_job(job['jobId'])
+            portfolio_archive.run_copy_job(self.env, guard, job['jobId'], plan)
+            store.finish_maintenance_job(job['jobId'], status='completed')
+        finally:
+            guard.release()
+        # …then the user undeletes it before any commit happened.
+        store.undelete_document(DOC_DELETED, 2)
+
+        summary = run_full_job(self.env, make_plan(self.env, self.POLICY))
+        # The old non-current revision of the undeleted document was
+        # removed as PARTIAL history (entry, not tombstone)…
+        self.assertIsNotNone(store.get_archive_entry(DOC_DELETED, 1))
+        self.assertIsNone(store.get_archive_tombstone(DOC_DELETED))
+        skip_reasons = {item['reason'] for item in summary['commit']['skipped']}
+        self.assertNotIn('skipped_undeleted', skip_reasons)
+        # …and the candidates converge instead of sticking forever.
+        final = make_plan(self.env, self.POLICY)
+        self.assertEqual(final['totals']['revisionCount'], 0)
+        # The document is alive and loads at its current revision, whose
+        # archived copy legitimately keeps the batch resumable for now.
+        self.assertEqual(store.load_workspace(DOC_DELETED)['revision'], 2)
+        self._assert_no_payload_lost()
+
+        # Once the document advances, the final row commits and the batch
+        # reaches its terminal state.
+        store.save_workspace(
+            document_id=DOC_DELETED, title='已删除工作区',
+            payload=_payload(underlyingSymbol='QQQ', note='三'),
+            save_token=_token(950), expected_revision=2,
+        )
+        run_full_job(self.env, make_plan(self.env, self.POLICY))
+        shard = portfolio_archive.ArchiveShard(
+            next(self.archive_dir.glob('*.db'))
+        )
+        self.assertEqual(shard.list_batches(('verified',)), [])
+        self.assertEqual(
+            make_plan(self.env, self.POLICY)['totals']['revisionCount'], 0
+        )
+        self._assert_no_payload_lost()
+
+
 class CrashMatrixTest(CommitTestBase):
     """Plan section 16 phase 4: crash at every boundary, then converge."""
 

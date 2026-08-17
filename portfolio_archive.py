@@ -1212,21 +1212,51 @@ def run_verify_job(store_env, guard, *, archive_id):
         conn = shard._connect()
         try:
             for batch in conn.execute(
-                'SELECT batch_id, revision_count, payload_bytes '
+                'SELECT batch_id, revision_count, payload_bytes, '
+                'document_count, manifest_sha256 '
                 'FROM archive_batches WHERE status IN (?, ?, ?)',
                 _GOOD_BATCH_STATES,
             ).fetchall():
                 actual = conn.execute(
                     'SELECT count(*) AS n, '
-                    'COALESCE(SUM(payload_bytes), 0) AS b '
+                    'COALESCE(SUM(payload_bytes), 0) AS b, '
+                    'count(DISTINCT document_id) AS d '
                     'FROM archived_revisions WHERE archive_batch_id = ?',
                     (batch['batch_id'],),
                 ).fetchone()
+                doc_rows = conn.execute(
+                    'SELECT count(*) FROM archived_documents '
+                    'WHERE archive_batch_id = ?', (batch['batch_id'],),
+                ).fetchone()[0]
                 if (actual['n'] != batch['revision_count']
-                        or actual['b'] != batch['payload_bytes']):
+                        or actual['b'] != batch['payload_bytes']
+                        or actual['d'] != batch['document_count']
+                        or doc_rows != batch['document_count']):
                     raise ArchiveVerificationError(
                         f'batch {batch["batch_id"]} counts do not match '
                         'its rows'
+                    )
+                # Recompute the batch manifest with the copy-stage formula
+                # and compare exactly: manifest-only corruption must fail
+                # verification, not slip past as "ok".
+                manifest_rows = [
+                    {
+                        'documentId': record['document_id'],
+                        'revision': record['revision'],
+                        'payloadSha256': record['payload_sha256'],
+                        'payloadBytes': record['payload_bytes'],
+                        'savedAtUtc': record['saved_at_utc'],
+                    }
+                    for record in conn.execute(
+                        'SELECT document_id, revision, payload_sha256, '
+                        'payload_bytes, saved_at_utc FROM archived_revisions '
+                        'WHERE archive_batch_id = ?', (batch['batch_id'],),
+                    )
+                ]
+                if _manifest_hash(manifest_rows) != batch['manifest_sha256']:
+                    raise ArchiveVerificationError(
+                        f'batch {batch["batch_id"]} manifest hash does not '
+                        'match its rows'
                     )
             for record in conn.execute(
                 'SELECT r.document_id, r.revision, r.payload_sha256, '
@@ -1906,6 +1936,18 @@ def commit_verified_batches(store_env, guard, job_id, shard, archive_id):
             doc_id: meta for doc_id, meta in documents.items()
             if meta['archiveKind'] == 'deleted_document'
         }
+        # Reclassify against CURRENT reality, not the kind recorded at copy
+        # time: a document that was undeleted after copy/verify is a live
+        # document again — its archived rows are ordinary partial history
+        # now (entry + delete of non-current revisions), never a
+        # whole-document removal. Without this, the batch would retry the
+        # whole-document branch forever, skip on `undeleted`, and the
+        # active candidates could never converge (review 09c0370, P1-1).
+        if whole_docs:
+            live_states = store.document_deleted_states(list(whole_docs))
+            for doc_id in list(whole_docs):
+                if doc_id in live_states and live_states[doc_id] is None:
+                    del whole_docs[doc_id]
         partial_rows = [
             row for row in rows if row['documentId'] not in whole_docs
         ]

@@ -736,6 +736,30 @@ class VerifyArchiveProtocolTest(AdminWsTestBase):
         })
         self.assertEqual(stats['archive']['missingCount'], 1)
 
+    def test_verify_detects_manifest_only_tampering(self):
+        """Review 09c0370 P2: corrupting ONLY the batch manifest hash must
+        fail verification — quick_check and payload hashes alone cannot
+        catch it."""
+        self._seed()
+        archive_id = self._archive_everything()
+        archive_dir = pathlib.Path(
+            self.env['store'].db_path
+        ).parent / 'archives'
+        conn = sqlite3.connect(archive_dir / f'{archive_id}.db')
+        try:
+            conn.execute(
+                "UPDATE archive_batches SET manifest_sha256 = ?",
+                ('f' * 64,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        job = self._verify(archive_id)
+        self.assertEqual(job['status'], 'failed')
+        self.assertEqual(job['errorCode'], 'archive_verification_failed')
+        registry = self.env['store'].list_archive_registry()[0]
+        self.assertEqual(registry['last_verify_status'], 'failed')
+
     def test_verify_detects_tampered_payload(self):
         self._seed()
         archive_id = self._archive_everything()

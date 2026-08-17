@@ -323,10 +323,13 @@ as a failure, never silently downgraded to a file write.
   `backup_interval_hours`) and top up on clean exit, into
   `[portfolio_store] backup_dir` — point it at a OneDrive-synced folder for
   cross-machine disaster recovery — or `<app-data>/backups` by default.
-  Manual backup: `scripts/backup_portfolio_store.py` (backup only — no
-  flag deletes revisions; removal happens solely through the admin page's
-  archive flow). Restore (backends stopped):
-  `scripts/restore_portfolio_store.py <backup.db> --yes`. This is backup,
+  Manual backup: `scripts/backup_portfolio_store.py` publishes the FULL
+  recovery set — the active database plus every registered archive shard —
+  under the same cross-process maintenance guard the backends use (backup
+  only; no flag deletes revisions). Restore (backends stopped):
+  `scripts/restore_portfolio_store.py <backup.db> --yes` verifies the whole
+  set first and installs the main database together with its shards, or
+  fails closed if a registered shard's snapshot is missing. This is backup,
   not multi-master sync: two machines editing their own local databases
   fork and cannot be merged automatically.
 - Revision retention (`revision_keep_recent` / `revision_keep_daily_days`)
