@@ -731,10 +731,11 @@ class CopyOnlyJobTest(unittest.TestCase):
         registry = self.store.list_archive_registry()
         self.assertEqual(registry[0]['revision_count'], 8)
 
-    def test_rollover_seals_full_shard_and_creates_next(self):
+    def test_rollover_seals_full_shard_only_when_batches_are_terminal(self):
         run_job(self.env, make_plan(self.env))
-        # Force rollover: any real file exceeds a 1-byte cap.
-        self.env['_archive_rollover_bytes'] = 1
+        # Copy-only left the batch `verified` (non-terminal): an over-cap
+        # shard must NOT seal yet — sealing would freeze the batch out of
+        # its convergence path. It stays active; the next part is created.
         shard, archive_id, _ = portfolio_archive.select_writable_shard(
             self.store, self.archive_dir, rollover_bytes=1,
         )
@@ -743,12 +744,29 @@ class CopyOnlyJobTest(unittest.TestCase):
             row['archive_id']: row for row in self.store.list_archive_registry()
         }
         self.assertEqual(
+            registry['portfolio-archive-2026-001']['status'], 'active'
+        )
+
+        # Once every batch is terminal, the over-cap shard seals.
+        conn = self._shard_conn()
+        try:
+            conn.execute(
+                "UPDATE archive_batches SET status = 'main_committed', "
+                "committed_at_utc = '2026-08-16T00:00:00.000Z' "
+                "WHERE status = 'verified'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        portfolio_archive.select_writable_shard(
+            self.store, self.archive_dir, rollover_bytes=1,
+        )
+        registry = {
+            row['archive_id']: row for row in self.store.list_archive_registry()
+        }
+        self.assertEqual(
             registry['portfolio-archive-2026-001']['status'], 'sealed'
         )
-        self.assertEqual(
-            registry['portfolio-archive-2026-002']['status'], 'active'
-        )
-        # Sealed shards carry the sealed stamp inside the file too.
         meta = portfolio_archive.ArchiveShard(
             self.archive_dir / 'portfolio-archive-2026-001.db'
         ).meta()

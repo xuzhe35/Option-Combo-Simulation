@@ -873,6 +873,83 @@ class ArchiveShard:
         finally:
             conn.close()
 
+    def mark_batch_canceled(self, batch_id):
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE archive_batches SET status = 'canceled' "
+                "WHERE batch_id = ? AND status = 'verified'",
+                (batch_id,),
+            )
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
+    def trim_batch_rows(self, *, batch_id, keys, instance_id, fencing_token):
+        """Remove rows that are no longer legitimate archive content (the
+        current revision of a document that came back to life) from an
+        UNSEALED batch, then recompute the batch's counts and manifest so
+        verification stays exact. Returns the number of remaining rows."""
+        conn = self._connect()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                self._check_fence(conn, instance_id, fencing_token)
+                sealed = conn.execute(
+                    'SELECT sealed_at_utc FROM archive_meta'
+                ).fetchone()
+                if sealed is not None and sealed['sealed_at_utc'] is not None:
+                    raise ArchiveError('cannot trim a sealed archive shard')
+                for document_id, revision in keys:
+                    conn.execute(
+                        'DELETE FROM archived_revisions '
+                        'WHERE archive_batch_id = ? AND document_id = ? '
+                        'AND revision = ?',
+                        (batch_id, document_id, int(revision)),
+                    )
+                remaining = [
+                    {
+                        'documentId': row['document_id'],
+                        'revision': row['revision'],
+                        'payloadSha256': row['payload_sha256'],
+                        'payloadBytes': row['payload_bytes'],
+                        'savedAtUtc': row['saved_at_utc'],
+                    }
+                    for row in conn.execute(
+                        'SELECT document_id, revision, payload_sha256, '
+                        'payload_bytes, saved_at_utc FROM archived_revisions '
+                        'WHERE archive_batch_id = ?', (batch_id,),
+                    )
+                ]
+                remaining_docs = {row['documentId'] for row in remaining}
+                conn.execute(
+                    'DELETE FROM archived_documents '
+                    'WHERE archive_batch_id = ? AND document_id NOT IN '
+                    '(SELECT document_id FROM archived_revisions '
+                    ' WHERE archive_batch_id = ?)',
+                    (batch_id, batch_id),
+                )
+                conn.execute(
+                    'UPDATE archive_batches SET revision_count = ?, '
+                    'payload_bytes = ?, document_count = ?, '
+                    'manifest_sha256 = ? WHERE batch_id = ?',
+                    (len(remaining),
+                     sum(row['payloadBytes'] for row in remaining),
+                     len(remaining_docs), _manifest_hash(remaining),
+                     batch_id),
+                )
+                conn.execute('COMMIT')
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute('ROLLBACK')
+                raise
+            return len(remaining)
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
     def fetch_revision(self, document_id, revision):
         """One archived revision row (payload included), or None. Only rows
         belonging to GOOD batches are served — dead-batch remnants are
@@ -1108,12 +1185,17 @@ def publish_archive_backups(store_env, backup_dir):
     )
     target_dir = Path(backup_dir) / 'archives'
     published = []
+    missing = []
     for row in store.list_archive_registry():
         try:
             path = archive_path_for_id(archive_dir, row['archive_id'])
         except ArchiveNotFoundError:
+            missing.append(row['archive_id'])
             continue
         if not path.exists():
+            # A registered shard without its file is a hole in the recovery
+            # set — callers must surface it, never report "up to date".
+            missing.append(row['archive_id'])
             continue
         dest = target_dir / f"{row['archive_id']}-{install_id}.db"
         shard_mtime = path.stat().st_mtime
@@ -1140,7 +1222,7 @@ def publish_archive_backups(store_env, backup_dir):
             Path(str(staging) + '-wal').unlink(missing_ok=True)
             Path(str(staging) + '-shm').unlink(missing_ok=True)
         published.append(dest.name)
-    return published
+    return {'published': published, 'missing': missing}
 
 
 # ---------------------------------------------------------------------------
@@ -1561,6 +1643,17 @@ def select_writable_shard(store, archive_dir, *, rollover_bytes):
         file_bytes = os.stat(path).st_size
         if file_bytes >= rollover_bytes:
             shard = ArchiveShard(path, now=store.now_utc)
+            # Sealing freezes the shard read-only, so a shard still holding
+            # non-terminal batches must NOT seal — those batches would lose
+            # their only convergence path (review 69d509e P2). It stays
+            # `active` (but is skipped as a write target); the commit-stage
+            # sweep converges its batches, after which a later pass seals.
+            non_terminal = shard.list_batches((
+                'copying', 'copied', 'verified',
+                'cancel_requested', 'cleanup_pending',
+            ))
+            if non_terminal:
+                continue
             shard.seal()
             store.upsert_archive_registry(
                 archive_id=row['archive_id'],
@@ -2006,11 +2099,42 @@ def commit_verified_batches(store_env, guard, job_id, shard, archive_id):
             removed_bytes += result['removedBytes']
 
         # main_committed only when EVERY row of this batch has removal
-        # evidence. Skipped rows (oversized, undeleted, changed, missing
-        # receipt) are still active candidates: the batch stays `verified`
+        # evidence. Skipped rows (oversized, changed, missing receipt,
+        # back inside grace) are still pending: the batch stays `verified`
         # so a later job re-commits the remainder — otherwise safe replay
         # would treat those rows as done and they could never converge.
-        if batch_skipped:
+        #
+        # One skip kind must NOT wait: `skipped_current` — the copy of a
+        # revision that is the CURRENT head of a document that came back
+        # to life. It may stay current forever, so the batch would never
+        # reach a terminal state and would even block sealing. The copy is
+        # redundant (the live database IS the payload's home), so it is
+        # trimmed out of the unsealed batch, counts and manifest are
+        # recomputed, and the batch can then terminate (review 69d509e P2).
+        current_skips = [
+            item for item in batch_skipped
+            if item.get('reason') == 'skipped_current'
+        ]
+        other_skips = [
+            item for item in batch_skipped
+            if item.get('reason') != 'skipped_current'
+        ]
+        if current_skips and not other_skips:
+            remaining = shard.trim_batch_rows(
+                batch_id=batch['batch_id'],
+                keys=[(item['documentId'], item['revision'])
+                      for item in current_skips],
+                instance_id=guard.instance_id,
+                fencing_token=guard.fencing_token,
+            )
+            if remaining > 0:
+                # Every remaining row carries removal evidence.
+                shard.mark_batch_committed(batch['batch_id'])
+            else:
+                # The batch never contributed a removal: terminal as
+                # canceled, an audit stub with zeroed counts.
+                shard.mark_batch_canceled(batch['batch_id'])
+        elif batch_skipped:
             resumable_batches.append(batch['batch_id'])
             skipped.extend(batch_skipped)
         else:
@@ -2064,6 +2188,36 @@ def run_archive_job(store_env, guard, job_id, plan):
     commit_summary = commit_verified_batches(
         store_env, guard, job_id, shard, copy_summary['archiveId']
     )
+
+    # Sweep: verified batches may be stranded in OTHER unsealed shards
+    # (e.g. a shard that grew past the rollover cap while one batch was
+    # still resumable). Without this, only the current write shard would
+    # ever converge (review 69d509e P2).
+    swept = []
+    for row in store.list_archive_registry():
+        if (row['archive_id'] == copy_summary['archiveId']
+                or row['status'] != 'active' or row['missing_since_utc']):
+            continue
+        other_path = archive_path_for_id(archive_dir, row['archive_id'])
+        if not other_path.exists():
+            continue
+        other = ArchiveShard(other_path, now=store.now_utc)
+        if not other.list_batches(('verified',)):
+            continue
+        other.raise_writer_fence(
+            instance_id=guard.instance_id,
+            fencing_token=guard.fencing_token,
+        )
+        sweep = commit_verified_batches(
+            store_env, guard, job_id, other, row['archive_id']
+        )
+        swept.append(row['archive_id'])
+        for key in ('removedRevisions', 'alreadyRemoved', 'removedBytes',
+                    'tombstonesWritten', 'commitChunks'):
+            commit_summary[key] += sweep[key]
+        commit_summary['skipped'].extend(sweep['skipped'])
+        commit_summary['resumableBatches'].extend(sweep['resumableBatches'])
+    commit_summary['sweptShards'] = swept
 
     freelist_before = store.freelist_count()
     vacuum_ran = False

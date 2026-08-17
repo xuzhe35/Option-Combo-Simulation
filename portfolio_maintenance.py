@@ -68,6 +68,38 @@ def new_server_instance_id():
     return f'srv-{uuid.uuid4().hex[:16]}'
 
 
+class OsMaintenanceLock:
+    """Just the OS advisory flock next to a database path — for tools like
+    restore that must exclude running backends but have no (usable) database
+    to hold a lease in. Backends acquire the SAME file first in their guard
+    chain, so holding it here guarantees no backend maintenance can run."""
+
+    def __init__(self, db_path):
+        self._lock_path = Path(db_path).parent / LOCK_FILE_NAME
+        self._fd = None
+
+    def acquire(self):
+        """Non-blocking; False when another process holds maintenance."""
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            _lock_fd(fd)
+        except OSError:
+            os.close(fd)
+            return False
+        self._fd = fd
+        return True
+
+    def release(self):
+        if self._fd is not None:
+            _unlock_fd(self._fd)
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+
 class MaintenanceGuard:
     """A held guard: thread lock + OS flock + DB lease. Single-use."""
 

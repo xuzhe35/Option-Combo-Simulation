@@ -391,15 +391,19 @@ class DisasterRecoveryDrillTest(unittest.TestCase):
             # backup alone would point at shards a dead disk no longer has.
             synced_dir = pathlib.Path(tmp) / 'synced'
             published = store.publish_backup(synced_dir)
-            shard_backups = portfolio_archive.publish_archive_backups(
+            outcome = portfolio_archive.publish_archive_backups(
                 env, synced_dir
             )
+            shard_backups = outcome['published']
+            self.assertEqual(outcome['missing'], [])
             self.assertEqual(len(shard_backups), 1)
             install_id = store.ensure_install_id()
             self.assertTrue(shard_backups[0].endswith(f'-{install_id}.db'))
             # Freshness: an unchanged shard is not republished.
             self.assertEqual(
-                portfolio_archive.publish_archive_backups(env, synced_dir),
+                portfolio_archive.publish_archive_backups(
+                    env, synced_dir
+                )['published'],
                 [],
             )
             # Purity, recursively: only completed .db snapshots ever land

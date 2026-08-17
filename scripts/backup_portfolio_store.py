@@ -83,6 +83,14 @@ def main(argv=None):
         shard_backups = portfolio_archive.publish_archive_backups(
             env, backup_dir
         )
+        # A recovery set is only complete when EVERY registered shard has a
+        # verified snapshot for this install in the target folder.
+        install_id = store.ensure_install_id()
+        unconfirmed = [
+            row['archive_id'] for row in store.list_archive_registry()
+            if not (backup_dir / 'archives'
+                    / f"{row['archive_id']}-{install_id}.db").exists()
+        ]
     except PortfolioStoreError as exc:
         print(f'backup failed ({exc.code}): {exc}', file=sys.stderr)
         return 1
@@ -90,12 +98,17 @@ def main(argv=None):
         guard.release()
 
     print(f'published {published}')
-    registered = len(store.list_archive_registry())
-    if shard_backups:
-        for name in shard_backups:
-            print(f'published archive shard snapshot archives/{name}')
-    elif registered:
-        print(f'{registered} archive shard snapshot(s) already up to date')
+    for name in shard_backups['published']:
+        print(f'published archive shard snapshot archives/{name}')
+    if shard_backups['missing'] or unconfirmed:
+        broken = sorted(set(shard_backups['missing']) | set(unconfirmed))
+        print('backup INCOMPLETE: registered archive shard(s) '
+              f'{", ".join(broken)} have no snapshot in the target — the '
+              'published main database references payloads this set cannot '
+              'restore', file=sys.stderr)
+        return 1
+    if not shard_backups['published'] and store.list_archive_registry():
+        print('archive shard snapshot(s) already up to date')
     return 0
 
 

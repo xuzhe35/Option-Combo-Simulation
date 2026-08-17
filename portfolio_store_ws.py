@@ -466,9 +466,15 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
             shard_backups = portfolio_archive.publish_archive_backups(
                 store_env, backup_dir
             )
-            if shard_backups:
+            if shard_backups['published']:
                 logger.info('published archive shard backups: %s',
-                            shard_backups)
+                            shard_backups['published'])
+            if shard_backups['missing']:
+                logger.error(
+                    'recovery set INCOMPLETE: registered archive shard(s) '
+                    '%s have no local file to back up',
+                    shard_backups['missing'],
+                )
         except Exception:
             logger.exception('archive shard backup publish failed; '
                              'main backup unaffected')

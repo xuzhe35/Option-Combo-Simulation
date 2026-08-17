@@ -377,9 +377,23 @@ class UndeleteReclassificationTest(CommitTestBase):
         # …and the candidates converge instead of sticking forever.
         final = make_plan(self.env, self.POLICY)
         self.assertEqual(final['totals']['revisionCount'], 0)
-        # The document is alive and loads at its current revision, whose
-        # archived copy legitimately keeps the batch resumable for now.
         self.assertEqual(store.load_workspace(DOC_DELETED)['revision'], 2)
+        # The live document's CURRENT-revision copy was trimmed from the
+        # unsealed batch (its home is the active database), so the batch
+        # reaches a terminal state IMMEDIATELY — convergence never depends
+        # on the user saving again (review 69d509e P2). The trimmed batch
+        # still passes full verification with its recomputed manifest.
+        shard_path = next(self.archive_dir.glob('*.db'))
+        shard = portfolio_archive.ArchiveShard(shard_path)
+        self.assertEqual(shard.list_batches(('verified',)), [])
+        guard = portfolio_maintenance.acquire_maintenance(self.env)
+        try:
+            verify = portfolio_archive.run_verify_job(
+                self.env, guard, archive_id=shard_path.stem,
+            )
+        finally:
+            guard.release()
+        self.assertEqual(verify['status'], 'ok')
         self._assert_no_payload_lost()
 
         # Once the document advances, the final row commits and the batch
@@ -398,6 +412,93 @@ class UndeleteReclassificationTest(CommitTestBase):
             make_plan(self.env, self.POLICY)['totals']['revisionCount'], 0
         )
         self._assert_no_payload_lost()
+
+
+class RolloverAndSweepTest(CommitTestBase):
+    """Review 69d509e P2: rollover must not seal a shard holding
+    non-terminal batches, and stranded verified batches in other unsealed
+    shards must converge through the commit-stage sweep."""
+
+    POLICY = {'revisionKeepRecent': 1, 'revisionKeepDailyDays': 0,
+              'archiveDeletedAfterDays': 30}
+
+    def _rebuild_store_clock(self, now):
+        from tests.portfolio_archive_test import NOW  # noqa: F401
+        store = PortfolioStore(self.db_path, now=lambda: now)
+        store.initialize()
+        self.env['store'] = store
+        self.store = store
+
+    def test_stranded_batch_blocks_seal_then_sweep_converges_and_seals(self):
+        from datetime import timedelta
+        from tests.portfolio_archive_test import NOW
+
+        store = self.store
+        # Copy + verify the whole-document candidate, then undelete AND
+        # re-delete: at commit time the document is inside a fresh grace
+        # period, so the batch is legitimately stuck as `verified`.
+        plan = make_plan(self.env, self.POLICY)
+        job = store.create_maintenance_job(
+            job_type='archive_copy',
+            owner_instance_id=self.env.get('_server_instance_id'),
+        )
+        guard = portfolio_maintenance.acquire_maintenance(self.env)
+        try:
+            store.start_maintenance_job(job['jobId'])
+            portfolio_archive.run_copy_job(self.env, guard, job['jobId'], plan)
+            store.finish_maintenance_job(job['jobId'], status='completed')
+        finally:
+            guard.release()
+        store.undelete_document(DOC_DELETED, 2)
+        store.delete_document(DOC_DELETED, 2)  # re-deleted at NOW: in grace
+
+        summary = run_full_job(self.env, make_plan(self.env, self.POLICY))
+        reasons = {item['reason'] for item in summary['commit']['skipped']}
+        self.assertIn('skipped_grace_period', reasons)
+        shard_path = self.archive_dir / 'portfolio-archive-2026-001.db'
+        shard = portfolio_archive.ArchiveShard(shard_path)
+        self.assertEqual(len(shard.list_batches(('verified',))), 1)
+
+        # Over the rollover cap, sealing REFUSES while that batch is
+        # non-terminal: the shard stays active and a new part is created.
+        next_shard, next_id, _ = portfolio_archive.select_writable_shard(
+            store, self.archive_dir, rollover_bytes=1,
+        )
+        self.assertNotEqual(next_id, 'portfolio-archive-2026-001')
+        registry = {
+            row['archive_id']: row['status']
+            for row in store.list_archive_registry()
+        }
+        self.assertEqual(registry['portfolio-archive-2026-001'], 'active')
+
+        # The grace period passes; the next job's commit-stage SWEEP finds
+        # the stranded batch in the old shard and commits it, even though
+        # new copies now write into a different shard.
+        self._rebuild_store_clock(NOW + timedelta(days=31))
+        self.env['_archive_rollover_bytes'] = 1
+        summary = run_full_job(self.env, make_plan(self.env, self.POLICY))
+        self.assertIn('portfolio-archive-2026-001',
+                      summary['commit']['sweptShards'])
+        self.assertEqual(shard.list_batches(('verified',)), [])
+        self.assertGreater(len(shard.list_batches(('main_committed',))), 0)
+        self.assertIsNotNone(self.store.get_archive_tombstone(DOC_DELETED))
+        self.assertEqual(
+            make_plan(self.env, self.POLICY)['totals']['revisionCount'], 0
+        )
+        self._assert_no_payload_lost()
+
+        # Now terminal-clean, the over-cap shard finally seals.
+        portfolio_archive.select_writable_shard(
+            self.store, self.archive_dir, rollover_bytes=1,
+        )
+        registry = {
+            row['archive_id']: row['status']
+            for row in self.store.list_archive_registry()
+        }
+        self.assertEqual(registry['portfolio-archive-2026-001'], 'sealed')
+        self.assertIsNotNone(
+            portfolio_archive.ArchiveShard(shard_path).meta()['sealed_at_utc']
+        )
 
 
 class CrashMatrixTest(CommitTestBase):
