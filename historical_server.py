@@ -7,6 +7,7 @@ import signal
 
 import websockets
 
+import cost_basis_ws
 import portfolio_admin_ws
 import portfolio_store_ws
 from chain_service_config import resolve_chain_service_url
@@ -104,6 +105,9 @@ async def send_message_safe(ws, message):
 # Same shared store and protocol as ib_server.py; initialization failure
 # only disables persistence while historical replay keeps running.
 portfolio_store_env = portfolio_store_ws.create_store_env(config)
+# The ledger is served here too so the page works against whichever
+# backend is running; only the TWS position reconciliation needs IB.
+cost_basis_store_env = cost_basis_ws.create_store_env(config)
 
 
 async def handle_ws_client(websocket):
@@ -133,6 +137,12 @@ async def handle_ws_client(websocket):
 
             if await portfolio_admin_ws.handle_admin_action(
                 portfolio_store_env, websocket, data,
+                client_ip=client_ip, send=send_message_safe,
+            ):
+                continue
+
+            if await cost_basis_ws.handle_cost_basis_action(
+                cost_basis_store_env, websocket, data,
                 client_ip=client_ip, send=send_message_safe,
             ):
                 continue

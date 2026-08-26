@@ -14,12 +14,14 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import portfolio_store_ws
+import portfolio_archive
 from portfolio_store_ws import (
     PERSISTENCE_CLIENT_ACTIONS,
     create_store_env,
@@ -541,18 +543,57 @@ class ScheduledBackupTest(unittest.TestCase):
             # Re-enable scheduling after the save so the manual call below
             # deterministically reaches the (failing) publish.
             env['_backup_interval_seconds'] = 3600.0
-            original_publish = env['store'].publish_backup
-            env['store'].publish_backup = lambda *a, **k: (_ for _ in ()).throw(
-                RuntimeError('disk full')
-            )
-            self.assertFalse(portfolio_store_ws.maybe_publish_scheduled_backup(env))
-            portfolio_store_ws.publish_backup_best_effort(env)  # must not raise
+            with mock.patch.object(
+                portfolio_archive, 'publish_recovery_generation',
+                side_effect=RuntimeError('disk full'),
+            ) as publish:
+                self.assertFalse(
+                    portfolio_store_ws.maybe_publish_scheduled_backup(env)
+                )
+                # Failure is still an attempt. A shutdown/save callback in
+                # the same interval must not hammer the destination again.
+                portfolio_store_ws.publish_backup_best_effort(env)
+                self.assertEqual(publish.call_count, 1)
             # The maintenance lock is released after the failure: the next
-            # attempt runs and succeeds.
-            env['store'].publish_backup = original_publish
+            # explicit forced attempt runs and succeeds.
             self.assertTrue(portfolio_store_ws.maybe_publish_scheduled_backup(
                 env, force=True
             ))
+
+    def test_incomplete_generation_is_throttled_and_leaves_no_shard_orphans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backup_dir = pathlib.Path(tmp) / 'backups'
+            config = _config(tmp, backup_dir=str(backup_dir),
+                             backup_interval_hours='24')
+            env = create_store_env(config)
+            portfolio_store_ws.ensure_store_initialized(env)
+            env['store'].upsert_archive_registry(
+                archive_id='portfolio-archive-2026-001',
+                archive_schema_version=1,
+                status='active',
+                created_at_utc='2026-08-17T00:00:00.000Z',
+            )
+
+            # Missing registered shard: a main attempt is published, but no
+            # completion manifest exists and no shard member is emitted.
+            self.assertTrue(
+                portfolio_store_ws.maybe_publish_scheduled_backup(env)
+            )
+            self.assertEqual(len(list(backup_dir.glob('portfolio-*.db'))), 1)
+            self.assertEqual(
+                list(backup_dir.glob('recovery-manifest-*.json')), []
+            )
+            archive_dir = backup_dir / 'archives'
+            self.assertEqual(
+                list(archive_dir.glob('*.db')) if archive_dir.exists() else [],
+                [],
+            )
+
+            for _ in range(5):
+                self.assertFalse(
+                    portfolio_store_ws.maybe_publish_scheduled_backup(env)
+                )
+            self.assertEqual(len(list(backup_dir.glob('portfolio-*.db'))), 1)
 
     def test_concurrent_maintenance_runs_exactly_once(self):
         with tempfile.TemporaryDirectory() as tmp:

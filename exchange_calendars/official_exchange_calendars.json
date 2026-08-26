@@ -1,12 +1,12 @@
 {
   "version": 2,
-  "generatedAt": "2026-08-07T13:33:04+00:00",
+  "generatedAt": "2026-08-25T13:38:49+00:00",
   "calendars": {
     "NYSE": {
       "calendarKey": "NYSE",
       "sourceKind": "official_html",
       "sourceUrl": "https://www.nyse.com/trade/hours-calendars",
-      "fetchedAt": "2026-08-07T13:33:04+00:00",
+      "fetchedAt": "2026-08-25T13:38:49+00:00",
       "coverageStart": "2026-01-01",
       "coverageEnd": "2028-12-31",
       "closures": [
@@ -193,7 +193,7 @@
           "timezone": "America/New_York"
         }
       ],
-      "sourceSha256": "c466a9cb0377a8028046cd581e782f2695d01e2d06570a8f68d048681c0f2ebe"
+      "sourceSha256": "49ee8a651ec01ef2866e347842c0fb11309541f247d17aeaaf7ad9d6a513b1ed"
     },
     "CME:ES": {
       "calendarKey": "CME:ES",

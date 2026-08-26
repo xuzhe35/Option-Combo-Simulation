@@ -18,8 +18,6 @@ import logging
 import threading
 import time
 
-from datetime import datetime, timezone
-
 import portfolio_maintenance
 from portfolio_store import (
     ACCEPTED_PAYLOAD_SCHEMA_VERSIONS,
@@ -174,6 +172,9 @@ def create_store_env(config=None):
         '_backup_interval_seconds': max(0.0, backup_interval_hours) * 3600.0,
         '_backup_keep_daily': backup_keep_daily,
         '_backup_keep_weekly': backup_keep_weekly,
+        # Attempt time, not completion time: a known missing shard must not
+        # turn every workspace save into another multi-GB backup retry.
+        '_last_backup_attempt_epoch': None,
         # Real mutex: save-triggered maintenance, shutdown top-up, and forced
         # backups all funnel through this one lock. A dict flag was
         # check-then-set and let two threads run the whole chain in parallel.
@@ -439,13 +440,17 @@ def _resolve_effective_backup_dir(store_env):
 
 
 def maybe_publish_scheduled_backup(store_env, *, force=False):
-    """Publish a static snapshot when the newest own backup is older than the
-    configured interval. Runs on a worker thread; never raises."""
+    """Publish when the latest attempt (successful or not) is due."""
     if store_env is None:
         return False
     store = store_env.get('store')
     interval = store_env.get('_backup_interval_seconds', 24 * 3600.0)
     if store is None or interval <= 0:
+        return False
+    now_epoch = time.time()
+    cached_attempt = store_env.get('_last_backup_attempt_epoch')
+    if (not force and cached_attempt is not None
+            and now_epoch - cached_attempt < interval):
         return False
     # Non-blocking full maintenance guard: thread lock, OS file lock, and
     # the cross-process DB lease (portfolio_maintenance). Concurrent
@@ -456,61 +461,48 @@ def maybe_publish_scheduled_backup(store_env, *, force=False):
     if guard is None:
         return False
     try:
-        backup_dir = _resolve_effective_backup_dir(store_env)
-        newest = store.latest_own_backup_stamp(backup_dir)
-        if newest is not None and not force:
-            newest_at = datetime.strptime(newest, '%Y%m%dT%H%M%SZ').replace(
-                tzinfo=timezone.utc
-            )
-            age = (datetime.now(timezone.utc) - newest_at).total_seconds()
-            if age < interval:
-                return False
         import portfolio_archive
-        preserved = portfolio_archive.manifest_preserved_main(
-            store, backup_dir
-        )
-        published = store.publish_backup(
-            backup_dir,
+        backup_dir = _resolve_effective_backup_dir(store_env)
+        now_epoch = time.time()
+        cached_attempt = store_env.get('_last_backup_attempt_epoch')
+        if cached_attempt is None:
+            cached_attempt = portfolio_archive.latest_recovery_attempt_epoch(
+                store, backup_dir, now_epoch=now_epoch
+            )
+            store_env['_last_backup_attempt_epoch'] = cached_attempt
+        if not force and cached_attempt is not None:
+            if now_epoch - cached_attempt < interval:
+                return False
+        # Record before I/O. Any failed or incomplete attempt receives the
+        # same interval backoff as a successful generation.
+        store_env['_last_backup_attempt_epoch'] = now_epoch
+        recovery = portfolio_archive.publish_recovery_generation(
+            store_env, backup_dir,
             keep_daily=store_env.get('_backup_keep_daily', DEFAULT_BACKUP_KEEP_DAILY),
             keep_weekly=store_env.get('_backup_keep_weekly', DEFAULT_BACKUP_KEEP_WEEKLY),
-            preserve_names=[preserved] if preserved else (),
         )
-        logger.info('published scheduled workspace backup: %s', published)
-        # Archive shards get static snapshots too: after removal the shard
-        # is the ONLY holder of archived payloads, so a main-DB backup
-        # alone would point at files a dead disk no longer has.
-        try:
-            import portfolio_archive
-            shard_backups = portfolio_archive.publish_archive_backups(
-                store_env, backup_dir
+        if recovery['complete']:
+            logger.info(
+                'published recovery generation %s: main=%s manifest=%s '
+                'new_shards=%s reused_shards=%s',
+                recovery['generationId'], recovery['mainPath'],
+                recovery['manifestPath'], recovery['publishedShards'],
+                recovery['reusedShards'],
             )
-            if shard_backups['published']:
-                logger.info('published archive shard backups: %s',
-                            shard_backups['published'])
-            if shard_backups['missing']:
-                logger.error(
-                    'recovery set INCOMPLETE: registered archive shard(s) '
-                    '%s have no local file to back up — no recovery '
-                    'manifest written; restore will refuse this main file',
-                    shard_backups['missing'],
-                )
-            else:
-                # Complete generation: the manifest is the atomic
-                # completion marker restore requires.
-                manifest = portfolio_archive.write_recovery_manifest(
-                    store_env, backup_dir, published
-                )
-                logger.info('published recovery manifest %s', manifest.name)
-        except Exception:
-            logger.exception('archive shard backup publish failed; '
-                             'main backup unaffected')
+        else:
+            logger.error(
+                'recovery generation INCOMPLETE: missing shard(s) %s; '
+                'no manifest written, next retry after configured interval',
+                recovery['missingShards'],
+            )
+        for warning in recovery['housekeepingWarnings']:
+            logger.warning('recovery housekeeping warning: %s', warning)
         # Scheduled maintenance NEVER deletes revisions directly: the only
         # removal paths are the admin page's archive flow and, when the
         # user explicitly opted in (archive_auto_run=true, default false),
         # the guarded auto-archive below — both keep a verified archive
         # copy of every removed payload. Bounded reclamation stays here.
         try:
-            import portfolio_archive
             outcome = portfolio_archive.run_auto_archive(
                 store_env, guard, now_monotonic=time.monotonic()
             )

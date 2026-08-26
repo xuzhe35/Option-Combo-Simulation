@@ -1833,6 +1833,7 @@ class IbServerPortfolioPositionSnapshotTests(unittest.TestCase):
                     SimpleNamespace(
                         account='U19322426',
                         position=-4,
+                        avgCost=125.5,
                         contract=SimpleNamespace(
                             conId=91001,
                             secType='FOP',
@@ -1848,6 +1849,7 @@ class IbServerPortfolioPositionSnapshotTests(unittest.TestCase):
                     SimpleNamespace(
                         account='U19322426',
                         position=-4,
+                        avgCost=125.5,
                         contract=SimpleNamespace(
                             conId=91002,
                             secType='FOP',
@@ -1875,6 +1877,8 @@ class IbServerPortfolioPositionSnapshotTests(unittest.TestCase):
             [(item['right'], item['position'], item['tradingClass']) for item in payload['items']],
             [('C', -4.0, 'EW3'), ('P', -4.0, 'EW3')],
         )
+        self.assertEqual(
+            [item['avgCostPerUnit'] for item in payload['items']], [2.51, 2.51])
         self.assertEqual(len(ib_server.portfolio_position_cache), 2)
 
 

@@ -13,6 +13,7 @@ const PAGES = [
     'chart_lab.html',
     'iv_term_structure.html',
     'workspace_db_admin.html',
+    'cost_basis.html',
 ];
 const HASH_LENGTH = 12;
 const ASSET_REFERENCE = /\b(?:src|href)="([A-Za-z0-9_./-]+\.(?:js|css))(?:\?v=([^"]*))?"/g;
@@ -75,10 +76,14 @@ module.exports = {
         {
             name: 'pages actually reference assets, so the guard cannot pass vacuously',
             run() {
-                // The admin page's manifest is deliberately tiny (its exact
-                // three-asset content is asserted in
-                // workspace_db_admin_page.test.js); trading pages carry many.
-                const minimumReferences = { 'workspace_db_admin.html': 3 };
+                // The standalone pages keep deliberately tiny manifests and
+                // assert their exact contents in their own page tests
+                // (workspace_db_admin_page.test.js, cost_basis_page.test.js);
+                // trading pages carry many.
+                const minimumReferences = {
+                    'workspace_db_admin.html': 3,
+                    'cost_basis.html': 4,
+                };
                 PAGES.forEach((pageName) => {
                     const references = collectReferences(pageName);
                     const minimum = minimumReferences[pageName] || 6;

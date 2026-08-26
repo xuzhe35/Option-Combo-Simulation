@@ -659,9 +659,22 @@ Not implemented there today:
   - backends hold the SHARED `portfolio.runtime.lock` for their whole
     process life (acquired in `ensure_store_initialized`); restore takes
     it EXCLUSIVELY. Backups are only restorable as manifest-complete
-    generations (`recovery-manifest-*.json`, written last, hash-binding
-    main + shards); retention must never retire the manifest's main file
-    (`publish_backup(preserve_names=…)`);
+    generations. A generation id is present in each immutable main and its
+    `recovery-manifest-*.json`; format-3 manifests may share an unchanged,
+    immutable shard member from an earlier generation. Changed shards get a
+    new generation-named snapshot. The manifest is written last and
+    hash/size-binds the locally verified staging bytes, never a second read
+    from the sync destination. Both scheduled and manual publishers call only
+    `publish_recovery_generation`; scheduled failure/incompleteness advances
+    the attempt backoff, and old unreferenced own snapshots are cleaned after
+    a 48-hour grace period. Retention operates on whole completed generations,
+    preserves members still shared by kept manifests, and main-file retention
+    internally protects every main named by an existing manifest. Failures in
+    retention after manifest publication are warnings, not failed publishes.
+    Restore must install only its verified staged copies, prepare all
+    destination-local files before the swap, and keep every displaced member
+    (including degraded/missing shard paths) in one rollback journal; even
+    `KeyboardInterrupt` runs rollback before it is re-raised;
   - commit chunks re-check the lease INSIDE the write transaction and
     write the archive entry/tombstone in the SAME transaction as the
     delete; `workspace_save_receipts` is a permanent idempotency ledger

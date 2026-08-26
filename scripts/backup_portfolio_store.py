@@ -77,56 +77,35 @@ def main(argv=None):
               'right now; retry in a moment', file=sys.stderr)
         return 1
     try:
-        preserved = portfolio_archive.manifest_preserved_main(
-            store, backup_dir
-        )
-        published = store.publish_backup(
-            backup_dir, keep_daily=args.keep_daily,
+        recovery = portfolio_archive.publish_recovery_generation(
+            env, backup_dir,
+            keep_daily=args.keep_daily,
             keep_weekly=args.keep_weekly,
-            preserve_names=[preserved] if preserved else (),
         )
-        shard_backups = portfolio_archive.publish_archive_backups(
-            env, backup_dir
-        )
-        # A recovery set is only complete when EVERY registered shard has a
-        # verified snapshot for this install in the target folder.
-        install_id = store.ensure_install_id()
-        unconfirmed = [
-            row['archive_id'] for row in store.list_archive_registry()
-            if not (backup_dir / 'archives'
-                    / f"{row['archive_id']}-{install_id}.db").exists()
-        ]
-    except PortfolioStoreError as exc:
-        print(f'backup failed ({exc.code}): {exc}', file=sys.stderr)
+    except Exception as exc:
+        code = getattr(exc, 'code', 'store_unavailable')
+        print(f'backup failed ({code}): {exc}', file=sys.stderr)
         return 1
     finally:
         guard.release()
 
-    print(f'published {published}')
-    for name in shard_backups['published']:
-        print(f'published archive shard snapshot archives/{name}')
-    if shard_backups['missing'] or unconfirmed:
-        broken = sorted(set(shard_backups['missing']) | set(unconfirmed))
+    for warning in recovery['housekeepingWarnings']:
+        print(f'backup housekeeping WARNING: {warning}', file=sys.stderr)
+    if not recovery['complete']:
         print('backup INCOMPLETE: registered archive shard(s) '
-              f'{", ".join(broken)} have no snapshot in the target — no '
-              'recovery manifest was written, so restore will refuse this '
-              'main file', file=sys.stderr)
-        return 1
-    # The generation is complete: publish the manifest LAST. Restore only
-    # accepts main files a manifest names, so a failed publish can never
-    # masquerade as a recovery set.
-    try:
-        env['store'] = store  # unchanged; manifest reads registry + files
-        manifest_path = portfolio_archive.write_recovery_manifest(
-            env, backup_dir, published
-        )
-    except PortfolioStoreError as exc:
-        print(f'backup failed writing recovery manifest ({exc.code}): {exc}',
+              f'{", ".join(recovery["missingShards"])} have no local '
+              'snapshot; no recovery manifest was written and the next '
+              'scheduled retry will honor the configured interval',
               file=sys.stderr)
         return 1
-    print(f'published recovery manifest {manifest_path.name}')
-    if not shard_backups['published'] and store.list_archive_registry():
-        print('archive shard snapshot(s) already up to date')
+    print(f"published {recovery['mainPath']}")
+    for name in recovery['publishedShards']:
+        print(f'published archive shard snapshot archives/{name}')
+    for name in recovery['reusedShards']:
+        print(f'reused archive shard snapshot archives/{name}')
+    print(
+        f"published recovery manifest {recovery['manifestPath'].name}"
+    )
     return 0
 
 

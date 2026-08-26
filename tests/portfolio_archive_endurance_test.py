@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 import portfolio_archive
 import portfolio_maintenance
 import portfolio_store_ws
-from portfolio_store import PortfolioStore, restore_database
+from portfolio_store import PortfolioStore, StoreUnavailableError, restore_database
 
 NOW = datetime(2026, 8, 16, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -390,27 +390,44 @@ class DisasterRecoveryDrillTest(unittest.TestCase):
             # publish flow (backup API + verify + atomic rename) — a main
             # backup alone would point at shards a dead disk no longer has.
             synced_dir = pathlib.Path(tmp) / 'synced'
-            published = store.publish_backup(synced_dir)
-            outcome = portfolio_archive.publish_archive_backups(
-                env, synced_dir
-            )
-            shard_backups = outcome['published']
-            self.assertEqual(outcome['missing'], [])
-            self.assertEqual(len(shard_backups), 1)
-            install_id = store.ensure_install_id()
-            self.assertTrue(shard_backups[0].endswith(f'-{install_id}.db'))
-            # Freshness: an unchanged shard is not republished.
-            self.assertEqual(
-                portfolio_archive.publish_archive_backups(
+            guard = portfolio_maintenance.acquire_maintenance(env)
+            self.assertIsNotNone(guard)
+            try:
+                outcome = portfolio_archive.publish_recovery_generation(
                     env, synced_dir
-                )['published'],
-                [],
-            )
-            # Purity, recursively: only completed .db snapshots ever land
-            # in the synced folder — never WAL/SHM/partial files.
+                )
+            finally:
+                guard.release()
+            published = outcome['mainPath']
+            shard_entries = outcome['shards']
+            self.assertTrue(outcome['complete'])
+            self.assertEqual(outcome['missingShards'], [])
+            self.assertEqual(len(shard_entries), 1)
+            install_id = store.ensure_install_id()
+            suffix = f'-{install_id}@{outcome["generationId"]}.db'
+            self.assertTrue(shard_entries[0]['name'].endswith(suffix))
+            # Immutable generations never overwrite even on an accidental
+            # same-id retry.
+            with mock.patch.object(
+                portfolio_archive, 'new_recovery_generation_id',
+                return_value=outcome['generationId'],
+            ):
+                guard = portfolio_maintenance.acquire_maintenance(env)
+                self.assertIsNotNone(guard)
+                try:
+                    with self.assertRaises(StoreUnavailableError):
+                        portfolio_archive.publish_recovery_generation(
+                            env, synced_dir
+                        )
+                finally:
+                    guard.release()
+            # Purity, recursively: only completed databases and the atomic
+            # completion manifest land in sync — never WAL/SHM/partials.
             leftovers = [
                 p.name for p in synced_dir.rglob('*')
-                if p.is_file() and not p.name.endswith('.db')
+                if (p.is_file() and not p.name.endswith('.db')
+                    and not (p.name.startswith('recovery-manifest-')
+                             and p.name.endswith('.json')))
             ]
             self.assertEqual(leftovers, [])
 
@@ -421,12 +438,10 @@ class DisasterRecoveryDrillTest(unittest.TestCase):
             new_db = machine / 'portfolio.db'
             restore_database(published, new_db)
             (machine / 'archives').mkdir()
-            for backup_name in shard_backups:
-                # Strip the trailing "-<install_id>.db" to recover the id.
-                archive_id = backup_name[:-(len(install_id) + len('-.db'))]
+            for entry in shard_entries:
                 shutil.copyfile(
-                    synced_dir / 'archives' / backup_name,
-                    machine / 'archives' / f'{archive_id}.db',
+                    synced_dir / 'archives' / entry['name'],
+                    machine / 'archives' / f'{entry["archiveId"]}.db',
                 )
 
             new_env = portfolio_store_ws.create_store_env(

@@ -240,7 +240,8 @@ class IbServerWsHandlerTests(unittest.TestCase):
             'get_discount_curve_snapshot': get_discount_curve_snapshot,
             'execution_engine': _ExecutionEngineStub(),
             'send_portfolio_avg_cost_snapshot': lambda websocket: snapshot_calls.append(websocket),
-            'send_portfolio_positions_snapshot': lambda websocket: position_snapshot_calls.append(websocket),
+            'send_portfolio_positions_snapshot': lambda websocket, request_id=None: (
+                position_snapshot_calls.append((websocket, request_id))),
             'send_managed_accounts_snapshot': lambda websocket: managed_snapshot_calls.append(websocket),
             'cancel_iv_term_structure_sync_task': cancel_iv_term_structure_sync_task,
             'unsubscribe_client_safely': unsubscribe_client_safely,
@@ -339,7 +340,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
 
         self.assertEqual(sent_messages, [])
         self.assertEqual(snapshot_calls, [websocket])
-        self.assertEqual(env['_captures']['position_snapshot_calls'], [websocket])
+        self.assertEqual(env['_captures']['position_snapshot_calls'], [(websocket, None)])
         self.assertEqual(managed_snapshot_calls, [websocket])
         self.assertEqual(cancel_iv_calls, [websocket])
         self.assertEqual(unsubscribe_calls, [websocket])
@@ -390,12 +391,16 @@ class IbServerWsHandlerTests(unittest.TestCase):
 
     def test_handle_ws_client_routes_portfolio_positions_snapshot_action(self):
         env, *_rest = self._build_env()
-        websocket = _FakeWebSocket(messages=[json.dumps({'action': 'request_portfolio_positions_snapshot'})])
+        websocket = _FakeWebSocket(messages=[json.dumps({
+            'action': 'request_portfolio_positions_snapshot',
+            'requestId': 'positions-1',
+        })])
         handler = build_ws_client_handler(env)
 
         asyncio.run(handler(websocket))
 
-        self.assertEqual(env['_captures']['position_snapshot_calls'], [websocket, websocket])
+        self.assertEqual(env['_captures']['position_snapshot_calls'], [
+            (websocket, None), (websocket, 'positions-1')])
 
     def test_handle_ws_client_routes_ib_connection_status_action(self):
         (

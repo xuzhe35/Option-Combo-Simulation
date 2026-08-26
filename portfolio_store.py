@@ -54,11 +54,14 @@ MAINTENANCE_BACKUP_DIRNAME = 'maintenance-backups'
 DEFAULT_MIGRATION_BATCH_ROWS = 500
 DEFAULT_MIGRATION_BATCH_PAYLOAD_BYTES = 32 * 1024 * 1024
 
-# portfolio-<UTC stamp>-schema<user_version>-<install id>.db — the install id
-# keeps two machines publishing into one synced folder from colliding, and
-# retention only ever touches this machine's own matching files.
+# portfolio-<UTC stamp>-schema<user_version>-<install id>@<generation id>.db
+# — install id keeps machines apart; generation id makes every completed
+# recovery member immutable, including two publishes in the same second.
+# The optional generation suffix keeps pre-generation backups readable.
 _BACKUP_FILE_RE = re.compile(
-    r'^portfolio-(\d{8}T\d{6}Z)-schema(\d+)-([A-Za-z0-9][A-Za-z0-9-]{7,63})\.db$'
+    r'^portfolio-(\d{8}T\d{6}Z)-schema(\d+)-'
+    r'([A-Za-z0-9][A-Za-z0-9-]{7,63})'
+    r'(?:@([A-Za-z0-9][A-Za-z0-9-]{7,63}))?\.db$'
 )
 
 # UUIDs pass; so do project-style tokens. Anything shorter than 8 chars or
@@ -66,6 +69,29 @@ _BACKUP_FILE_RE = re.compile(
 _TOKEN_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$')
 
 _LIST_FIELDS = ('groups', 'hedges', 'futuresPool', 'forwardRateSamples')
+
+
+def parse_published_backup_name(name):
+    """Return immutable publish metadata for a main backup name.
+
+    `generationId` is None for legacy pre-generation files.
+    """
+    match = _BACKUP_FILE_RE.match(Path(name).name)
+    if match is None:
+        return None
+    try:
+        published_at = datetime.strptime(
+            match.group(1), '%Y%m%dT%H%M%SZ'
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return {
+        'stamp': match.group(1),
+        'publishedAtUtc': published_at,
+        'schemaVersion': int(match.group(2)),
+        'installId': match.group(3),
+        'generationId': match.group(4),
+    }
 
 
 class PortfolioStoreError(Exception):
@@ -1351,31 +1377,34 @@ class PortfolioStore:
             raise StoreUnavailableError(f'cannot persist install id: {exc}') from exc
         return install_id
 
-    def latest_own_backup_stamp(self, backup_dir):
-        """Newest publish stamp for this install in backup_dir, or None."""
-        install_id = self.ensure_install_id()
-        newest = None
-        try:
-            entries = list(Path(backup_dir).iterdir())
-        except OSError:
-            return None
-        for entry in entries:
-            match = _BACKUP_FILE_RE.match(entry.name)
-            if match and match.group(3) == install_id:
-                if newest is None or match.group(1) > newest:
-                    newest = match.group(1)
-        return newest
-
     def publish_backup(self, backup_dir, *, keep_daily=DEFAULT_BACKUP_KEEP_DAILY,
                        keep_weekly=DEFAULT_BACKUP_KEEP_WEEKLY,
-                       preserve_names=()):
+                       generation_id=None):
         """Publish one verified static snapshot into a synced folder.
 
         The snapshot is produced with the SQLite backup API into a local temp
         file, quick_check-verified, copied to the target as an explicit
         .partial name, flushed, then atomically renamed — sync software never
         sees a half-written final file and never touches the live WAL/SHM.
-        Retention prunes only this install's own completed files."""
+        Standalone retention automatically protects every main file named by
+        a completed recovery manifest; callers cannot forget that invariant.
+        """
+        artifact = self._publish_backup_artifact(
+            backup_dir, generation_id=generation_id
+        )
+        self.apply_backup_retention(
+            backup_dir, keep_daily=keep_daily, keep_weekly=keep_weekly,
+            current_name=artifact['name'],
+        )
+        return artifact['path']
+
+    def _publish_backup_artifact(self, backup_dir, *, generation_id=None):
+        """Publish without housekeeping and return the verified local digest.
+
+        Recovery-set orchestration uses this lower-level primitive so the
+        manifest binds the staging bytes that passed quick_check, never a
+        second read from a sync-managed destination.
+        """
         backup_dir = Path(backup_dir)
         try:
             backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1383,11 +1412,25 @@ class PortfolioStore:
             raise StoreUnavailableError(f'cannot create backup dir: {exc}') from exc
 
         install_id = self.ensure_install_id()
+        if generation_id is None:
+            generation_id = uuid.uuid4().hex
+        if (not isinstance(generation_id, str)
+                or not re.fullmatch(
+                    r'[A-Za-z0-9][A-Za-z0-9-]{7,63}', generation_id
+                )):
+            raise InvalidRequestError('invalid backup generation id')
         now = self._now()
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
         stamp = now.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-        name = f'portfolio-{stamp}-schema{SCHEMA_USER_VERSION}-{install_id}.db'
+        name = (f'portfolio-{stamp}-schema{SCHEMA_USER_VERSION}-{install_id}'
+                f'@{generation_id}.db')
+        destination = backup_dir / name
+        if destination.exists():
+            raise StoreUnavailableError(
+                f'backup generation {generation_id} already exists; '
+                'refusing overwrite'
+            )
 
         # Unique staging/partial names are a second line of defense behind
         # the caller's maintenance lock: even two same-second publishes can
@@ -1395,46 +1438,80 @@ class PortfolioStore:
         # so restore tooling and retention both ignore them.
         nonce = uuid.uuid4().hex[:8]
         local_snapshot = self._db_path.parent / f'.backup-staging-{stamp}-{nonce}.db'
+        partial = backup_dir / f'{name}.{nonce}.partial'
+        digest = hashlib.sha256()
+        byte_count = 0
         try:
             self.backup_to(local_snapshot)  # includes quick_check
-            partial = backup_dir / f'{name}.{nonce}.partial'
             with open(local_snapshot, 'rb') as src, open(partial, 'wb') as dst:
-                shutil.copyfileobj(src, dst)
+                for chunk in iter(lambda: src.read(1 << 20), b''):
+                    digest.update(chunk)
+                    byte_count += len(chunk)
+                    dst.write(chunk)
                 dst.flush()
                 os.fsync(dst.fileno())
-            os.replace(partial, backup_dir / name)
+            os.replace(partial, destination)
+            if destination.stat().st_size != byte_count:
+                raise StoreUnavailableError(
+                    'published backup size changed before completion'
+                )
         finally:
             local_snapshot.unlink(missing_ok=True)
             Path(str(local_snapshot) + '-wal').unlink(missing_ok=True)
             Path(str(local_snapshot) + '-shm').unlink(missing_ok=True)
+            partial.unlink(missing_ok=True)
+        return {
+            'path': destination,
+            'name': name,
+            'sha256': digest.hexdigest(),
+            'bytes': byte_count,
+        }
 
-        self._apply_backup_retention(backup_dir, install_id, keep_daily,
-                                     keep_weekly, preserve_names)
-        return backup_dir / name
+    def _manifest_protected_backup_names(self, backup_dir, install_id):
+        """Main snapshots named by structurally plausible own manifests."""
+        protected = set()
+        for candidate in Path(backup_dir).glob('recovery-manifest-*.json'):
+            try:
+                data = json.loads(candidate.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            if (not isinstance(data, dict)
+                    or data.get('publisherInstallId') != install_id
+                    or not isinstance(data.get('main'), dict)):
+                continue
+            name = data['main'].get('name')
+            if not isinstance(name, str) or Path(name).name != name:
+                continue
+            meta = parse_published_backup_name(name)
+            if meta is not None and meta['installId'] == install_id:
+                protected.add(name)
+        return protected
 
-    @staticmethod
-    def _apply_backup_retention(backup_dir, install_id, keep_daily,
-                                keep_weekly, preserve_names=()):
-        """Retire old snapshots — but NEVER one in preserve_names: the
-        recovery manifest's main file must survive even when a same-day
-        publish fails halfway, or the last complete generation dies with
-        it."""
-        preserve = set(preserve_names)
+    def apply_backup_retention(
+            self, backup_dir, *, keep_daily=DEFAULT_BACKUP_KEEP_DAILY,
+            keep_weekly=DEFAULT_BACKUP_KEEP_WEEKLY, current_name=None):
+        """Retire standalone/orphan main snapshots without breaking sets."""
+        install_id = self.ensure_install_id()
+        preserve = self._manifest_protected_backup_names(
+            backup_dir, install_id
+        )
+        if current_name is not None:
+            preserve.add(current_name)
         own = []
         for entry in Path(backup_dir).iterdir():
-            match = _BACKUP_FILE_RE.match(entry.name)
-            if (match and match.group(3) == install_id
+            meta = parse_published_backup_name(entry.name)
+            if (meta is not None and meta['installId'] == install_id
                     and entry.name not in preserve):
-                own.append((match.group(1), entry))
-        own.sort(reverse=True)
+                own.append((meta['publishedAtUtc'], entry))
+        own.sort(key=lambda item: (item[0], item[1].name), reverse=True)
 
         newest_per_day = {}
         newest_per_week = {}
-        for stamp, entry in own:
-            day = stamp[:8]
+        for published_at, entry in own:
+            day = published_at.date()
             if day not in newest_per_day:
                 newest_per_day[day] = entry
-            week = datetime.strptime(stamp[:8], '%Y%m%d').isocalendar()[:2]
+            week = published_at.isocalendar()[:2]
             if week not in newest_per_week:
                 newest_per_week[week] = entry
         keep = set()
@@ -1442,7 +1519,7 @@ class PortfolioStore:
             keep.add(newest_per_day[day])
         for week in sorted(newest_per_week, reverse=True)[:max(0, int(keep_weekly))]:
             keep.add(newest_per_week[week])
-        for _stamp, entry in own:
+        for _published_at, entry in own:
             if entry not in keep:
                 entry.unlink(missing_ok=True)
 

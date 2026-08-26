@@ -23,15 +23,19 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from portfolio_store import (
     DatabaseCorruptError,
+    DEFAULT_BACKUP_KEEP_DAILY,
+    DEFAULT_BACKUP_KEEP_WEEKLY,
     MAINTENANCE_BACKUP_DIRNAME,
     PortfolioStoreError,
     SCHEMA_USER_VERSION,
+    parse_published_backup_name,
 )
 
 # ---------------------------------------------------------------------------
@@ -989,6 +993,56 @@ class ArchiveShard:
         finally:
             conn.close()
 
+    def recovery_fingerprint(self):
+        """Hash recovery-relevant logical state without rereading payloads.
+
+        `payload_sha256` already binds every archived payload. Hashing the
+        remaining ordered metadata detects all legitimate shard mutations
+        while making an unchanged multi-GB sealed shard cheap to recognize
+        and reuse in a later recovery manifest.
+        """
+        queries = (
+            ('meta',
+             'SELECT archive_id, archive_schema_version, source_install_id, '
+             'created_at_utc, sealed_at_utc, part_year, part_number '
+             'FROM archive_meta ORDER BY archive_id'),
+            ('batches',
+             'SELECT batch_id, status, owner_server_instance_id, '
+             'lease_fencing_token, policy_json, preview_fingerprint, '
+             'document_count, revision_count, payload_bytes, '
+             'manifest_sha256, source_schema_version, created_at_utc, '
+             'verified_at_utc, committed_at_utc FROM archive_batches '
+             'ORDER BY batch_id'),
+            ('documents',
+             'SELECT document_id, archive_batch_id, archive_kind, title, '
+             'symbol, market_data_mode, last_revision, deleted_at_utc '
+             'FROM archived_documents ORDER BY document_id, archive_batch_id'),
+            ('revisions',
+             'SELECT document_id, revision, save_token, '
+             'payload_schema_version, payload_sha256, saved_at_utc, '
+             'payload_bytes, archive_batch_id, archived_at_utc '
+             'FROM archived_revisions ORDER BY document_id, revision'),
+        )
+        digest = hashlib.sha256()
+        conn = self._connect()
+        try:
+            user_version = conn.execute('PRAGMA user_version').fetchone()[0]
+            digest.update(f'user_version:{user_version}\n'.encode('ascii'))
+            for label, sql in queries:
+                digest.update((label + '\n').encode('ascii'))
+                for row in conn.execute(sql):
+                    encoded = json.dumps(
+                        list(row), ensure_ascii=False,
+                        separators=(',', ':'),
+                    ).encode('utf-8')
+                    digest.update(encoded)
+                    digest.update(b'\n')
+            return digest.hexdigest()
+        except sqlite3.Error as exc:
+            raise ArchiveError(str(exc)) from exc
+        finally:
+            conn.close()
+
 
 def _manifest_hash(rows):
     canonical = json.dumps(
@@ -1166,7 +1220,48 @@ def split_into_batches(manifest, *, max_rows, max_payload_bytes):
 # Recovery-set generation manifest (review 0edf86e P1-1 / P1-2)
 # ---------------------------------------------------------------------------
 
-RECOVERY_MANIFEST_FORMAT = 1
+RECOVERY_MANIFEST_FORMAT = 3
+SUPPORTED_RECOVERY_MANIFEST_FORMATS = (1, 2, RECOVERY_MANIFEST_FORMAT)
+DEFAULT_ORPHAN_SNAPSHOT_GRACE_SECONDS = 48 * 3600
+_RECOVERY_TOKEN_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9-]{7,63}$')
+_SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
+_ARCHIVE_SNAPSHOT_RE = re.compile(
+    r'^(portfolio-archive-\d{4}-\d{3})-'
+    r'([A-Za-z0-9][A-Za-z0-9-]{7,63})'
+    r'(?:@([A-Za-z0-9][A-Za-z0-9-]{7,63}))?\.db$'
+)
+
+
+def new_recovery_generation_id():
+    return uuid.uuid4().hex
+
+
+def recovery_archive_snapshot_name(
+        archive_id, install_id, generation_id=None):
+    """Canonical immutable shard-snapshot name (legacy when gen is None)."""
+    if (not isinstance(archive_id, str)
+            or ARCHIVE_ID_RE.fullmatch(archive_id) is None
+            or not isinstance(install_id, str)
+            or _RECOVERY_TOKEN_RE.fullmatch(install_id) is None
+            or (generation_id is not None
+                and (not isinstance(generation_id, str)
+                     or _RECOVERY_TOKEN_RE.fullmatch(generation_id) is None))):
+        raise ArchiveError('invalid recovery snapshot identity')
+    suffix = f'@{generation_id}' if generation_id is not None else ''
+    return f'{archive_id}-{install_id}{suffix}.db'
+
+
+def _parse_archive_snapshot_name(name):
+    if not isinstance(name, str) or Path(name).name != name:
+        return None
+    match = _ARCHIVE_SNAPSHOT_RE.fullmatch(name)
+    if match is None or ARCHIVE_ID_RE.fullmatch(match.group(1)) is None:
+        return None
+    return {
+        'archiveId': match.group(1),
+        'installId': match.group(2),
+        'generationId': match.group(3),
+    }
 
 
 def _sha256_file(path):
@@ -1177,7 +1272,104 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
-def write_recovery_manifest(store_env, backup_dir, main_path):
+def _valid_member_entry(entry, *, shard=False, require_fingerprint=False):
+    if not isinstance(entry, dict):
+        return False
+    name = entry.get('name')
+    sha = entry.get('sha256')
+    byte_count = entry.get('bytes')
+    if (not isinstance(name, str) or not name
+            or Path(name).name != name
+            or not isinstance(sha, str) or _SHA256_RE.fullmatch(sha) is None
+            or isinstance(byte_count, bool) or not isinstance(byte_count, int)
+            or byte_count < 0):
+        return False
+    if shard:
+        archive_id = entry.get('archiveId')
+        if (not isinstance(archive_id, str)
+                or ARCHIVE_ID_RE.fullmatch(archive_id) is None):
+            return False
+        fingerprint = entry.get('sourceFingerprint')
+        if (require_fingerprint
+                and (not isinstance(fingerprint, str)
+                     or _SHA256_RE.fullmatch(fingerprint) is None)):
+            return False
+    return True
+
+
+def _validated_recovery_manifest(data):
+    """Return a structurally safe manifest or None.
+
+    Manifest hashes are integrity bindings, not authenticity signatures, but
+    names still must be basenames so a malformed synced file can never make
+    restore read outside the recovery-set directory.
+    """
+    if (not isinstance(data, dict)
+            or data.get('format') not in SUPPORTED_RECOVERY_MANIFEST_FORMATS
+            or not _valid_member_entry(data.get('main'))
+            or not isinstance(data.get('shards'), list)):
+        return None
+    publisher = data.get('publisherInstallId')
+    if (not isinstance(publisher, str)
+            or _RECOVERY_TOKEN_RE.fullmatch(publisher) is None):
+        return None
+    manifest_format = data.get('format')
+    generation_id = data.get('generationId')
+    if manifest_format in (2, RECOVERY_MANIFEST_FORMAT):
+        if (not isinstance(generation_id, str)
+                or _RECOVERY_TOKEN_RE.fullmatch(generation_id) is None):
+            return None
+    main_meta = parse_published_backup_name(data['main']['name'])
+    if main_meta is None or main_meta['installId'] != publisher:
+        return None
+    if manifest_format == 1 and main_meta['generationId'] is not None:
+        return None
+    if (manifest_format in (2, RECOVERY_MANIFEST_FORMAT)
+            and main_meta['generationId'] != generation_id):
+        return None
+    seen = set()
+    for entry in data['shards']:
+        if not _valid_member_entry(
+                entry, shard=True,
+                require_fingerprint=(manifest_format == RECOVERY_MANIFEST_FORMAT)):
+            return None
+        if entry['archiveId'] in seen:
+            return None
+        seen.add(entry['archiveId'])
+    if manifest_format == 1:
+        for entry in data['shards']:
+            expected = recovery_archive_snapshot_name(
+                entry['archiveId'], publisher
+            )
+            if entry['name'] != expected:
+                return None
+    elif manifest_format == 2:
+        for entry in data['shards']:
+            expected = recovery_archive_snapshot_name(
+                entry['archiveId'], publisher, generation_id
+            )
+            if entry['name'] != expected:
+                return None
+    else:
+        for entry in data['shards']:
+            snapshot_meta = _parse_archive_snapshot_name(entry['name'])
+            if (snapshot_meta is None
+                    or snapshot_meta['archiveId'] != entry['archiveId']
+                    or snapshot_meta['installId'] != publisher):
+                return None
+    return data
+
+
+def _load_recovery_manifest(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (ValueError, OSError):
+        return None
+    return _validated_recovery_manifest(data)
+
+
+def _write_recovery_manifest(
+        store_env, backup_dir, main_artifact, shard_entries, *, generation_id):
     """Atomically publish the COMPLETION marker for one backup generation.
 
     Written strictly LAST: only after the main snapshot and every
@@ -1190,54 +1382,178 @@ def write_recovery_manifest(store_env, backup_dir, main_path):
     archive_meta.source_install_id stays untouched origin metadata."""
     store = store_env['store']
     install_id = store.ensure_install_id()
+    if (not isinstance(generation_id, str)
+            or _RECOVERY_TOKEN_RE.fullmatch(generation_id) is None):
+        raise ArchiveError('invalid recovery generation id')
     backup_dir = Path(backup_dir)
-    main_path = Path(main_path)
+    if not _valid_member_entry({
+        'name': main_artifact.get('name'),
+        'sha256': main_artifact.get('sha256'),
+        'bytes': main_artifact.get('bytes'),
+    }):
+        raise ArchiveError('invalid verified main backup artifact')
+    main_meta = parse_published_backup_name(main_artifact['name'])
+    if (main_meta is None or main_meta['installId'] != install_id
+            or main_meta['generationId'] != generation_id):
+        raise ArchiveError(
+            'main backup name does not match this recovery generation'
+        )
+    by_id = {entry['archiveId']: dict(entry) for entry in shard_entries}
     shards = []
     for row in store.list_archive_registry():
-        snapshot = backup_dir / 'archives' / f"{row['archive_id']}-{install_id}.db"
-        if not snapshot.exists():
+        entry = by_id.get(row['archive_id'])
+        if entry is None or not _valid_member_entry(
+                entry, shard=True, require_fingerprint=True):
             raise ArchiveError(
-                f'cannot complete recovery manifest: shard snapshot '
-                f'{snapshot.name} is missing'
+                f'cannot complete recovery manifest: verified artifact for '
+                f'{row["archive_id"]} is missing'
             )
-        shards.append({
-            'archiveId': row['archive_id'],
-            'name': snapshot.name,
-            'sha256': _sha256_file(snapshot),
-            'bytes': snapshot.stat().st_size,
-        })
+        snapshot_meta = _parse_archive_snapshot_name(entry['name'])
+        if (snapshot_meta is None
+                or snapshot_meta['archiveId'] != row['archive_id']
+                or snapshot_meta['installId'] != install_id):
+            raise ArchiveError('shard artifact identity does not match publisher')
+        shards.append(entry)
+    if len(by_id) != len(shards):
+        raise ArchiveError('unexpected shard artifact outside the registry')
     manifest = {
         'format': RECOVERY_MANIFEST_FORMAT,
         'publisherInstallId': install_id,
+        'generationId': generation_id,
         'createdAtUtc': _iso(store.now_utc()),
         'main': {
-            'name': main_path.name,
-            'sha256': _sha256_file(main_path),
-            'bytes': main_path.stat().st_size,
+            'name': main_artifact['name'],
+            'sha256': main_artifact['sha256'],
+            'bytes': main_artifact['bytes'],
         },
         'shards': shards,
     }
-    dest = backup_dir / f'recovery-manifest-{install_id}.json'
+    dest = backup_dir / f'recovery-manifest-{install_id}@{generation_id}.json'
+    if dest.exists():
+        raise ArchiveError(
+            f'recovery manifest {dest.name} already exists; refusing overwrite'
+        )
     partial = backup_dir / f'{dest.name}.{uuid.uuid4().hex[:8]}.partial'
-    with open(partial, 'w', encoding='utf-8') as handle:
-        json.dump(manifest, handle, indent=1, sort_keys=True)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(partial, dest)
+    try:
+        with open(partial, 'w', encoding='utf-8') as handle:
+            json.dump(manifest, handle, indent=1, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(partial, dest)
+    finally:
+        try:
+            partial.unlink(missing_ok=True)
+        except OSError:
+            pass
     return dest
 
 
-def manifest_preserved_main(store, backup_dir):
-    """The main-file name the current recovery manifest depends on (or
-    None). Backup retention must never retire it — a later failed publish
-    would otherwise destroy the last complete generation."""
-    manifest_path = (Path(backup_dir)
-                     / f'recovery-manifest-{store.ensure_install_id()}.json')
-    try:
-        data = json.loads(manifest_path.read_text(encoding='utf-8'))
-        return data['main']['name']
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+def latest_recovery_attempt_epoch(store, backup_dir, *, now_epoch=None):
+    """Newest valid own main publish time, explicitly including failures.
+
+    This is an attempt/backoff signal, not a statement that the generation is
+    restorable. Implausibly future-dated names are ignored so clock skew or a
+    malformed sync-folder file cannot suppress backups indefinitely.
+    """
+    install_id = store.ensure_install_id()
+    now_epoch = time.time() if now_epoch is None else float(now_epoch)
+    newest_epoch = None
+    for candidate in Path(backup_dir).glob('portfolio-*.db'):
+        meta = parse_published_backup_name(candidate.name)
+        if meta is None or meta['installId'] != install_id:
+            continue
+        candidate_epoch = meta['publishedAtUtc'].timestamp()
+        if candidate_epoch > now_epoch + 300:
+            continue
+        if newest_epoch is None or candidate_epoch > newest_epoch:
+            newest_epoch = candidate_epoch
+    return newest_epoch
+
+
+def _apply_recovery_generation_retention(
+        store, backup_dir, *, keep_daily=DEFAULT_BACKUP_KEEP_DAILY,
+        keep_weekly=DEFAULT_BACKUP_KEEP_WEEKLY, current_manifest):
+    """Retire whole immutable recovery generations, never individual members.
+
+    ``current_manifest`` identifies the generation that just completed. It
+    resolves the otherwise unknowable ordering of two publishes whose main
+    file timestamps have the same one-second precision.
+    """
+    backup_dir = Path(backup_dir)
+    install_id = store.ensure_install_id()
+    records = []
+    for candidate in backup_dir.glob('recovery-manifest-*.json'):
+        data = _load_recovery_manifest(candidate)
+        if data is None or data['publisherInstallId'] != install_id:
+            continue
+        meta = parse_published_backup_name(data['main']['name'])
+        if meta is None or meta['installId'] != install_id:
+            continue
+        records.append((meta['publishedAtUtc'], candidate, data))
+    records.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+
+    current_path = backup_dir / Path(current_manifest).name
+    current_record = next(
+        (record for record in records if record[1] == current_path),
+        None,
+    )
+    if current_record is None:
+        raise ArchiveError(
+            'current recovery manifest is not a completed generation '
+            'for this publisher'
+        )
+
+    newest_per_day = {}
+    newest_per_week = {}
+    for published_at, candidate, _data in records:
+        newest_per_day.setdefault(published_at.date(), candidate)
+        week = published_at.isocalendar()[:2]
+        newest_per_week.setdefault(week, candidate)
+    # File timestamps have only one-second precision. The caller knows which
+    # manifest was just committed, so make it the winner for its day/week
+    # instead of choosing between tied random generation ids lexically.
+    current_published_at = current_record[0]
+    newest_per_day[current_published_at.date()] = current_path
+    current_week = current_published_at.isocalendar()[:2]
+    newest_per_week[current_week] = current_path
+    keep = set()
+    for day in sorted(newest_per_day, reverse=True)[:max(0, int(keep_daily))]:
+        keep.add(newest_per_day[day])
+    for week in sorted(newest_per_week, reverse=True)[:max(0, int(keep_weekly))]:
+        keep.add(newest_per_week[week])
+    keep.add(current_path)
+
+    protected = set()
+    for _stamp, candidate, data in records:
+        if candidate not in keep:
+            continue
+        protected.add(backup_dir / data['main']['name'])
+        protected.update(
+            backup_dir / 'archives' / entry['name']
+            for entry in data['shards']
+        )
+
+    retiring = [
+        (candidate, data) for _stamp, candidate, data in records
+        if candidate not in keep
+    ]
+    removed = []
+    # Revoke every retiring completion marker before deleting any member.
+    # If a manifest unlink fails, member deletion has not begun and every
+    # still-visible manifest therefore remains internally complete.
+    for candidate, _data in retiring:
+        candidate.unlink(missing_ok=True)
+        removed.append(candidate.name)
+    for _candidate, data in retiring:
+        members = [backup_dir / data['main']['name']]
+        members.extend(
+            backup_dir / 'archives' / entry['name']
+            for entry in data['shards']
+        )
+        for member in members:
+            if member not in protected:
+                member.unlink(missing_ok=True)
+    return removed
 
 
 def load_recovery_manifest_for(main_path):
@@ -1246,14 +1562,8 @@ def load_recovery_manifest_for(main_path):
     publish that never completed — restore must refuse it."""
     main_path = Path(main_path)
     for candidate in sorted(main_path.parent.glob('recovery-manifest-*.json')):
-        try:
-            data = json.loads(candidate.read_text(encoding='utf-8'))
-        except (ValueError, OSError):
-            continue
-        if (isinstance(data, dict)
-                and data.get('format') == RECOVERY_MANIFEST_FORMAT
-                and isinstance(data.get('main'), dict)
-                and data['main'].get('name') == main_path.name):
+        data = _load_recovery_manifest(candidate)
+        if data is not None and data['main']['name'] == main_path.name:
             return data
     return None
 
@@ -1290,66 +1600,309 @@ def refresh_registry_stats(store, archive_dir, archive_id):
 
 
 # ---------------------------------------------------------------------------
-# Static shard backups (plan section 15)
+# Static recovery-set publishing (plan section 15)
 # ---------------------------------------------------------------------------
 
-def publish_archive_backups(store_env, backup_dir):
-    """Publish verified static snapshots of every registered, present shard
-    into `<backup_dir>/archives/`. File names carry the archive id AND the
-    install id so two machines publishing into one synced folder never
-    overwrite each other. Snapshots are produced with the SQLite backup
-    API, quick-check verified locally, copied as an explicit `.partial`
-    name, fsynced, then atomically renamed — sync software never sees a
-    half-written file and the live shard WAL/SHM never leave this machine.
+def _latest_reusable_shard_entry(
+        store, backup_dir, archive_id, source_fingerprint):
+    """Newest completed own member with identical logical shard state."""
+    install_id = store.ensure_install_id()
+    records = []
+    for manifest_path in Path(backup_dir).glob('recovery-manifest-*.json'):
+        data = _load_recovery_manifest(manifest_path)
+        if data is None or data['publisherInstallId'] != install_id:
+            continue
+        main_meta = parse_published_backup_name(data['main']['name'])
+        if main_meta is None:
+            continue
+        records.append((main_meta['publishedAtUtc'], manifest_path.name, data))
+    records.sort(reverse=True)
+    for _published_at, _manifest_name, data in records:
+        entry = next(
+            (item for item in data['shards']
+             if item['archiveId'] == archive_id),
+            None,
+        )
+        if entry is None or entry.get('sourceFingerprint') != source_fingerprint:
+            continue
+        candidate = Path(backup_dir) / 'archives' / entry['name']
+        try:
+            if candidate.is_file() and candidate.stat().st_size == entry['bytes']:
+                return dict(entry)
+        except OSError:
+            continue
+    return None
 
-    Freshness: a shard republishes when no snapshot exists or when the
-    shard (main file or its WAL) changed since the last publish. Must be
-    called while holding the maintenance guard."""
+
+def _copy_verified_artifact(source, partial, destination):
+    digest = hashlib.sha256()
+    byte_count = 0
+    with open(source, 'rb') as src, open(partial, 'wb') as out:
+        for chunk in iter(lambda: src.read(1 << 20), b''):
+            digest.update(chunk)
+            byte_count += len(chunk)
+            out.write(chunk)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(partial, destination)
+    if destination.stat().st_size != byte_count:
+        raise ArchiveError('published shard size changed before completion')
+    return digest.hexdigest(), byte_count
+
+
+def _publish_archive_members(store_env, backup_dir, *, generation_id):
+    """Publish changed shards and reuse immutable unchanged members."""
     store = store_env['store']
     install_id = store.ensure_install_id()
+    if (not isinstance(generation_id, str)
+            or _RECOVERY_TOKEN_RE.fullmatch(generation_id) is None):
+        raise ArchiveError('invalid recovery generation id')
     archive_dir = resolve_archive_dir(
         Path(store.db_path), config=store_env.get('_config')
     )
-    target_dir = Path(backup_dir) / 'archives'
-    published = []
+    registry = store.list_archive_registry()
+    sources = []
     missing = []
-    for row in store.list_archive_registry():
+    # Preflight the full registry before publishing the first byte. A known
+    # hole therefore cannot create a half-generation of orphan shard files.
+    for row in registry:
         try:
             path = archive_path_for_id(archive_dir, row['archive_id'])
         except ArchiveNotFoundError:
             missing.append(row['archive_id'])
             continue
         if not path.exists():
-            # A registered shard without its file is a hole in the recovery
-            # set — callers must surface it, never report "up to date".
             missing.append(row['archive_id'])
             continue
-        dest = target_dir / f"{row['archive_id']}-{install_id}.db"
-        shard_mtime = path.stat().st_mtime
-        wal = Path(str(path) + '-wal')
-        if wal.exists():
-            shard_mtime = max(shard_mtime, wal.stat().st_mtime)
-        if dest.exists() and dest.stat().st_mtime >= shard_mtime:
-            continue  # snapshot already covers the shard's current state
+        sources.append((row['archive_id'], path))
+    if missing:
+        return {
+            'entries': [], 'published': [], 'reused': [],
+            'missing': sorted(missing),
+        }
 
-        shard = ArchiveShard(path, now=store.now_utc)
+    target_dir = Path(backup_dir) / 'archives'
+    target_dir.mkdir(parents=True, exist_ok=True)
+    entries = []
+    published = []
+    reused = []
+    for archive_id, path in sources:
+        live_fingerprint = ArchiveShard(
+            path, now=store.now_utc
+        ).recovery_fingerprint()
+        reusable = _latest_reusable_shard_entry(
+            store, backup_dir, archive_id, live_fingerprint
+        )
+        if reusable is not None:
+            entries.append(reusable)
+            reused.append(reusable['name'])
+            continue
+
+        name = recovery_archive_snapshot_name(
+            archive_id, install_id, generation_id
+        )
+        destination = target_dir / name
+        if destination.exists():
+            raise ArchiveError(
+                f'archive snapshot {name} already exists; refusing overwrite'
+            )
         nonce = uuid.uuid4().hex[:8]
         staging = path.parent / f'.archive-backup-{nonce}.db'
+        partial = target_dir / f'{name}.{nonce}.partial'
         try:
-            shard.backup_to(staging)  # includes quick_check
-            target_dir.mkdir(parents=True, exist_ok=True)
-            partial = target_dir / f'{dest.name}.{nonce}.partial'
-            with open(staging, 'rb') as src, open(partial, 'wb') as out:
-                shutil.copyfileobj(src, out)
-                out.flush()
-                os.fsync(out.fileno())
-            os.replace(partial, dest)
+            ArchiveShard(path, now=store.now_utc).backup_to(staging)
+            staged_fingerprint = ArchiveShard(staging).recovery_fingerprint()
+            if staged_fingerprint != live_fingerprint:
+                raise ArchiveError('archive shard changed during guarded backup')
+            sha256, byte_count = _copy_verified_artifact(
+                staging, partial, destination
+            )
         finally:
             staging.unlink(missing_ok=True)
             Path(str(staging) + '-wal').unlink(missing_ok=True)
             Path(str(staging) + '-shm').unlink(missing_ok=True)
-        published.append(dest.name)
-    return {'published': published, 'missing': missing}
+            partial.unlink(missing_ok=True)
+        entry = {
+            'archiveId': archive_id,
+            'name': name,
+            'sha256': sha256,
+            'bytes': byte_count,
+            'sourceFingerprint': staged_fingerprint,
+        }
+        entries.append(entry)
+        published.append(name)
+    return {
+        'entries': entries, 'published': published, 'reused': reused,
+        'missing': [],
+    }
+
+
+def _discard_uncompleted_generation(store, backup_dir, generation_id):
+    """Best-effort removal of this attempt's useless shard members."""
+    install_id = store.ensure_install_id()
+    archive_dir = Path(backup_dir) / 'archives'
+    removed = []
+    if not archive_dir.exists():
+        return removed
+    for candidate in archive_dir.glob('*.db'):
+        meta = _parse_archive_snapshot_name(candidate.name)
+        if (meta is not None and meta['installId'] == install_id
+                and meta['generationId'] == generation_id):
+            candidate.unlink(missing_ok=True)
+            removed.append(candidate.name)
+    return removed
+
+
+def cleanup_orphan_archive_snapshots(
+        store, backup_dir, *, grace_seconds=DEFAULT_ORPHAN_SNAPSHOT_GRACE_SECONDS,
+        now_epoch=None):
+    """Delete old own shard snapshots no valid manifest references."""
+    backup_dir = Path(backup_dir)
+    archive_dir = backup_dir / 'archives'
+    if not archive_dir.exists():
+        return []
+    install_id = store.ensure_install_id()
+    referenced = set()
+    for manifest_path in backup_dir.glob('recovery-manifest-*.json'):
+        data = _load_recovery_manifest(manifest_path)
+        if data is not None:
+            referenced.update(entry['name'] for entry in data['shards'])
+    now_epoch = time.time() if now_epoch is None else float(now_epoch)
+    cutoff = now_epoch - max(0.0, float(grace_seconds))
+    removed = []
+    for candidate in archive_dir.glob('*.db'):
+        meta = _parse_archive_snapshot_name(candidate.name)
+        if (meta is None or meta['installId'] != install_id
+                or candidate.name in referenced):
+            continue
+        try:
+            modified_at = candidate.stat().st_mtime
+        except OSError:
+            continue
+        if modified_at > cutoff:
+            continue
+        try:
+            candidate.unlink(missing_ok=True)
+            removed.append(candidate.name)
+        except OSError:
+            continue
+    return removed
+
+
+def publish_recovery_generation(
+        store_env, backup_dir, *, keep_daily=DEFAULT_BACKUP_KEEP_DAILY,
+        keep_weekly=DEFAULT_BACKUP_KEEP_WEEKLY,
+        orphan_grace_seconds=DEFAULT_ORPHAN_SNAPSHOT_GRACE_SECONDS):
+    """Publish one recovery generation under an already-held guard.
+
+    This is the sole orchestration entry point used by scheduled and manual
+    publishers. Publication failure and post-publication housekeeping have
+    deliberately separate result semantics.
+    """
+    store = store_env['store']
+    backup_dir = Path(backup_dir)
+    warnings = []
+
+    def _housekeeping(label, operation):
+        try:
+            return operation()
+        except Exception as exc:
+            warnings.append(f'{label}: {exc}')
+            return []
+
+    _housekeeping(
+        'orphan snapshot cleanup',
+        lambda: cleanup_orphan_archive_snapshots(
+            store, backup_dir, grace_seconds=orphan_grace_seconds
+        ),
+    )
+    generation_id = new_recovery_generation_id()
+    main_artifact = store._publish_backup_artifact(
+        backup_dir, generation_id=generation_id
+    )
+    expected_manifest_path = (
+        backup_dir
+        / f'recovery-manifest-{store.ensure_install_id()}@{generation_id}.json'
+    )
+    manifest_path = None
+    shard_result = None
+    try:
+        shard_result = _publish_archive_members(
+            store_env, backup_dir, generation_id=generation_id
+        )
+        if shard_result['missing']:
+            _discard_uncompleted_generation(
+                store, backup_dir, generation_id
+            )
+            _housekeeping(
+                'main backup retention',
+                lambda: store.apply_backup_retention(
+                    backup_dir, keep_daily=keep_daily,
+                    keep_weekly=keep_weekly,
+                    current_name=main_artifact['name'],
+                ),
+            )
+            return {
+                'generationId': generation_id,
+                'complete': False,
+                'mainPath': main_artifact['path'],
+                'manifestPath': None,
+                'shards': [],
+                'publishedShards': [],
+                'reusedShards': [],
+                'missingShards': shard_result['missing'],
+                'housekeepingWarnings': warnings,
+            }
+        manifest_path = _write_recovery_manifest(
+            store_env, backup_dir, main_artifact, shard_result['entries'],
+            generation_id=generation_id,
+        )
+    except BaseException:
+        # If the atomic manifest rename completed but an interrupt landed
+        # before the helper returned, the generation is already complete.
+        # Never discard members named by that on-disk completion marker.
+        completed = _load_recovery_manifest(expected_manifest_path)
+        if completed is None:
+            try:
+                _discard_uncompleted_generation(
+                    store, backup_dir, generation_id
+                )
+            except OSError:
+                pass
+        raise
+
+    removed_generations = _housekeeping(
+        'generation retention',
+        lambda: _apply_recovery_generation_retention(
+            store, backup_dir, keep_daily=keep_daily,
+            keep_weekly=keep_weekly, current_manifest=manifest_path,
+        ),
+    )
+    _housekeeping(
+        'main backup retention',
+        lambda: store.apply_backup_retention(
+            backup_dir, keep_daily=keep_daily, keep_weekly=keep_weekly
+        ),
+    )
+    removed_orphans = _housekeeping(
+        'orphan snapshot cleanup',
+        lambda: cleanup_orphan_archive_snapshots(
+            store, backup_dir, grace_seconds=orphan_grace_seconds
+        ),
+    )
+    return {
+        'generationId': generation_id,
+        'complete': True,
+        'mainPath': main_artifact['path'],
+        'manifestPath': manifest_path,
+        'shards': shard_result['entries'],
+        'publishedShards': shard_result['published'],
+        'reusedShards': shard_result['reused'],
+        'missingShards': [],
+        'removedGenerations': removed_generations,
+        'removedOrphans': removed_orphans,
+        'housekeepingWarnings': warnings,
+    }
 
 
 # ---------------------------------------------------------------------------

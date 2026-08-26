@@ -9,6 +9,7 @@ Frontend surfaces:
 - `index.html` for the main portfolio workspace
 - `chart_lab.html` for the shared workspace plus experimental daily-bar projection
 - `iv_term_structure.html` for standalone live IV term-structure monitoring
+- `cost_basis.html` for the standalone per-underlying blended-cost ledger
 
 Backend entry points:
 
@@ -36,6 +37,15 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
   - reuses the main app state
   - has its own `js/chart_lab.js` rendering and socket lifecycle
   - requires `ib_server.py` for `request_historical_bars`
+
+- `cost_basis.html`
+  - standalone blended-cost ledger for one underlying at a time
+  - loads only `js/cost_basis_core.js`, `js/cost_basis_import.js`, and
+    `js/cost_basis.js`; never the trading shell
+  - reads TWS positions through the existing
+    `request_portfolio_positions_snapshot` /
+    `request_portfolio_avg_cost_snapshot` actions and writes its own
+    `cost_basis.db`; it cannot trade or subscribe to market data
 
 - `iv_term_structure.html`
   - standalone IV term-structure monitor
@@ -108,3 +118,4 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 - If a task touches historical replay, check whether the change belongs in `historical_server.py`, `historical_replay_service.py`, or the shared live frontend flow via `js/ws_client.js`.
 - If a task touches IV term structure, read `iv_term_structure.html`, `js/iv_term_structure.js`, `js/iv_term_structure_core.js`, `iv_term_structure_service.py`, and the IV sections in `ib_server.py`.
 - If a task touches runtime logs or pid files, use or update `scripts/cleanup_runtime_logs.py`; do not clean data directories such as `Portfolio/`, `Portfolio 2/`, or `sqlite_spy/` as part of log maintenance.
+- If a task touches the blended-cost ledger, read `CODE PLAN/COST_BASIS_LEDGER_PAGE_PLAN.md` first. Two invariants there are not negotiable: the ledger is the source of truth and a TWS snapshot only ever *detects* a gap (nothing auto-writes an event), and an assignment row's cash is the share delivery only, because the premium was already recorded when the contract was opened.

@@ -39,6 +39,7 @@ from portfolio_store import (
     StoreUnavailableError,
     canonicalize_payload,
     default_app_data_dir,
+    parse_published_backup_name,
     resolve_db_path,
 )
 
@@ -650,7 +651,8 @@ class PublishBackupTest(PortfolioStoreTestBase):
         self.assertTrue(published.exists())
         self.assertRegex(
             published.name,
-            rf'^portfolio-\d{{8}}T\d{{6}}Z-schema{SCHEMA_USER_VERSION}-[0-9a-f]{{16}}\.db$',
+            rf'^portfolio-\d{{8}}T\d{{6}}Z-schema{SCHEMA_USER_VERSION}-'
+            rf'[0-9a-f]{{16}}@[0-9a-f]{{32}}\.db$',
         )
         # No partials, no WAL/SHM ever land in the synced folder.
         leftovers = [p.name for p in self.backup_dir.iterdir() if p != published]
@@ -686,9 +688,15 @@ class PublishBackupTest(PortfolioStoreTestBase):
         # 3 dailies plus up to 2 older weekly anchors.
         self.assertLessEqual(len(own), 5)
         self.assertGreaterEqual(len(own), 3)
-        newest_stamp = self.store.latest_own_backup_stamp(self.backup_dir)
-        self.assertIsNotNone(newest_stamp)
-        self.assertIn(newest_stamp, ''.join(own))
+        parsed = [parse_published_backup_name(name) for name in own]
+        self.assertTrue(all(meta is not None for meta in parsed))
+        newest = max(parsed, key=lambda meta: meta['publishedAtUtc'])
+        self.assertIn(newest['stamp'], ''.join(own))
+
+    def test_backup_name_parser_rejects_impossible_calendar_dates(self):
+        self.assertIsNone(parse_published_backup_name(
+            'portfolio-20269999T999999Z-schema2-12345678@abcdefgh.db'
+        ))
 
     def test_restore_refuses_partials_and_preserves_old_database(self):
         from portfolio_store import restore_database

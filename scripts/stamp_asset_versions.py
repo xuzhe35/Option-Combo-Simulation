@@ -38,6 +38,7 @@ PAGES = (
     'chart_lab.html',
     'iv_term_structure.html',
     'workspace_db_admin.html',
+    'cost_basis.html',
 )
 
 HASH_LENGTH = 12

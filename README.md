@@ -4,11 +4,12 @@
 
 Option Combo Simulator is a local browser workspace for building, pricing, replaying, monitoring, and optionally executing multi-leg option structures.
 
-The repo currently has three frontend surfaces:
+The repo currently has four frontend surfaces:
 
 1. `index.html` - main portfolio workspace
 2. `chart_lab.html` - shared workspace plus experimental daily-bar projection
 3. `iv_term_structure.html` - standalone live ETF / futures-option IV term-structure monitor
+4. `cost_basis.html` - standalone per-account, per-underlying blended-cost ledger
 
 It also has two optional Python WebSocket backends:
 
@@ -319,24 +320,39 @@ as a failure, never silently downgraded to a file write.
   `store_unavailable` until an authenticated remote mode exists.
 - Same-browser tabs coordinate a single writer per document over
   BroadcastChannel; the server's revision check remains the real guard.
-- Scheduled static backups publish atomically after saves (at most once per
-  `backup_interval_hours`) and top up on clean exit, into
+- Scheduled static backups publish atomically after saves (at most one
+  attempt per `backup_interval_hours`, including incomplete/failed attempts)
+  and top up on clean exit, into
   `[portfolio_store] backup_dir` — point it at a OneDrive-synced folder for
   cross-machine disaster recovery — or `<app-data>/backups` by default.
   Manual backup: `scripts/backup_portfolio_store.py` publishes the FULL
-  recovery set — the active database plus every registered archive shard,
-  completed by an atomically written `recovery-manifest-*.json` that pins
-  each member's exact name and hash — under the same cross-process
-  maintenance guard the backends use (backup only; no flag deletes
-  revisions; a failed publish writes no manifest and exits non-zero).
+  recovery set — the active database plus every registered archive shard.
+  Each main/manifest gets a generation id; an unchanged immutable shard is
+  shared by later manifests instead of being copied and uploaded again.
+  Only logically changed shards get a new generation-named snapshot.
+  The atomically written `recovery-manifest-*.json` is published last and
+  pins each member's exact name, size, and hash from locally verified staging
+  bytes. Retention removes complete generations as a unit, never a member
+  still shared by another manifest. Unreferenced own shard snapshots from a
+  crash are reclaimed after a 48-hour grace period (including legacy names).
+  The entire
+  publish, including its manifest and retention pass, stays under the same
+  cross-process maintenance guard the backends use (backup only; no flag
+  deletes revisions). A failed publish writes no manifest and exits non-zero;
+  a failure in post-publication retention/cleanup is reported as a warning
+  while the already-complete manual backup still exits successfully.
   Restore: `scripts/restore_portfolio_store.py <backup.db> --yes` accepts
   only manifest-complete generations, cross-verifies every archive
-  entry/tombstone against the staged shards, takes the backends' runtime
-  lock exclusively (a running backend fails it closed), installs the set
-  with full rollback on any failure, and refuses missing shards unless
-  the explicit `--allow-missing-shards` downgrade is given. This is backup,
-  not multi-master sync: two machines editing their own local databases
-  fork and cannot be merged automatically.
+  entry/tombstone against staged copies, and installs exactly those verified
+  copies through destination-local temporary files. It takes the backends'
+  runtime lock exclusively (a running backend fails it closed), rolls the
+  whole old set back on any copy/SQLite/mid-swap failure or interrupt before
+  re-raising it, and refuses missing
+  shards unless the explicit `--allow-missing-shards` downgrade is given;
+  degraded restore quarantines any same-named old target shard so it cannot
+  be silently reused. Format-1 recovery manifests from earlier builds remain
+  restorable. This is backup, not multi-master sync: two machines editing
+  their own local databases fork and cannot be merged automatically.
 - Revision retention (`revision_keep_recent` / `revision_keep_daily_days`)
   only defines ARCHIVE CANDIDATES. Nothing is deleted on a schedule:
   revisions beyond the policy leave the active database solely through the
@@ -345,6 +361,211 @@ as a failure, never silently downgraded to a file write.
   Open → Recently Deleted. Revision history is never rewritten. After the
   30-day grace (`archive_deleted_after_days`) a deleted workspace becomes a
   whole-document archive candidate.
+
+## Blended Cost Ledger (`cost_basis.html`)
+
+A standalone page (own minimal WebSocket client; it loads none of the
+trading scripts and can never trade, subscribe, or touch orders) that
+answers one question for one IB account and one underlying: **what did this
+stock or futures position actually cost this account, all in?** The active
+book identity is `account + symbol + security type + currency`, so two managed
+accounts may keep independent books for the same symbol. A book is explicitly either `STK`
+(stock/ETF plus OPT) or `FUT` (deliverable FOP plus FUT). Works against either backend; only the TWS
+reconciliation panel needs a live IB connection.
+
+Open it at `http://localhost:8000/cost_basis.html`.
+
+Creating a book uses the same managed-account selector as the main page's
+`Enable Trade` controls. One TWS account is selected automatically; multiple
+accounts require an explicit choice. When IB API is unavailable, the same
+selector falls back to accounts already present in the ledger and a clearly
+labelled manual-account option, so the page still works with the historical
+backend. Once TWS supplies managed accounts, new books must use that live list.
+
+### Why it is an event ledger and not a snapshot tool
+
+IB can tell you what you hold right now, but not what you paid over the
+last two years: `reqExecutions` covers only a recent window, and an
+assignment is indistinguishable in a snapshot from "the option vanished
+and the share count moved". So the SQLite ledger in `cost_basis.db` is the
+source of truth, and the TWS position snapshot is a checksum against it.
+**Nothing auto-writes an event.** When the ledger has none of a position and
+the authoritative TWS snapshot includes both quantity and average cost, an
+explicit `采信 TWS` click plus confirmation records it directly as a
+current-date baseline. Partial gaps, missing TWS cost, and ledger-only gaps
+still go through the review form.
+
+### The three cost lenses
+
+All three come off the same event stream, because the number that matches
+your broker and the number you actually care about are not the same one:
+
+- **Net cash** (default) - `(net cash out + unrealized premium) / shares`.
+  The full-cycle cost of the shares you still hold. Counts only premium
+  from contracts that are closed; premium on open contracts is money
+  received but still at risk. **This number can go negative**, and a
+  negative value means the position has already returned more cash than it
+  consumed - the page labels it 已完全回本 rather than treating it as an
+  error. With no shares left there is no per-share cost at all, so the page
+  shows the lifetime realized figure instead of dividing by zero.
+- **Stock only** - plain rolling average of share trades, premium listed
+  separately. This is the one that should reconcile against TWS's average
+  cost column; if it does not, the ledger is missing an event and the page
+  flags the gap.
+- **Tax adjusted** - an assigned contract's premium rolls into the share
+  basis (short put assigned: basis = `K − premium/share`; short call
+  assigned: proceeds = `K + premium/share`), which explains most of the
+  residual difference against a broker's cost-basis view.
+
+Those three selectable lenses apply to an `STK` book. A `FUT` book instead
+shows the current FUT entry average and one blended cost in futures points:
+the current contract basis, minus realized FUT P&L and realized FOP premium,
+plus fees, divided by signed point exposure. Open FOP premium remains at risk
+and appears only in the separate "all open options expire at zero" figure.
+For a roll, this carries the old economic basis as
+`old basis + new open price - old close price + fees/(contracts × multiplier)`;
+the same signed equation works for long and short futures.
+
+### Recording events
+
+Every row stores explicit signed quantities and an explicit signed cash
+amount (`cashAmount` is the account cash delta: received positive, paid
+negative, fees inside). One formula covers both directions, so selling
+five puts at 1.20 records `contracts = -5` and `cash = +596.75`.
+
+The subtle one: **an assignment row's cash is the share delivery at the
+strike, nothing else.** The premium was banked when the contract was
+opened, so counting it again here would double it. The entry form and the
+store both enforce that, along with the delivery direction (short put
+assigned buys shares, short call assigned sells them) and the rule that
+the share count must equal contracts × multiplier.
+
+In a `FUT` book, FOP assignment/exercise closes the option and opens the
+actual delivered FUT at the strike. It moves FUT contracts, never shares, and
+the event cash is fees only: futures notional and daily variation margin are
+not treated as a cash purchase. The option premium was already recorded on
+the FOP trade rows.
+
+The ledger is append-only during normal use. Corrections append a void marker
+with a required reason; individual rows are never deleted, because the audit
+trail is the point. The one explicitly destructive exception is deleting an
+entire book, described below. Closing more contracts than the ledger shows
+open at that date is refused - including when you back-date a trade that would
+strand a later assignment.
+
+### Importing IBKR statements
+
+Import handles both a Flex Query flat CSV and a multi-section Activity
+Statement. IBKR records one assignment as two rows (the option closing at
+zero and the share delivery); the importer pairs them into a single event
+and reports anything it cannot pair rather than booking it as an ordinary
+trade. Every import runs through a preview - new / already-imported /
+needs-attention, row by row - and de-duplicates on the broker's trade id,
+so overlapping statements can be re-imported safely.
+
+For `FUT` books the asset classes stay distinct (`FOP` is never guessed as
+`OPT`, and `FUT` is never guessed as stock). An FOP delivery must pair uniquely
+with its actual FUT delivery row. A timestamped close-old/open-new FUT pair is
+a `futures_roll`; its common quantity carries the roll spread, while any excess
+quantity remains an outright `futures_trade`. Ambiguous pairs block the whole
+batch. If a partial-period statement starts with an existing FUT but omits its
+entry price, import is blocked until an earlier statement or a reviewed
+TWS/manual baseline supplies that cost.
+
+An explicitly adopted TWS position is a provisional baseline, not a second
+copy of later broker history. When a cumulative Activity Statement can
+reconstruct that exact account/contract quantity at the recorded snapshot
+timestamp without an unknown opening stub, the same import transaction voids
+the `tws_snapshot` baseline and writes the CSV rows. A genuinely incremental
+statement whose rows all occur after the snapshot keeps the baseline. Partial
+or same-day-ambiguous overlap is blocked: the page asks for a complete covering
+statement or a reviewed rebuild instead of retaining both cash flows.
+
+### Rebuilding a book from scratch
+
+When the import logic or a cost convention changes, patching dozens of events
+by hand is worse than starting over. `覆盖式重建` (in the import panel) empties
+the book and re-imports one complete statement in a single confirmed step.
+
+Four guards make it safe to have:
+
+- The full event set - voided rows included - is serialised into
+  `cost_basis_book_resets` with a sha256 **before** anything is deleted. The
+  active ledger ends up genuinely clean rather than littered with tombstones,
+  but nothing is actually lost.
+- The confirmation phrase is server-generated and carries the account,
+  symbol, and live count (`RESET U1234567 TQQQ 14 EVENTS`). It is re-checked inside the write transaction, so
+  a ledger that changed between reading the phrase and submitting it fails
+  instead of deleting rows you never saw.
+- The wipe happens only after the replacement file is parsed and previewed, so
+  a bad file can never leave you with an empty ledger.
+- Apart from the separately confirmed whole-book deletion below, this is the
+  only path that deletes events. There is no bulk row delete, arbitrary SQL,
+  or delete-event-by-id.
+
+### Permanently deleting a book
+
+`永久删除账本` removes the selected book itself plus all of its event rows
+(including voided rows), reconciliation snapshots, and reset/rebuild archives.
+Nothing is archived first and the operation cannot be undone. The page first
+asks the server for live counts and requires the exact account-and-symbol phrase,
+for example `DELETE U1234567 TQQQ 14 EVENTS 3 SNAPSHOTS 1 RESETS`. The server
+recomputes that phrase after taking the database write lock; any intervening
+event, snapshot, or reset makes the plan stale and leaves the complete book
+untouched. Another account's book for the same symbol is a different book ID
+and is not affected. If the delete response is lost, the page refreshes the
+authoritative book list before reporting the outcome. A missing book is shown
+as already deleted rather than as a misleading failure; no deletion receipt or
+other identifying residue is stored in the database.
+
+### Reconciliation
+
+`拉取 TWS 持仓` reads `ib.positions()` (which spans all managed accounts),
+then diffs only the selected book's IB account per contract. It compares current
+quantities only. A vanished option plus a matching underlying change is a
+useful clue, but it cannot prove assignment rather than an independent
+underlying trade; an absent expired option likewise cannot prove zero-cash
+expiry rather than an earlier paid close. Those gaps therefore show advice
+only and never manufacture assignment, exercise, expiry, share, or FUT
+events. Import the broker statement or enter the verified historical event.
+
+An `STK` book reconciles only `STK/OPT`; a `FUT` book reconciles only `FUT/FOP`.
+Futures remain separated by actual contract month, multiplier and broker
+identity, so different delivery months cannot silently cancel each other. If
+a vanished FOP could explain a newly visible FUT, standalone FUT adoption is
+blocked: recording only the FUT would leave the option premium incorrectly
+open in the ledger.
+
+For a whole position that exists only in TWS, `ib.positions()` also supplies
+the broker average cost. `采信 TWS` records that quantity and average cost
+directly after confirmation. TWS does not supply the original opening date,
+so the row is deliberately tagged `tws_snapshot` and dated on the adoption
+day; it is an auditable starting baseline, not invented trade history.
+If a later cumulative CSV supplies the real history behind it, that CSV
+atomically replaces the provisional baseline; the two costs are never added.
+
+Caveat worth knowing: the quantity and adoption average cost come from the
+all-account `ib.positions()` snapshot after filtering to the book account. The separate live average-cost
+comparison and market price still come from `updatePortfolioEvent`, which
+covers only the account TWS pushes portfolio updates for; those comparison
+cells show 不可用 for accounts TWS is not reporting.
+
+### Storage
+
+`cost_basis.db` sits next to `portfolio.db` in the platform
+application-data directory - a separate file on purpose: the ledger is
+tiny, append-only, must never be archived away, and deserves its own
+backup cadence. Configure under `[cost_basis]` in `config.ini`; a one-off
+override is `OPTION_COMBO_COST_BASIS_DB_PATH`. Loopback-only, like every
+other persistence surface.
+
+Databases created before schema v5 are migrated without rewriting event rows.
+If all account-bearing rows in an old book agree on one account (apart from
+book-wide split rows), that account is adopted as its book identity. A
+genuinely mixed- or unlabelled-account old book remains
+available as a clearly labelled legacy book; it is not split automatically,
+because doing so would also require an operator decision about book-wide rows
+and historical snapshots.
 
 ## Workspace Database Admin & Archive (`workspace_db_admin.html`)
 
