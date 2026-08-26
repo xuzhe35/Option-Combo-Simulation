@@ -31,6 +31,31 @@
                     </div>
                 </div>
                 <div class="header-actions">
+                    <button id="openWorkspaceBtn" class="btn btn-secondary" onclick="openWorkspaceFromStore()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        Open
+                    </button>
+                    <button id="saveBtn" class="btn btn-primary" onclick="saveWorkspaceToStore()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                            <polyline points="7 3 7 8 15 8"></polyline>
+                        </svg>
+                        Save
+                    </button>
+                    <button id="saveCopyBtn" class="btn btn-secondary" onclick="saveWorkspaceCopyToStore()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                            <line x1="7" y1="8" x2="15" y2="8"></line>
+                        </svg>
+                        Save a Copy
+                    </button>
                     <button id="importBtn" class="btn btn-secondary"
                         onclick="handleImportBtnClick()">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -43,23 +68,14 @@
                     </button>
                     <input type="file" id="importFile" accept=".json" style="display: none;"
                         onchange="importFromJSON(event)">
-                    <button id="saveBtn" class="btn btn-primary" onclick="saveToJSON()">
+                    <button id="exportJsonBtn" class="btn btn-secondary" onclick="exportSessionToJSON()">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
-                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
-                            <polyline points="7 3 7 8 15 8"></polyline>
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="17 8 12 3 7 8"></polyline>
+                            <line x1="12" y1="3" x2="12" y2="15"></line>
                         </svg>
-                        Save
-                    </button>
-                    <button id="saveAsBtn" class="btn btn-secondary" style="display: none;" onclick="saveAsJSON()">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
-                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
-                            <line x1="7" y1="8" x2="15" y2="8"></line>
-                        </svg>
-                        Save As
+                        Export JSON
                     </button>
                 </div>
             </div>
@@ -1290,7 +1306,7 @@
     <!-- Scripts -->
     <script src="js/t_params_db.js?v=477c2f77de45"></script>
     <script src="js/regime_conditional_samples.generated.js?v=0963607e1c2a"></script>
-    <script src="js/official_exchange_calendars.generated.js?v=0ac1ee39fe7d"></script>
+    <script src="js/official_exchange_calendars.generated.js?v=317f1f04eae7"></script>
     <script src="js/market_holidays.js?v=6da23349c406"></script>
     <script src="js/date_utils.js?v=ac6eea8a38b0"></script>
     <script src="js/implied_lambda_handoff.js?v=47150cf8fdc8"></script>
@@ -1298,7 +1314,7 @@
     <script src="js/market_curves.js?v=f15898beaf0c"></script>
     <script src="js/index_forward_rate.js?v=903ab02034e5"></script>
     <script src="js/pricing_context.js?v=d76dd223076d"></script>
-    <script src="js/trade_trigger_logic.js?v=03c1b2e51e1c"></script>
+    <script src="js/trade_trigger_logic.js?v=89bc6beb530a"></script>
     <script src="js/group_order_builder.js?v=1309685a659f"></script>
     <script src="js/leg_position_check.js?v=dc27e6fdef4a"></script>
     <script src="js/order_safety.js?v=09fbb9211080"></script>
@@ -1312,19 +1328,20 @@
     <script src="js/chart_controls.js?v=2c59af2b9250"></script>
     <script src="js/amortized.js?v=addaf65c6c4f"></script>
     <script src="js/valuation.js?v=30c55b71f0e4"></script>
-    <script src="js/session_logic.js?v=0dc7981ea967"></script>
-    <script src="js/session_ui.js?v=cd9af1781e9b"></script>
+    <script src="js/session_logic.js?v=cf6b2d7eaada"></script>
+    <script src="js/workspace_persistence.js?v=12938c2153a2"></script>
+    <script src="js/session_ui.js?v=a3543472ebba"></script>
     <script src="js/control_panel_ui.js?v=51f0f373d273"></script>
     <script src="js/hedge_editor_ui.js?v=4e0cbca9b0ba"></script>
-    <script src="js/group_editor_ui.js?v=b609f2f2304b"></script>
+    <script src="js/group_editor_ui.js?v=f57e171a1d55"></script>
     <script src="js/hedge_ui.js?v=19a43a52b8ad"></script>
     <script src="js/group_ui.js?v=01638eb49181"></script>
     <script src="js/global_ui.js?v=bf6f437d5605"></script>
     <script src="js/page_capabilities.js?v=ab3b6fe974a0"></script>
-    <script src="js/combo_order_transport.js?v=89314aba4de8"></script>
+    <script src="js/combo_order_transport.js?v=920fac6c25bf"></script>
     <script src="js/delta_hedge_transport.js?v=07a59f835858"></script>
-    <script src="js/app.js?v=181332e2f9bc"></script>
-    <script src="js/ws_client.js?v=5d8dd06f76e0"></script>
+    <script src="js/app.js?v=74f99b53b1c9"></script>
+    <script src="js/ws_client.js?v=4ed7c128d179"></script>
     <script src="js/chart_lab.js?v=29f87c0e1608"></script>
 </body>
 

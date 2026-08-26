@@ -85,6 +85,8 @@ from ib_server_ws import (
     purge_combo_order_tracking_for_websocket as purge_combo_order_tracking_for_websocket,
     purge_hedge_order_tracking_for_websocket as purge_hedge_order_tracking_for_websocket,
 )
+import cost_basis_ws
+import portfolio_store_ws
 from iv_term_structure_service import (
     DEFAULT_BUCKET_DEFINITIONS as IV_TERM_STRUCTURE_BUCKET_DEFINITIONS,
     DEFAULT_MAX_DTE as IV_TERM_STRUCTURE_DEFAULT_MAX_DTE,
@@ -115,6 +117,13 @@ TWS_CLIENT_ID = config.getint('tws', 'client_id', fallback=999)
 
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
+MAX_WS_MESSAGE_BYTES = portfolio_store_ws.read_max_ws_message_bytes(config)
+# Workspace persistence store: failure only disables persistence, never IB.
+portfolio_store_env = portfolio_store_ws.create_store_env(config)
+# The blended-cost ledger is a separate database with a separate
+# lifecycle: tiny, append-only, and never archived. A failure to open it
+# only disables the ledger page.
+cost_basis_store_env = cost_basis_ws.create_store_env(config)
 MANAGED_REPRICE_THRESHOLD_DEFAULT = config.getfloat('execution', 'managed_reprice_threshold_default', fallback=0.01)
 MANAGED_REPRICE_INTERVAL_SECONDS = config.getfloat('execution', 'managed_reprice_interval_seconds', fallback=2.0)
 MANAGED_REPRICE_MAX_UPDATES = config.getint('execution', 'managed_reprice_max_updates', fallback=12)
@@ -773,18 +782,39 @@ def _serialize_portfolio_position_item(portfolio_item):
     if position_value != position_value or position_value == 0:
         return None
 
+    sec_type = str(getattr(contract, 'secType', '') or '').upper()
+    multiplier_raw = getattr(contract, 'multiplier', '') or ''
+    try:
+        multiplier_value = float(multiplier_raw) if multiplier_raw not in ('', None) else 1.0
+    except (TypeError, ValueError):
+        multiplier_value = 1.0
+    try:
+        average_cost = float(getattr(portfolio_item, 'avgCost', None))
+    except (TypeError, ValueError):
+        average_cost = None
+    avg_cost_per_unit = None
+    if average_cost is not None and average_cost == average_cost and average_cost != 0:
+        avg_cost_per_unit = abs(average_cost)
+        if sec_type in ('OPT', 'FOP', 'FUT') and multiplier_value > 0:
+            avg_cost_per_unit /= multiplier_value
+        if not (avg_cost_per_unit == avg_cost_per_unit and avg_cost_per_unit > 0):
+            avg_cost_per_unit = None
+
     return {
         'account': getattr(portfolio_item, 'account', '') or '',
         'conId': getattr(contract, 'conId', None),
-        'secType': str(getattr(contract, 'secType', '') or '').upper(),
+        'secType': sec_type,
         'symbol': getattr(contract, 'symbol', '') or '',
         'localSymbol': getattr(contract, 'localSymbol', '') or '',
         'expDate': _normalize_contract_date(getattr(contract, 'lastTradeDateOrContractMonth', '') or ''),
         'right': getattr(contract, 'right', '') or '',
         'strike': getattr(contract, 'strike', None),
-        'multiplier': str(getattr(contract, 'multiplier', '') or ''),
+        'multiplier': str(multiplier_raw or ''),
         'tradingClass': getattr(contract, 'tradingClass', '') or '',
         'position': position_value,
+        'averageCost': average_cost,
+        'avgCostPerUnit': round(avg_cost_per_unit, 4)
+        if avg_cost_per_unit is not None else None,
     }
 
 
@@ -828,14 +858,17 @@ def _build_portfolio_avg_cost_payload(items):
     }
 
 
-def _build_portfolio_positions_payload():
+def _build_portfolio_positions_payload(request_id=None):
     items = _get_authoritative_portfolio_position_items()
-    return {
+    payload = {
         'action': 'portfolio_positions_snapshot',
         'items': items,
         'ibConnected': ib.isConnected(),
         'positionsReady': portfolio_positions_snapshot_ready,
     }
+    if request_id:
+        payload['requestId'] = str(request_id)
+    return payload
 
 
 def _get_managed_accounts():
@@ -930,8 +963,9 @@ def _schedule_portfolio_positions_broadcast():
     portfolio_position_broadcast_task = asyncio.create_task(_broadcast_portfolio_positions_after_coalesce())
 
 
-def _send_portfolio_positions_snapshot(websocket):
-    asyncio.create_task(send_message_safe(websocket, json.dumps(_build_portfolio_positions_payload())))
+def _send_portfolio_positions_snapshot(websocket, request_id=None):
+    asyncio.create_task(send_message_safe(
+        websocket, json.dumps(_build_portfolio_positions_payload(request_id))))
 
 
 def on_update_portfolio_item(portfolio_item):
@@ -974,7 +1008,6 @@ def on_update_portfolio_item(portfolio_item):
 
 def on_position_item(position_item):
     """Keep the authoritative quantity cache current between snapshots."""
-    global portfolio_positions_snapshot_ready
     serialized = _serialize_portfolio_position_item(position_item)
     position_key = _portfolio_avg_cost_cache_key_from_contract(
         getattr(position_item, 'account', '') or '',
@@ -984,7 +1017,9 @@ def on_position_item(position_item):
         portfolio_position_cache[_portfolio_avg_cost_cache_key(serialized)] = serialized
     elif position_key is not None:
         portfolio_position_cache.pop(position_key, None)
-    portfolio_positions_snapshot_ready = True
+    # One positionEvent is not proof that reqPositions has completed. The
+    # coalesced full snapshot below calls ib.positions() and only that path
+    # marks the payload authoritative.
     _schedule_portfolio_positions_broadcast()
 
 
@@ -2134,6 +2169,8 @@ def _build_ws_handler_environment():
         'is_terminal_hedge_tracking': _is_terminal_hedge_tracking,
         'is_terminal_combo_tracking': _is_terminal_combo_tracking,
         'extract_market_price': _extract_market_price,
+        'portfolio_store_env': portfolio_store_env,
+        'cost_basis_store_env': cost_basis_store_env,
         'ib': ib,
     }
 
@@ -2188,7 +2225,13 @@ async def main():
         try:
             for ws_host in WS_HOSTS:
                 logging.info(f"Starting WebSocket server on ws://{ws_host}:{WS_PORT}")
-                ws_servers.append(await websockets.serve(handle_ws_client, ws_host, WS_PORT))
+                # Explicit max_size: the library's 1 MiB default would close
+                # the socket (1009) on a large workspace save, tearing down
+                # order supervision with it. Must match historical_server.py.
+                ws_servers.append(await websockets.serve(
+                    handle_ws_client, ws_host, WS_PORT,
+                    max_size=MAX_WS_MESSAGE_BYTES,
+                ))
         except OSError as e:
             for ws_server in ws_servers:
                 ws_server.close()
@@ -2230,3 +2273,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Server stopped by user.")
+    finally:
+        # Best-effort scheduled-backup top-up on clean exit; never blocks
+        # shutdown and never the only backup trigger (saves also schedule it).
+        portfolio_store_ws.publish_backup_best_effort(portfolio_store_env)

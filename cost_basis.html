@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>综合成本账本 — Option Combo Simulator</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="cost_basis.css?v=aab042a8b6c9">
+</head>
+<body data-option-combo-page="cost-basis">
+    <header class="ledger-header">
+        <h1>综合成本账本 <span class="subtitle">Blended Cost Ledger</span></h1>
+        <p class="readonly-note">账本是成本的事实来源；TWS 持仓快照只用来发现漏记，
+            永不自动写入。本页不下单、不订阅行情，只读取持仓快照并写自己的账本。</p>
+        <div id="connection-banner" data-state="disconnected">未连接</div>
+        <dl class="status-line">
+            <dt>账本库</dt><dd id="store-status">不可用</dd>
+            <dt>TWS 持仓快照</dt><dd id="positions-status">未获取</dd>
+        </dl>
+    </header>
+
+    <main>
+        <section class="panel" aria-labelledby="book-title">
+            <h2 id="book-title">账本</h2>
+            <div class="controls">
+                <label for="book-select">IB 账户 / 标的</label>
+                <select id="book-select" disabled>
+                    <option value="">— 无账本 —</option>
+                </select>
+                <button id="btn-new-book" type="button" disabled>新建账本</button>
+                <button id="btn-delete-book" class="danger" type="button" disabled
+                        title="永久删除当前账本及其全部事件、快照和重建存档">永久删除账本</button>
+                <button id="btn-refresh" type="button" disabled>刷新</button>
+                <button id="btn-refresh-positions" type="button" disabled>拉取 TWS 持仓</button>
+            </div>
+            <form id="new-book-form" class="inline-form" hidden>
+                <label for="new-book-account">IB 账户</label>
+                <select id="new-book-account" required disabled>
+                    <option value="" selected disabled>等待 TWS 账户列表…</option>
+                </select>
+                <input id="new-book-account-manual" type="text" maxlength="32" hidden
+                       autocomplete="off" spellcheck="false" placeholder="输入 IB 账号，例如 U1234567">
+                <label for="new-book-symbol">标的代码</label>
+                <input id="new-book-symbol" type="text" maxlength="32" required
+                       autocomplete="off" spellcheck="false" placeholder="TQQQ">
+                <label for="new-book-type">账本类型</label>
+                <select id="new-book-type">
+                    <option value="STK">股票 / ETF 期权</option>
+                    <option value="FUT">FOP / FUT</option>
+                </select>
+                <label for="new-book-start">起算日</label>
+                <input id="new-book-start" type="date">
+                <label for="new-book-spc" id="new-book-spc-label">每张交割股数</label>
+                <input id="new-book-spc" type="number" min="1" step="1" value="100" required>
+                <button id="btn-create-book" type="submit">创建</button>
+                <button id="btn-cancel-book" type="button">取消</button>
+                <p class="form-hint" id="new-book-account-hint">有 IB API 时从 TWS 账户中选择；
+                    未连接时可选已有账本账户或手动输入。</p>
+                <p class="form-hint" id="new-book-type-hint">股票 / ETF 账本按交割股数计算每股成本；
+                    FOP / FUT 账本按具体期货月份和点值计算综合成本，并延续 ROLL spread。
+                    现金结算指数期权仍不适用。</p>
+            </form>
+            <p id="book-meta" class="section-note">未选择账本。</p>
+        </section>
+
+        <section class="panel" aria-labelledby="summary-title">
+            <h2 id="summary-title">综合成本总览</h2>
+            <div class="controls">
+                <label for="scope-select">视图</label>
+                <select id="scope-select">
+                    <option value="split">当前账本账户</option>
+                    <option value="combined">账本合计（旧版兼容）</option>
+                </select>
+                <label for="basis-select">口径</label>
+                <select id="basis-select">
+                    <option value="net_cash">净现金（全周期净成本）</option>
+                    <option value="stock_only">纯股票均价（对账 TWS）</option>
+                    <option value="tax_adjusted">税务调整（权利金滚入成本）</option>
+                </select>
+                <label for="reference-price">参考价</label>
+                <input id="reference-price" type="number" step="0.01" min="0"
+                       autocomplete="off" placeholder="自动">
+                <span id="reference-source" class="hint"></span>
+            </div>
+            <p id="basis-explainer" class="section-note"></p>
+            <div class="table-wrap">
+                <table id="summary-table" aria-label="综合成本总览">
+                    <thead><tr><th>指标</th></tr></thead>
+                    <tbody><tr><td class="empty">未选择账本</td></tr></tbody>
+                </table>
+            </div>
+            <p id="summary-warnings" class="warnings" hidden></p>
+        </section>
+
+        <section class="panel" aria-labelledby="reconcile-title">
+            <h2 id="reconcile-title">持仓对账（TWS vs 账本）</h2>
+            <p class="section-note">账本为空而 TWS 返回完整持仓与均价时，可点「采信 TWS」
+                经确认直接登记为当前基线；TWS 均价缺失、部分数量差异及账本侧缺口仍需手工补录。</p>
+            <div class="table-wrap">
+                <table id="reconcile-table" aria-label="持仓对账">
+                    <thead><tr><th>账户</th><th>合约</th><th>账本</th><th>TWS</th>
+                        <th>差异</th><th>状态</th><th>建议</th><th></th></tr></thead>
+                    <tbody><tr><td colspan="8" class="empty">尚未拉取 TWS 持仓</td></tr></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel" aria-labelledby="premium-title">
+            <h2 id="premium-title">期权费统计</h2>
+            <div class="card-grid" id="premium-cards">
+                <div class="card"><span class="card-label">近 30 天</span>
+                    <span class="card-value" id="premium-30">—</span></div>
+                <div class="card"><span class="card-label">近 90 天</span>
+                    <span class="card-value" id="premium-90">—</span></div>
+                <div class="card"><span class="card-label">近 365 天</span>
+                    <span class="card-value" id="premium-365">—</span></div>
+                <div class="card"><span class="card-label" id="premium-annualized-label">相对占用资金年化</span>
+                    <span class="card-value" id="premium-annualized">—</span>
+                    <span class="card-detail" id="premium-annualized-detail">按近 365 天权利金 / 当前持仓成本</span></div>
+            </div>
+        </section>
+
+        <section class="panel" aria-labelledby="entry-title">
+            <h2 id="entry-title">录入事件</h2>
+            <form id="event-form" class="entry-form">
+                <div class="field"><label for="field-kind">类型</label>
+                    <select id="field-kind">
+                        <option value="option_trade">期权开平仓 option_trade</option>
+                        <option value="option_assignment">被指派 option_assignment</option>
+                        <option value="option_exercise">自行行权 option_exercise</option>
+                        <option value="option_expiry">到期作废 option_expiry</option>
+                        <option value="share_trade">股票买卖 share_trade</option>
+                        <option value="futures_trade">期货买卖 futures_trade</option>
+                        <option value="futures_roll">期货换月 futures_roll</option>
+                        <option value="opening_balance">期初余额 opening_balance</option>
+                        <option value="dividend">股息 dividend</option>
+                        <option value="fee">费用 fee</option>
+                        <option value="split">拆股 split</option>
+                        <option value="manual_adjust">手工调整 manual_adjust</option>
+                    </select></div>
+                <div class="field"><label for="field-date">交易日</label>
+                    <input id="field-date" type="date"></div>
+                <div class="field"><label for="field-account">IB 账户（随账本）</label>
+                    <input id="field-account" type="text" maxlength="32"
+                           autocomplete="off" spellcheck="false"></div>
+                <div class="field" data-field="right"><label for="field-right">方向</label>
+                    <select id="field-right">
+                        <option value="P">Put</option>
+                        <option value="C">Call</option>
+                    </select></div>
+                <div class="field" data-field="strike"><label for="field-strike">行权价</label>
+                    <input id="field-strike" type="number" step="0.01" min="0"></div>
+                <div class="field" data-field="expiry"><label for="field-expiry">到期日</label>
+                    <input id="field-expiry" type="date"></div>
+                <div class="field" data-field="contracts"><label for="field-contracts">张数</label>
+                    <input id="field-contracts" type="number" step="1">
+                    <span class="hint">+ 增多头 / 减空头，− 增空头 / 减多头</span></div>
+                <div class="field" data-field="sharesPerContract">
+                    <label for="field-spc" id="field-spc-label">每张股数</label>
+                    <input id="field-spc" type="number" min="1" step="1" value="100"></div>
+                <div class="field" data-field="shares"><label for="field-shares">股数</label>
+                    <input id="field-shares" type="number" step="1">
+                    <span class="hint">+ 买入 / − 卖出</span></div>
+                <div class="field" data-field="futureExpiry">
+                    <label for="field-future-expiry">FUT 合约月</label>
+                    <input id="field-future-expiry" type="month"></div>
+                <div class="field" data-field="futureContracts">
+                    <label for="field-future-contracts">FUT 张数</label>
+                    <input id="field-future-contracts" type="number" step="1">
+                    <span class="hint">买入/持有多头为正，卖出/持有空头为负</span></div>
+                <div class="field" data-field="rollToExpiry">
+                    <label for="field-roll-to-expiry">换入合约月</label>
+                    <input id="field-roll-to-expiry" type="month"></div>
+                <div class="field" data-field="rollToPrice">
+                    <label for="field-roll-to-price">换入价格</label>
+                    <input id="field-roll-to-price" type="number" step="0.0001" min="0"></div>
+                <div class="field" data-field="rollGroup">
+                    <label for="field-roll-group">ROLL 标识</label>
+                    <input id="field-roll-group" type="text" maxlength="128"></div>
+                <div class="field" data-field="price"><label for="field-price">价格</label>
+                    <input id="field-price" type="number" step="0.0001" min="0"></div>
+                <div class="field" data-field="splitRatio"><label for="field-ratio">拆股比例</label>
+                    <input id="field-ratio" type="number" step="0.0001" min="0"></div>
+                <div class="field"><label for="field-fees">费用</label>
+                    <input id="field-fees" type="number" step="0.01" min="0" value="0"></div>
+                <div class="field"><label for="field-cash">现金（收正付负）</label>
+                    <input id="field-cash" type="number" step="0.01">
+                    <span class="hint" id="cash-hint"></span></div>
+                <div class="field"><label for="field-tag">标签</label>
+                    <input id="field-tag" type="text" maxlength="64" autocomplete="off"></div>
+                <div class="field wide"><label for="field-note">备注</label>
+                    <input id="field-note" type="text" maxlength="500" autocomplete="off"></div>
+                <div class="field checkbox"><label for="field-include">
+                    <input id="field-include" type="checkbox" checked> 计入综合成本</label></div>
+                <div class="form-actions">
+                    <button id="btn-submit-event" type="submit" disabled>写入账本</button>
+                    <button id="btn-reset-event" type="button">清空</button>
+                    <span id="entry-message" class="entry-message"></span>
+                </div>
+            </form>
+        </section>
+
+        <section class="panel" aria-labelledby="import-title">
+            <h2 id="import-title">导入 IBKR 报表</h2>
+            <p class="section-note">支持 Flex Query 平表和 Activity Statement 多段式
+                CSV。导入前必须过预览：新增 / 已存在跳过 / 待人工处理逐行可见，确认后才写库。
+                重复导入按 IBKR 成交号或稳定成交指纹去重，重叠时间段可以放心重导。累计报表若已完整覆盖「采信 TWS」的历史，
+                会在同一事务中用 CSV 取代临时基线；只包含采信后交易时则保留基线。</p>
+            <div class="controls">
+                <input id="import-file" type="file" accept=".csv,text/csv" disabled>
+                <button id="btn-import-commit" type="button" disabled>确认导入</button>
+                <button id="btn-import-clear" type="button" disabled>清空预览</button>
+            </div>
+            <div class="controls">
+                <label class="checkbox" for="import-replace">
+                    <input id="import-replace" type="checkbox" disabled>
+                    覆盖式重建：先清空账本，再用这个文件重新导入</label>
+            </div>
+            <label class="confirm-row" for="import-confirm" id="import-confirm-row" hidden>
+                <span id="import-confirm-hint"></span>
+                <input id="import-confirm" type="text" autocomplete="off"
+                       spellcheck="false" placeholder="确认短语">
+            </label>
+            <p id="import-replace-note" class="section-note" hidden>
+                清空前会把整份事件存档到数据库里（不是真的丢弃），但活动账本会变成
+                干净的空账本。只有当预览里的草稿数看起来正确时才执行。</p>
+            <p id="import-summary" class="section-note">未选择文件。</p>
+            <p id="import-openings" class="warnings" hidden></p>
+            <p id="import-blocked" class="warnings" hidden></p>
+            <div class="table-wrap" id="import-preview-wrap" hidden>
+                <table id="import-table" aria-label="导入预览">
+                    <thead><tr><th>日期</th><th>账户</th><th>类型</th><th>合约</th>
+                        <th>数量</th><th>价格</th><th>现金</th><th>来源行</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="table-wrap" id="import-problem-wrap" hidden>
+                <h3>待人工处理</h3>
+                <table id="import-problem-table" aria-label="待人工处理">
+                    <thead><tr><th>行</th><th>原因</th><th>原始内容</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel" aria-labelledby="flow-title">
+            <h2 id="flow-title">事件流水</h2>
+            <div class="controls">
+                <label for="filter-account">账户</label>
+                <select id="filter-account"><option value="">全部</option></select>
+                <label for="filter-kind">类型</label>
+                <select id="filter-kind"><option value="">全部</option></select>
+                <label for="filter-start">起</label>
+                <input id="filter-start" type="date">
+                <label for="filter-end">止</label>
+                <input id="filter-end" type="date">
+                <label class="checkbox"><input id="filter-voided" type="checkbox"> 显示已冲销</label>
+                <button id="btn-export-csv" type="button" disabled>导出 CSV</button>
+                <button id="btn-save-snapshot" type="button" disabled>生成对账快照</button>
+            </div>
+            <div class="table-wrap">
+                <table id="flow-table" aria-label="事件流水">
+                    <thead><tr><th>日期</th><th>账户</th><th>类型</th><th>合约</th>
+                        <th>数量</th><th>价格</th><th>现金</th>
+                        <th id="flow-position-heading">累计股数</th>
+                        <th title="按至此为止的全部现金计算，含未平仓期权已收的权利金；口径与总览的「若未平仓期权全部归零」一致">累计成本（含未平仓权利金）</th>
+                        <th>来源</th><th></th></tr></thead>
+                    <tbody><tr><td colspan="11" class="empty">未选择账本</td></tr></tbody>
+                </table>
+            </div>
+            <div class="controls">
+                <button id="flow-prev" type="button">上一页</button>
+                <span id="flow-page-label"></span>
+                <button id="flow-next" type="button">下一页</button>
+            </div>
+        </section>
+    </main>
+
+    <script src="js/cost_basis_core.js?v=26ccde24ac6d"></script>
+    <script src="js/cost_basis_import.js?v=a150b51b8f53"></script>
+    <script src="js/cost_basis.js?v=7e75918d811a"></script>
+</body>
+</html>

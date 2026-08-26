@@ -104,12 +104,23 @@
         return next;
     }
 
+    // Normalize in place. The UI binds change handlers to the object this
+    // returns, so handing back a fresh copy on every call silently orphaned
+    // those handlers: any later ensure call (a portfolio snapshot, an order
+    // status update) detached the bound controls, and the next render repainted
+    // "Send to TWS" back to "Preview Only" because the user's selection had
+    // been written into a copy nothing reads.
     function ensureGroupTradeTrigger(group) {
         if (!group || typeof group !== 'object') {
             return createDefaultTradeTrigger();
         }
 
-        group.tradeTrigger = normalizeTradeTrigger(group.tradeTrigger);
+        const normalized = normalizeTradeTrigger(group.tradeTrigger);
+        if (group.tradeTrigger && typeof group.tradeTrigger === 'object') {
+            Object.assign(group.tradeTrigger, normalized);
+        } else {
+            group.tradeTrigger = normalized;
+        }
         return group.tradeTrigger;
     }
 

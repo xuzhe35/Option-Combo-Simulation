@@ -8,6 +8,9 @@ from typing import Any
 from ib_async import Stock
 from websockets.exceptions import ConnectionClosed
 
+import cost_basis_ws
+import portfolio_admin_ws
+import portfolio_store_ws
 from ib_server_iv_term_structure import build_iv_term_structure_payload_evidence
 from ib_server_market_data import (
     cancel_mkt_data_if_unused,
@@ -886,7 +889,7 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
         env['send_portfolio_avg_cost_snapshot'](websocket)
     elif action == 'request_portfolio_positions_snapshot':
         logging.info(f"Received portfolio positions snapshot request from {client_ip}")
-        env['send_portfolio_positions_snapshot'](websocket)
+        env['send_portfolio_positions_snapshot'](websocket, data.get('requestId'))
     elif action == 'request_managed_accounts_snapshot':
         logging.info(f"Received managed accounts snapshot request from {client_ip}")
         env['send_managed_accounts_snapshot'](websocket)
@@ -901,6 +904,30 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
         await env['send_message_safe'](
             websocket,
             json.dumps(env['build_active_combo_orders_snapshot'](websocket, data)),
+        )
+    elif action in portfolio_store_ws.PERSISTENCE_CLIENT_ACTIONS:
+        await portfolio_store_ws.handle_persistence_action(
+            env.get('portfolio_store_env'),
+            websocket,
+            data,
+            client_ip=client_ip,
+            send=env['send_message_safe'],
+        )
+    elif action in portfolio_admin_ws.ADMIN_CLIENT_ACTIONS:
+        await portfolio_admin_ws.handle_admin_action(
+            env.get('portfolio_store_env'),
+            websocket,
+            data,
+            client_ip=client_ip,
+            send=env['send_message_safe'],
+        )
+    elif action in cost_basis_ws.COST_BASIS_CLIENT_ACTIONS:
+        await cost_basis_ws.handle_cost_basis_action(
+            env.get('cost_basis_store_env'),
+            websocket,
+            data,
+            client_ip=client_ip,
+            send=env['send_message_safe'],
         )
     else:
         payload = await dispatch_execution_action(

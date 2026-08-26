@@ -281,5 +281,140 @@ module.exports = {
                 assert.equal(elements.daysPassedDisplay.textContent, '+1 td / +2 cd');
             },
         },
+        {
+            name: 'workspace title prompt trims, caps, and honors cancel',
+            run() {
+                const ctx = loadBrowserScripts(['js/session_ui.js']);
+                const ui = ctx.OptionComboSessionUI;
+
+                assert.equal(
+                    ui.promptWorkspaceTitle('SPY', { prompt: () => '  My Book  ' }),
+                    'My Book'
+                );
+                assert.equal(
+                    ui.promptWorkspaceTitle('SPY', { prompt: () => 'x'.repeat(200) }),
+                    'x'.repeat(120)
+                );
+                assert.equal(ui.promptWorkspaceTitle('SPY', { prompt: () => null }), null);
+                assert.equal(ui.promptWorkspaceTitle('SPY', { prompt: () => '   ' }), null);
+            },
+        },
+        {
+            name: 'three-way decisions map confirm chains to stable choices',
+            run() {
+                const ctx = loadBrowserScripts(['js/session_ui.js']);
+                const ui = ctx.OptionComboSessionUI;
+                const confirmSequence = (answers) => {
+                    const queue = answers.slice();
+                    return { confirm: () => queue.shift() === true };
+                };
+
+                assert.equal(ui.confirmUnsavedChanges(confirmSequence([true])), 'save');
+                assert.equal(ui.confirmUnsavedChanges(confirmSequence([false, true])), 'discard');
+                assert.equal(ui.confirmUnsavedChanges(confirmSequence([false, false])), 'cancel');
+
+                assert.equal(
+                    ui.chooseConflictResolution({ currentRevision: 7 }, confirmSequence([true])),
+                    'open-latest'
+                );
+                assert.equal(
+                    ui.chooseConflictResolution({}, confirmSequence([false, true])),
+                    'save-copy'
+                );
+                assert.equal(
+                    ui.chooseConflictResolution({}, confirmSequence([false, false])),
+                    'cancel'
+                );
+            },
+        },
+        {
+            name: 'stale and takeover decisions map confirm chains to stable choices',
+            run() {
+                const ctx = loadBrowserScripts(['js/session_ui.js']);
+                const ui = ctx.OptionComboSessionUI;
+                const confirmSequence = (answers) => {
+                    const queue = answers.slice();
+                    return { confirm: () => queue.shift() === true };
+                };
+
+                assert.equal(
+                    ui.chooseStaleResolution({ revision: 7 }, confirmSequence([true])),
+                    'reload'
+                );
+                assert.equal(
+                    ui.chooseStaleResolution({}, confirmSequence([false, true])),
+                    'save-copy'
+                );
+                assert.equal(
+                    ui.chooseStaleResolution({}, confirmSequence([false, false])),
+                    'cancel'
+                );
+                assert.equal(
+                    ui.chooseTakeoverResolution(confirmSequence([true])), 'take-over'
+                );
+                assert.equal(
+                    ui.chooseTakeoverResolution(confirmSequence([false, true])),
+                    'save-copy'
+                );
+                assert.equal(
+                    ui.chooseTakeoverResolution(confirmSequence([false, false])),
+                    'cancel'
+                );
+            },
+        },
+        {
+            name: 'deleted workspace rows carry their deletion time',
+            run() {
+                const ctx = loadBrowserScripts(['js/session_ui.js']);
+                const row = ctx.OptionComboSessionUI.formatWorkspaceListRow({
+                    title: 'Old book',
+                    symbol: 'SPY',
+                    marketDataMode: 'live',
+                    revision: 2,
+                    updatedAtUtc: '2026-08-01T09:00:00.000Z',
+                    deletedAtUtc: '2026-08-08T10:30:00.000Z',
+                });
+                assert.equal(
+                    row,
+                    'Old book · SPY · live · rev 2 · 2026-08-01 09:00 · deleted 2026-08-08 10:30'
+                );
+            },
+        },
+        {
+            name: 'workspace list rows read as title, symbol, mode, revision, time',
+            run() {
+                const ctx = loadBrowserScripts(['js/session_ui.js']);
+                const row = ctx.OptionComboSessionUI.formatWorkspaceListRow({
+                    title: 'Aug dc rfly',
+                    symbol: 'spy',
+                    marketDataMode: 'live',
+                    revision: 4,
+                    updatedAtUtc: '2026-08-08T12:34:56.000Z',
+                });
+                assert.equal(row, 'Aug dc rfly · SPY · live · rev 4 · 2026-08-08 12:34');
+            },
+        },
+        {
+            name: 'list dialog falls back to a numbered prompt without a DOM',
+            async run() {
+                const ctx = loadBrowserScripts(['js/session_ui.js']);
+                const documents = [
+                    { documentId: 'doc-one', title: 'One' },
+                    { documentId: 'doc-two', title: 'Two' },
+                ];
+                const picked = await ctx.OptionComboSessionUI.showWorkspaceListDialog(
+                    documents,
+                    { documentRef: null, prompt: () => '2' }
+                );
+                assert.equal(picked.action, 'open');
+                assert.equal(picked.documentId, 'doc-two');
+
+                const cancelled = await ctx.OptionComboSessionUI.showWorkspaceListDialog(
+                    documents,
+                    { documentRef: null, prompt: () => 'nope' }
+                );
+                assert.equal(cancelled, null);
+            },
+        },
     ],
 };

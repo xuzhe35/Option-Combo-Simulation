@@ -1,0 +1,280 @@
+/* Blended cost ledger page — standalone stylesheet. No shared trading-page
+   CSS: this page must stay independent of the workspace UI. */
+
+:root {
+    --bg: #10141a;
+    --panel: #1a212b;
+    --border: #2c3644;
+    --text: #d8e0ea;
+    --muted: #8b98a8;
+    --accent: #4da3ff;
+    --warn: #e0a63c;
+    --bad: #e06c5c;
+    --ok: #57b98a;
+}
+
+* { box-sizing: border-box; }
+
+/* A class that sets `display` outranks the user-agent's [hidden] rule, so
+   every panel this page toggles with the hidden attribute needs this or it
+   never actually hides. */
+[hidden] { display: none !important; }
+
+body {
+    margin: 0;
+    padding: 1.5rem;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+        'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif;
+}
+
+.ledger-header h1 {
+    margin: 0 0 0.25rem;
+    font-size: 1.4rem;
+}
+
+.ledger-header h1 .subtitle {
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-weight: 400;
+    margin-left: 0.5rem;
+}
+
+.readonly-note {
+    color: var(--muted);
+    margin: 0 0 0.75rem;
+    max-width: 60rem;
+}
+
+#connection-banner {
+    display: inline-block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    margin-bottom: 0.75rem;
+}
+
+#connection-banner[data-state="connected"] { border-color: var(--ok); color: var(--ok); }
+#connection-banner[data-state="connecting"] { border-color: var(--warn); color: var(--warn); }
+#connection-banner[data-state="unavailable"] { border-color: var(--warn); color: var(--warn); }
+#connection-banner[data-state="disconnected"] { border-color: var(--bad); color: var(--bad); }
+
+.status-line {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.1rem 0.75rem;
+    margin: 0;
+    color: var(--muted);
+}
+
+.status-line dt { font-weight: 600; }
+.status-line dd { margin: 0; color: var(--text); }
+
+section.panel { margin-top: 1.5rem; }
+
+section.panel h2 {
+    font-size: 1.05rem;
+    margin: 0 0 0.5rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.3rem;
+}
+
+section.panel h3 {
+    font-size: 0.95rem;
+    margin: 1rem 0 0.5rem;
+    color: var(--muted);
+}
+
+.section-note {
+    color: var(--muted);
+    margin: 0.25rem 0 0.75rem;
+    max-width: 60rem;
+}
+
+.hint, .form-hint {
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.form-hint { display: block; width: 100%; margin: 0.25rem 0 0; }
+
+.controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin: 0.5rem 0;
+}
+
+.controls label { color: var(--muted); }
+
+button, select, input[type="text"], input[type="number"], input[type="date"],
+input[type="file"] {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.3rem 0.6rem;
+    font: inherit;
+}
+
+button { cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button:disabled, select:disabled, input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+button.primary { border-color: var(--accent); color: var(--accent); }
+button.draft { padding: 0.15rem 0.5rem; font-size: 0.85rem; }
+button.danger { border-color: var(--bad); color: var(--bad); }
+button.danger:hover:not(:disabled) { background: rgba(224, 108, 92, 0.1); }
+
+.inline-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.75rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 0.5rem;
+}
+
+.inline-form label { color: var(--muted); }
+
+.entry-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+    gap: 0.6rem 0.9rem;
+    padding: 0.9rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.entry-form .field { display: flex; flex-direction: column; gap: 0.2rem; }
+.entry-form .field.wide { grid-column: 1 / -1; }
+.entry-form .field.checkbox { justify-content: flex-end; }
+.entry-form .field.checkbox label { flex-direction: row; }
+.entry-form .field > label { color: var(--muted); font-size: 0.85rem; }
+
+.entry-form .form-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    border-top: 1px solid var(--border);
+    padding-top: 0.6rem;
+}
+
+.entry-message { color: var(--muted); }
+.entry-message[data-state="error"] { color: var(--bad); }
+.entry-message[data-state="ok"] { color: var(--ok); }
+
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+    gap: 0.6rem;
+}
+
+.card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.6rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.card-label { color: var(--muted); font-size: 0.85rem; }
+.card-value { font-size: 1.1rem; font-variant-numeric: tabular-nums; }
+.card-detail { color: var(--muted); font-size: 0.8rem; }
+
+.table-wrap { overflow-x: auto; }
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+th, td {
+    text-align: left;
+    padding: 0.35rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+th {
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+tbody tr:last-child td { border-bottom: none; }
+td.empty { color: var(--muted); text-align: center; padding: 1rem; }
+td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* A negative blended cost means the position already returned more cash
+   than it consumed. It is a result, not an error, so it gets the good
+   colour and an explicit label rather than the alarm colour. */
+.value-recovered { color: var(--ok); }
+.value-short { color: var(--warn); }
+.value-unavailable { color: var(--muted); }
+.value-headline { font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+
+tr.row-voided td { color: var(--muted); text-decoration: line-through; }
+tr.row-excluded td { color: var(--muted); font-style: italic; }
+td.mismatch-flag { color: var(--warn); }
+
+.status-match { color: var(--ok); }
+.status-explained { color: var(--muted); }
+.status-mismatch { color: var(--warn); }
+.status-missing { color: var(--bad); }
+
+.confidence-high { color: var(--ok); font-size: 0.8rem; }
+.confidence-low { color: var(--warn); font-size: 0.8rem; }
+
+.warnings {
+    color: var(--warn);
+    background: rgba(224, 166, 60, 0.08);
+    border: 1px solid var(--warn);
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    margin: 0.5rem 0 0;
+}
+
+#summary-table td:first-child, #summary-table th:first-child {
+    color: var(--muted);
+}
+
+#summary-table td { font-variant-numeric: tabular-nums; text-align: right; }
+#summary-table td:first-child { text-align: left; }
+#summary-table th:not(:first-child) { text-align: right; }
+#summary-table tr.section-row td {
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    font-size: 0.85rem;
+}
+
+.confirm-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin: 0.4rem 0;
+}
+
+.confirm-row span { color: var(--warn); }
+.confirm-row input { min-width: 18rem; }
+
+/* A cost computed over a premium-less prior_open stub. Arithmetically
+   consistent, but not the real blended cost. */
+.value-incomplete { color: var(--warn); }

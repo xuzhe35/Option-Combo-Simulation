@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Workspace DB Admin — Option Combo Simulator</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="workspace_db_admin.css?v=f8cd2c04f3fe">
+</head>
+<body data-option-combo-page="workspace-db-admin">
+    <header class="admin-header">
+        <h1>Workspace Database Admin</h1>
+        <p class="readonly-note">Archiving copies old revisions and expired
+            deleted workspaces into verified archive shards before anything
+            leaves the active database. Archived data can be restored as new
+            revisions or copies; nothing here can trade, subscribe, or touch
+            orders.</p>
+        <div id="connection-banner" data-state="disconnected">Disconnected</div>
+        <dl class="status-line">
+            <dt>Store schema</dt><dd id="admin-schema-version">unavailable</dd>
+            <dt>Retention policy</dt><dd id="admin-policy">unavailable</dd>
+            <dt>Stats generated</dt><dd id="stats-generated-at">unavailable</dd>
+        </dl>
+    </header>
+
+    <main>
+        <section class="cards" aria-labelledby="overview-title">
+            <h2 id="overview-title">Active database</h2>
+            <div class="card-grid">
+                <div class="card"><span class="card-label">Active workspaces</span>
+                    <span class="card-value" id="stat-active-documents">unavailable</span></div>
+                <div class="card"><span class="card-label">Recently deleted</span>
+                    <span class="card-value" id="stat-deleted-documents">unavailable</span></div>
+                <div class="card"><span class="card-label">Revisions</span>
+                    <span class="card-value" id="stat-revision-count">unavailable</span></div>
+                <div class="card"><span class="card-label">Logical payload</span>
+                    <span class="card-value" id="stat-logical-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Allocated DB size</span>
+                    <span class="card-value" id="stat-allocated-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Reclaimable</span>
+                    <span class="card-value" id="stat-reclaimable-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">WAL size</span>
+                    <span class="card-value" id="stat-wal-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">DB file on disk</span>
+                    <span class="card-value" id="stat-db-file-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Save receipts</span>
+                    <span class="card-value" id="stat-receipt-count">unavailable</span>
+                    <span class="card-detail">permanent idempotency ledger,
+                        <span id="stat-receipt-bytes">unavailable</span></span></div>
+            </div>
+            <h3>Recent activity</h3>
+            <div class="card-grid">
+                <div class="card"><span class="card-label">Last 7 days</span>
+                    <span class="card-value"><span id="stat-recent7-revisions">unavailable</span> revisions</span>
+                    <span class="card-detail" id="stat-recent7-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Last 30 days</span>
+                    <span class="card-value"><span id="stat-recent30-revisions">unavailable</span> revisions</span>
+                    <span class="card-detail" id="stat-recent30-bytes">unavailable</span></div>
+            </div>
+        </section>
+
+        <section class="cards" aria-labelledby="candidates-title">
+            <h2 id="candidates-title">Archive candidates</h2>
+            <p class="section-note">Computed by the server from the retention
+                policy. Archiving copies candidates into a verified archive
+                shard FIRST; only verified copies are then removed from the
+                active database. A recovery snapshot is taken before any
+                removal.</p>
+            <div class="card-grid">
+                <div class="card"><span class="card-label">Old revisions beyond retention</span>
+                    <span class="card-value" id="candidate-old-revisions">unavailable</span>
+                    <span class="card-detail" id="candidate-old-revision-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Soft-deleted past 30-day grace</span>
+                    <span class="card-value" id="candidate-deleted-documents">unavailable</span>
+                    <span class="card-detail" id="candidate-deleted-bytes">unavailable</span></div>
+            </div>
+            <div class="archive-flow">
+                <div class="controls">
+                    <button id="btn-preview-archive" type="button" disabled>Preview archive</button>
+                </div>
+                <p id="preview-summary">No preview yet.</p>
+                <label class="confirm-row" for="confirm-input">
+                    <span id="confirm-hint"></span>
+                    <input id="confirm-input" type="text" autocomplete="off"
+                           spellcheck="false" placeholder="confirmation phrase">
+                </label>
+                <div class="controls">
+                    <button id="btn-execute-archive" type="button" disabled>Execute archive</button>
+                    <button id="btn-cancel-job" type="button" disabled>Cancel (copy stage only)</button>
+                </div>
+                <p id="guidance-line" class="guidance"></p>
+            </div>
+        </section>
+
+        <section class="cards" aria-labelledby="archive-title">
+            <h2 id="archive-title">Archive shards</h2>
+            <div class="card-grid">
+                <div class="card"><span class="card-label">Registered shards</span>
+                    <span class="card-value" id="stat-archive-count">unavailable</span></div>
+                <div class="card"><span class="card-label">Missing files</span>
+                    <span class="card-value" id="stat-archive-missing">unavailable</span></div>
+                <div class="card"><span class="card-label">Shard files on disk</span>
+                    <span class="card-value" id="stat-archive-file-bytes">unavailable</span></div>
+                <div class="card"><span class="card-label">Archived revisions</span>
+                    <span class="card-value" id="stat-archive-revisions">unavailable</span></div>
+            </div>
+            <h3>Batches</h3>
+            <div class="controls">
+                <select id="batch-archive-select" disabled>
+                    <option value="">— select shard —</option>
+                </select>
+                <button id="btn-verify-archive" type="button" disabled>Verify shard</button>
+            </div>
+            <div class="table-wrap">
+                <table aria-label="Archive batches">
+                    <thead><tr><th>Batch</th><th>Status</th><th>Revisions</th>
+                        <th>Bytes</th><th>Manifest</th><th>Created</th></tr></thead>
+                    <tbody id="batches-table-body">
+                        <tr><td colspan="6" class="empty">No batches</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="cards" aria-labelledby="archived-docs-title">
+            <h2 id="archived-docs-title">Archived workspaces</h2>
+            <div class="table-wrap">
+                <table aria-label="Archived workspaces">
+                    <thead><tr><th>Title</th><th>Symbol</th><th>Kind</th>
+                        <th>Revisions</th><th>Shard</th><th>Archived</th>
+                        <th>Restore</th></tr></thead>
+                    <tbody id="archived-docs-body">
+                        <tr><td colspan="7" class="empty">No archived workspaces</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="controls">
+                <button id="docs-prev" type="button">Prev</button>
+                <span id="docs-page-label"></span>
+                <button id="docs-next" type="button">Next</button>
+            </div>
+        </section>
+
+        <section class="cards" aria-labelledby="maintenance-title">
+            <h2 id="maintenance-title">Maintenance</h2>
+            <p id="job-status">No maintenance job running</p>
+            <div class="controls">
+                <button id="btn-refresh-stats" type="button" disabled>Refresh stats</button>
+                <button id="btn-exact-stats" type="button" disabled>Exact recount (background)</button>
+                <button id="btn-reclaim" type="button" disabled>Reclaim space (bounded)</button>
+            </div>
+            <h3>Task history</h3>
+            <div class="table-wrap">
+                <table aria-label="Task history">
+                    <thead><tr><th>Type</th><th>Status</th><th>Created</th>
+                        <th>Finished</th><th>Job id</th></tr></thead>
+                    <tbody id="jobs-table-body">
+                        <tr><td colspan="5" class="empty">No tasks yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <script src="js/workspace_db_admin_core.js?v=5fd8a88b6ff8"></script>
+    <script src="js/workspace_db_admin.js?v=9fcdf27d1c83"></script>
+</body>
+</html>

@@ -283,6 +283,12 @@ function loadAppContext(options = {}) {
             buildExportState(state) {
                 return JSON.parse(JSON.stringify(state));
             },
+            buildPersistenceState(state) {
+                return JSON.parse(JSON.stringify(state));
+            },
+            stableStringify(value) {
+                return JSON.stringify(value);
+            },
         },
         OptionComboValuation: {
             isSettlementScenarioMode(viewMode) {
@@ -398,6 +404,37 @@ function loadAppContext(options = {}) {
                 callLog.syncWorkspaceChrome.push(state);
             },
             syncControlPanel() {},
+            resolveDocumentTitle() {
+                return 'Stub Workspace';
+            },
+            promptWorkspaceTitle() {
+                return 'Stub Workspace';
+            },
+            confirmUnsavedChanges() {
+                return 'discard';
+            },
+            chooseConflictResolution() {
+                return 'cancel';
+            },
+            chooseStaleResolution() {
+                return 'cancel';
+            },
+            chooseTakeoverResolution() {
+                return 'cancel';
+            },
+            confirmWorkspaceDelete() {
+                return true;
+            },
+            confirmWorkspaceUndelete() {
+                return true;
+            },
+            showWorkspaceStoreUnavailable() {},
+            formatWorkspaceListRow() {
+                return '';
+            },
+            showWorkspaceListDialog() {
+                return Promise.resolve(null);
+            },
         },
         OptionComboAmortized: {
             calculateAmortizedCost() {

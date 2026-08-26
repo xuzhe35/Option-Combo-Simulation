@@ -240,7 +240,8 @@ class IbServerWsHandlerTests(unittest.TestCase):
             'get_discount_curve_snapshot': get_discount_curve_snapshot,
             'execution_engine': _ExecutionEngineStub(),
             'send_portfolio_avg_cost_snapshot': lambda websocket: snapshot_calls.append(websocket),
-            'send_portfolio_positions_snapshot': lambda websocket: position_snapshot_calls.append(websocket),
+            'send_portfolio_positions_snapshot': lambda websocket, request_id=None: (
+                position_snapshot_calls.append((websocket, request_id))),
             'send_managed_accounts_snapshot': lambda websocket: managed_snapshot_calls.append(websocket),
             'cancel_iv_term_structure_sync_task': cancel_iv_term_structure_sync_task,
             'unsubscribe_client_safely': unsubscribe_client_safely,
@@ -339,7 +340,7 @@ class IbServerWsHandlerTests(unittest.TestCase):
 
         self.assertEqual(sent_messages, [])
         self.assertEqual(snapshot_calls, [websocket])
-        self.assertEqual(env['_captures']['position_snapshot_calls'], [websocket])
+        self.assertEqual(env['_captures']['position_snapshot_calls'], [(websocket, None)])
         self.assertEqual(managed_snapshot_calls, [websocket])
         self.assertEqual(cancel_iv_calls, [websocket])
         self.assertEqual(unsubscribe_calls, [websocket])
@@ -390,12 +391,16 @@ class IbServerWsHandlerTests(unittest.TestCase):
 
     def test_handle_ws_client_routes_portfolio_positions_snapshot_action(self):
         env, *_rest = self._build_env()
-        websocket = _FakeWebSocket(messages=[json.dumps({'action': 'request_portfolio_positions_snapshot'})])
+        websocket = _FakeWebSocket(messages=[json.dumps({
+            'action': 'request_portfolio_positions_snapshot',
+            'requestId': 'positions-1',
+        })])
         handler = build_ws_client_handler(env)
 
         asyncio.run(handler(websocket))
 
-        self.assertEqual(env['_captures']['position_snapshot_calls'], [websocket, websocket])
+        self.assertEqual(env['_captures']['position_snapshot_calls'], [
+            (websocket, None), (websocket, 'positions-1')])
 
     def test_handle_ws_client_routes_ib_connection_status_action(self):
         (
@@ -1999,6 +2004,48 @@ class MarketReferenceContractMetadataTests(unittest.TestCase):
 
         self.assertEqual(metadata['contractMonthSource'], 'last_trade_date')
         self.assertEqual(metadata['contractMonth'], '202608')
+
+
+class PersistenceRoutingTests(unittest.TestCase):
+    """dispatch_client_message must answer persistence actions itself and
+    never let them fall through to the execution dispatcher."""
+
+    @staticmethod
+    def _env():
+        async def send_message_safe(ws, message):
+            ws.sent.append(message)
+
+        engine = _ExecutionEngineStub()
+        return {
+            'send_message_safe': send_message_safe,
+            'execution_engine': engine,
+        }, engine
+
+    def test_persistence_action_without_store_env_reports_unavailable(self):
+        websocket = _FakeWebSocket()
+        env, engine = self._env()
+        asyncio.run(dispatch_client_message(env, websocket, {
+            'action': 'request_workspace_store_status',
+            'requestId': 'probe-1',
+        }, client_ip='127.0.0.1'))
+        self.assertEqual(len(websocket.sent), 1)
+        response = json.loads(websocket.sent[0])
+        self.assertEqual(response['action'], 'workspace_store_status')
+        self.assertEqual(response['requestId'], 'probe-1')
+        self.assertFalse(response['available'])
+        # The action never reached the execution dispatcher.
+        self.assertEqual(engine.calls, [])
+
+    def test_persistence_error_keeps_dispatch_usable(self):
+        websocket = _FakeWebSocket()
+        env, engine = self._env()
+        asyncio.run(dispatch_client_message(env, websocket, {
+            'action': 'save_saved_workspace',
+            'requestId': 'save-1',
+        }, client_ip='127.0.0.1'))
+        response = json.loads(websocket.sent[0])
+        self.assertFalse(response['success'])
+        self.assertEqual(response['code'], 'store_unavailable')
 
 
 if __name__ == '__main__':

@@ -7,6 +7,9 @@ import signal
 
 import websockets
 
+import cost_basis_ws
+import portfolio_admin_ws
+import portfolio_store_ws
 from chain_service_config import resolve_chain_service_url
 from historical_replay_service import (
     HistoricalReplayService,
@@ -24,6 +27,7 @@ config.read('config.ini')
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_HOST = '127.0.0.1'
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
+MAX_WS_MESSAGE_BYTES = portfolio_store_ws.read_max_ws_message_bytes(config)
 CHAIN_SERVICE_URL = resolve_chain_service_url(config)
 RATES_SQLITE_DB = os.path.abspath(
     config.get('historical', 'rates_sqlite_db_path', fallback=os.path.join('sqlite_spy', 'rates.db'))
@@ -98,14 +102,50 @@ async def send_message_safe(ws, message):
         pass
 
 
+# Same shared store and protocol as ib_server.py; initialization failure
+# only disables persistence while historical replay keeps running.
+portfolio_store_env = portfolio_store_ws.create_store_env(config)
+# The ledger is served here too so the page works against whichever
+# backend is running; only the TWS position reconciliation needs IB.
+cost_basis_store_env = cost_basis_ws.create_store_env(config)
+
+
 async def handle_ws_client(websocket):
     client_ip = websocket.remote_address[0] if websocket.remote_address else 'Unknown'
     logging.info("Historical replay client connected: %s", client_ip)
 
     try:
         async for message in websocket:
-            data = json.loads(message)
+            # One malformed message must not tear down the session.
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                logging.warning("Ignoring malformed WebSocket message from %s", client_ip)
+                continue
+            if not isinstance(data, dict):
+                logging.warning("Ignoring non-object WebSocket message from %s", client_ip)
+                continue
             action = data.get('action')
+
+            # Shared persistence protocol first; unhandled actions fall
+            # through to the historical-only branches below.
+            if await portfolio_store_ws.handle_persistence_action(
+                portfolio_store_env, websocket, data,
+                client_ip=client_ip, send=send_message_safe,
+            ):
+                continue
+
+            if await portfolio_admin_ws.handle_admin_action(
+                portfolio_store_env, websocket, data,
+                client_ip=client_ip, send=send_message_safe,
+            ):
+                continue
+
+            if await cost_basis_ws.handle_cost_basis_action(
+                cost_basis_store_env, websocket, data,
+                client_ip=client_ip, send=send_message_safe,
+            ):
+                continue
 
             if action == 'request_historical_snapshot':
                 raw_underlying = data.get('underlying')
@@ -179,7 +219,11 @@ async def handle_ws_client(websocket):
 async def main():
     logging.info("Starting historical replay WebSocket server on ws://%s:%s", WS_HOST, WS_PORT)
     try:
-        ws_server = await websockets.serve(handle_ws_client, WS_HOST, WS_PORT)
+        # Explicit max_size shared with ib_server.py: the library default of
+        # 1 MiB would 1009-close the socket on a large workspace save.
+        ws_server = await websockets.serve(
+            handle_ws_client, WS_HOST, WS_PORT, max_size=MAX_WS_MESSAGE_BYTES,
+        )
     except OSError as exc:
         logging.error(
             "Cannot bind WebSocket server on port %s: %s\n"
@@ -202,3 +246,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Historical replay server stopped by user.")
+    finally:
+        # Best-effort scheduled-backup top-up on clean exit.
+        portfolio_store_ws.publish_backup_best_effort(portfolio_store_env)

@@ -760,6 +760,46 @@ The split is intentional:
 
 Any other message to `historical_server.py` returns a historical replay error.
 
+### Workspace persistence (shared by both backends)
+
+`portfolio_store.py` is the pure SQLite store (schema v2: workspace
+documents + full-JSON revisions with canonical UTF-8 `payload_bytes`,
+canonical-JSON validation and SHA-256 before any write transaction,
+BEGIN IMMEDIATE saves writing the revision and a permanent
+`workspace_save_receipts` row in one transaction — idempotent replay reads
+the receipt and returns the original ACK even after the payload is
+archived — soft delete, restore, verified backup publishing, and the
+archive index tables: entries, tombstones, shard registry, maintenance
+jobs, and the cross-process lease). `portfolio_store_ws.py` serves the
+persistence actions on both sockets via `asyncio.to_thread`, enforces
+loopback-only access before lazily opening the database, and schedules the
+static backup after committed saves. The scheduled pass never deletes
+revisions: retention only defines archive candidates.
+
+Three sibling modules complete the archive layer. `portfolio_maintenance.py`
+is the cross-process guard every maintenance path must hold: process
+threading.Lock, then a non-blocking OS flock next to the database, then the
+`workspace_maintenance_lease` row whose fencing token increments only on
+takeover after a holder dies (a paused holder's OS lock blocks takeover
+even with an expired lease). `portfolio_archive.py` owns candidate policy
+(pure, clock-injected), shard schema/rollover, preview manifests with
+generation fingerprints, the copy-then-verify-then-remove state machine
+(commit chunks re-check the lease inside the write transaction and insert
+the archive entry/tombstone in the same transaction as the delete), the
+crash reconciler, restore, and the guarded opt-in auto-archive.
+`portfolio_admin_ws.py` is the loopback admin protocol used by
+`workspace_db_admin.html` (own minimal client: `js/workspace_db_admin.js`
++ DOM-free `js/workspace_db_admin_core.js`); plan tokens are single-use,
+15-minute, bound to the issuing server instance, and responses never carry
+paths, SQL, or payloads. On
+the browser side `js/workspace_persistence.js` owns request correlation,
+the document envelope, the canonical fingerprint for dirty detection, the
+5 MiB pre-send check, and the BroadcastChannel writer lease; `js/app.js`
+only hands snapshots in and applies load results atomically through the
+replace-mode normalizer. Both `websockets.serve` calls share an explicit
+`max_size` (`[server] max_ws_message_bytes`) because the library's 1 MiB
+default would 1009-close a socket that also carries order supervision.
+
 ## 8. Historical Replay Architecture
 
 Historical replay is implemented as a first-class runtime mode in the main workspace.

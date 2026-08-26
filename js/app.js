@@ -309,10 +309,25 @@ function consumePendingCalendarHandoff() {
 document.addEventListener('DOMContentLoaded', () => {
     _syncSessionFileActionButtons();
     bindControlPanelEvents();
-    consumePendingCalendarHandoff();
+    const handoffConsumed = consumePendingCalendarHandoff() === true;
     renderGroups();
     renderHedges();
     updateDerivedValues();
+    // The pristine default workspace becomes the unbound dirty baseline:
+    // closing an untouched page stays silent, while any real edit before
+    // the first database Save is protected by the unsaved-changes guard.
+    const persistenceClient = _getPersistenceClient();
+    if (persistenceClient
+        && typeof persistenceClient.setUnboundBaseline === 'function') {
+        persistenceClient.setUnboundBaseline(_buildPersistencePayload());
+        if (handoffConsumed
+            && typeof persistenceClient.markUnboundDirty === 'function') {
+            // A consumed calendar handoff is one-shot: the new combo exists
+            // only in this tab's memory until the first Save, so it must be
+            // protected as unsaved work from the very start.
+            persistenceClient.markUnboundDirty();
+        }
+    }
     setInterval(() => {
         runDeltaHedgeAutoSupervisor();
     }, 5000);
@@ -582,6 +597,9 @@ function renderGroups() {
         requestPortfolioAvgCostSnapshot,
         requestLegExistsCheck: typeof requestLegExistsCheck === 'function'
             ? requestLegExistsCheck
+            : null,
+        requestTrialGroupComboOrder: typeof requestTrialGroupComboOrder === 'function'
+            ? requestTrialGroupComboOrder
             : null,
         requestContinueManagedComboOrder,
         requestConcedeManagedComboOrder,
@@ -1710,6 +1728,18 @@ function processImportedFile(file, options = {}) {
 
                 applyImportedState(normalizedState, file && typeof file.name === 'string' ? file.name : '');
                 _setSessionFileTarget(options.fileHandle || null, file && typeof file.name === 'string' ? file.name : '');
+                // A JSON import is a new, database-unbound workspace: the
+                // next Save names it and creates revision 1. The imported
+                // content itself is safe in its source file, so it becomes
+                // the clean baseline — the first manual edit turns dirty.
+                const persistenceClient = _getPersistenceClient();
+                if (persistenceClient) {
+                    persistenceClient.clearDocument();
+                    persistenceClient.releaseWriterLease();
+                    if (typeof persistenceClient.setUnboundBaseline === 'function') {
+                        persistenceClient.setUnboundBaseline(_buildPersistencePayload());
+                    }
+                }
                 OptionComboSessionUI.syncControlPanel(state, currencyFormatter, {
                     diffDays,
                     calendarToTradingDays,
@@ -1727,6 +1757,463 @@ function processImportedFile(file, options = {}) {
         }
     };
     reader.readAsText(file);
+}
+
+// ---------------------------------------------------------------------------
+// Database workspace orchestration.
+//
+// app.js hands snapshots to the persistence client and applies load results;
+// the request state machine lives in js/workspace_persistence.js and the
+// transport in js/ws_client.js. A failed database save is reported as a
+// failure — it is never silently downgraded to a file write.
+// ---------------------------------------------------------------------------
+
+let _workspaceStaleHandlerBound = false;
+
+function _getPersistenceClient() {
+    const client = typeof getWorkspacePersistenceClient === 'function'
+        ? getWorkspacePersistenceClient()
+        : null;
+    if (client && !_workspaceStaleHandlerBound
+        && typeof client.setStaleRevisionHandler === 'function') {
+        _workspaceStaleHandlerBound = true;
+        client.setStaleRevisionHandler(_onWorkspaceStaleRevision);
+    }
+    return client;
+}
+
+function _onWorkspaceStaleRevision(event) {
+    // Another tab committed a newer revision of the document this read-only
+    // tab is showing. Surface it immediately instead of leaving the user on
+    // silently stale data.
+    const choice = OptionComboSessionUI.chooseStaleResolution(event);
+    if (choice === 'reload') {
+        // Reload discards this tab's read-only local view by explicit choice.
+        _openWorkspaceDocument(event.documentId, { skipDirtyCheck: true });
+        return;
+    }
+    if (choice === 'save-copy') {
+        saveWorkspaceToStore({ copy: true });
+    }
+    // 'cancel': stay on the read-only stale view.
+}
+
+function _generateWorkspaceUuid() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+    return `doc-${generateId()}-${Date.now().toString(16)}`;
+}
+
+function _buildPersistencePayload() {
+    return OptionComboSessionLogic.buildPersistenceState(state);
+}
+
+function _workspaceIsDirty() {
+    const client = _getPersistenceClient();
+    if (!client) {
+        return false;
+    }
+    // The client compares against the bound document's fingerprint or, for
+    // database-unbound workspaces, the pristine/imported baseline — an
+    // unsaved draft is protected either way.
+    return client.isDirty(_buildPersistencePayload());
+}
+
+// One save at a time per tab. The lock spans the naming prompt through the
+// ACK so a double-click cannot fork documents or self-conflict; the client
+// enforces the same rule underneath for any caller that bypasses this.
+let _workspaceSavePending = false;
+
+function _setWorkspaceSaveButtonsDisabled(disabled) {
+    for (const id of ['saveBtn', 'saveCopyBtn']) {
+        const button = document.getElementById(id);
+        if (button) {
+            button.disabled = disabled === true;
+        }
+    }
+}
+
+async function saveWorkspaceToStore(options = {}) {
+    if (_workspaceSavePending) {
+        return false;
+    }
+    _workspaceSavePending = true;
+    _setWorkspaceSaveButtonsDisabled(true);
+    try {
+        return await _saveWorkspaceToStoreUnlocked(options);
+    } finally {
+        _workspaceSavePending = false;
+        _setWorkspaceSaveButtonsDisabled(false);
+    }
+}
+
+async function _saveWorkspaceToStoreUnlocked(options = {}) {
+    const client = _getPersistenceClient();
+    if (!client) {
+        OptionComboSessionUI.showWorkspaceStoreUnavailable();
+        return false;
+    }
+    const copy = options.copy === true;
+    const envelope = client.getEnvelope();
+    const writer = client.getWriterState();
+    const requestedOperation = copy ? 'copy' : (envelope ? 'update' : 'create');
+    const unknownAttempt = typeof client.getUnknownSaveAttempt === 'function'
+        ? client.getUnknownSaveAttempt()
+        : null;
+    const unknownOperation = unknownAttempt
+        ? (['create', 'update', 'copy'].includes(unknownAttempt.operation)
+            ? unknownAttempt.operation
+            : (unknownAttempt.expectedRevision === undefined
+                || unknownAttempt.expectedRevision === null
+                ? (envelope ? 'copy' : 'create')
+                : 'update'))
+        : null;
+    if (unknownOperation && unknownOperation !== requestedOperation) {
+        // Never let a different button silently replace an unresolved
+        // operation. In particular, Save must not update the original after
+        // a Save-a-Copy ACK was lost and the copy may already exist.
+        const pendingLabel = unknownOperation === 'copy' ? 'Save a Copy' : 'Save';
+        alert(`The previous ${pendingLabel} result is still unknown. `
+            + `Retry ${pendingLabel} before starting a different save.`);
+        return false;
+    }
+    const operation = unknownOperation || requestedOperation;
+    // Allow-list: only an actual writer may update its bound document.
+    // idle / readonly / stale / takeover-pending never overwrite in place.
+    if (operation === 'update' && envelope && writer.state !== 'writer') {
+        const eligibility = typeof client.canTakeover === 'function'
+            ? client.canTakeover()
+            : { allowed: false };
+        if (eligibility.allowed === true) {
+            const choice = OptionComboSessionUI.chooseTakeoverResolution();
+            if (choice === 'take-over') {
+                // Eligibility was a pure query; state only changes now that
+                // the user has confirmed — and rolls back on any failure.
+                if (client.beginTakeover() !== true) {
+                    return false;
+                }
+                const reloaded = await _openWorkspaceDocument(envelope.documentId, {
+                    skipDirtyCheck: true,
+                    allowDuringSave: true,
+                    preserveTakeover: true,
+                });
+                if (reloaded) {
+                    client.completeTakeover();
+                } else {
+                    client.cancelTakeover();
+                }
+                // The local edits were replaced by the latest revision; the
+                // user explicitly chose that over Save a Copy.
+                return false;
+            }
+            if (choice === 'save-copy') {
+                return _saveWorkspaceToStoreUnlocked({ copy: true });
+            }
+            return false;
+        }
+        const branch = typeof confirm === 'function' && confirm(
+            'Another tab is editing this workspace, so this tab is read-only. '
+            + 'Save your edits as a new copy instead?'
+        );
+        return branch ? _saveWorkspaceToStoreUnlocked({ copy: true }) : false;
+    }
+
+    let documentId;
+    let expectedRevision;
+    let title;
+    if (unknownAttempt) {
+        // Resume every unknown operation with its complete identity. The
+        // client reuses the token only when all idempotency inputs still
+        // match; a changed payload gets a new token but never a new document.
+        documentId = unknownAttempt.documentId;
+        title = unknownAttempt.title;
+        expectedRevision = unknownAttempt.expectedRevision;
+        state.importedSessionTitle = title;
+    } else if (operation === 'update' && envelope) {
+        documentId = envelope.documentId;
+        expectedRevision = envelope.revision;
+        title = envelope.title;
+    } else {
+        title = OptionComboSessionUI.promptWorkspaceTitle(
+            OptionComboSessionUI.resolveDocumentTitle(state)
+        );
+        if (!title) {
+            return false;
+        }
+        // Set before the snapshot so the saved payload and the fingerprint
+        // both carry the final title.
+        state.importedSessionTitle = title;
+        documentId = _generateWorkspaceUuid();
+        expectedRevision = undefined;
+    }
+
+    const payload = _buildPersistencePayload();
+    try {
+        const response = await client.saveWorkspace({
+            documentId, title, payload, expectedRevision, operation,
+        });
+        if (operation !== 'update') {
+            await client.acquireWriterLease(documentId);
+        }
+        // Saved is only shown after the store's commit ACK.
+        _markSaveButtonSaved(document.getElementById('saveBtn'));
+        OptionComboSessionUI.syncWorkspaceChrome(state);
+        return response !== undefined;
+    } catch (error) {
+        const code = error && error.code ? error.code : 'internal_store_error';
+        if (code === 'revision_conflict') {
+            const currentRevision = error.response
+                && Number.isInteger(error.response.currentRevision)
+                ? error.response.currentRevision
+                : null;
+            const choice = OptionComboSessionUI.chooseConflictResolution({
+                currentRevision,
+            });
+            if (choice === 'open-latest') {
+                return _openWorkspaceDocument(documentId, {
+                    skipDirtyCheck: true,
+                    allowDuringSave: true,
+                });
+            }
+            if (choice === 'save-copy') {
+                return _saveWorkspaceToStoreUnlocked({ copy: true });
+            }
+            return false;
+        }
+        if (code === 'save_in_progress') {
+            // Client-level serialization refused an interleaved save.
+            return false;
+        }
+        if (code === 'timeout' || code === 'disconnected') {
+            const retryLabel = operation === 'copy' ? 'Save a Copy' : 'Save';
+            alert('The save result is unknown (connection problem). '
+                + `Retry ${retryLabel} — the retry resumes the same document and `
+                + 'cannot create a duplicate.');
+            return false;
+        }
+        if (code === 'payload_too_large_local' || code === 'payload_too_large') {
+            alert('This workspace exceeds the 5 MiB save limit. '
+                + 'Trim unused groups or export it as JSON.');
+            return false;
+        }
+        if (code === 'store_unavailable' || code === 'remote_access_disabled') {
+            OptionComboSessionUI.showWorkspaceStoreUnavailable(code);
+            return false;
+        }
+        console.error('Workspace save failed:', error);
+        alert(`Save failed: ${code}`);
+        return false;
+    }
+}
+
+function saveWorkspaceCopyToStore() {
+    return saveWorkspaceToStore({ copy: true });
+}
+
+async function openWorkspaceFromStore() {
+    return _openWorkspaceListFlow('active');
+}
+
+async function _openWorkspaceListFlow(view) {
+    if (_workspaceSavePending) {
+        alert('A save is in progress. Wait for it to finish before opening.');
+        return false;
+    }
+    const client = _getPersistenceClient();
+    if (!client) {
+        OptionComboSessionUI.showWorkspaceStoreUnavailable();
+        return false;
+    }
+    const deletedView = view === 'deleted';
+    let listing;
+    try {
+        listing = await client.listWorkspaces({ includeDeleted: deletedView });
+    } catch (error) {
+        OptionComboSessionUI.showWorkspaceStoreUnavailable(error && error.code);
+        return false;
+    }
+    let documents = Array.isArray(listing.documents) ? listing.documents : [];
+    if (deletedView) {
+        documents = documents.filter(doc => doc.deletedAtUtc);
+    }
+    const selection = await OptionComboSessionUI.showWorkspaceListDialog(
+        documents, { view }
+    );
+    if (!selection) {
+        return false;
+    }
+    if (selection.action === 'show-deleted') {
+        return _openWorkspaceListFlow('deleted');
+    }
+    if (selection.action === 'show-active') {
+        return _openWorkspaceListFlow('active');
+    }
+    if (!selection.documentId) {
+        return false;
+    }
+    const target = documents.find(doc => doc.documentId === selection.documentId);
+    if (!target) {
+        return false;
+    }
+    if (selection.action === 'undelete') {
+        if (!OptionComboSessionUI.confirmWorkspaceUndelete(target.title)) {
+            return _openWorkspaceListFlow('deleted');
+        }
+        try {
+            await client.undeleteWorkspace(target.documentId, target.revision);
+        } catch (error) {
+            alert(`Restore failed: ${error && error.code ? error.code : 'unknown error'}`);
+        }
+        return _openWorkspaceListFlow('active');
+    }
+    if (selection.action === 'delete') {
+        if (!OptionComboSessionUI.confirmWorkspaceDelete(target.title)) {
+            return false;
+        }
+        try {
+            await client.deleteWorkspace(target.documentId, target.revision);
+            const envelope = client.getEnvelope();
+            if (envelope && envelope.documentId === target.documentId) {
+                // The in-memory workspace just lost its saved home; it must
+                // read as an unsaved draft, never silently as clean.
+                client.clearDocument();
+                client.releaseWriterLease();
+                if (typeof client.markUnboundDirty === 'function') {
+                    client.markUnboundDirty();
+                }
+            }
+        } catch (error) {
+            alert(`Delete failed: ${error && error.code ? error.code : 'unknown error'}`);
+        }
+        return _openWorkspaceListFlow('active');
+    }
+    return _openWorkspaceDocument(selection.documentId);
+}
+
+async function _openWorkspaceDocument(documentId, options = {}) {
+    if (_workspaceSavePending && options.allowDuringSave !== true) {
+        alert('A save is in progress. Wait for it to finish before opening.');
+        return false;
+    }
+    const client = _getPersistenceClient();
+    if (!client) {
+        return false;
+    }
+    if (options.skipDirtyCheck !== true && _workspaceIsDirty()) {
+        const choice = OptionComboSessionUI.confirmUnsavedChanges();
+        if (choice === 'cancel') {
+            return false;
+        }
+        if (choice === 'save') {
+            const saved = await saveWorkspaceToStore();
+            if (!saved) {
+                return false;
+            }
+        }
+    }
+    let loaded;
+    try {
+        loaded = await client.loadWorkspace(documentId);
+    } catch (error) {
+        alert(`Open failed: ${error && error.code ? error.code : 'unknown error'}`);
+        return false;
+    }
+    // Normalize in a pure function first: a rejected payload leaves the
+    // current workspace untouched — no partially-applied state.
+    let normalizedState;
+    try {
+        normalizedState = OptionComboSessionLogic.normalizeImportedState(
+            state,
+            loaded.payload,
+            initialDateStr,
+            generateId,
+            addDays,
+            { mode: 'replace' }
+        );
+    } catch (error) {
+        console.error('Stored workspace payload rejected:', error);
+        alert('The stored workspace could not be loaded. The current workspace is unchanged.');
+        return false;
+    }
+    applyImportedState(normalizedState, loaded.document.title);
+    _setSessionFileTarget(null, '');
+    OptionComboSessionUI.syncControlPanel(state, currencyFormatter, {
+        diffDays,
+        calendarToTradingDays,
+    });
+    renderGroups();
+    renderHedges();
+    // Market/replay subscriptions only; the load path never produces order
+    // previews or submissions (the snapshot contract loads disarmed).
+    handleLiveSubscriptions();
+    // The fingerprint is taken from the applied state (ids were regenerated
+    // by the import), so an untouched workspace reads as clean.
+    const fingerprint = client.fingerprintPayload(_buildPersistencePayload());
+    client.bindDocument(loaded.document, fingerprint);
+    if (options.preserveTakeover === true) {
+        // Takeover path: completeTakeover() claims the lease after this
+        // reload. A normal acquire would release the pending state first,
+        // which is exactly the rollback hazard this option exists to avoid.
+        return true;
+    }
+    const lease = await client.acquireWriterLease(documentId);
+    if (lease === 'readonly') {
+        alert('This workspace is being edited in another tab, so this tab is '
+            + 'read-only. Reload later or use Save a Copy to branch.');
+    }
+    return true;
+}
+
+function _downloadSessionJsonFallback(dataStr) {
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = _resolveSuggestedSessionFileName({ copy: false });
+    if (document.body && typeof document.body.appendChild === 'function') {
+        document.body.appendChild(anchor);
+    }
+    anchor.click();
+    if (typeof anchor.remove === 'function') {
+        anchor.remove();
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportSessionToJSON() {
+    // Export never changes the database document identity or revision.
+    const dataStr = JSON.stringify(
+        OptionComboSessionLogic.buildPersistenceState(state), null, 2
+    );
+    if (window.showSaveFilePicker) {
+        try {
+            const fileHandle = await window.showSaveFilePicker({
+                suggestedName: _resolveSuggestedSessionFileName({ copy: false }),
+                types: _getJsonFilePickerTypes(),
+            });
+            const writable = await fileHandle.createWritable();
+            await writable.write(dataStr);
+            await writable.close();
+            return true;
+        } catch (error) {
+            if (error && error.name === 'AbortError') {
+                return false;
+            }
+            console.error('Export via file picker failed, falling back to download:', error);
+        }
+    }
+    _downloadSessionJsonFallback(dataStr);
+    return true;
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('beforeunload', (event) => {
+        if (_workspaceIsDirty()) {
+            event.preventDefault();
+            event.returnValue = '';
+        }
+    });
 }
 
 // WebSocket & Live Data Integration -> see ws_client.js

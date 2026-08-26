@@ -168,6 +168,23 @@
         return next;
     }
 
+    // Same in-place contract as ensureGroupTradeTrigger: the close-group
+    // controls bind handlers to this object, so its identity must survive
+    // every normalization pass.
+    function _ensureGroupCloseExecution(group) {
+        if (!group || typeof group !== 'object') {
+            return _normalizeCloseExecution(null);
+        }
+
+        const normalized = _normalizeCloseExecution(group.closeExecution);
+        if (group.closeExecution && typeof group.closeExecution === 'object') {
+            Object.assign(group.closeExecution, normalized);
+        } else {
+            group.closeExecution = normalized;
+        }
+        return group.closeExecution;
+    }
+
     function _toFiniteNumberOrNull(value) {
         const parsed = parseFloat(value);
         return Number.isFinite(parsed) ? parsed : null;
@@ -372,44 +389,6 @@
             : next.isStale === true;
 
         return next;
-    }
-
-    function _buildArchivableForwardRateSample(sample) {
-        const normalized = {
-            ..._createDefaultForwardRateSample(),
-            ...(sample && typeof sample === 'object' ? sample : {}),
-        };
-
-        return {
-            id: normalized.id || '',
-            daysToExpiry: Math.max(0, parseInt(normalized.daysToExpiry, 10) || 0),
-            expDate: typeof normalized.expDate === 'string' ? normalized.expDate : '',
-            strike: _toFiniteNumberOrNull(normalized.strike),
-            dailyCarry: _toFiniteNumberOrNull(normalized.dailyCarry),
-            carryRate: _toFiniteNumberOrNull(normalized.carryRate),
-            impliedRate: _toFiniteNumberOrNull(normalized.impliedRate),
-            forwardPrice: _toFiniteNumberOrNull(normalized.forwardPrice),
-            spotPrice: _toFiniteNumberOrNull(normalized.spotPrice),
-            discountRate: _toFiniteNumberOrNull(normalized.discountRate),
-            discountFactor: _toFiniteNumberOrNull(normalized.discountFactor),
-            discountSource: typeof normalized.discountSource === 'string' ? normalized.discountSource : '',
-            quoteAsOf: typeof normalized.quoteAsOf === 'string' ? normalized.quoteAsOf : '',
-            expiryAsOf: typeof normalized.expiryAsOf === 'string' ? normalized.expiryAsOf : '',
-            quoteSkewMs: _toFiniteNumberOrNull(normalized.quoteSkewMs),
-            tenorSeconds: _toFiniteNumberOrNull(normalized.tenorSeconds),
-            tenorDays: _toFiniteNumberOrNull(normalized.tenorDays),
-            timeYears: _toFiniteNumberOrNull(normalized.timeYears),
-            unavailableReason: typeof normalized.unavailableReason === 'string'
-                ? normalized.unavailableReason
-                : '',
-            quality: normalized.quality && typeof normalized.quality === 'object'
-                ? { ...normalized.quality }
-                : null,
-            lastComputedAt: typeof normalized.lastComputedAt === 'string' && normalized.lastComputedAt
-                ? normalized.lastComputedAt
-                : null,
-            isStale: normalized.isStale === true,
-        };
     }
 
     function _createDefaultFuturesPoolEntry() {
@@ -797,39 +776,134 @@
         return currentMode;
     }
 
-    function buildExportState(state) {
+    // ------------------------------------------------------------------
+    // Persistence snapshot contract (sessionSchemaVersion 1)
+    // ------------------------------------------------------------------
+
+    const SESSION_SCHEMA_VERSION = 1;
+
+    // Price/IV provenance written by live subscriptions. These values churn
+    // with every tick and would masquerade as fresh market data after a
+    // reopen, so they never survive a snapshot. Manual entries, historical
+    // replay quotes, and unlabeled legacy values all persist.
+    const TRANSIENT_PRICE_SOURCES = ['live', 'equivalent_expiry_offset', 'missing'];
+
+    function _stableStringify(value) {
+        // Canonical JSON: recursively key-sorted, compact separators. Matches
+        // JSON.stringify semantics for undefined and non-finite numbers (both
+        // become null inside containers), so the same state always yields the
+        // same bytes regardless of property insertion order.
+        if (value === undefined || value === null || typeof value !== 'object') {
+            const encoded = JSON.stringify(value === undefined ? null : value);
+            return encoded === undefined ? 'null' : encoded;
+        }
+        if (Array.isArray(value)) {
+            return '[' + value.map(item => _stableStringify(item)).join(',') + ']';
+        }
+        const keys = Object.keys(value).sort();
+        const parts = [];
+        for (const key of keys) {
+            if (value[key] === undefined) {
+                continue;
+            }
+            parts.push(JSON.stringify(key) + ':' + _stableStringify(value[key]));
+        }
+        return '{' + parts.join(',') + '}';
+    }
+
+    function _buildPersistenceLeg(leg) {
+        const archived = { ...leg };
+        delete archived.expiryAsOf;
+        delete archived.expiryTimingSource;
+        delete archived.lastTradeDate;
+        delete archived.lastTradeTime;
+        delete archived.expiryTimeZoneId;
+        delete archived.realExpirationDate;
+        delete archived.qualifiedOptionConId;
+        delete archived.qualifiedOptionLocalSymbol;
+        delete archived.qualifiedOptionTradingClass;
+        delete archived.qualifiedOptionUnderConId;
+        delete archived.qualifiedOptionUnderlyingContractMonth;
+        delete archived.liveQuoteIdentityStatus;
+        delete archived.liveQuoteIdentityReason;
+        const priceSource = typeof archived.currentPriceSource === 'string'
+            ? archived.currentPriceSource
+            : '';
+        if (TRANSIENT_PRICE_SOURCES.includes(priceSource)) {
+            archived.currentPrice = 0.00;
+            archived.currentPriceSource = '';
+        }
+        // ws_client only rewrites leg.iv while ivSource === 'live'; every
+        // other provenance is user input that must survive.
+        if (archived.ivSource === 'live') {
+            archived.iv = null;
+        }
+        // TWS portfolio sync evidence, refreshed on the next connect. Deleted
+        // outright (not nulled) so a leg the sync has touched serializes
+        // identically to one it never reached; import re-normalizes them.
+        delete archived.portfolioMarketPrice;
+        delete archived.portfolioMarketPriceSource;
+        delete archived.portfolioMarketPriceAsOf;
+        delete archived.portfolioUnrealizedPnl;
+        return archived;
+    }
+
+    function _buildPersistenceForwardRateSample(sample) {
+        const normalized = {
+            ..._createDefaultForwardRateSample(),
+            ...(sample && typeof sample === 'object' ? sample : {}),
+        };
+        return {
+            id: normalized.id || '',
+            daysToExpiry: Math.max(0, parseInt(normalized.daysToExpiry, 10) || 0),
+            expDate: typeof normalized.expDate === 'string' ? normalized.expDate : '',
+            strike: _toFiniteNumberOrNull(normalized.strike),
+            // Everything below is recomputed from quotes after a reopen. The
+            // saved copy would only masquerade as fresh evidence and churn the
+            // unsaved-changes fingerprint on every live recompute.
+            dailyCarry: null,
+            carryRate: null,
+            impliedRate: null,
+            forwardPrice: null,
+            spotPrice: null,
+            discountRate: null,
+            discountFactor: null,
+            discountSource: '',
+            quoteAsOf: '',
+            expiryAsOf: '',
+            quoteSkewMs: null,
+            tenorSeconds: null,
+            tenorDays: null,
+            timeYears: null,
+            unavailableReason: '',
+            quality: null,
+            lastComputedAt: null,
+            isStale: false,
+        };
+    }
+
+    function buildPersistenceState(state) {
         const snapshot = JSON.parse(JSON.stringify(state));
+        snapshot.sessionSchemaVersion = SESSION_SCHEMA_VERSION;
         snapshot.projectionConvergenceMode = normalizeProjectionConvergenceMode(
             snapshot.projectionConvergenceMode
         );
+        // Live-order authorization is a per-page decision, never a document
+        // property: no workspace may reopen armed or name a real account.
+        snapshot.allowLiveComboOrders = false;
+        snapshot.allowLiveHedgeOrders = false;
         snapshot.liveComboOrderAccounts = [];
         snapshot.liveComboOrderAccountsConnected = false;
-        snapshot.allowLiveHedgeOrders = false;
+        snapshot.selectedLiveComboOrderAccount = '';
         snapshot.deltaHedge = _buildArchivableDeltaHedgeConfig(snapshot.deltaHedge);
         snapshot.groups = (snapshot.groups || []).map(group => ({
             ...group,
             tradeTrigger: _buildArchivableTradeTrigger(group.tradeTrigger),
             closeExecution: _buildArchivableCloseExecution(group.closeExecution),
-            legs: (group.legs || []).map((leg) => {
-                const archived = { ...leg };
-                delete archived.expiryAsOf;
-                delete archived.expiryTimingSource;
-                delete archived.lastTradeDate;
-                delete archived.lastTradeTime;
-                delete archived.expiryTimeZoneId;
-                delete archived.realExpirationDate;
-                delete archived.qualifiedOptionConId;
-                delete archived.qualifiedOptionLocalSymbol;
-                delete archived.qualifiedOptionTradingClass;
-                delete archived.qualifiedOptionUnderConId;
-                delete archived.qualifiedOptionUnderlyingContractMonth;
-                delete archived.liveQuoteIdentityStatus;
-                delete archived.liveQuoteIdentityReason;
-                return archived;
-            }),
+            legs: (group.legs || []).map(leg => _buildPersistenceLeg(leg)),
         }));
         snapshot.forwardRateSamples = (snapshot.forwardRateSamples || [])
-            .map(sample => _buildArchivableForwardRateSample(sample));
+            .map(sample => _buildPersistenceForwardRateSample(sample));
         snapshot.futuresPool = (snapshot.futuresPool || [])
             .map(entry => _buildArchivableFuturesPoolEntry(entry));
         delete snapshot.comboTemplateQuoteRequests;
@@ -848,10 +922,39 @@
         delete snapshot.liveProjectionFeedConnected;
         delete snapshot.liveProjectionFeedStale;
         delete snapshot.liveProjectionLastReceivedAt;
+        // Broker/session runtime that used to leak into saved JSON.
+        delete snapshot.portfolioPositions;
+        delete snapshot.portfolioPositionsConnected;
+        delete snapshot.discountCurveRequestPending;
+        delete snapshot.discountCurveRequestManual;
+        delete snapshot.discountCurveLastResponseStatus;
+        delete snapshot.discountCurveLastLoadedAt;
+        delete snapshot.discountCurveLastLoadWasManual;
+        delete snapshot.liveFuturesRequestGeneration;
+        delete snapshot.pendingLegExistsCheckGroupId;
+        // Replay-service availability is re-fetched on connect, and the
+        // Live/Historical routing lock belongs to the page entry, not the file.
+        delete snapshot.historicalTradingDates;
+        delete snapshot.historicalAvailableStartDate;
+        delete snapshot.historicalAvailableEndDate;
+        delete snapshot.marketDataModeLocked;
         return snapshot;
     }
 
-    function normalizeImportedState(currentState, importedState, initialDateStr, generateId, addDays) {
+    function buildPersistencePayloadJson(state) {
+        return _stableStringify(buildPersistenceState(state));
+    }
+
+    function buildExportState(state) {
+        // Compatibility alias: JSON Export and DB Save share one snapshot path.
+        return buildPersistenceState(state);
+    }
+
+    function normalizeImportedState(currentState, importedState, initialDateStr, generateId, addDays, options) {
+        // merge: legacy JSON Import behavior — imported groups/hedges join the
+        // current workspace. replace: database Open — the loaded document IS
+        // the workspace; nothing from the previous one may survive.
+        const mode = options && options.mode === 'replace' ? 'replace' : 'merge';
         const nextState = {
             underlyingSymbol: importedState.underlyingSymbol || 'SPY',
             underlyingContractMonth: importedState.underlyingContractMonth || '',
@@ -907,17 +1010,17 @@
             greeksEnabled: normalizeGreeksEnabled(importedState.greeksEnabled),
             deltaHedge: _normalizeDeltaHedgeConfig(importedState.deltaHedge),
             primaryControlPanelCollapsed: importedState.primaryControlPanelCollapsed === true,
-            allowLiveComboOrders: importedState.allowLiveComboOrders === true,
+            // Live-order authorization never survives a load, no matter what
+            // the file claims: the user must re-arm on the current page.
+            allowLiveComboOrders: false,
             allowLiveHedgeOrders: false,
             liveComboOrderAccounts: [],
             liveComboOrderAccountsConnected: false,
-            selectedLiveComboOrderAccount: typeof importedState.selectedLiveComboOrderAccount === 'string'
-                ? importedState.selectedLiveComboOrderAccount.trim()
-                : '',
+            selectedLiveComboOrderAccount: '',
             forwardRateSamples: [],
             futuresPool: [],
-            groups: currentState.groups.slice(),
-            hedges: currentState.hedges.slice(),
+            groups: mode === 'replace' ? [] : currentState.groups.slice(),
+            hedges: mode === 'replace' ? [] : currentState.hedges.slice(),
         };
         nextState.deltaHedge.autoSubmitEnabled = false;
         nextState.deltaHedge.autoLastDecision = null;
@@ -1100,6 +1203,10 @@
         groupHasDeterministicCost,
         resolveGroupViewModeChange,
         getRenderableGroupViewMode,
+        SESSION_SCHEMA_VERSION,
+        buildPersistenceState,
+        buildPersistencePayloadJson,
+        stableStringify: _stableStringify,
         buildExportState,
         normalizeImportedState,
         buildArchivableTradeTrigger: _buildArchivableTradeTrigger,
@@ -1108,6 +1215,7 @@
         buildArchivableDeltaHedgeConfig: _buildArchivableDeltaHedgeConfig,
         createDefaultCloseExecution: _createDefaultCloseExecution,
         normalizeCloseExecution: _normalizeCloseExecution,
+        ensureGroupCloseExecution: _ensureGroupCloseExecution,
         buildArchivableCloseExecution: _buildArchivableCloseExecution,
         groupHasOpenPosition,
     };

@@ -632,6 +632,62 @@ Not implemented there today:
 - `syncAvgCostFromPortfolio` defaults to enabled for newly created trial groups.
 - `livePriceMode` affects displayed price and live P&L, but combo-order pricing still uses the existing midpoint-based order-preview/submit flow.
 - Shared backend runtime payload contracts now live in `runtime_contracts.py`; shared combo/hedge tracking shape lives in `trade_execution/order_tracking.py`.
+- Workspace Save/Open is SQLite-backed (`portfolio_store.py` +
+  `portfolio_store_ws.py` on both backends, `js/workspace_persistence.js` +
+  `js/app.js` orchestration in the browser). The active database lives in
+  the platform app-data dir, never in this repo; tests must always point
+  stores at temp dirs (`create_store_env` is lazy precisely so importing
+  `ib_server` cannot touch the user database). The snapshot contract is
+  `buildPersistenceState()` (`sessionSchemaVersion` 1): every load path
+  reopens with live-order authorization off. JSON Import/Export remains the
+  migration path; `scripts/backup_portfolio_store.py` /
+  `scripts/restore_portfolio_store.py` handle static backups and recovery.
+- Both `websockets.serve` calls must keep the same explicit `max_size`
+  (`[server] max_ws_message_bytes`, 8 MiB): the library default of 1 MiB
+  would close the live socket — and drop order supervision — on a large
+  workspace save.
+- The archive layer (`portfolio_maintenance.py`, `portfolio_archive.py`,
+  `portfolio_admin_ws.py`, `workspace_db_admin.html`) has hard invariants
+  a future change must not weaken:
+  - the ONLY removal path for revisions is archive-then-remove; nothing
+    deletes on a schedule, and `prune_revisions` has no scheduled call
+    site (a structural test enforces this);
+  - every maintenance path (backup, archive, vacuum, exact stats, restore)
+    runs under `portfolio_maintenance.acquire_maintenance` — thread lock,
+    OS flock, DB lease with fencing. Never add a maintenance entry point
+    that only takes the thread lock; both backends share one database;
+  - backends hold the SHARED `portfolio.runtime.lock` for their whole
+    process life (acquired in `ensure_store_initialized`); restore takes
+    it EXCLUSIVELY. Backups are only restorable as manifest-complete
+    generations. A generation id is present in each immutable main and its
+    `recovery-manifest-*.json`; format-3 manifests may share an unchanged,
+    immutable shard member from an earlier generation. Changed shards get a
+    new generation-named snapshot. The manifest is written last and
+    hash/size-binds the locally verified staging bytes, never a second read
+    from the sync destination. Both scheduled and manual publishers call only
+    `publish_recovery_generation`; scheduled failure/incompleteness advances
+    the attempt backoff, and old unreferenced own snapshots are cleaned after
+    a 48-hour grace period. Retention operates on whole completed generations,
+    preserves members still shared by kept manifests, and main-file retention
+    internally protects every main named by an existing manifest. Failures in
+    retention after manifest publication are warnings, not failed publishes.
+    Restore must install only its verified staged copies, prepare all
+    destination-local files before the swap, and keep every displaced member
+    (including degraded/missing shard paths) in one rollback journal; even
+    `KeyboardInterrupt` runs rollback before it is re-raised;
+  - commit chunks re-check the lease INSIDE the write transaction and
+    write the archive entry/tombstone in the SAME transaction as the
+    delete; `workspace_save_receipts` is a permanent idempotency ledger
+    with no cascade — never "clean it up";
+  - server stats fields must also be added to
+    `js/workspace_db_admin_core.js`'s normalizers, which rebuild nested
+    objects and silently drop unknown keys otherwise;
+  - new pages must be registered in `scripts/stamp_asset_versions.py` AND
+    `tests/asset_versions.test.js`, and new JS suites in `tests/run.js`;
+  - `archive_auto_run` stays `false` until the manual flow has survived a
+    release cycle; the Windows leg of the manual end-to-end matrix (paths,
+    `msvcrt` file locking, launcher Python resolution) still needs a run
+    on a real Windows machine.
 
 ## 8. Tests
 

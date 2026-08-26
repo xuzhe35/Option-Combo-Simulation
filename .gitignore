@@ -16,3 +16,20 @@ config.local.ini
 *.pid
 *PLANE*
 .DS_Store
+
+# Real IBKR account statements. They carry the account number, positions
+# and P&L, and this repository is public.
+Reports/
+
+# SQLite databases and every common sidecar/backup naming form. Runtime
+# portfolio and cost-basis databases contain real positions and trades and
+# must never enter this public repository, even if copied into the workspace.
+*.db
+*.db-*
+*.db.*
+*.sqlite
+*.sqlite-*
+*.sqlite.*
+*.sqlite3
+*.sqlite3-*
+*.sqlite3.*

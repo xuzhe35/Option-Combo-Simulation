@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 
-const { loadAppContext } = require('./helpers/load-browser-scripts');
+const { loadAppContext, loadBrowserScripts } = require('./helpers/load-browser-scripts');
 
 function createSaveButtonElements() {
     return {
@@ -797,5 +797,1002 @@ module.exports = {
                 assert.equal(harness.callLog.renderGroups.length, 1);
             },
         },
+        {
+            name: 'first DB Save names the workspace and creates revision 1',
+            async run() {
+                const elements = createSaveButtonElements();
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                const harness = loadAppContext({
+                    elements,
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const saved = await harness.context.saveWorkspaceToStore();
+                assert.equal(saved, true);
+                assert.equal(calls.save.length, 1);
+                assert.equal(calls.save[0].title, 'Stub Workspace');
+                assert.equal(calls.save[0].expectedRevision, undefined);
+                assert.ok(calls.save[0].documentId);
+                assert.deepEqual(calls.lease, [calls.save[0].documentId]);
+                const state = harness.context.__optionComboApp.getState();
+                assert.equal(state.importedSessionTitle, 'Stub Workspace');
+                // The payload the client received is disarmed snapshot data.
+                assert.equal(calls.save[0].payload.importedSessionTitle, 'Stub Workspace');
+                assert.match(elements.saveBtn.innerHTML, /Saved!/);
+            },
+        },
+        {
+            name: 'bound DB Save carries the expected revision and document id',
+            async run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const saved = await harness.context.saveWorkspaceToStore();
+                assert.equal(saved, true);
+                assert.equal(calls.save[0].documentId, 'doc-bound-1');
+                assert.equal(calls.save[0].expectedRevision, 3);
+                assert.equal(calls.save[0].title, 'Bound');
+                // An already-bound save does not re-acquire the lease.
+                assert.equal(calls.lease.length, 0);
+            },
+        },
+        {
+            name: 'Save a Copy posts a fresh document id and leaves the old one alone',
+            async run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const saved = await harness.context.saveWorkspaceCopyToStore();
+                assert.equal(saved, true);
+                assert.equal(calls.save.length, 1);
+                assert.notEqual(calls.save[0].documentId, 'doc-bound-1');
+                assert.equal(calls.save[0].expectedRevision, undefined);
+            },
+        },
+        {
+            name: 'a failed DB save reports failure and never shows Saved',
+            async run() {
+                const elements = createSaveButtonElements();
+                const alerts = [];
+                const { client: fakeClient } = createFakePersistenceClient({
+                    saveWorkspace() {
+                        const error = new Error('boom');
+                        error.code = 'internal_store_error';
+                        return Promise.reject(error);
+                    },
+                });
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                const harness = loadAppContext({
+                    elements,
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        alert(message) { alerts.push(message); },
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const saved = await harness.context.saveWorkspaceToStore();
+                assert.equal(saved, false);
+                assert.equal(elements.saveBtn.innerHTML, 'Save');
+                assert.match(alerts.join('\n'), /internal_store_error/);
+            },
+        },
+        {
+            name: 'revision conflict can branch into Save a Copy',
+            async run() {
+                const saves = [];
+                const { client: fakeClient, calls } = createFakePersistenceClient({
+                    saveWorkspace(params) {
+                        saves.push(params);
+                        if (saves.length === 1) {
+                            const error = new Error('conflict');
+                            error.code = 'revision_conflict';
+                            error.response = { currentRevision: 9 };
+                            return Promise.reject(error);
+                        }
+                        return Promise.resolve({
+                            document: {
+                                documentId: params.documentId,
+                                title: params.title,
+                                revision: 1,
+                                updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                            },
+                        });
+                    },
+                });
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                const conflictChoices = [];
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'Copy Title'; },
+                            promptWorkspaceTitle() { return 'Copy Title'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution(details) {
+                                conflictChoices.push(details);
+                                return 'save-copy';
+                            },
+                            confirmWorkspaceDelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const saved = await harness.context.saveWorkspaceToStore();
+                assert.equal(saved, true);
+                assert.equal(saves.length, 2);
+                assert.equal(conflictChoices.length, 1);
+                assert.equal(conflictChoices[0].currentRevision, 9);
+                assert.equal(saves[0].documentId, 'doc-bound-1');
+                assert.notEqual(saves[1].documentId, 'doc-bound-1');
+                assert.equal(saves[1].expectedRevision, undefined);
+                assert.equal(calls.lease.length, 1);
+            },
+        },
+        {
+            name: 'opening a stored workspace replaces the current one and rebinds identity',
+            async run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                const normalizeCalls = [];
+                const storedPayload = createImportedSession({
+                    underlyingSymbol: 'GLD',
+                    groups: [{ id: 'stored_group', legs: [] }],
+                    hedges: [{ id: 'stored_hedge' }],
+                });
+                fakeClient.loadWorkspace = () => Promise.resolve({
+                    document: {
+                        documentId: 'doc-open-1', title: 'GLD book', revision: 5,
+                        updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                    },
+                    payload: storedPayload,
+                });
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+                const context = harness.context;
+                const state = context.__optionComboApp.getState();
+                state.groups = [{ id: 'old_group' }];
+                state.hedges = [{ id: 'old_hedge' }];
+
+                // Observe the mode the app passes to the pure normalizer.
+                const originalNormalize = context.OptionComboSessionLogic.normalizeImportedState;
+                context.OptionComboSessionLogic.normalizeImportedState =
+                    (currentState, imported, dateStr, genId, addDaysFn, options) => {
+                        normalizeCalls.push(options);
+                        return originalNormalize(currentState, imported, dateStr, genId, addDaysFn, options);
+                    };
+
+                const opened = await context._openWorkspaceDocument('doc-open-1');
+                assert.equal(opened, true);
+                assert.equal(normalizeCalls.length, 1);
+                assert.equal(normalizeCalls[0].mode, 'replace');
+                // The stub normalizer returns the imported payload as-is, so
+                // replace semantics show up as the stored groups only.
+                assert.equal(state.groups.length, 1);
+                assert.equal(state.groups[0].id, 'stored_group');
+                assert.equal(state.hedges[0].id, 'stored_hedge');
+                assert.equal(state.underlyingSymbol, 'GLD');
+                // Identity is rebound and the lease acquired for the new doc.
+                assert.equal(fakeClient.envelope.documentId, 'doc-open-1');
+                assert.equal(fakeClient.envelope.revision, 5);
+                assert.deepEqual(calls.lease, ['doc-open-1']);
+                assert.ok(harness.callLog.renderGroups.length >= 1);
+            },
+        },
+        {
+            name: 'a rejected stored payload leaves the current workspace untouched',
+            async run() {
+                const { client: fakeClient } = createFakePersistenceClient();
+                fakeClient.loadWorkspace = () => Promise.resolve({
+                    document: { documentId: 'doc-bad', title: 'Bad', revision: 1 },
+                    payload: { broken: true },
+                });
+                const alerts = [];
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        alert(message) { alerts.push(message); },
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+                const context = harness.context;
+                const state = context.__optionComboApp.getState();
+                state.groups = [{ id: 'old_group' }];
+                context.OptionComboSessionLogic.normalizeImportedState = () => {
+                    throw new Error('unusable payload');
+                };
+
+                const opened = await context._openWorkspaceDocument('doc-bad');
+                assert.equal(opened, false);
+                assert.equal(state.groups.length, 1);
+                assert.equal(state.groups[0].id, 'old_group');
+                assert.equal(fakeClient.envelope, null);
+                assert.match(alerts.join('\n'), /unchanged/);
+            },
+        },
+        {
+            name: 'JSON import unbinds the database document',
+            async run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+                harness.context.processImportedFile({
+                    name: 'SPY Session.json',
+                    __text: JSON.stringify(createImportedSession()),
+                });
+                assert.equal(fakeClient.envelope, null);
+                assert.equal(calls.released, 1);
+            },
+        },
+        {
+            name: 'bootstrap seeds the unbound dirty baseline',
+            run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+                assert.equal(calls.baseline.length, 1);
+                // The stale-revision handler is registered exactly once.
+                assert.equal(calls.staleHandlers.length, 1);
+            },
+        },
+        {
+            name: 'JSON import re-seeds the unbound baseline after unbinding',
+            run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+                const seededAtBoot = calls.baseline.length;
+                harness.context.processImportedFile({
+                    name: 'SPY Session.json',
+                    __text: JSON.stringify(createImportedSession()),
+                });
+                assert.equal(fakeClient.envelope, null);
+                assert.equal(calls.baseline.length, seededAtBoot + 1);
+            },
+        },
+        {
+            name: 'deleting the bound document marks the draft dirty',
+            async run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                fakeClient.listWorkspaces = () => Promise.resolve({
+                    documents: [{
+                        documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    }],
+                });
+                fakeClient.deleteWorkspace = () => Promise.resolve({});
+                const dialogResults = [
+                    { action: 'delete', documentId: 'doc-bound-1' },
+                    null,
+                ];
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'T'; },
+                            promptWorkspaceTitle() { return 'T'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() { return 'cancel'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() {
+                                return Promise.resolve(dialogResults.shift());
+                            },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+                await harness.context.openWorkspaceFromStore();
+                assert.equal(fakeClient.envelope, null);
+                assert.equal(calls.markedDirty, 1);
+                assert.equal(calls.released, 1);
+            },
+        },
+        {
+            name: 'rapid Save clicks collapse into a single client save',
+            async run() {
+                const elements = createSaveButtonElements();
+                elements.saveCopyBtn = { style: {}, innerHTML: 'Save a Copy' };
+                let resolveSave;
+                const { client: fakeClient, calls } = createFakePersistenceClient({
+                    saveWorkspace(params) {
+                        calls.save.push(params);
+                        return new Promise((resolve) => { resolveSave = resolve; });
+                    },
+                });
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                const harness = loadAppContext({
+                    elements,
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const attempts = [];
+                for (let i = 0; i < 10; i += 1) {
+                    attempts.push(harness.context.saveWorkspaceToStore());
+                }
+                // The lock spans the whole ACK wait: buttons disabled and
+                // exactly one client call.
+                assert.equal(calls.save.length, 1);
+                assert.equal(elements.saveBtn.disabled, true);
+                assert.equal(elements.saveCopyBtn.disabled, true);
+
+                resolveSave({
+                    document: {
+                        documentId: 'doc-bound-1', title: 'Bound', revision: 4,
+                        updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                    },
+                });
+                const results = await Promise.all(attempts);
+                assert.equal(results.filter(Boolean).length, 1);
+                assert.equal(calls.save.length, 1);
+                assert.equal(elements.saveBtn.disabled, false);
+                assert.equal(elements.saveCopyBtn.disabled, false);
+            },
+        },
+        {
+            name: 'readonly save offers takeover once the writer is gone',
+            async run() {
+                const loads = [];
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                fakeClient.getWriterState = () => ({ state: 'readonly' });
+                fakeClient.canTakeover = () => {
+                    calls.takeoverQueries += 1;
+                    return { allowed: true, mustReloadFirst: true };
+                };
+                fakeClient.loadWorkspace = (documentId) => {
+                    loads.push(documentId);
+                    return Promise.resolve({
+                        document: {
+                            documentId, title: 'Bound', revision: 9,
+                            updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                        },
+                        payload: createImportedSession(),
+                    });
+                };
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'T'; },
+                            promptWorkspaceTitle() { return 'T'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() { return 'take-over'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const saved = await harness.context.saveWorkspaceToStore();
+                // Takeover replaces local edits with the latest revision; it
+                // is not a save, so the call reports false.
+                assert.equal(saved, false);
+                assert.equal(calls.takeoverQueries, 1);
+                assert.equal(calls.takeoverBegun, 1);
+                assert.deepEqual(loads, ['doc-bound-1']);
+                assert.equal(calls.takeoverCompleted, 1);
+                assert.equal(calls.takeoverCancelled, 0);
+                // The takeover reload claims the lease via completeTakeover,
+                // never via a plain acquire (which would drop pending state).
+                assert.equal(calls.lease.length, 0);
+                assert.equal(calls.save.length, 0);
+            },
+        },
+        {
+            name: 'a failed takeover reload rolls the state back',
+            async run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                fakeClient.getWriterState = () => ({ state: 'readonly' });
+                fakeClient.canTakeover = () => ({ allowed: true, mustReloadFirst: true });
+                fakeClient.loadWorkspace = () => {
+                    const error = new Error('gone');
+                    error.code = 'document_not_found';
+                    return Promise.reject(error);
+                };
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        alert() {},
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'T'; },
+                            promptWorkspaceTitle() { return 'T'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() { return 'take-over'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const saved = await harness.context.saveWorkspaceToStore();
+                assert.equal(saved, false);
+                assert.equal(calls.takeoverBegun, 1);
+                assert.equal(calls.takeoverCompleted, 0);
+                assert.equal(calls.takeoverCancelled, 1);
+                assert.equal(calls.save.length, 0);
+            },
+        },
+        {
+            name: 'an unknown first-save retry resumes the same document id',
+            async run() {
+                let failNext = true;
+                let unknownAttempt = null;
+                const prompts = [];
+                const { client: fakeClient, calls } = createFakePersistenceClient({
+                    saveWorkspace(params) {
+                        calls.save.push(params);
+                        if (failNext) {
+                            failNext = false;
+                            unknownAttempt = {
+                                documentId: params.documentId,
+                                title: params.title,
+                                operation: params.operation,
+                                expectedRevision: params.expectedRevision,
+                                fingerprint: JSON.stringify(params.payload),
+                                saveToken: 'token-1',
+                            };
+                            const error = new Error('lost ack');
+                            error.code = 'timeout';
+                            return Promise.reject(error);
+                        }
+                        unknownAttempt = null;
+                        return Promise.resolve({
+                            document: {
+                                documentId: params.documentId,
+                                title: params.title,
+                                revision: 1,
+                                updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                            },
+                        });
+                    },
+                });
+                fakeClient.getUnknownSaveAttempt = () =>
+                    (unknownAttempt ? { ...unknownAttempt } : null);
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        alert() {},
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'My Book'; },
+                            promptWorkspaceTitle(suggested) {
+                                prompts.push(suggested);
+                                return 'My Book';
+                            },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() { return 'cancel'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const first = await harness.context.saveWorkspaceToStore();
+                assert.equal(first, false);
+                const retried = await harness.context.saveWorkspaceToStore();
+                assert.equal(retried, true);
+                // Same document id resumed, and the user was not re-prompted
+                // for a name on the resuming retry.
+                assert.equal(calls.save.length, 2);
+                assert.equal(calls.save[1].documentId, calls.save[0].documentId);
+                assert.equal(calls.save[1].title, calls.save[0].title);
+                assert.equal(calls.save[0].operation, 'create');
+                assert.equal(calls.save[1].operation, 'create');
+                assert.equal(prompts.length, 1);
+            },
+        },
+        {
+            name: 'unknown Save a Copy cannot fall through to updating the original',
+            async run() {
+                let failNext = true;
+                let unknownAttempt = null;
+                const alerts = [];
+                const prompts = [];
+                const { client: fakeClient, calls } = createFakePersistenceClient({
+                    saveWorkspace(params) {
+                        calls.save.push(params);
+                        if (failNext) {
+                            failNext = false;
+                            unknownAttempt = {
+                                documentId: params.documentId,
+                                title: params.title,
+                                operation: params.operation,
+                                expectedRevision: params.expectedRevision,
+                                fingerprint: JSON.stringify(params.payload),
+                                saveToken: 'copy-token-1',
+                            };
+                            const error = new Error('lost copy ack');
+                            error.code = 'timeout';
+                            return Promise.reject(error);
+                        }
+                        unknownAttempt = null;
+                        return Promise.resolve({
+                            document: {
+                                documentId: params.documentId,
+                                title: params.title,
+                                revision: 1,
+                                updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                            },
+                        });
+                    },
+                });
+                fakeClient.envelope = {
+                    documentId: 'doc-original', title: 'Original', revision: 4,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                fakeClient.getUnknownSaveAttempt = () =>
+                    (unknownAttempt ? { ...unknownAttempt } : null);
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        alert(message) { alerts.push(message); },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'Copy'; },
+                            promptWorkspaceTitle(suggested) {
+                                prompts.push(suggested);
+                                return 'Copy';
+                            },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() { return 'cancel'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                // The copy may commit even though its ACK is lost.
+                assert.equal(await harness.context.saveWorkspaceCopyToStore(), false);
+                assert.equal(calls.save.length, 1);
+                assert.equal(calls.save[0].operation, 'copy');
+                assert.notEqual(calls.save[0].documentId, 'doc-original');
+
+                // A normal Save must not overwrite the original while that
+                // copy result remains unresolved.
+                assert.equal(await harness.context.saveWorkspaceToStore(), false);
+                assert.equal(calls.save.length, 1);
+                assert.match(alerts.join('\n'), /Retry Save a Copy/);
+
+                // Retrying the original operation resumes its identity.
+                assert.equal(await harness.context.saveWorkspaceCopyToStore(), true);
+                assert.equal(calls.save.length, 2);
+                assert.equal(calls.save[1].operation, 'copy');
+                assert.equal(calls.save[1].documentId, calls.save[0].documentId);
+                assert.equal(calls.save[1].title, calls.save[0].title);
+                assert.equal(prompts.length, 1);
+            },
+        },
+        {
+            name: 'takeover cancel and reload failure keep read-only protection (real state machine)',
+            async run() {
+                // Two REAL persistence clients on a shared channel bus; the
+                // app drives client B. No fake takeover methods: every state
+                // transition below is the production state machine.
+                const persistenceCtx = loadBrowserScripts(['js/workspace_persistence.js']);
+                const channels = [];
+                const busFactory = () => {
+                    const channel = {
+                        onmessage: null,
+                        postMessage(message) {
+                            for (const other of channels) {
+                                if (other !== channel
+                                    && typeof other.onmessage === 'function') {
+                                    other.onmessage({ data: message });
+                                }
+                            }
+                        },
+                        close() {},
+                    };
+                    channels.push(channel);
+                    return channel;
+                };
+                let idCounter = 0;
+                const clock = { t: 1_000_000 };
+                const makeRealClient = (sent) => {
+                    const timers = [];
+                    const client = persistenceCtx.OptionComboWorkspacePersistence.createClient({
+                        send: (message) => { sent.push(JSON.parse(message)); return true; },
+                        setTimeoutFn: (fn) => { timers.push(fn); return timers.length; },
+                        clearTimeoutFn: () => {},
+                        setIntervalFn: () => 1,
+                        clearIntervalFn: () => {},
+                        generateId: () => `real-${++idCounter}`,
+                        now: () => clock.t,
+                        channelFactory: busFactory,
+                    });
+                    return {
+                        client,
+                        fireTimers: () => timers.splice(0).forEach(fn => fn()),
+                    };
+                };
+                const sentA = [];
+                const sentB = [];
+                const a = makeRealClient(sentA);
+                const b = makeRealClient(sentB);
+                const documentId = 'doc-aaaaaaaa-1111-4111-8111-111111111111';
+
+                const aLease = a.client.acquireWriterLease(documentId);
+                a.fireTimers(); // grace expires unopposed: A is the writer
+                assert.equal(await aLease, 'writer');
+                b.client.bindDocument(
+                    { documentId, title: 'Bound', revision: 3, updatedAtUtc: '' },
+                    'fp'
+                );
+                assert.equal(await b.client.acquireWriterLease(documentId), 'readonly');
+
+                const takeoverChoices = ['cancel', 'take-over'];
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => b.client,
+                        setTimeout() { return 1; },
+                        alert() {},
+                        confirm() { return false; },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'T'; },
+                            promptWorkspaceTitle() { return 'T'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'cancel'; },
+                            chooseTakeoverResolution() {
+                                return takeoverChoices.shift();
+                            },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+
+                // 1. Writer alive: not eligible, save refused, still readonly.
+                assert.equal(await harness.context.saveWorkspaceToStore(), false);
+                assert.equal(b.client.getWriterState().state, 'readonly');
+
+                // 2. Writer ages out; the user cancels the takeover offer.
+                //    The pure eligibility query left the state untouched.
+                clock.t += 60_000;
+                assert.equal(await harness.context.saveWorkspaceToStore(), false);
+                assert.equal(b.client.getWriterState().state, 'readonly');
+
+                // 3. Take over, but the reload fails: full rollback.
+                const savePromise = harness.context.saveWorkspaceToStore();
+                const loadRequest = sentB.find(
+                    message => message.action === 'load_saved_workspace'
+                );
+                assert.ok(loadRequest, 'takeover must reload before claiming');
+                b.client.handleMessage({
+                    action: 'saved_workspace_loaded',
+                    requestId: loadRequest.requestId,
+                    success: false,
+                    code: 'document_not_found',
+                    message: 'gone',
+                });
+                assert.equal(await savePromise, false);
+                assert.equal(b.client.getWriterState().state, 'readonly');
+
+                // 4. takeover-pending itself never saves the bound document.
+                assert.equal(b.client.beginTakeover(), true);
+                assert.equal(b.client.getWriterState().state, 'takeover-pending');
+                assert.equal(await harness.context.saveWorkspaceToStore(), false);
+                assert.equal(
+                    sentB.filter(m => m.action === 'save_saved_workspace').length, 0
+                );
+                assert.equal(b.client.cancelTakeover(), true);
+                assert.equal(b.client.getWriterState().state, 'readonly');
+            },
+        },
+        {
+            name: 'a consumed calendar handoff starts dirty; a plain boot stays clean',
+            run() {
+                const plain = createFakePersistenceClient();
+                const plainHarness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => plain.client,
+                        setTimeout() { return 1; },
+                    },
+                });
+                plainHarness.triggerDomReady();
+                assert.equal(plain.calls.baseline.length, 1);
+                assert.equal(plain.calls.markedDirty, 0);
+
+                const handoff = createFakePersistenceClient();
+                const handoffHarness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => handoff.client,
+                        setTimeout() { return 1; },
+                        OptionComboCalendarHandoff: {
+                            takeHandoffPayload() {
+                                return {
+                                    symbol: 'ES',
+                                    underlyingContractMonth: '202606',
+                                    underlyingPrice: 6000,
+                                };
+                            },
+                            buildGroupName() { return 'ES calendar'; },
+                            buildCalendarLegs() { return []; },
+                        },
+                    },
+                });
+                handoffHarness.triggerDomReady();
+                // Baseline is still the pristine reference, and the one-shot
+                // handoff content is explicitly protected as unsaved work.
+                assert.equal(handoff.calls.baseline.length, 1);
+                assert.equal(handoff.calls.markedDirty, 1);
+            },
+        },
+        {
+            name: 'stale notifications can branch into Save a Copy',
+            async run() {
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        OptionComboSessionUI: {
+                            syncWorkspaceChrome() {},
+                            syncControlPanel() {},
+                            resolveDocumentTitle() { return 'Copy'; },
+                            promptWorkspaceTitle() { return 'Copy'; },
+                            confirmUnsavedChanges() { return 'discard'; },
+                            chooseConflictResolution() { return 'cancel'; },
+                            chooseStaleResolution() { return 'save-copy'; },
+                            chooseTakeoverResolution() { return 'cancel'; },
+                            confirmWorkspaceDelete() { return true; },
+                            confirmWorkspaceUndelete() { return true; },
+                            showWorkspaceStoreUnavailable() {},
+                            formatWorkspaceListRow() { return ''; },
+                            showWorkspaceListDialog() { return Promise.resolve(null); },
+                        },
+                    },
+                });
+                harness.triggerDomReady();
+                assert.equal(calls.staleHandlers.length, 1);
+                calls.staleHandlers[0]({ documentId: 'doc-bound-1', revision: 7 });
+                // Give the async save-copy a microtask turn.
+                await Promise.resolve();
+                await Promise.resolve();
+                assert.equal(calls.save.length, 1);
+                assert.equal(calls.save[0].expectedRevision, undefined);
+            },
+        },
+        {
+            name: 'read-only tabs cannot overwrite the writer document',
+            async run() {
+                const confirms = [];
+                const { client: fakeClient, calls } = createFakePersistenceClient();
+                fakeClient.envelope = {
+                    documentId: 'doc-bound-1', title: 'Bound', revision: 3,
+                    updatedAtUtc: '', lastSavedPayloadFingerprint: 'fp',
+                };
+                fakeClient.getWriterState = () => ({ state: 'readonly' });
+                const harness = loadAppContext({
+                    elements: createSaveButtonElements(),
+                    overrides: {
+                        getWorkspacePersistenceClient: () => fakeClient,
+                        setTimeout() { return 1; },
+                        confirm(message) { confirms.push(message); return false; },
+                    },
+                });
+                harness.triggerDomReady();
+
+                const saved = await harness.context.saveWorkspaceToStore();
+                assert.equal(saved, false);
+                assert.equal(calls.save.length, 0);
+                assert.match(confirms.join('\n'), /read-only/);
+            },
+        },
     ],
 };
+
+function createFakePersistenceClient(overrides = {}) {
+    const calls = {
+        save: [], lease: [], released: 0,
+        baseline: [], markedDirty: 0, staleHandlers: [],
+        takeoverQueries: 0, takeoverBegun: 0, takeoverCancelled: 0,
+        takeoverCompleted: 0, undelete: [],
+    };
+    const client = {
+        envelope: null,
+        getEnvelope() { return this.envelope ? { ...this.envelope } : null; },
+        getWriterState() { return { state: 'writer' }; },
+        fingerprintPayload(payload) { return JSON.stringify(payload); },
+        isDirty() { return false; },
+        setUnboundBaseline(payload) { calls.baseline.push(payload); },
+        markUnboundDirty() { calls.markedDirty += 1; },
+        setStaleRevisionHandler(handler) { calls.staleHandlers.push(handler); },
+        getUnknownSaveAttempt() { return null; },
+        canTakeover() {
+            calls.takeoverQueries += 1;
+            return { allowed: false, reason: 'writer_active' };
+        },
+        beginTakeover() { calls.takeoverBegun += 1; return true; },
+        cancelTakeover() { calls.takeoverCancelled += 1; return true; },
+        completeTakeover() { calls.takeoverCompleted += 1; return true; },
+        undeleteWorkspace(documentId, expectedRevision) {
+            calls.undelete.push({ documentId, expectedRevision });
+            return Promise.resolve({});
+        },
+        bindDocument(document, fingerprint) {
+            this.envelope = {
+                documentId: document.documentId,
+                title: document.title,
+                revision: document.revision,
+                updatedAtUtc: document.updatedAtUtc || '',
+                lastSavedPayloadFingerprint: fingerprint || '',
+            };
+        },
+        clearDocument() { this.envelope = null; },
+        releaseWriterLease() { calls.released += 1; },
+        acquireWriterLease(documentId) {
+            calls.lease.push(documentId);
+            return Promise.resolve('writer');
+        },
+        saveWorkspace(params) {
+            calls.save.push(params);
+            return Promise.resolve({
+                document: {
+                    documentId: params.documentId,
+                    title: params.title,
+                    symbol: 'SPY',
+                    marketDataMode: 'live',
+                    revision: params.expectedRevision ? params.expectedRevision + 1 : 1,
+                    updatedAtUtc: '2026-08-08T12:00:00.000Z',
+                },
+            }).then((response) => {
+                client.bindDocument(response.document, client.fingerprintPayload(params.payload));
+                return response;
+            });
+        },
+        listWorkspaces() { return Promise.resolve({ documents: [] }); },
+        loadWorkspace() { return Promise.reject(new Error('not stubbed')); },
+        deleteWorkspace() { return Promise.resolve({}); },
+        ...overrides,
+    };
+    return { client, calls };
+}
