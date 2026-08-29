@@ -1611,7 +1611,8 @@ class CostBasisStore:
         return event
 
     def _insert_event(self, conn, book, normalized, *, client_token,
-                      allow_overdraw, import_batch_id=None):
+                      allow_overdraw, import_batch_id=None,
+                      check_share_warning=True):
         book_id = book['bookId']
         seq_row = conn.execute(
             'SELECT COALESCE(max(seq), 0) AS max_seq FROM cost_basis_events '
@@ -1655,7 +1656,8 @@ class CostBasisStore:
         )
 
         warnings = self._validate_timeline(
-            conn, book_id, normalized, allow_overdraw=allow_overdraw)
+            conn, book_id, normalized, allow_overdraw=allow_overdraw,
+            check_share_warning=check_share_warning)
 
         row = conn.execute(
             'SELECT * FROM cost_basis_events WHERE event_id = ?', (event_id,)
@@ -1762,7 +1764,43 @@ class CostBasisStore:
                 positions[old_key] = positions.get(old_key, 0.0) \
                     + float(row['future_contracts'] or 0)
 
-    def _validate_timeline(self, conn, book_id, normalized, *, allow_overdraw):
+    def _net_short_share_warnings(self, conn, book_id):
+        """Report only the final replayed share direction.
+
+        Share assignments in one broker settlement batch commonly carry the
+        same timestamp.  Their database sequence is an audit tie-breaker, not
+        evidence that the account was economically short between two rows.
+        Replaying the complete active, included event stream also keeps split
+        handling aligned with the browser core instead of summing raw shares.
+        """
+        rows = conn.execute(
+            'SELECT kind, account, shares, split_ratio FROM cost_basis_events '
+            'WHERE book_id = ? AND voided_at_utc IS NULL AND include_in_cost = 1 '
+            "AND kind IN ('opening_balance','share_trade','option_assignment',"
+            "'option_exercise','split') "
+            f'ORDER BY {_EVENT_ORDER_SQL}',
+            (book_id,),
+        ).fetchall()
+        positions = {}
+        for row in rows:
+            account = str(row['account'] or '')
+            if row['kind'] == 'split':
+                ratio = float(row['split_ratio'] or 0)
+                if ratio <= 0:
+                    continue
+                if account:
+                    positions[account] = positions.get(account, 0.0) * ratio
+                else:
+                    for name in tuple(positions):
+                        positions[name] *= ratio
+                continue
+            positions[account] = positions.get(account, 0.0) \
+                + float(row['shares'] or 0)
+        return ['net_short_shares'] if any(
+            shares < -1e-9 for shares in positions.values()) else []
+
+    def _validate_timeline(self, conn, book_id, normalized, *, allow_overdraw,
+                           check_share_warning=True):
         """Re-run the affected contract's timeline after the insert.
 
         Back-dating is legitimate - you record history out of order - but a
@@ -1819,14 +1857,10 @@ class CostBasisStore:
                             False if broker_close else allow_overdraw, warnings)
                 positions[identity] = position + contracts
 
-        if normalized['shares'] is not None or normalized['kind'] == 'split':
-            total = conn.execute(
-                'SELECT COALESCE(sum(shares), 0) AS total FROM cost_basis_events '
-                'WHERE book_id = ? AND account = ? AND voided_at_utc IS NULL',
-                (book_id, normalized['account']),
-            ).fetchone()['total']
-            if float(total or 0) < -1e-9:
-                warnings.append('net_short_shares')
+        if check_share_warning \
+                and (normalized['shares'] is not None
+                     or normalized['kind'] == 'split'):
+            warnings.extend(self._net_short_share_warnings(conn, book_id))
         if normalized['kind'] in FUTURE_KINDS \
                 or normalized['future_contracts'] is not None:
             self._validate_futures_timeline(conn, book_id, normalized['account'])
@@ -2117,6 +2151,7 @@ class CostBasisStore:
                         client_token=f'{client_token_prefix}-{index:05d}',
                         allow_overdraw=allow_overdraw,
                         import_batch_id=import_batch_id,
+                        check_share_warning=False,
                     )
                     warnings.extend(result['warnings'])
                     inserted += 1
@@ -2127,6 +2162,10 @@ class CostBasisStore:
                     self._validate_contract_timeline(conn, book_id, row)
                     if row['kind'] == 'futures_trade':
                         self._validate_futures_timeline(conn, book_id, row['account'])
+                # Intermediate rows in an atomic import may cross zero only
+                # because same-time broker settlements need a deterministic
+                # sequence.  Surface the direction after the whole batch.
+                warnings.extend(self._net_short_share_warnings(conn, book_id))
                 conn.execute('COMMIT')
             except BaseException:
                 self._rollback_quietly(conn)
@@ -2473,9 +2512,11 @@ class CostBasisStore:
                         client_token=f'{client_token}-{index:05d}',
                         allow_overdraw=allow_overdraw,
                         import_batch_id=import_batch_id,
+                        check_share_warning=False,
                     )
                     warnings.extend(result['warnings'])
                     inserted += 1
+                warnings.extend(self._net_short_share_warnings(conn, book_id))
                 conn.execute(
                     'UPDATE cost_basis_books SET updated_at_utc = ? WHERE book_id = ?',
                     (self._utc_now_iso(), book_id))

@@ -375,6 +375,10 @@ reconciliation panel needs a live IB connection.
 
 Open it at `http://localhost:8000/cost_basis.html`.
 
+The event-flow table keeps its running balances anchored to chronological
+ledger replay, but displays the finished rows newest-first in 25-row pages so
+the latest activity is always on page 1.
+
 Creating a book uses the same managed-account selector as the main page's
 `Enable Trade` controls. One TWS account is selected automatically; multiple
 accounts require an explicit choice. When IB API is unavailable, the same
@@ -400,14 +404,24 @@ still go through the review form.
 All three come off the same event stream, because the number that matches
 your broker and the number you actually care about are not the same one:
 
-- **Net cash** (default) - `(net cash out + unrealized premium) / shares`.
+- **Net cash** (default) - share investment after realized option premium,
+  divided by shares. The UI presents cumulative account cash directly:
+  receipts are positive and payments are negative, so a net receipt appears
+  as `+1,504.31` rather than as a negative "cash outflow".
   The full-cycle cost of the shares you still hold. Counts only premium
   from contracts that are closed; premium on open contracts is money
   received but still at risk. **This number can go negative**, and a
   negative value means the position has already returned more cash than it
   consumed - the page labels it 已完全回本 rather than treating it as an
   error. With no shares left there is no per-share cost at all, so the page
-  shows the lifetime realized figure instead of dividing by zero.
+  shows cumulative net cash instead of dividing by zero, while realized and
+  still-at-risk option premium remain separate rows.
+  A negative share balance is fully supported: the same signed calculation
+  becomes the short position's buy-back break-even level. Realized option
+  premium raises that level, while premium on open contracts remains excluded
+  until the risk is closed. A short-position notice is based only on the final
+  replayed balance, never on a temporary negative balance between same-time
+  settlement rows.
 - **Stock only** - plain rolling average of share trades, premium listed
   separately. This is the one that should reconcile against TWS's average
   cost column; if it does not, the ledger is missing an event and the page

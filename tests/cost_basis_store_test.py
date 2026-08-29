@@ -502,6 +502,38 @@ class ImportTests(CostBasisStoreTestBase):
         self.assertEqual(result['inserted'], 2)
         self.assertEqual(result['skipped'], 0)
 
+    def test_import_short_warning_uses_the_final_batch_balance(self):
+        timestamp = '2026-08-28T16:20:00'
+        rows = [
+            {
+                'kind': 'share_trade', 'tradeDate': '2026-08-28',
+                'brokerTimestamp': timestamp, 'account': 'U1111111',
+                'shares': -100, 'price': 70, 'cashAmount': 7000,
+                'fees': 0, 'source': 'csv_import', 'externalRef': 'shares-1',
+            },
+            {
+                'kind': 'share_trade', 'tradeDate': '2026-08-28',
+                'brokerTimestamp': timestamp, 'account': 'U1111111',
+                'shares': 300, 'price': 72, 'cashAmount': -21600,
+                'fees': 0, 'source': 'csv_import', 'externalRef': 'shares-2',
+            },
+        ]
+        result = self.store.import_events(
+            self.book_id, rows,
+            import_batch_id=_token('batch'), client_token_prefix=_token('imp'))
+        self.assertNotIn('net_short_shares', result['warnings'])
+
+    def test_import_reports_a_supported_final_short_position(self):
+        result = self.store.import_events(
+            self.book_id, [{
+                'kind': 'share_trade', 'tradeDate': '2026-08-28',
+                'account': 'U1111111', 'shares': -100, 'price': 70,
+                'cashAmount': 7000, 'fees': 0, 'source': 'csv_import',
+                'externalRef': 'short-shares',
+            }], import_batch_id=_token('batch'),
+            client_token_prefix=_token('imp'))
+        self.assertIn('net_short_shares', result['warnings'])
+
     def test_overlapping_statement_skips_already_imported_rows(self):
         self.store.import_events(
             self.book_id, self._rows(),

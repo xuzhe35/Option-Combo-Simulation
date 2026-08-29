@@ -1145,9 +1145,6 @@
         // option income would double it.
         state.taxRealizedPremium = _round(state.taxRealizedPremium - realizedPremium, 6);
         state.shares = _round(state.shares + shares, 6);
-        if (state.shares < -SHARE_EPSILON) {
-            state.warnings.push('net_short_shares');
-        }
     }
 
     function _recordShareFlow(state, shares, price, fees) {
@@ -1197,6 +1194,15 @@
             realizedPremium += contractState.realizedPremium;
             openPremium += contractState.openPremium;
         });
+        // A negative balance is a supported final position, not an error in
+        // the event that happened to cross zero first.  Settlement imports
+        // often give every expiry/assignment row the same broker timestamp;
+        // their arbitrary sequence must not leave a historical short warning
+        // after later rows in that batch restore a long balance.
+        if (state.shares < -SHARE_EPSILON
+            && state.warnings.indexOf('net_short_shares') < 0) {
+            state.warnings.push('net_short_shares');
+        }
         const summary = {
             account: state.account,
             shares: _round(state.shares, 6),
@@ -1326,13 +1332,13 @@
      * Render one lens for display, naming the cases a bare number hides.
      *
      * A zero-share ledger has no per-share cost at all - what it has is a
-     * lifetime realized figure - and a negative cost on a long position
+     * cumulative signed cash balance - and a negative cost on a long position
      * means the money is already back. Both need a label, not a number.
      */
     function summarizeCost(summary, mode) {
         const basisMode = BASIS_MODES.indexOf(mode) >= 0 ? mode : 'net_cash';
-        // EVERY path reports this. A closed-out book still shows a lifetime
-        // realized figure at the top of the page, and that figure is just as
+        // EVERY path reports this. A closed-out book still shows cumulative
+        // net cash at the top of the page, and that figure is just as
         // wrong as a per-share cost when a premium-less stub is behind it -
         // which is exactly the shape a fully-closed prior position leaves.
         const incomplete = Boolean(summary && summary.costIncomplete === true);
