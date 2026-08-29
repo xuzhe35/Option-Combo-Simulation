@@ -257,7 +257,7 @@ class IbServerOrderErrorTests(unittest.TestCase):
             'statusMessage': 'IB 201: Order rejected - reason: Available Funds are insufficient.',
         }
         trade = SimpleNamespace(
-            order=SimpleNamespace(orderId=42567, account='U17775528'),
+            order=SimpleNamespace(orderId=42567, account='U1111111'),
             orderStatus=SimpleNamespace(
                 permId=429367627,
                 status='Inactive',
