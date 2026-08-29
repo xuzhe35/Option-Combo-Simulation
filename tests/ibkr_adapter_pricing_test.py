@@ -1831,7 +1831,7 @@ class IbServerPortfolioPositionSnapshotTests(unittest.TestCase):
             def positions(self):
                 return [
                     SimpleNamespace(
-                        account='U19322426',
+                        account='U1111111',
                         position=-4,
                         avgCost=125.5,
                         contract=SimpleNamespace(
@@ -1847,7 +1847,7 @@ class IbServerPortfolioPositionSnapshotTests(unittest.TestCase):
                         ),
                     ),
                     SimpleNamespace(
-                        account='U19322426',
+                        account='U1111111',
                         position=-4,
                         avgCost=125.5,
                         contract=SimpleNamespace(
