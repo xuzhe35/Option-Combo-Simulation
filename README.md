@@ -83,9 +83,21 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
   - per-weekend implied λ solved on demand through a three-tier source chain: a complete coherent two-sided ATM straddle snapshot is preferred, incomplete TWS evidence falls back to an atomic subset of usable BBO expiry pairs, and a final audited `vendor_iv` estimate uses the visible ATM Call/Put IV pairs when books are missing. Signed inversion values are preserved instead of clipped. Listed-expiry gaps of 8–31 days use an explicitly marked endpoint-variance aggregate; longer gaps use the robust median of identifiable intervals from the same frozen surface. These inferred dates are marked `≈`, retained with provenance in V2, and prevent silent holes between usable expiry endpoints. The result is frozen in the UI, then explicitly synced to same-origin simulators or exported as a V2 date array
   - configurable DTE buckets
   - per-symbol JSON history files
-- Session persistence:
-  - JSON import / save / save-as
-  - direct save-back when the browser File System Access API is available
+- Workspace persistence:
+  - backend-owned SQLite workspace store is the day-to-day Save path, so
+    routine saving no longer depends on browser file permissions
+  - JSON import / export / save-as retained for portability, with direct
+    save-back when the browser File System Access API is available
+  - soft delete with restore, verified static backups, and a read-mostly
+    admin page (`workspace_db_admin.html`) for database stats, the archive
+    flow, and restore
+- Blended cost ledger (`cost_basis.html`):
+  - standalone per-underlying event ledger with its own SQLite database;
+    it cannot place orders or subscribe to market data
+  - three cost lenses off one event stream (net cash, stock only, tax
+    adjusted), with a short share balance treated as supported state
+  - IBKR Activity Statement CSV import, and TWS reconciliation that only
+    ever *detects* a gap and drafts it for a human to confirm
 
 ## Main Entry Points
 
@@ -156,6 +168,22 @@ Default configured symbols:
 - `CL`
 - `SI`
 - `ES`
+
+### `cost_basis.html`
+
+Standalone per-underlying blended-cost ledger. It loads only
+`js/cost_basis_core.js`, `js/cost_basis_import.js`, and `js/cost_basis.js` —
+never the trading shell — and writes its own `cost_basis.db`. It cannot place
+an order or subscribe to market data. Full details in
+[Blended Cost Ledger](#blended-cost-ledger-cost_basishtml) below.
+
+### `workspace_db_admin.html`
+
+Standalone, loopback-only admin page for the workspace database: size and
+growth stats, the archive preview/commit flow, and restore. It loads its own
+minimal client and never the trading runtime. Full details in
+[Workspace Database Admin & Archive](#workspace-database-admin--archive-workspace_db_adminhtml)
+below.
 
 ## Backend Responsibilities
 

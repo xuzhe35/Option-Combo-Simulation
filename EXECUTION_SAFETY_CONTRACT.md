@@ -1,6 +1,16 @@
 # Execution Safety Contract
 
-**Updated:** 2026-07-11
+**Updated:** 2026-08-29
+
+> This is a current-state contract, not a backlog: the pipeline below is
+> implemented. `trade_execution/safety.py`
+> owns the one-time, TTL-bound execution-plan token, bound to the issuing
+> websocket, the order-type kind, a canonical payload fingerprint, and the
+> TWS position-snapshot marker. Note two deliberate carve-outs the code makes
+> and this contract should be read alongside: a `close` combo intent does not
+> consume an execution-plan token (it has its own close-plan token flow), and
+> `executionMode` is excluded from the fingerprint because the client
+> legitimately changes it between validate and submit.
 
 ## Goal
 
