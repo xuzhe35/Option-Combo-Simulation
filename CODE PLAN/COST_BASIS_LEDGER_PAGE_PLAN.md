@@ -1,12 +1,16 @@
 # 标的综合成本账本页实施计划
 
-> 状态：阶段 0-6 已实现（2026-08-22），即 v1 交付范围全部完成；阶段 7-9 待做
+> 状态：阶段 0-6（v1 交付范围）**已实施并合并**——PR #24 落 main，随后 PR #25
+> 把空头股票余额改为受支持状态（净现金口径显示空头回补水位，`net_short_shares`
+> 只按最终回放余额判断）。阶段 7-9 待做。
+> FOP/FUT 扩展见 `COST_BASIS_FOP_FUTURES_ROLL_PLAN.md`。
 >
 > 页面定位：独立的本地记账与对账页面。输入一个 IB 账户和一个标的（如 `U1234567 + TQQQ`），只聚合该账户里该标的的股票与期权仓位，按事件账本计算综合成本。**不下单、不订阅行情、不加载交易工作区脚本。**
 >
 > 适用后端：`ib_server.py`（持仓快照 + 账本）、`historical_server.py`（仅账本）
 >
-> 依赖分支：`codex/portfolio-sqlite-persistence`（复用其 loopback 约束、WS 协议形状、备份脚本与目录约定）
+> 复用来源：工作区 SQLite 持久化子系统（loopback 约束、WS 协议形状、备份脚本
+> 与目录约定）；该分支已合并，见 `PORTFOLIO_SQLITE_PERSISTENCE_PLAN.md`。
 
 > 已确认口径（2026-08-22）：
 >

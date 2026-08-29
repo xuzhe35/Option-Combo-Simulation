@@ -1,5 +1,15 @@
 # IVTS Strategy Dashboard — Code Plan
 
+> Status: **implemented and merged.** `computeDisplacementWatermark` and
+> `buildStrategySuggestion` live in `js/iv_term_structure_core.js`, the
+> Strategy Signal panel renders from `js/iv_term_structure.js` with the three
+> zone styles in `iv_term_structure.css`, and both core and page tests cover
+> them. Review findings were addressed in `2ac3477` (fail-closed watermark,
+> real trading calendar, unrounded slope classification). This file is kept
+> for the frozen zone thresholds and the playbook mapping, not as a to-do
+> list. The "Explicitly out of scope" section at the end still stands - in
+> particular, nothing here creates an order.
+
 Goal: surface the validated VRP research findings (see `VRP_RESEARCH_MEMO.md`)
 as an objective, per-symbol dashboard on the IV Term Structure page, at
 **suggestion level only** — no order is ever created from the dashboard. Paper

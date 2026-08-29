@@ -18,11 +18,18 @@ Runtime surfaces:
    - standalone live ETF / futures-option IV term-structure monitor
    - syncs ATM option pairs by expiry and appends samples to per-symbol JSON history files
 
-4. Python backends
+4. `cost_basis.html`
+   - standalone per-underlying blended-cost ledger
+   - event-sourced accounting over its own SQLite database; cannot trade or subscribe to market data
+
+5. `workspace_db_admin.html`
+   - standalone read-mostly admin page for the workspace database and its archive
+
+6. Python backends
    - `ib_server.py` for live IBKR market data, live execution, Chart Lab bars, IV term-structure sync, and historical fallback paths
    - `historical_server.py` for historical replay snapshots only (options-chain-service backed)
 
-5. Optional Docker lifecycle layer
+7. Optional Docker lifecycle layer
    - `option_combo_starter/supervisor.py` runs as PID 1
    - the HTTP server and `ib_server.py` are critical child processes
    - the backend remains the sole owner of IB reconnect attempts
@@ -84,6 +91,45 @@ It currently:
   visible append target, or create a new one, then refresh/append an ATM
   snapshot hourly while the page is open; manual and automatic samples are
   merged only for signal computation, not into either source file
+
+### `cost_basis.html`
+
+The blended-cost ledger is standalone and never loads the trading shell. It
+loads only `js/cost_basis_core.js`, `js/cost_basis_import.js`, and
+`js/cost_basis.js`.
+
+It currently:
+
+- keeps one book per underlying, summarised per account, over an append-only
+  event stream in its own `cost_basis.db`
+- presents three lenses off the same stored cash: net cash (default), stock
+  only (the one that should reconcile against the TWS average-cost column),
+  and tax adjusted
+- reads TWS positions through the existing
+  `request_portfolio_positions_snapshot` /
+  `request_portfolio_avg_cost_snapshot` actions, and only ever *detects* a
+  gap from them - nothing auto-writes an event
+- imports IBKR Activity Statement CSVs, de-duplicating on a content-derived
+  key because those statements carry no TradeID
+- treats a negative share balance as supported state: the net-cash lens
+  reports the short's buy-back break-even level, and the short notice is
+  raised only from the final replayed balance, never from an intermediate
+  row inside one same-timestamp settlement batch
+
+Two invariants are load-bearing and easy to break by "improving" the code:
+the ledger is the source of truth, and an assignment row's cash is the share
+delivery at the strike only, because the contract's premium was already
+recorded when it was opened. See
+`CODE PLAN/COST_BASIS_LEDGER_PAGE_PLAN.md`.
+
+### `workspace_db_admin.html`
+
+A standalone loopback admin surface for the workspace database. It loads its
+own minimal client (`js/workspace_db_admin.js` plus the DOM-free
+`js/workspace_db_admin_core.js`), never the trading runtime, and speaks the
+`portfolio_admin_ws.py` protocol. Responses never carry paths, SQL, or
+payloads. `Rehydrate Original` is deliberately absent until its
+"archive again after restore" semantics are frozen and tested.
 
 ## 3. Ordered Script Runtime
 
@@ -800,6 +846,32 @@ replace-mode normalizer. Both `websockets.serve` calls share an explicit
 `max_size` (`[server] max_ws_message_bytes`) because the library's 1 MiB
 default would 1009-close a socket that also carries order supervision.
 
+### Blended-cost ledger (shared by both backends)
+
+`cost_basis_store.py` is the pure SQLite store (schema v5) behind
+`cost_basis.html`: append-only money events keyed per book, one derivation
+for every event's cash amount, per-kind field validation, client-token
+idempotency, external-ref import de-duplication, voiding that replays the
+contract timeline rather than deleting, and snapshot hashing. Ordering is
+`trade_date -> broker_timestamp -> seq` in both the store and the browser
+engine, so the two agree on replay. Every write runs under BEGIN IMMEDIATE
+on its own short-lived connection.
+
+`cost_basis_ws.py` is the shared protocol layer both `ib_server.py` and
+`historical_server.py` mount, so Live and Historical answer with identical
+response shapes and error codes. It owns loopback enforcement, request
+validation, and the sync-store to event-loop bridge (`asyncio.to_thread`).
+It never writes SQL and never leaks database paths or raw SQL errors to the
+browser, and an exception must not escape it - one bad ledger request must
+not tear down a socket that is also carrying live market data and order
+supervision.
+
+`reset_cost_basis_book` is the only path that deletes events. It archives
+the full event set as JSON first, then demands a server-generated,
+count-bearing phrase that is re-checked inside the write transaction, so a
+ledger that changed between reading the phrase and submitting it fails
+closed.
+
 ## 8. Historical Replay Architecture
 
 Historical replay is implemented as a first-class runtime mode in the main workspace.
@@ -870,6 +942,20 @@ Current boundaries:
 - route: `iv_term_structure.html`
 - use `ib_server.py` for IB connection status and live IV sync
 
+### Blended-cost ledger
+
+- served by the same frontend HTTP server
+- route: `cost_basis.html`
+- works against either backend; `ib_server.py` additionally supplies the TWS
+  position snapshot used for reconciliation, and without it the page degrades
+  to ledger-only rather than assuming an all-zero portfolio
+
+### Workspace database admin
+
+- served by the same frontend HTTP server
+- route: `workspace_db_admin.html`
+- loopback only; works against either backend
+
 ### Background / Codex launchers
 
 - `powershell_scripts/start_option_combo_codex.ps1` starts HTTP and IB services with redirected logs and pid files under `logs/`
@@ -888,12 +974,15 @@ Use `cleanup_logs.bat` or `cleanup_logs_mac.command` for periodic runtime log cl
 - `historical_server.py` cannot serve Chart Lab bars or IV term-structure sync.
 - `ib_server.py` supports more runtime paths than the lightweight historical server.
 - If multiple unmanaged `ib_server.py` processes are left running, broker-status debugging becomes unreliable because the browser may connect to a different backend than the logs you are reading.
+- The blended-cost ledger is deliberately not wired to trading: it cannot place an order or subscribe to market data, and a TWS snapshot can only produce a draft for a human to confirm.
+- `Rehydrate Original` on the workspace database admin page is not implemented; the backend answers `rehydrateOriginal: False` until its re-archive semantics are frozen and tested.
+- Auto-archive stays opt-in and off by default.
 
 ## 12. If Notes and Code Drift
 
 Trust in this order:
 
-1. HTML script order in `index.html`, `chart_lab.html`, and `iv_term_structure.html`
+1. HTML script order in `index.html`, `chart_lab.html`, `iv_term_structure.html`, and `cost_basis.html`
 2. `js/product_registry.js`
 3. `js/pricing_context.js`
 4. `js/pricing_core.js`

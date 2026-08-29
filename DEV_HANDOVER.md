@@ -1,6 +1,6 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-07-19
+**Updated:** 2026-08-29
 
 ## 1. Current Product State
 
@@ -11,12 +11,20 @@ Current surfaces:
 - `index.html` for the main portfolio workspace
 - `chart_lab.html` for the shared workspace plus the experimental Chart Lab tab
 - `iv_term_structure.html` for the standalone ETF / futures-option IV term-structure monitor
+- `cost_basis.html` for the standalone per-underlying blended-cost ledger
+- `workspace_db_admin.html` for the standalone workspace-database / archive admin page
 - `ib_server.py` as the live-backend composition entry point
 - `ib_server_ws.py` for live backend WebSocket session routing
 - `ib_server_order_tracking.py` for combo/hedge tracking payloads and IB event consumers
 - `ib_server_market_data.py` for live quote fanout and historical-bars helpers
 - `ib_server_iv_term_structure.py` for IV term-structure live sync helpers
 - `historical_server.py` for historical replay snapshots only (chains/bars via the shared options-chain-service, rates via `sqlite_spy/rates.db`)
+
+Persistence and ledger modules, mounted by BOTH backends:
+
+- `portfolio_store.py` / `portfolio_store_ws.py` for the SQLite workspace store
+- `portfolio_maintenance.py`, `portfolio_archive.py`, `portfolio_admin_ws.py` for the archive layer and its admin protocol
+- `cost_basis_store.py` / `cost_basis_ws.py` for the blended-cost ledger
 
 ## 2. What Is Actually Implemented
 
@@ -27,8 +35,10 @@ Current surfaces:
   - `entry=live`
   - `entry=historical`
 - workspace banner / title / subtitle changes driven by `workspaceVariant` and `marketDataModeLocked`
-- JSON import / save / save-as
-- direct save-back when the browser File System Access API is available
+- workspace persistence into the backend-owned SQLite store (`js/workspace_persistence.js`),
+  which is the day-to-day Save path and no longer depends on browser file permissions
+- JSON import / export / save-as retained for portability, with direct
+  save-back when the browser File System Access API is available
 
 ### Control panel
 
@@ -354,6 +364,8 @@ Current surfaces:
 - `index.html`
 - `chart_lab.html`
 - `iv_term_structure.html`
+- `cost_basis.html`
+- `workspace_db_admin.html`
 
 ### Backends
 
@@ -364,6 +376,12 @@ Current surfaces:
 - `historical_server.py`
 - `historical_replay_service.py`
 - `historical_data.py`
+
+Mounted by both backends:
+
+- `portfolio_store_ws.py`, `portfolio_store.py`
+- `portfolio_admin_ws.py`, `portfolio_archive.py`, `portfolio_maintenance.py`
+- `cost_basis_ws.py`, `cost_basis_store.py`
 
 ### Startup scripts
 

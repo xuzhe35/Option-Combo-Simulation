@@ -1,6 +1,9 @@
 # 仓位工作区 SQLite 持久化实施计划
 
-> 状态：Proposed / 尚未实施
+> 状态：**已实施并合并**（PR #24，2026-08-29 落 main）。本文件保留为该子
+> 系统的设计依据与验收口径，不再是待办清单；实现现状以 `ARCHITECTURE.md`
+> §7「Workspace persistence」为准。仍未做的只有 phase 7（IndexedDB 草稿，
+> 计划要求先做一次真实恢复演练）和 §12.4 的 macOS/Windows 人工浏览器矩阵。
 >
 > 适用页面：index.html、chart_lab.html
 >
