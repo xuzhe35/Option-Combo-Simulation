@@ -1,8 +1,11 @@
 # Delta Hedge Current State
 
-**Updated:** 2026-07-05
+**Updated:** 2026-08-29
 
-This file name is historical. The original staged implementation plan has been retired because the code now includes recommendation, broker preview, manual submit, cancel / clear, resting-order lock, stale-review, and guarded auto-preview / auto-submit flows. Treat this document as the current Delta Hedge behavior map.
+This is the current Delta Hedge behavior map, not a plan. The original staged
+implementation plan was retired once the code gained recommendation, broker
+preview, manual submit, cancel / clear, resting-order lock, stale-review, and
+guarded auto-preview / auto-submit flows.
 
 ## Implemented Scope
 

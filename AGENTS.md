@@ -24,6 +24,7 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 - `README.md` for user-facing startup, feature notes, and maintenance commands
 - `ARCHITECTURE.md` for the actual runtime design and module boundaries
 - `DEV_HANDOVER.md` for current developer-facing operational notes
+- `EXECUTION_SAFETY_CONTRACT.md` for the safety contract every broker-facing flow must satisfy
 - `powershell_scripts/` for Windows launch and Python resolution helpers
 
 ## Frontend Entry Points
@@ -133,10 +134,11 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 - If a task mentions Python resolution problems, debug the existing launcher chain before debugging `PATH`.
 - If a task touches product-family behavior, read `js/product_registry.js` first.
 - If a task touches pricing, date semantics, or replay valuation, read `js/pricing_context.js`, `js/pricing_core.js`, and `js/valuation.js`.
-- If a task touches delta hedging semantics, read `js/delta_hedge_logic.js` and `js/delta_hedge_ui.js`.
+- If a task touches delta hedging semantics, read `DELTA_HEDGE_CURRENT_STATE.md` for the behavior map, then `js/delta_hedge_logic.js` and `js/delta_hedge_ui.js`.
 - If a task touches chart or projection semantics, read both the main charting files and `js/chart_lab.js`.
 - If a task touches historical replay, check whether the change belongs in `historical_server.py`, `historical_replay_service.py`, or the shared live frontend flow via `js/ws_client.js`.
 - If a task touches IV term structure, read `iv_term_structure.html`, `js/iv_term_structure.js`, `js/iv_term_structure_core.js`, `iv_term_structure_service.py`, and the IV sections in `ib_server.py`.
 - If a task touches runtime logs or pid files, use or update `scripts/cleanup_runtime_logs.py`; do not clean data directories such as `Portfolio/`, `Portfolio 2/`, or `sqlite_spy/` as part of log maintenance.
+- If a task touches ANY broker-facing flow, read `EXECUTION_SAFETY_CONTRACT.md` first. The one-time execution-plan token in `trade_execution/safety.py` is the boundary that stops a stale or altered preview from reaching TWS; do not add a submit path that bypasses it.
 - If a task touches workspace persistence or the archive, read `CODE PLAN/PORTFOLIO_SQLITE_PERSISTENCE_PLAN.md` and `CODE PLAN/PORTFOLIO_DATABASE_ADMIN_PAGE_PLAN.md` for the frozen semantics; both are implemented, and the admin plan's `Rehydrate Original` constraint still applies.
 - If a task touches the blended-cost ledger, read `CODE PLAN/COST_BASIS_LEDGER_PAGE_PLAN.md` first. Two invariants there are not negotiable: the ledger is the source of truth and a TWS snapshot only ever *detects* a gap (nothing auto-writes an event), and an assignment row's cash is the share delivery only, because the premium was already recorded when the contract was opened.

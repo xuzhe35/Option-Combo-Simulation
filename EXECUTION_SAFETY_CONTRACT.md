@@ -2,8 +2,8 @@
 
 **Updated:** 2026-08-29
 
-> Despite the `..._CODE_PLAN` filename, this is a current-state contract, not
-> a backlog: the pipeline below is implemented. `trade_execution/safety.py`
+> This is a current-state contract, not a backlog: the pipeline below is
+> implemented. `trade_execution/safety.py`
 > owns the one-time, TTL-bound execution-plan token, bound to the issuing
 > websocket, the order-type kind, a canonical payload fingerprint, and the
 > TWS position-snapshot marker. Note two deliberate carve-outs the code makes
