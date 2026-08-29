@@ -31,7 +31,7 @@
     const RECONNECT_MAX_DELAY_MS = 60000;
     const REQUEST_TIMEOUT_MS = 20000;
     const POSITIONS_TIMEOUT_MS = 8000;
-    const FLOW_PAGE_SIZE = 100;
+    const FLOW_PAGE_SIZE = 25;
     const MANUAL_ACCOUNT_VALUE = '__manual_account__';
     // One request per 2000 rows (the store's page cap), looped until the
     // whole book is in hand.
@@ -75,9 +75,11 @@
     };
 
     const BASIS_EXPLAINERS = {
-        net_cash: '净现金口径：(净现金流出 + 未实现权利金) ÷ 持股数。'
-            + '只认已平仓合约的权利金，未平仓的钱还在风险里。这个数可以为负，'
-            + '为负表示成本已全部收回。',
+        net_cash: '净现金口径：按股票净投入扣除已实现权利金，再除以持股数。'
+            + '累计净现金始终按账户视角显示：收到为正、付出为负。'
+            + '只认已平仓合约的权利金，未平仓的钱还在风险里。成本可以为负，'
+            + '多头为负表示成本已全部收回；空头则显示可回补的'
+            + '盈亏平衡水位，已实现权利金会把这条水位抬高。',
         stock_only: '纯股票均价：只按股票成交滚动平均，权利金完全独立列示。'
             + '这是唯一应该和 TWS 均价对得上的数——对不上就是账本漏记了。',
         tax_adjusted: '税务调整口径：被指派合约的权利金滚进股票成本'
@@ -192,6 +194,18 @@
             minimumFractionDigits: digits,
             maximumFractionDigits: digits,
         });
+    }
+
+    /** Account cash delta: receipts are visibly positive, payments negative. */
+    function _signedMoney(value, places) {
+        if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+            return '—';
+        }
+        const digits = places === undefined ? 2 : places;
+        const numeric = Number(value);
+        const displayValue = Math.abs(numeric) < (0.5 * (10 ** -digits)) ? 0 : numeric;
+        const formatted = _money(displayValue, digits);
+        return displayValue > 0 ? `+${formatted}` : formatted;
     }
 
     function _quantity(value) {
@@ -760,7 +774,7 @@
             if (start && String(event.tradeDate || '') < start) return false;
             if (end && String(event.tradeDate || '') > end) return false;
             return true;
-        });
+        }).reverse();
     }
 
     function requestPositions() {
@@ -942,7 +956,7 @@
         });
         head.appendChild(headRow);
 
-        _summaryRow(body, futures ? '当前 FUT 净张数' : '当前持股', columns,
+        _summaryRow(body, futures ? '当前 FUT 净张数' : '当前股票净头寸', columns,
             (summary) => _quantity(futures
                 ? summary.futuresContracts : summary.shares));
         _headlineRow(body, columns);
@@ -956,8 +970,8 @@
         _twsAvgCostRow(body, columns);
 
         _sectionRow(body, '现金分解', columns.length);
-        _summaryRow(body, '净现金流出', columns,
-            (summary) => _money(summary.netCashOut));
+        _summaryRow(body, '累计净现金（收正付负）', columns,
+            (summary) => _signedMoney(summary.netCash));
         _summaryRow(body, '已实现期权费', columns,
             (summary) => _money(summary.realizedPremium));
         _summaryRow(body, '未实现期权费', columns,
@@ -976,7 +990,7 @@
                 ? '—' : _money(summary.breakEvenPrice, 4)));
         _summaryRow(body, '全部清算后累计净收益', columns,
             (summary) => (summary.lifetimeNetIfLiquidated === null
-                ? '—' : _money(summary.lifetimeNetIfLiquidated)));
+                ? '—' : _signedMoney(summary.lifetimeNetIfLiquidated)));
 
         _renderWarnings();
         _renderReferenceSource();
@@ -1021,7 +1035,7 @@
             const rendered = core.summarizeCost(column.summary, state.basisMode);
             if (!rendered.available) {
                 const label = rendered.state === 'no_shares'
-                    ? `无${futures ? ' FUT 持仓' : '持股'}（累计已实现 ${_money(rendered.lifetimeNetCash)}）`
+                    ? `无${futures ? ' FUT 持仓' : '持股'}（累计净现金 ${_signedMoney(rendered.lifetimeNetCash)}）`
                     : '—';
                 // A closed-out book still shows a lifetime figure here, and
                 // it is just as incomplete as a per-share cost would be.
@@ -1036,7 +1050,8 @@
                 suffix = '（已完全回本）';
             } else if (rendered.state === 'short') {
                 classNames.push('value-short');
-                suffix = '（空头均价）';
+                suffix = state.basisMode === 'net_cash'
+                    ? '（空头回补水位）' : '（空头均价）';
             }
             if (rendered.costIncomplete) {
                 // A premium-less prior_open stub is still in this book. The
@@ -1122,14 +1137,25 @@
         const unique = Array.from(new Set(warnings));
         if (!unique.length) {
             node.hidden = true;
+            node.classList.remove('position-status');
             return;
         }
+        const isShort = unique.indexOf('net_short_shares') >= 0;
+        const ledgerWarnings = unique.filter((warning) => warning !== 'net_short_shares');
         node.hidden = false;
-        node.textContent = `账本告警：${unique.map(_describeWarning).join('；')}`;
+        node.classList.toggle('position-status', isShort && !ledgerWarnings.length);
+        const messages = [];
+        if (isShort) messages.push(`头寸状态：${_describeWarning('net_short_shares')}`);
+        if (ledgerWarnings.length) {
+            messages.push(`账本告警：${ledgerWarnings.map(_describeWarning).join('；')}`);
+        }
+        node.textContent = messages.join('；');
     }
 
     function _describeWarning(warning) {
-        if (warning === 'net_short_shares') return '出现净空头股票';
+        if (warning === 'net_short_shares') {
+            return '当前为净空头股票；已按空头回补水位计算';
+        }
         if (warning === 'mixed_future_directions') {
             return '同一视图同时有多头和空头 FUT，无法用一个综合成本表示';
         }
@@ -1414,7 +1440,7 @@
                 body.appendChild(row);
             });
         }
-        _text($('flow-page-label'), `第 ${state.flowPage} / ${pageCount} 页 · 筛选出 `
+        _text($('flow-page-label'), `最新优先 · 第 ${state.flowPage} / ${pageCount} 页 · 筛选出 `
             + `${filtered.length} 条 · 账本共 ${state.eventsTotal} 条`);
         $('flow-prev').disabled = state.flowPage <= 1;
         $('flow-next').disabled = state.flowPage >= pageCount;
@@ -2584,6 +2610,7 @@
         KIND_FIELDS,
         KIND_LABELS,
         BASIS_EXPLAINERS,
+        formatSignedMoney: _signedMoney,
         canReconcilePositions,
         buildImportBaseline,
         planTwsBaselineSupersession,

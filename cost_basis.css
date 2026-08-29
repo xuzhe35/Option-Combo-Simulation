@@ -226,7 +226,8 @@ td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; 
    than it consumed. It is a result, not an error, so it gets the good
    colour and an explicit label rather than the alarm colour. */
 .value-recovered { color: var(--ok); }
-.value-short { color: var(--warn); }
+/* A short position is supported portfolio state, not a validation error. */
+.value-short { color: var(--accent); }
 .value-unavailable { color: var(--muted); }
 .value-headline { font-size: 1.15rem; font-variant-numeric: tabular-nums; }
 
@@ -249,6 +250,12 @@ td.mismatch-flag { color: var(--warn); }
     border-radius: 4px;
     padding: 0.5rem 0.75rem;
     margin: 0.5rem 0 0;
+}
+
+.warnings.position-status {
+    color: var(--accent);
+    background: rgba(77, 163, 255, 0.08);
+    border-color: var(--accent);
 }
 
 #summary-table td:first-child, #summary-table th:first-child {

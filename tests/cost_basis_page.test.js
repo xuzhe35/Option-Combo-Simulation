@@ -440,6 +440,18 @@ module.exports = {
             },
         },
         {
+            name: 'the flow shows newest events first in pages of twenty-five',
+            run() {
+                const source = readScript();
+                const flowRows = source.slice(
+                    source.indexOf('function _flowRows()'),
+                    source.indexOf('function requestPositions()'));
+                assert.match(source, /const FLOW_PAGE_SIZE = 25;/);
+                assert.match(flowRows, /state\.ledger\.rows\.filter\([\s\S]*\)\.reverse\(\)/);
+                assert.match(source, /最新优先 · 第/);
+            },
+        },
+        {
             name: 'the premium panel counts realized income, not open credit',
             run() {
                 const source = readScript();
@@ -654,6 +666,33 @@ module.exports = {
                 assert.match(source, /rendered\.costIncomplete/);
                 assert.match(source, /成本不完整/);
                 assert.match(source, /value-incomplete/);
+            },
+        },
+        {
+            name: 'cash balances use direct signed account-cash semantics',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const source = readScript();
+                assert.equal(page.formatSignedMoney(1504.314648), '+1,504.31');
+                assert.equal(page.formatSignedMoney(-0.32946), '-0.33');
+                assert.equal(page.formatSignedMoney(-0.001), '0.00');
+                assert.match(source, /累计净现金（收正付负）/);
+                assert.ok(source.includes('累计净现金 ${_signedMoney'));
+                assert.doesNotMatch(source, /净现金流出|累计已实现/);
+            },
+        },
+        {
+            name: 'the summary presents negative shares as a supported short waterline',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const source = readScript();
+                assert.match(page.BASIS_EXPLAINERS.net_cash, /空头/);
+                assert.match(page.BASIS_EXPLAINERS.net_cash, /水位抬高/);
+                assert.match(source, /当前股票净头寸/);
+                assert.match(source, /空头回补水位/);
+                assert.match(source, /头寸状态/);
+                assert.match(source, /position-status/);
+                assert.doesNotMatch(source, /出现净空头股票/);
             },
         },
         {

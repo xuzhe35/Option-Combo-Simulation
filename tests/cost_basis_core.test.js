@@ -320,6 +320,64 @@ module.exports = {
             },
         },
         {
+            name: 'only the final share balance decides the short-position notice',
+            run() {
+                const core = loadCore();
+                const settlementTimestamp = '2026-08-21T16:20:00';
+                const events = [
+                    event({
+                        kind: 'opening_balance', tradeDate: '2026-06-01',
+                        shares: 200, price: 50, cashAmount: -10000,
+                    }),
+                    shortCall({ contracts: -3 }),
+                    shortPut({ contracts: -3, expiry: '20260821' }),
+                    callAssignment({
+                        contracts: 3, brokerTimestamp: settlementTimestamp,
+                    }),
+                    putAssignment({
+                        tradeDate: '2026-08-21', expiry: '20260821', contracts: 3,
+                        brokerTimestamp: settlementTimestamp,
+                    }),
+                ];
+                const ledger = core.computeLedger(events);
+                assert.ok(ledger.rows.some((row) => row.runningShares < 0));
+                assert.equal(ledger.combined.shares, 200);
+                assert.equal(ledger.warnings.includes('net_short_shares'), false);
+            },
+        },
+        {
+            name: 'realized option premium raises a supported short-stock buy-back level',
+            run() {
+                const core = loadCore();
+                const shortSale = event({
+                    kind: 'share_trade', tradeDate: '2026-06-01',
+                    shares: -100, price: 50, cashAmount: 5000,
+                });
+                const premium = shortPut({
+                    tradeDate: '2026-06-02', contracts: -1, price: 1,
+                    expiry: '20260717',
+                });
+                const open = core.computeLedger([shortSale, premium]).combined;
+                assert.equal(open.isShort, true);
+                assert.equal(open.stockAvgCost, 50);
+                assert.equal(open.blendedCost, 50);
+                assert.equal(open.blendedCostIfExpired, 51);
+
+                const expired = event({
+                    kind: 'option_expiry', tradeDate: '2026-07-17',
+                    right: 'P', strike: 45, expiry: '20260717', contracts: 1,
+                    sharesPerContract: 100, cashAmount: 0,
+                });
+                const closed = core.computeLedger(
+                    [shortSale, premium, expired]).combined;
+                assert.equal(closed.shares, -100);
+                assert.equal(closed.blendedCost, 51);
+                assert.equal(closed.breakEvenPrice, 51);
+                assert.ok(closed.warnings.includes('net_short_shares'));
+                assert.equal(core.summarizeCost(closed, 'net_cash').state, 'short');
+            },
+        },
+        {
             name: 'a covered call assignment leaves no short warning',
             run() {
                 const core = loadCore();
