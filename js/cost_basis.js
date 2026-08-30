@@ -74,6 +74,13 @@
             'rollToExpiry', 'rollToPrice', 'rollGroup'],
     };
 
+    // Short names for the same lenses, matching the 口径 selector's options.
+    const BASIS_LABELS = {
+        net_cash: '净现金',
+        stock_only: '纯股票均价',
+        tax_adjusted: '税务调整',
+    };
+
     const BASIS_EXPLAINERS = {
         net_cash: '净现金口径：按股票净投入扣除已实现权利金，再除以持股数。'
             + '累计净现金始终按账户视角显示：收到为正、付出为负。'
@@ -120,6 +127,7 @@
         positionsTimer: null,
         requestCounter: 0,
         pending: new Map(),
+        activeView: 'ledger',
     };
 
     // ------------------------------------------------------------------
@@ -215,6 +223,22 @@
         return Number(value).toLocaleString('en-US', { maximumFractionDigits: 4 });
     }
 
+    /** Current notional and P&L versus the cost lens visible in the hero. */
+    function computeMarketMetrics(referencePrice, exposure, blendedCost) {
+        const price = Number(referencePrice);
+        const quantity = Number(exposure);
+        if (referencePrice === null || referencePrice === undefined
+            || !Number.isFinite(price) || !Number.isFinite(quantity)) {
+            return { marketValue: null, dilutedPnl: null };
+        }
+        const marketValue = price * quantity;
+        const cost = Number(blendedCost);
+        const dilutedPnl = blendedCost === null || blendedCost === undefined
+            || !Number.isFinite(cost)
+            ? null : (price - cost) * quantity;
+        return { marketValue, dilutedPnl };
+    }
+
     function _text(node, value) {
         if (node) node.textContent = value;
     }
@@ -258,21 +282,40 @@
     function _setConnection(nextState) {
         state.connection = nextState;
         const banner = $('connection-banner');
+        const labels = {
+            connected: '已连接',
+            connecting: '连接中…',
+            unavailable: '账本库不可用',
+            disconnected: '未连接',
+        };
         if (banner) {
             banner.dataset.state = nextState;
-            banner.textContent = {
-                connected: '已连接',
-                connecting: '连接中…',
-                unavailable: '账本库不可用',
-                disconnected: '未连接',
-            }[nextState] || nextState;
+            banner.textContent = labels[nextState] || nextState;
         }
+        const topbar = $('topbar-connection');
+        if (topbar) {
+            topbar.dataset.state = nextState;
+            const label = topbar.querySelector('span');
+            _text(label, nextState === 'connected'
+                ? '后端已连接' : (labels[nextState] || nextState));
+        }
+        _text($('settings-connection-label'), labels[nextState] || nextState);
+        const orb = globalScope.document.querySelector('.connection-orb');
+        if (orb) orb.dataset.state = nextState;
         _refreshControls();
+        if (!state.books.length
+            && (nextState === 'disconnected' || nextState === 'unavailable')) {
+            _renderSidebarBooks();
+            _showView('settings');
+        }
     }
 
     function connect() {
         const host = _readStorage(WS_HOST_STORAGE_KEY, DEFAULT_WS_HOST);
         const port = _readStorage(WS_PORT_STORAGE_KEY, String(DEFAULT_WS_PORT));
+        if ($('server-host')) $('server-host').value = host;
+        if ($('server-port')) $('server-port').value = port;
+        _text($('sidebar-server-address'), `${host}:${port}`);
         _setConnection('connecting');
         let socket;
         try {
@@ -623,7 +666,9 @@
             state.resetPlan = null;
             state.importResult = null;
             state.importText = '';
+            _renderSidebarBooks();
             _renderAll();
+            _showView('settings');
             return;
         }
         state.books.forEach((book) => {
@@ -638,11 +683,99 @@
             state.bookId = state.books[0].bookId;
         }
         select.value = state.bookId;
+        _renderSidebarBooks();
         await _loadEvents();
     }
 
     function _currentBook() {
         return state.books.find((book) => book.bookId === state.bookId) || null;
+    }
+
+    function _showView(view) {
+        const next = view === 'settings' ? 'settings' : 'ledger';
+        state.activeView = next;
+        $('ledger-view').hidden = next !== 'ledger';
+        $('settings-view').hidden = next !== 'settings';
+        $('btn-open-settings').classList.toggle('active', next === 'settings');
+        Array.from($('book-sidebar-list').querySelectorAll('[data-book-id]'))
+            .forEach((button) => button.classList.toggle(
+                'active', next === 'ledger' && button.dataset.bookId === state.bookId));
+        const book = _currentBook();
+        _text($('page-eyebrow'), next === 'settings'
+            ? '系统管理' : '综合成本账本');
+        _text($('page-title'), next === 'settings'
+            ? '设置与新建账本'
+            : (book ? `${book.account || '旧版账户'} / ${book.symbol}` : '请选择账本'));
+        globalScope.document.body.classList.remove('sidebar-open');
+    }
+
+    function _renderSidebarBooks() {
+        const container = $('book-sidebar-list');
+        if (!container) return;
+        _clear(container);
+        if (!state.books.length) {
+            const empty = globalScope.document.createElement('p');
+            empty.className = 'sidebar-empty';
+            empty.textContent = state.status && state.status.available
+                ? '还没有账本。请从下方设置页创建。'
+                : '连接后显示已建立的账本。';
+            container.appendChild(empty);
+            return;
+        }
+        const groups = new Map();
+        state.books.forEach((book) => {
+            const account = book.account || '旧版未限定账户';
+            if (!groups.has(account)) groups.set(account, []);
+            groups.get(account).push(book);
+        });
+        groups.forEach((books, account) => {
+            const group = globalScope.document.createElement('div');
+            group.className = 'account-group';
+            const heading = globalScope.document.createElement('div');
+            heading.className = 'account-heading';
+            heading.textContent = account;
+            group.appendChild(heading);
+            books.sort((left, right) => String(left.symbol).localeCompare(String(right.symbol)))
+                .forEach((book) => {
+                    const button = globalScope.document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'nav-item book-nav-item';
+                    button.dataset.bookId = book.bookId;
+                    const symbolMark = globalScope.document.createElement('span');
+                    symbolMark.className = 'book-symbol';
+                    symbolMark.textContent = String(book.symbol || '?').slice(0, 3);
+                    const labels = globalScope.document.createElement('span');
+                    const title = globalScope.document.createElement('strong');
+                    title.textContent = book.symbol || '未知标的';
+                    const meta = globalScope.document.createElement('small');
+                    meta.textContent = `${book.secType || 'STK'} · ${book.eventCount || 0} 条事件`;
+                    labels.appendChild(title);
+                    labels.appendChild(meta);
+                    button.appendChild(symbolMark);
+                    button.appendChild(labels);
+                    button.classList.toggle('active', state.activeView === 'ledger'
+                        && book.bookId === state.bookId);
+                    button.addEventListener('click', async () => {
+                        if (state.bookId !== book.bookId) {
+                            state.bookId = book.bookId;
+                            $('book-select').value = book.bookId;
+                            state.avgCostByAccount = {};
+                            state.marketPrice = null;
+                            state.importResult = null;
+                            state.importText = '';
+                            $('import-file').value = '';
+                            $('import-replace').checked = false;
+                            $('import-confirm').value = '';
+                            await _loadEvents();
+                            await _refreshResetPlan();
+                            _renderImportPreview();
+                        }
+                        _showView('ledger');
+                    });
+                    group.appendChild(button);
+                });
+            container.appendChild(group);
+        });
     }
 
     function _positionsForBook(book) {
@@ -822,11 +955,14 @@
         const node = $('positions-status');
         if (!state.positionsAt) {
             _text(node, '未获取');
+            _text($('settings-positions-status'), '未获取');
             return;
         }
-        _text(node, state.positionsConnected
+        const label = state.positionsConnected
             ? `${state.positionsAt} · ${state.positions.length} 条持仓`
-            : `${state.positionsAt} · TWS 未连接，数量不可信`);
+            : `${state.positionsAt} · TWS 未连接，数量不可信`;
+        _text(node, label);
+        _text($('settings-positions-status'), label);
     }
 
     function canReconcilePositions(positionsAt, positionsConnected) {
@@ -886,6 +1022,7 @@
         const node = $('book-meta');
         if (!book) {
             _text(node, '未选择账本。');
+            if (state.activeView === 'ledger') _text($('page-title'), '请选择账本');
             return;
         }
         const futures = String(book.secType || 'STK').toUpperCase() === 'FUT';
@@ -895,6 +1032,9 @@
             + ` · ${state.eventsTotal} 条事件`
             + (book.firstEventDate ? ` · ${book.firstEventDate} 至 ${book.lastEventDate}` : '')
             + (!book.account ? ' · 兼容模式：可包含多账户历史' : ''));
+        if (state.activeView === 'ledger') {
+            _text($('page-title'), `${book.account || '旧版账户'} / ${book.symbol}`);
+        }
     }
 
     function _summaryColumns() {
@@ -923,6 +1063,7 @@
     }
 
     function _renderSummary() {
+        _renderDashboardSummary();
         const table = $('summary-table');
         const head = table.querySelector('thead');
         const body = table.querySelector('tbody');
@@ -994,6 +1135,125 @@
 
         _renderWarnings();
         _renderReferenceSource();
+    }
+
+    /**
+     * Decide what the hero figure says for one cost lens.
+     *
+     * `no_shares`/`no_futures` is the ONLY unavailable state with a lifetime
+     * figure behind it. Every other one leaves an open position whose
+     * selected lens simply has no number, and captioning that "no position"
+     * asserts something the ledger does not support.
+     *
+     * The incompleteness marker rides on every path that puts a figure at
+     * the top of the page, closed-out books included: a premium-less
+     * prior_open stub taints a lifetime net-cash total exactly as much as a
+     * per-share cost. The detail table already says so, and the hero must
+     * not read as the more confident of the two.
+     */
+    function describeHeadlineCost(rendered, options) {
+        const futures = Boolean(options && options.futures);
+        const basisMode = (options && options.basisMode) || 'net_cash';
+        const marks = [];
+        let source;
+        let caption;
+        if (rendered.state === 'no_shares' || rendered.state === 'no_futures') {
+            source = 'lifetime_net_cash';
+            caption = futures
+                ? '当前无 FUT 持仓：显示全周期累计净现金'
+                : '当前无持股：显示全周期累计净现金';
+        } else if (!rendered.available) {
+            source = 'unavailable';
+            caption = futures
+                ? '当前口径无可用成本'
+                : `当前口径（${BASIS_LABELS[basisMode] || basisMode}）无可用成本`;
+        } else {
+            source = 'cost';
+            caption = futures ? '每 FUT 点综合成本' : '每股综合成本';
+            if (rendered.state === 'recovered') {
+                marks.push('recovered');
+                caption += ' · 成本已全部收回';
+            } else if (rendered.state === 'short') {
+                marks.push('short');
+                caption += basisMode === 'net_cash'
+                    ? ' · 空头回补水位' : ' · 空头均价';
+            }
+        }
+        if (rendered.costIncomplete) {
+            marks.push('incomplete');
+            caption += ' · 成本不完整';
+        }
+        return { source, caption, marks };
+    }
+
+    function _renderDashboardSummary() {
+        const ids = ['headline-cost', 'headline-position', 'headline-expired-cost',
+            'headline-reference-price', 'headline-market-value',
+            'headline-diluted-pnl', 'headline-stock-cost', 'headline-tws-cost',
+            'headline-break-even', 'cash-net', 'cash-realized-premium',
+            'cash-open-premium', 'cash-dividends', 'cash-fees'];
+        if (!state.ledger || !_currentBook()) {
+            ids.forEach((id) => _text($(id), '—'));
+            _text($('headline-cost-caption'), '选择账本后显示');
+            $('headline-cost').className = 'hero-value';
+            $('headline-diluted-pnl').className = '';
+            return;
+        }
+        const book = _currentBook();
+        const summary = state.ledger.combined;
+        const futures = String(book.secType || 'STK').toUpperCase() === 'FUT';
+        const rendered = core.summarizeCost(summary, state.basisMode);
+        const headline = $('headline-cost');
+        headline.className = 'hero-value';
+        const hero = describeHeadlineCost(rendered,
+            { futures, basisMode: state.basisMode });
+        if (hero.source === 'lifetime_net_cash') {
+            _text(headline, _signedMoney(rendered.lifetimeNetCash));
+        } else if (hero.source === 'unavailable') {
+            _text(headline, '—');
+        } else {
+            _text(headline, `${book.currency || 'USD'} ${_money(rendered.value, 4)}`);
+        }
+        hero.marks.forEach((mark) => headline.classList.add(mark));
+        _text($('headline-cost-caption'), hero.caption);
+        _text($('headline-position'), _quantity(futures
+            ? summary.futuresContracts : summary.shares));
+        _text($('headline-expired-cost'), summary.blendedCostIfExpired === null
+            ? '—' : _money(summary.blendedCostIfExpired, 4));
+        const reference = state.referencePrice !== null
+            ? state.referencePrice : state.marketPrice;
+        _text($('headline-reference-price'), reference === null
+            ? '—' : _money(reference, 4));
+        const exposure = futures ? summary.futureExposure : summary.shares;
+        const currency = book.currency || 'USD';
+        const marketMetrics = computeMarketMetrics(
+            reference, exposure, rendered.available ? rendered.value : null);
+        const marketValue = marketMetrics.marketValue;
+        _text($('headline-market-value'), marketValue === null
+            ? '—' : `${currency} ${_money(marketValue)}`);
+        const dilutedPnl = marketMetrics.dilutedPnl;
+        const pnlNode = $('headline-diluted-pnl');
+        pnlNode.className = dilutedPnl > 0
+            ? 'metric-positive' : (dilutedPnl < 0 ? 'metric-negative' : '');
+        _text(pnlNode, dilutedPnl === null
+            ? '—' : `${currency} ${_signedMoney(dilutedPnl)}`);
+        _text($('headline-stock-cost'), (futures
+            ? summary.futuresAvgCost : summary.stockAvgCost) === null
+            ? '—' : _money(futures ? summary.futuresAvgCost : summary.stockAvgCost, 4));
+        const accountKey = book.account || 'combined';
+        const twsEntry = _twsAvgCostFor({ key: accountKey, summary });
+        _text($('headline-tws-cost'), twsEntry && Number.isFinite(twsEntry.avgCost)
+            ? _money(twsEntry.avgCost, 4) : '—');
+        _text($('headline-break-even'), summary.breakEvenPrice === null
+            ? '—' : _money(summary.breakEvenPrice, 4));
+        _text($('cash-net'), _signedMoney(summary.netCash));
+        _text($('cash-realized-premium'), _signedMoney(summary.realizedPremium));
+        _text($('cash-open-premium'), _signedMoney(summary.openPremium));
+        _text($('cash-dividends'), _signedMoney(futures
+            ? summary.futuresRealizedPnl : summary.dividends));
+        _text($('cash-dividends-caption'), futures
+            ? 'FUT 换月 / 平仓已实现损益' : '股息');
+        _text($('cash-fees'), _signedMoney(-Math.abs(Number(summary.fees) || 0)));
     }
 
     function _summaryRow(body, label, columns, render) {
@@ -1237,8 +1497,11 @@
 
     function _renderReconciliation() {
         const body = $('reconcile-table').querySelector('tbody');
+        const badge = $('position-match-badge');
         _clear(body);
         if (!state.reconciliation) {
+            badge.className = 'soft-badge';
+            _text(badge, !state.positionsAt ? '尚未拉取' : 'TWS 不可用');
             const row = globalScope.document.createElement('tr');
             const cell = globalScope.document.createElement('td');
             cell.colSpan = 8;
@@ -1253,6 +1516,8 @@
             return;
         }
         if (!state.reconciliation.rows.length) {
+            badge.className = 'soft-badge ok';
+            _text(badge, '无持仓差异');
             const row = globalScope.document.createElement('tr');
             const cell = globalScope.document.createElement('td');
             cell.colSpan = 8;
@@ -1262,6 +1527,12 @@
             body.appendChild(row);
             return;
         }
+
+        const mismatches = state.reconciliation.rows.filter((entry) => (
+            entry.status !== 'match' && entry.status !== 'explained'));
+        badge.className = mismatches.length ? 'soft-badge warn' : 'soft-badge ok';
+        _text(badge, mismatches.length
+            ? `${mismatches.length} 项待核对` : '持仓数量一致');
 
         state.reconciliation.rows.forEach((entry) => {
             const adoption = state.positionsConnected
@@ -1463,7 +1734,20 @@
         $('btn-submit-event').disabled = !hasBook;
         $('btn-export-csv').disabled = !hasBook;
         $('btn-save-snapshot').disabled = !hasBook;
-        $('import-file').disabled = !hasBook || !importer;
+        // The input itself is visually hidden behind its label, and clicking
+        // a label bound to a disabled input does nothing at all. Without
+        // this the label stays a live-looking primary button that silently
+        // swallows the click.
+        const importDisabled = !hasBook || !importer;
+        $('import-file').disabled = importDisabled;
+        const importLabel = globalScope.document
+            .querySelector('label[for="import-file"]');
+        if (importLabel) {
+            importLabel.classList.toggle('is-disabled', importDisabled);
+            importLabel.setAttribute('aria-disabled', String(importDisabled));
+            importLabel.title = importDisabled
+                ? (hasBook ? 'CSV 导入模块未加载' : '请先选择账本') : '';
+        }
         const replacing = $('import-replace').checked === true;
         const phraseOk = !replacing || Boolean(state.resetPlan
             && $('import-confirm').value.trim() === state.resetPlan.phrase);
@@ -1581,6 +1865,8 @@
 
     function _fillForm(draft) {
         const book = _currentBook();
+        _showView('ledger');
+        $('manual-entry-details').open = true;
         $('field-kind').value = draft.kind;
         _applyKindVisibility();
         $('field-date').value = draft.tradeDate || _todayIso();
@@ -1989,9 +2275,12 @@
             wrap.hidden = true;
             problemWrap.hidden = true;
             $('import-blocked').hidden = true;
+            $('import-workspace').hidden = !state.importText;
             _refreshControls();
             return;
         }
+
+        $('import-workspace').hidden = false;
 
         const result = state.importResult;
         const kinds = Object.keys(result.summary.byKind)
@@ -2161,6 +2450,8 @@
     function _handleImportFile(changeEvent) {
         const file = changeEvent.target.files && changeEvent.target.files[0];
         if (!file || !importer) return;
+        $('import-workspace').hidden = false;
+        _text($('import-summary'), `正在读取 ${file.name}…`);
         const reader = new globalScope.FileReader();
         reader.onload = () => {
             state.importText = String(reader.result || '');
@@ -2470,10 +2761,10 @@
                 defaultSharesPerContract: multiplier,
                 secType: $('new-book-type').value,
             });
-            $('new-book-form').hidden = true;
             $('new-book-symbol').value = '';
             state.bookId = response.book ? response.book.bookId : state.bookId;
             await _loadBooks();
+            _showView('ledger');
         } catch (error) {
             globalScope.alert(`创建账本失败：${error.message}`);
         }
@@ -2482,6 +2773,37 @@
     // ------------------------------------------------------------------
     // Wiring
     // ------------------------------------------------------------------
+
+    function _reconnectConfiguredServer() {
+        const host = String($('server-host').value || '').trim();
+        const port = Number($('server-port').value);
+        if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+            globalScope.alert('请填写有效的服务器地址和 1–65535 端口。');
+            return;
+        }
+        try {
+            globalScope.localStorage.setItem(WS_HOST_STORAGE_KEY, host);
+            globalScope.localStorage.setItem(WS_PORT_STORAGE_KEY, String(port));
+        } catch (_) {
+            globalScope.alert('浏览器无法保存连接设置，请检查本地存储权限。');
+            return;
+        }
+        if (state.reconnectTimer) {
+            globalScope.clearTimeout(state.reconnectTimer);
+            state.reconnectTimer = null;
+        }
+        const previous = state.ws;
+        state.ws = null;
+        _failPending('服务器连接已重置');
+        _invalidatePositions();
+        _invalidateManagedAccounts();
+        if (previous) {
+            try { previous.close(); } catch (_) { /* a fresh connection follows */ }
+        }
+        state.reconnectDelay = RECONNECT_BASE_DELAY_MS;
+        _text($('sidebar-server-address'), `${host}:${port}`);
+        connect();
+    }
 
     function _wire() {
         $('book-select').addEventListener('change', async (changeEvent) => {
@@ -2497,15 +2819,22 @@
             await _loadEvents();
             await _refreshResetPlan();
             _renderImportPreview();
+            _renderSidebarBooks();
+            _showView('ledger');
         });
         $('btn-new-book').addEventListener('click', () => {
-            const form = $('new-book-form');
-            form.hidden = !form.hidden;
-            if (!form.hidden) $('new-book-start').value = _todayIso();
+            _showView('settings');
+            $('new-book-start').value = _todayIso();
+            $('new-book-symbol').focus();
         });
         $('btn-cancel-book').addEventListener('click', () => {
-            $('new-book-form').hidden = true;
+            _showView(state.bookId ? 'ledger' : 'settings');
         });
+        $('btn-open-settings').addEventListener('click', () => _showView('settings'));
+        $('btn-sidebar-toggle').addEventListener('click', () => {
+            globalScope.document.body.classList.toggle('sidebar-open');
+        });
+        $('btn-reconnect-server').addEventListener('click', _reconnectConfiguredServer);
         $('new-book-account').addEventListener('change', () => {
             _renderManagedAccounts($('new-book-account').value);
             _refreshControls();
@@ -2589,6 +2918,7 @@
         });
 
         $('field-date').value = _todayIso();
+        $('new-book-start').value = _todayIso();
         _applyKindVisibility();
     }
 
@@ -2611,6 +2941,8 @@
         KIND_LABELS,
         BASIS_EXPLAINERS,
         formatSignedMoney: _signedMoney,
+        computeMarketMetrics,
+        describeHeadlineCost,
         canReconcilePositions,
         buildImportBaseline,
         planTwsBaselineSupersession,
