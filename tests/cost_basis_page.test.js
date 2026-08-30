@@ -682,6 +682,87 @@ module.exports = {
             },
         },
         {
+            name: 'market value and diluted P&L use the visible cost lens',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const gain = page.computeMarketMetrics(70, 200, 64.4206);
+                assert.equal(gain.marketValue, 14000);
+                assert.ok(Math.abs(gain.dilutedPnl - 1115.88) < 1e-9);
+                const loss = page.computeMarketMetrics(60, 200, 64.4206);
+                assert.equal(loss.marketValue, 12000);
+                assert.ok(Math.abs(loss.dilutedPnl - (-884.12)) < 1e-9);
+                // The same signed equation correctly values a short: a
+                // price below its buy-back waterline is a positive result.
+                const shortGain = page.computeMarketMetrics(60, -200, 64.4206);
+                assert.equal(shortGain.marketValue, -12000);
+                assert.ok(Math.abs(shortGain.dilutedPnl - 884.12) < 1e-9);
+                const unavailable = page.computeMarketMetrics(null, 200, 64.4206);
+                assert.equal(unavailable.marketValue, null);
+                assert.equal(unavailable.dilutedPnl, null);
+            },
+        },
+        {
+            name: 'the hero never claims "no position" for a lens with no figure',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                // Shares are held; only the selected lens has no number.
+                const noLens = page.describeHeadlineCost(
+                    { available: false, state: 'no_data', costIncomplete: false },
+                    { futures: false, basisMode: 'tax_adjusted' });
+                assert.equal(noLens.source, 'unavailable');
+                assert.doesNotMatch(noLens.caption, /无持股|无 FUT 持仓/);
+                assert.match(noLens.caption, /税务调整/);
+                // Only a genuinely flat book falls back to lifetime net cash.
+                const flat = page.describeHeadlineCost(
+                    { available: false, state: 'no_shares', costIncomplete: false },
+                    { futures: false, basisMode: 'net_cash' });
+                assert.equal(flat.source, 'lifetime_net_cash');
+                assert.match(flat.caption, /当前无持股/);
+            },
+        },
+        {
+            name: 'the hero marks an incomplete cost on every path that shows a figure',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                // A closed-out book carrying a premium-less prior_open stub
+                // still shows a lifetime figure, and it is exactly as
+                // incomplete as a per-share cost would be.
+                const closed = page.describeHeadlineCost(
+                    { available: false, state: 'no_shares', costIncomplete: true },
+                    { futures: false, basisMode: 'net_cash' });
+                assert.equal(closed.source, 'lifetime_net_cash');
+                assert.ok(closed.marks.includes('incomplete'));
+                assert.match(closed.caption, /成本不完整/);
+                const open = page.describeHeadlineCost(
+                    { available: true, state: 'normal', value: 64.42, costIncomplete: true },
+                    { futures: false, basisMode: 'net_cash' });
+                assert.ok(open.marks.includes('incomplete'));
+                const clean = page.describeHeadlineCost(
+                    { available: true, state: 'short', value: 64.42, costIncomplete: false },
+                    { futures: false, basisMode: 'net_cash' });
+                // The sandbox has its own Array realm, so compare contents.
+                assert.equal(Array.from(clean.marks).join(','), 'short');
+                assert.match(clean.caption, /空头回补水位/);
+            },
+        },
+        {
+            name: 'the CSV import label carries its own disabled affordance',
+            run() {
+                const html = readPage();
+                // The input is visually hidden, so clicking its label while
+                // the input is disabled does nothing at all - the label has
+                // to look dead on its own or it swallows the click silently.
+                assert.match(html,
+                    /<label for="import-file" class="file-button is-disabled"/);
+                const source = readScript();
+                assert.match(source, /label\[for="import-file"\]/);
+                const css = fs.readFileSync(
+                    path.join(PROJECT_ROOT, 'cost_basis.css'), 'utf8');
+                assert.match(css, /\.file-button\.is-disabled[^}]*pointer-events:\s*none/);
+                assert.doesNotMatch(css, /\.file-button:hover/);
+            },
+        },
+        {
             name: 'the summary presents negative shares as a supported short waterline',
             run() {
                 const page = loadPage().OptionComboCostBasisPage;
