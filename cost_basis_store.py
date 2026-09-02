@@ -43,7 +43,7 @@ from pathlib import Path
 
 from portfolio_store import default_app_data_dir
 
-SCHEMA_USER_VERSION = 5
+SCHEMA_USER_VERSION = 7
 
 MAX_SYMBOL_CHARS = 32
 MAX_ACCOUNT_CHARS = 32
@@ -54,6 +54,7 @@ MAX_EXTERNAL_REF_CHARS = 128
 MAX_IMPORT_EVENTS = 5000
 DEFAULT_EVENT_PAGE_SIZE = 200
 MAX_EVENT_PAGE_SIZE = 2000
+MAX_SQLITE_INTEGER = (1 << 63) - 1
 
 # A stored cash amount further than this from the amount derived off
 # quantity x price x multiplier is flagged (never rejected): brokers really
@@ -266,6 +267,8 @@ _SCHEMA_STATEMENTS = (
         import_batch_id     TEXT,
         derived_mismatch    INTEGER NOT NULL DEFAULT 0
                             CHECK (derived_mismatch IN (0, 1)),
+        allow_overdraw      INTEGER NOT NULL DEFAULT 0
+                            CHECK (allow_overdraw IN (0, 1)),
         note                TEXT NOT NULL DEFAULT '',
         created_at_utc      TEXT NOT NULL,
         voided_at_utc       TEXT,
@@ -335,7 +338,7 @@ _EVENT_COLUMNS = (
     'roll_to_expiry', 'roll_to_con_id', 'roll_to_local_symbol', 'roll_to_price',
     'roll_group', 'price', 'cash_amount',
     'fees', 'split_ratio', 'include_in_cost', 'tag', 'source', 'external_ref',
-    'import_batch_id', 'derived_mismatch', 'note', 'created_at_utc',
+    'import_batch_id', 'derived_mismatch', 'allow_overdraw', 'note', 'created_at_utc',
     'voided_at_utc', 'voided_by_event_id', 'void_reason',
 )
 
@@ -482,6 +485,24 @@ def _number(value, field, *, allow_none=True):
     return round(number, 6)
 
 
+def _json_for_storage(value, field):
+    """Encode browser-visible JSON without JavaScript-invalid NaN tokens."""
+    try:
+        return json.dumps(
+            value, ensure_ascii=False, sort_keys=True,
+            separators=(',', ':'), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise InvalidRequestError(
+            f'{field} must contain only JSON values and finite numbers') from exc
+
+
+def _json_from_snapshot(value):
+    """Keep legacy non-finite snapshots listable as valid JSON responses."""
+    if value in (None, ''):
+        return None
+    return json.loads(value, parse_constant=lambda _constant: None)
+
+
 def _positive_int(value, field, *, allow_none=True):
     if value is None or value == '':
         if allow_none:
@@ -546,6 +567,11 @@ def future_key(event, *, roll_target=False):
     ))
 
 
+def _normalized_local_symbol(value):
+    """Ignore presentation-only whitespace when comparing broker identities."""
+    return ' '.join(str(value or '').split()).upper()
+
+
 def _resolve_contract_identity_rows(rows):
     """Group one structural contract timeline by its real broker identity.
 
@@ -560,20 +586,20 @@ def _resolve_contract_identity_rows(rows):
         if row['con_id'] not in (None, '')
     }
     local_symbols = {
-        str(row['local_symbol']).strip().upper() for row in rows
+        _normalized_local_symbol(row['local_symbol']) for row in rows
         if row['local_symbol']
     }
     local_to_con_ids = {}
     for row in rows:
         if row['con_id'] in (None, '') or not row['local_symbol']:
             continue
-        local_symbol = str(row['local_symbol']).strip().upper()
+        local_symbol = _normalized_local_symbol(row['local_symbol'])
         local_to_con_ids.setdefault(local_symbol, set()).add(str(row['con_id']))
 
     resolved = []
     for row in rows:
         con_id = '' if row['con_id'] in (None, '') else str(row['con_id'])
-        local_symbol = str(row['local_symbol'] or '').strip().upper()
+        local_symbol = _normalized_local_symbol(row['local_symbol'])
         ambiguous = False
         if con_id:
             identity = f'con:{con_id}'
@@ -612,21 +638,24 @@ def _exact_event_timestamp(event):
             explicit = event.get(field) if hasattr(event, 'get') else None
         if explicit and _BROKER_TIMESTAMP_FIELD_RE.match(str(explicit)):
             return str(explicit)
-    note = str(event.get('note') or '')
-    match = _BROKER_TIMESTAMP_RE.search(note)
-    if match:
-        return (
-            f'{match.group(1)}T{match.group(2).zfill(2)}:'
-            f'{match.group(3)}:{match.group(4) or "00"}'
-        )
+    source = event.get('source') if hasattr(event, 'get') else event['source']
+    tag = event.get('tag') if hasattr(event, 'get') else event['tag']
+    trusted_note = source in ('csv_import', 'execution_report') \
+        or (source == 'reconcile' and tag == 'tws_snapshot')
+    if trusted_note:
+        note = str(event.get('note') or '')
+        match = _BROKER_TIMESTAMP_RE.search(note)
+        if match:
+            return (
+                f'{match.group(1)}T{match.group(2).zfill(2)}:'
+                f'{match.group(3)}:{match.group(4) or "00"}'
+            )
 
     # Legacy TWS baselines predate the note-level snapshot timestamp, but
     # their immutable SQLite creation time is still exact. Both the browser
     # snapshot and IBKR Activity Statement are recorded in this machine's
     # local time, so convert UTC back to local for the same comparison. A
     # timezone/date disagreement stays ambiguous and therefore fail-closed.
-    source = event.get('source') if hasattr(event, 'get') else event['source']
-    tag = event.get('tag') if hasattr(event, 'get') else event['tag']
     if source != 'reconcile' or tag != 'tws_snapshot':
         return ''
     created = (event.get('createdAtUtc') or event.get('created_at_utc') or '') \
@@ -664,6 +693,31 @@ def _event_may_overlap_tws_snapshot(event, baseline):
     if exact_snapshot and exact_event:
         return exact_event <= exact_snapshot
     return event['trade_date'] <= baseline['tradeDate']
+
+
+def _single_execution_reconstructs_option_baseline(baseline, matching,
+                                                   incoming_rows):
+    """Prove that one API fill is the exact economics behind a baseline."""
+    baseline_contracts = float(baseline.get('contracts') or 0)
+    baseline_cash = baseline.get('cashAmount')
+    if baseline_cash is None:
+        return False
+    baseline_cash = float(baseline_cash)
+    for item in matching:
+        if (item['source'] != 'execution_report' or item['tag'] != 'ibkr_exec'
+                or abs(float(item['contracts'] or 0) - baseline_contracts) >= 1e-6):
+            continue
+        execution_cash = float(item['cash_amount'] or 0)
+        rebate_ref = f"{item['external_ref'] or ''}-rebate"
+        execution_cash += sum(
+            float(row['cash_amount'] or 0) for row in incoming_rows
+            if row['source'] == 'execution_report'
+            and row['tag'] == 'ibkr_rebate'
+            and row['external_ref'] == rebate_ref
+        )
+        if abs(execution_cash - baseline_cash) < 0.011:
+            return True
+    return False
 
 
 def _future_deltas(event):
@@ -1162,6 +1216,12 @@ class CostBasisStore:
             version = 4
         if version == 4:
             self._migrate_v4_to_v5(conn)
+            version = 5
+        if version == 5:
+            self._migrate_v5_to_v6(conn)
+            version = 6
+        if version == 6:
+            self._migrate_v6_to_v7(conn)
             return
         object_count = conn.execute('SELECT count(*) FROM sqlite_master').fetchone()[0]
         if object_count > 0:
@@ -1261,6 +1321,81 @@ class CostBasisStore:
                 'DROP INDEX IF EXISTS idx_cost_basis_books_account_symbol')
             conn.execute(_SCHEMA_STATEMENTS[1])
             conn.execute('PRAGMA user_version = 5')
+            conn.execute('COMMIT')
+        except BaseException:
+            conn.execute('ROLLBACK')
+            raise
+
+    @staticmethod
+    def _migrate_v5_to_v6(conn):
+        """Persist the event that received an explicit overdraw exception.
+
+        Older builds stored only the request flag. Recover existing exceptions
+        conservatively: a closing row that already overdraws the timeline could
+        only have committed through that explicit escape hatch, because normal
+        writes were rejected transactionally.
+        """
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            columns = {
+                row['name'] for row in conn.execute(
+                    'PRAGMA table_info(cost_basis_events)').fetchall()
+            }
+            if 'allow_overdraw' not in columns:
+                conn.execute(
+                    'ALTER TABLE cost_basis_events ADD COLUMN allow_overdraw '
+                    'INTEGER NOT NULL DEFAULT 0 CHECK (allow_overdraw IN (0, 1))')
+            groups = conn.execute(
+                'SELECT DISTINCT book_id, account, right, strike, expiry, '
+                'shares_per_contract FROM cost_basis_events '
+                'WHERE voided_at_utc IS NULL AND kind IN ('
+                "'option_trade','option_assignment','option_exercise','option_expiry')"
+            ).fetchall()
+            for group in groups:
+                rows = conn.execute(
+                    'SELECT event_id, kind, trade_date, broker_timestamp, seq, '
+                    'contracts, con_id, local_symbol, tag, allow_overdraw '
+                    'FROM cost_basis_events WHERE book_id = ? AND account = ? '
+                    'AND right IS ? AND strike IS ? AND expiry IS ? '
+                    'AND shares_per_contract IS ? AND voided_at_utc IS NULL '
+                    f'ORDER BY {_EVENT_ORDER_SQL}',
+                    tuple(group),
+                ).fetchall()
+                positions = {}
+                for row, identity, ambiguous in _resolve_contract_identity_rows(rows):
+                    if ambiguous:
+                        continue
+                    position = positions.get(identity, 0.0)
+                    contracts = float(row['contracts'] or 0)
+                    broker_close = row['kind'] == 'option_trade' \
+                        and row['tag'] == 'ibkr_close'
+                    closing = row['kind'] in CLOSING_KINDS or broker_close
+                    overdraw = closing and (
+                        (contracts > 0 and position > -contracts + 1e-9)
+                        or (contracts < 0 and position < -contracts - 1e-9))
+                    if overdraw and not broker_close:
+                        conn.execute(
+                            'UPDATE cost_basis_events SET allow_overdraw = 1 '
+                            'WHERE event_id = ?', (row['event_id'],))
+                    positions[identity] = position + contracts
+            conn.execute('PRAGMA user_version = 6')
+            conn.execute('COMMIT')
+        except BaseException:
+            conn.execute('ROLLBACK')
+            raise
+
+    @staticmethod
+    def _migrate_v6_to_v7(conn):
+        """Remove broker ordering stamps inferred from untrusted free-form notes."""
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            conn.execute(
+                "UPDATE cost_basis_events SET broker_timestamp = NULL "
+                "WHERE broker_timestamp IS NOT NULL "
+                "AND source NOT IN ('csv_import', 'execution_report') "
+                "AND NOT (source = 'reconcile' AND tag = 'tws_snapshot')"
+            )
+            conn.execute('PRAGMA user_version = 7')
             conn.execute('COMMIT')
         except BaseException:
             conn.execute('ROLLBACK')
@@ -1555,6 +1690,9 @@ class CostBasisStore:
                 if replay is not None:
                     conn.execute('ROLLBACK')
                     stored = _event_row_to_dict(replay)
+                    if stored['bookId'] != book_id:
+                        raise InvalidRequestError(
+                            'clientToken has already been used for another ledger')
                     return {
                         'bookId': stored['bookId'],
                         'event': stored,
@@ -1610,6 +1748,68 @@ class CostBasisStore:
             return {**event, 'sharesPerContract': int(rows[0][0])}
         return event
 
+    @staticmethod
+    def _option_multiplier_key(event):
+        """Return the same structural contract key used by single-row inference."""
+        return (
+            _optional_account(event.get('account')),
+            str(event.get('right') or '').strip().upper()[:1],
+            _number(event.get('strike'), 'strike'),
+            _optional_expiry(event.get('expiry')),
+        )
+
+    def _normalize_event_batch(self, conn, book_id, events, book, *,
+                               include_existing_history):
+        """Validate a batch while carrying known option multipliers forward.
+
+        A reviewed import may close an adjusted contract without repeating its
+        deliverable size on every row.  Single-row append already infers that
+        size from the ledger.  Bulk import must additionally see an earlier row
+        in the same incoming batch; rebuild must use only replacement rows,
+        because the old book is about to be archived and deleted.
+        """
+        known = {}
+        if include_existing_history:
+            rows = conn.execute(
+                'SELECT account, right, strike, expiry, shares_per_contract '
+                'FROM cost_basis_events WHERE book_id = ? '
+                'AND kind IN (\'option_trade\', \'option_assignment\', '
+                '\'option_exercise\', \'option_expiry\') '
+                'AND shares_per_contract IS NOT NULL AND voided_at_utc IS NULL',
+                (book_id,),
+            ).fetchall()
+            for row in rows:
+                key = (row['account'], row['right'], row['strike'], row['expiry'])
+                known.setdefault(key, set()).add(int(row['shares_per_contract']))
+
+        normalized_rows = []
+        for item in events:
+            candidate = _bind_event_to_book_account(item, book)
+            if (isinstance(candidate, dict)
+                    and candidate.get('kind') in OPTION_KINDS
+                    and not candidate.get('sharesPerContract')):
+                try:
+                    key = self._option_multiplier_key(candidate)
+                except CostBasisStoreError:
+                    # Shape validation below owns the precise user-facing error.
+                    key = None
+                values = known.get(key, set()) if key is not None else set()
+                if len(values) == 1:
+                    candidate = {
+                        **candidate,
+                        'sharesPerContract': next(iter(values)),
+                    }
+            normalized = _validate_event_shape(candidate, book)
+            normalized_rows.append(normalized)
+            if normalized['kind'] in OPTION_KINDS:
+                key = (
+                    normalized['account'], normalized['right'],
+                    normalized['strike'], normalized['expiry'],
+                )
+                known.setdefault(key, set()).add(
+                    int(normalized['shares_per_contract']))
+        return normalized_rows
+
     def _insert_event(self, conn, book, normalized, *, client_token,
                       allow_overdraw, import_batch_id=None,
                       check_share_warning=True):
@@ -1632,9 +1832,9 @@ class CostBasisStore:
             'roll_to_local_symbol, roll_to_price, roll_group, price, cash_amount, '
             'fees, split_ratio, '
             'include_in_cost, tag, source, external_ref, import_batch_id, '
-            'derived_mismatch, note, created_at_utc'
+            'derived_mismatch, allow_overdraw, note, created_at_utc'
             ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
-            '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (
                 event_id, book_id, seq, client_token, normalized['kind'],
                 normalized['trade_date'], normalized['broker_timestamp'],
@@ -1651,12 +1851,13 @@ class CostBasisStore:
                 normalized['split_ratio'],
                 normalized['include_in_cost'], normalized['tag'], normalized['source'],
                 normalized['external_ref'], import_batch_id,
-                normalized['derived_mismatch'], normalized['note'], stamp,
+                normalized['derived_mismatch'], 1 if allow_overdraw else 0,
+                normalized['note'], stamp,
             ),
         )
 
         warnings = self._validate_timeline(
-            conn, book_id, normalized, allow_overdraw=allow_overdraw,
+            conn, book_id, normalized,
             check_share_warning=check_share_warning)
 
         row = conn.execute(
@@ -1675,7 +1876,7 @@ class CostBasisStore:
             return
         rows = conn.execute(
             'SELECT event_id, kind, trade_date, broker_timestamp, seq, contracts, '
-            'con_id, local_symbol, tag '
+            'con_id, local_symbol, tag, allow_overdraw '
             'FROM cost_basis_events '
             'WHERE book_id = ? AND account = ? AND right = ? AND strike = ? '
             'AND expiry = ? AND shares_per_contract IS ? AND voided_at_utc IS NULL '
@@ -1699,16 +1900,21 @@ class CostBasisStore:
             if item['kind'] in CLOSING_KINDS or (
                     item['kind'] == 'option_trade'
                     and item['tag'] == 'ibkr_close'):
+                broker_close = item['kind'] == 'option_trade' \
+                    and item['tag'] == 'ibkr_close'
+                allowed = bool(item['allow_overdraw']) and not broker_close
                 if contracts > 0 and position > -contracts + 1e-9:
-                    raise PositionOverdrawError(
-                        f"voiding this row would leave the {item['kind']} on "
-                        f"{item['trade_date']} without an opening behind it"
-                    )
+                    if not allowed:
+                        raise PositionOverdrawError(
+                            f"voiding this row would leave the {item['kind']} on "
+                            f"{item['trade_date']} without an opening behind it"
+                        )
                 if contracts < 0 and position < -contracts - 1e-9:
-                    raise PositionOverdrawError(
-                        f"voiding this row would leave the {item['kind']} on "
-                        f"{item['trade_date']} without an opening behind it"
-                    )
+                    if not allowed:
+                        raise PositionOverdrawError(
+                            f"voiding this row would leave the {item['kind']} on "
+                            f"{item['trade_date']} without an opening behind it"
+                        )
             positions[identity] = position + contracts
 
     def _validate_futures_timeline(self, conn, book_id, account):
@@ -1739,7 +1945,7 @@ class CostBasisStore:
             if item[con_column] not in (None, ''):
                 marker['con_ids'].add(str(item[con_column]))
             if item[local_column]:
-                marker['locals'].add(str(item[local_column]).strip().upper())
+                marker['locals'].add(_normalized_local_symbol(item[local_column]))
             if len(marker['con_ids']) > 1 or (
                     not marker['con_ids'] and len(marker['locals']) > 1):
                 raise InvalidRequestError(
@@ -1799,7 +2005,7 @@ class CostBasisStore:
         return ['net_short_shares'] if any(
             shares < -1e-9 for shares in positions.values()) else []
 
-    def _validate_timeline(self, conn, book_id, normalized, *, allow_overdraw,
+    def _validate_timeline(self, conn, book_id, normalized, *,
                            check_share_warning=True):
         """Re-run the affected contract's timeline after the insert.
 
@@ -1821,7 +2027,7 @@ class CostBasisStore:
             rows = conn.execute(
                 'SELECT event_id, kind, trade_date, broker_timestamp, seq, '
                 'contracts, con_id, '
-                'local_symbol, tag '
+                'local_symbol, tag, allow_overdraw '
                 'FROM cost_basis_events '
                 'WHERE book_id = ? AND account = ? AND right = ? AND strike = ? '
                 'AND expiry = ? AND shares_per_contract IS ? AND voided_at_utc IS NULL '
@@ -1850,11 +2056,13 @@ class CostBasisStore:
                     if contracts > 0 and position > -contracts + 1e-9:
                         self._raise_or_warn_overdraw(
                             row, position, contracts,
-                            False if broker_close else allow_overdraw, warnings)
+                            False if broker_close else bool(row['allow_overdraw']),
+                            warnings)
                     elif contracts < 0 and position < -contracts - 1e-9:
                         self._raise_or_warn_overdraw(
                             row, position, contracts,
-                            False if broker_close else allow_overdraw, warnings)
+                            False if broker_close else bool(row['allow_overdraw']),
+                            warnings)
                 positions[identity] = position + contracts
 
         if check_share_warning \
@@ -1878,10 +2086,10 @@ class CostBasisStore:
         raise PositionOverdrawError(detail)
 
     def _validate_tws_supersessions(self, conn, book_id, event_ids, incoming_rows):
-        """Return active provisional rows that this CSV can fully replace.
+        """Return active provisional rows that broker history can replace.
 
         The browser supplies candidate ids for preview purposes, but the
-        store independently proves the economic condition: broker CSV rows
+        store independently proves the economic condition: broker-history rows
         at or before the snapshot must reconstruct the exact adopted
         quantity. A later incremental statement therefore cannot erase its
         opening basis, even if a buggy or forged client sends the id.
@@ -1930,7 +2138,7 @@ class CostBasisStore:
                     raise InvalidRequestError(
                         'ambiguous adopted TWS option baselines require manual review')
                 matching = [item for item in incoming_rows
-                            if item['source'] == 'csv_import'
+                            if item['source'] in ('csv_import', 'execution_report')
                             and item['tag'] != 'prior_open'
                             and item['contracts'] is not None
                             and contract_key(item) == structural
@@ -1943,11 +2151,14 @@ class CostBasisStore:
                         or (baseline_con_id and con_ids
                             and baseline_con_id not in con_ids)):
                     raise InvalidRequestError(
-                        'CSV contract identity does not prove this TWS baseline')
+                        'broker history contract identity does not prove this TWS baseline')
                 reconstructed = sum(float(item['contracts'] or 0) for item in matching)
-                if abs(reconstructed - float(row['contracts'] or 0)) >= 1e-6:
+                exact_api_execution = _single_execution_reconstructs_option_baseline(
+                    baseline, matching, incoming_rows)
+                if (abs(reconstructed - float(row['contracts'] or 0)) >= 1e-6
+                        and not exact_api_execution):
                     raise InvalidRequestError(
-                        'CSV history does not reconstruct the adopted TWS option quantity')
+                        'broker history does not reconstruct the adopted TWS option quantity')
             elif row['kind'] == 'futures_trade':
                 baseline_key = future_key(baseline)
                 siblings = conn.execute(
@@ -1966,7 +2177,8 @@ class CostBasisStore:
                 matching = []
                 con_ids = set()
                 for item in incoming_rows:
-                    if (item['source'] != 'csv_import' or item['tag'] == 'prior_open'
+                    if (item['source'] not in ('csv_import', 'execution_report')
+                            or item['tag'] == 'prior_open'
                             or not _event_precedes_tws_snapshot(item, baseline)):
                         continue
                     for key, delta in _future_deltas(item):
@@ -1982,10 +2194,10 @@ class CostBasisStore:
                         or (baseline_con_id and con_ids
                             and baseline_con_id not in con_ids)):
                     raise InvalidRequestError(
-                        'CSV FUT identity does not prove this TWS baseline')
+                        'broker history FUT identity does not prove this TWS baseline')
                 if abs(sum(matching) - float(row['future_contracts'] or 0)) >= 1e-6:
                     raise InvalidRequestError(
-                        'CSV history does not reconstruct the adopted TWS FUT quantity')
+                        'broker history does not reconstruct the adopted TWS FUT quantity')
             else:
                 siblings = conn.execute(
                     'SELECT * FROM cost_basis_events WHERE book_id = ? AND account = ? '
@@ -1998,18 +2210,18 @@ class CostBasisStore:
                     raise InvalidRequestError(
                         'ambiguous adopted TWS share baselines require manual review')
                 matching = [item for item in incoming_rows
-                            if item['source'] == 'csv_import'
+                            if item['source'] in ('csv_import', 'execution_report')
                             and item['tag'] != 'prior_open'
                             and item['account'] == row['account']
                             and item['shares'] is not None
                             and _event_precedes_tws_snapshot(item, baseline)]
                 if not matching:
                     raise InvalidRequestError(
-                        'CSV does not contain share history for this TWS baseline')
+                        'broker history does not contain shares for this TWS baseline')
                 reconstructed = sum(float(item['shares'] or 0) for item in matching)
                 if abs(reconstructed - float(row['shares'] or 0)) >= 1e-6:
                     raise InvalidRequestError(
-                        'CSV history does not reconstruct the adopted TWS share quantity')
+                        'broker history does not reconstruct the adopted TWS share quantity')
             selected.append(row)
         return selected
 
@@ -2018,7 +2230,7 @@ class CostBasisStore:
         """Never append history already economically covered by a baseline.
 
         Exact complete history is handled by supersession. No pre-snapshot
-        rows means an incremental CSV and is safe to append. Anything between
+        rows means an incremental import and is safe to append. Anything between
         those two states is partial/ambiguous overlap and must stop the whole
         batch instead of manufacturing an inverse prior_open quantity while
         retaining both cash flows.
@@ -2037,7 +2249,7 @@ class CostBasisStore:
             if row['kind'] == 'option_trade':
                 structural = contract_key(baseline)
                 overlaps = [item for item in incoming_rows
-                            if item['source'] == 'csv_import'
+                            if item['source'] in ('csv_import', 'execution_report')
                             and item['tag'] != 'prior_open'
                             and item['contracts'] is not None
                             and contract_key(item) == structural
@@ -2047,7 +2259,7 @@ class CostBasisStore:
                             and _event_may_overlap_tws_snapshot(item, baseline)]
             elif row['kind'] == 'opening_balance':
                 overlaps = [item for item in incoming_rows
-                            if item['source'] == 'csv_import'
+                            if item['source'] in ('csv_import', 'execution_report')
                             and item['tag'] != 'prior_open'
                             and item['account'] == row['account']
                             and item['shares'] is not None
@@ -2056,7 +2268,8 @@ class CostBasisStore:
                 baseline_key = future_key(baseline)
                 overlaps = []
                 for item in incoming_rows:
-                    if (item['source'] != 'csv_import' or item['tag'] == 'prior_open'
+                    if (item['source'] not in ('csv_import', 'execution_report')
+                            or item['tag'] == 'prior_open'
                             or not _event_may_overlap_tws_snapshot(item, baseline)):
                         continue
                     if any(key == baseline_key for key, _delta in _future_deltas(item)):
@@ -2065,7 +2278,7 @@ class CostBasisStore:
                 overlaps = []
             if overlaps:
                 raise InvalidRequestError(
-                    'CSV history overlaps an adopted TWS baseline but does not '
+                    'broker history overlaps an adopted TWS baseline but does not '
                     'safely supersede it; import a complete covering statement '
                     'or use reviewed rebuild')
 
@@ -2090,10 +2303,8 @@ class CostBasisStore:
         conn = self._connect()
         try:
             book = self._get_book(conn, book_id)
-            normalized_rows = [
-                _validate_event_shape(_bind_event_to_book_account(item, book), book)
-                for item in events
-            ]
+            normalized_rows = self._normalize_event_batch(
+                conn, book_id, events, book, include_existing_history=True)
             conn.execute('BEGIN IMMEDIATE')
             try:
                 existing_batch = conn.execute(
@@ -2129,7 +2340,7 @@ class CostBasisStore:
                         'UPDATE cost_basis_events SET voided_at_utc = ?, '
                         'voided_by_event_id = ?, void_reason = ? WHERE event_id = ?',
                         (supersede_stamp, supersede_token,
-                         'Superseded atomically by complete broker CSV history',
+                         'Superseded atomically by complete broker execution history',
                          row['event_id']),
                     )
 
@@ -2192,8 +2403,9 @@ class CostBasisStore:
         if limit < 1 or limit > MAX_EVENT_PAGE_SIZE:
             raise InvalidRequestError(f'limit must be 1-{MAX_EVENT_PAGE_SIZE}')
         offset = int(offset or 0)
-        if offset < 0:
-            raise InvalidRequestError('offset must not be negative')
+        if offset < 0 or offset > MAX_SQLITE_INTEGER:
+            raise InvalidRequestError(
+                f'offset must be between 0 and {MAX_SQLITE_INTEGER}')
 
         clauses = ['book_id = ?']
         params = [book_id]
@@ -2203,6 +2415,9 @@ class CostBasisStore:
         if kinds:
             if not isinstance(kinds, (list, tuple)):
                 raise InvalidRequestError('kinds must be a list')
+            if len(kinds) > len(EVENT_KINDS):
+                raise InvalidRequestError(
+                    f'kinds may contain at most {len(EVENT_KINDS)} entries')
             for kind in kinds:
                 if kind not in EVENT_KINDS:
                     raise InvalidRequestError(f'unknown kind {kind}')
@@ -2374,6 +2589,9 @@ class CostBasisStore:
                 ).fetchone()
                 if replay is not None:
                     conn.execute('ROLLBACK')
+                    if replay['book_id'] != book_id:
+                        raise InvalidRequestError(
+                            'clientToken has already been used for another ledger')
                     return {
                         'bookId': book_id,
                         'resetId': replay['reset_id'],
@@ -2453,10 +2671,8 @@ class CostBasisStore:
             book = self._get_book(conn, book_id)
             # Validate the replacement BEFORE opening the transaction so a
             # malformed batch never even reaches the delete.
-            normalized_rows = [
-                _validate_event_shape(_bind_event_to_book_account(item, book), book)
-                for item in events
-            ]
+            normalized_rows = self._normalize_event_batch(
+                conn, book_id, events, book, include_existing_history=False)
 
             conn.execute('BEGIN IMMEDIATE')
             try:
@@ -2466,6 +2682,9 @@ class CostBasisStore:
                 ).fetchone()
                 if replay is not None:
                     conn.execute('ROLLBACK')
+                    if replay['book_id'] != book_id:
+                        raise InvalidRequestError(
+                            'clientToken has already been used for another ledger')
                     return {
                         'bookId': book_id,
                         'resetId': replay['reset_id'],
@@ -2578,6 +2797,9 @@ class CostBasisStore:
         account_scope = _optional_text(account_scope, 'accountScope', MAX_NOTE_CHARS)
         if not isinstance(summary, dict):
             raise InvalidRequestError('summary must be an object')
+        summary_json = _json_for_storage(summary, 'summary')
+        tws_snapshot_json = None if tws_snapshot is None else _json_for_storage(
+            tws_snapshot, 'twsSnapshot')
 
         conn = self._connect()
         try:
@@ -2612,10 +2834,8 @@ class CostBasisStore:
                 (
                     snapshot_id, book_id, self._utc_now_iso(), as_of_date,
                     account_scope, through_seq, len(rows), digest.hexdigest(),
-                    json.dumps(summary, ensure_ascii=False, sort_keys=True,
-                               separators=(',', ':')),
-                    json.dumps(tws_snapshot, ensure_ascii=False, sort_keys=True,
-                               separators=(',', ':')) if tws_snapshot is not None else None,
+                    summary_json,
+                    tws_snapshot_json,
                     1 if reconciled else 0, note,
                 ),
             )
@@ -2758,6 +2978,7 @@ def _event_row_to_dict(row):
         'externalRef': row['external_ref'],
         'importBatchId': row['import_batch_id'],
         'derivedMismatch': bool(row['derived_mismatch']),
+        'allowOverdraw': bool(row['allow_overdraw']),
         'note': row['note'],
         'createdAtUtc': row['created_at_utc'],
         'voidedAtUtc': row['voided_at_utc'],
@@ -2775,8 +2996,8 @@ def _snapshot_row_to_dict(row):
         'throughSeq': int(row['through_seq']),
         'eventCount': int(row['event_count']),
         'eventsSha256': row['events_sha256'],
-        'summary': json.loads(row['summary_json']),
-        'twsSnapshot': json.loads(row['tws_snapshot_json']) if row['tws_snapshot_json'] else None,
+        'summary': _json_from_snapshot(row['summary_json']),
+        'twsSnapshot': _json_from_snapshot(row['tws_snapshot_json']),
         'reconciled': bool(row['reconciled']),
         'note': row['note'],
     }

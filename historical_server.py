@@ -17,6 +17,7 @@ from historical_replay_service import (
     normalize_replay_date,
 )
 from yield_curve.backend_adapter import YieldCurveBackendAdapter
+from websocket_security import read_allowed_ws_origins
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,6 +29,7 @@ CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip
 WS_HOST = '127.0.0.1'
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
 MAX_WS_MESSAGE_BYTES = portfolio_store_ws.read_max_ws_message_bytes(config)
+WS_ALLOWED_ORIGINS = read_allowed_ws_origins(config)
 CHAIN_SERVICE_URL = resolve_chain_service_url(config)
 RATES_SQLITE_DB = os.path.abspath(
     config.get('historical', 'rates_sqlite_db_path', fallback=os.path.join('sqlite_spy', 'rates.db'))
@@ -223,6 +225,7 @@ async def main():
         # 1 MiB would 1009-close the socket on a large workspace save.
         ws_server = await websockets.serve(
             handle_ws_client, WS_HOST, WS_PORT, max_size=MAX_WS_MESSAGE_BYTES,
+            origins=WS_ALLOWED_ORIGINS,
         )
     except OSError as exc:
         logging.error(

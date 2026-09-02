@@ -91,6 +91,56 @@ class _DummyIb:
         return True
 
 
+class CostBasisMarketPriceContractTests(unittest.IsolatedAsyncioTestCase):
+    def test_stock_snapshot_copy_supplies_exchange_without_mutating_cache(self):
+        cached = SimpleNamespace(
+            secType='STK', conId=123, symbol='TQQQ', exchange='',
+            primaryExchange='NASDAQ', currency='', localSymbol='TQQQ',
+            tradingClass='TQQQ')
+        request = ib_server._cost_basis_stock_snapshot_contract(cached, 'EUR')
+        self.assertEqual(request.exchange, 'SMART')
+        self.assertEqual(request.currency, 'EUR')
+        self.assertEqual(request.conId, 123)
+        self.assertEqual(cached.exchange, '')
+        self.assertEqual(cached.currency, '')
+
+    async def test_market_price_uses_complete_book_currency_contract(self):
+        captured = []
+        cached = SimpleNamespace(
+            secType='STK', conId=456, symbol='TQQQ', exchange='',
+            primaryExchange='', currency='', localSymbol='TQQQ',
+            tradingClass='TQQQ')
+
+        class FakeIb:
+            def isConnected(self):
+                return True
+
+            def positions(self):
+                return [SimpleNamespace(account='U1', contract=cached)]
+
+            async def reqTickersAsync(self, contract):
+                captured.append(contract)
+                return [SimpleNamespace(
+                    contract=contract, marketPrice=lambda: 71.25,
+                    last=float('nan'), close=float('nan'), marketDataType=1)]
+
+        original_ib = ib_server.ib
+        ib_server.ib = FakeIb()
+        try:
+            result = await ib_server._request_cost_basis_market_price({
+                'account': 'U1', 'symbol': 'TQQQ', 'secType': 'STK',
+                'currency': 'EUR',
+            })
+        finally:
+            ib_server.ib = original_ib
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].exchange, 'SMART')
+        self.assertEqual(captured[0].currency, 'EUR')
+        self.assertEqual(result['marketPrice'], 71.25)
+        self.assertEqual(result['currency'], 'EUR')
+
+
 class IbkrAdapterPricingTests(unittest.TestCase):
     def setUp(self):
         self.adapter = IbkrExecutionAdapter(
@@ -4314,6 +4364,7 @@ class IbServerConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_backend_main_fails_when_reconnect_supervisor_task_returns(self):
         stopped = []
+        serve_calls = []
         fake_ib = self._LifecycleIb(connected=False)
         ib_server.ib = fake_ib
 
@@ -4341,6 +4392,7 @@ class IbServerConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
         async def fake_serve(*_args, **_kwargs):
+            serve_calls.append((_args, _kwargs))
             return _WsServer()
 
         ib_server.ib_connection_supervisor = _StoppedSupervisor()
@@ -4350,6 +4402,9 @@ class IbServerConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, 'connection supervisor'):
             await asyncio.wait_for(ib_server.main(), timeout=0.1)
         self.assertEqual(stopped, [True])
+        self.assertEqual(len(serve_calls), 1)
+        self.assertEqual(
+            serve_calls[0][1]['origins'], ib_server.WS_ALLOWED_ORIGINS)
 
 
 class IbServerSubmissionFillReplayTests(unittest.IsolatedAsyncioTestCase):

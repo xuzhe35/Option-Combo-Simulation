@@ -150,6 +150,7 @@ class StatusTests(CostBasisWsTestBase):
         self.assertTrue(response['available'])
         self.assertEqual(response['storeSchemaVersion'], SCHEMA_USER_VERSION)
         self.assertIn('option_assignment', response['eventKinds'])
+        self.assertFalse(response['features']['optionScenarioInputs'])
 
     async def test_disabled_ledger_reports_a_reason(self):
         env = create_store_env(_config(self._tmp.name, enabled='false'))
@@ -170,6 +171,135 @@ class StatusTests(CostBasisWsTestBase):
         response = json.loads(socket.sent[0])
         self.assertFalse(response['success'])
         self.assertEqual(response['code'], 'disabled')
+
+
+class ExecutionHistoryTests(CostBasisWsTestBase):
+    async def test_historical_backend_reports_execution_api_unavailable(self):
+        book_id = await self.make_book()
+        response = await self.call(
+            'request_cost_basis_executions', bookId=book_id,
+            sinceTimestamp='2026-09-01T00:00:00')
+        self.assertFalse(response['success'])
+        self.assertEqual(response['code'], 'broker_execution_history_unavailable')
+
+    async def test_live_fetcher_is_scoped_from_the_book_not_browser_fields(self):
+        book_id = await self.make_book()
+        captured = []
+
+        async def fetcher(request):
+            captured.append(request)
+            return {'executions': [{'execId': 'E1'}], 'coverage': 'tws_recent_window'}
+
+        self.env['fetch_executions'] = fetcher
+        response = await self.call(
+            'request_cost_basis_executions', bookId=book_id,
+            account='ATTACKER', symbol='SPY',
+            sinceTimestamp='2026-09-01T09:30:00')
+        self.assertTrue(response['success'], response)
+        self.assertEqual(captured, [{
+            'account': 'U1111111', 'symbol': 'TQQQ', 'secType': 'STK',
+            'sinceTimestamp': '2026-09-01T09:30:00',
+        }])
+        self.assertEqual(response['executions'][0]['execId'], 'E1')
+
+
+class MarketPriceTests(CostBasisWsTestBase):
+    async def test_historical_backend_reports_fresh_price_unavailable(self):
+        book_id = await self.make_book()
+        response = await self.call(
+            'request_cost_basis_market_price', bookId=book_id)
+        self.assertFalse(response['success'])
+        self.assertEqual(response['code'], 'broker_market_price_unavailable')
+
+    async def test_live_price_fetcher_is_scoped_from_the_book(self):
+        book_id = await self.make_book()
+        captured = []
+
+        async def fetcher(request):
+            captured.append(request)
+            return {
+                'marketPrice': 71.23,
+                'fetchedAt': '2026-09-01T10:00:00+08:00',
+                'coverage': 'tws_snapshot_quote',
+            }
+
+        self.env['fetch_market_price'] = fetcher
+        response = await self.call(
+            'request_cost_basis_market_price', bookId=book_id,
+            account='ATTACKER', symbol='SPY')
+        self.assertTrue(response['success'], response)
+        self.assertEqual(captured, [{
+            'account': 'U1111111', 'symbol': 'TQQQ', 'secType': 'STK',
+            'currency': 'USD',
+        }])
+        self.assertEqual(response['marketPrice'], 71.23)
+
+
+class OptionScenarioInputTests(CostBasisWsTestBase):
+    async def test_historical_backend_reports_option_inputs_unavailable(self):
+        book_id = await self.make_book()
+        response = await self.call(
+            'request_cost_basis_option_scenario_inputs',
+            bookId=book_id, throughExpiry='20260902', contracts=[])
+        self.assertFalse(response['success'])
+        self.assertEqual(
+            response['code'], 'broker_option_scenario_inputs_unavailable')
+
+    async def test_live_fetcher_uses_book_scope_and_sanitized_contracts(self):
+        book_id = await self.make_book()
+        captured = []
+
+        async def fetcher(request):
+            captured.append(request)
+            return {
+                'underlyingPrice': 69.59,
+                'options': [{'conId': 123, 'impliedVolatility': 0.62}],
+                'ratesByExpiry': [{'expiry': '20270115', 'zeroRate': 0.031}],
+            }
+
+        self.env['fetch_option_scenario_inputs'] = fetcher
+        status = await self.call('request_cost_basis_status')
+        self.assertTrue(status['features']['optionScenarioInputs'])
+        response = await self.call(
+            'request_cost_basis_option_scenario_inputs',
+            bookId=book_id, account='ATTACKER', symbol='SPY',
+            throughExpiry='2026-09-02 ignored',
+            contracts=[{
+                'conId': 123, 'localSymbol': ' TQQQ  270115P00065000 ',
+                'right': 'put', 'strike': 65, 'expiry': '2027-01-15',
+                'ignored': 'not forwarded',
+            }])
+        self.assertTrue(response['success'], response)
+        self.assertEqual(captured, [{
+            'account': 'U1111111', 'symbol': 'TQQQ', 'secType': 'STK',
+            'currency': 'USD',
+            'throughExpiry': '20260902',
+            'contracts': [{
+                'conId': 123,
+                'localSymbol': 'TQQQ  270115P00065000',
+                'right': 'P', 'strike': 65, 'expiry': '20270115',
+            }],
+        }])
+        self.assertEqual(response['underlyingPrice'], 69.59)
+
+    async def test_live_fetcher_has_a_server_side_deadline(self):
+        book_id = await self.make_book()
+
+        async def fetcher(_request):
+            await asyncio.sleep(1)
+
+        self.env['fetch_option_scenario_inputs'] = fetcher
+        original_timeout = cost_basis_ws.OPTION_SCENARIO_INPUT_TIMEOUT_SECONDS
+        cost_basis_ws.OPTION_SCENARIO_INPUT_TIMEOUT_SECONDS = 0.01
+        try:
+            response = await self.call(
+                'request_cost_basis_option_scenario_inputs',
+                bookId=book_id, throughExpiry='20260902', contracts=[])
+        finally:
+            cost_basis_ws.OPTION_SCENARIO_INPUT_TIMEOUT_SECONDS = original_timeout
+        self.assertFalse(response['success'])
+        self.assertEqual(
+            response['code'], 'broker_option_scenario_inputs_timeout')
 
 
 class BookActionTests(CostBasisWsTestBase):

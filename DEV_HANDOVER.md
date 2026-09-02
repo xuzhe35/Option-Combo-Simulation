@@ -1,6 +1,6 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-08-29
+**Updated:** 2026-09-02
 
 ## 1. Current Product State
 
@@ -11,7 +11,7 @@ Current surfaces:
 - `index.html` for the main portfolio workspace
 - `chart_lab.html` for the shared workspace plus the experimental Chart Lab tab
 - `iv_term_structure.html` for the standalone ETF / futures-option IV term-structure monitor
-- `cost_basis.html` for the standalone per-underlying blended-cost ledger
+- `cost_basis.html` for the standalone per-account, per-underlying blended-cost ledger
 - `workspace_db_admin.html` for the standalone workspace-database / archive admin page
 - `ib_server.py` as the live-backend composition entry point
 - `ib_server_ws.py` for live backend WebSocket session routing
@@ -188,6 +188,27 @@ Persistence and ledger modules, mounted by BOTH backends:
 - live/latest price overlay
 - one-group or included-global projection
 - same simulated-date concept as the shared portfolio runtime
+
+### Blended-cost ledger
+
+- one active book per account + underlying + security type + currency in the
+  separate schema-v7 `cost_basis.db`
+- STK/OPT and deliverable FUT/FOP event replay, including FOP delivery and
+  uniquely paired futures rolls
+- CSV/ledger-inferred holdings remain visible while TWS is offline; current
+  broker quantities and AvgCost are corroboration, never automatic writes
+- reviewed recent TWS fills import by `execId`; same-batch duplicates block in
+  preview, and a later CSV is accepted as the same fill only after strict
+  cross-source economics and broker-time matching
+- expiry-bounded What If replay plus a modal multi-price pressure test; the
+  optional still-live Long Call/Put overlay uses per-contract TWS IV and the
+  shared discount curve, and never persists synthetic events
+- full-cash running cost intentionally includes long-option cash while the
+  headline blended-cost lens excludes the complete Long Call/Put lifecycle
+- book switching is request-generation scoped, clears the old rows before the
+  new load, and consumes socket failures at both the select and sidebar entry
+- no dedicated cost-ledger backup CLI or automatic scheduler; workspace
+  recovery sets do not include `cost_basis.db`
 
 ### IV term structure
 

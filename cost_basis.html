@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>综合成本账本 — Option Combo Simulator</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="cost_basis.css?v=23221438570c">
+    <link rel="stylesheet" href="cost_basis.css?v=33681d30abbf">
 </head>
 <body data-option-combo-page="cost-basis">
     <div class="app-shell">
@@ -55,7 +55,7 @@
                             </div>
                             <div id="headline-cost" class="hero-value">—</div>
                             <p id="headline-cost-caption" class="hero-caption">选择账本后显示</p>
-                            <div class="hero-foot"><div><span>当前净头寸</span><strong id="headline-position">—</strong></div><div><span>持有资产市值</span><strong id="headline-market-value">—</strong></div><div><span>摊薄后浮盈亏（当前口径）</span><strong id="headline-diluted-pnl">—</strong></div><div><span>若未平仓期权归零</span><strong id="headline-expired-cost">—</strong></div><div><span>参考价</span><strong id="headline-reference-price">—</strong></div></div>
+                            <div class="hero-foot"><div><span>当前净头寸</span><strong id="headline-position">—</strong></div><div><span>持有资产市值</span><strong id="headline-market-value">—</strong></div><div><span>摊薄后浮盈亏（当前口径）</span><strong id="headline-diluted-pnl">—</strong></div><div><span>若未平仓卖方期权归零</span><strong id="headline-expired-cost">—</strong></div><div><span>参考价</span><strong id="headline-reference-price">—</strong></div></div>
                         </article>
                         <article class="panel position-card">
                             <div class="panel-heading compact"><div><span class="eyebrow">对账视图</span><h2>TWS 与账本</h2></div><span id="position-match-badge" class="soft-badge">尚未拉取</span></div>
@@ -64,34 +64,49 @@
                         </article>
                     </section>
 
-                    <details class="panel detail-panel summary-details">
-                        <summary>查看完整成本口径与计算说明</summary>
+                    <details id="summary-details" class="panel detail-panel summary-details">
+                        <summary>展开完整成本明细（含股票已实现盈亏）</summary>
                         <div class="detail-content"><div class="controls"><label for="scope-select">视图</label><select id="scope-select"><option value="split">当前账本账户</option><option value="combined">账本合计（旧版兼容）</option></select></div><p id="basis-explainer" class="section-note"></p><div class="table-wrap"><table id="summary-table" aria-label="综合成本总览"><thead><tr><th>指标</th></tr></thead><tbody><tr><td class="empty">未选择账本</td></tr></tbody></table></div><p id="summary-warnings" class="warnings" hidden></p></div>
                     </details>
 
+                    <section id="what-if-section" class="panel what-if-section" aria-labelledby="what-if-title">
+                        <div class="panel-heading">
+                            <div><span class="eyebrow">情景测算</span><h2 id="what-if-title">What If · 期权结算后成本</h2></div>
+                            <div class="what-if-controls"><label for="what-if-expiry">计算至</label><select id="what-if-expiry" disabled><option value="">等待未平期权</option></select><label id="what-if-price-label" for="what-if-price">假设标的到期结算价</label><input id="what-if-price" type="number" step="0.01" min="0" autocomplete="off" placeholder="等待当前价"><button id="btn-what-if-current" type="button">使用当前价</button><button id="btn-open-stress-test" class="primary" type="button" disabled>打开压力测试</button></div>
+                        </div>
+                        <p id="what-if-context" class="what-if-context">选择账本后，可模拟所有未平期权结算后的持股与综合成本。</p>
+                        <div class="what-if-grid">
+                            <article class="what-if-card what-if-card-primary"><span>情景综合成本 / 股</span><strong id="what-if-result">—</strong><small id="what-if-result-caption">按上方选中的成本口径</small></article>
+                            <article class="what-if-card"><span>情景总成本</span><strong id="what-if-total-cost">—</strong><small id="what-if-total-caption">情景综合成本 × 结算后总股数</small></article>
+                            <article class="what-if-card"><span>结算后总股数</span><strong id="what-if-final-shares">—</strong><small id="what-if-share-caption">现有股票不会被卖出</small></article>
+                            <article class="what-if-card"><span>Short Put 结算</span><strong id="what-if-put-shares">—</strong><small id="what-if-put-caption">—</small></article>
+                        </div>
+                        <p id="what-if-outcomes" class="what-if-outcomes">输入假设到期结算价后，这里会列出被指派和归零的 Short Put。</p>
+                        <p class="what-if-note">只结算所选到期日及以前的未平期权，更晚到期的仓位继续保留为未平风险。假设范围内每个到期批次都使用同一个标的结算价：ITM Short Put 视为被指派，ATM / OTM Put 视为归零；现有股票不卖出。这是到期情景，不包含期权时间价值，也不会写入账本。</p>
+                    </section>
+
                     <section class="panel cashflow-section" aria-labelledby="cashflow-title">
-                        <div class="panel-heading"><div><span class="eyebrow">资金全景</span><h2 id="cashflow-title">现金流</h2></div><span class="section-helper">账户视角：收到为正，付出为负</span></div>
+                        <div class="panel-heading"><div><span class="eyebrow">资金全景</span><h2 id="cashflow-title">现金流</h2></div><div class="section-heading-actions"><span class="section-helper">账户视角：收到为正，付出为负</span><button id="btn-open-summary-details" class="text-button" type="button">查看完整明细</button></div></div>
                         <div class="cash-grid">
-                            <article class="cash-card cash-card-primary"><span>累计净现金</span><strong id="cash-net">—</strong><small>全部计入成本的事件</small></article>
-                            <article class="cash-card"><span>已实现期权费</span><strong id="cash-realized-premium">—</strong><small>已结束风险</small></article>
-                            <article class="cash-card"><span>未实现期权费</span><strong id="cash-open-premium">—</strong><small>仍处于风险中</small></article>
-                            <article class="cash-card"><span>股息 / 已实现损益</span><strong id="cash-dividends">—</strong><small id="cash-dividends-caption">股息</small></article>
+                            <article class="cash-card cash-card-primary"><span>累计净现金</span><strong id="cash-net">—</strong><small>全部账本事件（含 Long Option）</small></article>
+                            <article class="cash-card"><span>已到期 / 已结算卖方权利金</span><strong id="cash-realized-premium">—</strong><small>Short Call / Put 净收入 · 履约义务已结束</small></article>
+                            <article class="cash-card"><span>尚未到期卖方权利金</span><strong id="cash-open-premium">—</strong><small>Short Call / Put 净收入 · 不含 Long Option 支出</small></article>
+                            <article class="cash-card"><span id="cash-realized-label">股息 + 股票已实现盈亏</span><strong id="cash-dividends">—</strong><small id="cash-dividends-caption">股息 — · 股票已实现 —</small></article>
                             <article class="cash-card"><span>费用合计</span><strong id="cash-fees">—</strong><small>所有已记账费用</small></article>
                         </div>
-                        <div class="premium-window" id="premium-cards"><div><span>近 30 天已实现权利金</span><strong id="premium-30">—</strong></div><div><span>近 90 天</span><strong id="premium-90">—</strong></div><div><span>近 365 天</span><strong id="premium-365">—</strong></div><div><span id="premium-annualized-label">相对占用资金年化</span><strong id="premium-annualized">—</strong><small id="premium-annualized-detail">按近 365 天权利金 / 当前持仓成本</small></div></div>
+                        <div class="premium-window" id="premium-cards"><div><span>近 30 天已到期 / 已结算卖方权利金</span><strong id="premium-30">—</strong></div><div><span>近 90 天</span><strong id="premium-90">—</strong></div><div><span>近 365 天</span><strong id="premium-365">—</strong></div><div><span id="premium-annualized-label">相对占用资金年化</span><strong id="premium-annualized">—</strong><small id="premium-annualized-detail">按近 365 天已到期 / 已结算卖方权利金 / 当前持仓成本</small></div></div>
                     </section>
 
                     <section class="panel flow-section" aria-labelledby="flow-title">
-                        <div class="panel-heading flow-heading"><div><span class="eyebrow">可审计记录</span><h2 id="flow-title">事件流水</h2></div><div class="flow-primary-actions"><label for="import-file" class="file-button is-disabled" aria-disabled="true" title="请先选择账本">↑ 导入 IBKR CSV</label><input id="import-file" class="visually-hidden" type="file" accept=".csv,text/csv" disabled><button id="btn-export-csv" type="button" disabled>导出 CSV</button><button id="btn-save-snapshot" type="button" disabled>生成对账快照</button></div></div>
-                        <div class="controls flow-filters"><label for="filter-account">账户</label><select id="filter-account"><option value="">全部</option></select><label for="filter-kind">类型</label><select id="filter-kind"><option value="">全部</option></select><label for="filter-start">起</label><input id="filter-start" type="date"><label for="filter-end">止</label><input id="filter-end" type="date"><label class="checkbox"><input id="filter-voided" type="checkbox"> 显示已冲销</label></div>
-                        <div class="table-wrap flow-table-wrap"><table id="flow-table" aria-label="事件流水"><thead><tr><th>日期</th><th>账户</th><th>类型</th><th>合约</th><th>数量</th><th>价格</th><th>现金</th><th id="flow-position-heading">累计股数</th><th title="按至此为止的全部现金计算">累计成本</th><th>来源</th><th></th></tr></thead><tbody><tr><td colspan="11" class="empty">未选择账本</td></tr></tbody></table></div>
+                        <div class="panel-heading flow-heading"><div><span class="eyebrow">可审计记录</span><h2 id="flow-title">事件流水</h2></div><div class="flow-primary-actions"><button id="btn-fetch-executions" class="primary" type="button" disabled>↓ 拉取 TWS 成交</button><label for="import-file" class="file-button is-disabled" aria-disabled="true" title="请先选择账本">↑ 导入 IBKR CSV</label><input id="import-file" class="visually-hidden" type="file" accept=".csv,text/csv" disabled><button id="btn-export-csv" type="button" disabled>导出 CSV</button><button id="btn-save-snapshot" type="button" disabled>生成对账快照</button></div></div>
+                        <div class="controls flow-filters"><label for="filter-account">账户</label><select id="filter-account"><option value="">全部</option></select><label for="filter-kind">类型</label><select id="filter-kind"><option value="">全部</option></select><label for="filter-start">起</label><input id="filter-start" type="date"><label for="filter-end">止</label><input id="filter-end" type="date"><label class="checkbox"><input id="filter-voided" type="checkbox"> 显示已删除记录</label></div>
+                        <div class="table-wrap flow-table-wrap"><table id="flow-table" aria-label="事件流水"><thead><tr><th>日期</th><th>账户</th><th>类型</th><th>合约</th><th>数量</th><th>价格</th><th>现金</th><th id="flow-position-heading">累计股数</th><th title="包含所有现金流；与上方可排除长期 Long Option 的综合成本口径不同">全现金累计成本</th><th>来源</th><th>操作</th></tr></thead><tbody><tr><td colspan="11" class="empty">未选择账本</td></tr></tbody></table></div>
                         <div class="flow-pagination"><span id="flow-page-label"></span><div><button id="flow-prev" type="button">上一页</button><button id="flow-next" type="button">下一页</button></div></div>
                         <div id="import-workspace" class="import-workspace" hidden>
-                            <div class="import-heading"><div><h3>CSV 导入预览</h3><p id="import-summary">未选择文件。</p></div><div><button id="btn-import-clear" type="button" disabled>取消</button><button id="btn-import-commit" class="primary" type="button" disabled>确认导入</button></div></div>
-                            <p class="section-note">支持 Flex Query 与 Activity Statement。导入前逐行预览，重叠时间段会自动去重。</p>
+                            <div class="import-heading"><div><h3 id="import-preview-title">导入预览</h3><p id="import-summary">未选择文件。</p></div><div><button id="btn-import-clear" type="button" disabled>取消</button><button id="btn-import-commit" class="primary" type="button" disabled>确认导入</button></div></div>
+                            <p id="import-source-note" class="section-note">支持 TWS API 近期成交、Flex Query 与 Activity Statement。导入前逐行预览，execId 或报表成交号会自动去重。</p>
                             <label class="checkbox rebuild-option" for="import-replace"><input id="import-replace" type="checkbox" disabled> 覆盖式重建：存档当前流水后，用此文件重建账本</label>
-                            <label class="confirm-row" for="import-confirm" id="import-confirm-row" hidden><span id="import-confirm-hint"></span><input id="import-confirm" type="text" autocomplete="off" spellcheck="false" placeholder="确认短语"></label>
-                            <p id="import-replace-note" class="section-note" hidden>执行前会把全部事件存档到数据库；仅当预览结果完整正确时执行。</p>
+                            <p id="import-replace-note" class="section-note" hidden>执行前会把全部事件存档到数据库；点击「确认导入」后会再弹窗确认。</p>
                             <p id="import-openings" class="warnings" hidden></p><p id="import-blocked" class="warnings" hidden></p>
                             <div class="table-wrap" id="import-preview-wrap" hidden><table id="import-table" aria-label="导入预览"><thead><tr><th>日期</th><th>账户</th><th>类型</th><th>合约</th><th>数量</th><th>价格</th><th>现金</th><th>来源行</th></tr></thead><tbody></tbody></table></div>
                             <div class="table-wrap" id="import-problem-wrap" hidden><h3>待人工处理</h3><table id="import-problem-table" aria-label="待人工处理"><thead><tr><th>行</th><th>原因</th><th>原始内容</th></tr></thead><tbody></tbody></table></div>
@@ -99,9 +114,9 @@
                     </section>
 
                     <section class="panel reconcile-section" aria-labelledby="reconcile-title">
-                        <div class="panel-heading"><div><span class="eyebrow">TWS 当日采信</span><h2 id="reconcile-title">持仓对账</h2></div><span id="positions-status" class="section-helper">未获取</span></div>
-                        <p class="section-note">账本为空且 TWS 提供完整数量与均价时，可显式「采信 TWS」建立临时基线。其他差异仍需 CSV 或核实后手工补录。</p>
-                        <div class="table-wrap"><table id="reconcile-table" aria-label="持仓对账"><thead><tr><th>账户</th><th>合约</th><th>账本</th><th>TWS</th><th>差异</th><th>状态</th><th>建议</th><th></th></tr></thead><tbody><tr><td colspan="8" class="empty">尚未拉取 TWS 持仓</td></tr></tbody></table></div>
+                        <div class="panel-heading"><div><span class="eyebrow">CSV 推测 · TWS 对账</span><h2 id="reconcile-title">持仓对账</h2></div><span id="positions-status" class="section-helper">TWS 未获取</span></div>
+                        <p class="section-note">本表始终先显示 CSV / 账本流水回放出的推测持仓；连接 TWS 后再显示券商数量与差异。账本为空且 TWS 提供完整数量与均价时，可显式「采信 TWS」建立临时基线。</p>
+                        <div class="table-wrap"><table id="reconcile-table" aria-label="持仓对账"><thead><tr><th>账户</th><th>合约</th><th>账本</th><th>TWS</th><th>差异</th><th>状态</th><th>建议</th><th></th></tr></thead><tbody><tr><td colspan="8" class="empty">正在根据 CSV / 账本流水推导持仓…</td></tr></tbody></table></div>
                     </section>
 
                     <details id="manual-entry-details" class="panel detail-panel manual-entry-panel">
@@ -145,8 +160,36 @@
             </main>
         </div>
     </div>
-    <script src="js/cost_basis_core.js?v=a6fd1b2f4eba"></script>
-    <script src="js/cost_basis_import.js?v=a150b51b8f53"></script>
-    <script src="js/cost_basis.js?v=6fc823d8db44"></script>
+
+    <div id="stress-modal" class="stress-modal" hidden>
+        <section class="stress-dialog" role="dialog" aria-modal="true" aria-labelledby="stress-title" aria-describedby="stress-note">
+            <header class="stress-header">
+                <div><span class="eyebrow">What If · 多价格情景</span><h2 id="stress-title">到期压力测试</h2></div>
+                <button id="btn-close-stress-test" class="stress-close" type="button" aria-label="关闭压力测试">×</button>
+            </header>
+            <div class="stress-controls">
+                <label for="stress-expiry">到期范围<select id="stress-expiry"><option value="">等待未平期权</option></select></label>
+                <label for="stress-base-price">基准现价<input id="stress-base-price" type="number" step="0.01" min="0" autocomplete="off" placeholder="输入现价"></label>
+                <label for="stress-range">价格扫描范围<select id="stress-range"><option value="10">上下 10%</option><option value="20">上下 20%</option><option value="30" selected>上下 30%</option><option value="50">上下 50%</option></select></label>
+                <button id="btn-stress-refresh-price" type="button">刷新 TWS 现价</button>
+            </div>
+            <div class="stress-protection-panel">
+                <label class="stress-protection-toggle" for="stress-include-long-options"><input id="stress-include-long-options" type="checkbox"><span><strong>计入测试日仍未到期的 Long Call / Put</strong><small>可选；将上行凸性与下行保护的理论市值、浮动盈亏一并纳入</small></span></label>
+                <div id="stress-protection-inputs" class="stress-protection-inputs" hidden>
+                    <span id="stress-option-iv-source">逐合约 TWS IV：等待拉取</span>
+                    <span id="stress-option-rate-source">期限无风险利率：尚未读取</span>
+                    <p>BSM spot 简化估值 · 每张期权使用它当前的 TWS IV，并按剩余期限使用工程共享的 USD 折现曲线 · ACT/365 · 股息率 0% · 不考虑提前行权。这是情景估值，不是 TWS 报价。</p>
+                </div>
+            </div>
+            <p id="stress-status" class="stress-status">等待压力测试参数。</p>
+            <div class="stress-legend" aria-hidden="true"><span id="stress-legend-base-pnl" class="legend-pnl">到期后盈亏（左轴）</span><span id="stress-legend-protected-pnl" class="legend-protected-pnl" hidden>计入 Long Call / Put 后盈亏（左轴）</span><span class="legend-cost">综合成本 / 股（右轴）</span><span class="legend-strike">期权执行价</span></div>
+            <div class="stress-chart-wrap"><svg id="stress-chart" role="img" aria-label="标的价格变化与到期后盈亏、综合成本的压力测试图"></svg><div id="stress-tooltip" class="stress-tooltip" hidden><strong id="stress-tooltip-price">—</strong><dl><div><dt id="stress-tooltip-pnl-label">到期后盈亏</dt><dd id="stress-tooltip-pnl">—</dd></div><div id="stress-tooltip-base-row" hidden><dt>不含未到期多头期权</dt><dd id="stress-tooltip-base-pnl">—</dd></div><div id="stress-tooltip-long-option-value-row" hidden><dt>Long Call / Put 理论市值</dt><dd id="stress-tooltip-long-option-value">—</dd></div><div id="stress-tooltip-long-option-pnl-row" hidden><dt>Long Call / Put 浮动盈亏</dt><dd id="stress-tooltip-long-option-pnl">—</dd></div><div id="stress-tooltip-long-option-iv-row" hidden><dt>TWS IV（保持不变）</dt><dd id="stress-tooltip-long-option-iv">—</dd></div><div id="stress-tooltip-long-option-rate-row" hidden><dt>无风险利率 r(T)</dt><dd id="stress-tooltip-long-option-rate">—</dd></div><div><dt>综合成本 / 股</dt><dd id="stress-tooltip-cost">—</dd></div><div><dt>结算后持股</dt><dd id="stress-tooltip-shares">—</dd></div><div><dt>结算结果</dt><dd id="stress-tooltip-outcome">—</dd></div></dl></div></div>
+            <div id="stress-key-points" class="stress-key-points"></div>
+            <p id="stress-note" class="stress-note">只结算所选到期日及以前的期权；更晚到期的仓位继续保留。默认不估计更晚期权的时间价值；勾选后，测试日仍未到期的所有多头 Call 与 Put 都会按情景价估值，并把理论市值和相对买入权利金的浮动盈亏叠加到图上。所有结果只在浏览器内测算，不写入账本。</p>
+        </section>
+    </div>
+    <script src="js/cost_basis_core.js?v=162296db9598"></script>
+    <script src="js/cost_basis_import.js?v=1b0728076d84"></script>
+    <script src="js/cost_basis.js?v=d5214abec8fd"></script>
 </body>
 </html>

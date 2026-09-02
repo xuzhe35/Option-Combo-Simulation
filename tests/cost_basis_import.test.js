@@ -282,6 +282,31 @@ module.exports = {
             },
         },
         {
+            name: 'dividend symbols are matched exactly and withholding tax is netted',
+            run() {
+                const parser = loadImport();
+                const text = activity(
+                    'Trades,Data,Order,Stocks,USD,QQQ,"2026-06-01, 09:35:00",'
+                    + '100,45,-4500,-1,O',
+                ) + '\nDividends,Header,Currency,Date,Description,Amount'
+                  + '\nDividends,Data,USD,2026-06-30,QQQM(US0000000001) Cash Dividend,99.00'
+                  + '\nDividends,Data,USD,2026-06-30,QQQ(US46090E1038) Cash Dividend,25.00'
+                  + '\nWithholding Tax,Header,Currency,Date,Description,Amount'
+                  + '\nWithholding Tax,Data,USD,2026-06-30,QQQM(US0000000001) Cash Dividend,-29.70'
+                  + '\nWithholding Tax,Data,USD,2026-06-30,QQQ(US46090E1038) Cash Dividend,-7.50';
+                const result = parser.parse(text, { symbol: 'QQQ' });
+                const dividend = result.events.filter(
+                    (item) => item.kind === 'dividend');
+                const tax = result.events.filter(
+                    (item) => item.kind === 'fee' && item.tag === 'withholding_tax');
+                assert.equal(dividend.length, 1);
+                assert.equal(dividend[0].cashAmount, 25);
+                assert.equal(tax.length, 1);
+                assert.equal(tax[0].cashAmount, -7.5);
+                assert.equal(tax[0].fees, 7.5);
+            },
+        },
+        {
             name: 'a dividend row for the underlying is imported',
             run() {
                 const parser = loadImport();
@@ -334,6 +359,31 @@ module.exports = {
             },
         },
         {
+            name: 'a compact Flex wall-clock timestamp keeps its exact time',
+            run() {
+                const parser = loadImport();
+                const result = parser.parse(flex(
+                    'U1111111,TQQQ,TQQQ,STK,20260820;111213,100,45,-4500,-1,'
+                    + ',,,,compact-1,O',
+                ), { symbol: 'TQQQ' });
+                assert.equal(result.problems.length, 0);
+                assert.equal(result.events[0].brokerTimestamp, '2026-08-20T11:12:13');
+                assert.equal(result.statementThrough, '2026-08-20T11:12:13');
+            },
+        },
+        {
+            name: 'a duplicate Flex execution id blocks and is counted once',
+            run() {
+                const parser = loadImport();
+                const row = 'U1111111,TQQQ,TQQQ,STK,20260820;111213,100,45,'
+                    + '-4500,-1,,,,,duplicate-1,O';
+                const result = parser.parse(flex(row, row), { symbol: 'TQQQ' });
+                assert.equal(result.events.length, 1);
+                assert.equal(result.problems.length, 1);
+                assert.match(result.problems[0].reason, /duplicate broker execution id/);
+            },
+        },
+        {
             name: 'an adjusted multiplier from the statement is preserved',
             run() {
                 const parser = loadImport();
@@ -342,6 +392,22 @@ module.exports = {
                     + '0,P,45,2026-07-17,130,111,O',
                 ), { symbol: 'TQQQ' });
                 assert.equal(result.events[0].sharesPerContract, 130);
+            },
+        },
+        {
+            name: 'a reviewed cross-source alias reuses the stored TWS exec identity',
+            run() {
+                const parser = loadImport();
+                const text = flex(
+                    'U1111111,TQQQ,TQQQ 17JUL26 45 P,OPT,2026-06-01,-5,1.20,600,'
+                    + '-3.25,P,45,2026-07-17,100,987654321,O');
+                const aliases = {
+                    [`U1111111\u0000987654321`]: 'ibkr-exec-987654321',
+                };
+                const result = parser.parse(text, {
+                    symbol: 'TQQQ', externalRefAliases: aliases,
+                });
+                assert.equal(result.events[0].externalRef, 'ibkr-exec-987654321');
             },
         },
         {

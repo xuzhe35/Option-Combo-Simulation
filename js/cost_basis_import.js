@@ -83,6 +83,7 @@
     const SECTION_ALIASES = Object.freeze({
         trades: ['trades', '交易'],
         dividends: ['dividends', '股息'],
+        withholdingTax: ['withholding tax', 'withholding taxes', '预扣税', '代扣税'],
         accountInformation: ['account information', '账户信息'],
         instruments: ['financial instrument information', '金融产品信息'],
         openPositions: ['open positions', '未平仓持仓'],
@@ -160,7 +161,7 @@
 
     function _upper(value) {
         return String(value === null || value === undefined ? '' : value)
-            .trim().toUpperCase();
+            .trim().replace(/\s+/g, ' ').toUpperCase();
     }
 
     function _number(value) {
@@ -199,8 +200,16 @@
         const date = _isoDate(text);
         if (!date) return '';
         const time = /(?:^|[\s,T])(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(text);
-        if (!time) return `${date}T23:59:59`;
-        return `${date}T${time[1].padStart(2, '0')}:${time[2]}:${time[3] || '00'}`;
+        if (time) {
+            return `${date}T${time[1].padStart(2, '0')}:${time[2]}:${time[3] || '00'}`;
+        }
+        // Flex Query commonly emits account-local time as YYYYMMDD;HHMMSS
+        // (and some custom queries remove the semicolon as well). Treating
+        // that as an end-of-day date would break second-level reconciliation.
+        const compact = /(?:^|[\s,T;])(\d{2})(\d{2})(\d{2})(?:\D|$)/.exec(text)
+            || /^\D*\d{8}(\d{2})(\d{2})(\d{2})\D*$/.exec(text);
+        if (!compact) return `${date}T23:59:59`;
+        return `${date}T${compact[1]}:${compact[2]}:${compact[3]}`;
     }
 
     const PERIOD_MONTHS = Object.freeze({
@@ -641,7 +650,13 @@
         const brokerCodes = _codes(record.codes);
         // A Flex export has a real trade id; an Activity Statement does not,
         // and then the row's own content is the identity.
-        const externalRef = String(record.externalRef || '').trim() || _contentKey(record);
+        const originalExternalRef = String(record.externalRef || '').trim()
+            || _contentKey(record);
+        const aliasKey = `${account}\u0000${originalExternalRef}`;
+        const aliases = options.externalRefAliases || {};
+        const externalRef = Object.prototype.hasOwnProperty.call(aliases, aliasKey)
+            ? String(aliases[aliasKey] || originalExternalRef)
+            : originalExternalRef;
 
         if (!tradeDate) {
             return { problem: 'trade date could not be read' };
@@ -1359,8 +1374,7 @@
             const tradeDate = _isoDate(values.tradeDate);
             const description = String(values.description || '');
             if (amount === null || !tradeDate) return;
-            if (options.symbol && description
-                && description.toUpperCase().indexOf(options.symbol) < 0) {
+            if (!_cashDescriptionMatchesSymbol(description, options.symbol)) {
                 return;
             }
             if (amount <= 0) return;
@@ -1379,6 +1393,53 @@
                 lineNumber: record.lineNumber,
             });
         });
+        });
+        return events;
+    }
+
+    function _cashDescriptionMatchesSymbol(description, symbol) {
+        const wanted = _upper(symbol);
+        if (!wanted) return true;
+        const text = _upper(description);
+        if (!text) return false;
+        const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // QQQ must not match QQQM, and SQQQ must not match QQQ. IBKR normally
+        // places the exact symbol at the start, before a CUSIP in parentheses,
+        // but bounded matching also supports localized prefix text.
+        return new RegExp(`(^|[^A-Z0-9.\\-])${escaped}(?=$|[^A-Z0-9.\\-])`).test(text);
+    }
+
+    function _buildWithholdingTaxes(rows, options) {
+        const section = extractSection(rows, 'withholdingTax');
+        if (!section) return [];
+        const events = [];
+        section.groups.forEach((group) => {
+            const mapping = group.built.mapping;
+            group.records.forEach((record) => {
+                const values = _cellsToRecord(record.values, mapping);
+                const amount = _number(values.amount);
+                const tradeDate = _isoDate(values.tradeDate);
+                const description = String(values.description || '');
+                if (amount === null || Math.abs(amount) < 1e-9 || !tradeDate) return;
+                if (!_cashDescriptionMatchesSymbol(description, options.symbol)) return;
+                const withheld = Math.abs(amount);
+                events.push({
+                    kind: 'fee',
+                    tradeDate,
+                    brokerTimestamp: _brokerTimestamp(values.tradeDate),
+                    account: String(values.account || options.accountFallback || '').trim(),
+                    cashAmount: _round(-withheld, 6),
+                    fees: _round(withheld, 6),
+                    source: 'csv_import',
+                    tag: 'withholding_tax',
+                    externalRef: `stmt-${_hash16([
+                        'withholding-tax', _upper(values.account), tradeDate,
+                        description, String(amount),
+                    ].join('|'))}`,
+                    note: `IBKR withholding tax: ${description}`.slice(0, 200),
+                    lineNumber: record.lineNumber,
+                });
+            });
         });
         return events;
     }
@@ -2043,7 +2104,8 @@
             if (!section) {
                 return {
                     format,
-                    events: _buildDividends(rows, opts),
+                    events: _buildDividends(rows, opts).concat(
+                        _buildWithholdingTaxes(rows, opts)),
                     problems: [{
                         lineNumber: 0,
                         reason: 'no Trades section found in the statement',
@@ -2123,6 +2185,7 @@
         const problems = [];
         const pendings = [];
         const contentRefOccurrences = new Map();
+        const brokerRefLines = new Map();
         let skipped = 0;
         let total = 0;
         const unmapped = [];
@@ -2154,6 +2217,20 @@
                     raw: record.values.join(','),
                 });
                 return;
+            }
+            const brokerRef = String(values.externalRef || '').trim();
+            if (brokerRef) {
+                const brokerRefKey = `${rowAccount}\u0000${brokerRef}`;
+                if (brokerRefLines.has(brokerRefKey)) {
+                    problems.push({
+                        lineNumber: record.lineNumber,
+                        reason: `duplicate broker execution id ${brokerRef} in this file; `
+                            + `first seen on line ${brokerRefLines.get(brokerRefKey)}`,
+                        raw: record.values.join(','),
+                    });
+                    return;
+                }
+                brokerRefLines.set(brokerRefKey, record.lineNumber);
             }
             const built1 = _buildDraft(values, classification, opts, record.lineNumber);
             if (built1.problem) {
@@ -2188,6 +2265,7 @@
         }
         if (format === 'activity' && _upper(opts.secType) !== 'FUT') {
             allEvents.push(..._buildDividends(rows, opts));
+            allEvents.push(..._buildWithholdingTaxes(rows, opts));
         }
         problems.push(..._corporateActionProblems(rows, opts));
         // A void/exclusion removes the row from the active ledger but the
