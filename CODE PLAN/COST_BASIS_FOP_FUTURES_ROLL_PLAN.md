@@ -219,11 +219,11 @@ assignment/exercise 使用 `futureContracts`，不使用 `shares`。
   迁移门禁。报表期初已有 FUT 但文件无建仓价时，现在整批阻断，不再用
   0 价或静默忽略伪造成本。
 
-### 5.2 验证记录
+### 5.2 验证记录（2026-09-02 复验）
 
-- `node tests/run.js`：`902 passed, 0 failed`。
-- `python3 -m unittest tests.cost_basis_store_test tests.cost_basis_ws_test`：
-  `Ran 162 tests, OK (skipped=1)`；跳过项是可选 IB 桥接环境测试。
+- `node tests/run.js`：`981 passed, 0 failed`。
+- `python3 -m unittest tests.cost_basis_store_test tests.cost_basis_ws_test tests.cost_basis_executions_test`：
+  `Ran 219 tests, OK (skipped=1)`；跳过项是可选 IB 桥接环境测试。
 - `python3 scripts/stamp_asset_versions.py --check`：页面资源指纹一致。
 - 真实报表回归：按 `Reports/` 中 8/21 → 8/24 的顺序对
   `GLD/QQQ/SLV/SPY/TQQQ/USO` 重新执行部分重叠导入，六个标的都与直接使用

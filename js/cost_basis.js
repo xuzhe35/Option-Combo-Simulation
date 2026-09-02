@@ -10,6 +10,8 @@
  * - The ledger is the source of truth; the TWS snapshot only ever *detects*
  *   a gap. Reconciliation fills the entry form with a draft and stops. A
  *   human presses the button that writes.
+ * - Market-data reads are one-shot TWS snapshots triggered by What If;
+ *   underlying price and per-contract IV never create a live subscription.
  * - Every write carries a client token, so a retry after a dropped socket
  *   cannot book the same trade twice.
  */
@@ -82,18 +84,20 @@
     };
 
     const BASIS_EXPLAINERS = {
-        net_cash: '净现金口径：按股票净投入扣除已实现权利金，再除以持股数。'
+        net_cash: '净现金口径：按股票净投入扣除已到期 / 已结算的卖方净权利金，再除以持股数。'
             + '累计净现金始终按账户视角显示：收到为正、付出为负。'
-            + '只认已平仓合约的权利金，未平仓的钱还在风险里。成本可以为负，'
+            + '尚未到期的卖方权利金同样已经收取；保守口径只是在履约义务结束前暂不用它降低头条成本。'
+            + 'Long Call / Put 的全周期支出、回款和盈亏都不混入标的综合成本，只在压力测试中按理论市值与浮盈亏单列。成本可以为负，'
             + '多头为负表示成本已全部收回；空头则显示可回补的'
-            + '盈亏平衡水位，已实现权利金会把这条水位抬高。',
+            + '盈亏平衡水位，已到期 / 已结算权利金会把这条水位抬高。',
         stock_only: '纯股票均价：只按股票成交滚动平均，权利金完全独立列示。'
             + '这是唯一应该和 TWS 均价对得上的数——对不上就是账本漏记了。',
         tax_adjusted: '税务调整口径：被指派合约的权利金滚进股票成本'
             + '（短 Put 成本 = K − 每股权利金，短 Call 卖价 = K + 每股权利金），'
             + '其余权利金独立列示。用于解释纯股票均价与券商成本基准视图的残余差异。',
         futures: 'FOP / FUT 口径：当前 FUT 开仓基础，加换月已实现价差和费用，'
-            + '再减已实现 FOP 权利金。未平仓 FOP 只在「若全部归零」一行中反映。',
+            + '再减已到期 / 已结算 FOP 卖方权利金。尚未到期的卖方权利金已收取，'
+            + '但只在「若全部归零」一行中抵扣成本。',
     };
 
     const state = {
@@ -102,6 +106,10 @@
         status: null,
         books: [],
         bookId: '',
+        eventLoadGeneration: 0,
+        eventSubmitPending: false,
+        eventSubmitToken: '',
+        eventSubmitFingerprint: '',
         allEvents: [],      // every row of the book; the ledger is computed from this
         eventsTotal: 0,
         flowPage: 1,
@@ -119,8 +127,22 @@
         scope: 'split',
         basisMode: 'net_cash',
         referencePrice: null,
+        whatIfPrice: null,
+        whatIfPriceSource: '',
+        whatIfExpiry: '',
+        stressOpen: false,
+        stressExpiry: '',
+        stressRangePct: 30,
+        stressBasePrice: null,
+        stressIncludeLongOptions: false,
+        stressLongOptionInputs: null,
+        stressInputsPending: false,
+        stressInputsError: '',
+        marketPriceRefreshPending: false,
+        marketPriceFetchedAt: '',
         importResult: null,
         importText: '',
+        executionFetchPending: false,
         resetPlan: null,
         reconnectDelay: RECONNECT_BASE_DELAY_MS,
         reconnectTimer: null,
@@ -175,16 +197,6 @@
         return `${now.getFullYear()}-${month}-${day}`;
     }
 
-    function _localTimestampIso() {
-        const now = new Date();
-        const month = String(now.getMonth() + 1).padStart(2, '0');
-        const day = String(now.getDate()).padStart(2, '0');
-        const hour = String(now.getHours()).padStart(2, '0');
-        const minute = String(now.getMinutes()).padStart(2, '0');
-        const second = String(now.getSeconds()).padStart(2, '0');
-        return `${now.getFullYear()}-${month}-${day}T${hour}:${minute}:${second}`;
-    }
-
     function _shiftDays(isoDate, days) {
         const parts = String(isoDate || '').split('-');
         const date = new Date(Date.UTC(
@@ -202,6 +214,24 @@
             minimumFractionDigits: digits,
             maximumFractionDigits: digits,
         });
+    }
+
+    function _currencySymbol(currencyCode) {
+        const code = String(currencyCode || 'USD').trim().toUpperCase();
+        return {
+            USD: '$', CAD: 'C$', AUD: 'A$', HKD: 'HK$', SGD: 'S$',
+            EUR: '€', GBP: '£', JPY: '¥', CNY: '¥', CHF: 'CHF ',
+        }[code] || `${code} `;
+    }
+
+    function _currencyAmount(currencyCode, value, places, signed) {
+        const formatted = signed ? _signedMoney(value, places) : _money(value, places);
+        if (formatted === '—') return formatted;
+        const symbol = _currencySymbol(currencyCode);
+        if (formatted.startsWith('+') || formatted.startsWith('-')) {
+            return `${formatted.slice(0, 1)}${symbol}${formatted.slice(1)}`;
+        }
+        return `${symbol}${formatted}`;
     }
 
     /** Account cash delta: receipts are visibly positive, payments negative. */
@@ -223,6 +253,48 @@
         return Number(value).toLocaleString('en-US', { maximumFractionDigits: 4 });
     }
 
+    function _whatIfContractLabel(outcome) {
+        const digits = String(outcome.expiry || '').replace(/\D/g, '').slice(0, 8);
+        const expiry = digits.length === 8
+            ? `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`
+            : '未知到期日';
+        const right = String(outcome.right || '?').toUpperCase().slice(0, 1);
+        return `${expiry} ${_money(outcome.strike, 2)}${right} × ${_quantity(outcome.contracts)}`;
+    }
+
+    function _renderWhatIfExpiryOptions(openOptions, disabled) {
+        const select = $('what-if-expiry');
+        const counts = new Map();
+        (openOptions || []).forEach((option) => {
+            const expiry = String(option.expiry || '').replace(/\D/g, '').slice(0, 8);
+            if (expiry.length !== 8) return;
+            counts.set(expiry, (counts.get(expiry) || 0)
+                + Math.abs(Number(option.contracts) || 0));
+        });
+        const expiries = Array.from(counts.keys()).sort();
+        if (!expiries.includes(state.whatIfExpiry)) {
+            state.whatIfExpiry = expiries[0] || '';
+        }
+        _clear(select);
+        if (!expiries.length) {
+            const option = globalScope.document.createElement('option');
+            option.value = '';
+            option.textContent = '无可用到期日';
+            select.appendChild(option);
+        } else {
+            expiries.forEach((expiry) => {
+                const option = globalScope.document.createElement('option');
+                option.value = expiry;
+                option.textContent = `${expiry.slice(0, 4)}-${expiry.slice(4, 6)}`
+                    + `-${expiry.slice(6, 8)}（${_quantity(counts.get(expiry))} 张当日到期）`;
+                select.appendChild(option);
+            });
+        }
+        select.value = state.whatIfExpiry;
+        select.disabled = Boolean(disabled || !expiries.length);
+        return expiries;
+    }
+
     /** Current notional and P&L versus the cost lens visible in the hero. */
     function computeMarketMetrics(referencePrice, exposure, blendedCost) {
         const price = Number(referencePrice);
@@ -237,6 +309,328 @@
             || !Number.isFinite(cost)
             ? null : (price - cost) * quantity;
         return { marketValue, dilutedPnl };
+    }
+
+    function _normalCdf(value) {
+        const x = Number(value);
+        if (!Number.isFinite(x)) return x > 0 ? 1 : 0;
+        const absolute = Math.abs(x);
+        const t = 1 / (1 + 0.2316419 * absolute);
+        const density = Math.exp(-0.5 * absolute * absolute) / Math.sqrt(2 * Math.PI);
+        const tail = density * t * (0.319381530
+            + t * (-0.356563782
+                + t * (1.781477937
+                    + t * (-1.821255978 + t * 1.330274429))));
+        const cdf = 1 - tail;
+        return x >= 0 ? cdf : 1 - cdf;
+    }
+
+    /** European BSM value used by the optional, read-only long-option overlay. */
+    function calculateBsmOptionPrice(right, spot, strike, timeYears, rate, volatility) {
+        const optionRight = String(right || '').toUpperCase().slice(0, 1);
+        const s = Number(spot);
+        const k = Number(strike);
+        const t = Number(timeYears);
+        const r = Number(rate);
+        const sigma = Number(volatility);
+        if ((optionRight !== 'C' && optionRight !== 'P')
+            || ![s, k, t, r, sigma].every(Number.isFinite) || s < 0 || k <= 0 || t < 0) {
+            return null;
+        }
+        if (t <= 0) return optionRight === 'C'
+            ? Math.max(s - k, 0) : Math.max(k - s, 0);
+        if (s <= 0) return optionRight === 'C' ? 0 : k * Math.exp(-r * t);
+        if (sigma <= 0) return optionRight === 'C'
+            ? Math.max(s - k * Math.exp(-r * t), 0)
+            : Math.max(k * Math.exp(-r * t) - s, 0);
+        const rootT = Math.sqrt(t);
+        const d1 = (Math.log(s / k) + (r + 0.5 * sigma * sigma) * t)
+            / (sigma * rootT);
+        const d2 = d1 - sigma * rootT;
+        if (optionRight === 'C') {
+            return s * _normalCdf(d1) - k * Math.exp(-r * t) * _normalCdf(d2);
+        }
+        return k * Math.exp(-r * t) * _normalCdf(-d2) - s * _normalCdf(-d1);
+    }
+
+    function calculateBsmPutPrice(spot, strike, timeYears, rate, volatility) {
+        return calculateBsmOptionPrice('P', spot, strike, timeYears, rate, volatility);
+    }
+
+    function _dateUtcFromDigits(value) {
+        const digits = String(value || '').replace(/\D/g, '').slice(0, 8);
+        if (digits.length !== 8) return null;
+        const year = Number(digits.slice(0, 4));
+        const month = Number(digits.slice(4, 6));
+        const day = Number(digits.slice(6, 8));
+        const milliseconds = Date.UTC(year, month - 1, day);
+        const date = new Date(milliseconds);
+        if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1
+            || date.getUTCDate() !== day) return null;
+        return milliseconds;
+    }
+
+    /**
+     * Mark Long Calls and Puts that remain open after the selected stress date.
+     * `openPremium` is signed ledger cash (negative for a purchased option), so
+     * mark + openPremium is the position's unrealized P&L without double
+     * counting its original premium in the stock/cost curve.
+     */
+    function estimateDeferredLongOptions(deferredOptions, scenarioPrice, options) {
+        const opts = options || {};
+        const throughExpiry = String(opts.throughExpiry || '').replace(/\D/g, '').slice(0, 8);
+        const scenarioAt = _dateUtcFromDigits(throughExpiry);
+        const marketInputs = opts.marketInputs && typeof opts.marketInputs === 'object'
+            ? opts.marketInputs : null;
+        const optionInputs = marketInputs && Array.isArray(marketInputs.options)
+            ? marketInputs.options : [];
+        const ratesByExpiry = marketInputs && Array.isArray(marketInputs.ratesByExpiry)
+            ? marketInputs.ratesByExpiry : [];
+        const eligible = (Array.isArray(deferredOptions) ? deferredOptions : []).filter(
+            (position) => Number(position.contracts) > 0
+                && ['C', 'P'].includes(
+                    String(position.right || '').toUpperCase().slice(0, 1)));
+        if (!eligible.length) {
+            return {
+                available: true, count: 0, contracts: 0,
+                callContracts: 0, putContracts: 0,
+                marketValue: 0, pnl: 0, details: [],
+            };
+        }
+        if (scenarioAt === null || !marketInputs
+            || String(marketInputs.throughExpiry || '') !== throughExpiry) {
+            return {
+                available: false, reason: 'missing_long_option_market_inputs',
+                count: eligible.length, contracts: 0,
+                callContracts: 0, putContracts: 0,
+                marketValue: null, pnl: null, details: [],
+            };
+        }
+        const details = [];
+        for (const position of eligible) {
+            const expiryAt = _dateUtcFromDigits(position.expiry);
+            const right = String(position.right || '').toUpperCase().slice(0, 1);
+            const strike = Number(position.strike);
+            const contracts = Number(position.contracts);
+            const multiplier = Math.abs(Number(position.sharesPerContract));
+            const openPremium = Number(position.openPremium);
+            if (expiryAt === null || expiryAt <= scenarioAt || !Number.isFinite(strike)
+                || strike <= 0 || !Number.isFinite(contracts) || contracts <= 0
+                || !Number.isFinite(multiplier) || multiplier <= 0
+                || !Number.isFinite(openPremium) || position.identityConflict) {
+                return {
+                    available: false, reason: 'incomplete_long_option',
+                    count: eligible.length, contracts: 0,
+                    callContracts: 0, putContracts: 0,
+                    marketValue: null, pnl: null, details: [],
+                };
+            }
+            const positionConId = Number(position.conId);
+            const positionLocalSymbol = String(position.localSymbol || '').trim();
+            const quote = optionInputs.find((candidate) => {
+                const candidateConId = Number(candidate && candidate.conId);
+                if (Number.isFinite(positionConId) && positionConId > 0
+                    && candidateConId === positionConId) return true;
+                const candidateLocal = String(
+                    candidate && candidate.localSymbol || '').trim();
+                if (positionLocalSymbol && candidateLocal === positionLocalSymbol) return true;
+                return String(candidate && candidate.right || '').toUpperCase().slice(0, 1)
+                        === right
+                    && String(candidate && candidate.expiry || '').replace(/\D/g, '').slice(0, 8)
+                        === String(position.expiry || '').replace(/\D/g, '').slice(0, 8)
+                    && Math.abs(Number(candidate && candidate.strike) - strike) <= 1e-8;
+            });
+            const impliedVolatility = Number(quote && quote.impliedVolatility);
+            if (!quote || !Number.isFinite(impliedVolatility) || impliedVolatility <= 0) {
+                return {
+                    available: false, reason: 'missing_long_option_iv',
+                    count: eligible.length, contracts: 0,
+                    callContracts: 0, putContracts: 0,
+                    marketValue: null, pnl: null, details: [],
+                };
+            }
+            const rateInput = ratesByExpiry.find((candidate) => (
+                String(candidate && candidate.expiry || '').replace(/\D/g, '').slice(0, 8)
+                    === String(position.expiry || '').replace(/\D/g, '').slice(0, 8)));
+            const zeroRate = Number(rateInput && rateInput.zeroRate);
+            if (!rateInput || !Number.isFinite(zeroRate)) {
+                return {
+                    available: false, reason: 'missing_discount_rate',
+                    count: eligible.length, contracts: 0,
+                    callContracts: 0, putContracts: 0,
+                    marketValue: null, pnl: null, details: [],
+                };
+            }
+            const timeYears = (expiryAt - scenarioAt) / (365 * 24 * 60 * 60 * 1000);
+            const markPerShare = calculateBsmOptionPrice(
+                right, scenarioPrice, strike, timeYears,
+                zeroRate, impliedVolatility);
+            if (!Number.isFinite(markPerShare)) {
+                return {
+                    available: false, reason: 'incomplete_long_option',
+                    count: eligible.length, contracts: 0,
+                    callContracts: 0, putContracts: 0,
+                    marketValue: null, pnl: null, details: [],
+                };
+            }
+            const marketValue = markPerShare * contracts * multiplier;
+            details.push({
+                expiry: String(position.expiry), right, strike, contracts, multiplier,
+                timeYears, markPerShare, marketValue,
+                impliedVolatility, ivSource: String(quote.ivSource || ''),
+                zeroRate, rateSource: String(rateInput.source || ''),
+                openPremium, pnl: marketValue + openPremium,
+            });
+        }
+        const result = details.reduce((total, detail) => ({
+            available: true,
+            count: total.count + 1,
+            contracts: total.contracts + detail.contracts,
+            callContracts: total.callContracts
+                + (detail.right === 'C' ? detail.contracts : 0),
+            putContracts: total.putContracts
+                + (detail.right === 'P' ? detail.contracts : 0),
+            marketValue: total.marketValue + detail.marketValue,
+            pnl: total.pnl + detail.pnl,
+            details: total.details.concat([detail]),
+        }), {
+            available: true, count: 0, contracts: 0,
+            callContracts: 0, putContracts: 0,
+            marketValue: 0, pnl: 0, details: [],
+        });
+        result.ivMin = Math.min(...details.map((detail) => detail.impliedVolatility));
+        result.ivMax = Math.max(...details.map((detail) => detail.impliedVolatility));
+        result.rateMin = Math.min(...details.map((detail) => detail.zeroRate));
+        result.rateMax = Math.max(...details.map((detail) => detail.zeroRate));
+        return result;
+    }
+
+    /**
+     * Sweep one expiry-settlement scenario across a symmetric underlying
+     * range. This is deliberately pure and read-only: every point is a fresh
+     * replay with synthetic settlement rows that are never persisted.
+     */
+    function buildStressTestSeries(events, options) {
+        const opts = options || {};
+        const centerPrice = Number(opts.centerPrice);
+        const rawRange = Number(opts.rangePct);
+        const rangePct = Number.isFinite(rawRange)
+            ? Math.min(90, Math.max(1, Math.abs(rawRange))) : 30;
+        const rawPointCount = Number(opts.pointCount);
+        const pointCount = Number.isInteger(rawPointCount)
+            ? Math.min(121, Math.max(11, rawPointCount)) : 61;
+        const throughExpiry = String(opts.throughExpiry || '').replace(/\D/g, '').slice(0, 8);
+        const basisMode = core.BASIS_MODES.includes(opts.basisMode)
+            ? opts.basisMode : 'net_cash';
+        const includeDeferredLongOptions = opts.includeDeferredLongOptions === true;
+        const longOptionInputs = opts.longOptionInputs || null;
+        if (!Number.isFinite(centerPrice) || centerPrice <= 0 || !throughExpiry) {
+            return {
+                available: false,
+                reason: !throughExpiry ? 'missing_expiry' : 'invalid_center_price',
+                centerPrice: Number.isFinite(centerPrice) ? centerPrice : null,
+                rangePct,
+                throughExpiry,
+                basisMode,
+                includeDeferredLongOptions,
+                points: [],
+            };
+        }
+
+        const low = Math.max(0, centerPrice * (1 - rangePct / 100));
+        const high = centerPrice * (1 + rangePct / 100);
+        const points = [];
+        for (let index = 0; index < pointCount; index += 1) {
+            const ratio = pointCount === 1 ? 0 : index / (pointCount - 1);
+            const price = low + (high - low) * ratio;
+            const scenario = core.computeOptionSettlementScenario(events, price, {
+                secType: opts.secType || 'STK',
+                throughExpiry,
+            });
+            const summary = scenario.ledger && scenario.ledger.combined;
+            const rendered = summary ? core.summarizeCost(summary, basisMode) : null;
+            const cost = rendered && rendered.available ? Number(rendered.value) : null;
+            const shares = summary ? Number(summary.shares) : null;
+            let basePnl = cost !== null && Number.isFinite(shares)
+                ? (price - cost) * shares : null;
+            // If the selected expiry closes the entire position, cumulative
+            // net cash is the locked-in result. Do not use that shortcut while
+            // a later option remains open because its mark is intentionally
+            // absent from this expiry-only model.
+            if (basePnl === null && rendered && rendered.state === 'no_shares'
+                && scenario.ledger && !(scenario.ledger.openOptions || []).length) {
+                basePnl = Number(summary.lifetimeNetCash);
+            }
+            const convexity = includeDeferredLongOptions
+                ? estimateDeferredLongOptions(scenario.deferredOptions, price, {
+                    throughExpiry, marketInputs: longOptionInputs,
+                })
+                : {
+                    available: true, count: 0, contracts: 0,
+                    callContracts: 0, putContracts: 0, marketValue: 0, pnl: 0,
+                };
+            const pnl = basePnl !== null && convexity.available
+                ? basePnl + convexity.pnl : basePnl;
+            points.push({
+                price,
+                changePct: ((price / centerPrice) - 1) * 100,
+                cost: Number.isFinite(cost) ? cost : null,
+                basePnl: Number.isFinite(basePnl) ? basePnl : null,
+                pnl: Number.isFinite(pnl) ? pnl : null,
+                longOptionMarketValue: Number.isFinite(convexity.marketValue)
+                    ? convexity.marketValue : null,
+                longOptionPnl: Number.isFinite(convexity.pnl) ? convexity.pnl : null,
+                longOptionCount: Number(convexity.count || 0),
+                longOptionContracts: Number(convexity.contracts || 0),
+                longCallContracts: Number(convexity.callContracts || 0),
+                longPutContracts: Number(convexity.putContracts || 0),
+                longOptionIvMin: Number.isFinite(convexity.ivMin)
+                    ? convexity.ivMin : null,
+                longOptionIvMax: Number.isFinite(convexity.ivMax)
+                    ? convexity.ivMax : null,
+                longOptionRateMin: Number.isFinite(convexity.rateMin)
+                    ? convexity.rateMin : null,
+                longOptionRateMax: Number.isFinite(convexity.rateMax)
+                    ? convexity.rateMax : null,
+                convexityReason: String(convexity.reason || ''),
+                convexityAvailable: convexity.available,
+                shares: Number.isFinite(shares) ? shares : null,
+                assignedContracts: Number(scenario.assignedContracts || 0),
+                exercisedContracts: Number(scenario.exercisedContracts || 0),
+                expiredContracts: Number(scenario.expiredContracts || 0),
+                unresolvedCount: (scenario.unresolvedOptions || []).length,
+            });
+        }
+        const hasUnresolved = points.some((point) => point.unresolvedCount);
+        const hasInvalidConvexity = includeDeferredLongOptions
+            && points.some((point) => !point.convexityAvailable);
+        const convexityFailure = points.find((point) => !point.convexityAvailable);
+        return {
+            available: !hasUnresolved && !hasInvalidConvexity
+                && points.some((point) => point.pnl !== null || point.cost !== null),
+            reason: hasUnresolved ? 'unresolved_options'
+                : (hasInvalidConvexity
+                    ? convexityFailure.convexityReason || 'invalid_long_option_inputs' : ''),
+            centerPrice,
+            rangePct,
+            throughExpiry,
+            basisMode,
+            includeDeferredLongOptions,
+            longOptionCount: points.length ? points[0].longOptionCount : 0,
+            longOptionContracts: points.length ? points[0].longOptionContracts : 0,
+            longCallContracts: points.length ? points[0].longCallContracts : 0,
+            longPutContracts: points.length ? points[0].longPutContracts : 0,
+            longOptionIvMin: points.length ? points[0].longOptionIvMin : null,
+            longOptionIvMax: points.length ? points[0].longOptionIvMax : null,
+            longOptionRateMin: points.length ? points[0].longOptionRateMin : null,
+            longOptionRateMax: points.length ? points[0].longOptionRateMax : null,
+            inputsFetchedAt: String(longOptionInputs && longOptionInputs.fetchedAt || ''),
+            curveAsOf: String(longOptionInputs && (
+                longOptionInputs.curveEffectiveDate || longOptionInputs.curveAsOf) || ''),
+            low,
+            high,
+            points,
+        };
     }
 
     function _text(node, value) {
@@ -329,7 +723,7 @@
         socket.onopen = () => {
             state.reconnectDelay = RECONNECT_BASE_DELAY_MS;
             _setConnection('connected');
-            _bootstrap();
+            void _bootstrap(socket);
         };
         socket.onclose = () => {
             if (state.ws !== socket) return;
@@ -390,8 +784,14 @@
                 reject(new Error('请求超时'));
             }, REQUEST_TIMEOUT_MS);
             state.pending.set(requestId, { resolve, reject, timer });
-            socket.send(JSON.stringify(Object.assign(
-                { action, requestId }, fields || {})));
+            try {
+                socket.send(JSON.stringify(Object.assign(
+                    { action, requestId }, fields || {})));
+            } catch (error) {
+                globalScope.clearTimeout(timer);
+                state.pending.delete(requestId);
+                reject(error instanceof Error ? error : new Error('发送请求失败'));
+            }
         });
     }
 
@@ -399,8 +799,12 @@
         if (core.ALLOWED_CLIENT_ACTIONS.indexOf(action) < 0) return false;
         const socket = state.ws;
         if (!socket || socket.readyState !== 1) return false;
-        socket.send(JSON.stringify(Object.assign({ action }, fields || {})));
-        return true;
+        try {
+            socket.send(JSON.stringify(Object.assign({ action }, fields || {})));
+            return true;
+        } catch (_) {
+            return false;
+        }
     }
 
     function _failPending(reason) {
@@ -437,7 +841,11 @@
             // an empty array into a trusted zero-position snapshot.
             state.positionsConnected = data.ibConnected === true
                 && data.positionsReady === true;
-            state.positionsTimestamp = _localTimestampIso();
+            // The server stamps this in TWS's configured timezone. Browser
+            // local time must never be compared with broker-local CSV rows.
+            state.positionsTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/
+                .test(String(data.brokerTimestamp || ''))
+                ? String(data.brokerTimestamp) : '';
             state.positionsAt = new Date().toLocaleTimeString();
             if (state.positionsTimer) {
                 globalScope.clearTimeout(state.positionsTimer);
@@ -629,10 +1037,11 @@
     // Data flow
     // ------------------------------------------------------------------
 
-    async function _bootstrap() {
+    async function _bootstrap(socket) {
         _sendOneWay('request_managed_accounts_snapshot');
         try {
             const status = await request('request_cost_basis_status');
+            if (state.ws !== socket || state.connection !== 'connected') return;
             state.status = status;
             if (!status.available) {
                 _setConnection('unavailable');
@@ -642,6 +1051,7 @@
             _text($('store-status'), `就绪 · schema v${status.storeSchemaVersion}`);
             await _loadBooks();
         } catch (error) {
+            if (state.ws !== socket || state.connection !== 'connected') return;
             _text($('store-status'), `不可用（${error.message}）`);
             _setConnection('unavailable');
         }
@@ -757,22 +1167,24 @@
                         && book.bookId === state.bookId);
                     button.addEventListener('click', async () => {
                         if (state.bookId !== book.bookId) {
-                            state.bookId = book.bookId;
-                            $('book-select').value = book.bookId;
-                            state.avgCostByAccount = {};
-                            state.marketPrice = null;
-                            state.importResult = null;
-                            state.importText = '';
-                            $('import-file').value = '';
-                            $('import-replace').checked = false;
-                            $('import-confirm').value = '';
-                            await _loadEvents();
-                            await _refreshResetPlan();
-                            _renderImportPreview();
+                            await _selectBook(book.bookId);
                         }
                         _showView('ledger');
                     });
-                    group.appendChild(button);
+                    const row = globalScope.document.createElement('div');
+                    row.className = 'book-nav-row';
+                    const deleteButton = globalScope.document.createElement('button');
+                    deleteButton.type = 'button';
+                    deleteButton.className = 'book-nav-delete';
+                    deleteButton.dataset.deleteBookId = book.bookId;
+                    deleteButton.textContent = '删除';
+                    deleteButton.title = `永久删除 ${account} / ${book.symbol} 整本账本`;
+                    deleteButton.setAttribute('aria-label', deleteButton.title);
+                    deleteButton.addEventListener('click', () => (
+                        _deleteBook(book.bookId, deleteButton)));
+                    row.appendChild(button);
+                    row.appendChild(deleteButton);
+                    group.appendChild(row);
                 });
             container.appendChild(group);
         });
@@ -847,18 +1259,110 @@
      * locally instead, so its running columns stay anchored to the real
      * timeline rather than restarting at whatever the page begins with.
      */
+    function isCurrentEventLoad(activeBookId, requestedBookId,
+                                activeGeneration, requestedGeneration) {
+        return Boolean(requestedBookId)
+            && activeBookId === requestedBookId
+            && activeGeneration === requestedGeneration;
+    }
+
+    /**
+     * A DOM event handler must never leak a rejected ledger request to the
+     * browser's unhandled-rejection hook. Returning false also keeps stale
+     * generations from running their post-load render work.
+     */
+    async function loadSelectedBookSafely(loadEvents, afterLoad, onFailure) {
+        try {
+            const loaded = await loadEvents();
+            if (loaded === false) return false;
+            await afterLoad();
+            return true;
+        } catch (error) {
+            try {
+                onFailure(error && typeof error === 'object'
+                    ? error : new Error(String(error)));
+            } catch (_) {
+                // Error rendering must not turn a handled socket failure back
+                // into an unhandled promise rejection.
+            }
+            return false;
+        }
+    }
+
+    function _beginBookSelection(bookId) {
+        state.bookId = String(bookId || '');
+        $('book-select').value = state.bookId;
+        state.flowPage = 1;
+        state.avgCostByAccount = {};
+        state.marketPrice = null;
+        state.whatIfPrice = null;
+        state.whatIfPriceSource = '';
+        state.marketPriceFetchedAt = '';
+        state.whatIfExpiry = '';
+        state.stressLongOptionInputs = null;
+        state.stressInputsError = '';
+        state.importResult = null;
+        state.importText = '';
+        state.resetPlan = null;
+        state.allEvents = [];
+        state.eventsTotal = 0;
+        state.ledger = null;
+        state.reconciliation = null;
+        $('import-file').value = '';
+        $('import-replace').checked = false;
+        // Clear the previous book immediately. If the socket drops during
+        // this request, the new title can never be paired with old rows.
+        _renderImportPreview();
+        _renderAll();
+    }
+
+    async function _selectBook(bookId) {
+        const requestedBookId = String(bookId || '');
+        _beginBookSelection(requestedBookId);
+        return loadSelectedBookSafely(
+            () => _loadEvents(),
+            async () => {
+                if (state.bookId !== requestedBookId) return;
+                await _refreshResetPlan();
+                _renderImportPreview();
+                _renderSidebarBooks();
+            },
+            (error) => {
+                if (state.bookId !== requestedBookId) return;
+                state.eventLoadGeneration += 1;
+                state.allEvents = [];
+                state.eventsTotal = 0;
+                state.ledger = null;
+                state.reconciliation = null;
+                state.resetPlan = null;
+                _renderImportPreview();
+                _renderAll();
+                _text($('store-status'), state.connection === 'connected'
+                    ? `读取失败（${error.message}）`
+                    : '未连接（当前账本尚未载入）');
+            },
+        );
+    }
+
     async function _loadEvents() {
         if (!state.bookId) return;
+        const bookId = state.bookId;
+        state.eventLoadGeneration += 1;
+        const generation = state.eventLoadGeneration;
         const collected = [];
         let offset = 0;
         let total = 0;
         for (;;) {
             const response = await request('list_cost_basis_events', {
-                bookId: state.bookId,
+                bookId,
                 limit: LEDGER_FETCH_SIZE,
                 offset,
                 includeVoided: true,
             });
+            if (!isCurrentEventLoad(
+                state.bookId, bookId, state.eventLoadGeneration, generation)) {
+                return false;
+            }
             const batch = Array.isArray(response.events) ? response.events : [];
             batch.forEach((event) => {
                 const timestamp = _exactBrokerTimestamp(event);
@@ -875,6 +1379,10 @@
                 break;
             }
         }
+        if (!isCurrentEventLoad(
+            state.bookId, bookId, state.eventLoadGeneration, generation)) {
+            return false;
+        }
         state.allEvents = collected;
         state.eventsTotal = total;
         state.flowPage = 1;
@@ -889,6 +1397,7 @@
             _parseImportText(state.importText);
             _renderImportPreview();
         }
+        return true;
     }
 
     /** The rows the flow table should show, after local filtering. */
@@ -911,16 +1420,17 @@
     }
 
     function requestPositions() {
-        const socket = state.ws;
-        if (!socket || socket.readyState !== 1) return;
         _invalidatePositions();
         state.requestCounter += 1;
         state.positionsRequestId = `cb-pos-${state.requestCounter}-${Date.now()}`;
-        socket.send(JSON.stringify({
-            action: 'request_portfolio_positions_snapshot',
+        if (!_sendOneWay('request_portfolio_positions_snapshot', {
             requestId: state.positionsRequestId,
-        }));
-        socket.send(JSON.stringify({ action: 'request_portfolio_avg_cost_snapshot' }));
+        })) {
+            state.positionsRequestId = '';
+            _text($('positions-status'), '未连接到后端');
+            return;
+        }
+        _sendOneWay('request_portfolio_avg_cost_snapshot');
         _text($('positions-status'), '拉取中…');
         if (state.positionsTimer) globalScope.clearTimeout(state.positionsTimer);
         // The avg-cost snapshot answers only when TWS has pushed portfolio
@@ -933,6 +1443,35 @@
                 _text($('positions-status'), '无响应（TWS 可能未连接）');
             }
         }, POSITIONS_TIMEOUT_MS);
+    }
+
+    async function _refreshWhatIfMarketPrice() {
+        const book = _currentBook();
+        if (!book || !state.bookId || state.marketPriceRefreshPending) return;
+        state.marketPriceRefreshPending = true;
+        _renderWhatIf();
+        try {
+            const response = await request('request_cost_basis_market_price', {
+                bookId: state.bookId,
+            });
+            const price = Number(response.marketPrice);
+            if (!Number.isFinite(price) || price <= 0) {
+                throw new Error('TWS 返回的最新价格无效');
+            }
+            state.marketPrice = price;
+            state.marketPriceFetchedAt = String(response.fetchedAt || '');
+            state.whatIfPrice = price;
+            state.whatIfPriceSource = 'tws';
+            _recompute();
+        } catch (error) {
+            const unavailable = error.code === 'broker_market_price_unavailable';
+            globalScope.alert(unavailable
+                ? '当前后端不支持主动刷新 TWS 价格，请连接实时 IB 后端。'
+                : `刷新 TWS 当前价失败：${error.message}`);
+        } finally {
+            state.marketPriceRefreshPending = false;
+            _renderWhatIf();
+        }
     }
 
     function _invalidatePositions() {
@@ -949,24 +1488,88 @@
         state.marketPrice = null;
         state.reconciliation = null;
         _renderPositionsStatus();
+        _renderReconciliation();
     }
 
     function _renderPositionsStatus() {
         const node = $('positions-status');
+        const book = _currentBook();
+        const inferred = buildLedgerPositionPreview(
+            state.ledger, book && book.symbol, book && book.secType);
         if (!state.positionsAt) {
-            _text(node, '未获取');
-            _text($('settings-positions-status'), '未获取');
+            const label = inferred.length
+                ? `TWS 未获取 · ${inferred.length} 项 CSV 推测`
+                : 'TWS 未获取';
+            _text(node, label);
+            _text($('settings-positions-status'), label);
             return;
         }
         const label = state.positionsConnected
             ? `${state.positionsAt} · ${state.positions.length} 条持仓`
-            : `${state.positionsAt} · TWS 未连接，数量不可信`;
+            : (inferred.length
+                ? `${state.positionsAt} · TWS 未连接 · ${inferred.length} 项 CSV 推测`
+                : `${state.positionsAt} · TWS 未连接`);
         _text(node, label);
         _text($('settings-positions-status'), label);
     }
 
     function canReconcilePositions(positionsAt, positionsConnected) {
         return Boolean(positionsAt && positionsConnected);
+    }
+
+    /**
+     * Present the positions reconstructed by replaying the persisted ledger.
+     *
+     * These rows are deliberately not a reconciliation result: without a
+     * completed TWS snapshot there is no broker-side zero, no difference,
+     * and no safe reconciliation suggestion. They keep the CSV-derived position visible
+     * while making the missing live verification explicit.
+     */
+    function buildLedgerPositionPreview(ledger, symbol, bookSecType) {
+        if (!ledger) return [];
+        const rows = [];
+        const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+        const futures = String(bookSecType || 'STK').toUpperCase() === 'FUT';
+
+        if (futures) {
+            (ledger.openFutures || []).forEach((position) => {
+                const quantity = Number(position.contracts);
+                if (!Number.isFinite(quantity) || Math.abs(quantity) < 1e-6) return;
+                rows.push({
+                    kind: 'future',
+                    account: String(position.account || ''),
+                    label: `${normalizedSymbol} ${position.expiry || ''} FUT`.trim(),
+                    ledger: quantity,
+                    identityConflict: Boolean(position.identityConflict),
+                });
+            });
+        } else {
+            Object.keys(ledger.perAccount || {}).sort().forEach((account) => {
+                const quantity = Number((ledger.perAccount[account] || {}).shares);
+                if (!Number.isFinite(quantity) || Math.abs(quantity) < 1e-6) return;
+                rows.push({
+                    kind: 'shares', account, label: '股票', ledger: quantity,
+                    identityConflict: false,
+                });
+            });
+        }
+
+        (ledger.openOptions || []).forEach((position) => {
+            const quantity = Number(position.contracts);
+            if (!Number.isFinite(quantity) || Math.abs(quantity) < 1e-6) return;
+            const strike = position.strike === null || position.strike === undefined
+                ? '' : position.strike;
+            rows.push({
+                kind: 'option',
+                account: String(position.account || ''),
+                label: `${normalizedSymbol} ${position.expiry || ''} `
+                    + `${position.right || ''}${strike}`.trim(),
+                ledger: quantity,
+                identityConflict: Boolean(position.identityConflict),
+            });
+        });
+
+        return core.sortPositionRows(rows);
     }
 
     function _recompute() {
@@ -1011,6 +1614,7 @@
         _renderBookMeta();
         _renderSummary();
         _renderReconciliation();
+        _renderPositionsStatus();
         _renderPremium();
         _renderFlow();
         _renderAccountFilter();
@@ -1101,7 +1705,7 @@
             (summary) => _quantity(futures
                 ? summary.futuresContracts : summary.shares));
         _headlineRow(body, columns);
-        _summaryRow(body, '若未平仓期权全部归零', columns,
+        _summaryRow(body, '若未平仓卖方期权全部归零', columns,
             (summary) => (summary.blendedCostIfExpired === null
                 ? '—' : _money(summary.blendedCostIfExpired, 4)));
         _summaryRow(body, futures ? '当前 FUT 开仓均价' : '纯股票均价', columns,
@@ -1113,10 +1717,10 @@
         _sectionRow(body, '现金分解', columns.length);
         _summaryRow(body, '累计净现金（收正付负）', columns,
             (summary) => _signedMoney(summary.netCash));
-        _summaryRow(body, '已实现期权费', columns,
-            (summary) => _money(summary.realizedPremium));
-        _summaryRow(body, '未实现期权费', columns,
-            (summary) => _money(summary.openPremium));
+        _summaryRow(body, '已到期 / 已结算卖方权利金', columns,
+            (summary) => _money(summary.realizedShortPremium));
+        _summaryRow(body, '尚未到期卖方权利金', columns,
+            (summary) => _money(summary.openShortPremium));
         _summaryRow(body, futures ? 'FUT 换月 / 平仓已实现盈亏' : '股票已实现盈亏', columns,
             (summary) => _money(futures
                 ? summary.futuresRealizedPnl : summary.stockRealizedPnl));
@@ -1129,7 +1733,7 @@
         _summaryRow(body, '盈亏平衡价', columns,
             (summary) => (summary.breakEvenPrice === null
                 ? '—' : _money(summary.breakEvenPrice, 4)));
-        _summaryRow(body, '全部清算后累计净收益', columns,
+        _summaryRow(body, '标的按参考价清算后净收益（不含 Long Option）', columns,
             (summary) => (summary.lifetimeNetIfLiquidated === null
                 ? '—' : _signedMoney(summary.lifetimeNetIfLiquidated)));
 
@@ -1186,6 +1790,746 @@
         return { source, caption, marks };
     }
 
+    function _renderWhatIf() {
+        const book = _currentBook();
+        const input = $('what-if-price');
+        const currentButton = $('btn-what-if-current');
+        const stressButton = $('btn-open-stress-test');
+        const resultNode = $('what-if-result');
+        const totalCostNode = $('what-if-total-cost');
+        const finalSharesNode = $('what-if-final-shares');
+        const putSharesNode = $('what-if-put-shares');
+        [resultNode, totalCostNode, finalSharesNode, putSharesNode].forEach((node) => {
+            node.className = '';
+            _text(node, '—');
+        });
+        _text($('what-if-share-caption'), '现有股票不会被卖出');
+        _text($('what-if-put-caption'), '—');
+        _text($('what-if-total-caption'), '情景综合成本 × 结算后总股数');
+        _text($('what-if-outcomes'), '输入假设到期结算价后，这里会列出被指派和归零的 Short Put。');
+        if (!state.ledger || !book) {
+            _renderWhatIfExpiryOptions([], true);
+            input.value = '';
+            input.disabled = true;
+            currentButton.disabled = true;
+            stressButton.disabled = true;
+            _text($('what-if-price-label'), '假设标的到期结算价');
+            _text($('what-if-context'), '选择账本后，可模拟所有未平期权结算后的持股与综合成本。');
+            _text($('what-if-result-caption'), '按上方选中的成本口径');
+            return;
+        }
+        const futures = String(book.secType || 'STK').toUpperCase() === 'FUT';
+        const reference = state.referencePrice !== null
+            ? state.referencePrice : state.marketPrice;
+        const expiries = _renderWhatIfExpiryOptions(
+            state.ledger.openOptions || [], futures);
+        input.disabled = futures || !expiries.length;
+        currentButton.textContent = state.marketPriceRefreshPending
+            ? '刷新中…' : '使用当前价';
+        currentButton.disabled = futures || !expiries.length
+            || state.marketPriceRefreshPending || state.connection !== 'connected';
+        stressButton.disabled = futures || !expiries.length;
+        _text($('what-if-price-label'), `${book.symbol} 假设到期结算价`);
+        if (futures) {
+            input.value = '';
+            _text($('what-if-context'), 'What If 期权结算情景目前仅适用于股票 / ETF 账本。');
+            _text($('what-if-result-caption'), '期货请使用 FUT 成本口径');
+            return;
+        }
+        if (!expiries.length) {
+            input.value = '';
+            _text($('what-if-context'), `${book.symbol} 当前没有可用于情景测算的未平期权。`);
+            _text($('what-if-result-caption'), '无未平期权到期日');
+            return;
+        }
+        const currentSummary = state.ledger.combined;
+        const price = state.whatIfPrice !== null ? state.whatIfPrice : reference;
+        if (globalScope.document.activeElement !== input) {
+            input.value = price === null ? '' : String(price);
+        }
+        const refreshedClock = state.marketPriceFetchedAt.length >= 19
+            ? state.marketPriceFetchedAt.slice(11, 19) : '';
+        const priceSource = state.whatIfPrice !== null
+            ? (state.whatIfPriceSource === 'tws'
+                ? `TWS 最新价${refreshedClock ? `（${refreshedClock} 刷新）` : ''}`
+                : '自定义到期价')
+            : (state.referencePrice !== null ? '手工参考价' : 'TWS 当前价');
+        const openCount = (state.ledger.openOptions || []).reduce(
+            (total, option) => total + Math.abs(Number(option.contracts) || 0), 0);
+        _text($('what-if-context'), `${book.symbol} · 现有 ${_quantity(currentSummary.shares)} 股`
+            + ` · ${_quantity(openCount)} 张未平期权 · ${priceSource}`
+            + ` · 计算至 ${state.whatIfExpiry.slice(0, 4)}-${state.whatIfExpiry.slice(4, 6)}`
+            + `-${state.whatIfExpiry.slice(6, 8)}`
+            + ` · ${BASIS_LABELS[state.basisMode] || state.basisMode}口径`);
+        if (price === null) {
+            _text($('what-if-result-caption'), '请先拉取 TWS 当前价，或输入假设到期结算价');
+            return;
+        }
+        const scenario = core.computeOptionSettlementScenario(state.allEvents, price, {
+            secType: book.secType || 'STK',
+            throughExpiry: state.whatIfExpiry,
+        });
+        if (!scenario.available) {
+            const missing = (scenario.unresolvedOptions || []).length;
+            _text($('what-if-result-caption'), missing
+                ? `${missing} 个未平期权缺少行权价、乘数或唯一标识，无法完整测算`
+                : '无法计算当前情景');
+            return;
+        }
+        const summary = scenario.ledger.combined;
+        const rendered = core.summarizeCost(summary, state.basisMode);
+        if (!rendered.available) {
+            _text($('what-if-result-caption'), '期权结算后没有股票净持仓，因此不存在每股综合成本');
+            _text(finalSharesNode, `${_quantity(summary.shares)} 股`);
+            return;
+        }
+        const currency = book.currency || 'USD';
+        const totalCost = rendered.value * summary.shares;
+        _text(resultNode, _currencyAmount(currency, rendered.value, 4));
+        resultNode.className = rendered.value < 0 ? 'metric-positive' : '';
+        _text(totalCostNode, _currencyAmount(currency, totalCost));
+        if (state.basisMode === 'net_cash') {
+            _text($('what-if-total-caption'), `结算后标的成本净投入 ${_currencyAmount(currency, summary.costNetCashOut)}`
+                + ` · 尚未到期卖方权利金 ${_currencyAmount(currency, summary.openShortPremium)}`
+                + ' 已收取，但履约义务尚存；Long Call / Put 全周期现金均排除');
+        } else {
+            _text($('what-if-total-caption'), `${BASIS_LABELS[state.basisMode] || state.basisMode}`
+                + '口径每股成本 × 结算后总股数');
+        }
+        _text(finalSharesNode, `${_quantity(summary.shares)} 股`);
+        const shareChange = summary.shares - currentSummary.shares;
+        _text($('what-if-share-caption'), `现有 ${_quantity(currentSummary.shares)} 股`
+            + ` · 期权结算 ${shareChange > 0 ? '+' : ''}${_quantity(shareChange)} 股`);
+        const putShares = scenario.shortPutAssignedShares;
+        _text(putSharesNode, `${putShares > 0 ? '+' : ''}${_quantity(putShares)} 股`);
+        const assignmentSpend = Math.abs(Number(scenario.shortPutAssignmentCash) || 0);
+        _text($('what-if-put-caption'), scenario.shortPutContracts
+                ? `${_quantity(scenario.shortPutAssignedContracts)} 张被指派 · `
+                + `${_quantity(scenario.shortPutExpiredContracts)} 张归零 · `
+                + `买股支出 ${_currencyAmount(currency, assignmentSpend)}`
+            : '当前没有未平 Short Put');
+        const byExpiryThenStrike = (left, right) => {
+            const leftExpiry = String(left.expiry || '');
+            const rightExpiry = String(right.expiry || '');
+            if (leftExpiry !== rightExpiry) return leftExpiry < rightExpiry ? -1 : 1;
+            return Number(left.strike || 0) - Number(right.strike || 0);
+        };
+        const shortPuts = scenario.outcomes.filter(
+            (outcome) => outcome.side === 'short' && outcome.right === 'P')
+            .sort(byExpiryThenStrike);
+        const assignedPuts = shortPuts.filter(
+            (outcome) => outcome.outcome === 'option_assignment');
+        const expiredPuts = shortPuts.filter(
+            (outcome) => outcome.outcome === 'option_expiry');
+        const assignedText = assignedPuts.length
+            ? assignedPuts.map(_whatIfContractLabel).join('、') : '无';
+        const expiredText = expiredPuts.length
+            ? expiredPuts.map(_whatIfContractLabel).join('、') : '无';
+        const deferredPuts = (scenario.deferredOptions || []).filter((option) => (
+            Number(option.contracts) < 0
+            && String(option.right || '').toUpperCase().slice(0, 1) === 'P'))
+            .sort(byExpiryThenStrike);
+        const deferredText = deferredPuts.length
+            ? deferredPuts.map((option) => _whatIfContractLabel({
+                expiry: option.expiry,
+                strike: option.strike,
+                right: option.right,
+                contracts: Math.abs(Number(option.contracts) || 0),
+            })).join('、') : '无';
+        _text($('what-if-outcomes'), `截至所选日被指派：${assignedText}；`
+            + `截至所选日归零：${expiredText}；`
+            + `所选日后继续保留：${deferredText}`);
+        _text($('what-if-result-caption'), `计算至 ${state.whatIfExpiry.slice(0, 4)}`
+            + `-${state.whatIfExpiry.slice(4, 6)}-${state.whatIfExpiry.slice(6, 8)}`
+            + ` · ${_money(price, 4)} 结算情景 · `
+            + `${BASIS_LABELS[state.basisMode] || state.basisMode}口径`);
+    }
+
+    function _stressDateLabel(expiry) {
+        const digits = String(expiry || '').replace(/\D/g, '').slice(0, 8);
+        return digits.length === 8
+            ? `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`
+            : '未选择';
+    }
+
+    function _stressReferencePrice() {
+        if (state.marketPrice !== null) return Number(state.marketPrice);
+        if (state.referencePrice !== null) return Number(state.referencePrice);
+        if (state.whatIfPrice !== null) return Number(state.whatIfPrice);
+        return null;
+    }
+
+    function _stressLongOptionRequests() {
+        return ((state.ledger && state.ledger.openOptions) || []).filter((option) => (
+            Number(option.contracts) > 0
+            && ['C', 'P'].includes(String(option.right || '').toUpperCase().slice(0, 1))
+            && String(option.expiry || '').replace(/\D/g, '').slice(0, 8)
+                > state.stressExpiry
+        )).map((option) => ({
+            conId: option.conId || null,
+            localSymbol: option.localSymbol || '',
+            right: String(option.right || '').toUpperCase().slice(0, 1),
+            strike: Number(option.strike),
+            expiry: String(option.expiry || '').replace(/\D/g, '').slice(0, 8),
+        }));
+    }
+
+    function _stressPercentRange(minimum, maximum) {
+        const min = Number(minimum);
+        const max = Number(maximum);
+        if (!Number.isFinite(min) || !Number.isFinite(max)) return '—';
+        if (Math.abs(max - min) < 1e-9) return `${_money(min * 100, 2)}%`;
+        return `${_money(min * 100, 2)}%–${_money(max * 100, 2)}%`;
+    }
+
+    function _renderStressExpiryOptions() {
+        const select = $('stress-expiry');
+        const expiries = Array.from(new Set(((state.ledger && state.ledger.openOptions) || [])
+            .map((option) => String(option.expiry || '').replace(/\D/g, '').slice(0, 8))
+            .filter((expiry) => expiry.length === 8))).sort();
+        if (!expiries.includes(state.stressExpiry)) {
+            state.stressExpiry = expiries.includes(state.whatIfExpiry)
+                ? state.whatIfExpiry : (expiries[0] || '');
+        }
+        _clear(select);
+        if (!expiries.length) {
+            const option = globalScope.document.createElement('option');
+            option.value = '';
+            option.textContent = '没有未平期权到期日';
+            select.appendChild(option);
+        } else {
+            expiries.forEach((expiry) => {
+                const option = globalScope.document.createElement('option');
+                option.value = expiry;
+                option.textContent = `计算至 ${_stressDateLabel(expiry)}`;
+                select.appendChild(option);
+            });
+        }
+        select.value = state.stressExpiry;
+        select.disabled = !expiries.length;
+        return expiries;
+    }
+
+    function _svgNode(tag, attributes, label) {
+        const node = globalScope.document.createElementNS(
+            'http://www.w3.org/2000/svg', tag);
+        Object.keys(attributes || {}).forEach((name) => (
+            node.setAttribute(name, String(attributes[name]))));
+        if (label !== undefined) node.textContent = label;
+        return node;
+    }
+
+    function _stressExtent(values, includeZero) {
+        const finite = (values || []).filter((value) => Number.isFinite(value));
+        if (includeZero) finite.push(0);
+        if (!finite.length) return { min: -1, max: 1 };
+        let min = Math.min(...finite);
+        let max = Math.max(...finite);
+        if (Math.abs(max - min) < 1e-9) {
+            const pad = Math.max(1, Math.abs(max) * 0.1);
+            min -= pad;
+            max += pad;
+        } else {
+            const pad = (max - min) * 0.1;
+            min -= pad;
+            max += pad;
+        }
+        return { min, max };
+    }
+
+    function _compactAxisNumber(value) {
+        const magnitude = Math.abs(Number(value));
+        if (magnitude >= 1000000) return `${_money(value / 1000000, 1)}m`;
+        if (magnitude >= 1000) return `${_money(value / 1000, 1)}k`;
+        return _money(value, magnitude >= 100 ? 0 : 2);
+    }
+
+    function _renderStressCards(series, currency) {
+        const wrap = $('stress-key-points');
+        _clear(wrap);
+        if (!series.points.length) return;
+        const middle = series.points.reduce((best, point) => (
+            Math.abs(point.price - series.centerPrice)
+                < Math.abs(best.price - series.centerPrice) ? point : best
+        ), series.points[0]);
+        const choices = [
+            ['下行情景', series.points[0]],
+            ['基准现价', middle],
+            ['上行情景', series.points[series.points.length - 1]],
+        ];
+        choices.forEach(([label, point]) => {
+            const card = globalScope.document.createElement('article');
+            const heading = globalScope.document.createElement('span');
+            heading.textContent = `${label} · ${_money(point.price, 2)}`
+                + `（${point.changePct > 0 ? '+' : ''}${_money(point.changePct, 1)}%）`;
+            const pnl = globalScope.document.createElement('strong');
+            pnl.textContent = point.pnl === null
+                ? '盈亏 —' : `${series.includeDeferredLongOptions && point.longOptionCount
+                    ? '含多头期权盈亏' : '盈亏'} ${_currencyAmount(currency, point.pnl, 2, true)}`;
+            if (point.pnl > 0) pnl.className = 'metric-positive';
+            else if (point.pnl < 0) pnl.className = 'metric-negative';
+            const detail = globalScope.document.createElement('small');
+            detail.textContent = `综合成本 ${point.cost === null ? '—' : _money(point.cost, 4)}`
+                + ` · ${point.shares === null ? '—' : _quantity(point.shares)} 股`;
+            card.appendChild(heading);
+            card.appendChild(pnl);
+            card.appendChild(detail);
+            if (series.includeDeferredLongOptions && point.longOptionCount) {
+                const protection = globalScope.document.createElement('small');
+                protection.textContent = `不含多头期权 ${_currencyAmount(currency, point.basePnl, 2, true)}`
+                    + ` · Long Call / Put ${_currencyAmount(currency, point.longOptionPnl, 2, true)}`;
+                card.appendChild(protection);
+            }
+            wrap.appendChild(card);
+        });
+    }
+
+    function _renderStressChart(series, book) {
+        const svg = $('stress-chart');
+        const tooltip = $('stress-tooltip');
+        _clear(svg);
+        tooltip.hidden = true;
+        const width = 960;
+        const height = 470;
+        const margin = { top: 34, right: 92, bottom: 62, left: 92 };
+        const plotWidth = width - margin.left - margin.right;
+        const plotHeight = height - margin.top - margin.bottom;
+        svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+        const showConvexity = series.includeDeferredLongOptions && series.longOptionCount > 0;
+        const pnlValues = series.points.map((point) => point.pnl);
+        if (showConvexity) {
+            series.points.forEach((point) => pnlValues.push(point.basePnl));
+        }
+        const pnlExtent = _stressExtent(pnlValues, true);
+        const costExtent = _stressExtent(series.points.map((point) => point.cost), false);
+        const x = (price) => margin.left
+            + ((price - series.low) / (series.high - series.low)) * plotWidth;
+        const yPnl = (value) => margin.top
+            + ((pnlExtent.max - value) / (pnlExtent.max - pnlExtent.min)) * plotHeight;
+        const yCost = (value) => margin.top
+            + ((costExtent.max - value) / (costExtent.max - costExtent.min)) * plotHeight;
+
+        const grid = _svgNode('g', { class: 'stress-grid' });
+        for (let index = 0; index <= 5; index += 1) {
+            const ratio = index / 5;
+            const y = margin.top + ratio * plotHeight;
+            const pnlValue = pnlExtent.max - ratio * (pnlExtent.max - pnlExtent.min);
+            const costValue = costExtent.max - ratio * (costExtent.max - costExtent.min);
+            grid.appendChild(_svgNode('line', {
+                x1: margin.left, y1: y, x2: width - margin.right, y2: y,
+            }));
+            grid.appendChild(_svgNode('text', {
+                x: margin.left - 12, y: y + 4, 'text-anchor': 'end', class: 'axis-pnl',
+            }, _compactAxisNumber(pnlValue)));
+            grid.appendChild(_svgNode('text', {
+                x: width - margin.right + 12, y: y + 4,
+                'text-anchor': 'start', class: 'axis-cost',
+            }, _money(costValue, 2)));
+        }
+        for (let index = 0; index <= 6; index += 1) {
+            const ratio = index / 6;
+            const price = series.low + ratio * (series.high - series.low);
+            const xPos = x(price);
+            grid.appendChild(_svgNode('line', {
+                x1: xPos, y1: margin.top, x2: xPos, y2: height - margin.bottom,
+            }));
+            grid.appendChild(_svgNode('text', {
+                x: xPos, y: height - margin.bottom + 22,
+                'text-anchor': 'middle', class: 'axis-x',
+            }, _money(price, 2)));
+            grid.appendChild(_svgNode('text', {
+                x: xPos, y: height - margin.bottom + 39,
+                'text-anchor': 'middle', class: 'axis-change',
+            }, `${((price / series.centerPrice) - 1) * 100 >= 0 ? '+' : ''}`
+                + `${_money(((price / series.centerPrice) - 1) * 100, 0)}%`));
+        }
+        svg.appendChild(grid);
+
+        if (pnlExtent.min <= 0 && pnlExtent.max >= 0) {
+            svg.appendChild(_svgNode('line', {
+                x1: margin.left, y1: yPnl(0), x2: width - margin.right, y2: yPnl(0),
+                class: 'stress-zero-line',
+            }));
+        }
+        svg.appendChild(_svgNode('line', {
+            x1: x(series.centerPrice), y1: margin.top,
+            x2: x(series.centerPrice), y2: height - margin.bottom,
+            class: 'stress-current-line',
+        }));
+
+        const strikes = Array.from(new Set(((state.ledger && state.ledger.openOptions) || [])
+            .filter((option) => String(option.expiry || '').replace(/\D/g, '').slice(0, 8)
+                <= series.throughExpiry)
+            .map((option) => Number(option.strike))
+            .filter((strike) => Number.isFinite(strike)
+                && strike >= series.low && strike <= series.high))).sort((a, b) => a - b);
+        strikes.slice(0, 14).forEach((strike, index) => {
+            const xPos = x(strike);
+            svg.appendChild(_svgNode('line', {
+                x1: xPos, y1: margin.top, x2: xPos, y2: height - margin.bottom,
+                class: 'stress-strike-line',
+            }));
+            svg.appendChild(_svgNode('text', {
+                x: xPos + 3, y: margin.top + 11 + (index % 2) * 13,
+                class: 'stress-strike-label',
+            }, `K${_quantity(strike)}`));
+        });
+
+        function pathFor(key, scale) {
+            let drawing = false;
+            return series.points.map((point) => {
+                const value = point[key];
+                if (!Number.isFinite(value)) {
+                    drawing = false;
+                    return '';
+                }
+                const command = drawing ? 'L' : 'M';
+                drawing = true;
+                return `${command}${x(point.price).toFixed(2)},${scale(value).toFixed(2)}`;
+            }).filter(Boolean).join(' ');
+        }
+        svg.appendChild(_svgNode('path', {
+            d: pathFor(showConvexity ? 'basePnl' : 'pnl', yPnl),
+            class: `stress-pnl-line${showConvexity ? ' with-protection' : ''}`,
+        }));
+        if (showConvexity) {
+            svg.appendChild(_svgNode('path', {
+                d: pathFor('pnl', yPnl), class: 'stress-protected-pnl-line',
+            }));
+        }
+        svg.appendChild(_svgNode('path', {
+            d: pathFor('cost', yCost), class: 'stress-cost-line',
+        }));
+
+        const hoverLayer = _svgNode('g', { class: 'stress-hover-points' });
+        series.points.forEach((point) => {
+            if (point.pnl === null && point.cost === null) return;
+            const markerY = point.pnl !== null ? yPnl(point.pnl) : yCost(point.cost);
+            const circle = _svgNode('circle', {
+                cx: x(point.price), cy: markerY, r: 7,
+            });
+            circle.appendChild(_svgNode('title', {},
+                `${book.symbol} ${_money(point.price, 2)} `
+                + `(${point.changePct > 0 ? '+' : ''}${_money(point.changePct, 1)}%)\n`
+                + `盈亏 ${point.pnl === null ? '—' : _signedMoney(point.pnl)}\n`
+                + `${showConvexity ? `不含多头期权 ${_signedMoney(point.basePnl)}\n`
+                    + `Long Call / Put 理论市值 ${_signedMoney(point.longOptionMarketValue)}\n`
+                    + `Long Call / Put 浮动盈亏 ${_signedMoney(point.longOptionPnl)}\n` : ''}`
+                + `综合成本/股 ${point.cost === null ? '—' : _money(point.cost, 4)}\n`
+                + `结算后 ${point.shares === null ? '—' : _quantity(point.shares)} 股`));
+            hoverLayer.appendChild(circle);
+        });
+        svg.appendChild(hoverLayer);
+
+        const guide = _svgNode('g', { class: 'stress-hover-guide' });
+        guide.style.display = 'none';
+        const guideLine = _svgNode('line', {
+            y1: margin.top, y2: height - margin.bottom,
+        });
+        const pnlMarker = _svgNode('circle', {
+            r: 5, class: showConvexity ? 'guide-pnl guide-protected-pnl' : 'guide-pnl',
+        });
+        const basePnlMarker = _svgNode('circle', { r: 4, class: 'guide-base-pnl' });
+        const costMarker = _svgNode('circle', { r: 5, class: 'guide-cost' });
+        guide.appendChild(guideLine);
+        guide.appendChild(pnlMarker);
+        if (showConvexity) guide.appendChild(basePnlMarker);
+        guide.appendChild(costMarker);
+        svg.appendChild(guide);
+
+        function hideTooltip() {
+            tooltip.hidden = true;
+            guide.style.display = 'none';
+        }
+
+        svg.onpointermove = (pointerEvent) => {
+            const rect = svg.getBoundingClientRect();
+            const svgX = ((pointerEvent.clientX - rect.left) / rect.width) * width;
+            if (svgX < margin.left || svgX > width - margin.right) {
+                hideTooltip();
+                return;
+            }
+            const ratio = (svgX - margin.left) / plotWidth;
+            const pointIndex = Math.max(0, Math.min(series.points.length - 1,
+                Math.round(ratio * (series.points.length - 1))));
+            const point = series.points[pointIndex];
+            const pointX = x(point.price);
+            guide.style.display = '';
+            guideLine.setAttribute('x1', pointX);
+            guideLine.setAttribute('x2', pointX);
+            if (point.pnl === null) {
+                pnlMarker.style.display = 'none';
+            } else {
+                pnlMarker.style.display = '';
+                pnlMarker.setAttribute('cx', pointX);
+                pnlMarker.setAttribute('cy', yPnl(point.pnl));
+            }
+            if (showConvexity) {
+                if (point.basePnl === null) {
+                    basePnlMarker.style.display = 'none';
+                } else {
+                    basePnlMarker.style.display = '';
+                    basePnlMarker.setAttribute('cx', pointX);
+                    basePnlMarker.setAttribute('cy', yPnl(point.basePnl));
+                }
+            }
+            if (point.cost === null) {
+                costMarker.style.display = 'none';
+            } else {
+                costMarker.style.display = '';
+                costMarker.setAttribute('cx', pointX);
+                costMarker.setAttribute('cy', yCost(point.cost));
+            }
+
+            _text($('stress-tooltip-price'), `${book.symbol} `
+                + `${_currencyAmount(book.currency, point.price, 2)}`
+                + `（${point.changePct > 0 ? '+' : ''}${_money(point.changePct, 1)}%）`);
+            const pnlNode = $('stress-tooltip-pnl');
+            pnlNode.className = point.pnl > 0
+                ? 'metric-positive' : (point.pnl < 0 ? 'metric-negative' : '');
+            _text(pnlNode, point.pnl === null
+                ? '—' : _currencyAmount(book.currency, point.pnl, 2, true));
+            _text($('stress-tooltip-pnl-label'), showConvexity
+                ? '计入多头期权后盈亏' : '到期后盈亏');
+            ['stress-tooltip-base-row', 'stress-tooltip-long-option-value-row',
+                'stress-tooltip-long-option-pnl-row', 'stress-tooltip-long-option-iv-row',
+                'stress-tooltip-long-option-rate-row'].forEach((id) => {
+                $(id).hidden = !showConvexity;
+            });
+            if (showConvexity) {
+                _text($('stress-tooltip-base-pnl'), _currencyAmount(
+                    book.currency, point.basePnl, 2, true));
+                _text($('stress-tooltip-long-option-value'), _currencyAmount(
+                    book.currency, point.longOptionMarketValue, 2));
+                const optionPnl = $('stress-tooltip-long-option-pnl');
+                optionPnl.className = point.longOptionPnl > 0
+                    ? 'metric-positive' : (point.longOptionPnl < 0 ? 'metric-negative' : '');
+                _text(optionPnl, _currencyAmount(
+                    book.currency, point.longOptionPnl, 2, true));
+                _text($('stress-tooltip-long-option-iv'), _stressPercentRange(
+                    point.longOptionIvMin, point.longOptionIvMax));
+                _text($('stress-tooltip-long-option-rate'), _stressPercentRange(
+                    point.longOptionRateMin, point.longOptionRateMax));
+            }
+            _text($('stress-tooltip-cost'), point.cost === null
+                ? '—' : _currencyAmount(book.currency, point.cost, 4));
+            _text($('stress-tooltip-shares'), point.shares === null
+                ? '—' : `${_quantity(point.shares)} 股`);
+            _text($('stress-tooltip-outcome'),
+                `${_quantity(point.assignedContracts)} 张指派 · `
+                + `${_quantity(point.exercisedContracts)} 张行权 · `
+                + `${_quantity(point.expiredContracts)} 张归零`);
+
+            tooltip.hidden = false;
+            const wrap = tooltip.parentElement;
+            const wrapRect = wrap.getBoundingClientRect();
+            const pointerLeft = pointerEvent.clientX - wrapRect.left + wrap.scrollLeft;
+            const visibleLeft = wrap.scrollLeft;
+            let left = pointerLeft + 16;
+            if (left + 246 > visibleLeft + wrap.clientWidth) left = pointerLeft - 254;
+            left = Math.max(visibleLeft + 8,
+                Math.min(left, visibleLeft + wrap.clientWidth - 246));
+            const pointerTop = pointerEvent.clientY - wrapRect.top + wrap.scrollTop;
+            const visibleTop = wrap.scrollTop;
+            const top = Math.max(visibleTop + 8,
+                Math.min(pointerTop - 72,
+                    visibleTop + wrap.clientHeight - tooltip.offsetHeight - 8));
+            tooltip.style.left = `${left}px`;
+            tooltip.style.top = `${top}px`;
+        };
+        svg.onpointerleave = hideTooltip;
+        svg.appendChild(_svgNode('text', {
+            x: 18, y: margin.top + plotHeight / 2,
+            transform: `rotate(-90 18 ${margin.top + plotHeight / 2})`,
+            'text-anchor': 'middle', class: 'stress-axis-title axis-pnl',
+        }, `到期后盈亏（${_currencySymbol(book.currency)}）`));
+        svg.appendChild(_svgNode('text', {
+            x: width - 18, y: margin.top + plotHeight / 2,
+            transform: `rotate(90 ${width - 18} ${margin.top + plotHeight / 2})`,
+            'text-anchor': 'middle', class: 'stress-axis-title axis-cost',
+        }, `综合成本 / 股（${_currencySymbol(book.currency)}）`));
+    }
+
+    function _renderStressTest() {
+        if (!state.stressOpen) return;
+        const book = _currentBook();
+        const expiries = _renderStressExpiryOptions();
+        const baseInput = $('stress-base-price');
+        const refreshButton = $('btn-stress-refresh-price');
+        refreshButton.disabled = state.stressInputsPending
+            || state.connection !== 'connected';
+        refreshButton.textContent = state.stressInputsPending
+            ? '拉取中…' : '刷新 TWS 现价与期权参数';
+        if (!book || !state.ledger || !expiries.length) {
+            _text($('stress-status'), '当前账本没有可用于压力测试的未平股票期权。');
+            _clear($('stress-chart'));
+            _clear($('stress-key-points'));
+            return;
+        }
+        if (globalScope.document.activeElement !== baseInput) {
+            baseInput.value = state.stressBasePrice === null
+                ? '' : String(state.stressBasePrice);
+        }
+        $('stress-range').value = String(state.stressRangePct);
+        const protectionToggle = $('stress-include-long-options');
+        const protectionInputs = $('stress-protection-inputs');
+        protectionToggle.checked = state.stressIncludeLongOptions;
+        protectionInputs.hidden = !state.stressIncludeLongOptions;
+        const liveInputs = state.stressLongOptionInputs;
+        _text($('stress-option-iv-source'), state.stressInputsPending
+            ? '逐合约 TWS IV：正在拉取…'
+            : (liveInputs
+                ? `逐合约 TWS IV：${_quantity((liveInputs.options || []).filter(
+                    (item) => Number(item.impliedVolatility) > 0).length)} 张已取得`
+                : `逐合约 TWS IV：${state.stressInputsError || '尚未拉取'}`));
+        const liveRates = liveInputs && Array.isArray(liveInputs.ratesByExpiry)
+            ? liveInputs.ratesByExpiry : [];
+        _text($('stress-option-rate-source'), state.stressInputsPending
+            ? '期限无风险利率：正在读取最近共享曲线…'
+            : (liveRates.length
+                ? `期限无风险利率：共享曲线 ${liveInputs.curveEffectiveDate
+                    || liveInputs.curveAsOf || '日期未知'}`
+                : (liveInputs
+                    ? `期限无风险利率：不可用·${liveInputs.curveError
+                        || liveInputs.curveStatus || '最近曲线无法覆盖该期限'}`
+                    : `期限无风险利率：${state.stressInputsError
+                        || '尚未读取'}`)));
+        _text($('stress-title'), `${book.symbol} · 到期压力测试`);
+        const series = buildStressTestSeries(state.allEvents, {
+            centerPrice: state.stressBasePrice,
+            rangePct: state.stressRangePct,
+            pointCount: 61,
+            throughExpiry: state.stressExpiry,
+            basisMode: state.basisMode,
+            secType: book.secType || 'STK',
+            includeDeferredLongOptions: state.stressIncludeLongOptions,
+            longOptionInputs: state.stressLongOptionInputs,
+        });
+        if (!series.available) {
+            let failure = '当前期权资料不完整，无法生成压力测试。';
+            if (series.reason === 'invalid_center_price') {
+                failure = '请输入大于 0 的基准现价，或连接 TWS 后刷新现价。';
+            } else if (series.reason === 'missing_long_option_market_inputs') {
+                failure = state.stressInputsPending
+                    ? '正在从 TWS 拉取逐合约 IV 和共享利率曲线…'
+                    : `尚无可用的实时期权参数。${state.stressInputsError || '请点击刷新。'}`;
+            } else if (series.reason === 'missing_long_option_iv') {
+                failure = '至少一张未到期 Long Call / Put 没有取得 TWS 当前 IV，已停止叠加，不使用统一假设值。';
+            } else if (series.reason === 'missing_discount_rate') {
+                failure = '共享 USD 折现曲线无法覆盖至少一个剩余期限，已停止叠加。';
+            }
+            _text($('stress-status'), failure);
+            _clear($('stress-chart'));
+            _clear($('stress-key-points'));
+            return;
+        }
+        const currency = book.currency || 'USD';
+        $('stress-legend-base-pnl').textContent = series.includeDeferredLongOptions
+            && series.longOptionCount ? '不含未到期多头期权（左轴）' : '到期后盈亏（左轴）';
+        $('stress-legend-protected-pnl').hidden = !(series.includeDeferredLongOptions
+            && series.longOptionCount);
+        const longOptionParts = [];
+        if (series.longCallContracts) {
+            longOptionParts.push(`${_quantity(series.longCallContracts)} 张 Long Call`);
+        }
+        if (series.longPutContracts) {
+            longOptionParts.push(`${_quantity(series.longPutContracts)} 张 Long Put`);
+        }
+        _text($('stress-status'), `${_stressDateLabel(series.throughExpiry)} 到期后`
+            + ` · 基准 ${_currencyAmount(currency, series.centerPrice, 4)}`
+            + ` · 扫描 ±${_money(series.rangePct, 0)}%`
+            + ` · ${BASIS_LABELS[series.basisMode] || series.basisMode}口径`
+            + (series.includeDeferredLongOptions
+                ? (series.longOptionCount
+                    ? ` · 已计入 ${longOptionParts.join(' + ')}`
+                        + `（逐合约 TWS IV ${_stressPercentRange(
+                            series.longOptionIvMin, series.longOptionIvMax)}`
+                        + `，曲线 r(T) ${_stressPercentRange(
+                            series.longOptionRateMin, series.longOptionRateMax)}）`
+                    : ' · 所选日之后没有仍未到期的 Long Call / Put')
+                : ''));
+        _renderStressChart(series, book);
+        _renderStressCards(series, currency);
+    }
+
+    function _openStressTest() {
+        const book = _currentBook();
+        if (!book || !state.ledger) return;
+        state.stressOpen = true;
+        state.stressExpiry = state.whatIfExpiry;
+        state.stressBasePrice = _stressReferencePrice();
+        $('stress-modal').hidden = false;
+        globalScope.document.body.classList.add('stress-modal-open');
+        _renderStressTest();
+        $('stress-expiry').focus();
+        if (state.stressIncludeLongOptions) {
+            _refreshStressMarketInputs(false);
+        }
+    }
+
+    function _closeStressTest() {
+        if (!state.stressOpen) return;
+        state.stressOpen = false;
+        $('stress-modal').hidden = true;
+        globalScope.document.body.classList.remove('stress-modal-open');
+        $('btn-open-stress-test').focus();
+    }
+
+    async function _refreshStressMarketInputs(showAlert) {
+        if (!state.bookId || !state.stressExpiry || state.stressInputsPending) return;
+        if (!state.status || !state.status.features
+            || state.status.features.optionScenarioInputs !== true) {
+            state.stressLongOptionInputs = null;
+            state.stressInputsError = '当前运行的后端未加载期权情景接口。'
+                + '请真正重启 ib_server.py（仅刷新页面无效）后再试。';
+            _renderStressTest();
+            if (showAlert) globalScope.alert(state.stressInputsError);
+            return;
+        }
+        state.stressInputsPending = true;
+        state.stressInputsError = '';
+        state.stressLongOptionInputs = null;
+        _renderStressTest();
+        try {
+            const response = await request('request_cost_basis_option_scenario_inputs', {
+                bookId: state.bookId,
+                throughExpiry: state.stressExpiry,
+                contracts: _stressLongOptionRequests(),
+            });
+            const price = Number(response.underlyingPrice);
+            if (!Number.isFinite(price) || price <= 0) {
+                throw new Error('TWS 返回的标的现价无效');
+            }
+            state.stressLongOptionInputs = response;
+            state.marketPrice = price;
+            state.marketPriceFetchedAt = String(response.fetchedAt || '');
+            state.whatIfPrice = price;
+            state.whatIfPriceSource = 'tws';
+            state.stressBasePrice = price;
+            _recompute();
+        } catch (error) {
+            state.stressLongOptionInputs = null;
+            if (error.code === 'broker_option_scenario_inputs_unavailable') {
+                state.stressInputsError = '当前后端不支持 TWS 期权参数快照。';
+            } else if (error.code === 'broker_option_scenario_inputs_timeout') {
+                state.stressInputsError = 'TWS 期权参数在 15 秒内未完成，'
+                    + '服务器已终止请求，没有继续后台等待。';
+            } else {
+                state.stressInputsError = `拉取失败：${error.message}`;
+            }
+            if (showAlert) {
+                globalScope.alert(state.stressInputsError);
+            }
+        } finally {
+            state.stressInputsPending = false;
+            _renderStressTest();
+        }
+    }
+
+    async function _refreshStressPrice() {
+        await _refreshStressMarketInputs(true);
+    }
+
     function _renderDashboardSummary() {
         const ids = ['headline-cost', 'headline-position', 'headline-expired-cost',
             'headline-reference-price', 'headline-market-value',
@@ -1197,6 +2541,8 @@
             _text($('headline-cost-caption'), '选择账本后显示');
             $('headline-cost').className = 'hero-value';
             $('headline-diluted-pnl').className = '';
+            _renderWhatIf();
+            _renderStressTest();
             return;
         }
         const book = _currentBook();
@@ -1212,7 +2558,7 @@
         } else if (hero.source === 'unavailable') {
             _text(headline, '—');
         } else {
-            _text(headline, `${book.currency || 'USD'} ${_money(rendered.value, 4)}`);
+            _text(headline, _currencyAmount(book.currency, rendered.value, 4));
         }
         hero.marks.forEach((mark) => headline.classList.add(mark));
         _text($('headline-cost-caption'), hero.caption);
@@ -1230,13 +2576,13 @@
             reference, exposure, rendered.available ? rendered.value : null);
         const marketValue = marketMetrics.marketValue;
         _text($('headline-market-value'), marketValue === null
-            ? '—' : `${currency} ${_money(marketValue)}`);
+            ? '—' : _currencyAmount(currency, marketValue));
         const dilutedPnl = marketMetrics.dilutedPnl;
         const pnlNode = $('headline-diluted-pnl');
         pnlNode.className = dilutedPnl > 0
             ? 'metric-positive' : (dilutedPnl < 0 ? 'metric-negative' : '');
         _text(pnlNode, dilutedPnl === null
-            ? '—' : `${currency} ${_signedMoney(dilutedPnl)}`);
+            ? '—' : _currencyAmount(currency, dilutedPnl, 2, true));
         _text($('headline-stock-cost'), (futures
             ? summary.futuresAvgCost : summary.stockAvgCost) === null
             ? '—' : _money(futures ? summary.futuresAvgCost : summary.stockAvgCost, 4));
@@ -1247,13 +2593,22 @@
         _text($('headline-break-even'), summary.breakEvenPrice === null
             ? '—' : _money(summary.breakEvenPrice, 4));
         _text($('cash-net'), _signedMoney(summary.netCash));
-        _text($('cash-realized-premium'), _signedMoney(summary.realizedPremium));
-        _text($('cash-open-premium'), _signedMoney(summary.openPremium));
-        _text($('cash-dividends'), _signedMoney(futures
-            ? summary.futuresRealizedPnl : summary.dividends));
+        _text($('cash-realized-premium'), _signedMoney(summary.realizedShortPremium));
+        _text($('cash-open-premium'), _signedMoney(summary.openShortPremium));
+        const realizedTotal = futures
+            ? summary.futuresRealizedPnl
+            : Number(summary.dividends || 0) + Number(summary.stockRealizedPnl || 0);
+        _text($('cash-dividends'), _signedMoney(realizedTotal));
+        _text($('cash-realized-label'), futures
+            ? 'FUT 换月 / 平仓已实现盈亏'
+            : '股息 + 股票已实现盈亏');
         _text($('cash-dividends-caption'), futures
-            ? 'FUT 换月 / 平仓已实现损益' : '股息');
+            ? '已实现 FUT 损益'
+            : `股息 ${_signedMoney(summary.dividends)} · `
+                + `股票已实现 ${_signedMoney(summary.stockRealizedPnl)}`);
         _text($('cash-fees'), _signedMoney(-Math.abs(Number(summary.fees) || 0)));
+        _renderWhatIf();
+        _renderStressTest();
     }
 
     function _summaryRow(body, label, columns, render) {
@@ -1500,19 +2855,35 @@
         const badge = $('position-match-badge');
         _clear(body);
         if (!state.reconciliation) {
-            badge.className = 'soft-badge';
-            _text(badge, !state.positionsAt ? '尚未拉取' : 'TWS 不可用');
-            const row = globalScope.document.createElement('tr');
-            const cell = globalScope.document.createElement('td');
-            cell.colSpan = 8;
-            cell.className = 'empty';
-            cell.textContent = !state.positionsAt
-                ? '尚未拉取 TWS 持仓'
-                : (!state.positionsConnected
-                    ? 'TWS 未连接或持仓快照未完成；不进行对账，也不生成补录建议'
-                    : '无差异');
-            row.appendChild(cell);
-            body.appendChild(row);
+            const book = _currentBook();
+            const previewRows = buildLedgerPositionPreview(
+                state.ledger, book && book.symbol, book && book.secType);
+            badge.className = previewRows.length ? 'soft-badge warn' : 'soft-badge';
+            _text(badge, previewRows.length ? '仅 CSV / 账本推测' : '尚无推测持仓');
+            if (!previewRows.length) {
+                const row = globalScope.document.createElement('tr');
+                const cell = globalScope.document.createElement('td');
+                cell.colSpan = 8;
+                cell.className = 'empty';
+                cell.textContent = 'CSV / 账本流水尚未推导出当前持仓；TWS 尚未核对';
+                row.appendChild(cell);
+                body.appendChild(row);
+                return;
+            }
+            previewRows.forEach((entry) => {
+                const row = globalScope.document.createElement('tr');
+                _cell(row, entry.account || '（未标账户）');
+                _cell(row, entry.label);
+                _cell(row, _quantity(entry.ledger), 'numeric');
+                _cell(row, '—', 'numeric');
+                _cell(row, '—', 'numeric');
+                _cell(row, entry.identityConflict
+                    ? '仅 CSV 推测 · 合约身份待复核' : '仅 CSV 推测',
+                entry.identityConflict ? 'status-missing' : 'status-explained');
+                _cell(row, '尚未与 TWS 当前持仓对账', 'confidence-low');
+                _cell(row, '');
+                body.appendChild(row);
+            });
             return;
         }
         if (!state.reconciliation.rows.length) {
@@ -1541,6 +2912,12 @@
                     secType: (_currentBook() || {}).secType || 'STK',
                 })
                 : null;
+            const avgCostDraft = state.positionsConnected && !adoption
+                ? core.buildTwsAvgCostGapDraft(entry, {
+                    today: _todayIso(),
+                    secType: (_currentBook() || {}).secType || 'STK',
+                })
+                : null;
             const row = globalScope.document.createElement('tr');
             _cell(row, entry.account || '（未标账户）');
             _cell(row, entry.kind === 'shares' ? '股票' : entry.label);
@@ -1565,18 +2942,20 @@
                 identity_conflict: '合约身份歧义，需人工确认',
             }[entry.status] || entry.status, statusClass);
 
-            if (!entry.suggestion && !adoption) {
+            if (!entry.suggestion && !adoption && !avgCostDraft) {
                 _cell(row, entry.advice || '', entry.advice ? 'confidence-low' : '');
                 _cell(row, '');
             } else {
                 const label = adoption
                     ? `TWS 持仓基线 · 均价 ${_money(adoption.price, 4)}`
+                    : (avgCostDraft
+                        ? `AvgCost ${_money(avgCostDraft.price, 4)} 只生成差额草稿`
                     : `${KIND_LABELS[entry.suggestion.kind] || entry.suggestion.kind}`
                         + (entry.suggestion.shares
                             ? ` · ${_quantity(entry.suggestion.shares)} 股` : '')
                         + (entry.status === 'tws_only' && !entry.twsAvgCost
                             ? ' · TWS 均价不可用'
-                            : (entry.confidence === 'high' ? '' : ' · 需核实'));
+                            : (entry.confidence === 'high' ? '' : ' · 需核实')));
                 _cell(row, label,
                     adoption || entry.confidence === 'high'
                         ? 'confidence-high' : 'confidence-low');
@@ -1588,6 +2967,10 @@
                     button.textContent = '采信 TWS';
                     button.addEventListener('click', () => (
                         _adoptTwsPosition(entry, adoption, button)));
+                } else if (avgCostDraft) {
+                    button.textContent = '按 AvgCost 填草稿';
+                    button.title = '只填入手工表单，不会直接写账；AvgCost 可能混合开平仓';
+                    button.addEventListener('click', () => _fillForm(avgCostDraft));
                 } else {
                     button.textContent = '手工补录…';
                     button.addEventListener('click', () => _fillForm(entry.suggestion));
@@ -1609,9 +2992,9 @@
         const windows = [[30, 'premium-30'], [90, 'premium-90'], [365, 'premium-365']];
         let yearly = 0;
         windows.forEach(([days, id]) => {
-            // Realization dates, not trade dates: premium on a contract that
-            // is still open is money received but still at risk, and calling
-            // it income would overstate every rate below.
+            // Settlement dates, not receipt dates: both buckets are already
+            // received cash. This window measures when the associated
+            // contract obligation ended, not whether premium income exists.
             const total = core.realizedPremiumWindow(state.ledger, {
                 since: _shiftDays(today, -days),
                 until: today,
@@ -1625,8 +3008,8 @@
         _text($('premium-annualized-label'), futures
             ? '相对 FUT 名义金额年化' : '相对占用资金年化');
         _text($('premium-annualized-detail'), futures
-            ? '按近 365 天已实现 FOP 权利金 / 当前 FUT 名义金额（非保证金收益率）'
-            : '按近 365 天权利金 / 当前持仓成本');
+            ? '按近 365 天已到期 / 已结算 FOP 卖方权利金 / 当前 FUT 名义金额（非保证金收益率）'
+            : '按近 365 天已到期 / 已结算卖方权利金 / 当前持仓成本');
         const committed = futures
             ? (summary.hasFutures && summary.futuresAvgCost !== null
                 ? Math.abs(summary.futureExposure * summary.futuresAvgCost) : 0)
@@ -1702,10 +3085,16 @@
                 if (!event.voidedAtUtc) {
                     const button = globalScope.document.createElement('button');
                     button.type = 'button';
-                    button.className = 'draft';
-                    button.textContent = '冲销';
+                    button.className = 'draft delete-event';
+                    button.textContent = '删除';
+                    button.title = '从有效流水和成本计算中移除，同时保留可审计的冲销记录';
                     button.addEventListener('click', () => _voidEvent(event));
                     actionCell.appendChild(button);
+                } else {
+                    const deleted = globalScope.document.createElement('span');
+                    deleted.className = 'deleted-label';
+                    deleted.textContent = '已删除';
+                    actionCell.appendChild(deleted);
                 }
                 row.appendChild(actionCell);
                 body.appendChild(row);
@@ -1729,11 +3118,15 @@
             || $('new-book-account').value !== MANUAL_ACCOUNT_VALUE;
         $('btn-create-book').disabled = !canCreateBook || !selectedNewBookAccount;
         $('btn-delete-book').disabled = !hasBook;
+        Array.from($('book-sidebar-list').querySelectorAll('[data-delete-book-id]'))
+            .forEach((button) => { button.disabled = !connected; });
         $('btn-refresh').disabled = !connected;
         $('btn-refresh-positions').disabled = !connected;
-        $('btn-submit-event').disabled = !hasBook;
+        $('btn-submit-event').disabled = !hasBook || state.eventSubmitPending;
         $('btn-export-csv').disabled = !hasBook;
         $('btn-save-snapshot').disabled = !hasBook;
+        $('btn-fetch-executions').disabled = !hasBook || !state.positionsConnected
+            || state.executionFetchPending || Boolean(state.importResult);
         // The input itself is visually hidden behind its label, and clicking
         // a label bound to a disabled input does nothing at all. Without
         // this the label stays a live-looking primary button that silently
@@ -1749,17 +3142,21 @@
                 ? (hasBook ? 'CSV 导入模块未加载' : '请先选择账本') : '';
         }
         const replacing = $('import-replace').checked === true;
-        const phraseOk = !replacing || Boolean(state.resetPlan
-            && $('import-confirm').value.trim() === state.resetPlan.phrase);
+        // Replacement still needs the server-issued, count-bearing reset
+        // plan, but the operator confirms it with one explicit dialog rather
+        // than retyping an implementation phrase.
+        const resetPlanReady = !replacing || Boolean(state.resetPlan);
         // A batch carrying unresolved rows must not be committed piecemeal.
         // Writing the readable half of a statement produces a ledger that
         // looks imported but is missing a delivery - the worst outcome
         // available, because nothing on the page would say so afterwards.
         const blocked = Boolean(state.importResult
             && state.importResult.problems.length);
-        $('import-replace').disabled = !hasBook;
+        const apiImport = Boolean(state.importResult
+            && state.importResult.format === 'tws_api');
+        $('import-replace').disabled = !hasBook || apiImport;
         $('btn-import-commit').disabled = !hasBook || !state.importResult
-            || !_importRows(state.importResult).length || !phraseOk || blocked;
+            || !_importRows(state.importResult).length || !resetPlanReady || blocked;
         $('btn-import-clear').disabled = !state.importResult;
     }
 
@@ -1911,20 +3308,42 @@
         else delete node.dataset.state;
     }
 
+    function chooseManualSubmitToken(existingToken, existingFingerprint,
+                                     nextFingerprint, tokenFactory) {
+        if (existingToken && existingFingerprint === nextFingerprint) {
+            return existingToken;
+        }
+        return tokenFactory();
+    }
+
     async function _submitEvent(submitEvent) {
         submitEvent.preventDefault();
-        if (!state.bookId) return;
+        if (!state.bookId || state.eventSubmitPending) return;
+        const bookId = state.bookId;
         const event = _formEvent();
         if (event.cashAmount === null || event.cashAmount === undefined) {
             _message('无法推导现金金额，请手工填写。', 'error');
             return;
         }
+        const fingerprint = JSON.stringify([bookId, event]);
+        const clientToken = chooseManualSubmitToken(
+            state.eventSubmitToken, state.eventSubmitFingerprint,
+            fingerprint, () => _token('cbe-'));
+        state.eventSubmitToken = clientToken;
+        state.eventSubmitFingerprint = fingerprint;
+        state.eventSubmitPending = true;
+        $('btn-submit-event').textContent = '写入中…';
+        _refreshControls();
+        let writeAcknowledged = false;
         try {
             const response = await request('append_cost_basis_event', {
-                bookId: state.bookId,
+                bookId,
                 event,
-                clientToken: _token('cbe-'),
+                clientToken,
             });
+            writeAcknowledged = true;
+            state.eventSubmitToken = '';
+            state.eventSubmitFingerprint = '';
             const warnings = Array.isArray(response.warnings) ? response.warnings : [];
             _message(warnings.length
                 ? `已写入（告警：${warnings.map(_describeWarning).join('；')}）`
@@ -1932,7 +3351,25 @@
             _resetForm();
             await _loadBooks();
         } catch (error) {
-            _message(_explainWriteError(error), 'error');
+            if (writeAcknowledged) {
+                _message(`已写入账本，但刷新失败：${error.message || '未知错误'}`, 'error');
+                return;
+            }
+            // A typed server rejection proves that nothing committed and a
+            // corrected draft is a new logical operation. A timeout/socket
+            // loss is ambiguous: retain the token so retry is idempotent if
+            // the first write committed but its acknowledgement was lost.
+            if (error.code) {
+                state.eventSubmitToken = '';
+                state.eventSubmitFingerprint = '';
+            }
+            const retryNote = error.code
+                ? '' : '；可直接重试，不会重复写入';
+            _message(`${_explainWriteError(error)}${retryNote}`, 'error');
+        } finally {
+            state.eventSubmitPending = false;
+            $('btn-submit-event').textContent = '写入账本';
+            _refreshControls();
         }
     }
 
@@ -1966,7 +3403,9 @@
 
     async function _voidEvent(event) {
         const reason = globalScope.prompt(
-            `冲销这条事件需要写明原因（${event.tradeDate} ${KIND_LABELS[event.kind] || event.kind}）：`);
+            `删除这条账本记录（${event.tradeDate} ${KIND_LABELS[event.kind] || event.kind}）？\n\n`
+            + '删除后它会立即从有效流水和成本计算中移除，'
+            + '但会保留一条可审计的冲销记录。\n\n请填写删除原因：');
         if (!reason || !reason.trim()) return;
         try {
             await request('void_cost_basis_event', {
@@ -1977,7 +3416,7 @@
             });
             await _loadBooks();
         } catch (error) {
-            globalScope.alert(`冲销失败：${error.message}`);
+            globalScope.alert(`删除失败：${error.message}`);
         }
     }
 
@@ -1991,9 +3430,14 @@
             return explicit;
         }
         const note = String((event && event.note) || '');
-        const match = /(\d{4}-\d{2}-\d{2})[,\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(note);
-        if (match) {
-            return `${match[1]}T${match[2].padStart(2, '0')}:${match[3]}:${match[4] || '00'}`;
+        const source = String((event && event.source) || '');
+        const trustedNote = source === 'csv_import' || source === 'execution_report'
+            || (source === 'reconcile' && event && event.tag === 'tws_snapshot');
+        if (trustedNote) {
+            const match = /(\d{4}-\d{2}-\d{2})[,\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(note);
+            if (match) {
+                return `${match[1]}T${match[2].padStart(2, '0')}:${match[3]}:${match[4] || '00'}`;
+            }
         }
 
         // Baselines written before snapshot timestamps were added to the
@@ -2111,6 +3555,153 @@
         return !baselineConId || !conIds.size || conIds.has(baselineConId);
     }
 
+    function _singleApiExecutionMatchesBaseline(baseline, events, historyEvents) {
+        const baselineQuantity = Number(baseline.contracts || 0);
+        const baselineCash = Number(baseline.cashAmount);
+        if (!Number.isFinite(baselineCash)) return false;
+        return events.some((event) => {
+            if (event.source !== 'execution_report' || event.tag !== 'ibkr_exec'
+                || Math.abs(Number(event.contracts || 0) - baselineQuantity) >= 1e-6) {
+                return false;
+            }
+            let executionCash = Number(event.cashAmount);
+            const rebateRef = `${String(event.externalRef || '')}-rebate`;
+            historyEvents.forEach((candidate) => {
+                if (candidate.source === 'execution_report'
+                    && candidate.tag === 'ibkr_rebate'
+                    && candidate.externalRef === rebateRef) {
+                    executionCash += Number(candidate.cashAmount || 0);
+                }
+            });
+            // An adopted AvgCost baseline is rounded to four decimals while
+            // the ledger cash is cents. Matching both signed quantity and
+            // net cash identifies the real execution it represented, even
+            // when a later fill in the same contract is also visible.
+            return Number.isFinite(executionCash)
+                && Math.abs(executionCash - baselineCash) < 0.011;
+        });
+    }
+
+    function _tradeQuantity(event) {
+        if (!event) return null;
+        if (event.kind === 'option_trade') return Number(event.contracts);
+        if (event.kind === 'share_trade') return Number(event.shares);
+        if (event.kind === 'futures_trade') return Number(event.futureContracts);
+        return null;
+    }
+
+    function _sameExecutionContract(left, right) {
+        if (!left || !right || left.kind !== right.kind
+            || left.account !== right.account) return false;
+        if (left.kind === 'option_trade') {
+            if (core.contractKey(left) !== core.contractKey(right)) return false;
+            return !(left.conId && right.conId
+                && String(left.conId) !== String(right.conId));
+        }
+        if (left.kind === 'futures_trade') {
+            if (core.futureKey(left) !== core.futureKey(right)) return false;
+            return !(left.futureConId && right.futureConId
+                && String(left.futureConId) !== String(right.futureConId));
+        }
+        return left.kind === 'share_trade';
+    }
+
+    function _sameExecutionIdentity(left, right) {
+        return _sameExecutionContract(left, right)
+            && _exactBrokerTimestamp(left) === _exactBrokerTimestamp(right);
+    }
+
+    /**
+     * Map authoritative next-day CSV rows onto already-imported TWS fills.
+     * A match needs the exact account/contract/second plus signed quantity,
+     * price, and net cash. Ambiguous economic overlap blocks the batch.
+     */
+    function planExecutionReportAliases(importResult, allEvents) {
+        const result = importResult || {};
+        if (result.format !== 'activity' && result.format !== 'flex') {
+            return { aliases: {}, matched: [], problems: [] };
+        }
+        const active = (allEvents || []).filter((event) => (
+            event.eventId && !event.voidedAtUtc && event.includeInCost !== false
+            && event.source === 'execution_report' && event.tag === 'ibkr_exec'
+            && ['option_trade', 'share_trade', 'futures_trade'].includes(event.kind)));
+        const rebates = new Map();
+        (allEvents || []).forEach((event) => {
+            if (!event.voidedAtUtc && event.includeInCost !== false
+                && event.source === 'execution_report' && event.tag === 'ibkr_rebate') {
+                rebates.set(event.externalRef, Number(event.cashAmount || 0));
+            }
+        });
+        const remaining = new Set(active);
+        const aliases = {};
+        const matched = [];
+        const problems = [];
+        (result.events || []).filter((event) => (
+            event.source === 'csv_import'
+            && ['option_trade', 'share_trade', 'futures_trade'].includes(event.kind)
+            && Boolean(_exactBrokerTimestamp(event)))).forEach((csvEvent) => {
+            const directRef = String(csvEvent.externalRef || '').startsWith('ibkr-exec-')
+                ? String(csvEvent.externalRef)
+                : `ibkr-exec-${String(csvEvent.externalRef || '')}`;
+            const sameDayContract = active.filter((event) => (
+                remaining.has(event) && _sameExecutionContract(csvEvent, event)
+                && event.tradeDate === csvEvent.tradeDate));
+            const direct = sameDayContract.filter((event) => (
+                event.externalRef === directRef));
+            const related = direct.length ? direct : active.filter((event) => (
+                remaining.has(event) && _sameExecutionIdentity(csvEvent, event)));
+            if (!related.length) {
+                if (sameDayContract.length) {
+                    problems.push({
+                        lineNumber: csvEvent.lineNumber || 0,
+                        reason: 'CSV row may overlap a stored TWS execution for the same '
+                            + 'contract and day, but the broker timestamp differs; import is blocked for review',
+                        raw: `${csvEvent.account} ${_describeContract(csvEvent)}`,
+                    });
+                }
+                return;
+            }
+            const csvQuantity = _tradeQuantity(csvEvent);
+            const csvPrice = Number(csvEvent.price);
+            const csvCash = Number(csvEvent.cashAmount);
+            const exact = related.filter((event) => {
+                const apiCash = Number(event.cashAmount || 0)
+                    + Number(rebates.get(`${event.externalRef}-rebate`) || 0);
+                return Math.abs(_tradeQuantity(event) - csvQuantity) < 1e-6
+                    && Math.abs(Number(event.price) - csvPrice) < 1e-8
+                    && Math.abs(apiCash - csvCash) < 0.011;
+            }).sort((left, right) => String(left.externalRef).localeCompare(
+                String(right.externalRef)));
+            if (!exact.length) {
+                problems.push({
+                    lineNumber: csvEvent.lineNumber || 0,
+                    reason: 'CSV row overlaps a stored TWS execution at the same second, '
+                        + 'but quantity, price, or net cash differs; import is blocked to avoid double counting',
+                    raw: `${csvEvent.account} ${_describeContract(csvEvent)}`,
+                });
+                return;
+            }
+            const execution = exact[0];
+            remaining.delete(execution);
+            aliases[`${csvEvent.account}\u0000${csvEvent.externalRef}`]
+                = execution.externalRef;
+            matched.push({ csvEvent, execution });
+        });
+        return { aliases, matched, problems };
+    }
+
+    /**
+     * Cross-source matching protects append imports from double-counting.
+     * A replacement rebuild archives and removes every stored row first, so
+     * comparing the new CSV against those soon-to-be-removed TWS fills would
+     * create false blockers and can never prevent a duplicate.
+     */
+    function planImportExecutionAliases(replacing, importResult, allEvents) {
+        return replacing
+            ? { aliases: {}, matched: [], problems: [] }
+            : planExecutionReportAliases(importResult, allEvents);
+    }
+
     function _futureDeltaForKey(event, key) {
         if (!event || !key) return 0;
         if (event.kind === 'futures_trade') {
@@ -2144,22 +3735,24 @@
     }
 
     /**
-     * Find provisional TWS baselines for which this Activity Statement now
-     * supplies the complete broker history. The CSV rows alone must rebuild
-     * the exact snapshot quantity and need no unknown prior-opening stub.
+     * Find provisional TWS baselines for which reviewed broker history now
+     * supplies the real executions. CSV and TWS API rows must independently
+     * rebuild the exact snapshot quantity; partial overlap stays blocked.
      */
     function planTwsBaselineSupersession(importResult, allEvents) {
         const result = importResult || {};
         const openings = result.openings;
         const account = String(result.account || '');
         const cutoff = String(result.statementThrough || '');
-        if (result.format !== 'activity' || !openings
+        const historySource = result.format === 'activity' ? 'csv_import'
+            : (result.format === 'tws_api' ? 'execution_report' : '');
+        if (!historySource || !openings
             || (result.problems || []).length || !account || !cutoff) {
             return { eventIds: [], events: [], problems: [] };
         }
 
-        const csvEvents = (result.events || []).filter(
-            (event) => event.source === 'csv_import' && event.tag !== 'prior_open');
+        const historyEvents = (result.events || []).filter(
+            (event) => event.source === historySource && event.tag !== 'prior_open');
         const openingKeys = new Set((openings.drafts || []).map(
             (event) => core.contractKey(event)));
         const candidates = (allEvents || []).filter((event) => (
@@ -2176,7 +3769,7 @@
                     : `${baseline.expiry || ''} ${baseline.right || ''}${baseline.strike || ''}`);
             problems.push({
                 lineNumber: 0,
-                reason: 'CSV history partially or ambiguously overlaps an adopted TWS '
+                reason: 'Broker execution history partially or ambiguously overlaps an adopted TWS '
                     + 'baseline; import a complete covering statement or use reviewed rebuild',
                 raw: `${account} ${label}`,
             });
@@ -2185,7 +3778,7 @@
         candidates.forEach((baseline) => {
             if (baseline.kind === 'futures_trade') {
                 const key = core.futureKey(baseline);
-                const sameFuture = csvEvents.filter(
+                const sameFuture = historyEvents.filter(
                     (event) => Math.abs(_futureDeltaForKey(event, key)) > 1e-6);
                 const ambiguous = sameFuture.filter(
                     (event) => _eventVsAdoptedSnapshot(event, baseline) === 'ambiguous');
@@ -2209,7 +3802,7 @@
             }
             if (baseline.kind === 'option_trade') {
                 const key = core.contractKey(baseline);
-                const sameContract = csvEvents.filter((event) => (
+                const sameContract = historyEvents.filter((event) => (
                     event.contracts !== null && event.contracts !== undefined
                     && core.contractKey(event) === key
                     && (!(baseline.conId && event.conId)
@@ -2226,7 +3819,11 @@
                 }
                 const reconstructed = matching.reduce(
                     (total, event) => total + Number(event.contracts || 0), 0);
-                if (Math.abs(reconstructed - Number(baseline.contracts || 0)) < 1e-6) {
+                const exactApiExecution = result.format === 'tws_api'
+                    && _singleApiExecutionMatchesBaseline(
+                        baseline, matching, historyEvents);
+                if (Math.abs(reconstructed - Number(baseline.contracts || 0)) < 1e-6
+                    || exactApiExecution) {
                     selected.push(baseline);
                 } else {
                     conflict(baseline);
@@ -2234,7 +3831,7 @@
                 return;
             }
             if (baseline.kind !== 'opening_balance') return;
-            const sameAccount = csvEvents.filter((event) => (
+            const sameAccount = historyEvents.filter((event) => (
                 event.account === account && event.shares !== null
                 && event.shares !== undefined));
             const ambiguous = sameAccount.filter(
@@ -2272,6 +3869,9 @@
 
         if (!state.importResult) {
             _text(summaryNode, '未选择文件。');
+            _text($('import-preview-title'), '导入预览');
+            _text($('import-source-note'), '支持 TWS API 近期成交、Flex Query 与 Activity Statement。'
+                + '导入前逐行预览，execId 或报表成交号会自动去重。');
             wrap.hidden = true;
             problemWrap.hidden = true;
             $('import-blocked').hidden = true;
@@ -2283,16 +3883,25 @@
         $('import-workspace').hidden = false;
 
         const result = state.importResult;
+        const apiImport = result.format === 'tws_api';
+        _text($('import-preview-title'), apiImport ? 'TWS 成交预览' : 'CSV 导入预览');
+        _text($('import-source-note'), apiImport
+            ? (result.coverageNote || 'TWS API 只是近期成交窗口，不能代替完整历史报表。')
+            : '支持 Flex Query 与 Activity Statement。导入前逐行预览，'
+                + '重叠时间段会自动去重。');
         const kinds = Object.keys(result.summary.byKind)
             .map((kind) => `${KIND_LABELS[kind] || kind} ${result.summary.byKind[kind]}`)
             .join(' · ');
-        _text(summaryNode, `格式 ${result.format} · 读取 ${result.summary.total} 行`
+        _text(summaryNode, `${apiImport ? 'TWS API' : `格式 ${result.format}`} · 读取 ${result.summary.total} 行`
             + (result.account ? ` · 账户 ${result.account}` : '')
             + ` · 生成草稿 ${result.summary.drafted} 条`
             + ` · 其他标的跳过 ${result.summary.skipped} 行`
             + ` · 待人工处理 ${result.summary.problems} 行`
             + (result.supersedeTwsEventIds && result.supersedeTwsEventIds.length
-                ? ` · CSV 将取代 TWS 临时基线 ${result.supersedeTwsEventIds.length} 条`
+                ? ` · ${apiImport ? '真实成交' : 'CSV'}将取代 TWS 临时基线 ${result.supersedeTwsEventIds.length} 条`
+                : '')
+            + (result.confirmedExecutionCount
+                ? ` · 已核对并跳过 TWS 重复成交 ${result.confirmedExecutionCount} 条`
                 : '')
             + (kinds ? ` · ${kinds}` : ''));
         _renderOpenings(result);
@@ -2414,13 +4023,18 @@
             // First discover the statement's own cutoff without letting the
             // latest ledger state influence any opening-position arithmetic.
             const discovery = importer.parse(text, parseOptions);
-            const supersession = $('import-replace').checked === true
+            const replacing = $('import-replace').checked === true;
+            const executionAliases = planImportExecutionAliases(
+                replacing, discovery, state.allEvents);
+            const supersession = replacing
                 ? { eventIds: [], events: [], problems: [] }
                 : planTwsBaselineSupersession(discovery, state.allEvents);
             const baseline = buildImportBaseline(
-                $('import-replace').checked === true, state.ledger, state.allEvents,
+                replacing, state.ledger, state.allEvents,
                 discovery.statementThrough, supersession.eventIds);
-            const first = importer.parse(text, Object.assign({}, parseOptions, baseline));
+            const first = importer.parse(text, Object.assign({}, parseOptions, baseline, {
+                externalRefAliases: executionAliases.aliases,
+            }));
             // Opening stubs must sort before every real row, so they are
             // dated the day before the earliest trade in the file.
             const earliest = first.events.reduce(
@@ -2429,12 +4043,17 @@
             state.importResult = earliest
                 ? importer.parse(text, Object.assign({}, parseOptions, {
                     openingDate: _shiftDays(earliest, -1),
-                }, baseline))
+                }, baseline, { externalRefAliases: executionAliases.aliases }))
                 : first;
             state.importResult.supersedeTwsEventIds = supersession.eventIds;
+            state.importResult.confirmedExecutionCount = executionAliases.matched.length;
             if (supersession.problems.length) {
                 state.importResult.problems.push(...supersession.problems);
                 state.importResult.summary.problems += supersession.problems.length;
+            }
+            if (executionAliases.problems.length) {
+                state.importResult.problems.push(...executionAliases.problems);
+                state.importResult.summary.problems += executionAliases.problems.length;
             }
         } catch (error) {
             state.importResult = {
@@ -2473,21 +4092,16 @@
     }
 
     /**
-     * Ask the server what wiping this book would destroy.
-     *
-     * The phrase carries the live event count, so it goes stale the moment
-     * the ledger changes - which is the point: an operator can only confirm
-     * a deletion they actually looked at.
+     * Ask the server what wiping this book would destroy. The returned reset
+     * token carries the live event count and is rechecked transactionally;
+     * the UI presents that count in a normal confirmation dialog.
      */
     async function _refreshResetPlan() {
-        const row = $('import-confirm-row');
         const note = $('import-replace-note');
         const wanted = $('import-replace').checked === true;
         if (!wanted || !state.bookId) {
             state.resetPlan = null;
-            row.hidden = true;
             note.hidden = true;
-            $('import-confirm').value = '';
             _refreshControls();
             return;
         }
@@ -2495,13 +4109,11 @@
         try {
             state.resetPlan = await request('request_cost_basis_reset_plan',
                 { bookId: state.bookId });
-            row.hidden = false;
-            _text($('import-confirm-hint'),
-                `将删除 ${state.resetPlan.eventCount} 条事件，请原样输入：`
-                + `${state.resetPlan.phrase}`);
+            _text(note, `将存档并替换当前 ${state.resetPlan.eventCount} 条事件。`
+                + '点击「确认导入」后会再弹窗确认；账本若在此期间发生变化，后台会自动取消。');
         } catch (error) {
             state.resetPlan = null;
-            row.hidden = true;
+            note.hidden = true;
             globalScope.alert(`无法读取清空计划：${error.message}`);
             $('import-replace').checked = false;
         }
@@ -2517,17 +4129,19 @@
             return copy;
         });
         const replacing = $('import-replace').checked === true;
+        const apiImport = state.importResult.format === 'tws_api';
         const supersedeTwsEventIds = replacing ? []
             : (state.importResult.supersedeTwsEventIds || []);
         const confirmed = globalScope.confirm(replacing
-            ? `将先清空 ${_currentBook().symbol} 账本（${state.resetPlan
-                ? state.resetPlan.eventCount : '?'} 条事件，存档后删除），`
-                + `再写入 ${events.length} 条事件。确认重建？`
-            : `将向 ${_currentBook().symbol} 账本写入 ${events.length} 条事件。`
+            ? `危险操作：将存档并清空 ${_currentBook().symbol} 账本当前 ${state.resetPlan
+                ? state.resetPlan.eventCount : '?'} 条事件，`
+                + `再用本文件的 ${events.length} 条事件完整重建。\n\n`
+                + '旧数据会保留在重建存档中。确定继续吗？'
+            : `将向 ${_currentBook().symbol} 账本写入 ${events.length} 条${apiImport ? ' TWS 成交' : '事件'}。`
                 + (supersedeTwsEventIds.length
-                    ? `CSV 已完整重建对应历史，将同时冲销 ${supersedeTwsEventIds.length} 条 TWS 临时基线。`
+                    ? `${apiImport ? 'TWS 真实成交' : 'CSV'}已完整重建对应历史，将同时冲销 ${supersedeTwsEventIds.length} 条 TWS 临时基线。`
                     : '')
-                + '已存在的 CSV 成交会自动跳过。确认导入？');
+                + `已存在的${apiImport ? ' execId' : ' CSV 成交'}会自动跳过。确认导入？`);
         if (!confirmed) return;
         try {
             // One request either way. The rebuild archives, wipes and
@@ -2538,7 +4152,10 @@
                 ? await request('rebuild_cost_basis_book', {
                     bookId: state.bookId,
                     events,
-                    confirmation: $('import-confirm').value.trim(),
+                    // The server still rechecks this count-bearing value in
+                    // the write transaction. No typing is required, and a
+                    // stale plan cannot wipe a ledger that changed meanwhile.
+                    confirmation: state.resetPlan.phrase,
                     clientToken: _token('cbr-'),
                     importBatchId: _token('cbb-'),
                     reason: '覆盖式重建：按新导入的报表重建账本',
@@ -2552,26 +4169,109 @@
                 });
             globalScope.alert(replacing
                 ? `重建完成：归档并清空 ${response.removedEvents} 条，写入 ${response.inserted} 条。`
-                : `导入完成：新增 ${response.inserted} 条，跳过 ${response.skipped} 条`
+                : `${apiImport ? 'TWS 成交' : ''}导入完成：新增 ${response.inserted} 条，跳过 ${response.skipped} 条`
                     + (response.supersededTwsBaselines
-                        ? `，已用 CSV 取代 ${response.supersededTwsBaselines} 条 TWS 临时基线`
+                        ? `，已用${apiImport ? '真实成交' : ' CSV'}取代 ${response.supersededTwsBaselines} 条 TWS 临时基线`
                         : '') + '。');
             state.importResult = null;
             state.importText = '';
             $('import-file').value = '';
             $('import-replace').checked = false;
-            $('import-confirm').value = '';
             await _refreshResetPlan();
             _renderImportPreview();
             await _loadBooks();
         } catch (error) {
             if (error.code === 'reset_confirmation_mismatch') {
-                globalScope.alert('确认短语不匹配。账本未被清空，也没有写入任何数据。'
-                    + `${error.message}（账本条数若刚变动过，请重新勾选以刷新短语）`);
+                globalScope.alert('账本在预览确认后发生了变化，已自动取消重建。'
+                    + '账本未被清空，也没有写入任何数据；请重新确认预览。');
                 await _refreshResetPlan();
                 return;
             }
             globalScope.alert(`导入失败：${_explainWriteError(error)}`);
+        }
+    }
+
+    function _latestCsvCutoff() {
+        const candidates = state.allEvents.filter((event) => (
+            !event.voidedAtUtc && event.source === 'csv_import')).map((event) => {
+            const exact = _exactBrokerTimestamp(event);
+            if (exact) return exact;
+            const date = String(event.tradeDate || '');
+            return /^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date}T00:00:00` : '';
+        }).filter(Boolean).sort();
+        // With no broker-local CSV evidence, the backend chooses midnight in
+        // TWS's timezone. Browser-local midnight is not the broker clock.
+        return candidates.length ? candidates[candidates.length - 1] : '';
+    }
+
+    async function _fetchTwsExecutions() {
+        if (!state.bookId || state.executionFetchPending) return;
+        const book = _currentBook();
+        const sinceTimestamp = _latestCsvCutoff();
+        state.executionFetchPending = true;
+        $('btn-fetch-executions').textContent = '正在拉取…';
+        _refreshControls();
+        try {
+            const response = await request('request_cost_basis_executions', {
+                bookId: state.bookId,
+                sinceTimestamp,
+            });
+            const existingExternalRefs = state.allEvents
+                .filter((event) => Boolean(event.externalRef))
+                .map((event) => ({
+                    account: event.account,
+                    externalRef: event.externalRef,
+                }));
+            const result = core.buildExecutionImport(response.executions, {
+                account: book.account,
+                symbol: book.symbol,
+                secType: book.secType,
+                defaultSharesPerContract: book.defaultSharesPerContract,
+                existingExternalRefs,
+            });
+            const querySince = String(response.querySince || '');
+            const todayStart = /^\d{8}-/.test(querySince)
+                ? `${querySince.slice(0, 4)}-${querySince.slice(4, 6)}`
+                    + `-${querySince.slice(6, 8)}T00:00:00`
+                : '';
+            const olderCutoff = Boolean(sinceTimestamp && todayStart
+                && sinceTimestamp < todayStart);
+            result.requestedSince = sinceTimestamp;
+            result.fetchedAt = response.fetchedAt || '';
+            result.statementThrough = response.fetchedAt || '';
+            result.ignored = response.ignored || {};
+            const requestedLabel = sinceTimestamp
+                ? sinceTimestamp.replace('T', ' ')
+                : querySince.replace(
+                    /^(\d{4})(\d{2})(\d{2})-(.*)$/, '$1-$2-$3 $4');
+            result.coverageNote = `已请求 ${requestedLabel || 'TWS 当日起点'} 之后的可见成交。`
+                + (olderCutoff
+                    ? ' 最后一份 CSV 早于今天；TWS API 只返回近期可见窗口，因此不能证明中间没有缺口，请继续用 Activity Statement 补齐长期历史。'
+                    : ' 这些是真实成交回报，但 TWS API 仍不是长期历史报表。');
+            const supersession = planTwsBaselineSupersession(result, state.allEvents);
+            result.supersedeTwsEventIds = supersession.eventIds;
+            if (supersession.problems.length) {
+                result.problems.push(...supersession.problems);
+                result.summary.problems += supersession.problems.length;
+            }
+            state.importResult = result;
+            state.importText = '';
+            $('import-replace').checked = false;
+            _renderImportPreview();
+            if (!result.events.length && !result.problems.length) {
+                globalScope.alert('未找到新的 TWS 成交。可能是今天没有成交、'
+                    + '这些 execId 已在账本中，或当前 API 客户端看不到该订单来源。');
+            }
+        } catch (error) {
+            const unavailable = error.code === 'broker_execution_history_unavailable';
+            globalScope.alert(unavailable
+                ? '当前连接的后端不支持 TWS 成交查询。请连接实时 IB 后端，'
+                    + '或在持仓对账中用 AvgCost 生成待核实草稿。'
+                : `拉取 TWS 成交失败：${error.message}`);
+        } finally {
+            state.executionFetchPending = false;
+            $('btn-fetch-executions').textContent = '↓ 拉取 TWS 成交';
+            _refreshControls();
         }
     }
 
@@ -2646,51 +4346,50 @@
         }
     }
 
-    async function _deleteBook() {
-        const book = _currentBook();
+    async function _deleteBook(targetBookId, triggerButton) {
+        const requestedId = typeof targetBookId === 'string' ? targetBookId : state.bookId;
+        const book = state.books.find((candidate) => candidate.bookId === requestedId) || null;
         if (!book) return;
         const bookId = book.bookId;
         const button = $('btn-delete-book');
         let deleteSubmitted = false;
         let deleteConfirmed = false;
         button.disabled = true;
+        if (triggerButton) triggerButton.disabled = true;
         try {
             const plan = await request('request_cost_basis_delete_plan', { bookId });
-            if (state.bookId !== bookId) {
-                globalScope.alert('当前账本已经切换，未执行删除。');
+            if (!state.books.some((candidate) => candidate.bookId === bookId)) {
+                globalScope.alert('账本列表已经变化，未执行删除。');
                 return;
             }
-            const phrase = globalScope.prompt(
-                `这会永久删除 ${plan.account || '旧版未限定账户'} · ${plan.symbol}，且不能恢复。\n\n`
+            const confirmed = globalScope.confirm(
+                `确定永久删除 ${plan.account || '旧版未限定账户'} · ${plan.symbol}？\n\n`
                 + `全部事件：${plan.eventCount}（有效 ${plan.liveEventCount}，已冲销 ${plan.voidedEventCount}）\n`
                 + `对账快照：${plan.snapshotCount}\n`
                 + `清空 / 重建存档：${plan.resetCount}\n\n`
-                + `请原样输入以下短语：\n${plan.phrase}`,
-                ''
-            );
-            if (phrase === null) return;
-            if (phrase.trim() !== plan.phrase) {
-                globalScope.alert('确认短语不匹配，账本未被删除。');
-                return;
-            }
+                + '删除后不能恢复。');
+            if (!confirmed) return;
             deleteSubmitted = true;
             const response = await request('delete_cost_basis_book', {
                 bookId,
-                confirmation: phrase.trim(),
+                // The user confirms once; the server-generated phrase stays
+                // an internal stale-plan guard instead of a transcription test.
+                confirmation: plan.phrase,
                 clientToken: _token('cbd-'),
             });
             deleteConfirmed = true;
-            state.bookId = '';
-            state.allEvents = [];
-            state.eventsTotal = 0;
-            state.ledger = null;
-            state.reconciliation = null;
-            state.resetPlan = null;
-            state.importResult = null;
-            state.importText = '';
-            $('import-file').value = '';
-            $('import-replace').checked = false;
-            $('import-confirm').value = '';
+            if (state.bookId === bookId) {
+                state.bookId = '';
+                state.allEvents = [];
+                state.eventsTotal = 0;
+                state.ledger = null;
+                state.reconciliation = null;
+                state.resetPlan = null;
+                state.importResult = null;
+                state.importText = '';
+                $('import-file').value = '';
+                $('import-replace').checked = false;
+            }
             await _loadBooks();
             globalScope.alert(
                 `已永久删除 ${response.account || '旧版未限定账户'} · ${response.symbol}：`
@@ -2730,6 +4429,9 @@
                 globalScope.alert(`删除账本失败：${error.message}`);
             }
         } finally {
+            if (triggerButton && triggerButton.isConnected) {
+                triggerButton.disabled = state.connection !== 'connected';
+            }
             _refreshControls();
         }
     }
@@ -2807,19 +4509,7 @@
 
     function _wire() {
         $('book-select').addEventListener('change', async (changeEvent) => {
-            state.bookId = changeEvent.target.value;
-            state.flowPage = 1;
-            state.avgCostByAccount = {};
-            state.marketPrice = null;
-            state.importResult = null;
-            state.importText = '';
-            $('import-file').value = '';
-            $('import-replace').checked = false;
-            $('import-confirm').value = '';
-            await _loadEvents();
-            await _refreshResetPlan();
-            _renderImportPreview();
-            _renderSidebarBooks();
+            await _selectBook(changeEvent.target.value);
             _showView('ledger');
         });
         $('btn-new-book').addEventListener('click', () => {
@@ -2848,7 +4538,7 @@
             $('new-book-spc').placeholder = futures
                 ? '必填，例如 ES=50' : '';
         });
-        $('btn-delete-book').addEventListener('click', _deleteBook);
+        $('btn-delete-book').addEventListener('click', () => _deleteBook());
         $('btn-refresh').addEventListener('click', () => _loadBooks());
         $('btn-refresh-positions').addEventListener('click', requestPositions);
 
@@ -2863,6 +4553,54 @@
         $('reference-price').addEventListener('change', (changeEvent) => {
             state.referencePrice = _numberOrNull(changeEvent.target.value);
             _recompute();
+        });
+        $('what-if-price').addEventListener('input', (inputEvent) => {
+            state.whatIfPrice = _numberOrNull(inputEvent.target.value);
+            state.whatIfPriceSource = state.whatIfPrice === null ? '' : 'custom';
+            _renderWhatIf();
+        });
+        $('what-if-expiry').addEventListener('change', (changeEvent) => {
+            state.whatIfExpiry = changeEvent.target.value;
+            _renderWhatIf();
+        });
+        $('btn-what-if-current').addEventListener('click', _refreshWhatIfMarketPrice);
+        $('btn-open-stress-test').addEventListener('click', _openStressTest);
+        $('btn-close-stress-test').addEventListener('click', _closeStressTest);
+        $('stress-modal').addEventListener('click', (clickEvent) => {
+            if (clickEvent.target === $('stress-modal')) _closeStressTest();
+        });
+        $('stress-expiry').addEventListener('change', (changeEvent) => {
+            state.stressExpiry = changeEvent.target.value;
+            state.stressLongOptionInputs = null;
+            state.stressInputsError = '';
+            _renderStressTest();
+            if (state.stressIncludeLongOptions) {
+                _refreshStressMarketInputs(false);
+            }
+        });
+        $('stress-base-price').addEventListener('input', (inputEvent) => {
+            state.stressBasePrice = _numberOrNull(inputEvent.target.value);
+            _renderStressTest();
+        });
+        $('stress-range').addEventListener('change', (changeEvent) => {
+            state.stressRangePct = Number(changeEvent.target.value) || 30;
+            _renderStressTest();
+        });
+        $('stress-include-long-options').addEventListener('change', (changeEvent) => {
+            state.stressIncludeLongOptions = changeEvent.target.checked;
+            _renderStressTest();
+            if (state.stressIncludeLongOptions && !state.stressLongOptionInputs) {
+                _refreshStressMarketInputs(false);
+            }
+        });
+        $('btn-stress-refresh-price').addEventListener('click', _refreshStressPrice);
+        globalScope.document.addEventListener('keydown', (keyEvent) => {
+            if (keyEvent.key === 'Escape' && state.stressOpen) _closeStressTest();
+        });
+        $('btn-open-summary-details').addEventListener('click', () => {
+            const details = $('summary-details');
+            details.open = true;
+            details.scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
 
         $('field-kind').addEventListener('change', _applyKindVisibility);
@@ -2895,10 +4633,10 @@
         });
         $('btn-export-csv').addEventListener('click', _exportCsv);
         $('btn-save-snapshot').addEventListener('click', _saveSnapshot);
+        $('btn-fetch-executions').addEventListener('click', _fetchTwsExecutions);
 
         if (importer) {
             $('import-replace').addEventListener('change', _handleImportReplaceChange);
-            $('import-confirm').addEventListener('input', _refreshControls);
             $('import-file').addEventListener('change', _handleImportFile);
             $('btn-import-commit').addEventListener('click', _commitImport);
             $('btn-import-clear').addEventListener('click', () => {
@@ -2941,10 +4679,22 @@
         KIND_LABELS,
         BASIS_EXPLAINERS,
         formatSignedMoney: _signedMoney,
+        currencySymbol: _currencySymbol,
+        formatCurrencyAmount: _currencyAmount,
         computeMarketMetrics,
+        calculateBsmOptionPrice,
+        calculateBsmPutPrice,
+        estimateDeferredLongOptions,
+        buildStressTestSeries,
         describeHeadlineCost,
         canReconcilePositions,
+        buildLedgerPositionPreview,
         buildImportBaseline,
         planTwsBaselineSupersession,
+        planExecutionReportAliases,
+        planImportExecutionAliases,
+        isCurrentEventLoad,
+        loadSelectedBookSafely,
+        chooseManualSubmitToken,
     };
 })(typeof window !== 'undefined' ? window : globalThis);

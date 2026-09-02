@@ -36,6 +36,7 @@ from cost_basis_store import (
 )
 
 logger = logging.getLogger('cost_basis.ws')
+OPTION_SCENARIO_INPUT_TIMEOUT_SECONDS = 15.0
 
 SERVER_ACTIONS = {
     'request_cost_basis_status': 'cost_basis_status',
@@ -54,6 +55,9 @@ SERVER_ACTIONS = {
     'reset_cost_basis_book': 'cost_basis_book_reset',
     'rebuild_cost_basis_book': 'cost_basis_book_rebuilt',
     'list_cost_basis_resets': 'cost_basis_resets_list',
+    'request_cost_basis_executions': 'cost_basis_executions',
+    'request_cost_basis_market_price': 'cost_basis_market_price',
+    'request_cost_basis_option_scenario_inputs': 'cost_basis_option_scenario_inputs',
 }
 
 COST_BASIS_CLIENT_ACTIONS = frozenset(SERVER_ACTIONS)
@@ -206,6 +210,10 @@ async def build_cost_basis_response(store_env, websocket, data, *,
             response['storeSchemaVersion'] = SCHEMA_USER_VERSION
             response['eventKinds'] = list(EVENT_KINDS)
             response['maxImportEvents'] = MAX_IMPORT_EVENTS
+            response['features'] = {
+                'optionScenarioInputs': callable(
+                    store_env.get('fetch_option_scenario_inputs')),
+            }
         return response
 
     if store is None:
@@ -214,6 +222,135 @@ async def build_cost_basis_response(store_env, websocket, data, *,
             store_env.get('reason') or 'store_unavailable',
             'the cost basis ledger is unavailable',
         )
+
+    if action == 'request_cost_basis_executions':
+        fetcher = store_env.get('fetch_executions')
+        if not callable(fetcher):
+            return _error_response(
+                server_action, request_id, 'broker_execution_history_unavailable',
+                'this backend cannot request TWS executions',
+            )
+        try:
+            book = await asyncio.to_thread(
+                store.get_book, _required_str(data, 'bookId'))
+            result = await fetcher({
+                'account': book['account'],
+                'symbol': book['symbol'],
+                'secType': book['secType'],
+                'sinceTimestamp': data.get('sinceTimestamp') or '',
+            })
+        except CostBasisStoreError as exc:
+            _log_result(action, request_id, data, started, error=exc.code)
+            return _error_response(server_action, request_id, exc.code, str(exc))
+        except Exception:
+            logger.exception('TWS execution-history request failed')
+            return _error_response(
+                server_action, request_id, 'broker_execution_history_failed',
+                'failed to request recent TWS executions',
+            )
+        response = {'action': server_action, 'requestId': request_id, 'success': True}
+        response.update(result)
+        _log_result(action, request_id, data, started, result=result)
+        return response
+
+    if action == 'request_cost_basis_market_price':
+        fetcher = store_env.get('fetch_market_price')
+        if not callable(fetcher):
+            return _error_response(
+                server_action, request_id, 'broker_market_price_unavailable',
+                'this backend cannot request a fresh TWS market price',
+            )
+        try:
+            book = await asyncio.to_thread(
+                store.get_book, _required_str(data, 'bookId'))
+            result = await fetcher({
+                'account': book['account'],
+                'symbol': book['symbol'],
+                'secType': book['secType'],
+                'currency': book['currency'],
+            })
+        except CostBasisStoreError as exc:
+            _log_result(action, request_id, data, started, error=exc.code)
+            return _error_response(server_action, request_id, exc.code, str(exc))
+        except Exception:
+            logger.exception('fresh TWS market-price request failed')
+            return _error_response(
+                server_action, request_id, 'broker_market_price_failed',
+                'failed to request a fresh TWS market price',
+            )
+        response = {'action': server_action, 'requestId': request_id, 'success': True}
+        response.update(result)
+        _log_result(action, request_id, data, started, result=result)
+        return response
+
+    if action == 'request_cost_basis_option_scenario_inputs':
+        fetcher = store_env.get('fetch_option_scenario_inputs')
+        if not callable(fetcher):
+            return _error_response(
+                server_action, request_id, 'broker_option_scenario_inputs_unavailable',
+                'this backend cannot request TWS option scenario inputs',
+            )
+        raw_contracts = data.get('contracts')
+        if not isinstance(raw_contracts, list) or len(raw_contracts) > 128:
+            return _error_response(
+                server_action, request_id, 'invalid_request',
+                'contracts must be a list with at most 128 rows',
+            )
+        contracts = []
+        for raw in raw_contracts:
+            if not isinstance(raw, dict):
+                return _error_response(
+                    server_action, request_id, 'invalid_request',
+                    'each contract request must be an object',
+                )
+            contracts.append({
+                'conId': raw.get('conId'),
+                'localSymbol': str(raw.get('localSymbol') or '').strip()[:96],
+                'right': str(raw.get('right') or '').strip().upper()[:1],
+                'strike': raw.get('strike'),
+                'expiry': ''.join(
+                    character for character in str(raw.get('expiry') or '')
+                    if character.isdigit())[:8],
+            })
+        try:
+            book = await asyncio.to_thread(
+                store.get_book, _required_str(data, 'bookId'))
+            result = await asyncio.wait_for(fetcher({
+                    'account': book['account'],
+                    'symbol': book['symbol'],
+                    'secType': book['secType'],
+                    'currency': book['currency'],
+                    'throughExpiry': ''.join(
+                        character for character in str(data.get('throughExpiry') or '')
+                        if character.isdigit())[:8],
+                    'contracts': contracts,
+                }), timeout=OPTION_SCENARIO_INPUT_TIMEOUT_SECONDS)
+        except CostBasisStoreError as exc:
+            _log_result(action, request_id, data, started, error=exc.code)
+            return _error_response(server_action, request_id, exc.code, str(exc))
+        except asyncio.TimeoutError:
+            _log_result(
+                action, request_id, data, started,
+                error='broker_option_scenario_inputs_timeout')
+            return _error_response(
+                server_action, request_id,
+                'broker_option_scenario_inputs_timeout',
+                'TWS option inputs exceeded the 15-second server deadline',
+            )
+        except ValueError as exc:
+            return _error_response(
+                server_action, request_id, 'invalid_request', str(exc),
+            )
+        except Exception:
+            logger.exception('TWS option scenario-input request failed')
+            return _error_response(
+                server_action, request_id, 'broker_option_scenario_inputs_failed',
+                'failed to request current TWS option IV or discount inputs',
+            )
+        response = {'action': server_action, 'requestId': request_id, 'success': True}
+        response.update(result)
+        _log_result(action, request_id, data, started, result=result)
+        return response
 
     try:
         result = await _dispatch_store_call(store, action, data)

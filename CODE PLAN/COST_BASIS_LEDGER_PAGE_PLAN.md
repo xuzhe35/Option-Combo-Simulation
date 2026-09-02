@@ -1,21 +1,23 @@
-# 标的综合成本账本页实施计划
+# 标的综合成本账本设计与当前实现
 
-> 状态：阶段 0-6（v1 交付范围）**已实施并合并**——PR #24 落 main，随后 PR #25
-> 把空头股票余额改为受支持状态（净现金口径显示空头回补水位，`net_short_shares`
-> 只按最终回放余额判断）。阶段 7-9 待做。
+> 状态：阶段 0-9 的页面、账本、CSV、TWS 对账/成交、What If 与压力测试
+> **均已实现**，当前数据库 schema 为 v7。本文档是当前设计说明，
+> 不再是待实施 backlog。唯一未提供的运维工具是独立的
+> `backup_cost_basis_store.py`；当前没有该 CLI，也没有自动账本备份调度。
 > FOP/FUT 扩展见 `COST_BASIS_FOP_FUTURES_ROLL_PLAN.md`。
 >
-> 页面定位：独立的本地记账与对账页面。输入一个 IB 账户和一个标的（如 `U1234567 + TQQQ`），只聚合该账户里该标的的股票与期权仓位，按事件账本计算综合成本。**不下单、不订阅行情、不加载交易工作区脚本。**
+> 页面定位：独立的本地记账与对账页面。输入一个 IB 账户和一个标的（如 `U1234567 + TQQQ`），只聚合该账户里该标的的股票与期权仓位，按事件账本计算综合成本。**不下单、不建立持续行情订阅、不加载交易工作区脚本。**
 >
-> 适用后端：`ib_server.py`（持仓快照 + 账本）、`historical_server.py`（仅账本）
+> 适用后端：`ib_server.py`（账本 + 持仓/AvgCost + 近期成交 + 一次性行情
+> + 长期期权 IV/折现曲线输入）、`historical_server.py`（账本、CSV、手工与本地情景回放）
 >
-> 复用来源：工作区 SQLite 持久化子系统（loopback 约束、WS 协议形状、备份脚本
-> 与目录约定）；该分支已合并，见 `PORTFOLIO_SQLITE_PERSISTENCE_PLAN.md`。
+> 复用来源：工作区 SQLite 持久化子系统的 loopback 约束、WS 协议形状
+> 与 app-data 目录约定。工作区的 recovery-set 备份**不包含** `cost_basis.db`。
 
 > 已确认口径（2026-08-22）：
 >
 > 1. 历史数据先走 **IBKR 报表 CSV 导入**一次性补齐，导入阶段提前到对账面板之前
-> 2. v1 交付到**阶段 5（含 TWS 持仓对账面板）**
+> 2. 历史首次导入后，工作流以 TWS 当日成交为临时证据，次日 CSV 为最终裁判
 > 3. 原 v1 账本按「一个标的一本」组织；2026-08-26 起改为**一个 IB 账户 + 一个标的一本**，同一标的在不同账户中完全独立计算
 
 ---
@@ -40,7 +42,7 @@
 | --- | --- | --- |
 | 当前各账户股票/期权数量 | 能。`ib.positions()` 跨全部 managed accounts，仓库里已有 `request_portfolio_positions_snapshot` | 用作对账校验和 |
 | 当前均价 / 市价 / 已实现盈亏 | 部分。`updatePortfolioEvent` 只覆盖 TWS 推送账户更新的那个账户 | 尽力而为的旁证，不作为真相 |
-| 历史成交（含权利金） | 不能。`reqExecutions` 只覆盖近期；本仓库只对自己下的单挂了 `execDetailsEvent` | 必须自己记 |
+| 历史成交（含权利金） | 部分。`reqExecutions` 只覆盖当前 API 客户端可见的近期窗口 | 当日/近期可预览后显式导入；长期仍以 CSV 补齐 |
 | 行权 / 被指派事件 | 不能可靠区分。快照里只看到「期权没了、股票多了」 | 必须自己记（可由差异探测建议） |
 | 历史股息 / 拆股 | 不能 | 必须自己记 |
 
@@ -54,25 +56,29 @@
 
 1. 新增独立页面 `cost_basis.html`，专用最小 WebSocket 客户端，不加载 `app.js` / `ws_client.js` / `valuation.js`，出站消息走白名单。
 2. 新增独立数据库 `cost_basis.db`（与 `portfolio.db` 同目录，不同文件）。理由见 §4.1。
-3. 事件表 **append-only**：更正靠追加冲销行（void），不 UPDATE、不 DELETE。对账需要的是轨迹，不是最终态。
+3. 常规记账工作流 **append-only**：更正靠追加冲销行（void），不 UPDATE、不 DELETE。只有用户明确确认的覆盖式重建会先存档再替换活动事件；整本永久删除是另一个隔离的不可恢复操作。对账需要的是轨迹，不是最终态。
 4. 事件行**存显式的有符号数量与现金**，不存"待推导的意图"。录入表单负责算默认值，引擎只负责求和。这样 CSV 导出脱离引擎也能读懂，券商报表导入也能套同一形状。
 5. 同一份事件流支持**三种成本口径**（净现金 / 券商均价 / 税务），同屏对比。只给一个数字无法对账——能和 TWS 对上的那个口径和你真正关心的那个口径不是同一个。
-6. 对账差异只分类和说明，不能从当前持仓猜历史事件。只有账本完全没有、
+6. 对账差异只分类和说明，不能从当前持仓猜历史事件。先用 `reqExecutions`
+   拉取 CSV 截止后当前 API 客户端可见的真实成交，逐笔预览且明确确认后才入账。
+   只有账本完全没有、
    TWS 同时给出完整数量和均价的当前持仓，才允许用户显式“采信 TWS”建立
    当日临时基线；其余差异必须来自 CSV 或手工核实后的事件。
-7. 页面永不下单、永不订阅行情。市价来自持仓快照里已有的 `marketPrice`，缺失时退化为手工输入参考价。
+7. 页面永不下单、永不建立持续行情订阅。平时市价来自持仓快照里的 `marketPrice`；用户点击 What If 的「使用当前价」时，后端另外发起一次 TWS snapshot quote，返回后即结束，不留下订阅。失败时保留原假设价并显示错误。
 
 ### 3.1 文件布局
 
 ```text
 <platform app data>/Option Combo Simulator/
 ├── portfolio.db                 # 既有工作区库，不动
-├── cost_basis.db                # 新增：成本账本
+├── cost_basis.db                # 成本账本
 ├── cost_basis.db-wal
-├── cost_basis.db-shm
-└── maintenance-backups/
-    └── cost-basis-<date>.db     # 独立备份节奏
+└── cost_basis.db-shm
 ```
+
+`maintenance-backups/` 及 workspace recovery manifest 当前只覆盖
+`portfolio.db` 与归档分片，不覆盖账本库。需备份时应在后端停止或
+数据库已静默时使用 SQLite-consistent 工具；不能在 WAL 活跃时只拷贝主 `.db`。
 
 ### 3.2 新增文件清单
 
@@ -84,11 +90,14 @@
 | `js/cost_basis.js` | 传输 + 渲染 + 表单 |
 | `cost_basis_store.py` | SQLite 存储层：建表、追加、冲销、幂等、导入去重、快照 |
 | `cost_basis_ws.py` | WS 协议层：loopback 校验、动作白名单、错误码、线程桥 |
-| `scripts/backup_cost_basis_store.py` | 备份 CLI |
+| `cost_basis_executions.py` | TWS 成交序列化、账户/标的过滤、broker-local 时间与 execId 去重 |
 | `tests/cost_basis_core.test.js` | 引擎金标准场景 |
+| `tests/cost_basis_import.test.js` | CSV/Flex/Activity 解析、配对、去重与期初推导 |
+| `tests/cost_basis_reports.test.js` | 真实报表 fixture 回归 |
 | `tests/cost_basis_page.test.js` | 页面模块（无 DOM 依赖部分） |
 | `tests/cost_basis_store_test.py` | 存储层不变式 |
 | `tests/cost_basis_ws_test.py` | 协议层：loopback、白名单、不泄漏 SQL/路径 |
+| `tests/cost_basis_executions_test.py` | TWS 时区、截止时间、佣金与 execId 回归 |
 
 同时需要：`tests/run.js` 注册两个 JS 套件；`scripts/stamp_asset_versions.py` 的 `PAGES` 加入 `cost_basis.html`。
 
@@ -97,10 +106,12 @@
 ### 4.1 为什么是独立数据库文件
 
 - `portfolio.db` 刚经过多轮归档/恢复/迁移不变式加固，其归档清单、迁移日志、校验流程都按工作区表枚举。塞进一套无关的关系表，等于让每条归档路径都要重新论证。
-- 生命周期完全不同：账本很小、只增不删、**永远不该被归档掉**，且备份频率应高于工作区快照。
+- 生命周期完全不同：账本很小、常规修正用冲销保留轨迹，
+  **永远不该被 workspace revision 归档掉**。覆盖重建与整本删除是两个显式例外。
 - 独立文件意味着可以单独拷走对账，几十 KB，随手可查。
 
-复用 `portfolio_store.py` 的 `default_app_data_dir()`、`resolve_backup_dir()` 与 loopback 判定，不重复造轮子。
+复用 `portfolio_store.py` 的 `default_app_data_dir()` 与 loopback 判定。
+备份目录与 recovery-set 发布器未复用，不应在文档中暗示已有自动备份。
 
 ### 4.2 表结构
 
@@ -120,7 +131,7 @@ CREATE TABLE cost_basis_books (
 );
 
 CREATE UNIQUE INDEX idx_cost_basis_books_account_symbol
-    ON cost_basis_books(account, symbol, sec_type, currency)
+    ON cost_basis_books(account COLLATE NOCASE, symbol, sec_type, currency)
     WHERE archived_at_utc IS NULL;
 
 CREATE TABLE cost_basis_events (
@@ -131,8 +142,10 @@ CREATE TABLE cost_basis_events (
     kind                TEXT NOT NULL CHECK (kind IN (
                             'opening_balance','share_trade','option_trade',
                             'option_assignment','option_exercise','option_expiry',
-                            'dividend','fee','split','manual_adjust')),
+                            'dividend','fee','split','manual_adjust',
+                            'futures_trade','futures_roll')),
     trade_date          TEXT NOT NULL,              -- YYYY-MM-DD
+    broker_timestamp    TEXT,                       -- broker-local, 精确到秒
     account             TEXT NOT NULL DEFAULT '',
     -- 期权合约身份（股票/现金行为 NULL）
     right               TEXT CHECK (right IN ('C','P') OR right IS NULL),
@@ -140,10 +153,21 @@ CREATE TABLE cost_basis_events (
     expiry              TEXT,                       -- YYYYMMDD
     con_id              INTEGER,
     local_symbol        TEXT,
+    option_sec_type     TEXT CHECK (option_sec_type IN ('OPT','FOP')
+                                    OR option_sec_type IS NULL),
     shares_per_contract INTEGER,
     -- 显式有符号量（账户视角）
     contracts           REAL,   -- 期权张数增量：+ 增多头/减空头，- 增空头/减多头
     shares              REAL,   -- 股数增量：+ 买入，- 卖出
+    future_expiry       TEXT,
+    future_con_id       INTEGER,
+    future_local_symbol TEXT,
+    future_contracts    REAL,
+    roll_to_expiry      TEXT,
+    roll_to_con_id      INTEGER,
+    roll_to_local_symbol TEXT,
+    roll_to_price       REAL,
+    roll_group          TEXT,
     price               REAL,   -- 正数量级：股票每股价 / 期权每股权利金 / 行权价
     cash_amount         REAL NOT NULL,  -- 有符号现金增量：+ 收到，- 付出（已含费用）
     fees                REAL NOT NULL DEFAULT 0,
@@ -153,7 +177,9 @@ CREATE TABLE cost_basis_events (
     source              TEXT NOT NULL DEFAULT 'manual'
                         CHECK (source IN ('manual','reconcile','csv_import','execution_report')),
     external_ref        TEXT,                       -- IB execId / tradeID
+    import_batch_id     TEXT,
     derived_mismatch    INTEGER NOT NULL DEFAULT 0, -- 现金被手工覆盖的标记
+    allow_overdraw      INTEGER NOT NULL DEFAULT 0, -- 只属于获得例外的该行
     note                TEXT NOT NULL DEFAULT '',
     created_at_utc      TEXT NOT NULL,
     voided_at_utc       TEXT,
@@ -164,12 +190,15 @@ CREATE TABLE cost_basis_events (
 CREATE UNIQUE INDEX idx_cost_basis_events_external
     ON cost_basis_events(book_id, account, external_ref)
     WHERE external_ref IS NOT NULL;                 -- 报表重复导入幂等
-CREATE INDEX idx_cost_basis_events_book_seq  ON cost_basis_events(book_id, seq);
-CREATE INDEX idx_cost_basis_events_book_date ON cost_basis_events(book_id, trade_date);
+CREATE UNIQUE INDEX idx_cost_basis_events_book_seq ON cost_basis_events(book_id, seq);
+CREATE INDEX idx_cost_basis_events_book_date
+    ON cost_basis_events(book_id, trade_date, broker_timestamp, seq);
+CREATE INDEX idx_cost_basis_events_batch ON cost_basis_events(import_batch_id)
+    WHERE import_batch_id IS NOT NULL;
 
 CREATE TABLE cost_basis_snapshots (                 -- 对账单：证明"当时我认为是多少"
     snapshot_id       TEXT PRIMARY KEY,
-    book_id           TEXT NOT NULL,
+    book_id           TEXT NOT NULL REFERENCES cost_basis_books(book_id),
     taken_at_utc      TEXT NOT NULL,
     as_of_date        TEXT NOT NULL,
     account_scope     TEXT NOT NULL,
@@ -180,6 +209,17 @@ CREATE TABLE cost_basis_snapshots (                 -- 对账单：证明"当时
     tws_snapshot_json TEXT,
     reconciled        INTEGER NOT NULL DEFAULT 0,
     note              TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE cost_basis_book_resets (
+    reset_id       TEXT PRIMARY KEY,
+    book_id        TEXT NOT NULL,                  -- 故意不做 FK，整本删除才显式清理
+    client_token   TEXT NOT NULL UNIQUE,
+    reset_at_utc   TEXT NOT NULL,
+    event_count    INTEGER NOT NULL,
+    events_sha256  TEXT NOT NULL,
+    events_json    TEXT NOT NULL,
+    reason         TEXT NOT NULL DEFAULT ''
 );
 ```
 
@@ -229,22 +269,27 @@ CREATE TABLE cost_basis_snapshots (                 -- 对账单：证明"当时
 sharesHeld    = Σ shares                    （经拆股调整）
 netCash       = Σ cash_amount               （负数 = 净流出）
 openPremium   = Σ cash_amount  over 仍未平仓合约的 option_trade 行
+openShortPremium = 仍未平仓 Short Call / Put 对应的净权利金
+shortPremiumNet = 全周期 Short Call / Put 对应的净权利金
+costNetCash   = netCash - optionPremiumNet + shortPremiumNet
 ```
 
-「未平仓」的判定：按 `(account, right, strike, expiry)` 分组累计 `contracts`，归零即该合约的全部权利金转为已实现。
+「尚未到期 / 履约义务尚存」的判定：按 `(account, right, strike, expiry)` 分组累计 `contracts`，归零即该合约的全部权利金转入「已到期 / 已结算」。这两组都是已经收取或支付的权利金现金；分组表示的是合约履约状态，不是权利金是否「实现」。
+
+核心账本仍保留净额 `openPremium / realizedPremium`，因此 Long Option 的支出与平仓回款不会从真实现金中消失。但标的综合成本、「若卖方期权归零」、两张「卖方权利金」卡、近 30 / 90 / 365 天窗口与年化率都只使用 Short Call / Put 的分拆桶，排除保护性或凸性 Long Call / Put 全周期的权利金支出、回款与盈亏。Long Option 只在压力测试中作为可选的独立市值 / 浮盈亏项。
 
 ### 口径 A：净现金综合成本（默认，即你要的那个数）
 
 ```
-综合成本/股（保守）= (-netCash + openPremium) / sharesHeld
-综合成本/股（全额）= -netCash / sharesHeld
+综合成本/股（保守）= (-costNetCash + openShortPremium) / sharesHeld
+综合成本/股（卖方期权归零）= -costNetCash / sharesHeld
 ```
 
-- 保守：只认已实现权利金。未平仓期权的钱虽然到账了，但还在风险里。
-- 全额：假设当前所有未平仓期权到期归零。
+- 保守：头条成本只纳入已到期 / 已结算的卖方期权现金。尚未到期的卖方权利金虽已确定到账，在履约义务结束前暂不抵扣。Long Option 无论未到期、已平仓或已到期，其现金和盈亏都不进入标的成本曲线。
+- 卖方期权归零：假设当前所有未平仓 Short Call / Put 到期归零；Long Call / Put 仍排除。
 - 这个数**可以为负**，且为负是有意义的（成本已全部收回）。UI 必须把负值显示成「−3.42（已完全回本）」，而不是当成异常。
 - `sharesHeld = 0` 时每股成本无定义，改显示**累计净现金 = 全周期已实现盈亏**。
-- `sharesHeld < 0` 时数值仍成立：净现金口径表示**空头回补盈亏平衡水位**，已实现权利金会抬高水位；纯股票/税务口径显示空头均价。负头寸是受支持的状态，只按全部事件回放后的最终余额判断，不因同一结算批次中间短暂跨过零而留下告警。
+- `sharesHeld < 0` 时数值仍成立：净现金口径表示**空头回补盈亏平衡水位**，已到期 / 已结算权利金会抬高水位；纯股票/税务口径显示空头均价。负头寸是受支持的状态，只按全部事件回放后的最终余额判断，不因同一结算批次中间短暂跨过零而留下告警。
 
 ### 口径 B：纯股票均价（对账 TWS 用）
 
@@ -271,7 +316,7 @@ avg = totalBasis / sharesHeld
 
 - **盈亏平衡价** = 口径 A 的每股综合成本（现价高于它，全部清算即净赚）
 - **清算后累计净收益** = `sharesHeld × 参考价 + netCash`
-- **期权费收入率**：近 30 / 90 / 365 天已实现权利金，及其相对占用资金（`sharesHeld × 成本`）的年化百分比
+- **卖方权利金收入率**：近 30 / 90 / 365 天已到期 / 已结算 Short Call / Put 净权利金，及其相对占用资金（`sharesHeld × 成本`）的年化百分比。该窗口按合约义务结束日归类，不含 Long Option 支出或平仓盈亏。
 - **按月 / 按到期日的权利金汇总**
 
 ## 6. 对账机制
@@ -280,6 +325,7 @@ avg = totalBasis / sharesHeld
 
 - `request_portfolio_positions_snapshot` → 全账户权威数量
 - `request_portfolio_avg_cost_snapshot` → TWS 均价、市价、已实现盈亏（**覆盖面受限，仅作旁证**）
+- `request_cost_basis_market_price` → 用户点击「使用当前价」后读取一次 TWS snapshot quote（只读、无持续订阅）
 
 按 `symbol` 过滤（股票 `secType='STK'`，期权 `secType='OPT'` 且 `symbol` 相同；调整后合约 `tradingClass` 可能不同，一并纳入），按账户分组，与引擎算出的账本持仓逐合约比对。
 
@@ -291,13 +337,15 @@ avg = totalBasis / sharesHeld
 | 账本有期权、TWS 没有、已过到期日 | 可能到期，也可能提前有偿平仓 | 只提示；没有结算证据不得生成 `option_expiry` |
 | TWS 有完整期权/FUT、账本为零 | 可信的当前数量与均价 | 用户确认后直接采信为 `tws_snapshot` 临时基线 |
 | TWS 有股票、账本为零 | 可信的当前数量与均价 | 用户确认后直接采信为 `tws_snapshot` 临时基线 |
-| 部分数量差异或缺均价 | 只能证明账本与当前状态不同 | 导入 CSV 或手工录入真实成交，不猜历史 |
+| 部分数量差异或缺均价 | 只能证明账本与当前状态不同 | 先拉取 TWS 近期成交，再导入 CSV；AvgCost 只可填入待核实草稿 |
 | FOP 消失且新增 FUT 可能是交割 | 两条差异可能属于同一事件 | 阻止单独采信 FUT，要求完整 CSV/手工交割 |
 | 数量一致但 TWS 均价与口径 B 差异 > 容差 | 权利金归属或漏记费用 | 只提示 |
 
-完整的 TWS-only 持仓显示 `[采信 TWS]`：用户明确点击并再次确认后，按权威数量与 TWS 均价直接写入一条带 `tws_snapshot` 标签的当前日期基线。TWS 不提供原始开仓日期，因此界面明确说明日期语义。部分缺口、TWS 均价缺失及账本侧缺口只显示解释，不能预填一个猜测事件。**任何情况下都不自动落库。**
+完整的 TWS-only 持仓显示 `[采信 TWS]`：用户明确点击并再次确认后，按权威数量与 TWS 均价直接写入一条带 `tws_snapshot` 标签的当前日期基线。TWS 不提供原始开仓日期，因此界面明确说明日期语义。部分缺口先请求近期真实成交；如果 API 窗口不足且 TWS 有 AvgCost，只允许生成带明确风险说明的差额手工草稿，由用户核实后再写入。**任何情况下都不自动落库。**
 
-`tws_snapshot` 只是用户确认的临时起点。以后的累计 Activity Statement 若能按账户、合约和秒级时间顺序独立重建采信时点的精确数量，且不需要未知权利金的 `prior_open`，则同一 SQLite 事务先冲销该基线、再写入 CSV 真实成交。只含采信后新交易的增量 CSV 保留基线并追加；采信前历史只覆盖一部分、或者无法证明同日先后顺序时整批阻断，不得用反向零权利金补桩维持表面数量。
+`tws_snapshot` 只是用户确认的临时起点。以后的累计 Activity Statement 若能按账户、合约和秒级时间顺序独立重建采信时点的精确数量，且不需要未知权利金的 `prior_open`，则同一 SQLite 事务先冲销该基线、再写入 CSV 真实成交。TWS API 近期成交也可走相同事务：完整数量可直接重建，或者单笔 `execId` 的合约、带符号数量、时间与含佣金/返佣的净现金能精确证明它就是该 AvgCost 临时基线。只含采信后新交易的增量历史保留基线并追加；采信前历史只覆盖一部分、或者无法证明同日先后顺序时整批阻断，不得用反向零权利金补桩维持表面数量。
+
+若 TWS API 成交已经由用户确认入库，次日 CSV 对同一成交采用跨来源去重：优先核对 broker execId；Activity Statement 无 execId 时，必须同时匹配账户、合约、带符号数量、秒级时间、成交价和含佣金/返佣净现金。验证通过后 CSV 行复用已有 API `external_ref`，数据库幂等跳过；同日同合约疑似重叠但任何一项无法证明时，整批导入阻断，不允许双记。
 
 TWS 未连接时：整块降级为「持仓快照不可用」，账本与成本照常显示，明确标注「未对账」。
 
@@ -318,8 +366,8 @@ TWS 未连接时：整块降级为「持仓快照不可用」，账本与成本�
 │ TWS 均价       $44.08         不可用      —      ✅ 差 $0.02     │
 │ ────────────────────────────────────────────────────────── │
 │ 累计净现金   −$38,420     −$19,205     −$57,630   收正付负     │
-│ 已实现期权费   $8,300       $4,180      $12,480                 │
-│ 未实现期权费   $1,520         $760       $2,280                 │
+│ 已到期/已结算权利金 $8,300       $4,180      $12,480                 │
+│ 尚未到期权利金   $1,520         $760       $2,280                 │
 │ 股票已实现     $2,100       $1,050       $3,150                 │
 │ 股息            $140          $70          $210                 │
 │ 参考价 [52.30] → 盈亏平衡 $38.42 · 全部清算净收益 $20,820        │
@@ -343,10 +391,22 @@ TWS 未连接时：整块降级为「持仓快照不可用」，账本与成本�
 │ [显示已冲销行]  [筛选: 类型/账户/日期/标签]                        │
 └─────────────────────────────────────────────────────────────┘
 
-[录入事件] [导入 CSV] [生成对账快照] [导出 CSV] [备份数据库]
+[录入事件] [拉取 TWS 成交] [导入 CSV] [生成对账快照] [导出 CSV]
 ```
 
 **流水里的「累计股数 / 累计成本」运行余额列是这个页面能对账的关键**——你能直接看出哪一笔把成本推到了现在的位置，而不是只看到一个结论数字。
+
+页面另有一张只读的 **What If · 期权结算后成本** 情景卡：
+可使用 TWS 持仓快照中的市价（或手工参考价），也可输入任意假设到期结算价。点击「使用当前价」必须重新请求一次 TWS snapshot quote；按钮显示刷新状态，返回值带抓取时间并立即重算情景。
+用户可选择「计算至」某个到期日：只虚拟结算该日及以前的未平期权，更晚的仓位仍保持未平与在险状态。
+当前股票不卖出；选中范围内的期权按同一个标的到期价进行虚拟指派、行权或归零，
+再用同一套账本重放计算结算后股数、总成本与每股综合成本。情景不包含期权时间价值或
+结算费用，虚拟事件永不写入数据库。
+
+「打开压力测试」使用弹窗横向扫描可选涨跌幅，悬停点显示精确标的价、到期后盈亏、
+综合成本、结算后持股与指派/行权/归零张数。勾选长期多头期权后，只对测试日仍未到期的
+Long Call/Put 做 BSM 理论估值：每份合约保持当前 TWS IV 不变，无风险利率复用工程的
+USD 折现曲线。IV 或曲线请求有服务端时限，失败时凸性覆盖层关闭，基础情景仍可用。
 
 ## 8. WebSocket 协议
 
@@ -359,19 +419,29 @@ TWS 未连接时：整块降级为「持仓快照不可用」，账本与成本�
 | `create_cost_basis_book` | `cost_basis_book_created` |
 | `request_cost_basis_delete_plan` | `cost_basis_delete_plan` |
 | `delete_cost_basis_book` | `cost_basis_book_deleted` |
-| `load_cost_basis_book` | `cost_basis_book_loaded` |
 | `list_cost_basis_events` | `cost_basis_events_list`（分页 + 筛选） |
 | `append_cost_basis_event` | `cost_basis_event_appended`（`client_token` 幂等） |
 | `void_cost_basis_event` | `cost_basis_event_voided` |
 | `import_cost_basis_events` | `cost_basis_events_imported`（批量，按 `external_ref` 去重） |
+| `request_cost_basis_reset_plan` | `cost_basis_reset_plan` |
+| `rebuild_cost_basis_book` | `cost_basis_book_rebuilt`（存档+清空+导入同一事务） |
 | `save_cost_basis_snapshot` | `cost_basis_snapshot_saved` |
-| `list_cost_basis_snapshots` | `cost_basis_snapshots_list` |
+| `request_cost_basis_executions` | `cost_basis_executions`（实时后端） |
+| `request_cost_basis_market_price` | `cost_basis_market_price`（实时后端一次性 quote） |
+| `request_cost_basis_option_scenario_inputs` | `cost_basis_option_scenario_inputs`（TWS IV + 共享折现曲线） |
 
-挂载点：`ib_server_ws.py` 的 `elif action in cost_basis_ws.COST_BASIS_CLIENT_ACTIONS`（紧跟现有 `portfolio_admin_ws` 分支），以及 `historical_server.py` 的同位置。CSV 导出走浏览器端 Blob，不落服务端文件。
+挂载点：`ib_server_ws.py` 的
+`action in cost_basis_ws.COST_BASIS_CLIENT_ACTIONS` 分支，以及
+`historical_server.py` 的 `handle_cost_basis_action` 分支。实时专属的三个读取动作在
+`ib_server.py` 向 store environment 注入 fetcher；历史后端返回明确的 unavailable。
+CSV 导出走浏览器端 Blob，不落服务端文件。
+
+`cost_basis_ws.py` 仍保留个别底层兼容/审计动作（如列出快照或重建存档），
+但 `cost_basis.html` 未使用它们，前端 core 白名单不再暴露这些无调用入口。
 
 ## 9. 安全与失败模式
 
-- 页面永不发送任何下单、订阅、行情动作；出站白名单在 core 模块里，`js/cost_basis.js` 不得绕过。
+- 页面永不发送任何下单或持续行情订阅动作；唯一行情动作是用户显式点击触发的一次性 TWS snapshot quote。出站白名单在 core 模块里，`js/cost_basis.js` 不得绕过。
 - 账本写入永远需要用户显式确认；对账建议只是预填表单。
 - 一条坏的账本请求不得拖垮 socket（`ib_server.py` 的同一条连接同时承载行情与订单监管）——异常一律在协议层收敛为错误响应。
 - SQLite 用 WAL，后端是唯一 owner；数据库文件在 app data 目录，**不在仓库里**（仓库在 OneDrive 上，同步软件不能碰活的 WAL）。
@@ -390,7 +460,7 @@ TWS 未连接时：整块降级为「持仓快照不可用」，账本与成本�
 7. 同一标的的两个账户账本互不干扰；旧版未限定账户账本仍能按账户拆分
 8. 倒序补录：先录 8 月的平仓、再录 7 月的开仓，运行余额校验按日期位置生效
 9. 冲销行被正确排除
-10. 未平仓/已实现权利金拆分在合约多次加减仓后仍正确
+10. 尚未到期/已到期或已结算权利金拆分在合约多次加减仓后仍正确
 
 `tests/cost_basis_store_test.py`：建表、`client_token` 幂等、`external_ref` 去重、冲销语义、超量平仓拒绝、快照哈希稳定性。
 
@@ -469,7 +539,7 @@ TWS 未连接时：整块降级为「持仓快照不可用」，账本与成本�
 
 修正：`deriveOpeningPositions` 接受 `existingOpen` / `existingShares`，把账本已有的持仓从推导结果里扣掉，页面从 `state.ledger` 传入。按时间顺序逐份导入报表时，账本当前的未平仓量就等于下一份报表的期初量，扣减后恰好归零。部分持有的情况只补差额。
 
-实测：账本有内容时补桩 0 条、期初股数 0；空账本时仍补 4 条、报 200 股（行为不变）。合并后四个合约全部归零，综合成本 65.9328——正好等于此前「若未平仓期权全部归零」那一行的预测值。
+实测：账本有内容时补桩 0 条、期初股数 0；空账本时仍补 4 条、报 200 股（行为不变）。合并后四个卖方合约全部归零，综合成本 65.9328——正好等于此前「若未平仓卖方期权全部归零」那一行的预测值。
 
 ### 11.5 期初持仓：精确推导，不是猜
 
@@ -493,14 +563,14 @@ TWS 未连接时：整块降级为「持仓快照不可用」，账本与成本�
 滚动（买回近月、卖出远月）是 wheel 的核心动作，它的现金流**已完整纳入**：
 
 - 报表里 `C` 码的行进 `option_trade`，方向按张数正负，现金取报表的 `收益 + 佣金/税`（买回时 `收益` 为负），和开仓行走同一条路径、同一个公式。
-- 该合约累计的权利金按比例转入「已实现」：买回 5 张空头里的 2 张，实现 2/5 的贷方**加上整笔借方**；全部平掉则整份转入已实现。恒等式「已实现 + 未实现 = 期权净费」在真实数据上对每个标的都成立。
+- 该合约累计的权利金按比例转入「已到期 / 已结算」：买回 5 张空头里的 2 张，转入 2/5 的贷方**加上整笔借方**；全部平掉则整份转入已结算。恒等式「已到期/已结算 + 尚未到期 = 期权净权利金」在真实数据上对每个标的都成立。
 - 滚动不动股票，所以持股与纯股票均价不变。
 
 **两个口径在亏损滚动时方向相反，这是设计如此，不是 bug**。实测（TQQQ 200 股，P68 收 235.58 后以 421.12 买回，同时卖出 P67 收 508.88）：
 
 | 口径 | 滚动前 | 滚动后 | 变化 |
 | --- | --- | --- | --- |
-| 保守（只认已实现） | 68.2123 | 69.1400 | **+0.9277** |
+| 保守（只用已到期/已结算权利金抵扣） | 68.2123 | 69.1400 | **+0.9277** |
 | 若期权全部归零 | 65.9328 | 65.4940 | **−0.4388** |
 
 保守口径上升 0.9277 = 锁定的实亏 185.54 ÷ 200 股；全归零口径下降 0.4388 = 本次净收现金 87.76 ÷ 200 股。前者说「你确定性地亏掉了这些钱」，后者说「如果新卖出的也归零，你比之前收得更多」。两句都是真的，页面同时给出。
@@ -512,16 +582,34 @@ TWS 未连接时：整块降级为「持仓快照不可用」，账本与成本�
 设计上守四条：
 
 1. **清空前先存档**。整份事件（含已冲销行）序列化成 JSON 写进 `cost_basis_book_resets`，带 sha256。活动账本变成真正干净的空账本（不留一堆墓碑行污染流水表），但数据没有真的丢。
-2. **必须打确认短语**，短语由服务端生成且**带账户、标的和实时条数**：`RESET U1234567 TQQQ 14 EVENTS`。短语在写事务内用当时的真实条数复核——如果读到短语和提交之间账本发生了变化，短语就不再匹配，拒绝执行。你只能确认自己真正看过的那次删除。
-3. **先预览、后清空**。页面的顺序是：选文件 → 解析出草稿并预览 → 勾选「覆盖式重建」→ 输入短语 → 提交时才先清空再导入。一个坏文件不可能让你落得一个空账本。
-4. **除整本永久删除外，这是唯一允许删除活动事件的路径**，且不对外开放批量删行、任意 SQL 或按事件主键删除。
+2. **单次弹窗确认 + 后台实时条数复核**。弹窗显示标的、当前事件数和将写入的事件数，不再要求用户原样输入短语。页面内部仍使用服务端生成的计数凭据，并在写事务内用当时的真实条数复核；如果预览和提交之间账本发生变化，拒绝执行。
+3. **先预览、后清空**。页面的顺序是：选文件 → 解析出草稿并预览 → 勾选「覆盖式重建」→ 弹窗确认 → 提交时才先清空再导入。覆盖预览不会与即将被存档删除的 TWS 成交做追加去重；坏文件不可能让你落得一个空账本。
+4. **除整本永久删除外，这是唯一允许删除活动事件的路径**，且不对页面开放批量删行、任意 SQL 或按事件主键删除。
 
-这是账本里唯一违反 append-only 的操作，因此它被单独隔离、单独确认、单独存档。
+这是唯一会保留账本身份、同时替换活动事件流的操作，因此它被单独隔离、单独确认、单独存档；整本永久删除则连同账本身份一起移除，不属于重建流程。
 
 schema 从 v1 升到 v2，迁移只新增一张表，不动任何既有行；已在真实库的副本上演练过（14 条事件一条不少）。
 
 schema v5（2026-08-26）在 `cost_basis_books` 增加账本级 `account`，并把活动账本唯一键改为
 `account + symbol + sec_type + currency`。迁移不改写事件：旧账本所有带账户的行都指向同一账户（允许全书拆股行留空）时才自动采用该账户；真正混合或存在其他未标账户事件的旧账本保持为「旧版未限定账户」，不自动拆分。
+
+schema v6（2026-09-02）把 `allow_overdraw` 持久化到获得例外的那一条事件，整段时间线重放时逐行判定。新请求的开关不再代替旧事件的审核语义，因此一条历史例外不会让后续正常写入失败。
+
+schema v7（2026-09-02）清除旧版本从非权威自由备注中误推的 `broker_timestamp`；只有 CSV、TWS 成交和明确的 TWS 临时基线可提供券商本地时钟证据。
+
+### 11.5.1.1 当前正确性与安全边界（2026-09-02）
+
+- TWS aware datetime 必须按显式 `TimezoneTWS` 转成券商本地墙钟；无法解析时成交导入失败关闭，持仓基线使用服务端返回的 `brokerTimestamp`，不混用浏览器时钟。
+- 引擎先验证事件能否改变仓位，再把现金计入汇总；被拒的超量平仓或反向开仓不会污染预览和 What If。
+- 账本切换使用请求代际和账本 ID 双重守卫，旧账本分页响应不能覆盖新账本状态。
+- 手工录入在请求期间禁用提交，幂等 token 由表单指纹派生；同批 TWS 成交的重复 `execId` 在预览阶段即阻断。
+- 股息用完整标的边界匹配；预扣税导入为带 `withholding_tax` 标签的 fee 事件。
+- `allow_overdraw` 属于单条历史事件，不会因后来请求的开关变化而使整段时间线失效。
+- 导入和覆盖重建与单条追加共用期权乘数推断，避免其他客户端遗漏 `sharesPerContract` 时出现不同结果。
+- 两个 WebSocket 服务均校验 Origin；默认只接受本机 HTTP 页面，不支持直接以 `file://` 打开。
+- 流水的 running cash cost 是完整现金审计口径；页面标题综合成本按既定产品口径排除仍未到期长期 Long Call/Put 的权利金支出。两者有意不同，并在页面说明中分别命名。
+- 删除账本只需一次浏览器确认；服务端删除计划凭据仍用于检查计划是否过期、账本是否在确认期间发生变化。
+- 采信基线的替代规则有一条有意放宽：同一合约在快照前有多笔 API 成交、总量与基线不符时，若其中一笔的有符号数量与净现金（含返佣）与基线一致到分，即视为基线所代表的真实成交。依据是 TWS AvgCost 由更早持仓加多笔成交合成时不会恰好等于单笔现金；CSV 来源仍必须精确重建数量。
 
 ### 11.5.2 整本永久删除（2026-08-26 新增）
 
@@ -535,28 +623,34 @@ managed-account 选择规则：单账户自动选，多账户显式选。IB API 
 `cost_basis_events`、`cost_basis_book_resets`，最后删除 `cost_basis_books`。
 确认短语同时携带账户、标的和三类实时数量，例如
 `DELETE U1234567 TQQQ 14 EVENTS 3 SNAPSHOTS 1 RESETS`。数量在取得写锁后
-重新计算；计划过期、短语不符或任一步失败都整体回滚。此操作不会先生成
+重新计算；前端在用户点击一次普通确认后自动回传该短语，不要求手工抄写。
+计划过期、短语不符或任一步失败都整体回滚。此操作不会先生成
 reset archive，否则就不算“删除干净”；同标的其他账户因 book_id 不同不受影响。
 
 ### 11.6 时区与日期
 
-IBKR 的 `Date/Time` 是账户报表时区。账本的 `trade_date` 只取日期部分，不做时区换算，但导入时把原始字符串留在 `note` 里，以便对账时回溯。
+CSV/Flex 的 `Date/Time` 按账户报表时区解析为精确的 broker-local
+`YYYY-MM-DDTHH:MM:SS`，`trade_date` 取同一本地日期。TWS API 成交在服务端从
+`ib.TimezoneTWS` 解出显式 `ZoneInfo`，aware datetime 必须转到该时区后再去掉
+tzinfo；时区缺失时整批成交 fail-closed，不允许把 UTC 假写成本地时钟。
+持仓采信基线使用后端提供的 `brokerTimestamp`，不使用浏览器本地时间。
+自由备注里的日期时间永不作为 broker 证据。回放顺序在前后端统一为
+`trade_date -> broker_timestamp -> seq`。
 
 ## 12. 分阶段实施
 
 | 阶段 | 内容 | 可独立验证 |
 | --- | --- | --- |
 | 0 | 本方案 + 口径确认 + schema 冻结 | ✅ 已完成 |
-| 1 | `cost_basis_store.py` + 存储层测试 | ✅ 64 tests |
-| 2 | `cost_basis_ws.py` + 两个后端挂载 + 协议测试 | ✅ 34 tests |
-| 3 | `js/cost_basis_core.js` 引擎 + 金标准测试 | ✅ 35 tests |
-| 4 | 页面骨架：账户+标的账本选择、手工录入、流水、三口径总览 | ✅ 12 tests + 浏览器验证 |
-| 5 | **IBKR 报表 CSV 导入**：解析、分类、指派配对、预览、幂等 | ✅ 24 tests |
+| 1 | `cost_basis_store.py` + 存储层测试 | ✅ 150 tests |
+| 2 | `cost_basis_ws.py` + 两个后端挂载 + 协议测试 | ✅ 59 tests |
+| 3 | `js/cost_basis_core.js` 引擎 + 金标准测试 | ✅ 101 tests |
+| 4 | 页面骨架：账户+标的账本选择、手工录入、流水、三口径总览 | ✅ 58 page tests |
+| 5 | **IBKR 报表 CSV 导入**：解析、分类、指派配对、预览、幂等 | ✅ 81 import + 4 report tests |
 | 6 | TWS 持仓对账面板 + TWS-only 临时基线采信 | ✅ 引擎已测；差异只提示、不猜历史事件 |
-| — | 以上为 v1 交付范围，已全部实现 | |
-| 7（后续） | 对账快照与 CSV 导出已随页面落地；独立备份脚本 `scripts/backup_cost_basis_store.py` 待补 | CLI |
-| 8（后续） | 期权费统计与年化已随页面落地 | ✅ |
-| 9（可选） | index.html 成交回报自动入账 | 未开始 |
+| 7 | 对账快照与 CSV 导出 | ✅ 已实现；账本备份 CLI 不存在，已作为明示运维边界 |
+| 8 | 卖方期权费统计、年化、What If 与 Long Call/Put 可选压力覆盖 | ✅ 已实现 |
+| 9 | 近期 TWS 成交拉取、execId 批内/库内去重、佣金门禁与 CSV 跨来源对账 | ✅ 10 execution tests；长期历史仍以 CSV 为准 |
 
 ### 实现期间发现并修掉的问题
 
@@ -575,4 +669,6 @@ IBKR 的 `Date/Time` 是账户报表时区。账本的 `trade_date` 只取日期
 - TWS 均价/市价只覆盖 TWS 推送账户更新的那个账户；其余账户的口径 B 对账会显示「TWS 均价不可用」，数量对账不受影响。
 - 旧版未限定账户的账本仍可显示多账户合并数字；新账本始终以单一 IB 账户为边界。
 - 现金担保占用、保证金成本、融资利息不计入 v1。
-- 仅支持可交割的股票/ETF 标的；现金结算指数期权不适用，创建账本时直接拒绝并说明原因。
+- 支持可交割的股票/ETF + OPT，以及可交割的 FUT + FOP；现金结算指数期权不适用。
+- FOP/FUT 仍等待真实券商报表覆盖所有本地化字段组合；当前验收基于合成格式与真实 STK/OPT 报表回归。
+- 没有内建的 `cost_basis.db` 自动备份或独立 CLI；workspace recovery set 不会代替这个责任。

@@ -8,6 +8,7 @@ import configparser
 import uuid
 from contextlib import AsyncExitStack
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ib_async import *
 import websockets
 
@@ -18,6 +19,8 @@ from ib_connection_supervisor import (
     IbConnectionSupervisor,
 )
 from yield_curve.backend_adapter import YieldCurveBackendAdapter
+from websocket_security import read_allowed_ws_origins
+from yield_curve.builder import resolve_snapshot_discount
 from ib_server_order_tracking import (
     build_active_combo_orders_snapshot as build_active_combo_orders_snapshot_via_module,
     build_active_hedge_orders_snapshot as build_active_hedge_orders_snapshot_via_module,
@@ -86,6 +89,10 @@ from ib_server_ws import (
     purge_hedge_order_tracking_for_websocket as purge_hedge_order_tracking_for_websocket,
 )
 import cost_basis_ws
+from cost_basis_executions import (
+    execution_filter_time as cost_basis_execution_filter_time,
+    serialize_fills as serialize_cost_basis_fills,
+)
 import portfolio_store_ws
 from iv_term_structure_service import (
     DEFAULT_BUCKET_DEFINITIONS as IV_TERM_STRUCTURE_BUCKET_DEFINITIONS,
@@ -118,6 +125,7 @@ TWS_CLIENT_ID = config.getint('tws', 'client_id', fallback=999)
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
 MAX_WS_MESSAGE_BYTES = portfolio_store_ws.read_max_ws_message_bytes(config)
+WS_ALLOWED_ORIGINS = read_allowed_ws_origins(config)
 # Workspace persistence store: failure only disables persistence, never IB.
 portfolio_store_env = portfolio_store_ws.create_store_env(config)
 # The blended-cost ledger is a separate database with a separate
@@ -206,6 +214,32 @@ client_subscription_settings = {}
 ib_connect_task = None
 ib_connection_supervisor = None
 iv_term_structure_sync_tasks = {}
+
+
+def _cost_basis_tws_timezone():
+    """Resolve the clock TWS uses for executions and Activity Statements."""
+    name = str(getattr(ib, 'TimezoneTWS', '') or '').strip()
+    if not name:
+        raise RuntimeError(
+            'TWS did not report its timezone; execution import is disabled '
+            'rather than comparing UTC with broker-local CSV timestamps')
+    try:
+        return name, ZoneInfo(name)
+    except ZoneInfoNotFoundError as exc:
+        raise RuntimeError(f'TWS reported an unknown timezone: {name}') from exc
+
+
+def _cost_basis_tws_clock_payload():
+    """Best-effort broker-local snapshot clock for adopted TWS baselines."""
+    try:
+        name, timezone = _cost_basis_tws_timezone()
+    except RuntimeError:
+        return {}
+    return {
+        'brokerTimestamp': datetime.now(timezone).replace(
+            microsecond=0).strftime('%Y-%m-%dT%H:%M:%S'),
+        'brokerTimezone': name,
+    }
 iv_term_structure_contract_details_semaphore = asyncio.Semaphore(4)
 iv_term_structure_option_subscription_semaphore = asyncio.Semaphore(4)
 api_market_data_reset_lock = asyncio.Lock()
@@ -865,6 +899,7 @@ def _build_portfolio_positions_payload(request_id=None):
         'items': items,
         'ibConnected': ib.isConnected(),
         'positionsReady': portfolio_positions_snapshot_ready,
+        **_cost_basis_tws_clock_payload(),
     }
     if request_id:
         payload['requestId'] = str(request_id)
@@ -2121,6 +2156,456 @@ async def _request_ib_historical_bars(
     )
 
 
+async def _request_cost_basis_executions(request):
+    """Read recent TWS executions; never touches the order pipeline."""
+    if not ib.isConnected():
+        raise RuntimeError('TWS is not connected')
+
+    account = str((request or {}).get('account') or '').strip().upper()
+    symbol = str((request or {}).get('symbol') or '').strip().upper()
+    since = str((request or {}).get('sinceTimestamp') or '').strip()
+    timezone_name, tws_timezone = _cost_basis_tws_timezone()
+    broker_now = datetime.now(tws_timezone)
+    filter_time = cost_basis_execution_filter_time(since, broker_now)
+
+    execution_filter = ExecutionFilter(
+        acctCode=account,
+        time=filter_time,
+        symbol=symbol,
+    )
+    queried_fills = list(await asyncio.wait_for(
+        ib.reqExecutionsAsync(execution_filter), timeout=10.0) or [])
+
+    def fills_with_commissions():
+        # ib_async creates a transient Fill for a reqExecutions reply even
+        # when the same execId is already in its startup cache. Commission
+        # reports update the cached Fill, not that transient object, so merge
+        # by broker identity before serialization.
+        cached = {
+            str(getattr(getattr(item, 'execution', None), 'execId', '') or ''): item
+            for item in (ib.fills() or [])
+        }
+        return [cached.get(
+            str(getattr(getattr(item, 'execution', None), 'execId', '') or ''), item)
+            for item in queried_fills]
+
+    # execDetailsEnd can arrive just before the final commissionReport.  The
+    # Fill objects are updated in-place, so give those reports a short bounded
+    # window before declaring a row incomplete.
+    deadline = asyncio.get_running_loop().time() + 1.5
+    fills = fills_with_commissions()
+    while fills and asyncio.get_running_loop().time() < deadline:
+        serialized = serialize_cost_basis_fills(
+            fills, account=account, symbol=symbol,
+            target_timezone=tws_timezone)
+        if all(row.get('commissionAvailable')
+               for row in serialized.get('executions', [])):
+            break
+        await asyncio.sleep(0.05)
+        fills = fills_with_commissions()
+
+    serialized = serialize_cost_basis_fills(
+        fills, account=account, symbol=symbol,
+        target_timezone=tws_timezone)
+    fetched_at = datetime.now(tws_timezone).replace(
+        microsecond=0).strftime('%Y-%m-%dT%H:%M:%S')
+    return {
+        **serialized,
+        'ibConnected': True,
+        'account': account,
+        'symbol': symbol,
+        'requestedSince': since,
+        'querySince': filter_time,
+        'fetchedAt': fetched_at,
+        'brokerTimezone': timezone_name,
+        # reqExecutions is a recent-session window, not an Activity Statement.
+        'coverage': 'tws_recent_window',
+    }
+
+
+cost_basis_store_env['fetch_executions'] = _request_cost_basis_executions
+
+
+async def _request_cost_basis_market_price(request):
+    """Request one fresh snapshot quote for a ledger underlying."""
+    if not ib.isConnected():
+        raise RuntimeError('TWS is not connected')
+
+    account = str((request or {}).get('account') or '').strip().upper()
+    symbol = str((request or {}).get('symbol') or '').strip().upper()
+    sec_type = str((request or {}).get('secType') or 'STK').strip().upper()
+    currency = str((request or {}).get('currency') or 'USD').strip().upper()
+    if not account or not symbol or sec_type != 'STK' or len(currency) != 3:
+        raise ValueError('a stock/ETF cost-basis book is required')
+
+    contract = None
+    for position in list(ib.positions() or []):
+        candidate = getattr(position, 'contract', None)
+        if (str(getattr(position, 'account', '') or '').strip().upper() == account
+                and str(getattr(candidate, 'secType', '') or '').upper() == 'STK'
+                and str(getattr(candidate, 'symbol', '') or '').strip().upper() == symbol):
+            contract = _cost_basis_stock_snapshot_contract(candidate, currency)
+            break
+
+    if contract is None:
+        qualified = list(await asyncio.wait_for(
+            ib.qualifyContractsAsync(Stock(symbol, 'SMART', currency)),
+            timeout=10.0) or [])
+        if not qualified:
+            raise RuntimeError('TWS could not qualify the underlying')
+        contract = qualified[0]
+
+    tickers = list(await asyncio.wait_for(
+        ib.reqTickersAsync(contract), timeout=12.0) or [])
+    if not tickers:
+        raise RuntimeError('TWS returned no snapshot quote')
+    ticker = tickers[0]
+    market_price = _extract_market_price(ticker)
+    if market_price is None:
+        raise RuntimeError('TWS snapshot quote contained no usable price')
+
+    fetched_at = datetime.now().astimezone().replace(
+        microsecond=0).isoformat(timespec='seconds')
+    return {
+        'ibConnected': True,
+        'account': account,
+        'symbol': symbol,
+        'secType': sec_type,
+        'currency': currency,
+        'marketPrice': float(market_price),
+        'fetchedAt': fetched_at,
+        'marketDataType': getattr(ticker, 'marketDataType', None),
+        'conId': getattr(contract, 'conId', None),
+        # reqTickersAsync uses a one-shot snapshot request; it doesn't leave
+        # a live cost-ledger market-data subscription behind.
+        'coverage': 'tws_snapshot_quote',
+    }
+
+
+cost_basis_store_env['fetch_market_price'] = _request_cost_basis_market_price
+
+
+def _cost_basis_option_identity(contract):
+    con_id = _positive_contract_id(getattr(contract, 'conId', None))
+    local_symbol = str(getattr(contract, 'localSymbol', '') or '').strip()
+    right = str(getattr(contract, 'right', '') or '').strip().upper()[:1]
+    raw_expiry = str(
+        getattr(contract, 'lastTradeDateOrContractMonth', '') or '')
+    expiry = ''.join(character for character in raw_expiry if character.isdigit())[:8]
+    try:
+        strike = float(getattr(contract, 'strike', None))
+    except (TypeError, ValueError):
+        strike = None
+    return {
+        'conId': con_id,
+        'localSymbol': local_symbol,
+        'right': right,
+        'strike': strike,
+        'expiry': expiry,
+    }
+
+
+def _cost_basis_option_request_matches(identity, requested):
+    requested_con_id = _positive_contract_id(requested.get('conId'))
+    if requested_con_id is not None and identity['conId'] == requested_con_id:
+        return True
+    requested_local = str(requested.get('localSymbol') or '').strip()
+    if requested_local and identity['localSymbol'] == requested_local:
+        return True
+    try:
+        requested_strike = float(requested.get('strike'))
+    except (TypeError, ValueError):
+        return False
+    return (
+        identity['right'] == str(requested.get('right') or '').strip().upper()[:1]
+        and identity['expiry'] == str(requested.get('expiry') or '')[:8]
+        and identity['strike'] is not None
+        and abs(identity['strike'] - requested_strike) <= 1e-8
+    )
+
+
+def _cost_basis_option_iv_source(ticker):
+    for attribute in ('modelGreeks', 'bidGreeks', 'askGreeks', 'lastGreeks'):
+        greeks = getattr(ticker, attribute, None)
+        value = getattr(greeks, 'impliedVol', None) if greeks else None
+        if value is not None and value == value and value > 0:
+            return attribute
+    value = getattr(ticker, 'impliedVolatility', None)
+    if value is not None and value == value and value > 0:
+        return 'impliedVolatility'
+    return ''
+
+
+def _cost_basis_stock_snapshot_contract(contract, fallback_currency='USD'):
+    """Copy a position-cache STK into a complete snapshot request contract."""
+    return Contract(
+        secType='STK',
+        conId=int(getattr(contract, 'conId', 0) or 0),
+        symbol=str(getattr(contract, 'symbol', '') or ''),
+        exchange=str(getattr(contract, 'exchange', '') or 'SMART'),
+        primaryExchange=str(getattr(contract, 'primaryExchange', '') or ''),
+        currency=str(getattr(contract, 'currency', '') or fallback_currency),
+        localSymbol=str(getattr(contract, 'localSymbol', '') or ''),
+        tradingClass=str(getattr(contract, 'tradingClass', '') or ''),
+    )
+
+
+def _cost_basis_option_snapshot_contract(contract, fallback_currency='USD'):
+    """Copy a portfolio OPT into a market-data-valid SMART contract.
+
+    IB's position callback commonly omits ``exchange`` even though it provides
+    a conId.  Reusing that object in reqMktData produces error 321 ("Please
+    enter exchange") and therefore no IV.  Do not mutate the position-cache
+    object; build an isolated request contract with the broker identity intact.
+    """
+    return Contract(
+        secType='OPT',
+        conId=int(getattr(contract, 'conId', 0) or 0),
+        symbol=str(getattr(contract, 'symbol', '') or ''),
+        lastTradeDateOrContractMonth=str(
+            getattr(contract, 'lastTradeDateOrContractMonth', '') or ''),
+        strike=float(getattr(contract, 'strike', 0) or 0),
+        right=str(getattr(contract, 'right', '') or ''),
+        multiplier=str(getattr(contract, 'multiplier', '') or ''),
+        exchange=str(getattr(contract, 'exchange', '') or 'SMART'),
+        primaryExchange=str(getattr(contract, 'primaryExchange', '') or ''),
+        currency=str(getattr(contract, 'currency', '') or fallback_currency),
+        localSymbol=str(getattr(contract, 'localSymbol', '') or ''),
+        tradingClass=str(getattr(contract, 'tradingClass', '') or ''),
+    )
+
+
+async def _request_cost_basis_snapshot_tickers(contracts, timeout_seconds=8.0):
+    """Return partial TWS snapshots as soon as price and option IVs arrive.
+
+    ``IB.reqTickersAsync`` waits for IB's snapshot-end marker, which commonly
+    arrives about eleven seconds after the useful ticks and can wait once per
+    slow contract.  The cost-ledger request has a twenty-second browser
+    deadline, so waiting for that marker plus a curve refresh made the feature
+    time out even when TWS had already supplied every required value.
+
+    This uses the same IB snapshot request (never a streaming subscription),
+    observes fresh pending-ticker callbacks, and always cancels/cleans every
+    request at a bounded deadline.  Partial rows are intentional: the browser
+    can then name the exact contract whose IV is unavailable instead of showing
+    an indefinite spinner.
+    """
+    requested = list(contracts or [])
+    if not requested:
+        return []
+
+    request_key = 'cost_basis_snapshot_{}'.format(uuid.uuid4().hex)
+    rows = []
+    updated_ticker_ids = set()
+
+    def on_pending_tickers(pending_tickers):
+        requested_ids = {id(item['ticker']) for item in rows}
+        for ticker in pending_tickers or []:
+            if id(ticker) in requested_ids:
+                updated_ticker_ids.add(id(ticker))
+
+    ib.pendingTickersEvent += on_pending_tickers
+    try:
+        for contract in requested:
+            req_id = ib.client.getReqId()
+            # Do not reuse ``wrapper.tickers[hash(contract)]`` here.  A reused
+            # object may still contain an IV from an older main-workspace
+            # subscription, which would make a mere fresh bid tick incorrectly
+            # validate that stale IV.  Keep this one-shot request isolated with
+            # a new ticker while retaining the wrapper routing IB needs.
+            ticker = Ticker(contract=contract, defaults=ib.wrapper.defaults)
+            ib.wrapper.reqId2Ticker[req_id] = ticker
+            ib.wrapper._reqId2Contract[req_id] = contract
+            ib.wrapper.ticker2ReqId[request_key][ticker] = req_id
+            rows.append({'reqId': req_id, 'contract': contract, 'ticker': ticker})
+            ib.client.reqMktData(req_id, contract, '', True, False, [])
+
+        deadline = asyncio.get_running_loop().time() + max(
+            0.25, float(timeout_seconds))
+        while asyncio.get_running_loop().time() < deadline:
+            fresh = [row for row in rows
+                     if id(row['ticker']) in updated_ticker_ids]
+            underlying_ready = any(
+                str(getattr(row['contract'], 'secType', '') or '').upper() == 'STK'
+                and extract_market_price(row['ticker']) is not None
+                for row in fresh)
+            option_rows = [row for row in rows
+                           if str(getattr(row['contract'], 'secType', '') or '').upper()
+                           == 'OPT']
+            options_ready = all(
+                id(row['ticker']) in updated_ticker_ids
+                and extract_option_iv(row['ticker']) is not None
+                for row in option_rows)
+            if underlying_ready and options_ready:
+                break
+            await asyncio.sleep(0.05)
+        return [row['ticker'] for row in rows]
+    finally:
+        ib.pendingTickersEvent -= on_pending_tickers
+        for row in rows:
+            req_id = ib.wrapper.endTicker(row['ticker'], request_key)
+            if req_id:
+                ib.client.cancelMktData(req_id)
+            ib.wrapper.reqId2Ticker.pop(row['reqId'], None)
+            ib.wrapper._reqId2Contract.pop(row['reqId'], None)
+        ib.wrapper.ticker2ReqId.pop(request_key, None)
+
+
+async def _request_cost_basis_option_scenario_inputs(request):
+    """One-shot TWS IV/mark snapshot plus the shared USD discount curve.
+
+    This endpoint is read-only and leaves no live market-data subscription.
+    The browser supplies contract identities only to limit the snapshot fanout;
+    account and symbol scope always come from the stored ledger book, and every
+    requested identity must also exist as a current long TWS position.
+    """
+    if not ib.isConnected():
+        raise RuntimeError('TWS is not connected')
+
+    data = request or {}
+    account = str(data.get('account') or '').strip().upper()
+    symbol = str(data.get('symbol') or '').strip().upper()
+    sec_type = str(data.get('secType') or 'STK').strip().upper()
+    currency = str(data.get('currency') or 'USD').strip().upper()
+    through_expiry = ''.join(
+        character for character in str(data.get('throughExpiry') or '')
+        if character.isdigit())[:8]
+    requested_contracts = data.get('contracts') or []
+    if not account or not symbol or sec_type != 'STK' or len(currency) != 3:
+        raise ValueError('a stock/ETF cost-basis book is required')
+    try:
+        scenario_date = datetime.strptime(through_expiry, '%Y%m%d').date()
+    except ValueError as exc:
+        raise ValueError('throughExpiry must be YYYYMMDD') from exc
+
+    option_positions = []
+    underlying_contract = None
+    for position in list(ib.positions() or []):
+        position_account = str(
+            getattr(position, 'account', '') or '').strip().upper()
+        contract = getattr(position, 'contract', None)
+        contract_symbol = str(
+            getattr(contract, 'symbol', '') or '').strip().upper()
+        contract_sec_type = str(
+            getattr(contract, 'secType', '') or '').strip().upper()
+        if position_account != account or contract_symbol != symbol:
+            continue
+        if contract_sec_type == 'STK':
+            underlying_contract = _cost_basis_stock_snapshot_contract(
+                contract, currency)
+            continue
+        if contract_sec_type != 'OPT' or float(getattr(position, 'position', 0) or 0) <= 0:
+            continue
+        identity = _cost_basis_option_identity(contract)
+        if any(_cost_basis_option_request_matches(identity, item)
+               for item in requested_contracts):
+            option_positions.append((
+                position, _cost_basis_option_snapshot_contract(
+                    contract, currency), identity))
+
+    if underlying_contract is None:
+        qualified = list(await asyncio.wait_for(
+            ib.qualifyContractsAsync(Stock(symbol, 'SMART', currency)),
+            timeout=5.0) or [])
+        if not qualified:
+            raise RuntimeError('TWS could not qualify the underlying')
+        underlying_contract = qualified[0]
+
+    unique_contracts = []
+    seen_identities = set()
+    for _position, contract, identity in option_positions:
+        key = identity['conId'] or identity['localSymbol'] or (
+            identity['right'], identity['strike'], identity['expiry'])
+        if key in seen_identities:
+            continue
+        seen_identities.add(key)
+        unique_contracts.append(contract)
+
+    ticker_contracts = [underlying_contract] + unique_contracts
+    tickers, curve_payload = await asyncio.gather(
+        _request_cost_basis_snapshot_tickers(
+            ticker_contracts, timeout_seconds=8.0),
+        # This button must never block on a network update that can take up to
+        # a minute.  Reuse the latest unified curve already maintained by the
+        # project; if none exists, return an explicit unavailable result.
+        _get_discount_curve_snapshot({'refresh': False}),
+    )
+    tickers = list(tickers or [])
+    ticker_by_con_id = {}
+    ticker_by_local_symbol = {}
+    for ticker in tickers:
+        identity = _cost_basis_option_identity(getattr(ticker, 'contract', None))
+        if identity['conId'] is not None:
+            ticker_by_con_id[identity['conId']] = ticker
+        if identity['localSymbol']:
+            ticker_by_local_symbol[identity['localSymbol']] = ticker
+
+    underlying_ticker = next((ticker for ticker in tickers
+        if str(getattr(getattr(ticker, 'contract', None), 'secType', '') or '').upper()
+            == 'STK'), None)
+    underlying_price = extract_market_price(underlying_ticker) \
+        if underlying_ticker is not None else None
+
+    option_rows = []
+    for position, _contract, identity in option_positions:
+        ticker = ticker_by_con_id.get(identity['conId']) \
+            or ticker_by_local_symbol.get(identity['localSymbol'])
+        quote = extract_quote_snapshot(ticker, 'OPT') if ticker is not None else None
+        iv = extract_option_iv(ticker) if ticker is not None else None
+        option_rows.append({
+            **identity,
+            'position': float(getattr(position, 'position', 0) or 0),
+            'impliedVolatility': float(iv) if iv is not None else None,
+            'ivSource': _cost_basis_option_iv_source(ticker) if ticker is not None else '',
+            'mark': quote.get('mark') if quote else None,
+            'markSource': quote.get('markSource') if quote else '',
+            'marketDataType': getattr(ticker, 'marketDataType', None)
+                if ticker is not None else None,
+        })
+
+    curve = curve_payload.get('curve') if isinstance(curve_payload, dict) else None
+    rates_by_expiry = []
+    expiries = sorted({str(item.get('expiry') or '') for item in requested_contracts
+                       if str(item.get('expiry') or '') > through_expiry})
+    for expiry in expiries:
+        try:
+            expiry_date = datetime.strptime(expiry, '%Y%m%d').date()
+            maturity_days = (expiry_date - scenario_date).days
+            resolved = resolve_snapshot_discount(curve, maturity_days)
+        except (TypeError, ValueError):
+            continue
+        rates_by_expiry.append({
+            'expiry': expiry,
+            **resolved,
+        })
+
+    fetched_at = datetime.now().astimezone().replace(
+        microsecond=0).isoformat(timespec='seconds')
+    return {
+        'ibConnected': True,
+        'account': account,
+        'symbol': symbol,
+        'secType': sec_type,
+        'currency': currency,
+        'throughExpiry': through_expiry,
+        'underlyingPrice': float(underlying_price)
+            if underlying_price is not None else None,
+        'options': option_rows,
+        'ratesByExpiry': rates_by_expiry,
+        'curveAsOf': str((curve or {}).get('curveAsOf') or ''),
+        'curveEffectiveDate': str((curve or {}).get('effectiveDate') or ''),
+        'curveSnapshotId': str((curve or {}).get('snapshotId') or ''),
+        'curveStatus': str((curve_payload or {}).get('status') or ''),
+        'curveError': str((curve_payload or {}).get('error') or ''),
+        'fetchedAt': fetched_at,
+        'coverage': 'tws_option_snapshot_and_shared_discount_curve',
+    }
+
+
+cost_basis_store_env['fetch_option_scenario_inputs'] = (
+    _request_cost_basis_option_scenario_inputs)
+
+
 def _build_ws_handler_environment():
     return {
         'connected_clients': connected_clients,
@@ -2231,6 +2716,7 @@ async def main():
                 ws_servers.append(await websockets.serve(
                     handle_ws_client, ws_host, WS_PORT,
                     max_size=MAX_WS_MESSAGE_BYTES,
+                    origins=WS_ALLOWED_ORIGINS,
                 ))
         except OSError as e:
             for ws_server in ws_servers:

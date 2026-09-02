@@ -100,8 +100,8 @@ loads only `js/cost_basis_core.js`, `js/cost_basis_import.js`, and
 
 It currently:
 
-- keeps one book per underlying, summarised per account, over an append-only
-  event stream in its own `cost_basis.db`
+- keeps one active book per account + underlying + security type + currency
+  over an append-oriented event stream in its own `cost_basis.db`
 - presents three lenses off the same stored cash: net cash (default), stock
   only (the one that should reconcile against the TWS average-cost column),
   and tax adjusted
@@ -111,6 +111,17 @@ It currently:
   gap from them - nothing auto-writes an event
 - imports IBKR Activity Statement CSVs, de-duplicating on a content-derived
   key because those statements carry no TradeID
+- reviews and explicitly imports recent TWS executions by broker `execId`;
+  duplicate IDs inside one batch are blocked before storage, while later CSV
+  reports remain the final historical authority through strict cross-source
+  matching
+- supports `STK/OPT` and deliverable `FUT/FOP`, including FOP delivery and
+  uniquely paired futures rolls
+- derives current positions from CSV/ledger replay even when TWS is offline,
+  and labels the result as uncorroborated rather than rendering an empty table
+- provides expiry-bounded What If replay plus a modal multi-price stress test;
+  still-live Long Calls/Puts are an optional BSM overlay using per-contract TWS
+  IV and the shared discount curve, never a stored event
 - treats a negative share balance as supported state: the net-cash lens
   reports the short's buy-back break-even level, and the short notice is
   raised only from the final replayed balance, never from an intermediate
@@ -844,12 +855,16 @@ the document envelope, the canonical fingerprint for dirty detection, the
 only hands snapshots in and applies load results atomically through the
 replace-mode normalizer. Both `websockets.serve` calls share an explicit
 `max_size` (`[server] max_ws_message_bytes`) because the library's 1 MiB
-default would 1009-close a socket that also carries order supervision.
+default would 1009-close a socket that also carries order supervision. Both
+listeners also pass the exact `[server] allowed_origins` list to
+`websockets.serve`; this is the browser-side boundary that prevents an
+unrelated web origin from reaching loopback persistence, ledger, admin, or
+execution actions.
 
 ### Blended-cost ledger (shared by both backends)
 
-`cost_basis_store.py` is the pure SQLite store (schema v5) behind
-`cost_basis.html`: append-only money events keyed per book, one derivation
+`cost_basis_store.py` is the pure SQLite store (schema v7) behind
+`cost_basis.html`: append-oriented money events keyed per book, one derivation
 for every event's cash amount, per-kind field validation, client-token
 idempotency, external-ref import de-duplication, voiding that replays the
 contract timeline rather than deleting, and snapshot hashing. Ordering is
@@ -866,11 +881,23 @@ browser, and an exception must not escape it - one bad ledger request must
 not tear down a socket that is also carrying live market data and order
 supervision.
 
-`reset_cost_basis_book` is the only path that deletes events. It archives
-the full event set as JSON first, then demands a server-generated,
-count-bearing phrase that is re-checked inside the write transaction, so a
-ledger that changed between reading the phrase and submitting it fails
-closed.
+`rebuild_cost_basis_book` is the only normal workflow that removes active
+events: it archives the full set as JSON, validates the replacement, then wipes
+and refills inside one transaction. A server-generated count-bearing reset
+token is re-checked under the write lock, so a ledger changed after preview
+fails closed. `delete_cost_basis_book` is the separate, explicitly permanent
+exception: after a count-bearing confirmation it removes the book, events,
+snapshots and rebuild archives atomically and is not recoverable.
+
+The browser loader generation-scopes every multi-page event fetch. Both the
+select control and sidebar use the same rejection-consuming switch boundary;
+old rows are cleared before loading a new book, so a disconnect cannot pair a
+new title with the previous book's ledger or emit an unhandled rejection.
+
+The workspace recovery-set publisher does not include `cost_basis.db`. No
+dedicated cost-ledger backup command or automatic scheduler currently exists;
+operators must use a SQLite-consistent external backup while the backend is
+stopped or otherwise quiesced.
 
 ## 8. Historical Replay Architecture
 

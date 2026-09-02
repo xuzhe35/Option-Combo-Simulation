@@ -398,10 +398,31 @@ answers one question for one IB account and one underlying: **what did this
 stock or futures position actually cost this account, all in?** The active
 book identity is `account + symbol + security type + currency`, so two managed
 accounts may keep independent books for the same symbol. A book is explicitly either `STK`
-(stock/ETF plus OPT) or `FUT` (deliverable FOP plus FUT). Works against either backend; only the TWS
-reconciliation panel needs a live IB connection.
+(stock/ETF plus OPT) or `FUT` (deliverable FOP plus FUT). The ledger, CSV,
+manual-entry, export, snapshot and scenario-replay paths work against either
+backend. Current positions/AvgCost, recent executions, fresh prices, option IV
+and discount-curve inputs require the live IB backend; without it the page
+continues from CSV/ledger-inferred positions and labels them as not reconciled
+to TWS.
 
 Open it at `http://localhost:8000/cost_basis.html`.
+
+The dashboard also includes a read-only **What If** expiry-price scenario for
+stock/ETF books. It keeps the current shares, settles every open option against
+one hypothetical underlying expiry price through a user-selected expiry date,
+and then replays the ledger to show the resulting share count, total basis, and
+per-share blended cost under the selected lens. Later expiries remain open and
+at risk. For example, an ITM short put becomes an assignment while an ATM/OTM
+put expires. This is an expiry outcome with zero settlement fees and no option
+time value; it never records the synthetic settlement rows.
+
+The adjacent **pressure-test** dialog sweeps a selectable price range for the
+same expiry boundary and shows expiry P&L and blended cost at every point. Its
+optional convexity overlay values every still-live long Call and Put with that
+contract's current TWS IV held constant and the shared USD discount curve. If
+either input cannot be fetched within the bounded request, the overlay fails
+closed while the ordinary expiry scenario remains usable. Hovering a point
+shows its exact price, P&L, cost, resulting shares and settlement counts.
 
 The event-flow table keeps its running balances anchored to chronological
 ledger replay, but displays the finished rows newest-first in 25-row pages so
@@ -421,11 +442,36 @@ last two years: `reqExecutions` covers only a recent window, and an
 assignment is indistinguishable in a snapshot from "the option vanished
 and the share count moved". So the SQLite ledger in `cost_basis.db` is the
 source of truth, and the TWS position snapshot is a checksum against it.
+The page's **拉取 TWS 成交** action requests the recent executions visible to
+the connected API client from the last CSV timestamp, previews each stock,
+option, FOP, or FUT leg, and imports only after explicit confirmation.
+Broker `execId` values make retries idempotent; a duplicate `execId` inside one
+review batch is a blocking preview problem (the first row is retained for
+inspection), and BAG summary fills are excluded
+to avoid counting a combo twice, and a missing commission report blocks the
+batch. A negative IB commission is retained as a separate positive-cash rebate.
+When one of these executions is the real trade behind an adopted TWS baseline,
+the import replaces that baseline atomically only after contract, signed
+quantity, timestamp, and net cash (including commission/rebate) prove the
+match; ambiguous or partial overlap blocks the batch. This is useful for today's activity but does not replace a cumulative
+Activity Statement when the CSV cutoff predates TWS's available window.
+If those reviewed TWS fills were committed, a later CSV row is treated as the
+same execution only when account, contract, signed quantity, broker timestamp,
+price, and net cash all agree (or the broker execId agrees and the economics
+still verify). The CSV then reuses the stored exec identity and SQLite skips it;
+a suspected cross-source overlap that cannot be proved is blocked rather than
+double-booked.
+The What If **使用当前价** button does not reuse the last portfolio update: it
+requests a fresh one-shot TWS snapshot quote, stamps the refresh time in the
+scenario label, and recalculates immediately. The request is read-only and
+does not leave a live market-data subscription behind.
 **Nothing auto-writes an event.** When the ledger has none of a position and
 the authoritative TWS snapshot includes both quantity and average cost, an
 explicit `采信 TWS` click plus confirmation records it directly as a
 current-date baseline. Partial gaps, missing TWS cost, and ledger-only gaps
-still go through the review form.
+still go through the review form. For a partial gap with an available AvgCost,
+the fallback button only fills a clearly marked manual draft for the missing
+quantity; it never writes directly because AvgCost may blend opens and closes.
 
 ### The three cost lenses
 
@@ -458,6 +504,13 @@ your broker and the number you actually care about are not the same one:
   basis (short put assigned: basis = `K − premium/share`; short call
   assigned: proceeds = `K + premium/share`), which explains most of the
   residual difference against a broker's cost-basis view.
+
+The event table's **full-cash running cost** is deliberately a different audit
+lens: it includes every cash flow, including long-option purchases. The large
+headline blended cost excludes the full lifecycle of protective/convexity Long
+Calls and Puts. A 100-share lot bought at 50 plus a long Put costing 200 will
+therefore show 52 in the running full-cash column and 50 in the headline; that
+is intentional, not a reconciliation error.
 
 Those three selectable lenses apply to an `STK` book. A `FUT` book instead
 shows the current FUT entry average and one blended cost in futures points:
@@ -535,10 +588,13 @@ Four guards make it safe to have:
   `cost_basis_book_resets` with a sha256 **before** anything is deleted. The
   active ledger ends up genuinely clean rather than littered with tombstones,
   but nothing is actually lost.
-- The confirmation phrase is server-generated and carries the account,
-  symbol, and live count (`RESET U1234567 TQQQ 14 EVENTS`). It is re-checked inside the write transaction, so
-  a ledger that changed between reading the phrase and submitting it fails
-  instead of deleting rows you never saw.
+- A single confirmation dialog names the symbol, current event count, and
+  replacement row count. Behind that dialog the page sends a server-generated,
+  count-bearing reset token; it is re-checked inside the write transaction, so
+  a ledger that changed after the preview fails instead of deleting newer rows.
+- Replacement parsing ignores overlap warnings against stored TWS executions,
+  because every old row is archived and removed atomically before the CSV is
+  written. Append imports retain the strict cross-source duplicate checks.
 - The wipe happens only after the replacement file is parsed and previewed, so
   a bad file can never leave you with an empty ledger.
 - Apart from the separately confirmed whole-book deletion below, this is the
@@ -550,9 +606,10 @@ Four guards make it safe to have:
 `永久删除账本` removes the selected book itself plus all of its event rows
 (including voided rows), reconciliation snapshots, and reset/rebuild archives.
 Nothing is archived first and the operation cannot be undone. The page first
-asks the server for live counts and requires the exact account-and-symbol phrase,
-for example `DELETE U1234567 TQQQ 14 EVENTS 3 SNAPSHOTS 1 RESETS`. The server
-recomputes that phrase after taking the database write lock; any intervening
+asks the server for live counts and shows one ordinary confirmation dialog.
+After confirmation it returns the server-generated account, symbol, and count
+token internally; the user does not have to transcribe it. The server
+recomputes that token after taking the database write lock, so any intervening
 event, snapshot, or reset makes the plan stale and leaves the complete book
 untouched. Another account's book for the same symbol is a different book ID
 and is not affected. If the delete response is lost, the page refreshes the
@@ -596,12 +653,22 @@ cells show 不可用 for accounts TWS is not reporting.
 
 `cost_basis.db` sits next to `portfolio.db` in the platform
 application-data directory - a separate file on purpose: the ledger is
-tiny, append-only, must never be archived away, and deserves its own
-backup cadence. Configure under `[cost_basis]` in `config.ini`; a one-off
+small, append-oriented, and must never be swept into the workspace revision
+archive. Configure under `[cost_basis]` in `config.ini`; a one-off
 override is `OPTION_COMBO_COST_BASIS_DB_PATH`. Loopback-only, like every
 other persistence surface.
 
-Databases created before schema v5 are migrated without rewriting event rows.
+There is currently no dedicated `backup_cost_basis_store.py` command and no
+automatic cost-ledger backup scheduler. Back up this database with a
+SQLite-consistent backup while the backend is stopped (or with an external
+SQLite backup tool); do not copy only the main `.db` file while its WAL is
+active. The workspace archive/backup commands do not include `cost_basis.db`.
+
+Databases created before schema v7 are migrated in place. Schema v5's account
+migration does not rewrite event rows; schema v6 adds the per-event
+`allow_overdraw` audit flag and marks only legacy closing rows that demonstrably
+used that explicit exception. Schema v7 clears broker timestamps that older
+builds inferred from untrusted manual free-form notes.
 If all account-bearing rows in an old book agree on one account (apart from
 book-wide split rows), that account is adopted as its book identity. A
 genuinely mixed- or unlabelled-account old book remains
@@ -761,6 +828,7 @@ client_id = 999
 [server]
 ws_host = 127.0.0.1
 ws_port = 8765
+allowed_origins = http://localhost:8000,http://127.0.0.1:8000,http://[::1]:8000
 option_contract_timing_timeout_seconds = 5
 
 [execution]
@@ -840,6 +908,14 @@ Important distinction:
 - `server.ws_host` / `server.ws_port` tell the browser how to reach the backend
 
 `server.ws_host` may be a comma-separated list in `ib_server.py`, so one backend can listen on loopback plus a LAN or Tailscale address at the same time.
+
+`server.allowed_origins` is an exact comma-separated browser-origin allow-list
+enforced during the WebSocket handshake. Loopback binding is not a browser
+security boundary by itself: without this check, an unrelated website could
+connect to the local service. If the frontend is served from a LAN/Tailscale
+address or a different HTTP port, add that exact `http://host:port` (or HTTPS)
+origin. Missing origins, `null`, wildcards, paths, and unlisted origins are
+rejected; serve the frontend over HTTP rather than opening the HTML as a file.
 
 ### Historical backend
 

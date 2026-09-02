@@ -29,6 +29,83 @@ module.exports = {
     name: 'cost_basis page',
     tests: [
         {
+            name: 'manual entry retries reuse one idempotency token',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                let generated = 0;
+                const factory = () => `token-${++generated}`;
+                const first = page.chooseManualSubmitToken('', '', 'book-a|row', factory);
+                const retry = page.chooseManualSubmitToken(
+                    first, 'book-a|row', 'book-a|row', factory);
+                const changed = page.chooseManualSubmitToken(
+                    retry, 'book-a|row', 'book-a|changed-row', factory);
+                assert.equal(first, 'token-1');
+                assert.equal(retry, first);
+                assert.equal(changed, 'token-2');
+                const source = readScript();
+                assert.match(source, /state\.eventSubmitPending = true/);
+                assert.match(source,
+                    /btn-submit-event'\)\.disabled = !hasBook \|\| state\.eventSubmitPending/);
+                assert.match(source, /clientToken,\s*\}\);/);
+                assert.match(source, /if \(error\.code\)[\s\S]{0,180}eventSubmitToken = ''/);
+            },
+        },
+        {
+            name: 'stale ledger page loads cannot overwrite a newly selected book',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                assert.equal(page.isCurrentEventLoad('book-b', 'book-a', 2, 1), false);
+                assert.equal(page.isCurrentEventLoad('book-a', 'book-a', 2, 1), false);
+                assert.equal(page.isCurrentEventLoad('book-b', 'book-b', 2, 2), true);
+                const source = readScript();
+                const block = source.slice(
+                    source.indexOf('async function _loadEvents'),
+                    source.indexOf('/** The rows the flow table'));
+                assert.match(block, /const bookId = state\.bookId/);
+                assert.match(block, /bookId,\s*limit: LEDGER_FETCH_SIZE/);
+                assert.doesNotMatch(block, /bookId: state\.bookId/);
+                assert.match(block, /isCurrentEventLoad/);
+            },
+        },
+        {
+            name: 'book switching consumes disconnected load failures at both UI entries',
+            async run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const failure = new Error('socket closed');
+                let afterLoads = 0;
+                let handled = null;
+                const result = await page.loadSelectedBookSafely(
+                    async () => { throw failure; },
+                    async () => { afterLoads += 1; },
+                    (error) => { handled = error; },
+                );
+                assert.equal(result, false);
+                assert.equal(afterLoads, 0);
+                assert.equal(handled, failure);
+
+                // Even a defensive status-render failure must not recreate
+                // the unhandled rejection that this boundary is meant to stop.
+                const renderFailureResult = await page.loadSelectedBookSafely(
+                    async () => { throw failure; },
+                    async () => {},
+                    () => { throw new Error('status render failed'); },
+                );
+                assert.equal(renderFailureResult, false);
+
+                const source = readScript();
+                const sidebarHandler = source.slice(
+                    source.indexOf("button.addEventListener('click', async () =>"),
+                    source.indexOf("const row = globalScope.document.createElement('div')"));
+                const selectHandler = source.slice(
+                    source.indexOf("$('book-select').addEventListener('change'"),
+                    source.indexOf("$('btn-new-book').addEventListener('click'"));
+                assert.match(sidebarHandler, /await _selectBook\(book\.bookId\)/);
+                assert.doesNotMatch(sidebarHandler, /await _loadEvents\(\)/);
+                assert.match(selectHandler, /await _selectBook\(changeEvent\.target\.value\)/);
+                assert.doesNotMatch(selectHandler, /await _loadEvents\(\)/);
+            },
+        },
+        {
             name: 'the page loads only its own scripts, never the trading shell',
             run() {
                 const html = readPage();
@@ -173,6 +250,34 @@ module.exports = {
             },
         },
         {
+            name: 'recent TWS executions use a review gate and never auto-write',
+            run() {
+                const html = readPage();
+                const source = readScript();
+                assert.ok(html.includes('id="btn-fetch-executions"'));
+                assert.match(source,
+                    /request\('request_cost_basis_executions'[\s\S]{0,180}sinceTimestamp/);
+                assert.match(source,
+                    /core\.buildExecutionImport\(response\.executions/);
+                assert.match(source,
+                    /btn-fetch-executions'\)\.addEventListener\('click', _fetchTwsExecutions/);
+                assert.match(source,
+                    /state\.importResult = result;[\s\S]{0,180}_renderImportPreview\(\)/);
+                assert.doesNotMatch(source,
+                    /_fetchTwsExecutions[\s\S]{0,1800}import_cost_basis_events/);
+            },
+        },
+        {
+            name: 'AvgCost fallback fills a manual draft instead of writing directly',
+            run() {
+                const source = readScript();
+                assert.match(source, /core\.buildTwsAvgCostGapDraft/);
+                assert.match(source, /button\.textContent = '按 AvgCost 填草稿'/);
+                assert.match(source,
+                    /else if \(avgCostDraft\)[\s\S]{0,300}_fillForm\(avgCostDraft\)/);
+            },
+        },
+        {
             name: 'every action the script sends is on the core whitelist',
             run() {
                 const context = loadPage();
@@ -200,16 +305,24 @@ module.exports = {
                 assert.ok(html.includes('id="btn-delete-book"'));
                 assert.match(source, /request\('request_cost_basis_delete_plan'/);
                 assert.match(source, /request\('delete_cost_basis_book'/);
+                assert.match(source, /deleteButton\.dataset\.deleteBookId = book\.bookId/);
+                assert.match(source, /_deleteBook\(book\.bookId, deleteButton\)/);
+                assert.match(source,
+                    /state\.books\.find\(\(candidate\) => candidate\.bookId === requestedId\)/);
                 assert.match(source, /plan\.eventCount/);
                 assert.match(source, /plan\.snapshotCount/);
                 assert.match(source, /plan\.resetCount/);
-                assert.match(source, /phrase\.trim\(\) !== plan\.phrase/);
+                assert.match(source, /globalScope\.confirm\(/);
+                assert.match(source, /confirmation:\s*plan\.phrase/);
+                assert.doesNotMatch(source,
+                    /请原样输入以下短语|phrase\.trim\(\) !== plan\.phrase/);
                 assert.match(source, /delete_confirmation_mismatch/);
                 assert.match(source, /error\.code === 'book_not_found'/);
                 assert.match(source, /deleteConfirmed/);
                 assert.match(source, /账本已删除成功，但刷新账本列表失败/);
                 assert.match(source, /deleteSubmitted && !error\.code/);
                 assert.match(source, /刷新后确认账本已不存在，删除已经成功/);
+                assert.match(source, /if \(state\.bookId === bookId\)/);
                 assert.match(source, /await _loadBooks\(\)/);
             },
         },
@@ -230,18 +343,46 @@ module.exports = {
             },
         },
         {
-            name: 'an untrusted empty TWS snapshot cannot produce reconciliation advice',
+            name: 'an untrusted empty TWS snapshot shows ledger positions without advice',
             run() {
                 const page = loadPage().OptionComboCostBasisPage;
                 assert.equal(page.canReconcilePositions('', false), false);
                 assert.equal(page.canReconcilePositions('23:01:00', false), false);
                 assert.equal(page.canReconcilePositions('23:01:00', true), true);
+                const preview = page.buildLedgerPositionPreview({
+                    perAccount: { U1: { shares: 200 }, U2: { shares: 0 } },
+                    openOptions: [{
+                        account: 'U1', expiry: '20280121', right: 'P',
+                        strike: 60, contracts: 3,
+                    }, {
+                        account: 'U1', expiry: '20260902', right: 'P',
+                        strike: 71, contracts: -2,
+                    }, {
+                        account: 'U1', expiry: '20260902', right: 'C',
+                        strike: 72, contracts: -1,
+                    }],
+                }, 'TQQQ', 'STK');
+                assert.deepEqual(JSON.parse(JSON.stringify(preview)), [{
+                    kind: 'shares', account: 'U1', label: '股票', ledger: 200,
+                    identityConflict: false,
+                }, {
+                    kind: 'option', account: 'U1', label: 'TQQQ 20260902 C72',
+                    ledger: -1, identityConflict: false,
+                }, {
+                    kind: 'option', account: 'U1', label: 'TQQQ 20260902 P71',
+                    ledger: -2, identityConflict: false,
+                }, {
+                    kind: 'option', account: 'U1', label: 'TQQQ 20280121 P60',
+                    ledger: 3, identityConflict: false,
+                }]);
                 const source = readScript();
                 assert.match(source,
                     /canReconcilePositions\(\s*state\.positionsAt, state\.positionsConnected\)/);
                 assert.match(source,
                     /data\.ibConnected === true[\s\S]{0,80}data\.positionsReady === true/);
-                assert.match(source, /TWS 未连接或持仓快照未完成；不进行对账/);
+                assert.match(source, /buildLedgerPositionPreview\(\s*state\.ledger/);
+                assert.match(source, /仅 CSV \/ 账本推测/);
+                assert.match(source, /尚未与 TWS 当前持仓对账/);
             },
         },
         {
@@ -389,15 +530,30 @@ module.exports = {
             },
         },
         {
-            name: 'the rebuild flow is gated on a typed confirmation phrase',
+            name: 'premium cards describe settlement status without denying received income',
+            run() {
+                const html = readPage();
+                const source = readScript();
+                assert.match(html, /已到期 \/ 已结算卖方权利金/);
+                assert.match(html, /尚未到期卖方权利金/);
+                assert.match(html, /Short Call \/ Put 净收入/);
+                assert.match(html, /不含 Long Option 支出/);
+                assert.equal(html.includes('未实现期权费'), false);
+                assert.match(source, /同样已经收取/);
+                assert.match(source, /summary\.openShortPremium/);
+                assert.match(source, /summary\.realizedShortPremium/);
+            },
+        },
+        {
+            name: 'the rebuild flow uses one confirmation dialog and a server reset plan',
             run() {
                 const source = readScript();
                 const html = readPage();
                 assert.ok(html.includes('id="import-replace"'));
-                assert.ok(html.includes('id="import-confirm"'));
-                // The commit button must stay disabled until the typed text
-                // equals the server's phrase; nothing else may unlock it.
-                assert.match(source, /state\.resetPlan\s*\n?\s*&&\s*\$\('import-confirm'\)\.value\.trim\(\) === state\.resetPlan\.phrase/);
+                assert.equal(html.includes('id="import-confirm"'), false);
+                assert.match(source, /const resetPlanReady = !replacing \|\| Boolean\(state\.resetPlan\)/);
+                assert.match(source, /globalScope\.confirm\(replacing/);
+                assert.match(source, /confirmation: state\.resetPlan\.phrase/);
                 // One atomic backend call, never reset-then-import.
                 assert.match(source, /rebuild_cost_basis_book/);
                 assert.equal(/await request\('reset_cost_basis_book'/.test(source), false);
@@ -571,6 +727,51 @@ module.exports = {
             },
         },
         {
+            name: 'reviewed TWS executions can safely replace a reconstructed TWS baseline',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const adopted = {
+                    eventId: 'adopted-api-event', seq: 1,
+                    kind: 'option_trade', tradeDate: '2026-08-31',
+                    brokerTimestamp: '2026-08-31T12:00:00',
+                    account: 'U1', right: 'P', strike: 72, expiry: '20260902',
+                    contracts: -1, sharesPerContract: 100, conId: 123,
+                    price: 1.5, cashAmount: 150, fees: 0,
+                    source: 'reconcile', tag: 'tws_snapshot',
+                    externalRef: 'tws-position-api',
+                };
+                const realExecution = {
+                    kind: 'option_trade', tradeDate: '2026-08-31',
+                    brokerTimestamp: '2026-08-31T10:00:00',
+                    account: 'U1', right: 'P', strike: 72, expiry: '20260902',
+                    contracts: -1, sharesPerContract: 100, conId: 123,
+                    price: 1.5, cashAmount: 150, fees: 0,
+                    source: 'execution_report', tag: 'ibkr_exec',
+                    externalRef: 'ibkr-exec-api',
+                };
+                const result = {
+                    format: 'tws_api', account: 'U1',
+                    statementThrough: '2026-08-31T13:00:00+08:00',
+                    events: [realExecution, Object.assign({}, realExecution, {
+                        contracts: -1, price: 1.7, cashAmount: 169.5,
+                        externalRef: 'ibkr-exec-api-later',
+                        brokerTimestamp: '2026-08-31T11:00:00',
+                    })], problems: [],
+                    openings: { drafts: [], shareDrafts: [], openingShares: 0 },
+                };
+                const plan = page.planTwsBaselineSupersession(result, [adopted]);
+                assert.deepEqual(Array.from(plan.eventIds), ['adopted-api-event']);
+                assert.equal(plan.problems.length, 0);
+
+                const partial = Object.assign({}, result, {
+                    events: [Object.assign({}, realExecution, { contracts: -0.5 })],
+                });
+                const blocked = page.planTwsBaselineSupersession(partial, [adopted]);
+                assert.deepEqual(Array.from(blocked.eventIds), []);
+                assert.equal(blocked.problems.length, 1);
+            },
+        },
+        {
             name: 'a legacy TWS baseline recovers same-day ordering from its creation time',
             run() {
                 const context = loadPage();
@@ -617,6 +818,70 @@ module.exports = {
                 const ambiguous = page.planTwsBaselineSupersession(covering, [noClock]);
                 assert.deepEqual(Array.from(ambiguous.eventIds), []);
                 assert.equal(ambiguous.problems.length, 1);
+            },
+        },
+        {
+            name: 'next-day CSV aliases an exact stored TWS fill and blocks near misses',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const stored = {
+                    eventId: 'api-fill-1', kind: 'option_trade',
+                    tradeDate: '2026-08-31', brokerTimestamp: '2026-08-31T10:00:00',
+                    account: 'U1', right: 'P', strike: 72, expiry: '20260902',
+                    contracts: -1, sharesPerContract: 100, conId: 123,
+                    price: 1.01, cashAmount: 100.44, fees: 0.56,
+                    source: 'execution_report', tag: 'ibkr_exec',
+                    externalRef: 'ibkr-exec-E1',
+                };
+                const csvEvent = Object.assign({}, stored, {
+                    eventId: undefined, source: 'csv_import', tag: 'ibkr_open',
+                    externalRef: 'stmt-deadbeef', lineNumber: 4,
+                });
+                const exact = page.planExecutionReportAliases({
+                    format: 'activity', events: [csvEvent],
+                }, [stored]);
+                assert.equal(exact.matched.length, 1);
+                assert.equal(exact.aliases['U1\u0000stmt-deadbeef'], 'ibkr-exec-E1');
+                assert.equal(exact.problems.length, 0);
+
+                const nearMiss = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, csvEvent, {
+                        cashAmount: 100.40,
+                    })],
+                }, [stored]);
+                assert.equal(nearMiss.matched.length, 0);
+                assert.equal(nearMiss.problems.length, 1);
+            },
+        },
+        {
+            name: 'replacement rebuild ignores overlap checks against rows it will remove',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const stored = {
+                    eventId: 'api-fill-1', kind: 'option_trade',
+                    tradeDate: '2026-08-31', brokerTimestamp: '2026-08-31T10:00:00',
+                    account: 'U1', right: 'P', strike: 72, expiry: '20260902',
+                    contracts: -1, sharesPerContract: 100, conId: 123,
+                    price: 1.01, cashAmount: 100.44, fees: 0.56,
+                    source: 'execution_report', tag: 'ibkr_exec',
+                    externalRef: 'ibkr-exec-E1',
+                };
+                const csvEvent = Object.assign({}, stored, {
+                    eventId: undefined, source: 'csv_import', tag: 'ibkr_open',
+                    brokerTimestamp: '2026-08-31T11:00:00',
+                    externalRef: 'stmt-deadbeef', lineNumber: 4,
+                });
+                const append = page.planImportExecutionAliases(false, {
+                    format: 'activity', events: [csvEvent],
+                }, [stored]);
+                assert.equal(append.problems.length, 1);
+
+                const replace = page.planImportExecutionAliases(true, {
+                    format: 'activity', events: [csvEvent],
+                }, [stored]);
+                assert.equal(Object.keys(replace.aliases).length, 0);
+                assert.equal(replace.matched.length, 0);
+                assert.equal(replace.problems.length, 0);
             },
         },
         {
@@ -676,8 +941,13 @@ module.exports = {
                 assert.equal(page.formatSignedMoney(1504.314648), '+1,504.31');
                 assert.equal(page.formatSignedMoney(-0.32946), '-0.33');
                 assert.equal(page.formatSignedMoney(-0.001), '0.00');
+                assert.equal(page.currencySymbol('USD'), '$');
+                assert.equal(page.formatCurrencyAmount('USD', 70.9888, 4), '$70.9888');
+                assert.equal(page.formatCurrencyAmount('USD', -2055.7, 2, true), '-$2,055.70');
+                assert.equal(page.formatCurrencyAmount('USD', 980.79, 2, true), '+$980.79');
                 assert.match(source, /累计净现金（收正付负）/);
                 assert.ok(source.includes('累计净现金 ${_signedMoney'));
+                assert.doesNotMatch(source, /`\$\{book\.currency \|\| 'USD'\} /);
                 assert.doesNotMatch(source, /净现金流出|累计已实现/);
             },
         },
@@ -699,6 +969,183 @@ module.exports = {
                 const unavailable = page.computeMarketMetrics(null, 200, 64.4206);
                 assert.equal(unavailable.marketValue, null);
                 assert.equal(unavailable.dilutedPnl, null);
+            },
+        },
+        {
+            name: 'What If settles open options without selling current shares',
+            run() {
+                const html = readPage();
+                const source = readScript();
+                assert.ok(html.includes('id="what-if-price"'));
+                assert.ok(html.includes('id="what-if-expiry"'));
+                assert.ok(html.includes('id="btn-what-if-current"'));
+                assert.ok(html.includes('id="what-if-total-cost"'));
+                assert.ok(html.includes('id="what-if-total-caption"'));
+                assert.ok(html.includes('id="what-if-final-shares"'));
+                assert.ok(html.includes('id="what-if-put-shares"'));
+                assert.ok(html.includes('id="what-if-outcomes"'));
+                assert.match(html, /ITM Short Put 视为被指派/);
+                assert.match(html, /现有股票不卖出/);
+                assert.match(html, /不包含期权时间价值/);
+                assert.match(html, /若未平仓卖方期权归零/);
+                assert.match(source, /core\.computeOptionSettlementScenario\(/);
+                assert.match(source, /request\('request_cost_basis_market_price'/);
+                assert.match(source, /state\.marketPriceRefreshPending/);
+                assert.match(source, /TWS 最新价/);
+                assert.match(source, /throughExpiry: state\.whatIfExpiry/);
+                assert.match(source, /继续保留：\$\{deferredText\}/);
+                assert.match(source, /被指派：\$\{assignedText\}/);
+                assert.match(source, /尚未到期卖方权利金 \$\{_currencyAmount\(currency/);
+                assert.match(source, /已收取，但履约义务尚存/);
+                assert.match(source, /Long Call \/ Put 全周期现金均排除/);
+                assert.doesNotMatch(source, /computeLiquidationWhatIf/);
+                assert.doesNotMatch(html, /预计清算现金|清算后剩余成本/);
+            },
+        },
+        {
+            name: 'the stress-test modal sweeps expiry outcomes across option strikes',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const html = readPage();
+                const source = readScript();
+                const events = [{
+                    seq: 1, kind: 'opening_balance', tradeDate: '2026-06-01',
+                    account: 'U1', shares: 200, price: 73, cashAmount: -14600,
+                    fees: 0, includeInCost: true,
+                }, {
+                    seq: 2, kind: 'option_trade', tradeDate: '2026-08-01',
+                    account: 'U1', right: 'P', strike: 72, expiry: '20260831',
+                    contracts: -2, sharesPerContract: 100, price: 1,
+                    cashAmount: 200, fees: 0, includeInCost: true,
+                }, {
+                    seq: 3, kind: 'option_trade', tradeDate: '2026-08-02',
+                    account: 'U1', right: 'P', strike: 70, expiry: '20260902',
+                    contracts: -1, sharesPerContract: 100, price: 1,
+                    cashAmount: 100, fees: 0, includeInCost: true,
+                }, {
+                    seq: 4, kind: 'option_trade', tradeDate: '2026-08-03',
+                    account: 'U1', right: 'P', strike: 65, expiry: '20270115',
+                    contracts: 2, sharesPerContract: 100, price: 5,
+                    cashAmount: -1000, fees: 0, includeInCost: true,
+                }, {
+                    seq: 5, kind: 'option_trade', tradeDate: '2026-08-03',
+                    account: 'U1', right: 'C', strike: 80, expiry: '20270115',
+                    contracts: 1, sharesPerContract: 100, price: 4,
+                    cashAmount: -400, fees: 0, includeInCost: true,
+                }];
+                const series = page.buildStressTestSeries(events, {
+                    centerPrice: 70, rangePct: 10, pointCount: 11,
+                    throughExpiry: '20260831', basisMode: 'net_cash', secType: 'STK',
+                });
+                assert.equal(series.available, true);
+                assert.equal(series.points.length, 11);
+                assert.equal(series.points[0].price, 63);
+                assert.equal(series.points[0].assignedContracts, 2);
+                assert.equal(series.points[0].shares, 400);
+                assert.equal(series.points[10].price, 77);
+                assert.equal(series.points[10].assignedContracts, 0);
+                assert.equal(series.points[10].expiredContracts, 2);
+                assert.equal(series.points[10].shares, 200);
+                series.points.filter((point) => point.cost !== null).forEach((point) => {
+                    assert.ok(Math.abs(point.pnl
+                        - ((point.price - point.cost) * point.shares)) < 1e-7);
+                });
+                const liveInputs = {
+                    throughExpiry: '20260831',
+                    fetchedAt: '2026-08-30T12:00:00Z',
+                    curveEffectiveDate: '2026-08-28',
+                    options: [
+                        { right: 'C', strike: 80, expiry: '20270115',
+                            impliedVolatility: 0.45, ivSource: 'modelGreeks' },
+                        { right: 'P', strike: 65, expiry: '20270115',
+                            impliedVolatility: 0.40, ivSource: 'modelGreeks' },
+                    ],
+                    ratesByExpiry: [{
+                        expiry: '20270115', zeroRate: 0.03,
+                        source: 'usd_reference_discount_curve',
+                    }],
+                };
+                const protectedSeries = page.buildStressTestSeries(events, {
+                    centerPrice: 70, rangePct: 10, pointCount: 11,
+                    throughExpiry: '20260831', basisMode: 'net_cash', secType: 'STK',
+                    includeDeferredLongOptions: true,
+                    longOptionInputs: liveInputs,
+                });
+                assert.equal(protectedSeries.available, true);
+                assert.equal(protectedSeries.longOptionCount, 2);
+                assert.equal(protectedSeries.longOptionContracts, 3);
+                assert.equal(protectedSeries.longCallContracts, 1);
+                assert.equal(protectedSeries.longPutContracts, 2);
+                assert.equal(protectedSeries.longOptionIvMin, 0.4);
+                assert.equal(protectedSeries.longOptionIvMax, 0.45);
+                assert.equal(protectedSeries.longOptionRateMin, 0.03);
+                assert.ok(protectedSeries.points[0].longOptionMarketValue > 0);
+                protectedSeries.points.forEach((point) => {
+                    assert.ok(Math.abs(point.pnl
+                        - point.basePnl - point.longOptionPnl) < 1e-7);
+                });
+                const referencePut = page.calculateBsmPutPrice(100, 100, 1, 0.05, 0.2);
+                assert.ok(Math.abs(referencePut - 5.5735) < 0.001);
+                const referenceCall = page.calculateBsmOptionPrice(
+                    'C', 100, 100, 1, 0.05, 0.2);
+                assert.ok(Math.abs(referenceCall - 10.4506) < 0.001);
+                const lowMarks = page.estimateDeferredLongOptions([
+                    { right: 'C', strike: 80, expiry: '20270115', contracts: 1,
+                        sharesPerContract: 100, openPremium: -400 },
+                    { right: 'P', strike: 65, expiry: '20270115', contracts: 2,
+                        sharesPerContract: 100, openPremium: -1000 },
+                ], 63, { throughExpiry: '20260831', marketInputs: liveInputs });
+                const highMarks = page.estimateDeferredLongOptions([
+                    { right: 'C', strike: 80, expiry: '20270115', contracts: 1,
+                        sharesPerContract: 100, openPremium: -400 },
+                    { right: 'P', strike: 65, expiry: '20270115', contracts: 2,
+                        sharesPerContract: 100, openPremium: -1000 },
+                ], 77, { throughExpiry: '20260831', marketInputs: liveInputs });
+                assert.ok(highMarks.details.find((detail) => detail.right === 'C').markPerShare
+                    > lowMarks.details.find((detail) => detail.right === 'C').markPerShare);
+                assert.ok(lowMarks.details.find((detail) => detail.right === 'P').markPerShare
+                    > highMarks.details.find((detail) => detail.right === 'P').markPerShare);
+                const missingInputs = page.buildStressTestSeries(events, {
+                    centerPrice: 70, rangePct: 10, pointCount: 11,
+                    throughExpiry: '20260831', basisMode: 'net_cash', secType: 'STK',
+                    includeDeferredLongOptions: true,
+                });
+                assert.equal(missingInputs.available, false);
+                assert.equal(missingInputs.reason, 'missing_long_option_market_inputs');
+                assert.ok(html.includes('id="btn-open-stress-test"'));
+                assert.ok(html.includes('id="stress-modal"'));
+                assert.match(html, /role="dialog" aria-modal="true"/);
+                assert.ok(html.includes('id="stress-chart"'));
+                assert.ok(html.includes('id="stress-tooltip"'));
+                assert.ok(html.includes('id="stress-tooltip-pnl"'));
+                assert.ok(html.includes('id="stress-tooltip-cost"'));
+                assert.ok(html.includes('id="stress-include-long-options"'));
+                assert.ok(html.includes('id="stress-option-iv-source"'));
+                assert.ok(html.includes('id="stress-option-rate-source"'));
+                assert.equal(html.includes('id="stress-long-option-iv"'), false);
+                assert.ok(html.includes('id="stress-tooltip-long-option-value"'));
+                assert.ok(html.includes('id="stress-tooltip-long-option-pnl"'));
+                assert.ok(html.includes('id="stress-tooltip-long-option-iv"'));
+                assert.ok(html.includes('id="stress-tooltip-long-option-rate"'));
+                assert.match(html, /更晚到期的仓位继续保留/);
+                assert.match(html, /不是 TWS 报价/);
+                assert.match(source, /function buildStressTestSeries/);
+                assert.match(source, /function estimateDeferredLongOptions/);
+                assert.match(source, /\['C', 'P'\]\.includes/);
+                assert.match(source,
+                    /request\('request_cost_basis_option_scenario_inputs'/);
+                assert.match(source, /missing_long_option_iv/);
+                assert.match(source, /missing_discount_rate/);
+                assert.match(source, /curveError/);
+                assert.match(source, /optionScenarioInputs/);
+                assert.match(source, /仅刷新页面无效/);
+                assert.match(source, /mark \+ openPremium/);
+                assert.match(source, /core\.computeOptionSettlementScenario\(events, price/);
+                assert.match(source, /throughExpiry/);
+                assert.match(source, /synthetic settlement rows that are never persisted/);
+                assert.match(source, /svg\.onpointermove =/);
+                assert.match(source, /svg\.onpointerleave = hideTooltip/);
+                assert.match(source, /stress-tooltip-outcome/);
             },
         },
         {
@@ -763,6 +1210,22 @@ module.exports = {
             },
         },
         {
+            name: 'the cash card combines dividends with realized stock P&L',
+            run() {
+                const html = readPage();
+                const source = readScript();
+                assert.match(html, /股息 \+ 股票已实现盈亏/);
+                assert.match(source,
+                    /Number\(summary\.dividends \|\| 0\) \+ Number\(summary\.stockRealizedPnl \|\| 0\)/);
+                assert.match(source, /股息 \$\{_signedMoney\(summary\.dividends\)\}/);
+                assert.match(source,
+                    /股票已实现 \$\{_signedMoney\(summary\.stockRealizedPnl\)\}/);
+                assert.ok(html.includes('id="summary-details"'));
+                assert.ok(html.includes('id="btn-open-summary-details"'));
+                assert.match(source, /details\.open = true/);
+            },
+        },
+        {
             name: 'the summary presents negative shares as a supported short waterline',
             run() {
                 const page = loadPage().OptionComboCostBasisPage;
@@ -782,6 +1245,19 @@ module.exports = {
                 const html = readPage();
                 assert.match(html, /不下单/);
                 assert.match(html, /不订阅行情/);
+            },
+        },
+        {
+            name: 'each live event exposes a safe delete action backed by voiding',
+            run() {
+                const html = readPage();
+                const source = readScript();
+                assert.match(html, /<th>操作<\/th>/);
+                assert.match(html, /显示已删除记录/);
+                assert.match(source, /button\.textContent = '删除'/);
+                assert.match(source, /request\('void_cost_basis_event'/);
+                assert.match(source, /保留一条可审计的冲销记录/);
+                assert.doesNotMatch(source, /delete_cost_basis_event/);
             },
         },
         {
@@ -844,6 +1320,30 @@ module.exports = {
             },
         },
         {
+            name: 'free-form manual notes cannot impersonate broker time',
+            run() {
+                const context = loadPage();
+                const page = context.OptionComboCostBasisPage;
+                const core = context.OptionComboCostBasisCore;
+                const manual = {
+                    kind: 'share_trade', tradeDate: '2026-08-25', account: 'U1',
+                    shares: 100, price: 70, cashAmount: -7000, source: 'manual',
+                    note: 'personal reminder 2026-08-25 10:00:00',
+                };
+                const manualBaseline = page.buildImportBaseline(
+                    false, core.computeLedger([manual]), [manual],
+                    '2026-08-25T12:00:00', []);
+                assert.equal(
+                    Object.keys(manualBaseline.existingSharesByAccount).length, 0);
+
+                const csv = Object.assign({}, manual, { source: 'csv_import' });
+                const trustedBaseline = page.buildImportBaseline(
+                    false, core.computeLedger([csv]), [csv],
+                    '2026-08-25T12:00:00', []);
+                assert.equal(trustedBaseline.existingSharesByAccount.U1, 100);
+            },
+        },
+        {
             name: 'TWS snapshots are invalidated and generation-matched across refreshes',
             run() {
                 const source = readScript();
@@ -851,12 +1351,22 @@ module.exports = {
                     /socket\.onclose = \(\) => \{[\s\S]{0,220}_invalidatePositions\(\)/);
                 assert.match(source,
                     /function requestPositions\(\) \{[\s\S]{0,220}_invalidatePositions\(\)/);
+                const requestBlock = source.slice(
+                    source.indexOf('function requestPositions()'),
+                    source.indexOf('async function _refreshWhatIfMarketPrice'));
+                assert.doesNotMatch(requestBlock, /socket\.send/);
+                assert.match(requestBlock, /_sendOneWay\('request_portfolio_positions_snapshot'/);
                 assert.match(source,
                     /requestId:\s*state\.positionsRequestId/);
                 assert.match(source,
                     /incomingRequestId !== state\.positionsRequestId/);
                 assert.match(source,
                     /state\.positionsAt && state\.positionsConnected[\s\S]{0,80}\? \{ takenAt/);
+                assert.match(source,
+                    /function _invalidatePositions\(\)[\s\S]{0,500}_renderReconciliation\(\)/);
+                assert.match(source,
+                    /async function _bootstrap\(socket\)[\s\S]{0,500}state\.ws !== socket/);
+                assert.doesNotMatch(source, /function _localTimestampIso/);
             },
         },
         {

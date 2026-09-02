@@ -38,7 +38,25 @@ from cost_basis_store import (
     future_key,
     derive_cash_amount,
     resolve_db_path,
+    _exact_event_timestamp,
 )
+
+
+class BrokerTimestampTrustTests(unittest.TestCase):
+    def test_manual_note_date_is_not_broker_ordering_evidence(self):
+        event = {
+            'tradeDate': '2026-08-25', 'source': 'manual', 'tag': '',
+            'note': 'personal reminder 2026-08-25 10:00:00',
+        }
+        self.assertEqual(_exact_event_timestamp(event), '')
+
+    def test_csv_audit_note_remains_a_trusted_legacy_fallback(self):
+        event = {
+            'tradeDate': '2026-08-25', 'source': 'csv_import', 'tag': '',
+            'note': 'IBKR 2026-08-25, 10:00:00',
+        }
+        self.assertEqual(
+            _exact_event_timestamp(event), '2026-08-25T10:00:00')
 
 
 def _token(prefix='tok'):
@@ -423,6 +441,14 @@ class RunningPositionTests(CostBasisStoreTestBase):
     def test_allow_overdraw_downgrades_the_failure_to_a_warning(self):
         result = self.append(self.put_assignment(), allow_overdraw=True)
         self.assertTrue(any(w.startswith('overdraw:') for w in result['warnings']))
+        self.assertTrue(result['event']['allowOverdraw'])
+
+    def test_an_allowed_overdraw_does_not_poison_later_writes(self):
+        self.append(self.put_assignment(date='2026-07-17'), allow_overdraw=True)
+        result = self.append(self.short_put(
+            date='2026-08-01', contracts=-1, price=1.0))
+        self.assertEqual(result['event']['kind'], 'option_trade')
+        self.assertEqual(self.store.list_events(self.book_id)['total'], 2)
 
     def test_event_account_must_match_book_account(self):
         self.append(self.short_put(account='U1111111'))
@@ -479,6 +505,17 @@ class IdempotencyTests(CostBasisStoreTestBase):
         self.assertEqual(first['event']['eventId'], second['event']['eventId'])
         self.assertEqual(self.store.list_events(self.book_id)['total'], 1)
 
+    def test_reusing_a_token_in_another_book_never_returns_the_first_book(self):
+        token = _token()
+        self.append(self.short_put(), token=token)
+        other = self.store.create_book(
+            account='U2222222', symbol='TQQQ', start_date='2026-01-01')
+        with self.assertRaisesRegex(InvalidRequestError, 'another ledger'):
+            self.store.append_event(other['bookId'], {
+                **self.short_put(account='U2222222'),
+            }, client_token=token)
+        self.assertEqual(self.store.list_events(other['bookId'])['total'], 0)
+
     def test_seq_is_dense_and_monotonic(self):
         for index in range(3):
             self.append(self.short_put(date=f'2026-06-0{index + 1}'))
@@ -501,6 +538,25 @@ class ImportTests(CostBasisStoreTestBase):
             import_batch_id=_token('batch'), client_token_prefix=_token('imp'))
         self.assertEqual(result['inserted'], 2)
         self.assertEqual(result['skipped'], 0)
+
+    def test_import_infers_an_adjusted_multiplier_from_existing_history(self):
+        self.append({
+            **self.short_put(strike=46.0, contracts=-1),
+            'sharesPerContract': 130,
+            'cashAmount': 130.0,
+        })
+        close = {
+            'kind': 'option_expiry', 'tradeDate': '2026-07-17',
+            'account': 'U1111111', 'right': 'P', 'strike': 46.0,
+            'expiry': '20260717', 'contracts': 1, 'cashAmount': 0.0,
+            'source': 'csv_import', 'externalRef': 'adjusted-expiry-130',
+        }
+        result = self.store.import_events(
+            self.book_id, [close], import_batch_id=_token('batch'),
+            client_token_prefix=_token('imp'))
+        self.assertEqual(result['inserted'], 1)
+        events = self.store.list_events(self.book_id)['events']
+        self.assertEqual(events[-1]['sharesPerContract'], 130)
 
     def test_import_short_warning_uses_the_final_batch_balance(self):
         timestamp = '2026-08-28T16:20:00'
@@ -612,13 +668,86 @@ class ImportTests(CostBasisStoreTestBase):
         audit = self.store.list_events(self.book_id, include_voided=True)['events']
         old = next(item for item in audit if item['eventId'] == adopted['eventId'])
         self.assertIsNotNone(old['voidedAtUtc'])
-        self.assertIn('complete broker CSV', old['voidReason'])
+        self.assertIn('complete broker execution history', old['voidReason'])
         replay = self.store.import_events(
             self.book_id, [actual], import_batch_id=batch,
             client_token_prefix=_token('different-imp'),
             supersede_tws_event_ids=[adopted['eventId']])
         self.assertTrue(replay['idempotentReplay'])
         self.assertEqual(replay['supersededTwsBaselines'], 1)
+
+    def test_complete_tws_execution_history_supersedes_an_adopted_baseline(self):
+        adopted = self.append({
+            **self.short_put(date='2026-06-03', contracts=-1, price=1.23, fees=0),
+            'source': 'reconcile', 'tag': 'tws_snapshot',
+            'externalRef': 'tws-position-api-option',
+            'brokerTimestamp': '2026-06-03T12:00:00',
+        })['event']
+        execution = {
+            **self.short_put(date='2026-06-03', contracts=-1, price=1.5, fees=0),
+            'source': 'execution_report', 'tag': 'ibkr_exec',
+            'externalRef': 'ibkr-exec-real-option',
+            'brokerTimestamp': '2026-06-03T10:00:00',
+        }
+        result = self.store.import_events(
+            self.book_id, [execution], import_batch_id=_token('batch'),
+            client_token_prefix=_token('imp'),
+            supersede_tws_event_ids=[adopted['eventId']])
+        self.assertEqual(result['inserted'], 1)
+        self.assertEqual(result['supersededTwsBaselines'], 1)
+        live = self.store.list_events(self.book_id)['events']
+        self.assertEqual(len(live), 1)
+        self.assertEqual(live[0]['externalRef'], 'ibkr-exec-real-option')
+
+    def test_partial_tws_execution_overlap_is_rejected(self):
+        adopted = self.append({
+            **self.short_put(date='2026-06-03', contracts=-2, price=1.23, fees=0),
+            'source': 'reconcile', 'tag': 'tws_snapshot',
+            'externalRef': 'tws-position-api-partial',
+            'brokerTimestamp': '2026-06-03T12:00:00',
+        })['event']
+        partial = {
+            **self.short_put(date='2026-06-03', contracts=-1, price=1.5, fees=0),
+            'source': 'execution_report', 'tag': 'ibkr_exec',
+            'externalRef': 'ibkr-exec-partial-option',
+            'brokerTimestamp': '2026-06-03T10:00:00',
+        }
+        with self.assertRaises(InvalidRequestError) as ctx:
+            self.store.import_events(
+                self.book_id, [partial], import_batch_id=_token('batch'),
+                client_token_prefix=_token('imp'))
+        self.assertIn('overlaps an adopted TWS baseline', str(ctx.exception))
+        live = self.store.list_events(self.book_id)['events']
+        self.assertEqual([item['eventId'] for item in live], [adopted['eventId']])
+
+    def test_exact_execution_cash_identifies_baseline_before_later_same_contract_fill(self):
+        adopted = self.append({
+            **self.short_put(date='2026-06-03', contracts=-1, price=1.0044, fees=0),
+            'source': 'reconcile', 'tag': 'tws_snapshot',
+            'externalRef': 'tws-position-api-cash-match',
+            'brokerTimestamp': '2026-06-03T12:00:00',
+        })['event']
+        represented = {
+            **self.short_put(date='2026-06-03', contracts=-1, price=1.01, fees=0.56),
+            'source': 'execution_report', 'tag': 'ibkr_exec',
+            'externalRef': 'ibkr-exec-represented',
+            'brokerTimestamp': '2026-06-03T10:00:00',
+        }
+        later = {
+            **self.short_put(date='2026-06-03', contracts=-1, price=1.02, fees=1.04),
+            'source': 'execution_report', 'tag': 'ibkr_exec',
+            'externalRef': 'ibkr-exec-later-fill',
+            'brokerTimestamp': '2026-06-03T11:00:00',
+        }
+        result = self.store.import_events(
+            self.book_id, [represented, later], import_batch_id=_token('batch'),
+            client_token_prefix=_token('imp'),
+            supersede_tws_event_ids=[adopted['eventId']])
+        self.assertEqual(result['inserted'], 2)
+        self.assertEqual(result['supersededTwsBaselines'], 1)
+        live = self.store.list_events(self.book_id)['events']
+        self.assertEqual(sum(item['contracts'] for item in live), -2)
+        self.assertAlmostEqual(sum(item['cashAmount'] for item in live), 201.40)
 
     def test_post_snapshot_increment_cannot_erase_the_tws_baseline(self):
         adopted = self.append({
@@ -887,9 +1016,18 @@ class ListingTests(CostBasisStoreTestBase):
         with self.assertRaises(InvalidRequestError):
             self.store.list_events(self.book_id, kinds=['not_a_kind'])
 
+    def test_oversized_kind_filter_is_rejected_before_sql(self):
+        with self.assertRaisesRegex(InvalidRequestError, 'at most'):
+            self.store.list_events(
+                self.book_id, kinds=['dividend'] * 1000)
+
     def test_limit_is_bounded(self):
         with self.assertRaises(InvalidRequestError):
             self.store.list_events(self.book_id, limit=100000)
+
+    def test_offset_must_fit_sqlite_integer(self):
+        with self.assertRaisesRegex(InvalidRequestError, 'offset must be between'):
+            self.store.list_events(self.book_id, offset=1 << 80)
 
     def test_paging_walks_every_row_once(self):
         first = self.store.list_events(self.book_id, limit=2, offset=0)
@@ -910,6 +1048,29 @@ class SnapshotTests(CostBasisStoreTestBase):
         self.assertEqual(snapshot['summary']['netCash'], 596.75)
         self.assertTrue(snapshot['reconciled'])
         self.assertEqual(len(snapshot['eventsSha256']), 64)
+
+    def test_snapshot_rejects_non_finite_numbers(self):
+        with self.assertRaisesRegex(InvalidRequestError, 'finite numbers'):
+            self.store.save_snapshot(
+                self.book_id, as_of_date='2026-06-30',
+                summary={'nested': {'cost': float('nan')}})
+        self.assertEqual(self.store.list_snapshots(self.book_id), [])
+
+    def test_legacy_non_finite_snapshot_is_returned_as_valid_json_data(self):
+        snapshot = self.store.save_snapshot(
+            self.book_id, as_of_date='2026-06-30', summary={'cost': 1})
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                'UPDATE cost_basis_snapshots SET summary_json = ? '
+                'WHERE snapshot_id = ?',
+                ('{"cost":NaN,"nested":[Infinity,-Infinity]}',
+                 snapshot['snapshotId']))
+            conn.commit()
+        finally:
+            conn.close()
+        restored = self.store.list_snapshots(self.book_id)[0]['summary']
+        self.assertEqual(restored, {'cost': None, 'nested': [None, None]})
 
     def test_hash_changes_when_history_changes(self):
         self.append(self.short_put())
@@ -1191,6 +1352,18 @@ class ContractIdentityTests(CostBasisStoreTestBase):
         self.assertEqual(result['event']['conId'], 908200664)
         self.assertEqual(result['event']['localSymbol'], 'TQQQ 17JUL26 45 P')
 
+    def test_local_symbol_internal_whitespace_does_not_split_one_contract(self):
+        self.append({
+            **self.short_put(contracts=-1),
+            'localSymbol': 'TQQQ  260717P00045000',
+        })
+        self.append({
+            **self.short_put(date='2026-06-02', contracts=1, price=0.5, fees=0),
+            'localSymbol': 'TQQQ 260717P00045000',
+            'tag': 'ibkr_close',
+        })
+        self.assertEqual(self.store.list_events(self.book_id)['total'], 2)
+
     def test_the_timeline_keeps_adjusted_contracts_apart(self):
         # A 130-share contract must not be closed against the 100-share one.
         self.append(self.short_put(contracts=-1))
@@ -1321,6 +1494,25 @@ class RebuildTests(CostBasisStoreTestBase):
         self.assertEqual(result['inserted'], 1)
         events = self.store.list_events(self.book_id)['events']
         self.assertEqual([item['strike'] for item in events], [43.0])
+
+    def test_rebuild_infers_multiplier_from_an_earlier_replacement_row(self):
+        opening = {
+            **self.short_put(date='2026-06-01', strike=46.0, contracts=-1),
+            'sharesPerContract': 130,
+            'cashAmount': 130.0,
+        }
+        expiry = {
+            'kind': 'option_expiry', 'tradeDate': '2026-07-17',
+            'account': 'U1111111', 'right': 'P', 'strike': 46.0,
+            'expiry': '20260717', 'contracts': 1, 'cashAmount': 0.0,
+        }
+        result = self.store.rebuild_book(
+            self.book_id, [opening, expiry], confirmation=self._phrase(),
+            client_token=_token(), import_batch_id=_token('batch'))
+        self.assertEqual(result['inserted'], 2)
+        events = self.store.list_events(self.book_id)['events']
+        self.assertEqual(
+            [item['sharesPerContract'] for item in events], [130, 130])
 
     def test_a_replacement_that_fails_validation_keeps_the_old_book(self):
         stranded = self.put_assignment(contracts=5)
@@ -1785,6 +1977,7 @@ class MigrationTests(unittest.TestCase):
         store.append_event(book['bookId'], {
             'kind': 'share_trade', 'tradeDate': '2026-06-03', 'account': 'U1',
             'shares': 1, 'price': 100, 'cashAmount': -100,
+            'source': 'csv_import',
             'note': 'IBKR 2026-06-03, 10:11:12',
         }, client_token=_token())
 
@@ -1817,6 +2010,33 @@ class MigrationTests(unittest.TestCase):
         migrated = CostBasisStore(self.db_path).initialize()
         row = migrated.list_events(book['bookId'])['events'][0]
         self.assertEqual(row['brokerTimestamp'], '2026-06-03T10:11:12')
+
+    def test_v7_clears_untrusted_broker_time_but_keeps_authoritative_rows(self):
+        store = CostBasisStore(self.db_path).initialize()
+        book = store.create_book(
+            account='U1', symbol='TQQQ', start_date='2026-01-01')
+        manual = store.append_event(book['bookId'], {
+            'kind': 'share_trade', 'tradeDate': '2026-06-03',
+            'brokerTimestamp': '2026-06-03T10:00:00', 'account': 'U1',
+            'shares': 1, 'price': 100, 'cashAmount': -100,
+            'source': 'manual', 'note': 'personal reminder 2026-06-03 10:00:00',
+        }, client_token=_token())['event']
+        csv = store.append_event(book['bookId'], {
+            'kind': 'share_trade', 'tradeDate': '2026-06-03',
+            'brokerTimestamp': '2026-06-03T11:00:00', 'account': 'U1',
+            'shares': 1, 'price': 101, 'cashAmount': -101,
+            'source': 'csv_import', 'externalRef': 'trusted-v7-row',
+        }, client_token=_token())['event']
+
+        conn = sqlite3.connect(self.db_path, isolation_level=None)
+        conn.execute('PRAGMA user_version = 6')
+        conn.close()
+        migrated = CostBasisStore(self.db_path).initialize()
+        rows = {item['eventId']: item for item in migrated.list_events(
+            book['bookId'])['events']}
+        self.assertIsNone(rows[manual['eventId']]['brokerTimestamp'])
+        self.assertEqual(
+            rows[csv['eventId']]['brokerTimestamp'], '2026-06-03T11:00:00')
 
 
 class DescribeTests(CostBasisStoreTestBase):

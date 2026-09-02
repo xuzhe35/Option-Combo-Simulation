@@ -110,6 +110,9 @@ module.exports = {
                     'place_combo_order', 'submit_combo_order', 'sync_underlying',
                     'request_historical_bars', 'subscribe_iv_term_structure',
                     'place_hedge_order', 'cancel_combo_order',
+                    // Compatibility/admin protocol actions have no page entry point.
+                    'archive_cost_basis_book', 'list_cost_basis_snapshots',
+                    'reset_cost_basis_book', 'list_cost_basis_resets',
                 ];
                 forbidden.forEach((action) => {
                     assert.equal(core.ALLOWED_CLIENT_ACTIONS.includes(action), false,
@@ -119,7 +122,113 @@ module.exports = {
                 assert.ok(core.ALLOWED_CLIENT_ACTIONS.includes('delete_cost_basis_book'));
                 assert.ok(core.ALLOWED_CLIENT_ACTIONS.includes(
                     'request_managed_accounts_snapshot'));
+                assert.ok(core.ALLOWED_CLIENT_ACTIONS.includes(
+                    'request_cost_basis_executions'));
+                assert.ok(core.ALLOWED_CLIENT_ACTIONS.includes(
+                    'request_cost_basis_option_scenario_inputs'));
                 assert.ok(Object.isFrozen(core.ALLOWED_CLIENT_ACTIONS));
+            },
+        },
+        {
+            name: 'TWS executions become fee-complete idempotent ledger events',
+            run() {
+                const core = loadCore();
+                const result = core.buildExecutionImport([{
+                    execId: '0001.01', account: 'U17775528', symbol: 'TQQQ',
+                    secType: 'OPT', conId: 42, localSymbol: 'TQQQ P71',
+                    expiry: '20260902', right: 'P', strike: 71, multiplier: 100,
+                    side: 'SLD', quantity: 2, price: 1.25,
+                    brokerTimestamp: '2026-09-01T10:15:20',
+                    commission: 1.4, commissionAvailable: true,
+                }], {
+                    account: 'U17775528', symbol: 'TQQQ', secType: 'STK',
+                    defaultSharesPerContract: 100, existingExternalRefs: [],
+                });
+                assert.equal(result.problems.length, 0);
+                assert.equal(result.events.length, 1);
+                assert.deepEqual({
+                    kind: result.events[0].kind,
+                    contracts: result.events[0].contracts,
+                    cashAmount: result.events[0].cashAmount,
+                    source: result.events[0].source,
+                    externalRef: result.events[0].externalRef,
+                }, {
+                    kind: 'option_trade', contracts: -2, cashAmount: 248.6,
+                    source: 'execution_report', externalRef: 'ibkr-exec-0001.01',
+                });
+            },
+        },
+        {
+            name: 'TWS execution import blocks until commission is present',
+            run() {
+                const core = loadCore();
+                const result = core.buildExecutionImport([{
+                    execId: 'E2', account: 'U1', symbol: 'TQQQ', secType: 'STK',
+                    side: 'BOT', quantity: 100, price: 70,
+                    brokerTimestamp: '2026-09-01T11:00:00',
+                    commission: 0, commissionAvailable: false,
+                }], { account: 'U1', symbol: 'TQQQ', secType: 'STK' });
+                assert.equal(result.events.length, 0);
+                assert.equal(result.problems.length, 1);
+                assert.match(result.problems[0].reason, /佣金/);
+            },
+        },
+        {
+            name: 'duplicate execIds in one TWS batch are blocked before storage',
+            run() {
+                const core = loadCore();
+                const fill = {
+                    execId: 'DUPLICATE.01', account: 'U1', symbol: 'TQQQ',
+                    secType: 'STK', side: 'BOT', quantity: 100, price: 70,
+                    brokerTimestamp: '2026-09-01T11:00:00',
+                    commission: 1, commissionAvailable: true,
+                };
+                const result = core.buildExecutionImport([
+                    fill, Object.assign({}, fill),
+                ], { account: 'U1', symbol: 'TQQQ', secType: 'STK' });
+                assert.equal(result.events.length, 1);
+                assert.equal(result.problems.length, 1);
+                assert.equal(result.summary.problems, 1);
+                assert.match(result.problems[0].reason, /execId DUPLICATE\.01 重复/);
+                assert.match(result.problems[0].reason, /第 1 行/);
+            },
+        },
+        {
+            name: 'a negative IB commission becomes a positive-cash rebate event',
+            run() {
+                const core = loadCore();
+                const result = core.buildExecutionImport([{
+                    execId: 'REBATE1', account: 'U1', symbol: 'TQQQ', secType: 'OPT',
+                    expiry: '20260902', right: 'P', strike: 71, multiplier: 100,
+                    side: 'SLD', quantity: 1, price: 1.25,
+                    brokerTimestamp: '2026-09-01T11:00:00',
+                    commission: -0.18, commissionAvailable: true,
+                }], { account: 'U1', symbol: 'TQQQ', secType: 'STK' });
+                assert.equal(result.problems.length, 0);
+                assert.equal(result.events.length, 2);
+                assert.equal(result.events[0].cashAmount, 125);
+                assert.deepEqual({
+                    kind: result.events[1].kind,
+                    cashAmount: result.events[1].cashAmount,
+                    externalRef: result.events[1].externalRef,
+                }, {
+                    kind: 'fee', cashAmount: 0.18,
+                    externalRef: 'ibkr-exec-REBATE1-rebate',
+                });
+            },
+        },
+        {
+            name: 'AvgCost fallback only drafts the unexplained position gap',
+            run() {
+                const core = loadCore();
+                const draft = core.buildTwsAvgCostGapDraft({
+                    kind: 'option', account: 'U1', right: 'P', strike: 71,
+                    expiry: '20260902', ledger: -1, tws: -2, difference: -1,
+                    sharesPerContract: 100, twsAvgCost: 1.5,
+                }, { today: '2026-09-01', secType: 'STK' });
+                assert.equal(draft.contracts, -1);
+                assert.equal(draft.cashAmount, 150);
+                assert.match(draft.note, /whole live position/);
             },
         },
         {
@@ -180,6 +289,54 @@ module.exports = {
             },
         },
         {
+            name: 'an expiry-price What If settles short puts without selling shares',
+            run() {
+                const core = loadCore();
+                const existingShares = event({
+                    kind: 'opening_balance', tradeDate: '2026-06-01',
+                    shares: 200, price: 73, cashAmount: -14600,
+                });
+                const assignedPut = shortPut({
+                    tradeDate: '2026-06-02', contracts: -2,
+                    strike: 75, price: 2,
+                });
+                const expiredPut = shortPut({
+                    tradeDate: '2026-06-03', contracts: -3,
+                    strike: 65, price: 1, expiry: '20260821',
+                });
+                const scenario = core.computeOptionSettlementScenario(
+                    [existingShares, assignedPut, expiredPut], 71,
+                    { secType: 'STK' });
+                assert.equal(scenario.available, true);
+                assert.equal(scenario.shortPutContracts, 5);
+                assert.equal(scenario.shortPutAssignedContracts, 2);
+                assert.equal(scenario.shortPutExpiredContracts, 3);
+                assert.equal(scenario.shortPutAssignedShares, 200);
+                assert.equal(scenario.shortPutAssignmentCash, -15000);
+                assert.equal(scenario.ledger.openOptions.length, 0);
+                assert.equal(scenario.ledger.combined.shares, 400);
+                assert.equal(scenario.ledger.combined.blendedCost, 72.25);
+                assert.equal(scenario.ledger.combined.stockAvgCost, 74);
+                assert.equal(scenario.ledger.combined.taxAvgCost, 73);
+                assert.equal(scenario.baseLedger.combined.shares, 200,
+                    'the scenario must not sell or mutate current shares');
+
+                const firstExpiryOnly = core.computeOptionSettlementScenario(
+                    [existingShares, assignedPut, expiredPut], 71,
+                    { secType: 'STK', throughExpiry: '20260717' });
+                assert.equal(firstExpiryOnly.available, true);
+                assert.equal(firstExpiryOnly.throughExpiry, '20260717');
+                assert.equal(firstExpiryOnly.shortPutContracts, 2);
+                assert.equal(firstExpiryOnly.shortPutAssignedContracts, 2);
+                assert.equal(firstExpiryOnly.shortPutExpiredContracts, 0);
+                assert.equal(firstExpiryOnly.shortPutAssignedShares, 200);
+                assert.equal(firstExpiryOnly.deferredOptions.length, 1);
+                assert.equal(firstExpiryOnly.ledger.combined.shares, 400);
+                assert.equal(firstExpiryOnly.ledger.openOptions.length, 1,
+                    'later expiries must remain open and at risk');
+            },
+        },
+        {
             name: 'realized plus open premium always equals net option premium',
             run() {
                 const core = loadCore();
@@ -193,6 +350,112 @@ module.exports = {
                 assert.equal(
                     Math.round((summary.realizedPremium + summary.openPremium) * 1e6) / 1e6,
                     summary.optionPremiumNet);
+            },
+        },
+        {
+            name: 'seller premium metrics exclude long option protection spend',
+            run() {
+                const core = loadCore();
+                const longPut = shortPut({
+                    tradeDate: '2026-06-02', strike: 30, expiry: '20280121',
+                    contracts: 2, price: 10,
+                });
+                const ledger = core.computeLedger([shortPut(), longPut]);
+                const summary = ledger.combined;
+
+                assert.equal(summary.optionPremiumNet, -1400,
+                    'economic cash must still include the protective Long Put');
+                assert.equal(summary.openPremium, -1400,
+                    'the cost engine keeps the full net option cash');
+                assert.equal(summary.openShortPremium, 600,
+                    'the seller card must show only the Short Put credit');
+                assert.equal(summary.realizedShortPremium, 0);
+                assert.equal(summary.shortOptionPremiumNet, 600);
+            },
+        },
+        {
+            name: 'underlying cost lenses exclude the full Long Option lifecycle',
+            run() {
+                const core = loadCore();
+                const shares = event({
+                    kind: 'opening_balance', tradeDate: '2026-06-01',
+                    shares: 100, price: 70, cashAmount: -7000,
+                });
+                const shortProtectionFunding = shortPut({
+                    tradeDate: '2026-06-02', contracts: -1, price: 2,
+                    strike: 65, expiry: '20260918',
+                });
+                const longProtection = shortPut({
+                    tradeDate: '2026-06-03', contracts: 1, price: 10,
+                    strike: 50, expiry: '20280121',
+                });
+                const open = core.computeLedger([
+                    shares, shortProtectionFunding, longProtection,
+                ]).combined;
+
+                assert.equal(open.netCash, -7800,
+                    'the audit cash retains the $1,000 Long Put purchase');
+                assert.equal(open.excludedLongOptionCash, -1000);
+                assert.equal(open.costNetCash, -6800,
+                    'underlying cash keeps stock and Short premium only');
+                assert.equal(open.blendedCost, 70,
+                    'open Short premium is still withheld by the conservative lens');
+                assert.equal(open.blendedCostIfExpired, 68,
+                    'only the Short premium lowers the if-expired cost');
+
+                const longClose = shortPut({
+                    tradeDate: '2026-07-01', contracts: -1, price: 12,
+                    strike: 50, expiry: '20280121',
+                });
+                const closed = core.computeLedger([
+                    shares, shortProtectionFunding, longProtection, longClose,
+                ]).combined;
+                assert.equal(closed.netCash, -6600,
+                    'the audit cash retains the Long Put sale and its $200 gain');
+                assert.equal(closed.excludedLongOptionCash, 200);
+                assert.equal(closed.costNetCash, -6800);
+                assert.equal(closed.blendedCost, 70);
+                assert.equal(closed.blendedCostIfExpired, 68,
+                    'Long Option profit must not subsidize underlying cost either');
+            },
+        },
+        {
+            name: 'premium income windows exclude realized long option pnl',
+            run() {
+                const core = loadCore();
+                const opened = shortPut({
+                    tradeDate: '2026-01-05', strike: 30, expiry: '20280121',
+                    contracts: 2, price: 10,
+                });
+                const closed = shortPut({
+                    tradeDate: '2026-06-10', strike: 30, expiry: '20280121',
+                    contracts: -2, price: 12,
+                });
+                const ledger = core.computeLedger([opened, closed]);
+
+                assert.equal(ledger.combined.realizedPremium, 400,
+                    'the economic ledger retains the Long Put gain');
+                assert.equal(ledger.combined.realizedShortPremium, 0);
+                assert.equal(core.realizedPremiumWindow(
+                    ledger, { since: '2026-06-01', until: '2026-06-30' }), 0);
+            },
+        },
+        {
+            name: 'seller premium allocation remains correct when one fill crosses zero',
+            run() {
+                const core = loadCore();
+                const events = [
+                    shortPut({ contracts: 2, price: 10 }),
+                    shortPut({ tradeDate: '2026-06-02', contracts: -3, price: 12 }),
+                    shortPut({ tradeDate: '2026-06-03', contracts: 2, price: 8 }),
+                ];
+                const summary = core.computeLedger(events).combined;
+
+                assert.equal(summary.realizedShortPremium, 400,
+                    'only the one-contract short round trip belongs to seller income');
+                assert.equal(summary.openShortPremium, 0);
+                assert.equal(summary.openPremium, -800,
+                    'the final one-contract Long Put debit stays in economic cash');
             },
         },
         {
@@ -223,6 +486,9 @@ module.exports = {
                     cashAmount: 345, tag: 'ibkr_close', source: 'csv_import',
                 })]);
                 assert.equal(ledger.openOptions.length, 0);
+                assert.equal(ledger.combined.netCash, 0,
+                    'a rejected close must not leak cash into preview totals');
+                assert.equal(ledger.rows[0].runningNetCash, 0);
                 assert.ok(ledger.warnings.some(
                     (warning) => warning.startsWith('closes_more_than_open:')));
             },
@@ -259,6 +525,9 @@ module.exports = {
                         tag: 'ibkr_open', source: 'csv_import' }),
                 ]);
                 assert.equal(ledger.openOptions[0].contracts, -1);
+                assert.equal(ledger.combined.netCash, 120,
+                    'only the accepted opening credit belongs in net cash');
+                assert.equal(ledger.rows[1].runningNetCash, 120);
                 assert.ok(ledger.warnings.some(
                     (warning) => warning.startsWith('ibkr_open_opposes_existing:')));
             },
@@ -667,6 +936,35 @@ module.exports = {
                 });
                 assert.equal(result.balanced, true);
                 assert.equal(result.mismatches.length, 0);
+            },
+        },
+        {
+            name: 'position rows follow TWS-style expiry order',
+            run() {
+                const core = loadCore();
+                const rows = [
+                    { kind: 'option', account: 'U1', label: 'TQQQ 20280121 P60',
+                        expiry: '20280121', right: 'P', strike: 60 },
+                    { kind: 'option', account: 'U1', label: 'TQQQ 20260904 C70.5',
+                        expiry: '20260904', right: 'C', strike: 70.5 },
+                    { kind: 'option', account: 'U1', label: 'TQQQ 20260902 P72',
+                        expiry: '20260902', right: 'P', strike: 72 },
+                    { kind: 'option', account: 'U1', label: 'TQQQ 20260902 C73',
+                        expiry: '20260902', right: 'C', strike: 73 },
+                    { kind: 'shares', account: 'U1', label: 'TQQQ shares' },
+                    { kind: 'option', account: 'U1', label: 'TQQQ 20260902 C71',
+                        expiry: '20260902', right: 'C', strike: 71 },
+                ];
+                assert.deepEqual(core.sortPositionRows(rows).map((row) => row.label), [
+                    'TQQQ shares',
+                    'TQQQ 20260902 C71',
+                    'TQQQ 20260902 C73',
+                    'TQQQ 20260902 P72',
+                    'TQQQ 20260904 C70.5',
+                    'TQQQ 20280121 P60',
+                ]);
+                assert.equal(rows[0].label, 'TQQQ 20280121 P60',
+                    'sorting must not mutate the caller snapshot');
             },
         },
         {
@@ -1849,6 +2147,83 @@ module.exports = {
                 ].forEach((rendered) => {
                     assert.equal(typeof rendered.costIncomplete, 'boolean');
                 });
+            },
+        },
+        {
+            name: 'an account-filtered view still applies a book-wide split',
+            run() {
+                const core = loadCore();
+                const ledger = core.computeLedger([
+                    event({
+                        kind: 'opening_balance', tradeDate: '2026-01-01',
+                        account: 'U1', shares: 100, price: 10, cashAmount: -1000,
+                    }),
+                    event({
+                        kind: 'opening_balance', tradeDate: '2026-01-01',
+                        account: 'U2', shares: 50, price: 20, cashAmount: -1000,
+                    }),
+                    event({
+                        kind: 'split', tradeDate: '2026-03-01', account: '',
+                        splitRatio: 2, cashAmount: 0,
+                    }),
+                ], { accounts: ['U1'] });
+                assert.equal(ledger.combined.shares, 200);
+                assert.equal(ledger.combined.stockAvgCost, 5);
+                assert.deepEqual(Array.from(ledger.accounts), ['U1']);
+            },
+        },
+        {
+            name: 'local-symbol whitespace is presentation, not contract identity',
+            run() {
+                const core = loadCore();
+                const opened = event({
+                    kind: 'option_trade', tradeDate: '2026-06-01', right: 'P',
+                    strike: 45, expiry: '20260717', contracts: -1,
+                    sharesPerContract: 100, price: 1, cashAmount: 100,
+                    localSymbol: 'TQQQ  260717P00045000',
+                });
+                const closed = event({
+                    kind: 'option_trade', tradeDate: '2026-06-02', right: 'P',
+                    strike: 45, expiry: '20260717', contracts: 1,
+                    sharesPerContract: 100, price: 0.5, cashAmount: -50,
+                    localSymbol: 'TQQQ 260717P00045000', tag: 'ibkr_close',
+                });
+                const ledger = core.computeLedger([opened, closed]);
+                assert.equal(ledger.openOptions.length, 0);
+                assert.equal(ledger.warnings.some(
+                    (warning) => warning.includes('identity')), false);
+            },
+        },
+        {
+            name: 'a ledger-only option keeps its recorded contract multiplier',
+            run() {
+                const core = loadCore();
+                const ledger = core.computeLedger([event({
+                    kind: 'option_trade', tradeDate: '2026-06-01', right: 'P',
+                    strike: 45, expiry: '20260717', contracts: -1,
+                    sharesPerContract: 130, price: 1, cashAmount: 130,
+                })]);
+                const result = core.buildReconciliation({
+                    ledger, symbol: 'TQQQ', positions: [],
+                    defaultSharesPerContract: 100,
+                });
+                const row = result.rows.find((item) => item.kind === 'option');
+                assert.equal(row.status, 'ledger_only');
+                assert.equal(row.sharesPerContract, 130);
+            },
+        },
+        {
+            name: 'an IBKR closing trade with no opening is reported as a gap',
+            run() {
+                const core = loadCore();
+                const gaps = core.findUnbackedCloses([event({
+                    kind: 'option_trade', tradeDate: '2026-06-02', right: 'P',
+                    strike: 45, expiry: '20260717', contracts: 1,
+                    sharesPerContract: 100, price: 0.5, cashAmount: -50,
+                    tag: 'ibkr_close',
+                })], {});
+                assert.equal(gaps.length, 1);
+                assert.equal(gaps[0].missingContracts, -1);
             },
         },
         {
