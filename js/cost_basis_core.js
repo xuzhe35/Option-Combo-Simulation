@@ -1258,6 +1258,7 @@
                     sharesPerContract: contractState.sharesPerContract,
                     contracts: _round(contractState.contracts, 6),
                     openPremium: _round(contractState.openPremium, 6),
+                    openShortPremium: _round(contractState.openShortPremium, 6),
                     identities: (contractState.conIds.size
                         ? Array.from(contractState.conIds).map((id) => `con:${id}`)
                         : Array.from(contractState.localSymbols)).sort(),
@@ -1270,6 +1271,42 @@
             });
         });
         return open.sort((left, right) => (left.key < right.key ? -1 : 1));
+    }
+
+    /** Read-only maturity distribution of premium attached to open shorts.
+     * Use the replay engine's remaining allocation (including opening fees),
+     * not original trade proceeds or current AvgCost. Expiry dates alone do
+     * not settle a position: even a past expiry stays here until recorded.
+     */
+    function openShortPremiumByExpiry(ledger) {
+        const groups = new Map();
+        ((ledger && ledger.openOptions) || []).forEach((option) => {
+            if (!(option.contracts < -EPSILON)) return;
+            const expiry = option.expiry || '';
+            if (!groups.has(expiry)) {
+                groups.set(expiry, {
+                    expiry, putContracts: 0, callContracts: 0,
+                    putPremium: 0, callPremium: 0,
+                });
+            }
+            const row = groups.get(expiry);
+            const side = option.right === 'P' ? 'put' : 'call';
+            row[`${side}Contracts`] += Math.abs(option.contracts);
+            row[`${side}Premium`] += option.openShortPremium;
+        });
+        const rows = Array.from(groups.values()).sort((a, b) =>
+            (a.expiry || '99999999').localeCompare(b.expiry || '99999999'));
+        let totalPremium = 0;
+        let totalContracts = 0;
+        rows.forEach((row) => {
+            ['putContracts', 'callContracts', 'putPremium', 'callPremium']
+                .forEach((key) => { row[key] = _round(row[key], 6); });
+            row.totalPremium = _round(row.putPremium + row.callPremium, 6);
+            totalPremium = _round(totalPremium + row.totalPremium, 6);
+            totalContracts = _round(totalContracts + row.putContracts + row.callContracts, 6);
+            row.cumulativePremium = totalPremium;
+        });
+        return { rows, totalPremium, totalContracts };
     }
 
     function _finalizeAccount(state, opts) {
@@ -2307,6 +2344,17 @@
             return `${_upper((item || {}).account)}\u0000${String((item || {}).externalRef || '')}`;
         }));
         const batchRefLines = new Map();
+        // Seed the walk with the ledger's current option positions. This lets
+        // a real BOT against an existing short (or SLD against an existing
+        // long) retain its broker cash while being identified as a Close.
+        // A fill that crosses through zero remains a generic execution: one
+        // event cannot truthfully be labelled wholly close or wholly open.
+        const optionPositions = new Map();
+        (Array.isArray(opts.existingOpen) ? opts.existingOpen : []).forEach((item) => {
+            const key = contractKey(item);
+            optionPositions.set(key, _round(
+                _number(optionPositions.get(key)) + _number(item.contracts), 6));
+        });
         const result = {
             format: 'tws_api',
             account: wantedAccount,
@@ -2425,6 +2473,13 @@
                     localSymbol: row.localSymbol || '',
                     optionSecType: secType,
                 });
+                const key = contractKey(event);
+                const before = _number(optionPositions.get(key));
+                const closesWithoutCrossing = Math.abs(before) > EPSILON
+                    && Math.sign(before) !== Math.sign(signedQuantity)
+                    && Math.abs(signedQuantity) <= Math.abs(before) + EPSILON;
+                if (closesWithoutCrossing) event.tag = 'ibkr_close';
+                optionPositions.set(key, _round(before + signedQuantity, 6));
             } else {
                 const futureExpiry = _dateDigits(row.expiry).slice(0, 8);
                 if (!futureExpiry || !multiplier) {
@@ -2464,6 +2519,100 @@
         result.summary.drafted = result.events.length;
         result.summary.problems = result.problems.length;
         return result;
+    }
+
+    /**
+     * Match reviewed TWS Close events to one position-reconciliation row.
+     * The match is deliberately exact on account, structural contract,
+     * optional conId and signed quantity. A partial or oversized set remains
+     * unconfirmed instead of guessing which execution changed the position.
+     */
+    function matchReconciliationClose(row, events) {
+        const item = row || {};
+        const expected = _finiteOrNull(item.difference);
+        const reducible = item.kind === 'option' && expected !== null
+            && Math.abs(expected) > SHARE_EPSILON
+            && Math.abs(_number(item.tws)) < Math.abs(_number(item.ledger))
+            && (Math.abs(_number(item.tws)) <= SHARE_EPSILON
+                || Math.sign(_number(item.tws)) === Math.sign(_number(item.ledger)))
+            && Math.sign(expected) === -Math.sign(_number(item.ledger));
+        if (!reducible || item.identityConflict) {
+            return { eligible: false, complete: false, expectedContracts: 0,
+                matchedContracts: 0, events: [] };
+        }
+        const wantedKey = contractKey(item);
+        const wantedConId = item.conId === null || item.conId === undefined
+            || item.conId === '' ? '' : String(item.conId);
+        const matched = (Array.isArray(events) ? events : []).filter((event) => {
+            if (!event || event.kind !== 'option_trade'
+                || event.source !== 'execution_report' || event.tag !== 'ibkr_close'
+                || contractKey(event) !== wantedKey
+                || Math.sign(_number(event.contracts)) !== Math.sign(expected)) {
+                return false;
+            }
+            const eventConId = event.conId === null || event.conId === undefined
+                || event.conId === '' ? '' : String(event.conId);
+            return !wantedConId || !eventConId || wantedConId === eventConId;
+        });
+        const total = _round(matched.reduce(
+            (sum, event) => sum + _number(event.contracts), 0), 6);
+        return {
+            eligible: true,
+            complete: Math.abs(total - expected) <= SHARE_EPSILON,
+            expectedContracts: expected,
+            matchedContracts: total,
+            events: matched,
+        };
+    }
+
+    /**
+     * Match reviewed TWS executions to the complete signed quantity gap for
+     * one option contract. This is broader than matchReconciliationClose:
+     * a missing opening/increase is just as much a real ledger event as a
+     * missing close. Every same-contract execution in the returned window is
+     * included and its net movement must equal TWS - ledger exactly; offsetting
+     * opens/closes are therefore never cherry-picked to manufacture a match.
+     */
+    function matchReconciliationExecution(row, events) {
+        const item = row || {};
+        const expected = _finiteOrNull(item.difference);
+        const eligible = item.kind === 'option' && expected !== null
+            && Math.abs(expected) > SHARE_EPSILON && !item.identityConflict;
+        if (!eligible) {
+            return { eligible: false, complete: false, expectedContracts: 0,
+                matchedContracts: 0, events: [], movement: '' };
+        }
+        const wantedKey = contractKey(item);
+        const wantedConId = item.conId === null || item.conId === undefined
+            || item.conId === '' ? '' : String(item.conId);
+        const matched = (Array.isArray(events) ? events : []).filter((event) => {
+            if (!event || event.kind !== 'option_trade'
+                || event.source !== 'execution_report'
+                || (event.tag !== 'ibkr_exec' && event.tag !== 'ibkr_close')
+                || contractKey(event) !== wantedKey) {
+                return false;
+            }
+            const eventConId = event.conId === null || event.conId === undefined
+                || event.conId === '' ? '' : String(event.conId);
+            return !wantedConId || !eventConId || wantedConId === eventConId;
+        });
+        const total = _round(matched.reduce(
+            (sum, event) => sum + _number(event.contracts), 0), 6);
+        const ledger = _number(item.ledger);
+        const tws = _number(item.tws);
+        const closesWithoutReversal = Math.abs(ledger) > SHARE_EPSILON
+            && Math.abs(tws) < Math.abs(ledger)
+            && (Math.abs(tws) <= SHARE_EPSILON
+                || Math.sign(tws) === Math.sign(ledger));
+        return {
+            eligible: true,
+            complete: matched.length > 0
+                && Math.abs(total - expected) <= SHARE_EPSILON,
+            expectedContracts: expected,
+            matchedContracts: total,
+            events: matched,
+            movement: closesWithoutReversal ? 'close' : 'position_change',
+        };
     }
 
     /**
@@ -2692,12 +2841,15 @@
         deriveCashAmount,
         deliveredShares,
         computeLedger,
+        openShortPremiumByExpiry,
         summarizeCost,
         computeOptionSettlementScenario,
         buildReconciliation,
         sortPositionRows,
         buildTwsAdoptionEvent,
         buildExecutionImport,
+        matchReconciliationClose,
+        matchReconciliationExecution,
         buildTwsAvgCostGapDraft,
         findUnbackedCloses,
         buildPriorOpenDrafts,

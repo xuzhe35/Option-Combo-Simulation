@@ -1,10 +1,12 @@
 import asyncio
+import datetime
 import pathlib
 import sys
 import time
 import types
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -139,6 +141,77 @@ class CostBasisMarketPriceContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured[0].currency, 'EUR')
         self.assertEqual(result['marketPrice'], 71.25)
         self.assertEqual(result['currency'], 'EUR')
+
+
+class CostBasisExecutionRequestTests(unittest.IsolatedAsyncioTestCase):
+    def test_tws_timezone_is_configured_before_connection(self):
+        self.assertEqual(ib_server.ib.TimezoneTWS, ib_server.TWS_TIMEZONE)
+
+    def test_execution_timezone_resolution_is_independent_of_operator_config(self):
+        for configured in ('America/New_York', 'Asia/Shanghai', 'UTC'):
+            with self.subTest(timezone=configured):
+                with patch.object(ib_server, 'ib', SimpleNamespace(TimezoneTWS=configured)):
+                    name, timezone = ib_server._cost_basis_tws_timezone()
+                    self.assertEqual(name, configured)
+                    self.assertEqual(str(timezone), configured)
+        with patch.object(ib_server, 'ib', SimpleNamespace(TimezoneTWS='')):
+            with self.assertRaisesRegex(RuntimeError, 'timezone is not configured'):
+                ib_server._cost_basis_tws_timezone()
+
+    async def test_execution_request_uses_fresh_fill_and_cached_commission(self):
+        queried_contract = SimpleNamespace(
+            secType='OPT', symbol='TQQQ', conId=123,
+            localSymbol='TQQQ  260902C00071000',
+            lastTradeDateOrContractMonth='20260902', right='C', strike=71,
+            multiplier='100')
+        queried_execution = SimpleNamespace(
+            execId='CLOSE-1', acctNumber='U1', side='BOT', shares=2,
+            price=0.35,
+            time=datetime.datetime(
+                2026, 9, 2, 1, 30, tzinfo=datetime.timezone.utc),
+            permId=9, orderId=10, orderRef='')
+        queried_fill = SimpleNamespace(
+            contract=queried_contract, execution=queried_execution,
+            commissionReport=None, time=queried_execution.time)
+        cached_fill = SimpleNamespace(
+            contract=queried_contract,
+            execution=SimpleNamespace(
+                **{**vars(queried_execution), 'time': datetime.datetime(
+                    2026, 9, 2, 9, 30, tzinfo=datetime.timezone.utc)}),
+            commissionReport=SimpleNamespace(
+                commission=1.25, currency='USD', realizedPNL=260.5))
+        captured = []
+
+        class FakeIb:
+            TimezoneTWS = 'America/New_York'
+
+            def isConnected(self):
+                return True
+
+            async def reqExecutionsAsync(self, execution_filter):
+                captured.append(execution_filter)
+                return [queried_fill]
+
+            def fills(self):
+                return [cached_fill]
+
+        original_ib = ib_server.ib
+        ib_server.ib = FakeIb()
+        try:
+            result = await ib_server._request_cost_basis_executions({
+                'account': 'U1', 'symbol': 'TQQQ',
+                'sinceTimestamp': '2026-09-01T21:00:00',
+            })
+        finally:
+            ib_server.ib = original_ib
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].time, '20260901-21:00:00')
+        self.assertEqual(result['brokerTimezone'], 'America/New_York')
+        row = result['executions'][0]
+        self.assertEqual(row['brokerTimestamp'], '2026-09-01T21:30:00')
+        self.assertEqual(row['commission'], 1.25)
+        self.assertEqual(row['realizedPnl'], 260.5)
 
 
 class IbkrAdapterPricingTests(unittest.TestCase):

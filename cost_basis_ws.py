@@ -451,6 +451,7 @@ async def _dispatch_store_call(store, action, data):
     if action == 'import_cost_basis_events':
         events = data.get('events')
         supersede_tws_event_ids = data.get('supersedeTwsEventIds', [])
+        tws_reconciliation = data.get('twsReconciliation')
         if not isinstance(events, list):
             raise InvalidRequestError('events must be a list')
         if not isinstance(supersede_tws_event_ids, list):
@@ -466,6 +467,7 @@ async def _dispatch_store_call(store, action, data):
                 client_token_prefix=_required_str(data, 'clientTokenPrefix'),
                 allow_overdraw=data.get('allowOverdraw') is True,
                 supersede_tws_event_ids=supersede_tws_event_ids,
+                tws_reconciliation=tws_reconciliation,
             )
         )
 

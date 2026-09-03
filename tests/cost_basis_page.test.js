@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const { loadBrowserScripts } = require('./helpers/load-browser-scripts');
 
@@ -25,9 +26,210 @@ function loadPage() {
     return context;
 }
 
+// Exercise the real page handlers without sockets, browser persistence, or
+// writes. The private bindings are exposed only in this test-loaded copy.
+function loadReconciliationHarness() {
+    const context = loadPage();
+    vm.runInContext(readScript().replace('globalScope.OptionComboCostBasisPage = {', `
+        globalScope.pageHarness = {
+            state, render: _renderReconciliationTable, fetch: _fetchTwsExecutions,
+            configure(handlers) {
+                if (handlers.adopt) _adoptTwsPosition = handlers.adopt;
+                if (handlers.request) request = handlers.request;
+                _refreshControls = () => {};
+                _renderReconciliation = _renderReconciliationTable;
+                _renderImportPreview = () => {};
+            },
+        };
+        globalScope.OptionComboCostBasisPage = {`), context);
+    function node() {
+        return {
+            children: [], handlers: {}, textContent: '',
+            appendChild(child) { this.children.push(child); return child; },
+            removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
+            get firstChild() { return this.children[0]; },
+            addEventListener(name, callback) { this.handlers[name] = callback; },
+            querySelector() { return this.body || (this.body = node()); },
+        };
+    }
+    const nodes = new Map();
+    const alerts = [];
+    context.document = {
+        createElement: node,
+        getElementById(id) {
+            if (!nodes.has(id)) nodes.set(id, node());
+            return nodes.get(id);
+        },
+    };
+    context.alert = (message) => alerts.push(message);
+    const harness = context.pageHarness;
+    Object.assign(harness.state, {
+        bookId: 'book-test', books: [{bookId: 'book-test', account: 'U1', symbol: 'TQQQ', secType: 'STK'}],
+        positionsConnected: true, positionsTimestamp: '2026-09-03T10:00:00',
+        ledger: context.OptionComboCostBasisCore.computeLedger([]),
+    });
+    harness.configure({});
+    return { ...harness, context, alerts,
+        buttons() { return nodes.get('reconcile-table').body.children[0].children[7].children; },
+    };
+}
+
 module.exports = {
     name: 'cost_basis page',
     tests: [
+        {
+            name: 'bulk API conflicts on clockless baselines direct users to targeted replay without relaxing the guard',
+            run() {
+                const context = loadPage();
+                const baseline = {eventId:'baseline',kind:'option_trade',tradeDate:'2026-09-02',
+                    source:'reconcile',tag:'tws_snapshot',account:'U1',right:'C',strike:71,
+                    expiry:'20260904',sharesPerContract:100,contracts:-2,price:1,cashAmount:200,
+                    createdAtUtc:'2026-09-02T00:00:00Z'};
+                const fill = {...baseline,eventId:undefined,source:'execution_report',tag:'ibkr_exec',
+                    brokerTimestamp:'2026-09-02T10:00:00',externalRef:'ibkr-exec-real'};
+                const plan = context.OptionComboCostBasisPage.planTwsBaselineSupersession({
+                    format:'tws_api',account:'U1',statementThrough:'2026-09-02T12:00:00',
+                    events:[fill],problems:[],openings:{drafts:[]},
+                },[baseline]);
+                assert.equal(plan.eventIds.length, 0);
+                assert.equal(plan.problems.length, 1);
+                assert.match(plan.problems[0].reason, /先取消本次预览/);
+                assert.match(plan.problems[0].reason, /持仓对账.*查找 TWS 成交/);
+                assert.match(plan.problems[0].reason, /完整 CSV 覆盖式重建/);
+            },
+        },
+        {
+            name: 'targeted replay is not blocked by another contract awaiting commission',
+            async run() {
+                function setup() {
+                    const h = loadReconciliationHarness();
+                    const opening = {account:'U1',kind:'option_trade',right:'C',strike:71,
+                        expiry:'20260904',sharesPerContract:100,contracts:-2,price:1,
+                        cashAmount:200,fees:0,tradeDate:'2026-09-01'};
+                    h.state.allEvents = [opening];
+                    h.state.ledger = h.context.OptionComboCostBasisCore.computeLedger([opening]);
+                    const entry = {...opening,kind:'option',status:'ledger_only',label:'TQQQ C71',
+                        ledger:-2,tws:0,difference:2};
+                    h.state.reconciliation = {rows:[entry]};
+                    const fill = {account:'U1',symbol:'TQQQ',secType:'OPT',execId:'target',
+                        right:'C',strike:71,expiry:'20260904',multiplier:100,side:'BOT',
+                        quantity:2,price:0.2,commission:1,commissionAvailable:true,
+                        brokerTimestamp:'2026-09-03T10:00:00'};
+                    return {h,entry,fill};
+                }
+                const {h,entry,fill} = setup();
+                h.configure({request: async () => ({fetchedAt:'2026-09-03T11:00:00',
+                    executions:[{...fill,strike:72,execId:'other',commissionAvailable:false},fill]})});
+                await h.fetch(entry);
+                assert.equal(h.alerts.length, 0);
+                assert.equal(h.state.importResult.events.length, 1);
+                assert.equal(h.state.importResult.events[0].externalRef, 'ibkr-exec-target');
+                assert.equal(h.state.importResult.events[0].cashAmount, -41);
+                assert.equal(h.state.importResult.problems.length, 0);
+                assert.equal(h.state.importResult.reconciliationExecution.complete, true);
+
+                const blocked = setup();
+                blocked.h.configure({request: async () => ({fetchedAt:'2026-09-03T11:00:00',
+                    executions:[blocked.fill,{...blocked.fill,execId:'pending',commissionAvailable:false}]})});
+                await blocked.h.fetch(blocked.entry);
+                assert.equal(blocked.h.state.importResult, null);
+                assert.match(blocked.h.alerts[0], /佣金回报尚未到齐/);
+            },
+        },
+        {
+            name: 'target problem filtering retains unknown identities and cross-contract duplicate execIds',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const target = {account:'U1',symbol:'TQQQ',right:'C',strike:71,
+                    expiry:'20260904',sharesPerContract:100,conId:123};
+                const fill = {...target,secType:'OPT',multiplier:100,execId:'shared'};
+                const unrelated = {...fill,conId:456,strike:72};
+                const problem = {lineNumber:2,reason:'duplicate'};
+                assert.equal(page.targetExecutionProblems([problem], [fill,unrelated],target).length, 1);
+                assert.equal(page.targetExecutionProblems([problem], [fill,
+                    {...unrelated,execId:'different'}],target).length, 0);
+                assert.equal(page.targetExecutionProblems([{lineNumber:0}], [],target).length, 1);
+                assert.equal(page.targetExecutionProblems([{lineNumber:1}], [{account:'U1'}],target).length, 1);
+                assert.equal(page.targetExecutionProblems([{lineNumber:1}],
+                    [{account:'U1',right:'?',secType:'?',multiplier:0,strike:-1}],target).length, 1);
+                assert.equal(page.targetExecutionProblems([{lineNumber:1}],
+                    [{...unrelated,conId:123}],target).length, 1,
+                    'same conId with conflicting descriptors must not be dropped');
+            },
+        },
+        {
+            name: 'TWS-only options retain explicit baseline adoption beside execution lookup, including after failure',
+            async run() {
+                const h = loadReconciliationHarness();
+                const entry = {kind:'option', status:'tws_only', account:'U1', label:'TQQQ P70',
+                    right:'P', strike:70, expiry:'20260904', sharesPerContract:100,
+                    ledger:0, tws:-2, difference:-2, twsAvgCost:1.25};
+                h.state.reconciliation = {rows:[entry]};
+                let adopted = null;
+                h.configure({adopt: (row, event) => { adopted = event; },
+                    request: async () => { throw new Error('history unavailable'); }});
+                h.render();
+                assert.deepEqual(h.buttons().map(b => b.textContent), ['查找 TWS 成交', '采信 TWS']);
+                h.buttons()[1].handlers.click();
+                assert.equal(adopted.contracts, -2);
+                assert.equal(adopted.tag, 'tws_snapshot');
+                assert.equal(adopted.cashAmount, 250);
+                await h.fetch(entry);
+                assert.equal(h.alerts.length, 1);
+                assert.equal(h.buttons()[1].textContent, '采信 TWS');
+                assert.equal(h.buttons()[1].disabled, false);
+                h.state.executionFetchPending = true;
+                h.render();
+                assert.equal(h.buttons()[1].disabled, true);
+                h.state.executionFetchPending = false;
+                entry.twsAvgCost = null;
+                h.render();
+                assert.deepEqual(h.buttons().map(b => b.textContent), ['查找 TWS 成交']);
+            },
+        },
+        {
+            name: 'cashflow heading opens a read-only expiry distribution without enlarging metric cards',
+            run() {
+                const html = readPage();
+                const source = readScript();
+                assert.match(html, /id="btn-open-premium-expiry"[^>]*aria-haspopup="dialog"/);
+                const heading = html.slice(html.indexOf('class="panel-heading cashflow-heading"'),
+                    html.indexOf('class="cash-grid"'));
+                assert.match(heading, /id="btn-open-premium-expiry"/);
+                const cards = Array.from(html.matchAll(/<article class="cash-card[^\"]*">([\s\S]*?)<\/article>/g));
+                assert.equal(cards.length, 5);
+                cards.forEach((card) => assert.doesNotMatch(card[1], /<button/));
+                assert.equal((html.match(/id="btn-open-premium-expiry"/g) || []).length, 1);
+                assert.match(html, /<dialog id="premium-expiry-modal"/);
+                assert.match(html, /Short Put<\/th><th>Short Call<\/th><th>该日合计/);
+                assert.match(html, /不是到期日再收款，也不是最终盈亏/);
+                assert.match(source, /btn-open-premium-expiry'\)\.addEventListener\('click', _openPremiumExpiry\)/);
+                const render = source.slice(source.indexOf('function _renderPremiumExpiry()'),
+                    source.indexOf('function _renderDashboardSummary()'));
+                assert.match(render, /core\.openShortPremiumByExpiry\(state\.ledger\)/);
+                assert.match(render, /\.disabled = !available/);
+                assert.match(render, /if \(modal\.open\) modal\.close\(\)/);
+                assert.match(render, /state\.ledger\.combined\.costIncomplete/);
+                assert.match(render, /当前没有未平仓的 Short Call \/ Put/);
+                assert.match(render, /\.showModal\(\)/);
+                assert.doesNotMatch(render, /request\(|state\.positions|AvgCost/);
+                assert.match(source, /function _renderDashboardSummary\(\) \{\s*_renderPremiumExpiry\(\)/);
+            },
+        },
+        {
+            name: 'What If labels stay centered with their controls and wrap as pairs',
+            run() {
+                const html = readPage();
+                const css = fs.readFileSync(path.join(PROJECT_ROOT, 'cost_basis.css'), 'utf8');
+                assert.match(html, /class="what-if-field"><label for="what-if-expiry">计算至<\/label><select/);
+                assert.match(html, /class="what-if-field"><label id="what-if-price-label"[^>]*>[\s\S]*?<\/label><input id="what-if-price"/);
+                assert.match(css, /\.what-if-field\s*\{[^}]*align-items:\s*center/);
+                assert.match(css, /\.what-if-controls\s*\{[^}]*flex-wrap:\s*wrap/);
+                assert.match(css, /\.what-if-controls select, \.what-if-controls input, \.what-if-controls button\s*\{[^}]*height:\s*36px/);
+                assert.doesNotMatch(css, /\.what-if-controls\s*\{[^}]*align-items:\s*flex-end/);
+                assert.doesNotMatch(css, /premium-expiry-link/);
+            },
+        },
         {
             name: 'manual entry retries reuse one idempotency token',
             run() {
@@ -259,6 +461,17 @@ module.exports = {
                     /request\('request_cost_basis_executions'[\s\S]{0,180}sinceTimestamp/);
                 assert.match(source,
                     /core\.buildExecutionImport\(response\.executions/);
+                assert.match(source,
+                    /existingOpen: state\.ledger \? state\.ledger\.openOptions/);
+                assert.match(source, /button\.textContent = '查找 TWS 成交'/);
+                assert.match(source, /core\.matchReconciliationExecution/);
+                assert.match(source, /期权 Close（平仓）/);
+                assert.match(source, /button\.textContent = '确认导入成交'/);
+                assert.match(source,
+                    /button\.addEventListener\('click', _commitImport\)/);
+                assert.match(source,
+                    /twsReconciliation: apiImport[\s\S]{0,100}state\.importResult\.twsReconciliation/);
+                assert.match(source, /fallback\.textContent = 'AvgCost 后备'/);
                 assert.match(source,
                     /btn-fetch-executions'\)\.addEventListener\('click', _fetchTwsExecutions/);
                 assert.match(source,
@@ -727,7 +940,7 @@ module.exports = {
             },
         },
         {
-            name: 'reviewed TWS executions can safely replace a reconstructed TWS baseline',
+            name: 'untargeted TWS import supersedes only a fully reconstructed baseline',
             run() {
                 const page = loadPage().OptionComboCostBasisPage;
                 const adopted = {
@@ -752,15 +965,12 @@ module.exports = {
                 const result = {
                     format: 'tws_api', account: 'U1',
                     statementThrough: '2026-08-31T13:00:00+08:00',
-                    events: [realExecution, Object.assign({}, realExecution, {
-                        contracts: -1, price: 1.7, cashAmount: 169.5,
-                        externalRef: 'ibkr-exec-api-later',
-                        brokerTimestamp: '2026-08-31T11:00:00',
-                    })], problems: [],
+                    events: [realExecution], problems: [],
                     openings: { drafts: [], shareDrafts: [], openingShares: 0 },
                 };
                 const plan = page.planTwsBaselineSupersession(result, [adopted]);
                 assert.deepEqual(Array.from(plan.eventIds), ['adopted-api-event']);
+                assert.deepEqual(Array.from(plan.replacementExecutionRefs), []);
                 assert.equal(plan.problems.length, 0);
 
                 const partial = Object.assign({}, result, {
@@ -772,12 +982,101 @@ module.exports = {
             },
         },
         {
-            name: 'a legacy TWS baseline recovers same-day ordering from its creation time',
+            name: 'same-day TWS fills replay in broker order and replace a provisional baseline',
+            run() {
+                const context = loadPage();
+                const page = context.OptionComboCostBasisPage;
+                const core = context.OptionComboCostBasisCore;
+                const adopted = {
+                    eventId: 'adopted-api-no-clock', seq: 1,
+                    kind: 'option_trade', tradeDate: '2026-09-02',
+                    account: 'U1', right: 'C', strike: 71, expiry: '20260904',
+                    contracts: -1, sharesPerContract: 100, conId: 456,
+                    // Cash deliberately matches neither fill. AvgCost is not
+                    // evidence for choosing an execution.
+                    price: 9.9999, cashAmount: 999.99, fees: 0,
+                    source: 'reconcile', tag: 'tws_snapshot',
+                    externalRef: 'tws-position-no-clock',
+                    // Database insertion time is not broker time. In an Asia
+                    // browser it is later than the TWS wall clock below.
+                    createdAtUtc: '2026-09-02T14:09:42Z',
+                };
+                const first = {
+                    kind: 'option_trade', tradeDate: '2026-09-02',
+                    brokerTimestamp: '2026-09-02T10:01:00',
+                    account: 'U1', right: 'C', strike: 71, expiry: '20260904',
+                    contracts: -1, sharesPerContract: 100, conId: 456,
+                    price: 0.41, cashAmount: 39.95, fees: 1.05,
+                    source: 'execution_report', tag: 'ibkr_exec',
+                    externalRef: 'ibkr-exec-first',
+                };
+                const second = Object.assign({}, first, {
+                    brokerTimestamp: '2026-09-02T10:02:00',
+                    price: 0.47, cashAmount: 45.96, fees: 1.04,
+                    externalRef: 'ibkr-exec-second',
+                });
+                const target = {
+                    kind: 'option', key: core.contractKey(first), account: 'U1',
+                    right: 'C', strike: 71, expiry: '20260904', conId: 456,
+                    sharesPerContract: 100, ledger: -1, tws: -2, difference: -1,
+                };
+                // Give the planner reversed input to prove it uses broker
+                // timestamps rather than response/DOM order.
+                const plan = page.planTargetExecutionReconciliation(
+                    target, [second, first], [adopted]);
+                assert.equal(plan.complete, true);
+                assert.deepEqual(Array.from(plan.supersedeEventIds),
+                    ['adopted-api-no-clock']);
+                assert.deepEqual(Array.from(plan.events.map(
+                    (event) => event.externalRef)), [
+                    'ibkr-exec-first', 'ibkr-exec-second',
+                ]);
+                assert.deepEqual(Array.from(plan.events.map(
+                    (event) => event.tag)), ['ibkr_exec', 'ibkr_exec']);
+                assert.equal(plan.startingContracts, 0);
+                assert.equal(plan.executionContracts, -2);
+                assert.equal(plan.finalContracts, -2);
+                assert.equal(plan.matchedContracts, -1);
+            },
+        },
+        {
+            name: 'TWS execution replay keeps a real ledger position and blocks contradictions',
+            run() {
+                const context = loadPage();
+                const page = context.OptionComboCostBasisPage;
+                const core = context.OptionComboCostBasisCore;
+                const target = {
+                    kind: 'option', account: 'U1', right: 'C', strike: 72,
+                    expiry: '20260904', sharesPerContract: 100, conId: 789,
+                    ledger: -2, tws: -1, difference: 1,
+                };
+                const close = {
+                    kind: 'option_trade', tradeDate: '2026-09-02',
+                    brokerTimestamp: '2026-09-02T10:10:00',
+                    account: 'U1', right: 'C', strike: 72, expiry: '20260904',
+                    sharesPerContract: 100, conId: 789, contracts: 1,
+                    cashAmount: -50, price: 0.5, source: 'execution_report',
+                    tag: 'ibkr_exec', externalRef: 'ibkr-exec-close',
+                };
+                const fit = page.planTargetExecutionReconciliation(
+                    target, [close], []);
+                assert.equal(fit.complete, true);
+                assert.deepEqual(Array.from(fit.supersedeEventIds), []);
+                assert.equal(fit.events[0].tag, 'ibkr_close');
+                assert.equal(fit.finalContracts, -1);
+
+                const contradiction = page.planTargetExecutionReconciliation(
+                    target, [Object.assign({}, close, { contracts: 2 })], []);
+                assert.equal(contradiction.complete, false);
+                assert.match(contradiction.reason, /与 TWS 当前持仓 -1 不一致/);
+            },
+        },
+        {
+            name: 'a legacy TWS baseline never treats browser-local creation time as broker time',
             run() {
                 const context = loadPage();
                 const page = context.OptionComboCostBasisPage;
                 const importer = context.OptionComboCostBasisImport;
-                const localNoon = new Date(2026, 7, 25, 12, 0, 0);
                 const adopted = {
                     eventId: 'legacy-adopted-event', seq: 1,
                     kind: 'option_trade', tradeDate: '2026-08-25',
@@ -786,7 +1085,7 @@ module.exports = {
                     localSymbol: 'TQQQ 28AUG26 68.5 P', price: 1.23,
                     cashAmount: 123, fees: 0, source: 'reconcile',
                     tag: 'tws_snapshot', externalRef: 'legacy-tws-position',
-                    createdAtUtc: localNoon.toISOString(),
+                    createdAtUtc: '2026-08-25T04:00:00Z',
                     note: 'Adopted from an authoritative TWS position snapshot.',
                 };
                 const csv = [
@@ -806,18 +1105,14 @@ module.exports = {
                 ].join('\n');
                 const options = { symbol: 'TQQQ', defaultSharesPerContract: 100 };
                 const covering = importer.parse(csv, options);
-                assert.deepEqual(Array.from(
-                    page.planTwsBaselineSupersession(covering, [adopted]).eventIds),
-                ['legacy-adopted-event']);
-
-                const later = importer.parse(csv.replace('10:00:00', '13:00:00'), options);
-                assert.deepEqual(Array.from(
-                    page.planTwsBaselineSupersession(later, [adopted]).eventIds), []);
-
-                const noClock = Object.assign({}, adopted, { createdAtUtc: '' });
-                const ambiguous = page.planTwsBaselineSupersession(covering, [noClock]);
+                const ambiguous = page.planTwsBaselineSupersession(covering, [adopted]);
                 assert.deepEqual(Array.from(ambiguous.eventIds), []);
                 assert.equal(ambiguous.problems.length, 1);
+
+                const later = importer.parse(csv.replace('10:00:00', '13:00:00'), options);
+                const alsoAmbiguous = page.planTwsBaselineSupersession(later, [adopted]);
+                assert.deepEqual(Array.from(alsoAmbiguous.eventIds), []);
+                assert.equal(alsoAmbiguous.problems.length, 1);
             },
         },
         {
@@ -1190,6 +1485,97 @@ module.exports = {
                 // The sandbox has its own Array realm, so compare contents.
                 assert.equal(Array.from(clean.marks).join(','), 'short');
                 assert.match(clean.caption, /空头回补水位/);
+            },
+        },
+        {
+            name: 'a reference price follows its own book, and only that book',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const typed = { tqqq: 72.5 };
+                // Going to another underlying must not inherit the price:
+                // it would not read as missing, it would read as TSM's.
+                assert.equal(
+                    page.bookScopedStateReset('tsm', typed).referencePrice, null);
+                // Coming back must not have thrown it away either.
+                assert.equal(
+                    page.bookScopedStateReset('tqqq', typed).referencePrice, 72.5);
+                // A price of 0 is a real answer, not an absent one.
+                assert.equal(
+                    page.bookScopedStateReset('z', { z: 0 }).referencePrice, 0);
+                // No store at all is still safe.
+                assert.equal(page.bookScopedStateReset('tqqq').referencePrice, null);
+
+                // Prices fetched for the old book stay cleared regardless -
+                // TWS and the scenario refetch them for the new one.
+                const refetched = ['marketPrice', 'whatIfPrice'];
+                const reset = page.bookScopedStateReset('tsm', typed);
+                refetched.forEach((key) => assert.equal(reset[key], null, key));
+
+                const dirty = Object.assign({ basisMode: 'net_cash' }, {
+                    marketPrice: 71.2,
+                    avgCostByAccount: { U1: { avgCost: 64.4 } },
+                    ledger: { combined: {} },
+                    importText: 'old,csv',
+                });
+                Object.assign(dirty, page.bookScopedStateReset('tsm', typed));
+                assert.equal(dirty.marketPrice, null);
+                assert.deepEqual(Object.keys(dirty.avgCostByAccount), []);
+                assert.equal(dirty.ledger, null);
+                assert.equal(dirty.importText, '');
+                // Things that are NOT book-scoped survive the switch.
+                assert.equal(dirty.basisMode, 'net_cash');
+
+                // A deleted book must not leave a price for its successor.
+                const pruned = page.pruneReferencePrices(
+                    { tqqq: 72.5, gone: 12 }, [{ bookId: 'tqqq' }]);
+                assert.deepEqual(Object.keys(pruned), ['tqqq']);
+                assert.equal(pruned.tqqq, 72.5);
+                assert.deepEqual(Object.keys(page.pruneReferencePrices({ a: 1 }, [])), []);
+                assert.deepEqual(Object.keys(page.pruneReferencePrices()), []);
+
+                const source = readScript();
+                // Both paths that land on a different book funnel through the
+                // same reset - the implicit one after a delete used to
+                // reassign state.bookId on its own.
+                assert.equal(
+                    source.split('_beginBookSelection(').length - 1 >= 3, true);
+                // The store itself must never be inside the per-book reset.
+                const resetBody = source.split('function bookScopedStateReset')[1]
+                    .split('\n    }')[0];
+                assert.doesNotMatch(resetBody, /referencePriceByBook:/);
+            },
+        },
+        {
+            name: 'a collapsed reconcile table still opens itself for a real difference',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const settled = [
+                    { account: 'U1', label: 'TQQQ', status: 'match' },
+                    { account: 'U1', label: 'TQQQ 2026-09-18 P70', status: 'explained' },
+                ];
+                // Nothing outstanding: the table stays folded away.
+                const quiet = page.planReconcileDisclosure(settled, '');
+                assert.equal(quiet.open, false);
+                assert.equal(quiet.signature, '');
+                // A difference appears - the user must not have to go looking.
+                const rows = settled.concat(
+                    [{ account: 'U1', label: 'TQQQ', status: 'mismatch' }]);
+                const first = page.planReconcileDisclosure(rows, '');
+                assert.equal(first.open, true);
+                // Same difference on a later render: a deliberate collapse holds.
+                const again = page.planReconcileDisclosure(rows, first.signature);
+                assert.equal(again.open, false);
+                // The difference changes shape - open it again.
+                const grown = rows.concat(
+                    [{ account: 'U1', label: 'TQQQ 2026-10-16 P65', status: 'missing' }]);
+                assert.equal(
+                    page.planReconcileDisclosure(grown, first.signature).open, true);
+                // Row order must not by itself count as a change.
+                const shuffled = rows.slice().reverse();
+                assert.equal(
+                    page.planReconcileDisclosure(shuffled, first.signature).open, false);
+                // No reconciliation at all is not a silent all-clear either way.
+                assert.equal(page.planReconcileDisclosure([], '').open, false);
             },
         },
         {

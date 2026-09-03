@@ -20,6 +20,7 @@ from ib_connection_supervisor import (
 )
 from yield_curve.backend_adapter import YieldCurveBackendAdapter
 from websocket_security import read_allowed_ws_origins
+from tws_timezone import read_tws_timezone
 from yield_curve.builder import resolve_snapshot_discount
 from ib_server_order_tracking import (
     build_active_combo_orders_snapshot as build_active_combo_orders_snapshot_via_module,
@@ -121,6 +122,7 @@ config.read('config.ini')
 TWS_HOST = config.get('tws', 'host', fallback='127.0.0.1')
 TWS_PORT = config.getint('tws', 'port', fallback=7496)
 TWS_CLIENT_ID = config.getint('tws', 'client_id', fallback=999)
+TWS_TIMEZONE = read_tws_timezone(config)
 
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
@@ -187,6 +189,13 @@ for host in WS_HOSTS:
         )
 
 ib = IB()
+# IB sends execution timestamps as timezone-less TWS wall clocks. ib_async
+# cannot discover that timezone from TWS: TimezoneTWS is an application
+# setting used by its decoder. Set it before the first connection so both the
+# startup fill cache and later reqExecutions replies represent the same
+# instants. Invalid settings abort startup above, before creating IB or opening
+# stores. A missing setting remains fail-closed in the ledger import path.
+ib.TimezoneTWS = TWS_TIMEZONE
 connected_clients = set()
 # Map websocket -> { leg_id: Ticker }
 client_subscriptions = {}
@@ -221,12 +230,13 @@ def _cost_basis_tws_timezone():
     name = str(getattr(ib, 'TimezoneTWS', '') or '').strip()
     if not name:
         raise RuntimeError(
-            'TWS did not report its timezone; execution import is disabled '
-            'rather than comparing UTC with broker-local CSV timestamps')
+            'TWS timezone is not configured; set [tws] timezone to the '
+            'timezone used by TWS before importing executions')
     try:
         return name, ZoneInfo(name)
     except ZoneInfoNotFoundError as exc:
-        raise RuntimeError(f'TWS reported an unknown timezone: {name}') from exc
+        raise RuntimeError(
+            f'configured TWS timezone is unknown: {name}') from exc
 
 
 def _cost_basis_tws_clock_payload():
@@ -2176,37 +2186,41 @@ async def _request_cost_basis_executions(request):
     queried_fills = list(await asyncio.wait_for(
         ib.reqExecutionsAsync(execution_filter), timeout=10.0) or [])
 
-    def fills_with_commissions():
+    def cached_commission_reports():
         # ib_async creates a transient Fill for a reqExecutions reply even
         # when the same execId is already in its startup cache. Commission
-        # reports update the cached Fill, not that transient object, so merge
-        # by broker identity before serialization.
-        cached = {
-            str(getattr(getattr(item, 'execution', None), 'execId', '') or ''): item
-            for item in (ib.fills() or [])
-        }
-        return [cached.get(
-            str(getattr(getattr(item, 'execution', None), 'execId', '') or ''), item)
-            for item in queried_fills]
+        # reports update the cached Fill, not that transient object. Only
+        # borrow the report: replacing the whole queried Fill could revive a
+        # timestamp decoded before TimezoneTWS was configured.
+        reports = {}
+        for item in ib.fills() or []:
+            exec_id = str(
+                getattr(getattr(item, 'execution', None), 'execId', '') or '')
+            report = getattr(item, 'commissionReport', None)
+            if exec_id and report is not None:
+                reports[exec_id] = report
+        return reports
 
     # execDetailsEnd can arrive just before the final commissionReport.  The
-    # Fill objects are updated in-place, so give those reports a short bounded
-    # window before declaring a row incomplete.
+    # Cached Fill objects are updated in-place, so give those reports a short
+    # bounded window before declaring a row incomplete.
     deadline = asyncio.get_running_loop().time() + 1.5
-    fills = fills_with_commissions()
-    while fills and asyncio.get_running_loop().time() < deadline:
+    reports = cached_commission_reports()
+    while queried_fills and asyncio.get_running_loop().time() < deadline:
         serialized = serialize_cost_basis_fills(
-            fills, account=account, symbol=symbol,
-            target_timezone=tws_timezone)
+            queried_fills, account=account, symbol=symbol,
+            target_timezone=tws_timezone,
+            commission_reports_by_exec_id=reports)
         if all(row.get('commissionAvailable')
                for row in serialized.get('executions', [])):
             break
         await asyncio.sleep(0.05)
-        fills = fills_with_commissions()
+        reports = cached_commission_reports()
 
     serialized = serialize_cost_basis_fills(
-        fills, account=account, symbol=symbol,
-        target_timezone=tws_timezone)
+        queried_fills, account=account, symbol=symbol,
+        target_timezone=tws_timezone,
+        commission_reports_by_exec_id=reports)
     fetched_at = datetime.now(tws_timezone).replace(
         microsecond=0).strftime('%Y-%m-%dT%H:%M:%S')
     return {

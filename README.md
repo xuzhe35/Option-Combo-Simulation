@@ -407,6 +407,15 @@ to TWS.
 
 Open it at `http://localhost:8000/cost_basis.html`.
 
+The cash-flow section's heading has a **卖方权利金 · 按到期日查看** control,
+outside the metric cards so they stay compact. Its read-only
+dialog groups remaining Short Put / Call contracts and their net opening
+premium by expiry (earliest first), with daily and cumulative totals. It uses
+ledger replay, works without TWS, excludes Long Option cash, and allocates only
+the still-open share of premium after partial closes. These are premiums
+already received, not new cash payable at expiry or guaranteed final P&L;
+positions remain listed until a close or settlement is recorded in the ledger.
+
 The dashboard also includes a read-only **What If** expiry-price scenario for
 stock/ETF books. It keeps the current shares, settles every open option against
 one hypothetical underlying expiry price through a user-selected expiry date,
@@ -445,6 +454,39 @@ source of truth, and the TWS position snapshot is a checksum against it.
 The page's **拉取 TWS 成交** action requests the recent executions visible to
 the connected API client from the last CSV timestamp, previews each stock,
 option, FOP, or FUT leg, and imports only after explicit confirmation.
+Because some TWS versions send execution timestamps as timezone-less wall clocks, `[tws] timezone`
+in `config.ini` must match the timezone selected at TWS/Gateway login (for
+example `America/New_York`). The server assigns this setting to ib_async before
+connecting; it never guesses from the browser or server clock. Nonempty invalid
+IANA names now stop startup before IB or ledger stores are initialized, instead
+of making the decoder silently drop fills. An unset timezone still disables
+ledger execution imports; configure it explicitly. Backend settings continue to
+come from `config.ini`, not the launcher's `config.local.ini` Python overrides.
+When an option quantity differs, that reconciliation row exposes **查找 TWS
+成交** before any AvgCost fallback. All recent executions for the same account
+and contract are replayed in broker-timestamp order. The replay is accepted
+only when its final quantity is exactly the current TWS position; openings and
+increases remain ordinary execution events, while each non-reversing reduction
+is labelled **期权 Close（平仓）**. The preview keeps
+broker price, commission, and signed cash. Position differences alone never
+fabricate a trade, zero-price close, or cash flow. Targeted lookups only block
+on errors that belong or might belong to that contract; clearly unrelated
+commission-pending fills are neither imported nor allowed to block it.
+For a complete TWS-only position with a valid AvgCost, the same row also keeps
+an explicit **采信 TWS** fallback beside lookup, usable after lookup fails.
+It requires confirmation and creates a provisional baseline, not a historical
+fill. Partial-position gaps instead offer the separately labelled AvgCost
+manual-draft fallback. Both paths defer to real executions and reviewed CSV.
+Database insertion timestamps never substitute for a missing broker snapshot
+clock. Bulk imports encountering an ambiguous legacy option baseline stay
+blocked and direct the user to cancel the preview and use that contract's
+**查找 TWS 成交** row action (or a reviewed full-CSV rebuild).
+If that AvgCost fallback was used earlier, a later TWS pull can replace the
+temporary baseline with the complete ordered execution sequence when removing
+that one provisional row and replaying every fill produces the current TWS
+quantity exactly. No individual fill is selected by comparing it with AvgCost
+or provisional cash. The replacement and all fills are committed together only
+after confirmation.
 Broker `execId` values make retries idempotent; a duplicate `execId` inside one
 review batch is a blocking preview problem (the first row is retained for
 inspection), and BAG summary fills are excluded

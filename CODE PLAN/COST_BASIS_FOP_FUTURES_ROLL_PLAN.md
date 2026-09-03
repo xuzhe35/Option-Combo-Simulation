@@ -221,9 +221,10 @@ assignment/exercise 使用 `futureContracts`，不使用 `shares`。
 
 ### 5.2 验证记录（2026-09-02 复验）
 
-- `node tests/run.js`：`981 passed, 0 failed`。
+- `node tests/run.js`：`985 passed, 0 failed`。
 - `python3 -m unittest tests.cost_basis_store_test tests.cost_basis_ws_test tests.cost_basis_executions_test`：
-  `Ran 219 tests, OK (skipped=1)`；跳过项是可选 IB 桥接环境测试。
+  使用项目配置的解释器复验为 `Ran 219 tests, OK`；未安装可选 IB 桥接依赖的
+  精简环境会跳过对应桥接测试。
 - `python3 scripts/stamp_asset_versions.py --check`：页面资源指纹一致。
 - 真实报表回归：按 `Reports/` 中 8/21 → 8/24 的顺序对
   `GLD/QQQ/SLV/SPY/TQQQ/USO` 重新执行部分重叠导入，六个标的都与直接使用

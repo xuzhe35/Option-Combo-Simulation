@@ -55,6 +55,13 @@
         futures_roll: '期货换月',
     };
 
+    function _eventKindLabel(event) {
+        if (event && event.kind === 'option_trade' && event.tag === 'ibkr_close') {
+            return '期权 Close（平仓）';
+        }
+        return KIND_LABELS[(event || {}).kind] || (event || {}).kind || '';
+    }
+
     // Which entry-form fields each kind actually uses. A field that is not
     // listed is hidden and cleared, so a leftover strike from the previous
     // entry cannot ride along into a dividend row.
@@ -144,6 +151,8 @@
         importText: '',
         executionFetchPending: false,
         resetPlan: null,
+        reconcileOpenSignature: '',
+        referencePriceByBook: {},
         reconnectDelay: RECONNECT_BASE_DELAY_MS,
         reconnectTimer: null,
         positionsTimer: null,
@@ -1060,6 +1069,11 @@
     async function _loadBooks() {
         const response = await request('list_cost_basis_books');
         state.books = Array.isArray(response.books) ? response.books : [];
+        // A deleted book must not leave its price behind: book ids are not
+        // reused today, but a stale entry would silently prime whatever
+        // took its place.
+        state.referencePriceByBook = pruneReferencePrices(
+            state.referencePriceByBook, state.books);
         _renderManagedAccounts($('new-book-account').value);
         const select = $('book-select');
         _clear(select);
@@ -1090,7 +1104,12 @@
             select.appendChild(option);
         });
         if (!state.books.some((book) => book.bookId === state.bookId)) {
-            state.bookId = state.books[0].bookId;
+            // The selected book is gone (deleted, or renamed out from under
+            // us) and we are landing on a different underlying. That is a
+            // book switch, so it has to clear book-scoped state the same way
+            // an explicit one does - otherwise the vanished book's reference
+            // price is still on screen, now labelled as this book's.
+            _beginBookSelection(state.books[0].bookId);
         }
         select.value = state.bookId;
         _renderSidebarBooks();
@@ -1289,27 +1308,67 @@
         }
     }
 
+    /**
+     * Every piece of state that means something only for the current book.
+     *
+     * A price, an average cost or a parsed CSV belongs to one underlying;
+     * carried into the next book it does not read as missing, it reads as
+     * that book's number. The reference price used to be left behind here,
+     * so switching TQQQ -> TSM valued TSM's shares at TQQQ's price in the
+     * hero, the What If panel and the stress test at once.
+     *
+     * Keep this list as the single definition, and add to it whenever a new
+     * per-book field appears - the danger is silence, not a visible error.
+     */
+    function pruneReferencePrices(byBook, books) {
+        const live = new Set((books || []).map((book) => String(book.bookId)));
+        const kept = {};
+        Object.keys(byBook || {}).forEach((bookId) => {
+            if (live.has(bookId)) kept[bookId] = byBook[bookId];
+        });
+        return kept;
+    }
+
+    function bookScopedStateReset(nextBookId, referencePriceByBook) {
+        // The typed reference price belongs to ONE underlying, so it can
+        // neither carry across (it would value TSM at TQQQ's price) nor be
+        // dropped (you lose it every time you glance at another book). It is
+        // remembered per book and restored on the way back in.
+        const remembered = referencePriceByBook
+            ? referencePriceByBook[String(nextBookId || '')] : undefined;
+        return {
+            flowPage: 1,
+            avgCostByAccount: {},
+            referencePrice: remembered === undefined ? null : remembered,
+            marketPrice: null,
+            whatIfPrice: null,
+            whatIfPriceSource: '',
+            marketPriceFetchedAt: '',
+            whatIfExpiry: '',
+            stressLongOptionInputs: null,
+            stressInputsError: '',
+            importResult: null,
+            importText: '',
+            resetPlan: null,
+            allEvents: [],
+            eventsTotal: 0,
+            ledger: null,
+            reconciliation: null,
+        };
+    }
+
     function _beginBookSelection(bookId) {
         state.bookId = String(bookId || '');
         $('book-select').value = state.bookId;
-        state.flowPage = 1;
-        state.avgCostByAccount = {};
-        state.marketPrice = null;
-        state.whatIfPrice = null;
-        state.whatIfPriceSource = '';
-        state.marketPriceFetchedAt = '';
-        state.whatIfExpiry = '';
-        state.stressLongOptionInputs = null;
-        state.stressInputsError = '';
-        state.importResult = null;
-        state.importText = '';
-        state.resetPlan = null;
-        state.allEvents = [];
-        state.eventsTotal = 0;
-        state.ledger = null;
-        state.reconciliation = null;
+        Object.assign(state,
+            bookScopedStateReset(state.bookId, state.referencePriceByBook));
+        // These inputs hold book-scoped values too, so clearing only the
+        // state behind them would leave a stale figure on screen that no
+        // longer feeds anything.
         $('import-file').value = '';
         $('import-replace').checked = false;
+        $('reference-price').value = state.referencePrice === null
+            ? '' : String(state.referencePrice);
         // Clear the previous book immediately. If the socket drops during
         // this request, the new title can never be paired with old rows.
         _renderImportPreview();
@@ -1727,7 +1786,11 @@
         if (!futures) {
             _summaryRow(body, '股息', columns, (summary) => _money(summary.dividends));
         }
-        _summaryRow(body, '费用合计', columns, (summary) => _money(summary.fees));
+        // Account view, same as the cash card above: fees are money paid
+        // out, so both places show them negative. The table used to print
+        // the same figure positive under the same label.
+        _summaryRow(body, '费用合计', columns,
+            (summary) => _signedMoney(-Math.abs(Number(summary.fees) || 0)));
 
         _sectionRow(body, '按参考价', columns.length);
         _summaryRow(body, '盈亏平衡价', columns,
@@ -2530,9 +2593,62 @@
         await _refreshStressMarketInputs(true);
     }
 
+    function _renderPremiumExpiry() {
+        const book = _currentBook();
+        const modal = $('premium-expiry-modal');
+        const available = Boolean(book && state.ledger);
+        $('btn-open-premium-expiry').disabled = !available;
+        const body = $('premium-expiry-table').querySelector('tbody');
+        _clear(body);
+        if (!available) {
+            if (modal.open) modal.close();
+            _text($('premium-expiry-context'), '选择账本后显示');
+            _text($('premium-expiry-total'), '—');
+            $('premium-expiry-warning').hidden = true;
+            return;
+        }
+        const distribution = core.openShortPremiumByExpiry(state.ledger);
+        _text($('premium-expiry-context'), `${book.account || '全部账户'} / ${book.symbol}`
+            + ` · ${distribution.rows.length} 个到期日`
+            + ` · ${_quantity(distribution.totalContracts)} 张未平空头期权`);
+        _text($('premium-expiry-total'), _currencyAmount(
+            book.currency, state.ledger.combined.openShortPremium, 2, true));
+        $('premium-expiry-warning').hidden = !state.ledger.combined.costIncomplete;
+        distribution.rows.forEach((entry) => {
+            const row = globalScope.document.createElement('tr');
+            _cell(row, entry.expiry
+                ? entry.expiry.replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3')
+                : '未标明到期日');
+            ['put', 'call'].forEach((side) => {
+                const quantity = entry[`${side}Contracts`];
+                const cell = _cell(row, quantity
+                    ? _currencyAmount(book.currency, entry[`${side}Premium`], 4, true) : '—');
+                if (quantity) {
+                    const count = globalScope.document.createElement('small');
+                    count.textContent = `${_quantity(quantity)} 张`;
+                    cell.appendChild(count);
+                }
+            });
+            _cell(row, _currencyAmount(book.currency, entry.totalPremium, 4, true));
+            _cell(row, _currencyAmount(book.currency, entry.cumulativePremium, 4, true));
+            body.appendChild(row);
+        });
+        if (!distribution.rows.length) {
+            const row = globalScope.document.createElement('tr');
+            _cell(row, '当前没有未平仓的 Short Call / Put。', 'empty').colSpan = 5;
+            body.appendChild(row);
+        }
+    }
+
+    function _openPremiumExpiry() {
+        _renderPremiumExpiry();
+        if (state.ledger && _currentBook()) $('premium-expiry-modal').showModal();
+    }
+
     function _renderDashboardSummary() {
+        _renderPremiumExpiry();
         const ids = ['headline-cost', 'headline-position', 'headline-expired-cost',
-            'headline-reference-price', 'headline-market-value',
+            'headline-market-value',
             'headline-diluted-pnl', 'headline-stock-cost', 'headline-tws-cost',
             'headline-break-even', 'cash-net', 'cash-realized-premium',
             'cash-open-premium', 'cash-dividends', 'cash-fees'];
@@ -2568,8 +2684,6 @@
             ? '—' : _money(summary.blendedCostIfExpired, 4));
         const reference = state.referencePrice !== null
             ? state.referencePrice : state.marketPrice;
-        _text($('headline-reference-price'), reference === null
-            ? '—' : _money(reference, 4));
         const exposure = futures ? summary.futureExposure : summary.shares;
         const currency = book.currency || 'USD';
         const marketMetrics = computeMarketMetrics(
@@ -2796,21 +2910,39 @@
         return warning;
     }
 
+    /**
+     * The reference price sits in the hero because market value and the
+     * diluted P&L beside it are blank until it has one. The input carries
+     * the effective figure itself - typed value, or the TWS price as its
+     * placeholder - so the number and the control that sets it are the same
+     * object rather than two cells that have to be matched up by eye.
+     *
+     * Nothing here ever writes .value: a re-render lands mid-typing.
+     */
     function _renderReferenceSource() {
         const node = $('reference-source');
+        const input = $('reference-price');
+        const missing = state.referencePrice === null && state.marketPrice === null;
+        const foot = globalScope.document.querySelector('.hero-foot');
+        if (foot) foot.classList.toggle('needs-reference', missing);
+        if (input) {
+            input.placeholder = state.marketPrice === null
+                ? '输入' : _money(state.marketPrice, 4);
+        }
         if (state.referencePrice !== null) {
             _text(node, '手工输入');
             return;
         }
         if (state.marketPrice !== null) {
-            _text(node, `来自 TWS 持仓快照 ${_money(state.marketPrice, 4)}`);
+            _text(node, '来自 TWS 持仓快照');
             return;
         }
-        _text(node, '无参考价（可手工输入）');
+        _text(node, '填入后可算市值与浮盈亏');
     }
 
     async function _adoptTwsPosition(entry, event, button) {
-        if (!state.bookId || !state.positionsConnected || !event) return;
+        if (!state.bookId || !state.positionsConnected || !event
+            || state.executionFetchPending || state.importResult) return;
         const book = _currentBook();
         const description = entry.kind === 'shares'
             ? `${book ? book.symbol : ''} 股票`
@@ -2850,7 +2982,38 @@
         }
     }
 
+    /**
+     * The table is collapsed by default, so the summary line - and the
+     * auto-open below - are the only things standing between a real
+     * position mismatch and a page that looks settled. A difference the
+     * user never sees is worse than no reconciliation at all.
+     */
+    function planReconcileDisclosure(rows, lastSignature) {
+        const mismatches = (rows || []).filter((entry) => (
+            entry.status !== 'match' && entry.status !== 'explained'));
+        // Keyed on the outstanding set, not on a render count: a deliberate
+        // collapse survives an unrelated re-render, but a difference that
+        // appears or changes shape re-opens the table every time.
+        const signature = mismatches
+            .map((entry) => `${entry.account}|${entry.label}|${entry.status}`)
+            .sort().join(';');
+        return { signature, open: Boolean(signature) && signature !== lastSignature };
+    }
+
     function _renderReconciliation() {
+        _renderReconciliationTable();
+        const badge = $('position-match-badge');
+        _text($('reconcile-summary-label'), `持仓对账 · ${badge.textContent}`);
+        const details = $('reconcile-details');
+        if (!details) return;
+        const plan = planReconcileDisclosure(
+            state.reconciliation ? state.reconciliation.rows : [],
+            state.reconcileOpenSignature);
+        if (plan.open) details.open = true;
+        state.reconcileOpenSignature = plan.signature;
+    }
+
+    function _renderReconciliationTable() {
         const body = $('reconcile-table').querySelector('tbody');
         const badge = $('position-match-badge');
         _clear(body);
@@ -2906,6 +3069,18 @@
             ? `${mismatches.length} 项待核对` : '持仓数量一致');
 
         state.reconciliation.rows.forEach((entry) => {
+            const targetedPending = state.importResult
+                && state.importResult.format === 'tws_api'
+                && state.importResult.reconciliationExecution
+                && state.importResult.reconciliationExecution.key === entry.key
+                ? state.importResult.reconciliationExecution : null;
+            const pendingExecution = targetedPending || (state.importResult
+                && state.importResult.format === 'tws_api'
+                ? core.matchReconciliationExecution(entry, state.importResult.events)
+                : null);
+            const executionProbe = core.matchReconciliationExecution(entry, []);
+            const canFetchExecution = state.positionsConnected
+                && executionProbe.eligible === true;
             const adoption = state.positionsConnected
                 ? core.buildTwsAdoptionEvent(entry, {
                     today: _todayIso(), snapshotTimestamp: state.positionsTimestamp,
@@ -2932,7 +3107,10 @@
                 tws_only: 'status-missing',
                 identity_conflict: 'status-missing',
             }[entry.status] || '';
-            _cell(row, {
+            _cell(row, pendingExecution && pendingExecution.complete
+                ? (pendingExecution.movement === 'close'
+                    ? '已找到 Close · 待确认' : '已找到成交 · 待确认')
+                : ({
                 match: '一致',
                 explained: '已由期权解释',
                 quantity_mismatch: '数量不符',
@@ -2940,30 +3118,52 @@
                 tws_only: 'TWS 有账本无',
                 // Equal quantities here would be a coincidence, not a match.
                 identity_conflict: '合约身份歧义，需人工确认',
-            }[entry.status] || entry.status, statusClass);
+            }[entry.status] || entry.status), pendingExecution && pendingExecution.complete
+                ? 'status-explained' : statusClass);
 
-            if (!entry.suggestion && !adoption && !avgCostDraft) {
+            if (!entry.suggestion && !adoption && !avgCostDraft
+                && !canFetchExecution && !(pendingExecution && pendingExecution.complete)) {
                 _cell(row, entry.advice || '', entry.advice ? 'confidence-low' : '');
                 _cell(row, '');
             } else {
-                const label = adoption
-                    ? `TWS 持仓基线 · 均价 ${_money(adoption.price, 4)}`
-                    : (avgCostDraft
-                        ? `AvgCost ${_money(avgCostDraft.price, 4)} 只生成差额草稿`
-                    : `${KIND_LABELS[entry.suggestion.kind] || entry.suggestion.kind}`
-                        + (entry.suggestion.shares
-                            ? ` · ${_quantity(entry.suggestion.shares)} 股` : '')
-                        + (entry.status === 'tws_only' && !entry.twsAvgCost
-                            ? ' · TWS 均价不可用'
-                            : (entry.confidence === 'high' ? '' : ' · 需核实')));
+                const label = pendingExecution && pendingExecution.complete
+                    ? `TWS 真实${pendingExecution.movement === 'close' ? ' Close' : '成交'}`
+                        + ` · 净变动 ${_quantity(pendingExecution.matchedContracts)} 张；确认导入后计入流水`
+                        + (pendingExecution.replacedBaselines
+                            ? ` · 同时取代 ${pendingExecution.replacedBaselines} 条 AvgCost 临时基线`
+                            : '')
+                    : (canFetchExecution
+                        ? '优先查找能完整解释差额的 TWS 真实成交；AvgCost 仅作后备'
+                        : (adoption
+                            ? `TWS 持仓基线 · 均价 ${_money(adoption.price, 4)}`
+                            : (avgCostDraft
+                                ? `AvgCost ${_money(avgCostDraft.price, 4)} 只生成差额草稿`
+                                : `${KIND_LABELS[entry.suggestion.kind] || entry.suggestion.kind}`
+                                    + (entry.suggestion.shares
+                                        ? ` · ${_quantity(entry.suggestion.shares)} 股` : '')
+                                    + (entry.status === 'tws_only' && !entry.twsAvgCost
+                                        ? ' · TWS 均价不可用'
+                                        : (entry.confidence === 'high'
+                                            ? '' : ' · 需核实')))));
                 _cell(row, label,
-                    adoption || entry.confidence === 'high'
+                    (pendingExecution && pendingExecution.complete) || adoption
+                        || entry.confidence === 'high'
                         ? 'confidence-high' : 'confidence-low');
                 const actionCell = globalScope.document.createElement('td');
+                actionCell.className = 'reconcile-actions';
                 const button = globalScope.document.createElement('button');
                 button.type = 'button';
                 button.className = 'draft';
-                if (adoption) {
+                if (pendingExecution && pendingExecution.complete) {
+                    button.textContent = '确认导入成交';
+                    button.title = '再次确认后把上方预览的真实 TWS 成交写入账本';
+                    button.addEventListener('click', _commitImport);
+                } else if (canFetchExecution) {
+                    button.textContent = '查找 TWS 成交';
+                    button.title = '拉取真实 TWS 成交，以价格和费用建立可审计流水';
+                    button.disabled = state.executionFetchPending || Boolean(state.importResult);
+                    button.addEventListener('click', () => _fetchTwsExecutions(entry));
+                } else if (adoption) {
                     button.textContent = '采信 TWS';
                     button.addEventListener('click', () => (
                         _adoptTwsPosition(entry, adoption, button)));
@@ -2976,6 +3176,28 @@
                     button.addEventListener('click', () => _fillForm(entry.suggestion));
                 }
                 actionCell.appendChild(button);
+                if (adoption && canFetchExecution
+                    && !(pendingExecution && pendingExecution.complete)) {
+                    const fallback = globalScope.document.createElement('button');
+                    fallback.type = 'button';
+                    fallback.className = 'draft';
+                    fallback.textContent = '采信 TWS';
+                    fallback.title = '历史成交窗口不足时的后备：确认后按 TWS AvgCost 建立临时基线，不是历史成交';
+                    fallback.disabled = state.executionFetchPending || Boolean(state.importResult);
+                    fallback.addEventListener('click', () => (
+                        _adoptTwsPosition(entry, adoption, fallback)));
+                    actionCell.appendChild(fallback);
+                }
+                if (avgCostDraft && (canFetchExecution
+                    || (pendingExecution && pendingExecution.complete))) {
+                    const fallback = globalScope.document.createElement('button');
+                    fallback.type = 'button';
+                    fallback.className = 'draft';
+                    fallback.textContent = 'AvgCost 后备';
+                    fallback.title = '仅在近期真实成交无法取得时使用；只填草稿，不直接写账';
+                    fallback.addEventListener('click', () => _fillForm(avgCostDraft));
+                    actionCell.appendChild(fallback);
+                }
                 row.appendChild(actionCell);
             }
             body.appendChild(row);
@@ -3062,7 +3284,7 @@
                 else if (entry.excluded) row.className = 'row-excluded';
                 _cell(row, event.tradeDate);
                 _cell(row, event.account || '—');
-                _cell(row, KIND_LABELS[event.kind] || event.kind);
+                _cell(row, _eventKindLabel(event));
                 _cell(row, _describeContract(event));
                 const quantity = event.futureContracts !== null
                     && event.futureContracts !== undefined
@@ -3102,6 +3324,16 @@
         }
         _text($('flow-page-label'), `最新优先 · 第 ${state.flowPage} / ${pageCount} 页 · 筛选出 `
             + `${filtered.length} 条 · 账本共 ${state.eventsTotal} 条`);
+        // The table is collapsed by default, so its summary has to carry
+        // enough for the daily glance: how much is in the book and how
+        // recent it is. Anything less and folding it away hides the answer.
+        const book = _currentBook();
+        _text($('flow-summary-label'), book
+            ? `事件流水 · ${state.eventsTotal} 条`
+                + (book.lastEventDate ? ` · 最近 ${book.lastEventDate}` : '')
+                + (filtered.length !== state.eventsTotal
+                    ? ` · 当前筛选 ${filtered.length} 条` : '')
+            : '事件流水 · 未选择账本');
         $('flow-prev').disabled = state.flowPage <= 1;
         $('flow-next').disabled = state.flowPage >= pageCount;
     }
@@ -3424,7 +3656,7 @@
     // Import
     // ------------------------------------------------------------------
 
-    function _exactBrokerTimestamp(event) {
+    function _recordedBrokerTimestamp(event) {
         const explicit = String((event && event.brokerTimestamp) || '');
         if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(explicit)) {
             return explicit;
@@ -3439,31 +3671,11 @@
                 return `${match[1]}T${match[2].padStart(2, '0')}:${match[3]}:${match[4] || '00'}`;
             }
         }
+        return '';
+    }
 
-        // Baselines written before snapshot timestamps were added to the
-        // audit note still have an immutable UTC insertion timestamp. The
-        // page and IBKR Activity Statement both use this machine's local
-        // time, so converting createdAtUtc back to local time recovers the
-        // ordering evidence instead of permanently stranding those rows.
-        // The date must still agree with the adopted tradeDate; a baseline
-        // created under a different timezone remains fail-closed.
-        if (!event || event.source !== 'reconcile' || event.tag !== 'tws_snapshot') {
-            return '';
-        }
-        const createdAtUtc = String(event.createdAtUtc || '');
-        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(createdAtUtc)) {
-            return '';
-        }
-        const created = new Date(createdAtUtc);
-        if (!Number.isFinite(created.getTime())) return '';
-        const month = String(created.getMonth() + 1).padStart(2, '0');
-        const day = String(created.getDate()).padStart(2, '0');
-        const date = `${created.getFullYear()}-${month}-${day}`;
-        if (date !== String(event.tradeDate || '')) return '';
-        const hour = String(created.getHours()).padStart(2, '0');
-        const minute = String(created.getMinutes()).padStart(2, '0');
-        const second = String(created.getSeconds()).padStart(2, '0');
-        return `${date}T${hour}:${minute}:${second}`;
+    function _exactBrokerTimestamp(event) {
+        return _recordedBrokerTimestamp(event);
     }
 
     function _eventTimestamp(event) {
@@ -3555,31 +3767,111 @@
         return !baselineConId || !conIds.size || conIds.has(baselineConId);
     }
 
-    function _singleApiExecutionMatchesBaseline(baseline, events, historyEvents) {
-        const baselineQuantity = Number(baseline.contracts || 0);
-        const baselineCash = Number(baseline.cashAmount);
-        if (!Number.isFinite(baselineCash)) return false;
-        return events.some((event) => {
-            if (event.source !== 'execution_report' || event.tag !== 'ibkr_exec'
-                || Math.abs(Number(event.contracts || 0) - baselineQuantity) >= 1e-6) {
-                return false;
-            }
-            let executionCash = Number(event.cashAmount);
-            const rebateRef = `${String(event.externalRef || '')}-rebate`;
-            historyEvents.forEach((candidate) => {
-                if (candidate.source === 'execution_report'
-                    && candidate.tag === 'ibkr_rebate'
-                    && candidate.externalRef === rebateRef) {
-                    executionCash += Number(candidate.cashAmount || 0);
-                }
-            });
-            // An adopted AvgCost baseline is rounded to four decimals while
-            // the ledger cash is cents. Matching both signed quantity and
-            // net cash identifies the real execution it represented, even
-            // when a later fill in the same contract is also visible.
-            return Number.isFinite(executionCash)
-                && Math.abs(executionCash - baselineCash) < 0.011;
+    /**
+     * Reconcile one live option-position gap with the broker's ordered fills.
+     *
+     * The broker executions are the evidence. We never choose one fill
+     * because it happens to resemble AvgCost. Instead, every visible fill
+     * for the exact contract is replayed in broker-time order. The replay is
+     * accepted only when its final quantity equals the current TWS position.
+     * A provisional AvgCost row may be removed as one atomic part of that
+     * proof when keeping it would double-count the same position history.
+     */
+    function planTargetExecutionReconciliation(targetEntry, executionEvents,
+                                               allEvents) {
+        const target = targetEntry || {};
+        const probe = core.matchReconciliationExecution(target, executionEvents);
+        if (!probe.eligible) {
+            return { complete: false, events: [], supersedeEventIds: [],
+                expectedContracts: 0, matchedContracts: 0, movement: '',
+                reason: '该持仓差异不能用期权成交回放。' };
+        }
+
+        const ordered = probe.events.slice().sort((left, right) => {
+            const byTime = String(left.brokerTimestamp || '').localeCompare(
+                String(right.brokerTimestamp || ''));
+            return byTime || String(left.externalRef || '').localeCompare(
+                String(right.externalRef || ''));
         });
+        if (!ordered.length) {
+            return { complete: false, events: [], supersedeEventIds: [],
+                expectedContracts: probe.expectedContracts, matchedContracts: 0,
+                movement: probe.movement, reason: 'TWS 未返回该合约的新成交。' };
+        }
+
+        const wantedKey = core.contractKey(target);
+        const wantedConId = target.conId === null || target.conId === undefined
+            || target.conId === '' ? '' : String(target.conId);
+        const provisional = (allEvents || []).filter((event) => {
+            if (!(event && event.eventId && !event.voidedAtUtc
+                && event.includeInCost !== false && event.kind === 'option_trade'
+                && event.source === 'reconcile' && event.tag === 'tws_snapshot'
+                && core.contractKey(event) === wantedKey)) return false;
+            const eventConId = event.conId === null || event.conId === undefined
+                || event.conId === '' ? '' : String(event.conId);
+            return !wantedConId || !eventConId || wantedConId === eventConId;
+        });
+        const ledger = Number(target.ledger || 0);
+        const tws = Number(target.tws || 0);
+        const executionDelta = ordered.reduce(
+            (total, event) => total + Number(event.contracts || 0), 0);
+        const fitsKeepingBaseline = Math.abs(
+            ledger + executionDelta - tws) <= 1e-6;
+        const fitsReplacingBaseline = provisional.length === 1 && Math.abs(
+            ledger - Number(provisional[0].contracts || 0)
+                + executionDelta - tws) <= 1e-6;
+
+        let startingContracts = ledger;
+        let supersedeEventIds = [];
+        if (fitsReplacingBaseline && !fitsKeepingBaseline) {
+            startingContracts -= Number(provisional[0].contracts || 0);
+            supersedeEventIds = [provisional[0].eventId];
+        } else if (!fitsKeepingBaseline) {
+            return {
+                complete: false,
+                events: ordered,
+                supersedeEventIds: [],
+                expectedContracts: tws - ledger,
+                matchedContracts: executionDelta,
+                movement: probe.movement,
+                reason: provisional.length > 1
+                    ? '该合约有多条 TWS 临时基线，无法唯一确定应冲销哪一条。'
+                    : `按时间回放后持仓为 ${ledger + executionDelta}，`
+                        + `与 TWS 当前持仓 ${tws} 不一致。`,
+            };
+        }
+
+        // Re-label each fill from the position that actually precedes it.
+        // Signed broker quantity and cash remain untouched.
+        let running = startingContracts;
+        const replayed = ordered.map((sourceEvent) => {
+            const event = Object.assign({}, sourceEvent);
+            const delta = Number(event.contracts || 0);
+            const isPureClose = Math.abs(running) > 1e-6
+                && Math.sign(delta) === -Math.sign(running)
+                && Math.abs(delta) <= Math.abs(running) + 1e-6;
+            event.tag = isPureClose ? 'ibkr_close' : 'ibkr_exec';
+            running += delta;
+            return event;
+        });
+        if (Math.abs(running - tws) > 1e-6) {
+            return { complete: false, events: replayed, supersedeEventIds,
+                expectedContracts: tws - ledger,
+                matchedContracts: executionDelta, movement: probe.movement,
+                reason: `按时间回放后持仓为 ${running}，与 TWS 当前持仓 ${tws} 不一致。` };
+        }
+        return {
+            complete: true,
+            events: replayed,
+            supersedeEventIds,
+            expectedContracts: tws - ledger,
+            matchedContracts: tws - ledger,
+            executionContracts: executionDelta,
+            movement: probe.movement,
+            startingContracts,
+            finalContracts: running,
+            reason: '',
+        };
     }
 
     function _tradeQuantity(event) {
@@ -3623,7 +3915,8 @@
         }
         const active = (allEvents || []).filter((event) => (
             event.eventId && !event.voidedAtUtc && event.includeInCost !== false
-            && event.source === 'execution_report' && event.tag === 'ibkr_exec'
+            && event.source === 'execution_report'
+            && (event.tag === 'ibkr_exec' || event.tag === 'ibkr_close')
             && ['option_trade', 'share_trade', 'futures_trade'].includes(event.kind)));
         const rebates = new Map();
         (allEvents || []).forEach((event) => {
@@ -3739,7 +4032,7 @@
      * supplies the real executions. CSV and TWS API rows must independently
      * rebuild the exact snapshot quantity; partial overlap stays blocked.
      */
-    function planTwsBaselineSupersession(importResult, allEvents) {
+    function planTwsBaselineSupersession(importResult, allEvents, targetEntry) {
         const result = importResult || {};
         const openings = result.openings;
         const account = String(result.account || '');
@@ -3748,29 +4041,57 @@
             : (result.format === 'tws_api' ? 'execution_report' : '');
         if (!historySource || !openings
             || (result.problems || []).length || !account || !cutoff) {
-            return { eventIds: [], events: [], problems: [] };
+            return { eventIds: [], events: [], problems: [],
+                replacementExecutionRefs: [] };
         }
 
         const historyEvents = (result.events || []).filter(
             (event) => event.source === historySource && event.tag !== 'prior_open');
         const openingKeys = new Set((openings.drafts || []).map(
             (event) => core.contractKey(event)));
-        const candidates = (allEvents || []).filter((event) => (
-            event.eventId && !event.voidedAtUtc && event.includeInCost !== false
-            && event.source === 'reconcile' && event.tag === 'tws_snapshot'
-            && event.account === account && _eventTimestamp(event) <= cutoff));
+        const targetKey = targetEntry && targetEntry.kind === 'option'
+            ? core.contractKey(targetEntry) : '';
+        const targetConId = targetEntry && targetEntry.conId !== null
+            && targetEntry.conId !== undefined && targetEntry.conId !== ''
+            ? String(targetEntry.conId) : '';
+        const candidates = (allEvents || []).filter((event) => {
+            if (!(event.eventId && !event.voidedAtUtc && event.includeInCost !== false
+                && event.source === 'reconcile' && event.tag === 'tws_snapshot'
+                && event.account === account
+                && (!targetKey || (event.kind === 'option_trade'
+                    && core.contractKey(event) === targetKey))
+                && (!targetConId || !event.conId
+                    || String(event.conId) === targetConId))) return false;
+            if (_recordedBrokerTimestamp(event)) {
+                return _eventTimestamp(event) <= cutoff;
+            }
+            // Database insertion time is not the broker snapshot clock.
+            // Admit the date-level API candidate so it gets an explicit
+            // conflict and guidance to the targeted quantity-proof workflow.
+            if (result.format === 'tws_api' && event.kind === 'option_trade') {
+                return String(event.tradeDate || '') <= cutoff.slice(0, 10);
+            }
+            return _eventTimestamp(event) <= cutoff;
+        });
         const selected = [];
         const problems = [];
+        const replacementExecutionRefs = [];
 
         function conflict(baseline) {
+            const needsTargetedReplay = result.format === 'tws_api'
+                && baseline.kind === 'option_trade' && !_recordedBrokerTimestamp(baseline);
             const label = baseline.kind === 'opening_balance' ? 'shares'
                 : (baseline.kind === 'futures_trade'
                     ? `${baseline.futureExpiry || ''} FUT`
                     : `${baseline.expiry || ''} ${baseline.right || ''}${baseline.strike || ''}`);
             problems.push({
                 lineNumber: 0,
-                reason: 'Broker execution history partially or ambiguously overlaps an adopted TWS '
-                    + 'baseline; import a complete covering statement or use reviewed rebuild',
+                reason: needsTargetedReplay
+                    ? '旧 AvgCost 临时基线没有券商快照时钟，批量拉取无法证明成交先后，已阻止导入。'
+                        + '请先取消本次预览，再到「持仓对账」该合约行点击「查找 TWS 成交」，'
+                        + '按全部成交回放后的数量核对；若没有该入口或仍无法贴合，请用完整 CSV 覆盖式重建。'
+                    : 'Broker execution history partially or ambiguously overlaps an adopted TWS '
+                        + 'baseline; import a complete covering statement or use reviewed rebuild',
                 raw: `${account} ${label}`,
             });
         }
@@ -3802,15 +4123,21 @@
             }
             if (baseline.kind === 'option_trade') {
                 const key = core.contractKey(baseline);
+                const hasRecordedBrokerClock = Boolean(
+                    _recordedBrokerTimestamp(baseline));
                 const sameContract = historyEvents.filter((event) => (
                     event.contracts !== null && event.contracts !== undefined
                     && core.contractKey(event) === key
                     && (!(baseline.conId && event.conId)
                         || String(baseline.conId) === String(event.conId))));
-                const ambiguous = sameContract.filter(
-                    (event) => _eventVsAdoptedSnapshot(event, baseline) === 'ambiguous');
-                const matching = sameContract.filter(
-                    (event) => _eventVsAdoptedSnapshot(event, baseline) === 'before');
+                const ambiguous = hasRecordedBrokerClock
+                    ? sameContract.filter((event) => (
+                        _eventVsAdoptedSnapshot(event, baseline) === 'ambiguous'))
+                    : sameContract;
+                const matching = hasRecordedBrokerClock
+                    ? sameContract.filter((event) => (
+                        _eventVsAdoptedSnapshot(event, baseline) === 'before'))
+                    : [];
                 if (!matching.length && !ambiguous.length) return;
                 if (ambiguous.length || openingKeys.has(key)
                     || !_supersessionIdentityIsSafe(baseline, matching)) {
@@ -3819,11 +4146,7 @@
                 }
                 const reconstructed = matching.reduce(
                     (total, event) => total + Number(event.contracts || 0), 0);
-                const exactApiExecution = result.format === 'tws_api'
-                    && _singleApiExecutionMatchesBaseline(
-                        baseline, matching, historyEvents);
-                if (Math.abs(reconstructed - Number(baseline.contracts || 0)) < 1e-6
-                    || exactApiExecution) {
+                if (Math.abs(reconstructed - Number(baseline.contracts || 0)) < 1e-6) {
                     selected.push(baseline);
                 } else {
                     conflict(baseline);
@@ -3855,6 +4178,7 @@
             eventIds: selected.map((event) => event.eventId),
             events: selected,
             problems,
+            replacementExecutionRefs,
         };
     }
 
@@ -3895,7 +4219,7 @@
         _text(summaryNode, `${apiImport ? 'TWS API' : `格式 ${result.format}`} · 读取 ${result.summary.total} 行`
             + (result.account ? ` · 账户 ${result.account}` : '')
             + ` · 生成草稿 ${result.summary.drafted} 条`
-            + ` · 其他标的跳过 ${result.summary.skipped} 行`
+            + ` · ${result.reconciliationExecution ? '非本次差额' : '其他标的'}跳过 ${result.summary.skipped} 行`
             + ` · 待人工处理 ${result.summary.problems} 行`
             + (result.supersedeTwsEventIds && result.supersedeTwsEventIds.length
                 ? ` · ${apiImport ? '真实成交' : 'CSV'}将取代 TWS 临时基线 ${result.supersedeTwsEventIds.length} 条`
@@ -3912,7 +4236,7 @@
             const row = globalScope.document.createElement('tr');
             _cell(row, event.tradeDate);
             _cell(row, event.account || '—');
-            _cell(row, KIND_LABELS[event.kind] || event.kind);
+            _cell(row, _eventKindLabel(event));
             _cell(row, _describeContract(event));
             const quantity = event.futureContracts !== undefined
                 ? event.futureContracts
@@ -4164,6 +4488,8 @@
                     bookId: state.bookId,
                     events,
                     supersedeTwsEventIds,
+                    twsReconciliation: apiImport
+                        ? state.importResult.twsReconciliation : undefined,
                     importBatchId: _token('cbb-'),
                     clientTokenPrefix: _token('cbi-'),
                 });
@@ -4204,13 +4530,56 @@
         return candidates.length ? candidates[candidates.length - 1] : '';
     }
 
-    async function _fetchTwsExecutions() {
+    /** Keep errors whose source fill might belong to the targeted contract.
+     * Missing identity is not evidence of being unrelated. Also retain a
+     * duplicate execId error if another occurrence belongs to the target.
+     */
+    function targetExecutionProblems(problems, executions, target) {
+        const rows = Array.isArray(executions) ? executions : [];
+        const upper = (value) => String(value || '').trim().toUpperCase();
+        const date = (value) => String(value || '').replace(/\D/g, '').slice(0, 8);
+        function mightMatch(row) {
+            if (!row) return true;
+            if (row.account && target.account
+                && upper(row.account) !== upper(target.account)) return false;
+            if (row.conId && target.conId && String(row.conId) === String(target.conId)) return true;
+            if (row.symbol && target.symbol && upper(row.symbol) !== upper(target.symbol)) return false;
+            if (['STK', 'FUT', 'BAG'].includes(upper(row.secType))) return false;
+            if (['C', 'P'].includes(upper(row.right)) && target.right
+                && upper(row.right) !== upper(target.right)) return false;
+            if (date(row.expiry).length === 8 && date(target.expiry).length === 8
+                && date(row.expiry) !== date(target.expiry)) return false;
+            for (const [rawKey, targetKey] of [['strike', 'strike'], ['multiplier', 'sharesPerContract']]) {
+                const value = _numberOrNull(row[rawKey]);
+                const expected = _numberOrNull(target[targetKey]);
+                if (value > 0 && expected > 0 && Math.abs(value - expected) > 1e-6) return false;
+            }
+            return true;
+        }
+        return (problems || []).filter((problem) => {
+            const line = Number(problem.lineNumber);
+            const row = Number.isInteger(line) && line > 0 ? rows[line - 1] : null;
+            if (mightMatch(row)) return true;
+            return Boolean(row.execId && rows.some((other) => other
+                && String(other.execId || '').trim() === String(row.execId).trim()
+                && upper(other.account) === upper(row.account) && mightMatch(other)));
+        });
+    }
+
+    async function _fetchTwsExecutions(targetEntry) {
         if (!state.bookId || state.executionFetchPending) return;
+        const executionTarget = targetEntry && targetEntry.kind === 'option'
+            ? targetEntry : null;
+        if (executionTarget && state.importResult) {
+            globalScope.alert('请先确认或取消当前导入预览，再查找这笔成交。');
+            return;
+        }
         const book = _currentBook();
         const sinceTimestamp = _latestCsvCutoff();
         state.executionFetchPending = true;
         $('btn-fetch-executions').textContent = '正在拉取…';
         _refreshControls();
+        _renderReconciliation();
         try {
             const response = await request('request_cost_basis_executions', {
                 bookId: state.bookId,
@@ -4227,6 +4596,7 @@
                 symbol: book.symbol,
                 secType: book.secType,
                 defaultSharesPerContract: book.defaultSharesPerContract,
+                existingOpen: state.ledger ? state.ledger.openOptions : [],
                 existingExternalRefs,
             });
             const querySince = String(response.querySince || '');
@@ -4248,8 +4618,78 @@
                 + (olderCutoff
                     ? ' 最后一份 CSV 早于今天；TWS API 只返回近期可见窗口，因此不能证明中间没有缺口，请继续用 Activity Statement 补齐长期历史。'
                     : ' 这些是真实成交回报，但 TWS API 仍不是长期历史报表。');
-            const supersession = planTwsBaselineSupersession(result, state.allEvents);
+            const supersession = executionTarget
+                ? { eventIds: [], events: [], problems: [] }
+                : planTwsBaselineSupersession(result, state.allEvents);
             result.supersedeTwsEventIds = supersession.eventIds;
+            if (executionTarget) {
+                const relevantProblems = targetExecutionProblems(result.problems,
+                    response.executions, { ...executionTarget, symbol: book.symbol });
+                const executionMatch = planTargetExecutionReconciliation(
+                    executionTarget, result.events, state.allEvents);
+                if (!executionMatch.complete || relevantProblems.length) {
+                    const allProblems = relevantProblems;
+                    const detail = allProblems.length
+                        ? `\n${allProblems.map((item) => item.reason).join('\n')}`
+                        : (executionMatch.reason ? `\n${executionMatch.reason}` : '');
+                    globalScope.alert('TWS 成交按时间回放后无法精确贴合当前持仓。'
+                        + '不会用 AvgCost 代替真实交易；请稍后重拉、使用次日 CSV，'
+                        + '或明确选择 AvgCost 后备草稿。'
+                        + detail);
+                    return;
+                }
+                result.supersedeTwsEventIds = executionMatch.supersedeEventIds;
+                const matchedRefs = new Set(executionMatch.events.map(
+                    (event) => String(event.externalRef || '')));
+                const rebatesByExecution = new Map();
+                result.events.filter((event) => event.tag === 'ibkr_rebate')
+                    .forEach((event) => {
+                        const ref = String(event.externalRef || '').replace(/-rebate$/, '');
+                        if (!rebatesByExecution.has(ref)) rebatesByExecution.set(ref, []);
+                        rebatesByExecution.get(ref).push(event);
+                    });
+                result.events = [];
+                executionMatch.events.forEach((event) => {
+                    result.events.push(event);
+                    (rebatesByExecution.get(String(event.externalRef || '')) || [])
+                        .forEach((rebate) => result.events.push(rebate));
+                });
+                result.problems = [];
+                const byKind = {};
+                result.events.forEach((event) => {
+                    byKind[event.kind] = (byKind[event.kind] || 0) + 1;
+                });
+                result.summary = {
+                    total: Array.isArray(response.executions) ? response.executions.length : 0,
+                    drafted: result.events.length,
+                    problems: 0,
+                    skipped: Math.max(0, (Array.isArray(response.executions)
+                        ? response.executions.length : 0) - matchedRefs.size),
+                    byKind,
+                };
+                result.reconciliationExecution = {
+                    key: executionTarget.key,
+                    complete: true,
+                    movement: executionMatch.movement,
+                    expectedContracts: executionMatch.expectedContracts,
+                    matchedContracts: executionMatch.matchedContracts,
+                    replacedBaselines: executionMatch.supersedeEventIds.length,
+                    replayedExecutions: executionMatch.events.length,
+                    startingContracts: executionMatch.startingContracts,
+                    finalContracts: executionMatch.finalContracts,
+                };
+                result.twsReconciliation = {
+                    kind: 'option',
+                    account: executionTarget.account,
+                    right: executionTarget.right,
+                    strike: executionTarget.strike,
+                    expiry: executionTarget.expiry,
+                    sharesPerContract: executionTarget.sharesPerContract,
+                    conId: executionTarget.conId,
+                    ledgerContracts: Number(executionTarget.ledger || 0),
+                    twsContracts: Number(executionTarget.tws || 0),
+                };
+            }
             if (supersession.problems.length) {
                 result.problems.push(...supersession.problems);
                 result.summary.problems += supersession.problems.length;
@@ -4258,6 +4698,13 @@
             state.importText = '';
             $('import-replace').checked = false;
             _renderImportPreview();
+            _renderReconciliation();
+            if (executionTarget) {
+                const workspace = $('import-workspace');
+                if (workspace && typeof workspace.scrollIntoView === 'function') {
+                    workspace.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            }
             if (!result.events.length && !result.problems.length) {
                 globalScope.alert('未找到新的 TWS 成交。可能是今天没有成交、'
                     + '这些 execId 已在账本中，或当前 API 客户端看不到该订单来源。');
@@ -4272,6 +4719,7 @@
             state.executionFetchPending = false;
             $('btn-fetch-executions').textContent = '↓ 拉取 TWS 成交';
             _refreshControls();
+            _renderReconciliation();
         }
     }
 
@@ -4552,6 +5000,15 @@
         });
         $('reference-price').addEventListener('change', (changeEvent) => {
             state.referencePrice = _numberOrNull(changeEvent.target.value);
+            // Remembered against the book it was typed for, so coming back
+            // to this underlying restores it and no other one inherits it.
+            if (state.bookId) {
+                if (state.referencePrice === null) {
+                    delete state.referencePriceByBook[state.bookId];
+                } else {
+                    state.referencePriceByBook[state.bookId] = state.referencePrice;
+                }
+            }
             _recompute();
         });
         $('what-if-price').addEventListener('input', (inputEvent) => {
@@ -4564,6 +5021,21 @@
             _renderWhatIf();
         });
         $('btn-what-if-current').addEventListener('click', _refreshWhatIfMarketPrice);
+        $('btn-open-premium-expiry').addEventListener('click', _openPremiumExpiry);
+        $('btn-close-premium-expiry').addEventListener('click', () => {
+            $('premium-expiry-modal').close();
+        });
+        // Native dialog supplies Escape, focus trapping and focus restoration.
+        // Only a true backdrop click closes it, not whitespace inside the card.
+        $('premium-expiry-modal').addEventListener('click', (clickEvent) => {
+            const modal = $('premium-expiry-modal');
+            if (clickEvent.target !== modal) return;
+            const bounds = modal.getBoundingClientRect();
+            if (clickEvent.clientX < bounds.left || clickEvent.clientX > bounds.right
+                || clickEvent.clientY < bounds.top || clickEvent.clientY > bounds.bottom) {
+                modal.close();
+            }
+        });
         $('btn-open-stress-test').addEventListener('click', _openStressTest);
         $('btn-close-stress-test').addEventListener('click', _closeStressTest);
         $('stress-modal').addEventListener('click', (clickEvent) => {
@@ -4687,9 +5159,14 @@
         estimateDeferredLongOptions,
         buildStressTestSeries,
         describeHeadlineCost,
+        planReconcileDisclosure,
+        bookScopedStateReset,
+        pruneReferencePrices,
         canReconcilePositions,
         buildLedgerPositionPreview,
         buildImportBaseline,
+        planTargetExecutionReconciliation,
+        targetExecutionProblems,
         planTwsBaselineSupersession,
         planExecutionReportAliases,
         planImportExecutionAliases,

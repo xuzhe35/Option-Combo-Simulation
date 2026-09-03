@@ -82,6 +82,132 @@ module.exports = {
     name: 'cost_basis_core.js',
     tests: [
         {
+            name: 'expiry premium distribution groups remaining shorts and excludes long options',
+            run() {
+                const core = loadCore();
+                const ledger = core.computeLedger([
+                    shortPut({ expiry: '20260821', contracts: -1, price: 3, fees: 1 }),
+                    shortPut({ contracts: -4, price: 2, fees: 4 }),
+                    shortCall({ expiry: '20260717', contracts: -2, price: 1.5, fees: 2 }),
+                    shortPut({ account: 'U2222222', contracts: -2,
+                        sharesPerContract: 10, price: 1, fees: 2 }),
+                    shortPut({ tradeDate: '2026-06-02', contracts: 1,
+                        price: 0.5, fees: 1, tag: 'ibkr_close' }),
+                    shortPut({ expiry: '20260717', strike: 20, contracts: 3, price: 10 }),
+                    shortCall({ expiry: '20280121', contracts: 2, price: 20 }),
+                ]);
+                const before = JSON.stringify(ledger);
+                const result = core.openShortPremiumByExpiry(ledger);
+                assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+                    rows: [
+                        { expiry: '20260717', putContracts: 5, callContracts: 2,
+                            putPremium: 615, callPremium: 298,
+                            totalPremium: 913, cumulativePremium: 913 },
+                        { expiry: '20260821', putContracts: 1, callContracts: 0,
+                            putPremium: 299, callPremium: 0,
+                            totalPremium: 299, cumulativePremium: 1212 },
+                    ],
+                    totalPremium: 1212, totalContracts: 8,
+                });
+                assert.equal(result.totalPremium, ledger.combined.openShortPremium);
+                assert.equal(JSON.stringify(ledger), before, 'display aggregation is read-only');
+            },
+        },
+        {
+            name: 'expiry premium preserves fractional cents through partial closes and cumulative sums',
+            run() {
+                const core = loadCore();
+                const ledger = core.computeLedger([
+                    shortPut({ contracts: -4, price: 1, fees: 0.03 }),
+                    shortPut({ contracts: 1, price: 0.2, tradeDate: '2026-06-02' }),
+                    shortCall({ contracts: -4, price: 1, fees: 0.03 }),
+                    shortCall({ contracts: 1, price: 0.2, tradeDate: '2026-06-02' }),
+                ]);
+                const result = core.openShortPremiumByExpiry(ledger);
+                assert.equal(result.rows[0].totalPremium, 299.9775);
+                assert.equal(result.rows[1].totalPremium, 299.9775);
+                assert.equal(result.totalPremium, 599.955);
+                assert.equal(result.totalPremium, ledger.combined.openShortPremium);
+                assert.equal(result.rows[1].cumulativePremium, result.totalPremium);
+            },
+        },
+        {
+            name: 'expiry distribution changes only on recorded closes and settlements, not the clock',
+            run() {
+                const core = loadCore();
+                const opening = shortPut({ contracts: -2, price: 2, fees: 2 });
+                const initial = core.computeLedger([opening]);
+                assert.equal(core.openShortPremiumByExpiry(initial).totalPremium, 398,
+                    'a past expiry still carries open premium without a settlement event');
+                const close = shortPut({ tradeDate: '2026-07-01', contracts: 1,
+                    price: 1, fees: 1, tag: 'ibkr_close' });
+                const partial = core.computeLedger([opening, close]);
+                assert.equal(core.openShortPremiumByExpiry(partial).totalPremium, 199);
+                for (const kind of ['option_assignment', 'option_expiry']) {
+                    const settlement = kind === 'option_assignment'
+                        ? putAssignment({ contracts: 1 })
+                        : event({ kind, tradeDate: '2026-07-17', right: 'P', strike: 45,
+                            expiry: '20260717', contracts: 1, sharesPerContract: 100, cashAmount: 0 });
+                    const settled = core.computeLedger([opening, close, settlement]);
+                    const result = core.openShortPremiumByExpiry(settled);
+                    assert.equal(result.rows.length, 0);
+                    assert.equal(result.totalPremium, settled.combined.openShortPremium);
+                    assert.equal(result.totalPremium, 0);
+                }
+            },
+        },
+        {
+            name: 'expiry premium keeps only short cash when trades cross zero',
+            run() {
+                const core = loadCore();
+                const events = [shortPut({ contracts: 2, price: 4 }),
+                    shortPut({ tradeDate: '2026-06-02', contracts: -3, price: 2, fees: 3 })];
+                const short = core.computeLedger(events);
+                assert.equal(core.openShortPremiumByExpiry(short).totalPremium, 199);
+                const long = core.computeLedger(events.concat([
+                    shortPut({ tradeDate: '2026-06-03', contracts: 2, price: 3 }),
+                ]));
+                assert.equal(core.openShortPremiumByExpiry(long).rows.length, 0);
+                assert.equal(long.combined.openShortPremium, 0);
+            },
+        },
+        {
+            name: 'expiry premium honors FOP point values and signed net income',
+            run() {
+                const core = loadCore();
+                const ledger = core.computeLedger([
+                    shortCall({ optionSecType: 'FOP', sharesPerContract: 50,
+                        contracts: -2, price: 10, fees: 2 }),
+                    shortCall({ optionSecType: 'FOP', sharesPerContract: 50,
+                        tradeDate: '2026-06-02', contracts: 1, price: 4, fees: 1 }),
+                ], { secType: 'FUT' });
+                const result = core.openShortPremiumByExpiry(ledger);
+                assert.equal(result.totalContracts, 1);
+                assert.equal(result.totalPremium, 499);
+                assert.equal(result.totalPremium, ledger.combined.openShortPremium);
+                const negative = core.computeLedger([shortPut({ contracts: -1, price: 0.01, fees: 2 })]);
+                assert.equal(core.openShortPremiumByExpiry(negative).totalPremium, -1);
+            },
+        },
+        {
+            name: 'expiry premium handles empty, excluded and unknown-premium positions',
+            run() {
+                const core = loadCore();
+                assert.equal(core.openShortPremiumByExpiry(null).rows.length, 0);
+                const empty = core.computeLedger([
+                    shortPut({ includeInCost: false }), shortCall({ contracts: 1 }),
+                ]);
+                assert.equal(core.openShortPremiumByExpiry(empty).totalContracts, 0);
+                const unknown = core.computeLedger([
+                    shortPut({ contracts: -1, price: 0, tag: 'prior_open' }),
+                ]);
+                assert.equal(core.openShortPremiumByExpiry(unknown).totalContracts, 1);
+                assert.equal(core.openShortPremiumByExpiry(unknown).totalPremium, 0);
+                assert.equal(unknown.combined.costIncomplete, true,
+                    'UI must show incomplete history instead of presenting zero as complete income');
+            },
+        },
+        {
             name: 'broker timestamps order same-day events before insertion sequence',
             run() {
                 const core = loadCore();
@@ -171,6 +297,160 @@ module.exports = {
                 assert.equal(result.events.length, 0);
                 assert.equal(result.problems.length, 1);
                 assert.match(result.problems[0].reason, /佣金/);
+            },
+        },
+        {
+            name: 'a TWS buy-to-close is labelled Close and realizes signed cash',
+            run() {
+                const core = loadCore();
+                const existingOpen = [{
+                    account: 'U17775528', right: 'C', strike: 71,
+                    expiry: '20260902', contracts: -2, sharesPerContract: 100,
+                    conId: 42, localSymbol: 'TQQQ 260902C00071000',
+                }];
+                const result = core.buildExecutionImport([{
+                    execId: 'CLOSE.01', account: 'U17775528', symbol: 'TQQQ',
+                    secType: 'OPT', conId: 42,
+                    localSymbol: 'TQQQ 260902C00071000',
+                    expiry: '20260902', right: 'C', strike: 71, multiplier: 100,
+                    side: 'BOT', quantity: 2, price: 0.30,
+                    brokerTimestamp: '2026-09-02T10:15:20',
+                    commission: 1, commissionAvailable: true,
+                }], {
+                    account: 'U17775528', symbol: 'TQQQ', secType: 'STK',
+                    defaultSharesPerContract: 100, existingOpen,
+                    existingExternalRefs: [],
+                });
+                assert.equal(result.problems.length, 0);
+                assert.equal(result.events[0].tag, 'ibkr_close');
+                assert.equal(result.events[0].contracts, 2);
+                assert.equal(result.events[0].cashAmount, -61);
+
+                const matched = core.matchReconciliationClose({
+                    kind: 'option', account: 'U17775528', right: 'C', strike: 71,
+                    expiry: '20260902', sharesPerContract: 100, conId: 42,
+                    ledger: -2, tws: 0, difference: 2,
+                }, result.events);
+                assert.equal(matched.complete, true);
+                assert.equal(matched.matchedContracts, 2);
+
+                const ledger = core.computeLedger([{
+                    kind: 'option_trade', tradeDate: '2026-09-01',
+                    account: 'U17775528', right: 'C', strike: 71,
+                    expiry: '20260902', contracts: -2, sharesPerContract: 100,
+                    conId: 42, localSymbol: 'TQQQ 260902C00071000',
+                    price: 1, fees: 0, cashAmount: 200,
+                }, result.events[0]]);
+                assert.equal(ledger.openOptions.length, 0);
+                assert.equal(ledger.combined.realizedShortPremium, 139);
+                assert.equal(ledger.combined.netCash, 139);
+            },
+        },
+        {
+            name: 'reconciliation refuses an incomplete or wrong-way Close set',
+            run() {
+                const core = loadCore();
+                const row = {
+                    kind: 'option', account: 'U1', right: 'C', strike: 71,
+                    expiry: '20260902', sharesPerContract: 100,
+                    ledger: -2, tws: 0, difference: 2,
+                };
+                const partial = core.matchReconciliationClose(row, [{
+                    kind: 'option_trade', account: 'U1', right: 'C', strike: 71,
+                    expiry: '20260902', sharesPerContract: 100, contracts: 1,
+                    source: 'execution_report', tag: 'ibkr_close',
+                }]);
+                assert.equal(partial.complete, false);
+                assert.equal(partial.matchedContracts, 1);
+                const wrongWay = core.matchReconciliationClose(row, [{
+                    kind: 'option_trade', account: 'U1', right: 'C', strike: 71,
+                    expiry: '20260902', sharesPerContract: 100, contracts: -2,
+                    source: 'execution_report', tag: 'ibkr_close',
+                }]);
+                assert.equal(wrongWay.complete, false);
+                assert.equal(wrongWay.matchedContracts, 0);
+
+                const increasedShort = core.matchReconciliationClose({
+                    kind: 'option', account: 'U1', right: 'C', strike: 71,
+                    expiry: '20260904', sharesPerContract: 100,
+                    ledger: -1, tws: -2, difference: -1,
+                }, []);
+                assert.equal(increasedShort.eligible, false);
+                assert.equal(increasedShort.expectedContracts, 0);
+
+                const newShort = core.matchReconciliationClose({
+                    kind: 'option', account: 'U1', right: 'C', strike: 71.5,
+                    expiry: '20260904', sharesPerContract: 100,
+                    ledger: 0, tws: -1, difference: -1,
+                }, []);
+                assert.equal(newShort.eligible, false);
+                assert.equal(newShort.expectedContracts, 0);
+            },
+        },
+        {
+            name: 'reconciliation matches real executions for both increases and partial closes',
+            run() {
+                const core = loadCore();
+                const increasedShort = {
+                    kind: 'option', account: 'U1', right: 'C', strike: 71,
+                    expiry: '20260904', sharesPerContract: 100, conId: 71,
+                    ledger: -1, tws: -2, difference: -1,
+                };
+                const opening = {
+                    kind: 'option_trade', account: 'U1', right: 'C', strike: 71,
+                    expiry: '20260904', sharesPerContract: 100, conId: 71,
+                    contracts: -1, source: 'execution_report', tag: 'ibkr_exec',
+                };
+                const increased = core.matchReconciliationExecution(
+                    increasedShort, [opening]);
+                assert.equal(increased.eligible, true);
+                assert.equal(increased.complete, true);
+                assert.equal(increased.matchedContracts, -1);
+                assert.equal(increased.movement, 'position_change');
+
+                const reducedShort = Object.assign({}, increasedShort, {
+                    ledger: -2, tws: -1, difference: 1,
+                });
+                const close = Object.assign({}, opening, {
+                    contracts: 1, tag: 'ibkr_close',
+                });
+                const reduced = core.matchReconciliationExecution(
+                    reducedShort, [close]);
+                assert.equal(reduced.complete, true);
+                assert.equal(reduced.matchedContracts, 1);
+                assert.equal(reduced.movement, 'close');
+            },
+        },
+        {
+            name: 'reconciliation nets every same-contract execution instead of cherry-picking',
+            run() {
+                const core = loadCore();
+                const row = {
+                    kind: 'option', account: 'U1', right: 'C', strike: 71,
+                    expiry: '20260904', sharesPerContract: 100, conId: 71,
+                    ledger: -1, tws: -2, difference: -1,
+                };
+                const common = {
+                    kind: 'option_trade', account: 'U1', right: 'C', strike: 71,
+                    expiry: '20260904', sharesPerContract: 100, conId: 71,
+                    source: 'execution_report',
+                };
+                const matched = core.matchReconciliationExecution(row, [
+                    Object.assign({}, common, { contracts: 1, tag: 'ibkr_close' }),
+                    Object.assign({}, common, { contracts: -2, tag: 'ibkr_exec' }),
+                    Object.assign({}, common, {
+                        strike: 72, contracts: -5, tag: 'ibkr_exec',
+                    }),
+                ]);
+                assert.equal(matched.complete, true);
+                assert.equal(matched.events.length, 2);
+                assert.equal(matched.matchedContracts, -1);
+
+                const incomplete = core.matchReconciliationExecution(row, [
+                    Object.assign({}, common, { contracts: -2, tag: 'ibkr_exec' }),
+                ]);
+                assert.equal(incomplete.complete, false);
+                assert.equal(incomplete.matchedContracts, -2);
             },
         },
         {
