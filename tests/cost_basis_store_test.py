@@ -43,6 +43,15 @@ from cost_basis_store import (
 
 
 class BrokerTimestampTrustTests(unittest.TestCase):
+    def test_database_creation_time_never_substitutes_for_broker_snapshot_clock(self):
+        for created in ('2026-06-03T12:00:00Z', '2026-06-03T12:00:00+08:00',
+                        '2026-06-03T12:00:00-04:00'):
+            event = {'source': 'reconcile', 'tag': 'tws_snapshot',
+                     'tradeDate': '2026-06-03', 'createdAtUtc': created, 'note': ''}
+            self.assertEqual(_exact_event_timestamp(event), '')
+            event['brokerTimestamp'] = '2026-06-03T09:30:00'
+            self.assertEqual(_exact_event_timestamp(event), '2026-06-03T09:30:00')
+
     def test_manual_note_date_is_not_broker_ordering_evidence(self):
         event = {
             'tradeDate': '2026-08-25', 'source': 'manual', 'tag': '',
@@ -749,6 +758,76 @@ class ImportTests(CostBasisStoreTestBase):
         self.assertEqual(sum(item['contracts'] for item in live), -2)
         self.assertAlmostEqual(sum(item['cashAmount'] for item in live), 201.40)
 
+    def test_targeted_tws_replay_replaces_avgcost_baseline_without_cash_guessing(self):
+        adopted = self.append({
+            **self.short_put(date='2026-09-02', contracts=-1,
+                             price=9.9999, fees=0),
+            'source': 'reconcile', 'tag': 'tws_snapshot',
+            'externalRef': 'tws-position-replay',
+        })['event']
+        first = {
+            **self.short_put(date='2026-09-02', contracts=-1,
+                             price=0.41, fees=1.05),
+            'source': 'execution_report', 'tag': 'ibkr_exec',
+            'externalRef': 'ibkr-exec-replay-first',
+            'brokerTimestamp': '2026-09-02T10:01:00',
+        }
+        second = {
+            **self.short_put(date='2026-09-02', contracts=-1,
+                             price=0.47, fees=1.04),
+            'source': 'execution_report', 'tag': 'ibkr_exec',
+            'externalRef': 'ibkr-exec-replay-second',
+            'brokerTimestamp': '2026-09-02T10:02:00',
+        }
+        proof = {
+            'kind': 'option', 'account': 'U1111111', 'right': 'P',
+            'strike': first['strike'], 'expiry': first['expiry'],
+            'sharesPerContract': 100,
+            'ledgerContracts': -1, 'twsContracts': -2,
+        }
+        # Reverse request order: storage persists broker timestamps, and the
+        # ledger listing must still replay them in broker order.
+        result = self.store.import_events(
+            self.book_id, [second, first], import_batch_id=_token('batch'),
+            client_token_prefix=_token('imp'),
+            supersede_tws_event_ids=[adopted['eventId']],
+            tws_reconciliation=proof)
+        self.assertEqual(result['inserted'], 2)
+        self.assertEqual(result['supersededTwsBaselines'], 1)
+        live = self.store.list_events(self.book_id)['events']
+        self.assertEqual(
+            [item['externalRef'] for item in live],
+            ['ibkr-exec-replay-first', 'ibkr-exec-replay-second'])
+        self.assertEqual(sum(item['contracts'] for item in live), -2)
+
+    def test_targeted_tws_replay_rejects_a_stale_ledger_quantity(self):
+        adopted = self.append({
+            **self.short_put(date='2026-09-02', contracts=-1, price=1, fees=0),
+            'source': 'reconcile', 'tag': 'tws_snapshot',
+            'externalRef': 'tws-position-stale-replay',
+        })['event']
+        execution = {
+            **self.short_put(date='2026-09-02', contracts=-1, price=0.41, fees=1),
+            'source': 'execution_report', 'tag': 'ibkr_exec',
+            'externalRef': 'ibkr-exec-stale-replay',
+            'brokerTimestamp': '2026-09-02T10:01:00',
+        }
+        proof = {
+            'kind': 'option', 'account': 'U1111111', 'right': 'P',
+            'strike': execution['strike'], 'expiry': execution['expiry'],
+            'sharesPerContract': 100,
+            'ledgerContracts': -2, 'twsContracts': -2,
+        }
+        with self.assertRaises(InvalidRequestError) as ctx:
+            self.store.import_events(
+                self.book_id, [execution], import_batch_id=_token('batch'),
+                client_token_prefix=_token('imp'),
+                supersede_tws_event_ids=[adopted['eventId']],
+                tws_reconciliation=proof)
+        self.assertIn('ledger changed', str(ctx.exception))
+        live = self.store.list_events(self.book_id)['events']
+        self.assertEqual([item['eventId'] for item in live], [adopted['eventId']])
+
     def test_post_snapshot_increment_cannot_erase_the_tws_baseline(self):
         adopted = self.append({
             **self.short_put(date='2026-06-03', contracts=-1, price=1.23, fees=0),
@@ -794,8 +873,8 @@ class ImportTests(CostBasisStoreTestBase):
         self.assertIsNone(next(
             item for item in live if item['eventId'] == adopted['eventId'])['voidedAtUtc'])
 
-    def test_legacy_tws_baseline_uses_created_at_for_same_day_supersession(self):
-        local_noon_utc = datetime(2026, 6, 3, 12, 0, 0).astimezone(timezone.utc)
+    def test_legacy_tws_baseline_created_at_cannot_prove_same_day_supersession(self):
+        local_noon_utc = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
         self.store._now = lambda: local_noon_utc
         adopted = self.append({
             **self.short_put(date='2026-06-03', contracts=-1, price=1.23, fees=0),
@@ -808,17 +887,17 @@ class ImportTests(CostBasisStoreTestBase):
             'source': 'csv_import', 'externalRef': 'legacy-real-option',
             'note': 'IBKR 2026-06-03, 10:00:00',
         }
-        result = self.store.import_events(
-            self.book_id, [actual], import_batch_id=_token('batch'),
-            client_token_prefix=_token('imp'),
-            supersede_tws_event_ids=[adopted['eventId']])
-        self.assertEqual(result['supersededTwsBaselines'], 1)
+        with self.assertRaises(InvalidRequestError):
+            self.store.import_events(
+                self.book_id, [actual], import_batch_id=_token('batch'),
+                client_token_prefix=_token('imp'),
+                supersede_tws_event_ids=[adopted['eventId']])
         live = self.store.list_events(self.book_id)['events']
         self.assertEqual(len(live), 1)
-        self.assertEqual(live[0]['externalRef'], 'legacy-real-option')
+        self.assertEqual(live[0]['eventId'], adopted['eventId'])
 
-    def test_post_created_legacy_tws_increment_is_not_mistaken_for_history(self):
-        local_noon_utc = datetime(2026, 6, 3, 12, 0, 0).astimezone(timezone.utc)
+    def test_post_created_legacy_tws_increment_remains_ambiguous_without_broker_clock(self):
+        local_noon_utc = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.utc)
         self.store._now = lambda: local_noon_utc
         adopted = self.append({
             **self.short_put(date='2026-06-03', contracts=-1, price=1.23, fees=0),
@@ -831,13 +910,12 @@ class ImportTests(CostBasisStoreTestBase):
             'source': 'csv_import', 'externalRef': 'legacy-later-option',
             'note': 'IBKR 2026-06-03, 13:00:00',
         }
-        result = self.store.import_events(
-            self.book_id, [later], import_batch_id=_token('batch'),
-            client_token_prefix=_token('imp'))
-        self.assertEqual(result['inserted'], 1)
-        self.assertEqual(result['supersededTwsBaselines'], 0)
+        with self.assertRaisesRegex(InvalidRequestError, 'overlaps'):
+            self.store.import_events(
+                self.book_id, [later], import_batch_id=_token('batch'),
+                client_token_prefix=_token('imp'))
         live = self.store.list_events(self.book_id)['events']
-        self.assertEqual(len(live), 2)
+        self.assertEqual(len(live), 1)
         self.assertIsNone(next(
             item for item in live if item['eventId'] == adopted['eventId'])['voidedAtUtc'])
 

@@ -77,7 +77,12 @@ def execution_filter_time(since_timestamp, broker_now):
         '%Y%m%d-%H:%M:%S')
 
 
-def serialize_fill(fill, *, target_timezone=None):
+_NO_COMMISSION_OVERRIDE = object()
+
+
+def serialize_fill(
+        fill, *, target_timezone=None,
+        commission_report_override=_NO_COMMISSION_OVERRIDE):
     """Turn one ib_async Fill into a JSON-safe execution row.
 
     BAG summary fills are intentionally excluded.  IB normally returns the
@@ -106,7 +111,11 @@ def serialize_fill(fill, *, target_timezone=None):
     if quantity is None or quantity <= 0 or price is None or price < 0:
         return None, 'invalid_economics'
 
-    report = getattr(fill, 'commissionReport', None)
+    report = (
+        getattr(fill, 'commissionReport', None)
+        if commission_report_override is _NO_COMMISSION_OVERRIDE
+        else commission_report_override
+    )
     commission = _finite(getattr(report, 'commission', None)) if report is not None else None
     commission_currency = _upper(
         getattr(report, 'currency', '')) if report is not None else ''
@@ -152,15 +161,29 @@ def serialize_fill(fill, *, target_timezone=None):
     }, ''
 
 
-def serialize_fills(fills, *, account='', symbol='', target_timezone=None):
+def serialize_fills(
+        fills, *, account='', symbol='', target_timezone=None,
+        commission_reports_by_exec_id=None):
     """Serialize, filter and execId-de-duplicate a broker response."""
     wanted_account = _upper(account)
     wanted_symbol = _upper(symbol)
+    commission_reports = commission_reports_by_exec_id or {}
     rows = []
     seen = set()
     ignored = {}
     for fill in fills or []:
-        row, reason = serialize_fill(fill, target_timezone=target_timezone)
+        execution = getattr(fill, 'execution', None)
+        exec_id = _text(getattr(execution, 'execId', ''))
+        report_override = (
+            commission_reports[exec_id]
+            if exec_id in commission_reports
+            else _NO_COMMISSION_OVERRIDE
+        )
+        row, reason = serialize_fill(
+            fill,
+            target_timezone=target_timezone,
+            commission_report_override=report_override,
+        )
         if row is None:
             ignored[reason] = ignored.get(reason, 0) + 1
             continue

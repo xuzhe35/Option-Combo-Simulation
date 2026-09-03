@@ -630,7 +630,7 @@ _BROKER_TIMESTAMP_RE = re.compile(
 
 
 def _exact_event_timestamp(event):
-    """Return official local broker ordering evidence, with legacy fallbacks."""
+    """Return broker-clock evidence only, including trusted legacy audit notes."""
     for field in ('brokerTimestamp', 'broker_timestamp'):
         try:
             explicit = event[field]
@@ -651,27 +651,10 @@ def _exact_event_timestamp(event):
                 f'{match.group(3)}:{match.group(4) or "00"}'
             )
 
-    # Legacy TWS baselines predate the note-level snapshot timestamp, but
-    # their immutable SQLite creation time is still exact. Both the browser
-    # snapshot and IBKR Activity Statement are recorded in this machine's
-    # local time, so convert UTC back to local for the same comparison. A
-    # timezone/date disagreement stays ambiguous and therefore fail-closed.
-    if source != 'reconcile' or tag != 'tws_snapshot':
-        return ''
-    created = (event.get('createdAtUtc') or event.get('created_at_utc') or '') \
-        if hasattr(event, 'get') else event['created_at_utc']
-    try:
-        parsed = datetime.fromisoformat(str(created).replace('Z', '+00:00'))
-        if parsed.tzinfo is None:
-            return ''
-        local = parsed.astimezone()
-    except (TypeError, ValueError):
-        return ''
-    trade_date = (event.get('tradeDate') or event.get('trade_date') or '') \
-        if hasattr(event, 'get') else event['trade_date']
-    if local.strftime('%Y-%m-%d') != str(trade_date):
-        return ''
-    return local.strftime('%Y-%m-%dT%H:%M:%S')
+    # SQLite insertion time is not the broker snapshot time, even when both
+    # happen on the same date. Match the page: no clock means date-level
+    # ambiguity; only the explicit targeted quantity proof can resolve it.
+    return ''
 
 
 def _event_precedes_tws_snapshot(event, baseline):
@@ -681,8 +664,7 @@ def _event_precedes_tws_snapshot(event, baseline):
         if exact_event:
             return exact_event <= exact_snapshot
         return event['trade_date'] < baseline['tradeDate']
-    # A truly legacy/corrupt row with neither an audit-note timestamp nor a
-    # usable immutable creation time remains ambiguous on the same day.
+    # Without a broker clock, same-day ordering remains ambiguous.
     return event['trade_date'] < baseline['tradeDate']
 
 
@@ -2085,7 +2067,104 @@ class CostBasisStore:
             return
         raise PositionOverdrawError(detail)
 
-    def _validate_tws_supersessions(self, conn, book_id, event_ids, incoming_rows):
+    def _tws_option_replay_proves_supersession(
+            self, conn, book_id, baseline, incoming_rows, proof):
+        """Validate a targeted TWS fill replay against the stored ledger.
+
+        The UI supplies the current TWS quantity it just reconciled, but it
+        cannot supply the ledger side of the proof: that value is recomputed
+        here inside the write transaction.  This makes a stale preview fail
+        instead of deleting a provisional row after the ledger has changed.
+        """
+        if proof is None:
+            return False
+        if not isinstance(proof, dict) or proof.get('kind') != 'option':
+            raise InvalidRequestError('twsReconciliation must describe one option')
+        descriptor = {
+            'account': _optional_account(proof.get('account')),
+            'right': str(proof.get('right') or '').strip().upper()[:1],
+            'strike': _number(proof.get('strike'), 'twsReconciliation.strike',
+                              allow_none=False),
+            'expiry': _optional_expiry(proof.get('expiry')),
+            'sharesPerContract': _positive_int(
+                proof.get('sharesPerContract'),
+                'twsReconciliation.sharesPerContract', allow_none=False),
+        }
+        if descriptor['right'] not in ('C', 'P') or not descriptor['expiry']:
+            raise InvalidRequestError('twsReconciliation option identity is incomplete')
+        if contract_key(descriptor) != contract_key(baseline):
+            raise InvalidRequestError(
+                'twsReconciliation does not match the adopted TWS baseline')
+        proof_con_id = _positive_int(
+            proof.get('conId'), 'twsReconciliation.conId')
+        baseline_con_id = baseline.get('conId')
+        if (proof_con_id and baseline_con_id
+                and str(proof_con_id) != str(baseline_con_id)):
+            raise InvalidRequestError(
+                'twsReconciliation conId does not match the adopted baseline')
+        ledger_contracts = _number(
+            proof.get('ledgerContracts'), 'twsReconciliation.ledgerContracts',
+            allow_none=False)
+        tws_contracts = _number(
+            proof.get('twsContracts'), 'twsReconciliation.twsContracts',
+            allow_none=False)
+
+        active_rows = conn.execute(
+            'SELECT * FROM cost_basis_events WHERE book_id = ? '
+            'AND voided_at_utc IS NULL AND include_in_cost = 1 '
+            'AND account = ? AND contracts IS NOT NULL',
+            (book_id, descriptor['account']),
+        ).fetchall()
+        current_contracts = 0.0
+        for active_row in active_rows:
+            active = _event_row_to_dict(active_row)
+            if contract_key(active) != contract_key(descriptor):
+                continue
+            active_con_id = active.get('conId')
+            if (proof_con_id and active_con_id
+                    and str(proof_con_id) != str(active_con_id)):
+                continue
+            current_contracts += float(active.get('contracts') or 0)
+        if abs(current_contracts - ledger_contracts) >= 1e-6:
+            raise InvalidRequestError(
+                'the ledger changed after the TWS reconciliation preview')
+
+        matching = []
+        for item in incoming_rows:
+            if (item['kind'] != 'option_trade'
+                    or item['source'] != 'execution_report'
+                    or item['tag'] not in ('ibkr_exec', 'ibkr_close')
+                    or item['contracts'] is None
+                    or contract_key(item) != contract_key(descriptor)):
+                continue
+            item_con_id = item.get('con_id')
+            if (proof_con_id and item_con_id
+                    and str(proof_con_id) != str(item_con_id)):
+                continue
+            if not item.get('broker_timestamp') or not item.get('external_ref'):
+                raise InvalidRequestError(
+                    'TWS reconciliation executions need broker time and execId')
+            duplicate = conn.execute(
+                'SELECT 1 FROM cost_basis_events WHERE book_id = ? '
+                'AND account = ? AND external_ref = ?',
+                (book_id, item['account'], item['external_ref']),
+            ).fetchone()
+            if duplicate is not None:
+                raise InvalidRequestError(
+                    'the TWS reconciliation preview is stale; an execId already exists')
+            matching.append(item)
+        if not matching:
+            raise InvalidRequestError(
+                'twsReconciliation contains no matching TWS executions')
+        replayed = (current_contracts - float(baseline.get('contracts') or 0)
+                    + sum(float(item['contracts'] or 0) for item in matching))
+        if abs(replayed - tws_contracts) >= 1e-6:
+            raise InvalidRequestError(
+                'ordered TWS executions do not reach the reconciled TWS position')
+        return True
+
+    def _validate_tws_supersessions(self, conn, book_id, event_ids, incoming_rows,
+                                    tws_reconciliation=None):
         """Return active provisional rows that broker history can replace.
 
         The browser supplies candidate ids for preview purposes, but the
@@ -2137,6 +2216,8 @@ class CostBasisStore:
                 if len(siblings) != 1:
                     raise InvalidRequestError(
                         'ambiguous adopted TWS option baselines require manual review')
+                replay_proven = self._tws_option_replay_proves_supersession(
+                    conn, book_id, baseline, incoming_rows, tws_reconciliation)
                 matching = [item for item in incoming_rows
                             if item['source'] in ('csv_import', 'execution_report')
                             and item['tag'] != 'prior_open'
@@ -2147,15 +2228,16 @@ class CostBasisStore:
                            if item['con_id'] not in (None, '')}
                 baseline_con_id = ('' if row['con_id'] in (None, '')
                                    else str(row['con_id']))
-                if (not matching or len(con_ids) > 1
+                if (not replay_proven and (not matching or len(con_ids) > 1
                         or (baseline_con_id and con_ids
-                            and baseline_con_id not in con_ids)):
+                            and baseline_con_id not in con_ids))):
                     raise InvalidRequestError(
                         'broker history contract identity does not prove this TWS baseline')
                 reconstructed = sum(float(item['contracts'] or 0) for item in matching)
                 exact_api_execution = _single_execution_reconstructs_option_baseline(
                     baseline, matching, incoming_rows)
-                if (abs(reconstructed - float(row['contracts'] or 0)) >= 1e-6
+                if (not replay_proven
+                        and abs(reconstructed - float(row['contracts'] or 0)) >= 1e-6
                         and not exact_api_execution):
                     raise InvalidRequestError(
                         'broker history does not reconstruct the adopted TWS option quantity')
@@ -2283,7 +2365,8 @@ class CostBasisStore:
                     'or use reviewed rebuild')
 
     def import_events(self, book_id, events, *, import_batch_id, client_token_prefix,
-                      allow_overdraw=False, supersede_tws_event_ids=None):
+                      allow_overdraw=False, supersede_tws_event_ids=None,
+                      tws_reconciliation=None):
         """Bulk-append reviewed rows from a broker statement.
 
         Rows whose external_ref already exists are skipped, not merged: an
@@ -2330,7 +2413,8 @@ class CostBasisStore:
                     }
 
                 superseded_rows = self._validate_tws_supersessions(
-                    conn, book_id, supersede_tws_event_ids, normalized_rows)
+                    conn, book_id, supersede_tws_event_ids, normalized_rows,
+                    tws_reconciliation)
                 self._reject_unresolved_tws_overlap(
                     conn, book_id, normalized_rows, superseded_rows)
                 supersede_stamp = self._utc_now_iso()

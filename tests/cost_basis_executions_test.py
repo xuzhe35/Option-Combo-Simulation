@@ -62,6 +62,24 @@ class CostBasisExecutionSerializationTests(unittest.TestCase):
         row, _ = serialize_fill(_fill(commission=-0.18))
         self.assertEqual(row['commission'], -0.18)
 
+    def test_cached_commission_does_not_replace_fresh_execution_time(self):
+        queried = _fill(commission=None, currency='')
+        queried.execution.time = datetime.datetime(
+            2026, 9, 2, 1, 30, 0, tzinfo=datetime.timezone.utc)
+        cached_report = types.SimpleNamespace(
+            commission=1.25, currency='USD', realizedPNL=260.5)
+
+        result = serialize_fills(
+            [queried],
+            target_timezone=ZoneInfo('America/New_York'),
+            commission_reports_by_exec_id={'E1': cached_report},
+        )
+
+        row = result['executions'][0]
+        self.assertEqual(row['brokerTimestamp'], '2026-09-01T21:30:00')
+        self.assertEqual(row['commission'], 1.25)
+        self.assertEqual(row['realizedPnl'], 260.5)
+
     def test_aware_utc_execution_is_rendered_in_tws_timezone(self):
         fill = _fill()
         fill.execution.time = datetime.datetime(
