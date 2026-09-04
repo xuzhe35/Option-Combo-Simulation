@@ -19,13 +19,14 @@ service (Options DB workspace, EOD chains). Run:
     OPTION_COMBO_CHAIN_SERVICE_URL=http://host:port python3 scripts/skew_regime_study.py
 
 Result 2026-09-05 (seven QQQ crashes 2015-2025, 34 expiry cases): sticky-strike
-+ parallel shift fits better in 22/34 (mean RMSE 2.26 vs 2.60 vol points);
-OTM-put IV rose by about the ATM shift, i.e. the whole smile lifted roughly
-in parallel; the shift by tenor relative to ~30 days was ~0.9 at 120 days,
-0.57 at 240 and 0.48 at ~400 (about (30/DTE)^0.25, far above sqrt); front beta
-was 0.7 (slow -6%), 1.3-1.7 (3-4 weeks, -12..-15%), 2.3-2.9 (days, or with a
-VIX spike). The stress test therefore keeps sticky-strike + level shift and
-uses exponent 0.25 as its default tenor damping."""
++ parallel shift fits better in 22/34 (mean RMSE 2.26 vs 2.60 vol points).
+Tenor scaling of the STICKY-STRIKE shift relative to the ~30-day one (an
+earlier revision divided the sticky-delta shift by the sticky-strike front and
+reported ~0.9/0.57/0.48 - wrong, withdrawn): median 0.74 at 60 days, 0.44 at
+120, 0.21 at 240, 0.15 at ~400; least-squares exponent p ~ 0.67, i.e. faster
+than the square-root rule. Front beta (sticky-strike) 0.3-2.1 across episodes.
+The stress test keeps sticky-strike + level shift and uses p = 0.65 as its
+default tenor damping."""
 import json
 import math
 import statistics
@@ -159,24 +160,44 @@ def main():
                   f"{r['shift_ss']*100:>+8.1f}p{r['err_ss']*100:>6.2f} | {r['shift_sd']*100:>+8.1f}p{r['err_sd']*100:>6.2f} | {oa} / {osd}")
             summary.append({'drop': drop, **r, 'front_shift': ref})
     # aggregate: which rule fits, and tenor scaling of the level shift
+    if not summary:
+        sys.exit('no episode produced data: is the options-chain service running at '
+                 f'{BASE}? Start it with `python3 chain_server.py` in the Options DB '
+                 'workspace (chain_service/), or point OPTION_COMBO_CHAIN_SERVICE_URL at it.')
     print('\n=== aggregate ===')
     better_sd = sum(1 for r in summary if r['err_sd'] < r['err_ss'])
     print(f'sticky-delta + parallel shift beats sticky-strike + parallel shift in {better_sd}/{len(summary)} expiry cases')
     print(f"mean rmse: sticky-strike {statistics.mean(r['err_ss'] for r in summary)*100:.2f} pts, sticky-delta {statistics.mean(r['err_sd'] for r in summary)*100:.2f} pts")
-    print('\nlevel shift vs front (~30d) and vs sqrt(30/DTE):')
-    print(f"{'DTE0':>5} {'ratio to front':>15} {'sqrt(30/DTE)':>13}  (n)")
+    # Tenor scaling of the STICKY-STRIKE level shift (the rule the stress test
+    # uses) relative to the same episode's front (~30d) sticky-strike shift.
+    # Mixing in the sticky-delta shift here would compare two different
+    # models' intercepts (Review 19.3).
+    print('\nlevel shift (sticky-strike) vs front (~30d), against (30/DTE)^p:')
+    print(f"{'DTE0':>5} {'ratio to front':>15} {'p=0.5':>7} {'p=0.25':>7}  (n)  [values]")
     buckets = {}
     for r in summary:
         if r['front_shift'] and r['front_shift'] > 0.01:
             b = min(TARGET_DTES, key=lambda t: abs(t - r['dte0']))
-            buckets.setdefault(b, []).append(r['shift_sd'] / r['front_shift'])
+            buckets.setdefault(b, []).append(r['shift_ss'] / r['front_shift'])
     for b in sorted(buckets):
         vals = buckets[b]
-        print(f"{b:>5} {statistics.median(vals):>15.2f} {math.sqrt(30 / b):>13.2f}  ({len(vals)})")
-    print('\nbeta = front ATM shift / |drop| (pts per 1%):')
+        print(f"{b:>5} {statistics.median(vals):>15.2f} {math.sqrt(30 / b):>7.2f} {(30 / b) ** 0.25:>7.2f}  ({len(vals)})  "
+              + ' '.join(f'{v:.2f}' for v in vals))
+    # Best-fit exponent p in ratio = (30/DTE)^p over all non-front rows.
+    fit_x, fit_y = [], []
+    for b, vals in buckets.items():
+        if b <= 30:
+            continue
+        for v in vals:
+            if v > 0:
+                fit_x.append(math.log(30 / b)); fit_y.append(math.log(v))
+    if fit_x:
+        p_hat = sum(x * y for x, y in zip(fit_x, fit_y)) / sum(x * x for x in fit_x)
+        print(f'best-fit exponent p (least squares through origin in logs): {p_hat:.3f}  (n={len(fit_x)})')
+    print('\nbeta = front sticky-strike shift / |drop| (pts per 1%):')
     for r in summary:
         if abs(r['dte0'] - 30) <= 15 and r['drop'] < 0:
-            print(f"  drop {r['drop']:+.1f}%  front shift {r['shift_sd']*100:+.1f} pts  beta {r['shift_sd']*100/(-r['drop']):.2f}")
+            print(f"  drop {r['drop']:+.1f}%  front shift {r['shift_ss']*100:+.1f} pts  beta {r['shift_ss']*100/(-r['drop']):.2f}")
 
 
 if __name__ == '__main__':

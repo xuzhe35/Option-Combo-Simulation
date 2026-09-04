@@ -53,13 +53,17 @@
     const LINKED_IV_DEFAULT_BETA = 1.5;
     const LINKED_IV_MAX_BETA = 20;
     // Tenor damping: beta values describe ~30-day IV; longer-dated IV moves
-    // less, roughly like sqrt(reference tenor / remaining days), capped at 1.
+    // less, like (reference tenor / remaining days)^p capped at 1; p defaults
+    // to the historical fit below (sqrt would be p = 0.5).
     const LINKED_IV_DEFAULT_TENOR_DAYS = 30;
-    // Damping exponent for (reference / remaining days)^p. 0.25 is the fit
-    // to seven QQQ crashes 2015-2025 (scripts/skew_regime_study.py): the
-    // level shift of ~1-year IV was about half the ~30-day shift, not the
-    // quarter a square-root rule (p = 0.5) would give.
-    const LINKED_IV_DEFAULT_TENOR_EXPONENT = 0.25;
+    // Damping exponent for (reference / remaining days)^p. 0.65 is the
+    // least-squares fit of the sticky-strike level shift by tenor over seven
+    // QQQ crashes 2015-2025 (scripts/skew_regime_study.py, p_hat 0.67): OTM
+    // put IV at ~1 year moved only ~0.15-0.2 of the ~30-day shift. ATM-only
+    // shifts decay closer to the square-root rule (p = 0.5), kept as option.
+    // (An earlier 0.25 default came from a numerator mix-up in the study and
+    // was withdrawn - Review 19.3.)
+    const LINKED_IV_DEFAULT_TENOR_EXPONENT = 0.65;
     const LINKED_MAX_HORIZON_DAYS = 3650;
     const DAY_MS = 24 * 60 * 60 * 1000;
     // Typing "20" must not fire a TWS snapshot for "2" and then "20".
@@ -599,12 +603,16 @@
             .map((quote) => {
                 const iv = Number(quote && quote.impliedVolatility);
                 if (!Number.isFinite(iv) || iv <= 0) return quote;
+                // base shock × tenor damping × OTM-put discount: each factor
+                // multiplies what is already there, none overwrites it.
                 let applied = shock;
-                if (otmDiscount === true) applied *= otmShockFactor(quote && quote.strike, spot);
+                if (otmDiscount === true) {
+                    applied *= otmShockFactor(quote && quote.strike, spot, quote && quote.right);
+                }
                 if (reference !== null) {
                     const quoteExpiryAt = _dateUtcFromDigits(quote && quote.expiry);
                     if (quoteExpiryAt !== null && scenarioAt !== null) {
-                        applied = shock * tenorDampingFactor(
+                        applied *= tenorDampingFactor(
                             (quoteExpiryAt - scenarioAt) / DAY_MS, reference, exponent);
                     }
                 }
@@ -920,15 +928,16 @@
      * invented.
      */
     // Spot-vol beta by size of the index drop, from the QQQ daily series
-    // 2012-2026 (scripts/stress_model_validation.py, part A1): ~0.93 vol
-    // points per 1% for 2-5% drops, ~1.05 for 5-10%, ~1.4 above 10%, and
-    // the largest multi-week crashes reach ~1.6. Holding period mattered far
-    // less than size, so the table is keyed on the drop alone.
-    const AUTO_BETA_TABLE = Object.freeze([[0, 0.93], [5, 0.93], [7.5, 1.05], [12, 1.4], [20, 1.6]]);
+    // 2012-2026 pooled over 5-40 day holding periods (part A1b of
+    // scripts/stress_model_validation.py, rounded to 0.05): 0.90 for 2-5%
+    // drops (n=1563), 0.95 for 5-10% (n=809), 1.00 for 10-20% (n=274),
+    // 1.65 above 20% (n=22, thin). Keyed on bucket midpoints.
+    const AUTO_BETA_TABLE = Object.freeze([[0, 0.9], [3.5, 0.9], [7.5, 0.95], [15, 1.0], [25, 1.65]]);
     // OTM puts rose less than ATM in every crash: 10-20% OTM got a median
-    // 0.55 of the ATM shift (part B1). Full shock inside 5% of the money,
-    // linear down to 0.55 at 10% away, flat beyond.
-    const OTM_SHOCK_FLOOR = 0.55;
+    // 0.50 of the ATM shift where ATM rose >= 2 points (part B1, n=33).
+    // Full shock inside 5% of the money, linear down to the floor at 10%
+    // away, flat beyond. Measured on puts only - see otmShockFactor.
+    const OTM_SHOCK_FLOOR = 0.5;
     // Realised vol ran 1.43x the starting ATM IV in 20-day windows that fell
     // 8% or more (part A2); the compounding drag uses sigma^2, so the proxy
     // is scaled up as the index drop approaches that size.
@@ -949,10 +958,16 @@
         return table[table.length - 1][1];
     }
 
-    function otmShockFactor(strike, spot) {
+    /**
+     * Discount on the IV shock for OUT-OF-THE-MONEY PUTS only: that is the
+     * population the crash study measured (part B1). ITM puts and calls of
+     * either side keep the full shock; nothing is extrapolated to them.
+     */
+    function otmShockFactor(strike, spot, right) {
         const k = Number(strike);
         const s = Number(spot);
         if (!Number.isFinite(k) || !Number.isFinite(s) || k <= 0 || s <= 0) return 1;
+        if (String(right || '').toUpperCase().slice(0, 1) !== 'P' || k >= s) return 1;
         const moneyness = Math.abs(Math.log(k / s));
         if (moneyness <= 0.05) return 1;
         if (moneyness >= 0.10) return OTM_SHOCK_FLOOR;
@@ -1559,8 +1574,9 @@
             // moves |ratio| times as much as the index's.
             // Crash scaling of the path sigma keys off the index drop the
             // linear ratio implies, so the mapping itself is not circular.
+            // Signed: an inverse fund (ratio < 0) rallying means the index fell.
             const indexDropEstimate = linkedHedge && !linkedHedge.reason
-                ? changePct / Math.abs(linkedHedge.ratio) : 0;
+                ? changePct / linkedHedge.ratio : 0;
             const pointSigmaScale = linkedHedge && !linkedHedge.reason && linkedHedge.sigmaCrashScale
                 ? crashSigmaScale(indexDropEstimate) : 1;
             const pointSigma = linkedSigma === null || linkedSigma === undefined
@@ -4079,7 +4095,7 @@
             } else if (series.reason === 'invalid_weekly_premium') {
                 failure = '每周权利金无效：请留空或输入不小于 0 的金额。';
             } else if (series.reason === 'invalid_linked_tenor_exponent') {
-                failure = '衰减指数无效：请输入 0.05 到 1 之间的数字（0.25 = 历史拟合，0.5 = 平方根规则）。';
+                failure = '衰减指数无效：请输入 0.05 到 1 之间的数字（0.65 = 价外 Put 历史拟合，0.5 = 平方根 / ATM 口径）。';
             } else if (series.reason === 'invalid_linked_tenor_days') {
                 failure = `参考期限无效：请输入 1 到 ${LINKED_MAX_HORIZON_DAYS} 天（β 所描述的 IV 期限，通常 30）。`;
             } else if (series.reason === 'invalid_linked_iv_shock') {
@@ -4159,9 +4175,9 @@
                                     + `${_money(series.linkedIvShockPoints, 0)} 点）`
                                 : (series.linkedIvMode === 'beta'
                                     ? `（基准点；${series.linkedIvBetaAuto
-                                        ? 'β 按跌幅自适应 0.93–1.6 点/1%（历史回归）'
+                                        ? 'β 按跌幅自适应 0.90–1.65 点/1%（历史回归）'
                                         : `每跌 1% IV +${_money(series.linkedIvBeta, 2)} 点`}`
-                                        + (series.linkedIvOtmDiscount ? '，价外 ≥10% 取 0.55（历史）' : '')
+                                        + (series.linkedIvOtmDiscount ? '，价外 Put ≥10% 取 0.50（历史）' : '')
                                         + (series.linkedIvTenorDamping
                                             ? `，按期限衰减 (${_money(series.linkedIvTenorDays, 0)}/剩余天)^${_money(
                                                 series.linkedIvTenorExponent, 2)}`

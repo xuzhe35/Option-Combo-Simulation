@@ -2030,20 +2030,24 @@ module.exports = {
                 assert.equal(page.linkedIvShockPointsAt('none', -10, 7, 1.5), 0);
                 // Historical calibrations: beta by drop size, OTM discount,
                 // crash scaling of the path sigma.
-                assert.ok(Math.abs(page.autoBetaForDrop(-3) - 0.93) < 1e-9);
-                assert.ok(Math.abs(page.autoBetaForDrop(-7.5) - 1.05) < 1e-9);
-                assert.ok(Math.abs(page.autoBetaForDrop(-12) - 1.4) < 1e-9);
-                assert.ok(Math.abs(page.autoBetaForDrop(-16) - 1.5) < 1e-9);
-                assert.ok(Math.abs(page.autoBetaForDrop(-40) - 1.6) < 1e-9);
-                assert.ok(Math.abs(page.linkedIvShockPointsAt('beta', -12, 0, 9, true) - 16.8) < 1e-9);
+                assert.ok(Math.abs(page.autoBetaForDrop(-3) - 0.9) < 1e-9);
+                assert.ok(Math.abs(page.autoBetaForDrop(-7.5) - 0.95) < 1e-9);
+                assert.ok(Math.abs(page.autoBetaForDrop(-15) - 1.0) < 1e-9);
+                assert.ok(Math.abs(page.autoBetaForDrop(-20) - 1.325) < 1e-9);
+                assert.ok(Math.abs(page.autoBetaForDrop(-40) - 1.65) < 1e-9);
+                assert.ok(Math.abs(page.linkedIvShockPointsAt('beta', -15, 0, 9, true) - 15) < 1e-9);
                 assert.equal(page.linkedIvShockPointsAt('beta', -12, 0, 1.5, false), 18);
-                assert.equal(page.otmShockFactor(500, 500), 1);
-                assert.equal(page.otmShockFactor(480, 500), 1);
-                assert.ok(Math.abs(page.otmShockFactor(450, 500) - 0.55) < 1e-9);
-                assert.ok(Math.abs(page.otmShockFactor(560, 500) - 0.55) < 1e-9);
-                const mid = page.otmShockFactor(500 * Math.exp(-0.075), 500);
-                assert.ok(mid > 0.55 && mid < 1);
-                assert.equal(page.otmShockFactor('x', 500), 1);
+                // Only OTM puts are discounted: that is what was measured.
+                assert.equal(page.otmShockFactor(500, 500, 'P'), 1);
+                assert.equal(page.otmShockFactor(480, 500, 'P'), 1);
+                assert.ok(Math.abs(page.otmShockFactor(450, 500, 'P') - 0.5) < 1e-9);
+                assert.equal(page.otmShockFactor(560, 500, 'C'), 1);
+                assert.equal(page.otmShockFactor(560, 500, 'P'), 1);
+                assert.equal(page.otmShockFactor(450, 500, 'C'), 1);
+                assert.equal(page.otmShockFactor(450, 500), 1);
+                const mid = page.otmShockFactor(500 * Math.exp(-0.075), 500, 'P');
+                assert.ok(mid > 0.5 && mid < 1);
+                assert.equal(page.otmShockFactor('x', 500, 'P'), 1);
                 assert.equal(page.crashSigmaScale(0), 1);
                 assert.equal(page.crashSigmaScale(5), 1);
                 assert.ok(Math.abs(page.crashSigmaScale(-4) - 1.2) < 1e-9);
@@ -2154,12 +2158,12 @@ module.exports = {
                 assert.equal(page.tenorDampingFactor(10, 30), 1);
                 // Default exponent is the historical fit (0.25); 0.5 is the
                 // square-root rule and stays available.
-                assert.ok(Math.abs(page.tenorDampingFactor(120, 30) - Math.pow(0.25, 0.25)) < 1e-9);
+                assert.ok(Math.abs(page.tenorDampingFactor(120, 30) - Math.pow(0.25, 0.65)) < 1e-9);
                 assert.ok(Math.abs(page.tenorDampingFactor(120, 30, 0.5) - 0.5) < 1e-9);
                 assert.ok(Math.abs(page.tenorDampingFactor(480, 30, 0.25) - 0.5) < 1e-9);
                 assert.equal(page.tenorDampingFactor(120, 30, 'bad'), 1);
                 assert.equal(page.tenorDampingFactor(0, 30), 1);
-                assert.equal(page.normalizeLinkedTenorExponent(''), 0.25);
+                assert.equal(page.normalizeLinkedTenorExponent(''), 0.65);
                 assert.equal(page.normalizeLinkedTenorExponent('0.5'), 0.5);
                 assert.equal(page.normalizeLinkedTenorExponent(0), null);
                 assert.equal(page.normalizeLinkedTenorExponent(2), null);
@@ -2170,11 +2174,11 @@ module.exports = {
                     ivTenorDays: 30, ivTenorExponent: 0.5 });
                 const dampedDefault = withHedge({ ivMode: 'beta', ivBeta: 2, ivTenorDamping: true,
                     ivTenorDays: 30 });
-                assert.equal(dampedDefault.linkedIvTenorExponent, 0.25);
+                assert.equal(dampedDefault.linkedIvTenorExponent, 0.65);
                 assert.ok(Math.abs(dampedDefault.points[0].linkedIvShockPointsMax
-                    - dampedDefault.points[0].linkedIvShockPoints * Math.pow(30 / 137, 0.25)) < 1e-9);
+                    - dampedDefault.points[0].linkedIvShockPoints * Math.pow(30 / 137, 0.65)) < 1e-9);
                 assert.ok(dampedDefault.points[0].linkedIvShockPointsMax
-                    > damped.points[0].linkedIvShockPointsMax);
+                    < damped.points[0].linkedIvShockPointsMax);
                 assert.equal(withHedge({ ivMode: 'beta', ivTenorDamping: true, ivTenorExponent: 3 })
                     .reason, 'invalid_linked_tenor_exponent');
                 // Flags off by default in the pure API: identical to before.
@@ -2193,7 +2197,9 @@ module.exports = {
                 assert.equal(autoBeta.points[5].linkedIvBetaApplied, null);
                 assert.ok(autoDown.linkedIvShockPoints < 9 * (-autoDown.linkedChangePct));
                 // OTM discount: the 480 put (4% away at spot 500) keeps the
-                // full shock, the 560 call (11% away) gets 0.55 of it.
+                // full shock; the 560 CALL is not a put and keeps it too, so
+                // the discounted book equals the plain one except the 470 put
+                // (settled: no IV). Then a real OTM put case follows.
                 const discounted = withHedge({ ivMode: 'beta', ivBeta: 2, ivTenorDamping: false,
                     ivOtmDiscount: true });
                 const plainBeta = withHedge({ ivMode: 'beta', ivBeta: 2, ivTenorDamping: false });
@@ -2201,9 +2207,37 @@ module.exports = {
                 const dDown = discounted.points[0];
                 const pDown = plainBeta.points[0];
                 assert.ok(Math.abs(dDown.linkedIvShockPointsMax - pDown.linkedIvShockPointsMax) < 1e-9);
-                assert.ok(Math.abs(dDown.linkedIvShockPointsMin - 0.55 * pDown.linkedIvShockPointsMax) < 1e-9);
-                assert.ok(dDown.linkedPnl < pDown.linkedPnl);
-                assert.ok(dDown.linkedPnl > linked.points[0].linkedPnl);
+                assert.ok(Math.abs(dDown.linkedIvShockPointsMin - pDown.linkedIvShockPointsMax) < 1e-9);
+                assert.ok(Math.abs(dDown.linkedPnl - pDown.linkedPnl) < 1e-6);
+                // An OTM put 12% away gets half the shock; combined with tenor
+                // damping the factors multiply (Review 19.2), nothing overwrites.
+                const deepPut = [{ right: 'P', strike: 440, expiry: '20270115', contracts: 10,
+                    sharesPerContract: 100, openPremium: -9000 }];
+                const deepPutInputs = Object.assign({}, linkedInputs, { options: [
+                    { right: 'P', strike: 440, expiry: '20270115', impliedVolatility: 0.25,
+                        mark: 9, markSource: 'mid' }] });
+                const farPlain = withHedge({ openOptions: deepPut, marketInputs: deepPutInputs,
+                    ivMode: 'beta', ivBeta: 2, ivTenorDamping: false });
+                const farDisc = withHedge({ openOptions: deepPut, marketInputs: deepPutInputs,
+                    ivMode: 'beta', ivBeta: 2, ivTenorDamping: false, ivOtmDiscount: true });
+                const farBoth = withHedge({ openOptions: deepPut, marketInputs: deepPutInputs,
+                    ivMode: 'beta', ivBeta: 2, ivTenorDamping: true, ivTenorDays: 30,
+                    ivTenorExponent: 0.5, ivOtmDiscount: true });
+                const baseShock = farPlain.points[0].linkedIvShockPointsMax;
+                assert.ok(Math.abs(farDisc.points[0].linkedIvShockPointsMax - 0.5 * baseShock) < 1e-9);
+                assert.ok(Math.abs(farBoth.points[0].linkedIvShockPointsMax
+                    - 0.5 * baseShock * Math.sqrt(30 / 137)) < 1e-9);
+                assert.ok(farDisc.points[0].linkedPnl < farPlain.points[0].linkedPnl);
+                assert.ok(farBoth.points[0].linkedPnl < farDisc.points[0].linkedPnl);
+                // Inverse fund: the crash sigma keys off the SIGNED index move.
+                const inverse = withHedge({ ratio: -3, sigmaCrashScale: true });
+                assert.equal(inverse.available, true);
+                // ETF +30% (points[10]) means the index fell: scaled.
+                assert.ok(inverse.points[10].linkedChangePct < 0);
+                assert.ok(Math.abs(inverse.points[10].linkedSigmaScale - 1.4) < 1e-9);
+                // ETF -30% (points[0]) means the index rose: not scaled.
+                assert.ok(inverse.points[0].linkedChangePct > 0);
+                assert.equal(inverse.points[0].linkedSigmaScale, 1);
                 // Crash sigma: only the drag term moves, only on the downside.
                 const crash = withHedge({ sigmaCrashScale: true });
                 assert.equal(crash.linkedSigmaCrashScale, true);
@@ -2612,7 +2646,7 @@ module.exports = {
                 assert.equal(seeded.ivBetaAuto, true);
                 assert.equal(seeded.ivOtmDiscount, true);
                 assert.equal(seeded.sigmaCrashScale, true);
-                assert.equal(seeded.ivTenorExponent, 0.25);
+                assert.equal(seeded.ivTenorExponent, 0.65);
                 // A horizon is never remembered: it is a scenario, not a setting.
                 assert.equal('horizonDays' in remembered, false);
                 assert.equal(remembered.ivTenorDamping, false);
@@ -2938,7 +2972,7 @@ module.exports = {
                 h.state.stressLinkedIvMode = 'fixed';
                 h.state.stressLinkedIvShockPoints = 20;
                 // The fixed-shock plumbing is checked without the OTM discount
-                // (on by default), which would take the 560 call to 0.55x.
+                // (on by default) so the fixed-shock plumbing is checked alone.
                 h.state.stressLinkedIvOtmDiscount = false;
                 h.renderStress();
                 assert.equal(h.node('stress-linked-iv-shock').value, '20');
@@ -2956,7 +2990,7 @@ module.exports = {
                 assert.equal(h.node('stress-linked-iv-beta-auto').checked, true);
                 assert.equal(h.node('stress-linked-iv-beta').disabled, true);
                 assert.match(h.node('stress-status').textContent,
-                    /β 按跌幅自适应 0\.93–1\.6 点\/1%（历史回归），价外 ≥10% 取 0\.55（历史）/);
+                    /β 按跌幅自适应 0\.90–1\.65 点\/1%（历史回归），价外 Put ≥10% 取 0\.50（历史）/);
                 assert.match(h.node('stress-status').textContent, /σ ×1\.4（历史 RV\/IV）/);
                 h.state.stressLinkedIvBetaAuto = false;
                 h.state.stressLinkedIvOtmDiscount = false;
@@ -2966,7 +3000,7 @@ module.exports = {
                 assert.equal(h.node('stress-linked-iv-beta-field').hidden, false);
                 assert.equal(h.node('stress-linked-iv-shock-field').hidden, true);
                 assert.match(h.node('stress-status').textContent,
-                    /TWS IV 18\.00%–22\.00%（基准点；每跌 1% IV \+1\.50 点，按期限衰减 \(30\/剩余天\)\^0\.25，上涨侧不变）/);
+                    /TWS IV 18\.00%–22\.00%（基准点；每跌 1% IV \+1\.50 点，按期限衰减 \(30\/剩余天\)\^0\.65，上涨侧不变）/);
                 assert.equal(h.node('stress-linked-iv-tenor-field').hidden, false);
                 assert.equal(h.node('stress-linked-iv-tenor').checked, true);
                 h.state.stressLinkedIvTenorDamping = false;

@@ -626,3 +626,159 @@ mtime 正好是回退前那次写入的时间，符合 OneDrive 用云端旧副�
 - `py_compile` 与 `git diff --check`：通过。
 
 最终结论：第 17.2 和 17.3 节已关闭，本轮没有遗留代码级 Review finding。真实 TWS 浏览器验收仍是唯一未完成项。
+
+## 19. `STRESS_MODEL_RESEARCH_MEMO.md` 意图与实现对照 Review（2026-09-05）
+
+### 19.1 范围与总体结论
+
+本轮阅读了 `STRESS_MODEL_RESEARCH_MEMO.md`，并将其第 2、3 节的模型意图逐项对照
+`js/cost_basis.js`、`cost_basis.html`、`scripts/skew_regime_study.py`、
+`scripts/stress_model_validation.py` 和已生成的
+`CODE PLAN/STRESS_MODEL_VALIDATION_2026-09-05.md`。当前代码的主骨架是对的：
+
+- 复利杠杆映射、同一情景日、联动账本按「情景市值 − 今日标记市值」计算；
+- 缺失合约 IV、利率、mark、路径 σ 代理时具名 fail closed；
+- 上涨侧 β 冲击为 0，下跌侧按扫描点自身的联动跌幅计算；
+- 美式 CRR、股息率、点差折算、到期日内在价值的边界处理均已落到计算链。
+
+但实现还不能认定为「完整正确落实备忘意图」。本轮发现 **2 项 P1、3 项 P2、2 项 P3**；
+其中一项会直接使默认开启的 IV 校准组合算错，另一项使期限指数 0.25 的历史校准口径不一致。
+
+### 19.2 [P1] 期限衰减会覆盖已算好的价外折扣
+
+**位置**：`js/cost_basis.js:591-614`
+
+`_applyIvShock()` 先将 `applied` 乘上 `otmShockFactor()`，但一旦合约有有效到期日且启用期限衰减，
+第 607 行又用 `shock * tenorDampingFactor(...)` 重新赋值。因此备忘第 3 节要求的
+「基准冲击 × 期限衰减 × 价外折扣」实际变成了「基准冲击 × 期限衰减」。
+页面的 β 模式默认同时开启这两个校准，所以这不是罕见组合。
+
+可重复的最小例子：基准冲击 10 点、剩余 137 天、参考 30 天、指数 0.25、
+执行价距现货 20% 时，期限因子为 `0.684069`，价外因子为 `0.55`。预期冲击是
+`10 × 0.684069 × 0.55 = 3.762382` 点，实际返回 `6.840694` 点，与只启用期限衰减完全相同。
+
+**建议修复**：期限分支改为 `applied *= tenorDampingFactor(...)`，然后增加一项同时开启
+`ivTenorDamping` 和 `ivOtmDiscount` 的公开估值入口回归，不要只分别测两个开关。
+
+### 19.3 [P1] 期限校准脚本混用 sticky-strike 基准和 sticky-delta 分子
+
+**位置**：`scripts/skew_regime_study.py:152-175`
+
+脚本将最近 30 天合约的 `shift_ss` 存成 `front_shift`，却在聚合各期限比例时使用
+`shift_sd / front_shift`。这会把两种已经被脚本用来互相比较的模型口径混在同一个期限曲线里；
+甚至前端合约自身的比例也不一定为 1。备忘已选择 sticky-strike，因此期限比例应使用
+`shift_ss / front_shift`；如果要校准 sticky-delta，分子和前端基准则都应用 `shift_sd`。
+
+该脚本是默认期限指数 `0.25` 的唯一声称数据来源，而
+`stress_model_validation.py` 并不计算期限指数。因此在改正比例口径并重跑七段历史之前，
+`0.25` 可以作为现有经验值保留，但不应继续表述为已被当前脚本严格复现。
+
+### 19.4 [P2] 反向杠杆账本的崩盘 σ 放大方向反了
+
+**位置**：`js/cost_basis.js:1557-1567`
+
+`ratio = -3` 是设计文档、页面提示和 `normalizeLinkedRatio()` 明确支持的 SQQQ 用法。
+但 `indexDropEstimate` 用 `changePct / Math.abs(ratio)` 去掉了符号。结果是：
+
+- 反向 ETF 上涨 30% 时，复利映射的指数结果为约 `-8.77%`，但 `linkedSigmaScale = 1`；
+- 反向 ETF 下跌 30% 时，指数结果为约 `+11.66%`，却使用 `linkedSigmaScale = 1.4`。
+
+也就是真正的指数下跌不放大，指数上涨反而放大。建议至少使用有符号的
+`changePct / ratio`，并增加 `ratio=-3` 时 ETF 上涨/下跌两端的对称回归。
+
+### 19.5 [P2] 「价外 Put 折扣」被对称应用到 ITM Put 和所有 Call
+
+**位置**：`js/cost_basis.js:596-608`、`js/cost_basis.js:952-960`
+
+`otmShockFactor(strike, spot)` 仅使用 `abs(log(K/S))`，没有期权方向参数。因此它实际表示
+「距 ATM 越远折扣越多」，而不是页面和备忘所说的「价外 Put 折扣」。例如现货 100 时，
+`K=120` 的深度 ITM Put 和 `K=80` 的 OTM Put 都会取 `0.55`；Call 也一样。
+
+历史 B1 只研究了期初 `K < S` 的 QQQ Put，没有验证 ITM Put 或 Call 的相同规律。
+两本账本又都会经过这个函数，所以这是从研究样本到生产适用范围的无声外推。
+建议要么改成 right-aware，只对已验证的 OTM Put 应用；要么把功能和文案明确改称为
+「远离 ATM 折扣」，并补 ITM/Call 的独立数据验证。
+
+### 19.6 [P2] `0.55` 与 `≥20% 取 1.6` 还不能由当前报告复现
+
+**位置**：`scripts/stress_model_validation.py:141-172`、
+`scripts/stress_model_validation.py:221-247`、`js/cost_basis.js:923-931`
+
+- A1 只输出 `2–5%`、`5–10%`、`10%+` 三个跌幅档，没有 `20%+` 档；已生成报告中
+  `10%+` 的各持有期 β 为 `1.53 / 1.41 / 1.28 / 0.99`，没有一行输出 UI 所引的 `1.6`。
+- B1 输出 ATM 抬升、OTM 平均抬升和两者的绝对点数差，但没有计算或输出 OTM/ATM 比例。
+  使用当前 Markdown 报告中 34 行已四舍五入数据复算，「逐行 OTM/ATM 比例的中位数」约为
+  `0.495`，而不是 `0.55`。这不足以单独证明 0.55 错了，但说明必须定义并输出精确的聚合口径。
+
+这与备忘第 5 节「每个参数都要能追溯到脚本里的一行输出」的要求不符。
+建议把两个最终参数的计算直接收口到脚本，输出样本数、聚合方法、原始值和最终取整值，
+再由测试锁定这一聚合过程。
+
+### 19.7 [P3] 研究脚本在数据源不可用时不能给出稳定、可操作的结果
+
+**位置**：`scripts/skew_regime_study.py:143-179`、
+`scripts/stress_model_validation.py:105-133`
+
+本机当前 `127.0.0.1:8750` 的 chain service 未启动，仓库也没有
+`logs/qqq_atm30_series.json` 缓存。`stress_model_validation.py --part A` 直接以
+`ConnectionRefusedError` 退出；`skew_regime_study.py` 虽然逐事件捕获错误并注释「keep going; report」，
+但当 7 个事件全部失败后仍对空 `summary` 调用 `statistics.mean()`，最终以
+`StatisticsError: mean requires at least one data point` 崩溃。
+
+这不影响页面运行时，但会让备忘的参数在没有本地服务时无法验证。建议两个脚本在进入聚合前
+检查空数据，给出一条包含启动方法和缓存路径的明确错误，而不是二次统计异常。
+
+### 19.8 [P3] 页面详细帮助和顶部注释仍将默认期限衰减说成平方根
+
+**位置**：`cost_basis.html:237`、`js/cost_basis.js:55-61`
+
+运行时常量、输入框与 `tenorDampingFactor()` 的默认指数都已是 `0.25`，但长帮助仍写「乘以
+√(参考期限 ÷ 剩余天数)」，顶部注释也还说「roughly like sqrt」。这与备忘第 2.4 节明确推翻
+平方根规则相冲突，会让用户误解图上实际使用的衰减。建议统一改成
+`(参考期限 / 剩余天数)^p，默认 p=0.25`，并保留 `p=0.5` 只是可选对照的说明。
+
+### 19.9 新增测试与实际验证
+
+新增 `tests/stress_model_validation_test.py` 的 5 项离线单测，不依赖 chain service，锁定：
+
+1. 微笑样本必须有真实正 bid、有效 IV，并按 log-moneyness 排序；
+2. IV 微笑插值为线性插值，边界外夹在已观测端点；
+3. 过原点回归能从确定样本恢复已知 β；
+4. 研究用 BSM/CRR 的到期内在价值和 American Put 下界；
+5. skew 研究的 RMSE 与插值基础数学。
+
+验证结果：
+
+- `node tests/run.js`：`1012 passed, 0 failed`；这说明现有回归没有捕获 19.2 的组合开关问题。
+- `python3 tests/stress_model_validation_test.py`：`Ran 5 tests, OK`。
+- 公开 `estimateLinkedLongOptions()` 入口实测复现 19.2 的 `6.840694 vs 3.762382`。
+- 公开 `buildStressTestSeries()` 入口以 `ratio=-3` 实测复现 19.4 的放大方向错置。
+- 历史报告未能实时重跑：当前 chain service 未启动且缓存不存在；上述失败边界已记录在 19.7。
+
+### 19.10 建议处理顺序
+
+1. 先修 19.2 的乘法覆盖，并用组合回归锁住；这是当前默认 β 配置会直接遇到的错算。
+2. 修 19.3 的研究口径并重跑数据；用重跑结果决定是否继续保留 `p=0.25`。
+3. 修 19.4 的负杠杆符号，同时锁定正、负 ratio 两类路径。
+4. 明确 19.5 的产品定义，再补 right-aware 测试；不要在没有证据时继续将 Put 结论外推到所有合约。
+5. 最后把 0.55 / 1.6 的聚合算法收口到脚本，补空数据错误和文案一致性。
+
+最终判定：这一轮的方向和大部分计算链正确，但关键校准的组合实现与参数可复现性仍有实质缺口。
+在 19.2、19.3 关闭前，不建议把当前结果表述为已经完全实现备忘的定量意图。
+
+## 20. §19 意见的核实与处理（2026-09-05）
+
+| 意见 | 核实 | 处理 |
+| --- | --- | --- |
+| 19.2 [P1] 期限衰减覆盖价外折扣 | 成立，`applied = shock * tenor…` 覆盖了前面的乘法 | 改为 `applied *=`；新增公开入口回归：折扣单开 = 0.5×，两者同开 = 0.5 × √(30/137)×，且盈亏单调 |
+| 19.3 [P1] 期限校准脚本混用两种模型的截距 | 成立 | 聚合改为 `shift_ss / front_shift`，并输出每桶原始值与对数最小二乘指数。重跑结果：60 天 0.74、120 天 0.44、240 天 0.21、400 天 0.15，p̂ = 0.67。**0.25 撤回**，默认指数改为 0.65；备忘、计划、控件提示、脚本 docstring 同步改写，明写首版结论有误 |
+| 19.4 [P2] 反向杠杆 σ 放大方向反了 | 成立 | `indexDropEstimate = changePct / ratio`（带符号）；新增 `ratio = -3` 两端回归：ETF +30% → 指数下跌 → ×1.4，ETF −30% → 不放大 |
+| 19.5 [P2] 价外折扣对称套到价内 Put 和 Call | 成立 | `otmShockFactor(strike, spot, right)` 只对价外 Put 打折，其余全额；控件改名「价外 Put 折扣」并注明未验证范围；测试覆盖 ITM Put / Call 取 1 |
+| 19.6 [P2] 0.55 与 1.6 无法由脚本复现 | 成立 | 脚本新增 A1b（持有 5–40 天合并、按跌幅四档过原点回归、四舍五入到 0.05）与 B1 的 OTM/ATM 比例中位数（ATM ≥2 点）。输出：β 0.90 / 0.95 / 1.00 / 1.65（n 1563 / 809 / 274 / 22），OTM/ATM 中位 0.50（n=33）。常量与提示改为这些值 |
+| 19.7 [P3] 数据源不可用时脚本异常 | 成立 | 两个脚本在聚合前检查空数据并给出启动方法与缓存路径的提示；验证脚本开头先探测 `/health`（A 部分有缓存时除外） |
+| 19.8 [P3] 长帮助与顶部注释仍写平方根 | 成立 | 改为 `(参考期限 ÷ 剩余天数)^p`，默认 p = 0.65，0.5 为平方根对照 |
+| 19.9 新增离线测试 | 采纳 | `tests/stress_model_validation_test.py` 5 项保留并随本轮提交，对脚本改动后仍通过 |
+
+验证：`node tests/run.js` 1012 通过；`tests/stress_model_validation_test.py` 5 通过；两个研究脚本已在 chain service 上重跑，报告 `CODE PLAN/STRESS_MODEL_VALIDATION_2026-09-05.md` 已更新为重跑输出。
+
+**对用户的实质影响**：期限衰减从 0.25 改到 0.65 后，2027–2028 年到期的 TQQQ Long Put 在 β 模式下拿到的 IV 抬升从头条数的约 66% 降到 15–25%，比首版的平方根规则还少；价外 Put 折扣从 0.55 降到 0.50；β 表在 10–20% 跌幅档从 1.4 降到 1.0。三项都使保护估值更保守。

@@ -142,9 +142,10 @@ def part_a(out):
     series = [row for row in load_series() if row['atm30']]
     out('\n## A. 现货与 30 天 ATM IV 的关系（QQQ 日频，%d 个交易日）' % len(series))
     out('\n### A1 β = ΔIV30（点）/ 跌幅（%），按持有天数与跌幅分档，过原点回归\n')
-    out(f"{'天数':>4} | {'跌 2–5%':>10} {'跌 5–10%':>10} {'跌 >10%':>10} {'全部下跌':>10} | {'涨 2–5%':>10} {'涨 >5%':>10} {'全部上涨':>10} | n↓ n↑")
+    out(f"{'天数':>4} | {'跌 2–5%':>10} {'跌 5–10%':>10} {'跌 10–20%':>10} {'跌 >20%':>10} {'全部下跌':>10} | {'涨 2–5%':>10} {'涨 >5%':>10} {'全部上涨':>10} | n↓ n↑")
+    pooled = {'2-5': ([], []), '5-10': ([], []), '10-20': ([], []), '20+': ([], [])}
     for h in (1, 2, 5, 10, 20, 40):
-        downs = {'2-5': ([], []), '5-10': ([], []), '10+': ([], []), 'all': ([], [])}
+        downs = {'2-5': ([], []), '5-10': ([], []), '10-20': ([], []), '20+': ([], []), 'all': ([], [])}
         ups = {'2-5': ([], []), '5+': ([], []), 'all': ([], [])}
         for i in range(len(series) - h):
             a, b = series[i], series[i + h]
@@ -155,9 +156,12 @@ def part_a(out):
             if r < 0:
                 mag = -r
                 downs['all'][0].append(mag); downs['all'][1].append(div)
-                key = '2-5' if 2 <= mag < 5 else ('5-10' if 5 <= mag < 10 else ('10+' if mag >= 10 else None))
+                key = '2-5' if 2 <= mag < 5 else ('5-10' if 5 <= mag < 10 else (
+                    '10-20' if 10 <= mag < 20 else ('20+' if mag >= 20 else None)))
                 if key:
                     downs[key][0].append(mag); downs[key][1].append(div)
+                    if h >= 5:
+                        pooled[key][0].append(mag); pooled[key][1].append(div)
             elif r > 0:
                 ups['all'][0].append(r); ups['all'][1].append(div)
                 key = '2-5' if 2 <= r < 5 else ('5+' if r >= 5 else None)
@@ -167,9 +171,18 @@ def part_a(out):
         def cell(pair):
             xs, ys = pair
             return f"{regress_origin(xs, ys):>7.2f}({len(xs):>3})" if len(xs) >= 5 else f"{'--':>12}"
-        out(f"{h:>4} | {cell(downs['2-5'])} {cell(downs['5-10'])} {cell(downs['10+'])} {cell(downs['all'])} | "
+        out(f"{h:>4} | {cell(downs['2-5'])} {cell(downs['5-10'])} {cell(downs['10-20'])} {cell(downs['20+'])} {cell(downs['all'])} | "
             f"{cell(ups['2-5'])} {cell(ups['5+'])} {cell(ups['all'])} | {len(downs['all'][0])} {len(ups['all'][0])}")
     out('\n（读法：单元格 = β（样本数）。β 为每 1% 现货变动对应的 30 天 ATM IV 变动点数；上涨侧为负表示 IV 回落。）')
+    out('\n### A1b 自适应 β 表的来源：持有 5–40 天合并样本，按跌幅档过原点回归\n')
+    out(f"{'跌幅档':>8} {'β':>6} {'n':>6}   → AUTO_BETA_TABLE 取值（四舍五入到 0.05）")
+    for key, label in (('2-5', '2–5%'), ('5-10', '5–10%'), ('10-20', '10–20%'), ('20+', '>20%')):
+        xs, ys = pooled[key]
+        if len(xs) >= 5:
+            beta = regress_origin(xs, ys)
+            out(f"{label:>8} {beta:>6.2f} {len(xs):>6}   → {round(beta * 20) / 20:.2f}")
+        else:
+            out(f"{label:>8} {'--':>6} {len(xs):>6}   → 样本不足，沿用上一档")
 
     out('\n### A2 实现波动率 vs 起始 ATM IV（20 个交易日窗口）\n')
     ratios, crash_ratios = [], []
@@ -187,7 +200,8 @@ def part_a(out):
     out(f'全部窗口 RV/IV 中位数 {statistics.median(ratios):.2f}（n={len(ratios)}），'
         f'25/75 分位 {statistics.quantiles(ratios, n=4)[0]:.2f} / {statistics.quantiles(ratios, n=4)[2]:.2f}')
     if crash_ratios:
-        out(f'跌幅 ≥8% 的窗口 RV/IV 中位数 {statistics.median(crash_ratios):.2f}（n={len(crash_ratios)}）')
+        out(f'跌幅 ≥8% 的窗口 RV/IV 中位数 {statistics.median(crash_ratios):.2f}（n={len(crash_ratios)}）'
+            f'  → CRASH_SIGMA_SCALE 取值 {round(statistics.median(crash_ratios) * 10) / 10:.1f}')
     out('（对复利损耗的含义：损耗 ∝ σ²，用起始 ATM IV 代替路径 σ 时，平静期高估、暴跌期接近或低估。）')
 
 
@@ -221,8 +235,10 @@ def episode(day0, dayn):
 def part_b(out):
     out('\n## B. 事件逐张检验')
     out('\n### B1 深度价外 Put 相对 ATM 的额外抬升（暴跌）\n')
-    out(f"{'事件':<24}{'到期':<11}{'DTE':>4} | {'ATM 抬升':>8} {'价外10-20%':>10} {'价外20%+':>9} | 额外(点)")
+    out(f"{'事件':<24}{'到期':<11}{'DTE':>4} | {'ATM 抬升':>8} {'价外10-20%':>10} {'价外20%+':>9} | 额外(点) | OTM/ATM 比例")
     extra_all = []
+    ratio_all = []
+    ratio_deep = []
     spread_rows = []
     for day0, dayn in CRASHES:
         u0, un, rows = episode(day0, dayn)
@@ -234,7 +250,15 @@ def part_b(out):
             extra = (m1 - shift) if m1 is not None else None
             if extra is not None:
                 extra_all.append(extra)
-            out(f"{day0}→{dayn[5:]:<13}{r['exp']:<11}{r['dte0']:>4} | {shift:>+7.1f} {(f'{m1:+.1f}' if m1 is not None else '--'):>10} {(f'{m2:+.1f}' if m2 is not None else '--'):>9} | {(f'{extra:+.1f}' if extra is not None else '--')}")
+            # The production parameter: how much of the ATM lift an OTM put
+            # gets. Only meaningful when the ATM lift is clearly positive.
+            ratio = (m1 / shift) if (m1 is not None and shift >= 2.0) else None
+            ratio2 = (m2 / shift) if (m2 is not None and shift >= 2.0) else None
+            if ratio is not None:
+                ratio_all.append(ratio)
+            if ratio2 is not None:
+                ratio_deep.append(ratio2)
+            out(f"{day0}→{dayn[5:]:<13}{r['exp']:<11}{r['dte0']:>4} | {shift:>+7.1f} {(f'{m1:+.1f}' if m1 is not None else '--'):>10} {(f'{m2:+.1f}' if m2 is not None else '--'):>9} | {(f'{extra:+.1f}' if extra is not None else '--'):>8} | {(f'{ratio:.2f}' if ratio is not None else '--')}")
             # spreads on OTM puts present both days
             for k, q0, qn in r['pairs']:
                 if 0.7 * u0 <= k <= 0.95 * u0 and q0.get('mark') and qn.get('mark') and q0['mark'] > 0.05 and qn['mark'] > 0.05:
@@ -245,6 +269,11 @@ def part_b(out):
                     })
     if extra_all:
         out(f'\n价外 10–20% Put 相对 ATM 的额外抬升：中位 {statistics.median(extra_all):+.1f} 点，均值 {statistics.mean(extra_all):+.1f} 点（n={len(extra_all)}）')
+    if ratio_all:
+        out(f'价外 10–20% Put 抬升 / ATM 抬升（仅 ATM 抬升 ≥2 点的到期日）：中位 {statistics.median(ratio_all):.2f}，'
+            f'均值 {statistics.mean(ratio_all):.2f}（n={len(ratio_all)}）  → OTM_SHOCK_FLOOR 取值 {round(statistics.median(ratio_all) * 20) / 20:.2f}')
+    if ratio_deep:
+        out(f'价外 20%+ Put 抬升 / ATM 抬升：中位 {statistics.median(ratio_deep):.2f}，均值 {statistics.mean(ratio_deep):.2f}（n={len(ratio_deep)}）')
 
     out('\n### B2 点差在暴跌中的变化（价外 5–30% Put，同一合约前后对比）\n')
     for lo, hi, label in ((0, 45, '≤45 天'), (45, 150, '45–150 天'), (150, 500, '>150 天')):
@@ -323,6 +352,16 @@ def part_c(out):
                 f"{statistics.median(abs(e) for e in errs_a)*100:.2f} / {statistics.median(abs(e) for e in errs_e)*100:.2f}")
 
 
+def _service_or_exit():
+    try:
+        get('/health')
+    except Exception as exc:  # any transport failure: say how to fix it
+        sys.exit(f'options-chain service not reachable at {BASE} ({exc}). Start it with '
+                 '`python3 chain_server.py` in the Options DB workspace (chain_service/), or '
+                 'set OPTION_COMBO_CHAIN_SERVICE_URL. Part A can also run from the cached '
+                 f'series at {os.path.abspath(CACHE)} if it exists.')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--part', choices=['A', 'B', 'C'], default=None)
@@ -334,6 +373,8 @@ def main():
         print(text)
         lines.append(text)
     out(f'# 压力测试模型假设验证 · {SYMBOL} · {date.today().isoformat()}')
+    if not (args.part == 'A' and os.path.exists(CACHE)):
+        _service_or_exit()
     for part, fn in (('A', part_a), ('B', part_b), ('C', part_c)):
         if args.part in (None, part):
             fn(out)
