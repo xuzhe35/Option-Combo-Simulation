@@ -7,6 +7,7 @@
 > 待 TWS 连接后做 §9 浏览器手工验收  
 > 制定日期：2026-09-03  
 > 猜测、验证与反驳的全过程见根目录 `STRESS_MODEL_RESEARCH_MEMO.md`。  
+> 下一步「校准区间带」（紫线改为带子）的计划见 `STRESS_CALIBRATION_BAND_PLAN.md`。  
 > 已确认口径：叠加同账户另一本账本里的**全部未平多头期权（Long Call 与 Long Put 一起）**；
 > 价格映射先用线性收益率外推，不做路径依赖。
 
