@@ -23,10 +23,12 @@ Result 2026-09-05 (seven QQQ crashes 2015-2025, 34 expiry cases): sticky-strike
 Tenor scaling of the STICKY-STRIKE shift relative to the ~30-day one (an
 earlier revision divided the sticky-delta shift by the sticky-strike front and
 reported ~0.9/0.57/0.48 - wrong, withdrawn): median 0.74 at 60 days, 0.44 at
-120, 0.21 at 240, 0.15 at ~400; least-squares exponent p ~ 0.67, i.e. faster
-than the square-root rule. Front beta (sticky-strike) 0.3-2.1 across episodes.
-The stress test keeps sticky-strike + level shift and uses p = 0.65 as its
-default tenor damping."""
+120, 0.21 at 240, 0.15 at ~400. Fitting ratio = (front_DTE / contract_DTE)^p
+on the 25 per-contract rows with each episode's ACTUAL front DTE gives a
+least-squares p of 0.76 and a per-row median implied p of 0.64 - both faster
+than the square-root rule. Front beta (sticky-strike) 0.3-2.1 across
+episodes, too dispersed to set beta from. The stress test keeps sticky-strike
++ level shift and uses p = 0.65 (the robust median side) as its default."""
 import json
 import math
 import statistics
@@ -91,6 +93,51 @@ def rmse(values):
     return math.sqrt(sum(v * v for v in values) / len(values)) if values else float('nan')
 
 
+def tenor_ratio_rows(summary):
+    """Per-contract rows for the tenor fit: each episode's own front contract
+    (its earliest expiry) is the denominator, and BOTH the front's actual DTE
+    and the contract's actual DTE are kept. Bucket centres are for display
+    only and never enter the fit (Review 21.2)."""
+    rows = []
+    for r in summary:
+        front_shift = r.get('front_shift')
+        front_dte = r.get('front_dte')
+        if not front_shift or front_shift <= 0.01 or not front_dte:
+            continue
+        rows.append({'dte0': r['dte0'], 'front_dte': front_dte,
+                     'ratio': r['shift_ss'] / front_shift})
+    return rows
+
+
+def fit_tenor_exponent(rows):
+    """Least squares through the origin of ln(ratio) on ln(front_dte / dte0),
+    over contracts longer than their episode's front with a positive ratio.
+    Returns (p_hat, n); (nan, 0) when nothing qualifies."""
+    xs, ys = [], []
+    for r in rows:
+        if r['dte0'] <= r['front_dte'] or not (r['ratio'] > 0):
+            continue
+        xs.append(math.log(r['front_dte'] / r['dte0']))
+        ys.append(math.log(r['ratio']))
+    if not xs:
+        return float('nan'), 0
+    return sum(x * y for x, y in zip(xs, ys)) / sum(x * x for x in xs), len(xs)
+
+
+def median_row_exponent(rows):
+    """Median of the per-contract implied exponent ln(ratio)/ln(front/dte): a
+    robust companion to the least-squares fit, which a couple of episodes
+    with a tiny front shift can drag around. Returns (median, n)."""
+    values = []
+    for r in rows:
+        if r['dte0'] <= r['front_dte'] or not (r['ratio'] > 0):
+            continue
+        values.append(math.log(r['ratio']) / math.log(r['front_dte'] / r['dte0']))
+    if not values:
+        return float('nan'), 0
+    return statistics.median(values), len(values)
+
+
 def study(day0, dayn):
     u0 = get('/v1/underlying', symbol=SYMBOL, date=day0)['bar']['close']
     un = get('/v1/underlying', symbol=SYMBOL, date=dayn)['bar']['close']
@@ -151,14 +198,16 @@ def main():
         print(f'\n=== {day0} -> {dayn}: QQQ {u0:.2f} -> {un:.2f} ({drop:+.1f}%) ===')
         print(f"{'expiry':<11}{'DTE0':>5}{'ATM0':>7}{'ATMn':>7}{'n':>4} | {'shift ss':>9}{'rmse':>7} | {'shift sd':>9}{'rmse':>7} | OTM10%+ actual / sd-only")
         ref = None
+        ref_dte = None
         for r in rows:
             if ref is None:
                 ref = r['shift_ss']
+                ref_dte = r['dte0']
             oa = f"{r['otm_actual']*100:+.1f}" if r['otm_actual'] is not None else '  -- '
             osd = f"{r['otm_sd']*100:+.1f}" if r['otm_sd'] is not None else '  -- '
             print(f"{r['exp']:<11}{r['dte0']:>5}{r['atm0']*100:>7.1f}{r['atmn']*100:>7.1f}{r['n']:>4} | "
                   f"{r['shift_ss']*100:>+8.1f}p{r['err_ss']*100:>6.2f} | {r['shift_sd']*100:>+8.1f}p{r['err_sd']*100:>6.2f} | {oa} / {osd}")
-            summary.append({'drop': drop, **r, 'front_shift': ref})
+            summary.append({'drop': drop, **r, 'front_shift': ref, 'front_dte': ref_dte})
     # aggregate: which rule fits, and tenor scaling of the level shift
     if not summary:
         sys.exit('no episode produced data: is the options-chain service running at '
@@ -174,26 +223,23 @@ def main():
     # models' intercepts (Review 19.3).
     print('\nlevel shift (sticky-strike) vs front (~30d), against (30/DTE)^p:')
     print(f"{'DTE0':>5} {'ratio to front':>15} {'p=0.5':>7} {'p=0.25':>7}  (n)  [values]")
+    ratio_rows = tenor_ratio_rows(summary)
     buckets = {}
-    for r in summary:
-        if r['front_shift'] and r['front_shift'] > 0.01:
-            b = min(TARGET_DTES, key=lambda t: abs(t - r['dte0']))
-            buckets.setdefault(b, []).append(r['shift_ss'] / r['front_shift'])
+    for r in ratio_rows:
+        b = min(TARGET_DTES, key=lambda t: abs(t - r['dte0']))
+        buckets.setdefault(b, []).append(r['ratio'])
     for b in sorted(buckets):
         vals = buckets[b]
         print(f"{b:>5} {statistics.median(vals):>15.2f} {math.sqrt(30 / b):>7.2f} {(30 / b) ** 0.25:>7.2f}  ({len(vals)})  "
               + ' '.join(f'{v:.2f}' for v in vals))
-    # Best-fit exponent p in ratio = (30/DTE)^p over all non-front rows.
-    fit_x, fit_y = [], []
-    for b, vals in buckets.items():
-        if b <= 30:
-            continue
-        for v in vals:
-            if v > 0:
-                fit_x.append(math.log(30 / b)); fit_y.append(math.log(v))
-    if fit_x:
-        p_hat = sum(x * y for x, y in zip(fit_x, fit_y)) / sum(x * x for x in fit_x)
-        print(f'best-fit exponent p (least squares through origin in logs): {p_hat:.3f}  (n={len(fit_x)})')
+    print('\nper-contract rows used by the fit (front DTE -> contract DTE : ratio):')
+    for r in ratio_rows:
+        if r['dte0'] > r['front_dte']:
+            print(f"  {r['front_dte']:>4} -> {r['dte0']:>4} : {r['ratio']:+.2f}")
+    p_hat, n_fit = fit_tenor_exponent(ratio_rows)
+    p_med, n_med = median_row_exponent(ratio_rows)
+    print(f'best-fit exponent p in ratio = (front_DTE / contract_DTE)^p, least squares through origin in logs: '
+          f'{p_hat:.3f}  (n={n_fit}); median of per-contract implied p: {p_med:.3f}  (n={n_med})')
     print('\nbeta = front sticky-strike shift / |drop| (pts per 1%):')
     for r in summary:
         if abs(r['dte0'] - 30) <= 15 and r['drop'] < 0:

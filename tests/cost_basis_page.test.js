@@ -2277,6 +2277,12 @@ module.exports = {
                 assert.equal(shockedMarks.details.find((detail) => detail.settled).marketValue, 8000);
                 assert.ok(Math.abs(deferredPut(shockedMarks).impliedVolatility - 0.32) < 1e-9);
                 assert.equal(withHedge({ ivMode: 'fixed', ivShockPoints: 0 }).linkedIvShockPoints, 0);
+                // Fixed points are uniform: the OTM discount never applies there,
+                // even when the flag is on (the page default).
+                const fixedDiscounted = withHedge({ ivMode: 'fixed', ivShockPoints: 10, ivOtmDiscount: true });
+                assert.equal(fixedDiscounted.linkedIvOtmDiscount, false);
+                assert.ok(Math.abs(fixedDiscounted.points[0].linkedIvShockPointsMin - 10) < 1e-9);
+                assert.ok(Math.abs(fixedDiscounted.points[0].linkedIvShockPointsMax - 10) < 1e-9);
                 assert.equal(withHedge({ ivMode: 'fixed', ivShockPoints: 'x' }).reason,
                     'invalid_linked_iv_shock');
                 assert.equal(withHedge({ ivMode: 'fixed', ivShockPoints: -30 }).reason,
@@ -2971,10 +2977,11 @@ module.exports = {
                 assert.equal(h.node('stress-linked-iv-beta-field').hidden, true);
                 h.state.stressLinkedIvMode = 'fixed';
                 h.state.stressLinkedIvShockPoints = 20;
-                // The fixed-shock plumbing is checked without the OTM discount
-                // (on by default) so the fixed-shock plumbing is checked alone.
-                h.state.stressLinkedIvOtmDiscount = false;
+                // The page default (OTM discount on) must not touch fixed
+                // points: they are uniform by definition, and the control hides.
+                h.state.stressLinkedIvOtmDiscount = true;
                 h.renderStress();
+                assert.equal(h.node('stress-linked-iv-otm-field').hidden, true);
                 assert.equal(h.node('stress-linked-iv-shock').value, '20');
                 assert.equal(h.node('stress-linked-iv-shock-field').hidden, false);
                 assert.match(h.node('stress-status').textContent,

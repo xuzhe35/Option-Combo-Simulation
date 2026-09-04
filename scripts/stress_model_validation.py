@@ -138,6 +138,43 @@ def regress_origin(xs, ys):
     return sum(x * y for x, y in zip(xs, ys)) / sxx if sxx else float('nan')
 
 
+DROP_BUCKETS = (('2-5', 2, 5), ('5-10', 5, 10), ('10-20', 10, 20), ('20+', 20, float('inf')))
+
+
+def bucket_for_drop(magnitude):
+    """Bucket key for a drop magnitude in %, or None below the first edge."""
+    for key, lo, hi in DROP_BUCKETS:
+        if lo <= magnitude < hi:
+            return key
+    return None
+
+
+def beta_table_from_pairs(pooled, min_samples=5, step=0.05):
+    """AUTO_BETA_TABLE rows from pooled (magnitude, dIV) pairs per bucket:
+    origin regression per bucket, rounded to ``step``; a bucket with fewer
+    than ``min_samples`` pairs inherits the previous bucket's value."""
+    rows = []
+    previous = None
+    for key, _lo, _hi in DROP_BUCKETS:
+        xs, ys = pooled.get(key, ([], []))
+        if len(xs) >= min_samples:
+            beta = regress_origin(xs, ys)
+            value = round(beta / step) * step
+            rows.append({'bucket': key, 'beta': beta, 'n': len(xs), 'value': round(value, 2), 'inherited': False})
+            previous = round(value, 2)
+        else:
+            rows.append({'bucket': key, 'beta': None, 'n': len(xs), 'value': previous, 'inherited': True})
+    return rows
+
+
+def otm_lift_ratio(atm_shift, otm_lift, min_atm_shift=2.0):
+    """OTM lift / ATM lift, only when the ATM lift is at least ``min_atm_shift``
+    points (below that the ratio is noise); None otherwise."""
+    if otm_lift is None or atm_shift is None or atm_shift < min_atm_shift:
+        return None
+    return otm_lift / atm_shift
+
+
 def part_a(out):
     series = [row for row in load_series() if row['atm30']]
     out('\n## A. 现货与 30 天 ATM IV 的关系（QQQ 日频，%d 个交易日）' % len(series))
@@ -156,8 +193,7 @@ def part_a(out):
             if r < 0:
                 mag = -r
                 downs['all'][0].append(mag); downs['all'][1].append(div)
-                key = '2-5' if 2 <= mag < 5 else ('5-10' if 5 <= mag < 10 else (
-                    '10-20' if 10 <= mag < 20 else ('20+' if mag >= 20 else None)))
+                key = bucket_for_drop(mag)
                 if key:
                     downs[key][0].append(mag); downs[key][1].append(div)
                     if h >= 5:
@@ -176,13 +212,12 @@ def part_a(out):
     out('\n（读法：单元格 = β（样本数）。β 为每 1% 现货变动对应的 30 天 ATM IV 变动点数；上涨侧为负表示 IV 回落。）')
     out('\n### A1b 自适应 β 表的来源：持有 5–40 天合并样本，按跌幅档过原点回归\n')
     out(f"{'跌幅档':>8} {'β':>6} {'n':>6}   → AUTO_BETA_TABLE 取值（四舍五入到 0.05）")
-    for key, label in (('2-5', '2–5%'), ('5-10', '5–10%'), ('10-20', '10–20%'), ('20+', '>20%')):
-        xs, ys = pooled[key]
-        if len(xs) >= 5:
-            beta = regress_origin(xs, ys)
-            out(f"{label:>8} {beta:>6.2f} {len(xs):>6}   → {round(beta * 20) / 20:.2f}")
+    labels = {'2-5': '2–5%', '5-10': '5–10%', '10-20': '10–20%', '20+': '>20%'}
+    for row in beta_table_from_pairs(pooled):
+        if row['inherited']:
+            out(f"{labels[row['bucket']]:>8} {'--':>6} {row['n']:>6}   → {row['value']}（样本不足，沿用上一档）")
         else:
-            out(f"{label:>8} {'--':>6} {len(xs):>6}   → 样本不足，沿用上一档")
+            out(f"{labels[row['bucket']]:>8} {row['beta']:>6.2f} {row['n']:>6}   → {row['value']:.2f}")
 
     out('\n### A2 实现波动率 vs 起始 ATM IV（20 个交易日窗口）\n')
     ratios, crash_ratios = [], []
@@ -252,8 +287,8 @@ def part_b(out):
                 extra_all.append(extra)
             # The production parameter: how much of the ATM lift an OTM put
             # gets. Only meaningful when the ATM lift is clearly positive.
-            ratio = (m1 / shift) if (m1 is not None and shift >= 2.0) else None
-            ratio2 = (m2 / shift) if (m2 is not None and shift >= 2.0) else None
+            ratio = otm_lift_ratio(shift, m1)
+            ratio2 = otm_lift_ratio(shift, m2)
             if ratio is not None:
                 ratio_all.append(ratio)
             if ratio2 is not None:

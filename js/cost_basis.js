@@ -1441,7 +1441,9 @@
             ivShockPoints,
             ivBeta,
             ivBetaAuto: ivMode === 'beta' && linkedHedge.ivBetaAuto === true,
-            ivOtmDiscount: ivMode !== 'none' && linkedHedge.ivOtmDiscount === true,
+            // 'fixed' means the same points on every contract, so the OTM
+            // discount belongs to the beta mode only (Review 21.3).
+            ivOtmDiscount: ivMode === 'beta' && linkedHedge.ivOtmDiscount === true,
             sigmaCrashScale: linkedHedge.sigmaCrashScale === true,
             ivTenorDamping,
             ivTenorDays,
@@ -4748,7 +4750,7 @@
         betaAutoToggle.checked = state.stressLinkedIvBetaAuto;
         betaInput.disabled = state.stressLinkedIvBetaAuto;
         $('stress-linked-iv-otm').checked = state.stressLinkedIvOtmDiscount;
-        $('stress-linked-iv-otm-field').hidden = state.stressLinkedIvMode === 'none';
+        $('stress-linked-iv-otm-field').hidden = state.stressLinkedIvMode !== 'beta';
         $('stress-linked-sigma-crash').checked = state.stressLinkedSigmaCrashScale;
         const tenorExponentInput = $('stress-linked-iv-tenor-exponent');
         tenorExponentInput.disabled = !state.stressLinkedIvTenorDamping;

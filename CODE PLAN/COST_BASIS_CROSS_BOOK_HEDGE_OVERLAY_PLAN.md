@@ -354,12 +354,12 @@ WebSocket 出站白名单**不新增消息类型**；只复用
 | 步 | 改动 | 口径 / 公式 | 测试 |
 | --- | --- | --- | --- |
 | 1 | 情景日后仍未到期的**空头**期权盯市 | `estimateDeferredShortOptions`（与多头共用 `_estimateDeferredOptions`，`marketValue` 带符号）。贡献 = 已收权利金 + 负债市值（负数）。口径 A 的综合成本本就把仍未到期的卖方权利金加回（实测 blendedCost 73 而非 70），所以这里计全额，不重复。新增分项，编号按开启顺序分配（`stressComponentNumbers(showConvexity, showShorts, showLinked)`）。本账本 TWS 请求改为包含双向持仓；后端 `ib_server.py` 对请求合约不再只接受多头持仓 | 现有扫描测试补 P70@0902 的 IV 与利率后断言 `pnl = base + long + short`、负债 > 0、下跌侧为负；缺 IV → `missing_short_option_iv`；身份冲突 → `short_option_identity_mismatch` |
-| 2 | 以指数为驱动的复利映射 | `(1+ΔT) = (1+R)^ratio × exp(−(ratio²−ratio)/2·σ²·T)`，按 ΔT 反推 R；σ 留空取联动合约里到期日晚于情景日的最低 TWS IV 作代理（`_proxyPathSigma`），T = 今天→情景日。3× 跌 30% ⇒ 指数 −11.2%。线性模式保留作对照。横轴加一行指数价格 | `mapLinkedUnderlyingPrice` 复利 / 线性 / 负倍数 / 归零；`leveragedDragLog`；序列级 σ 代理与假设、`invalid_linked_sigma / invalid_linked_mapping` |
+| 2 | 以指数为驱动的复利映射 | `(1+ΔT) = (1+R)^ratio × exp(−(ratio²−ratio)/2·σ²·T)`，按 ΔT 反推 R；σ 留空取联动合约里到期日晚于情景日、距现价最近的合约 TWS IV 作代理（`_proxyPathSigma`，最初版本取最低 IV，Review 13.2 后改），T = 今天→情景日。3× 跌 30% ⇒ 指数 −11.2%。线性模式保留作对照。横轴加一行指数价格 | `mapLinkedUnderlyingPrice` 复利 / 线性 / 负倍数 / 归零；`leveragedDragLog`；序列级 σ 代理与假设、`invalid_linked_sigma / invalid_linked_mapping` |
 | 3 | 本账本期权 IV 冲击随联动 β 放大 | 本账本每点冲击 = |ratio| × 联动冲击点数，走同一 `_applyIvShock`（含期限衰减）；未开联动叠加时本账本 IV 固定 | 状态行「IV 冲击随 QQQ β 按 3.00× 放大」；`ownIvShockPoints`；冲击后 IV ≤ 0 → `invalid_*_iv_shock` |
 | 4 | 买卖价变现口径 | `liquidationHaircut`：多头 × bid/mark，空头 × ask/mark，联动账本今日市值直接取 bid；内在价值结算不折算；缺任一侧 → `missing_*_quote_sides`。后端快照行新增 `bid / ask / bidAskStatus` | 折算比例逐点验证（0.9 / 1.2）；缺侧拒绝；联动 reference 取 bid |
 | 5 | 美式二叉树 + 股息率 | `priceScenarioOption`：`american`（CRR 121 步，`js/american_binomial.js`，页面新增该脚本）/ `european`（BSM 加连续股息率 q）；默认美式；股息率默认 QQQ 0.6%、TQQQ 1%，可改；美式模块未加载 → `missing_american_pricer`，不静默回退 | 美式 ≥ 欧式、深度价内 Put 提前行权价值、股息压低 Call 抬高 Put、期末等于内在价值；序列级默认欧式（纯函数）、页面默认美式 |
 
-未做（需要新假设或新数据源）：sticky-delta 偏斜、β 历史回归、蒙特卡洛路径、历史情景回放。
+后续：sticky-delta 已用历史链验证并否决（§12），β 与期限衰减已用历史数据校准（§12、§13）；仍未做的是蒙特卡洛路径与历史情景整体回放。
 
 
 ## 12. 历史验证：IV 规则与期限衰减（2026-09-05）
@@ -375,13 +375,19 @@ WebSocket 出站白名单**不新增消息类型**；只复用
 | 项 | 结果 | 对模型的含义 |
 | --- | --- | --- |
 | sticky-strike + 平行抬升 vs sticky-delta + 平行抬升 | 前者在 34 个到期日案例中 22 个更优，平均 RMSE 2.26 vs 2.60 点 | **现有 sticky-strike + 整体抬升就是更贴近数据的规则**；sticky-delta 单独作用会让价外 Put 的 IV 下降（向 ATM 靠近），与实际相反。不实现 sticky-delta |
-| 价外 10% 以上 Put 的实际抬升 vs ATM 抬升 | 基本相等（例：2025-04 +19.0 vs +17.2；2020-03 +34.8 vs +34.8） | 逐合约统一冲击点数是对的 |
+| 价外 10% 以上 Put 的实际抬升 vs ATM 抬升 | 首版以「全体行权价的平均抬升」为基准得出「基本相等」，是同义反复；以真正的 ATM 为基准（§13 B1）价外 Put 只拿到 0.50 | 逐合约统一冲击不对，改为价外 Put 折扣 |
 | 各期限抬升相对约 30 天的比例 | **首版报的 0.88 / 0.57 / 0.48 是错的**（脚本把 sticky-delta 截距除以 sticky-strike 前端截距，Review 19.3）。改正后价外 Put 口径：60 天 0.74、120 天 0.44、240 天 0.21、400 天 0.15，最小二乘指数 0.67 | 默认衰减指数 0.65，0.5 为平方根对照（ATM 抬升的衰减接近 0.5） |
-| 前端 β（30 天 ATM 抬升 / 跌幅%） | 慢跌 −6%：0.7；三到四周跌 12–15%：1.3–1.7；四天跌 12.6%：2.3；2024-08 含 VIX 尖峰：2.9 | 默认 1.5 保留为中位起点；面板提示按速度选 β |
+| 前端 β（30 天抬升 / 跌幅%） | 首版数字（0.7 / 1.3–1.7 / 2.3–2.9）来自 sticky-delta 截距，已撤回。sticky-strike 口径逐事件：0.30–2.10，离散很大 | β 不再取自事件；改用日频回归的按跌幅分档表（§13） |
 
 实现改动：`tenorDampingFactor(remaining, reference, exponent)`，新增「衰减指数」输入
-（`stress-linked-iv-tenor-exponent`，默认 0.25，范围 0.05–1，按账本记忆），
-状态行写 `按期限衰减 (30/剩余天)^0.25`。研究脚本随仓库保留，可对新的暴跌事件重跑。
+（`stress-linked-iv-tenor-exponent`，默认 0.65，范围 0.05–1，按账本记忆），
+状态行写 `按期限衰减 (30/剩余天)^0.65`。研究脚本随仓库保留，可对新的暴跌事件重跑。
+
+**2026-09-05 再次修正（Review 21.2）**：指数拟合改用每段事件自己的前端合约实际 DTE 与各合约实际 DTE
+（桶只用于展示），逐合约 25 行，对数最小二乘 p̂ = 0.76，逐行隐含指数的中位数 0.64。两个统计都说
+远期抬升比平方根规则衰减得更快；默认取 0.65（靠近稳健的中位数，最小二乘被两段前端抬升很小的事件拉高）。
+纯函数 `tenor_ratio_rows / fit_tenor_exponent / median_row_exponent` 有合成数据测试，能从 p=0.6 的
+构造数据精确恢复，并证明按桶中心拟合会得到错误答案。
 
 
 ## 13. 假设逐项验证与落地（2026-09-05，`scripts/stress_model_validation.py`）
