@@ -425,13 +425,40 @@ at risk. For example, an ITM short put becomes an assignment while an ATM/OTM
 put expires. This is an expiry outcome with zero settlement fees and no option
 time value; it never records the synthetic settlement rows.
 
-The adjacent **pressure-test** dialog sweeps a selectable price range for the
-same expiry boundary and shows expiry P&L and blended cost at every point. Its
-optional convexity overlay values every still-live long Call and Put with that
-contract's current TWS IV held constant and the shared USD discount curve. If
-either input cannot be fetched within the bounded request, the overlay fails
-closed while the ordinary expiry scenario remains usable. Hovering a point
-shows its exact price, P&L, cost, resulting shares and settlement counts.
+The stress-test modal values every still-open option of this book on ONE
+scenario date (the selected expiry, or today + "days to reach the drop"):
+options expiring by then settle at intrinsic value, live longs are marked as
+assets and live shorts as liabilities (premium received minus model value),
+with each contract's own TWS IV, the shared USD discount curve resolved from
+that same day, a CRR American binomial with per-symbol dividend yields by
+default (European BSM optional), and either the mid or a "today's spread"
+lens that extrapolates today's bid/mark (longs) or ask/mark (shorts) ratio
+onto the scenario value and rejects crossed or one-sided quotes. It can also
+stack **cross-book protection**: a leveraged ETF book (seeded for `TQQQ`)
+borrows the long Calls/Puts of a same-account, same-currency sibling book
+(`QQQ`). The index is the driver: each scan point is mapped to the sibling's
+price by daily-rebalanced compounding with a volatility-drag term whose path
+sigma is an explicit assumption or the IV of the nearest-the-money sibling
+contract still alive after the date (refused, never zero, when none exists);
+a linear ratio is kept for comparison. The sibling's contracts are valued at
+that price with their own IV, optionally lifted by a fixed shock or a
+spot-vol beta (downside only, tenor-damped), and this book's IV shock follows
+the same beta scaled by the leverage ratio. The stacked figure is the change
+against today's TWS mark, so premium already paid is sunk and a crash shows
+the protection as a gain; P&L versus the premium is a tooltip reference only.
+The overlay reads the sibling ledger and a bounded TWS quote request only,
+matches contracts by strict identity (conId, else localSymbol, else terms
+plus multiplier), ignores short legs, never merges the books, and refuses to
+guess when any IV, rate, mark, sigma, or price is missing. See
+`CODE PLAN/COST_BASIS_CROSS_BOOK_HEDGE_OVERLAY_PLAN.md`.
+
+The dialog sweeps a selectable price range and shows, at every point, the
+numbered components (settlement, this book's live options, the sibling's) and
+their total, plus blended cost and settlement counts. Option quotes come from
+a bounded TWS request (short-lived streaming lines with the implied-volatility
+tick, opened in batches and cancelled once each contract has its mark and, if
+still alive, its IV); if anything cannot be fetched in time the affected
+overlay fails closed while the ordinary expiry scenario remains usable.
 
 The event-flow table keeps its running balances anchored to chronological
 ledger replay, but displays the finished rows newest-first in 25-row pages so
@@ -503,10 +530,28 @@ price, and net cash all agree (or the broker execId agrees and the economics
 still verify). The CSV then reuses the stored exec identity and SQLite skips it;
 a suspected cross-source overlap that cannot be proved is blocked rather than
 double-booked.
-The What If **使用当前价** button does not reuse the last portfolio update: it
-requests a fresh one-shot TWS snapshot quote, stamps the refresh time in the
-scenario label, and recalculates immediately. The request is read-only and
-does not leave a live market-data subscription behind.
+What If defaults to **自动跟随参考价**: the effective hero reference price also
+drives the expiry scenario. Existing TWS portfolio-price pushes immediately
+recalculate it without polling, extra quote requests, or ledger writes. A typed
+hero reference is followed too. Selecting a book reads the existing portfolio
+cache once so an initial push received before book loading is not lost. Typing
+a What If price (including zero or an
+empty edit) pauses following; unchecking the control freezes the displayed
+assumption. Checking it again resumes following without a request. No TWS
+price and no manual reference means an unavailable automatic scenario, not a
+stale last quote.
+The **使用当前价** button still requests a fresh one-shot TWS snapshot quote.
+On success it clears the manual hero reference and resumes automatic following;
+later portfolio updates replace that quote rather than leaving What If frozen.
+Failure preserves the assumption, and a late response cannot overwrite a newer
+edit or another book. The displayed refresh time belongs only to that one-shot
+quote and is cleared when a portfolio update replaces it. Refreshing stress-test
+inputs does not override a manually chosen What If price.
+The automatic cadence is the existing account/portfolio feed, not streaming
+tick data. IB documents updates at position changes or approximately three-minute
+intervals; repeatedly reading the backend cache cannot make the broker feed
+faster. See [IB account updates](https://interactivebrokers.github.io/tws-api/account_updates.html).
+None of these actions leaves a new live market-data subscription behind.
 **Nothing auto-writes an event.** When the ledger has none of a position and
 the authoritative TWS snapshot includes both quantity and average cost, an
 explicit `采信 TWS` click plus confirmation records it directly as a

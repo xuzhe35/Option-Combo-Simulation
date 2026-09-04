@@ -268,6 +268,12 @@ class OptionScenarioInputTests(CostBasisWsTestBase):
                 'conId': 123, 'localSymbol': ' TQQQ  270115P00065000 ',
                 'right': 'put', 'strike': 65, 'expiry': '2027-01-15',
                 'ignored': 'not forwarded',
+            }, {
+                'right': 'C', 'strike': 80, 'expiry': '20270115',
+                'multiplier': '100',
+            }, {
+                'right': 'C', 'strike': 81, 'expiry': '20270115',
+                'multiplier': 'n/a',
             }])
         self.assertTrue(response['success'], response)
         self.assertEqual(captured, [{
@@ -278,6 +284,15 @@ class OptionScenarioInputTests(CostBasisWsTestBase):
                 'conId': 123,
                 'localSymbol': 'TQQQ  270115P00065000',
                 'right': 'P', 'strike': 65, 'expiry': '20270115',
+                'multiplier': None,
+            }, {
+                'conId': None, 'localSymbol': '',
+                'right': 'C', 'strike': 80, 'expiry': '20270115',
+                'multiplier': 100.0,
+            }, {
+                'conId': None, 'localSymbol': '',
+                'right': 'C', 'strike': 81, 'expiry': '20270115',
+                'multiplier': None,
             }],
         }])
         self.assertEqual(response['underlyingPrice'], 69.59)

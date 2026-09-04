@@ -28,6 +28,8 @@
        most load-bearing colour on the page, and #19a886 / #df5c67 / #d58a20
        sat at 2.8-3.6:1 - below AA at every size these are actually used. */
     --accent-text: #2f63cf;
+    /* Fourth stress curve: the linked book's protection stacked on top. */
+    --linked: #6f4bd8;
     --teal-text: #127a62;
     --bad-text: #c23b45;
     --warn-text: #9b6414;
@@ -413,7 +415,9 @@ main { width: 100%; max-width: 1560px; margin: 0 auto; padding: 1.5rem 2rem 3rem
 .cashflow-expiry-control > span { color: var(--muted); font-size: .72rem; white-space: nowrap; }
 .cashflow-expiry-control button { height: 36px; white-space: nowrap; }
 .cashflow-heading .section-heading-actions { flex-wrap: wrap; }
-.what-if-context { margin: -.1rem 1.15rem .75rem; color: #526179; font-size: .76rem; }
+.what-if-context-row { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1rem; margin: -.1rem 1.15rem .75rem; }
+.what-if-context-row > .checkbox { flex-shrink: 0; color: var(--accent-text); font-size: .76rem; white-space: nowrap; }
+.what-if-context { margin: 0; color: #526179; font-size: .76rem; }
 .what-if-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .75rem; padding: 0 1.15rem .85rem; }
 .what-if-card { min-width: 0; display: flex; flex-direction: column; gap: .25rem; padding: 1rem; border: 1px solid var(--border); border-radius: 11px; background: var(--panel-soft); }
 .what-if-card > span { color: var(--muted); font-size: .72rem; }
@@ -496,14 +500,31 @@ body.stress-modal-open, body:has(#premium-expiry-modal[open]) { overflow: hidden
 .stress-protection-inputs { display: flex; align-items: end; flex-wrap: wrap; gap: .7rem; margin: .7rem 0 0 1.65rem; padding-top: .7rem; border-top: 1px solid #e0e8f6; }
 .stress-protection-inputs label { display: flex; align-items: center; gap: .28rem; color: var(--muted); font-size: .73rem; }
 .stress-protection-inputs input { width: 84px; height: 34px; }
+.stress-protection-inputs select { min-width: 132px; height: 34px; }
+.stress-protection-inputs .stress-linked-inline { display: flex; align-items: end; gap: .7rem; padding: 0; border: 0; background: transparent; }
+.stress-protection-inputs .stress-linked-inline .checkbox { display: inline-flex; align-items: center; gap: .3rem; height: 34px; color: var(--accent-text); font-size: .73rem; white-space: nowrap; }
+.stress-protection-inputs .stress-linked-inline .checkbox input { width: 15px; height: 15px; }
+.stress-linked-panel { margin-top: -.15rem; }
 .stress-protection-inputs > span { padding: .38rem .55rem; border: 1px solid #d9e4f7; border-radius: 7px; color: #4f6078; background: #fff; font-size: .72rem; }
 .stress-protection-inputs p { flex: 1 1 330px; margin: 0; color: var(--muted); font-size: .72rem; line-height: 1.45; }
+/* Explanatory copy is folded behind a chip; open, it takes a full row. */
+.stress-help { flex: 0 0 auto; }
+.stress-help[open] { flex: 1 1 100%; }
+.stress-help > summary { display: inline-flex; align-items: center; height: 34px; padding: 0 .55rem; border: 1px solid #d9e4f7; border-radius: 7px; background: #fff; color: var(--accent-text); font-size: .72rem; cursor: pointer; list-style: none; user-select: none; }
+.stress-help > summary::-webkit-details-marker { display: none; }
+.stress-help > summary::before { content: "ⓘ"; margin-right: .3rem; }
+.stress-help[open] > summary::before { content: "ⓧ"; }
+.stress-help > p { margin: .55rem 0 0; }
+.stress-note-details { margin: 0 1.25rem 1rem; }
+.stress-note-details > summary { height: 30px; }
+.stress-note-details > .stress-note { padding: .55rem 0 0; border-top: 0; }
 .stress-status { margin: 0 1.25rem .55rem; color: #526179; font-size: .76rem; }
 .stress-legend { display: flex; flex-wrap: wrap; gap: 1rem; margin: 0 1.25rem .45rem; color: var(--muted); font-size: .73rem; }
 .stress-legend span { display: inline-flex; align-items: center; gap: .38rem; }
 .stress-legend span::before { content: ""; width: 20px; height: 3px; border-radius: 99px; background: var(--accent); }
 .stress-legend .legend-cost::before { background: var(--warn); }
 .stress-legend .legend-protected-pnl::before { background: var(--teal); }
+.stress-legend .legend-linked-pnl::before { background: var(--linked); }
 .stress-legend .legend-strike::before { height: 0; border-top: 2px dashed #b9c2d0; background: transparent; }
 .stress-chart-wrap { position: relative; margin: 0 1rem; overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: #fbfcff; }
 #stress-chart { display: block; width: 100%; min-width: 760px; min-height: 390px; cursor: crosshair; }
@@ -512,11 +533,14 @@ body.stress-modal-open, body:has(#premium-expiry-modal[open]) { overflow: hidden
 .stress-grid .axis-pnl, .stress-axis-title.axis-pnl { fill: #2f6bdc; }
 .stress-grid .axis-cost, .stress-axis-title.axis-cost { fill: #b97818; }
 .stress-grid .axis-change { fill: #a1aab8; font-size: 10px; }
+.stress-grid .axis-linked { fill: var(--linked); font-size: 10px; }
 .stress-zero-line { stroke: #9aa7b8; stroke-width: 1.3; stroke-dasharray: 6 5; }
 .stress-current-line { stroke: #356fe6; stroke-width: 1.4; stroke-dasharray: 4 4; opacity: .55; }
 .stress-strike-line { stroke: #bfc8d5; stroke-width: 1; stroke-dasharray: 2 5; opacity: .72; }
 .stress-strike-label { fill: #8e99aa; font-size: 9px; }
-.stress-pnl-line, .stress-protected-pnl-line, .stress-cost-line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.stress-pnl-line, .stress-protected-pnl-line, .stress-linked-pnl-line, .stress-cost-line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.stress-linked-pnl-line { stroke: var(--linked); stroke-width: 3; }
+.stress-protected-pnl-line.with-linked { stroke-width: 2; opacity: .85; }
 .stress-pnl-line { stroke: var(--accent); stroke-width: 3; }
 .stress-protected-pnl-line { stroke: var(--teal); stroke-width: 3; }
 .stress-pnl-line.with-protection { stroke-width: 2; stroke-dasharray: 6 5; opacity: .7; }
@@ -527,12 +551,14 @@ body.stress-modal-open, body:has(#premium-expiry-modal[open]) { overflow: hidden
 .stress-hover-guide line { stroke: #46566e; stroke-width: 1.2; stroke-dasharray: 4 4; opacity: .72; }
 .stress-hover-guide .guide-pnl { fill: #fff; stroke: var(--accent); stroke-width: 3; }
 .stress-hover-guide .guide-protected-pnl { stroke: var(--teal); }
+.stress-hover-guide .guide-linked-pnl { stroke: var(--linked); }
+.stress-hover-guide .guide-own-pnl { fill: #fff; stroke: var(--accent); stroke-width: 2; }
 .stress-hover-guide .guide-base-pnl { fill: #fff; stroke: var(--accent); stroke-width: 2; }
 .stress-hover-guide .guide-cost { fill: #fff; stroke: var(--warn); stroke-width: 3; }
 .stress-tooltip {
     position: absolute;
     z-index: 4;
-    width: 238px;
+    width: 310px;
     padding: .72rem .78rem;
     border: 1px solid #cfd9e8;
     border-radius: 10px;
@@ -541,7 +567,13 @@ body.stress-modal-open, body:has(#premium-expiry-modal[open]) { overflow: hidden
     box-shadow: 0 12px 30px rgba(30, 48, 78, .18);
     pointer-events: none;
 }
-.stress-tooltip > strong { display: block; margin-bottom: .42rem; font-size: .82rem; font-variant-numeric: tabular-nums; }
+.stress-tooltip > strong { display: block; margin-bottom: .2rem; font-size: .82rem; font-variant-numeric: tabular-nums; }
+.stress-tooltip-sub { display: flex; justify-content: space-between; gap: .7rem; margin: 0 0 .42rem; color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; }
+.stress-tooltip-components { padding-bottom: .4rem; margin-bottom: .4rem !important; border-bottom: 1px solid #e3e9f3; }
+.stress-tooltip-components dt { color: #33425a; }
+.stress-tooltip-total { margin-top: .15rem; padding-top: .3rem; border-top: 1px dashed #cfd9e8; }
+.stress-tooltip-total dt, .stress-tooltip-total dd { font-size: .78rem !important; font-weight: 700; color: #202735; }
+.stress-key-points small.stress-card-part { color: #33425a; font-variant-numeric: tabular-nums; }
 .stress-tooltip dl { display: grid; gap: .25rem; margin: 0; }
 .stress-tooltip dl > div { display: flex; justify-content: space-between; gap: .7rem; }
 .stress-tooltip dt { color: var(--muted); font-size: .73rem; }

@@ -3,6 +3,7 @@ import json
 import pathlib
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
@@ -18,12 +19,195 @@ from ib_server_ws import (
     purge_hedge_order_tracking_for_websocket,
 )
 from ib_server_market_data import (
+    build_scenario_rates_by_expiry,
     cancel_all_api_market_data_subscriptions,
+    chunked,
+    cost_basis_batch_complete,
+    cost_basis_ticker_evidence,
+    cost_basis_option_identity,
+    cost_basis_option_request_matches,
     extract_market_reference_contract_metadata,
     extract_option_mark_with_source,
     extract_quote_snapshot,
     ticker_quote_fingerprint,
 )
+
+
+class CostBasisOptionIdentityTest(unittest.TestCase):
+    """Snapshot rows are matched to ledger rows by strict, layered identity."""
+
+    @staticmethod
+    def _contract(**overrides):
+        fields = {
+            'conId': 810, 'localSymbol': 'QQQ   270115P00480000', 'right': 'P',
+            'lastTradeDateOrContractMonth': '20270115', 'strike': 480.0,
+            'multiplier': '100',
+        }
+        fields.update(overrides)
+        return SimpleNamespace(**fields)
+
+    def test_identity_carries_the_multiplier(self):
+        identity = cost_basis_option_identity(self._contract())
+        self.assertEqual(identity, {
+            'conId': 810, 'localSymbol': 'QQQ   270115P00480000', 'right': 'P',
+            'strike': 480.0, 'expiry': '20270115', 'multiplier': 100.0,
+        })
+        self.assertIsNone(cost_basis_option_identity(
+            self._contract(multiplier='', conId=0))['multiplier'])
+        self.assertIsNone(cost_basis_option_identity(
+            self._contract(multiplier='', conId=0))['conId'])
+
+    def test_a_requested_con_id_is_matched_by_con_id_only(self):
+        identity = cost_basis_option_identity(self._contract())
+        self.assertTrue(cost_basis_option_request_matches(identity, {'conId': 810}))
+        self.assertTrue(cost_basis_option_request_matches(identity, {
+            'conId': '810', 'localSymbol': 'something else', 'strike': 1}))
+        # Same terms, other conId: an adjusted or otherwise different
+        # deliverable must never be quoted as the ledger's contract.
+        self.assertFalse(cost_basis_option_request_matches(identity, {
+            'conId': 811, 'localSymbol': 'QQQ   270115P00480000',
+            'right': 'P', 'strike': 480, 'expiry': '20270115'}))
+
+    def test_a_requested_local_symbol_is_matched_by_local_symbol_only(self):
+        identity = cost_basis_option_identity(self._contract())
+        self.assertTrue(cost_basis_option_request_matches(identity, {
+            'localSymbol': ' QQQ   270115P00480000 '.strip()}))
+        self.assertFalse(cost_basis_option_request_matches(identity, {
+            'localSymbol': 'QQQ1  270115P00480000',
+            'right': 'P', 'strike': 480, 'expiry': '20270115'}))
+
+    def test_terms_are_used_only_without_any_identifier(self):
+        identity = cost_basis_option_identity(self._contract())
+        bare = {'right': 'p', 'strike': '480', 'expiry': '20270115'}
+        self.assertTrue(cost_basis_option_request_matches(identity, bare))
+        self.assertTrue(cost_basis_option_request_matches(
+            identity, {**bare, 'multiplier': 100}))
+        self.assertFalse(cost_basis_option_request_matches(
+            identity, {**bare, 'multiplier': 10}))
+        self.assertFalse(cost_basis_option_request_matches(
+            identity, {**bare, 'strike': 485}))
+        self.assertFalse(cost_basis_option_request_matches(
+            identity, {**bare, 'expiry': '20270116'}))
+        self.assertFalse(cost_basis_option_request_matches(
+            identity, {**bare, 'right': 'C'}))
+        self.assertFalse(cost_basis_option_request_matches(identity, {'right': 'P'}))
+        # An unknown multiplier on either side does not block a terms match.
+        no_multiplier = cost_basis_option_identity(self._contract(multiplier=None))
+        self.assertTrue(cost_basis_option_request_matches(
+            no_multiplier, {**bare, 'multiplier': 100}))
+
+
+class CostBasisSnapshotReadinessTest(unittest.TestCase):
+    """A quote line is done when it has what its purpose needs, not on IV alone."""
+
+    @staticmethod
+    def _option(bid=None, ask=None, iv=None):
+        from types import SimpleNamespace
+        greeks = SimpleNamespace(impliedVol=iv) if iv is not None else None
+        return SimpleNamespace(bid=bid, ask=ask, last=float('nan'), close=float('nan'),
+                               modelGreeks=greeks, bidGreeks=None, askGreeks=None,
+                               lastGreeks=None, impliedVolatility=None,
+                               marketPrice=lambda: float('nan'), midpoint=lambda: float('nan'))
+
+    def test_iv_alone_is_not_enough_for_a_live_option(self):
+        # IV arrived first, no bid/ask yet: no mark, so not core-complete.
+        iv_only = cost_basis_ticker_evidence(self._option(iv=0.3), 'OPT', True)
+        self.assertTrue(iv_only['iv'])
+        self.assertFalse(iv_only['mark'])
+        self.assertFalse(iv_only['core'])
+        # BBO arrived first, IV still missing: not complete either.
+        bbo_only = cost_basis_ticker_evidence(self._option(bid=1.0, ask=1.2), 'OPT', True)
+        self.assertTrue(bbo_only['mark'])
+        self.assertTrue(bbo_only['bbo'])
+        self.assertFalse(bbo_only['core'])
+        both = cost_basis_ticker_evidence(self._option(bid=1.0, ask=1.2, iv=0.3), 'OPT', True)
+        self.assertTrue(both['core'])
+
+    def test_a_contract_settling_on_the_scenario_date_needs_only_a_mark(self):
+        evidence = cost_basis_ticker_evidence(self._option(bid=1.0, ask=1.2), 'OPT', False)
+        self.assertTrue(evidence['core'])
+        self.assertFalse(evidence['iv'])
+        nothing = cost_basis_ticker_evidence(self._option(), 'OPT', False)
+        self.assertFalse(nothing['core'])
+
+    def test_crossed_quotes_yield_neither_mark_nor_two_sided(self):
+        # The backend refuses to mint a mid from a crossed pair, so the line
+        # is not core-complete yet: the loop keeps waiting for a real quote.
+        evidence = cost_basis_ticker_evidence(self._option(bid=1.2, ask=1.0, iv=0.3), 'OPT', True)
+        self.assertTrue(evidence['iv'])
+        self.assertFalse(evidence['mark'])
+        self.assertFalse(evidence['bbo'])
+        self.assertFalse(evidence['core'])
+
+    def test_batch_waits_for_core_then_gives_bbo_a_grace_period(self):
+        rows = [{'core': True, 'bbo': True}, {'core': True, 'bbo': False}]
+        self.assertFalse(cost_basis_batch_complete(rows, None, 10.0))
+        self.assertFalse(cost_basis_batch_complete(rows, 10.0, 10.3, grace_seconds=0.75))
+        self.assertTrue(cost_basis_batch_complete(rows, 10.0, 10.8, grace_seconds=0.75))
+        self.assertTrue(cost_basis_batch_complete(
+            [{'core': True, 'bbo': True}], None, 10.0))
+        self.assertFalse(cost_basis_batch_complete(
+            [{'core': False, 'bbo': True}], 10.0, 99.0))
+        self.assertFalse(cost_basis_batch_complete([], 10.0, 99.0))
+
+    def test_batches_bound_concurrent_lines(self):
+        self.assertEqual(chunked(range(45), 20), [list(range(20)), list(range(20, 40)),
+                                                  list(range(40, 45))])
+        self.assertEqual(chunked([], 20), [])
+        self.assertEqual(chunked([1, 2], 0), [[1, 2]])
+
+
+class ScenarioRateAnchorTest(unittest.TestCase):
+    """Every discount tenor is measured from the scenario date, nothing else."""
+
+    # A deliberately non-flat curve: ~4% at one month, ~6% at one year.
+    CURVE = {'points': [
+        {'tenorDays': 30, 'discountFactor': 0.9967},
+        {'tenorDays': 365, 'discountFactor': 0.9418},
+    ]}
+    CONTRACTS = [
+        {'expiry': '20260904'}, {'expiry': '20261016'}, {'expiry': '20270115'},
+        {'expiry': 'bad'},
+    ]
+
+    def test_tenor_moves_with_the_scenario_date(self):
+        from datetime import date
+        from yield_curve.builder import resolve_snapshot_discount
+        early = build_scenario_rates_by_expiry(
+            self.CURVE, self.CONTRACTS, date(2026, 9, 4), resolve_snapshot_discount)
+        late = build_scenario_rates_by_expiry(
+            self.CURVE, self.CONTRACTS, date(2026, 9, 24), resolve_snapshot_discount)
+        # Expiries on or before the scenario date settle at intrinsic: no quote.
+        self.assertEqual([row['expiry'] for row in early], ['20261016', '20270115'])
+        self.assertEqual([row['expiry'] for row in late], ['20261016', '20270115'])
+        by_expiry_early = {row['expiry']: row for row in early}
+        by_expiry_late = {row['expiry']: row for row in late}
+        self.assertEqual(by_expiry_early['20270115']['maturityDays'], 133)
+        self.assertEqual(by_expiry_late['20270115']['maturityDays'], 113)
+        self.assertEqual(by_expiry_early['20261016']['maturityDays'], 42)
+        self.assertEqual(by_expiry_late['20261016']['maturityDays'], 22)
+        # On a sloped curve the shorter remaining life gets a lower rate, and
+        # it is exactly the resolver's rate for that many days.
+        self.assertLess(by_expiry_late['20270115']['zeroRate'],
+                        by_expiry_early['20270115']['zeroRate'])
+        self.assertEqual(by_expiry_late['20270115']['zeroRate'],
+                         resolve_snapshot_discount(self.CURVE, 113)['zeroRate'])
+        self.assertEqual(by_expiry_early['20270115']['zeroRate'],
+                         resolve_snapshot_discount(self.CURVE, 133)['zeroRate'])
+
+    def test_uncoverable_tenors_are_skipped_not_guessed(self):
+        from datetime import date
+
+        def resolver(_curve, days):
+            if days > 100:
+                raise ValueError('outside the curve')
+            return {'zeroRate': 0.04, 'source': 'test'}
+        rows = build_scenario_rates_by_expiry(
+            self.CURVE, self.CONTRACTS, date(2026, 9, 4), resolver)
+        self.assertEqual([row['expiry'] for row in rows], ['20261016'])
+        self.assertEqual(rows[0]['zeroRate'], 0.04)
+        self.assertEqual(build_scenario_rates_by_expiry(
+            self.CURVE, [], date(2026, 9, 4), resolver), [])
 
 
 class _FakeWebSocket:

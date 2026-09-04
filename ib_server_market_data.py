@@ -1289,6 +1289,162 @@ def cancel_mkt_data_if_unused(
         quote_fingerprint_by_ticker_key.pop(key, None)
 
 
+def positive_float(raw_value: Any) -> float | None:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value <= 0:
+        return None
+    return value
+
+
+def cost_basis_option_identity(contract: Any) -> dict:
+    """The identity a cost-basis snapshot row carries for one OPT position."""
+    con_id = positive_contract_id(getattr(contract, 'conId', None))
+    local_symbol = str(getattr(contract, 'localSymbol', '') or '').strip()
+    right = str(getattr(contract, 'right', '') or '').strip().upper()[:1]
+    raw_expiry = str(
+        getattr(contract, 'lastTradeDateOrContractMonth', '') or '')
+    expiry = ''.join(character for character in raw_expiry if character.isdigit())[:8]
+    try:
+        strike = float(getattr(contract, 'strike', None))
+    except (TypeError, ValueError):
+        strike = None
+    return {
+        'conId': con_id,
+        'localSymbol': local_symbol,
+        'right': right,
+        'strike': strike,
+        'expiry': expiry,
+        'multiplier': positive_float(getattr(contract, 'multiplier', None)),
+    }
+
+
+def cost_basis_option_request_matches(identity: dict, requested: dict) -> bool:
+    """Strict, layered identity match between a ledger request and a TWS position.
+
+    A request that names a conId is matched by conId only; one that names only
+    a localSymbol by localSymbol only.  Visible terms (right, expiry, strike,
+    multiplier when both sides know it) are used solely when the ledger has
+    neither identifier.  A strong identity that is absent from the positions
+    never degrades to "a contract that looks the same": adjusted contracts and
+    other same-terms deliverables would otherwise be quoted as if they were the
+    ledger's position.
+    """
+    requested_con_id = positive_contract_id(requested.get('conId'))
+    if requested_con_id is not None:
+        return identity.get('conId') == requested_con_id
+    requested_local = str(requested.get('localSymbol') or '').strip()
+    if requested_local:
+        return identity.get('localSymbol') == requested_local
+    try:
+        requested_strike = float(requested.get('strike'))
+    except (TypeError, ValueError):
+        return False
+    identity_strike = identity.get('strike')
+    if (
+        identity.get('right') != str(requested.get('right') or '').strip().upper()[:1]
+        or identity.get('expiry') != str(requested.get('expiry') or '')[:8]
+        or identity_strike is None
+        or abs(identity_strike - requested_strike) > 1e-8
+    ):
+        return False
+    requested_multiplier = positive_float(requested.get('multiplier'))
+    identity_multiplier = positive_float(identity.get('multiplier'))
+    if (requested_multiplier is not None and identity_multiplier is not None
+            and abs(requested_multiplier - identity_multiplier) > 1e-8):
+        return False
+    return True
+
+
+COST_BASIS_SNAPSHOT_BATCH_SIZE = 20
+COST_BASIS_SNAPSHOT_BBO_GRACE_SECONDS = 0.75
+
+
+def chunked(items: Any, size: int) -> list:
+    """Split ``items`` into lists of at most ``size`` (size < 1 means one chunk)."""
+    rows = list(items or [])
+    if size < 1:
+        return [rows] if rows else []
+    return [rows[index:index + size] for index in range(0, len(rows), size)]
+
+
+def cost_basis_ticker_evidence(ticker: Any, sec_type: str, needs_iv: bool) -> dict:
+    """What a one-shot quote line has delivered so far, by purpose.
+
+    ``core`` is what the stress test cannot do without: the underlying's
+    price for a stock; for an option a mark plus, when the contract is still
+    alive on the scenario date, its implied volatility.  ``bbo`` is the
+    two-sided quote the bid/ask lens wants; it is waited for briefly, never
+    required, because an illiquid wing may simply have no bid.
+    """
+    normalized = str(sec_type or '').strip().upper()
+    if normalized not in ('OPT', 'FOP'):
+        price = extract_market_price(ticker) if ticker is not None else None
+        return {'iv': False, 'mark': price is not None, 'bbo': False,
+                'core': price is not None}
+    quote = extract_quote_snapshot(ticker, normalized) if ticker is not None else None
+    has_iv = extract_option_iv(ticker) is not None if ticker is not None else False
+    has_mark = quote is not None
+    has_bbo = bool(quote and quote.get('bidAskValid'))
+    return {
+        'iv': has_iv,
+        'mark': has_mark,
+        'bbo': has_bbo,
+        'core': has_mark and (has_iv or not needs_iv),
+    }
+
+
+def cost_basis_batch_complete(evidence_rows: Any, core_ready_at: Any, now: float,
+                              grace_seconds: float = COST_BASIS_SNAPSHOT_BBO_GRACE_SECONDS) -> bool:
+    """True when every row has its core evidence and BBO has had its grace.
+
+    ``core_ready_at`` is the loop time at which every row first became core-
+    complete (None until then).  Once that happens the loop keeps lines open
+    only ``grace_seconds`` longer for the remaining two-sided quotes, so a
+    contract with no bid cannot pin the request to its full deadline.
+    """
+    rows = list(evidence_rows or [])
+    if not rows or not all(row.get('core') for row in rows):
+        return False
+    if all(row.get('bbo') for row in rows):
+        return True
+    return core_ready_at is not None and (now - core_ready_at) >= grace_seconds
+
+
+def build_scenario_rates_by_expiry(curve: Any, requested_contracts: Any,
+                                   scenario_date: Any, resolver: Any) -> list:
+    """One discount quote per requested expiry, tenor measured from the scenario date.
+
+    The scenario date is the single day every stress component is valued on,
+    so the zero rate a contract's BSM uses must be the one for
+    ``expiry - scenario_date`` days.  Expiries on or before that day settle at
+    intrinsic value and get no quote; expiries the curve cannot cover are
+    skipped so the browser fails closed on them instead of receiving a guess.
+    """
+    from datetime import datetime as _datetime
+    through_expiry = scenario_date.strftime('%Y%m%d')
+    expiries = sorted({
+        str(item.get('expiry') or '') for item in (requested_contracts or [])
+        if str(item.get('expiry') or '') > through_expiry
+    })
+    rates = []
+    for expiry in expiries:
+        try:
+            expiry_date = _datetime.strptime(expiry, '%Y%m%d').date()
+            maturity_days = (expiry_date - scenario_date).days
+            resolved = resolver(curve, maturity_days)
+        except (TypeError, ValueError):
+            continue
+        rates.append({
+            'expiry': expiry,
+            'maturityDays': maturity_days,
+            **resolved,
+        })
+    return rates
+
+
 def coerce_positive_int(value: Any, default_value: int) -> int:
     try:
         parsed = int(value)
