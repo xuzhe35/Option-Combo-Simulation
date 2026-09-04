@@ -56,11 +56,12 @@
     // less, like (reference tenor / remaining days)^p capped at 1; p defaults
     // to the historical fit below (sqrt would be p = 0.5).
     const LINKED_IV_DEFAULT_TENOR_DAYS = 30;
-    // Damping exponent for (reference / remaining days)^p. 0.65 is the
-    // least-squares fit of the sticky-strike level shift by tenor over seven
-    // QQQ crashes 2015-2025 (scripts/skew_regime_study.py, p_hat 0.67): OTM
-    // put IV at ~1 year moved only ~0.15-0.2 of the ~30-day shift. ATM-only
-    // shifts decay closer to the square-root rule (p = 0.5), kept as option.
+    // Damping exponent for (reference / remaining days)^p. Across seven QQQ
+    // crashes in 2015-2025, per-contract implied p has median 0.64 while the
+    // log least-squares fit is 0.76 (scripts/skew_regime_study.py); 0.65 keeps
+    // the robust median-side estimate. OTM put IV at ~1 year moved only
+    // ~0.15-0.2 of the front shift. ATM-only shifts decay closer to the
+    // square-root rule (p = 0.5), kept as an option.
     // (An earlier 0.25 default came from a numerator mix-up in the study and
     // was withdrawn - Review 19.3.)
     const LINKED_IV_DEFAULT_TENOR_EXPONENT = 0.65;
@@ -890,8 +891,9 @@
 
     /**
      * (reference / remaining days)^exponent, never above 1, never below a
-     * day. Exponent 0.5 is the textbook square-root rule; 0.25 is what the
-     * historical QQQ crashes actually show for the IV level shift by tenor.
+     * day. Exponent 0.5 is the textbook square-root rule; the historical QQQ
+     * crash sample gives a per-contract median near 0.64 and log least-squares
+     * fit near 0.76 for the OTM-put IV level shift by tenor.
      */
     function tenorDampingFactor(remainingDays, referenceDays, exponent) {
         const remaining = Math.max(1, Number(remainingDays));

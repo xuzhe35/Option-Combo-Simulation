@@ -443,7 +443,8 @@ contract still alive after the date (refused, never zero, when none exists);
 a linear ratio is kept for comparison. The sibling's contracts are valued at
 that price with their own IV, optionally lifted by a fixed shock or a
 spot-vol beta (downside only, tenor-damped by (30 / remaining days)^0.65, the
-exponent fitted to seven QQQ crashes 2015-2025 with
+default chosen near the 0.64 per-contract median from seven QQQ crashes
+2015-2025; the log least-squares fit is 0.76 in
 `scripts/skew_regime_study.py`, which also showed sticky-strike plus a level
 shift beats sticky-delta on real crash chains), and this book's IV shock
 follows the same beta scaled by the leverage ratio. The stacked figure is the change

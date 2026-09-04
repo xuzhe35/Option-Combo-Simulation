@@ -2152,12 +2152,12 @@ module.exports = {
                     openOptions: [Object.assign({}, linkedOptions[0], { conId: 111 })],
                     marketInputs: Object.assign({}, linkedInputs, { options: [] }),
                 }).reason, 'missing_linked_option_iv');
-                                // Tenor damping: a beta describes short-dated IV, so a long
-                // contract's lift shrinks by sqrt(reference / remaining days).
+                // Tenor damping: a beta describes short-dated IV, so a long
+                // contract's lift shrinks by (reference / remaining days)^p.
                 assert.equal(page.tenorDampingFactor(30, 30), 1);
                 assert.equal(page.tenorDampingFactor(10, 30), 1);
-                // Default exponent is the historical fit (0.25); 0.5 is the
-                // square-root rule and stays available.
+                // Default 0.65 follows the robust historical estimate; 0.5 is
+                // the square-root rule and stays available.
                 assert.ok(Math.abs(page.tenorDampingFactor(120, 30) - Math.pow(0.25, 0.65)) < 1e-9);
                 assert.ok(Math.abs(page.tenorDampingFactor(120, 30, 0.5) - 0.5) < 1e-9);
                 assert.ok(Math.abs(page.tenorDampingFactor(480, 30, 0.25) - 0.5) < 1e-9);

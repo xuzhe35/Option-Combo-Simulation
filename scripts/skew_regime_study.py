@@ -109,6 +109,33 @@ def tenor_ratio_rows(summary):
     return rows
 
 
+def tenor_bucket_summaries(rows, target_dtes=TARGET_DTES):
+    """Display-only bucket summaries using each row's actual front and DTE.
+
+    The observed ratio and both reference curves are aggregated only after
+    their per-contract values are calculated, so no bucket centre is used as
+    either side of a tenor ratio.
+    """
+    buckets = {}
+    for row in rows:
+        bucket = min(target_dtes, key=lambda target: abs(target - row['dte0']))
+        buckets.setdefault(bucket, []).append(row)
+    summaries = []
+    for bucket in sorted(buckets):
+        bucket_rows = buckets[bucket]
+        summaries.append({
+            'dte_bucket': bucket,
+            'ratio': statistics.median(row['ratio'] for row in bucket_rows),
+            'p_050': statistics.median(
+                (row['front_dte'] / row['dte0']) ** 0.5 for row in bucket_rows),
+            'p_065': statistics.median(
+                (row['front_dte'] / row['dte0']) ** 0.65 for row in bucket_rows),
+            'n': len(bucket_rows),
+            'values': [row['ratio'] for row in bucket_rows],
+        })
+    return summaries
+
+
 def fit_tenor_exponent(rows):
     """Least squares through the origin of ln(ratio) on ln(front_dte / dte0),
     over contracts longer than their episode's front with a positive ratio.
@@ -221,17 +248,13 @@ def main():
     # uses) relative to the same episode's front (~30d) sticky-strike shift.
     # Mixing in the sticky-delta shift here would compare two different
     # models' intercepts (Review 19.3).
-    print('\nlevel shift (sticky-strike) vs front (~30d), against (30/DTE)^p:')
-    print(f"{'DTE0':>5} {'ratio to front':>15} {'p=0.5':>7} {'p=0.25':>7}  (n)  [values]")
+    print('\nlevel shift (sticky-strike) vs each episode\'s actual front DTE:')
+    print(f"{'DTE0':>5} {'ratio to front':>15} {'p=0.5':>7} {'p=0.65':>7}  (n)  [values]")
     ratio_rows = tenor_ratio_rows(summary)
-    buckets = {}
-    for r in ratio_rows:
-        b = min(TARGET_DTES, key=lambda t: abs(t - r['dte0']))
-        buckets.setdefault(b, []).append(r['ratio'])
-    for b in sorted(buckets):
-        vals = buckets[b]
-        print(f"{b:>5} {statistics.median(vals):>15.2f} {math.sqrt(30 / b):>7.2f} {(30 / b) ** 0.25:>7.2f}  ({len(vals)})  "
-              + ' '.join(f'{v:.2f}' for v in vals))
+    for row in tenor_bucket_summaries(ratio_rows):
+        print(f"{row['dte_bucket']:>5} {row['ratio']:>15.2f} {row['p_050']:>7.2f} "
+              f"{row['p_065']:>7.2f}  ({row['n']})  "
+              + ' '.join(f"{value:.2f}" for value in row['values']))
     print('\nper-contract rows used by the fit (front DTE -> contract DTE : ratio):')
     for r in ratio_rows:
         if r['dte0'] > r['front_dte']:

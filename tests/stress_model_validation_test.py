@@ -117,6 +117,12 @@ class StressModelResearchHelpersTest(unittest.TestCase):
                                 "front_shift": front_shift, "front_dte": front_dte})
         rows = skew_study.tenor_ratio_rows(summary)
         self.assertEqual(len(rows), 10)
+        buckets = skew_study.tenor_bucket_summaries(rows)
+        bucket_60 = next(row for row in buckets if row["dte_bucket"] == 60)
+        self.assertAlmostEqual(bucket_60["p_050"],
+                               ((39 / 46) ** 0.5 + (32 / 60) ** 0.5) / 2)
+        self.assertAlmostEqual(bucket_60["p_065"],
+                               ((39 / 46) ** 0.65 + (32 / 60) ** 0.65) / 2)
         p_hat, n = skew_study.fit_tenor_exponent(rows)
         self.assertEqual(n, 8)
         self.assertAlmostEqual(p_hat, p, places=9)
