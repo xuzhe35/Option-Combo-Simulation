@@ -1,968 +1,200 @@
-# `cost_basis.html` Long Put / 跨账本压力测试改动 Review 与修复复核
+# `cost_basis.html` Long Put / 跨账本压力测试维护说明
 
-> 最新复核日期：2026-09-05  
-> 最新复核结论：提交 `9588183` 已覆盖第 15 节的关键功能修复；第 17 节新发现的股票行 BBO 宽限浪费与错误“最低 IV”注释也已在第 18 节所述改动中修复并通过回归。
-> 当前建议：代码级问题已关闭；剩余事项只是在真实 TWS 连接下完成浏览器手工验收。
+> 最后整理：2026-09-05
+>
+> 当前状态：已知代码级 Review 问题均已关闭；仍需真实 TWS 浏览器端到端验收。
+>
+> 文档定位：记录当前有效口径、关键不变量、研究依据和验证入口，不再保留逐轮已解决问题的流水账。
 
-> Review 日期：2026-09-04  
-> Review 范围：当前工作区相对 `HEAD` 的未提交改动  
-> Review 方式：代码与设计文档审查、现有自动化测试；未连接真实 TWS 做浏览器手工验收  
-> 结论：发现 5 项值得修正的问题，其中 1 项高优先级、3 项中优先级、1 项低优先级
+## 1. 最终结论
 
-第 1–8 节保留初次 Review 的问题现场；第 9、11、12 节记录前两轮修复与验证；第 13 节是精度迭代 Review，第 14 节是修复记录，第 15 节保留提交前曾被回退的现场，第 16 节记录重新写入过程，第 17 节是对已提交快照 `9588183` 的独立 Review，第 18 节记录本轮直接修复。
+`cost_basis.html` 已能把同账户、同币种联动账本中的 Long Call / Put 纳入主账本压力测试，并生成跨账本保护叠加曲线。当前实现的核心计算链、行情质量防护、并发请求边界和研究参数都有自动化测试覆盖，未发现仍会导致生产估值错误的已知问题。
 
-## 1. 总体结论
+这是一套**参数化压力测试**，不是未来价格预测器。复利映射、路径波动率、sticky-strike、IV 冲击、期限衰减和今日点差外推都是显式假设；页面应继续展示这些假设，不能把结果表述为未来可成交价格。
 
-本轮迭代已经比较完整地建立了 TQQQ 主账本与同账户 QQQ 账本之间的 Long Call / Put 保护叠加能力。以下关键边界处理得较好：
+唯一尚未完成的验证是连接真实 TWS 后的浏览器端到端检查，重点观察真实 tick 到达顺序、行情权限、取消订阅和断线恢复。
 
-- 联动仓位来自事件账本，而不是从 TWS 当前持仓反推历史事实。
-- 联动账本数据保存在独立状态中，没有覆盖当前主账本的 `allEvents`、`ledger` 或 `bookId`。
-- 行情与期权参数使用一次性 TWS snapshot，不创建持续行情订阅，也不写入账本。
-- 缺少 IV、折现利率、标记价或完整合约信息时会整体停止叠加，没有静默丢弃合约或使用统一 IV 猜测。
-- 联动账本事件和期权参数请求均有 generation 检查，可丢弃账本、到期日切换后的迟到响应。
-- 未启用跨账本叠加时，原有压力测试序列形状保持不变。
-- Long Option 的现金流仍保留在审计账本里，但没有重新混入标的综合成本口径。
+## 2. 当前有效模型
 
-主要风险集中在新增的“跌到位需要天数”语义。该参数会让主账本和联动保护采用不同估值日期，并且联动期权可能使用与实际剩余期限不匹配的零息利率。结果虽然能够正常生成，也能通过当前测试，但紫色合计曲线在经济含义上可能不成立。
+### 2.1 数据边界与仓位来源
 
-## 2. Review 范围
+- 事件账本是仓位与成本的事实来源；TWS snapshot 只补充当前标的价、逐合约 IV、mark、bid/ask、利率和合约身份，不自动写入账本。
+- 联动账本只能选择同账户、同币种的 STK 账本；跨币种 P&L 不会直接相加，也没有隐式 FX 换算。
+- 联动保护只计仍属于账本的 Long Call / Put；股票和空头腿不计入联动保护叠加。
+- 主账本与联动账本状态隔离，加载联动账本不会覆盖当前账本的事件、ledger 或 book id。
+- 所有请求都受 generation、book id 和情景日校验；切换账本、切换情景日或关闭弹窗后的迟到响应必须丢弃。
 
-重点检查了以下文件：
+### 2.2 统一情景日
 
-- `cost_basis.html`
-- `cost_basis.css`
-- `js/cost_basis.js`
-- `js/cost_basis_core.js`
-- `ib_server.py`
-- `cost_basis_ws.py`
-- `tests/cost_basis_page.test.js`
-- `tests/cost_basis_core.test.js`
-- `tests/cost_basis_ws_test.py`
-- `CODE PLAN/COST_BASIS_LEDGER_PAGE_PLAN.md`
-- `CODE PLAN/COST_BASIS_CROSS_BOOK_HEDGE_OVERLAY_PLAN.md`
-- `README.md`
-- `ARCHITECTURE.md`
+压力测试只有一个情景日。主账本结算、主账本未到期期权估值、联动期权估值以及两次 TWS 参数请求都使用同一个 `throughExpiry`。
 
-同时检查了本轮顺带加入的 What If 自动跟随参考价逻辑，包括手工输入暂停跟随、恢复跟随、主动刷新和迟到响应保护。该部分未发现需要单独阻止合并的明显错误。
+“跌到位需要天数”改变的是整个压力测试的情景日，不能只改变联动 Put 的估值日。期权剩余期限与零息利率也必须从同一个情景日起算，禁止把不同估值日期的 P&L 相加。
 
-## 3. Findings
+### 2.3 标的映射与路径损耗
 
-### [P1] “跌到位需要天数”会让合计混合两个不同估值日期
+联动指数是驱动变量。默认复利映射为：
 
-位置：`js/cost_basis.js:1037-1040`、`js/cost_basis.js:1108-1114`、`js/cost_basis.js:1143-1144`
+```text
+(1 + 主账本涨跌) = (1 + 联动指数涨跌)^杠杆倍数 × exp(−路径损耗)
 
-主账本部分始终通过：
-
-```js
-core.computeOptionSettlementScenario(events, price, {
-    throughExpiry,
-});
+路径损耗 = (倍数² − 倍数) / 2 × σ² × T
 ```
 
-按所选 `throughExpiry` 计算结算结果。联动账本部分在填写 `horizonDays` 后，却改为按 `today + horizonDays` 计算 QQQ Long Option 市值，随后仍直接执行：
+- 杠杆倍数保留符号，因此反向 ETF 的上涨会正确映射为指数下跌。
+- 线性映射 `指数涨跌 = 主账本涨跌 / 倍数` 仅作为对照。
+- 路径 σ 可由用户显式输入；否则使用情景日后仍存续、执行价距现价最近的联动合约 IV 作代理。
+- 代理距现价超过 10% 时仍可使用，但页面必须显示警告。
+- 正向时间且找不到路径 σ 代理时整体 fail closed，不能静默按零损耗计算；情景日为今天时路径损耗明确为 0。
+- “暴跌 σ 放大”只根据带符号的联动指数跌幅启用，不能根据杠杆 ETF 自身涨跌方向猜测。
 
-```js
-totalPnl = pnl + linked.pnl;
+### 2.4 期权估值
+
+- 默认使用带连续股息率的美式 CRR 二叉树，步数为 121；可切换到欧式 BSM。
+- 情景日及之前到期的合约按内在价值结算；之后仍存续的合约按自身 TWS IV、剩余期限和对应零息利率估值。
+- 缺 IV、mark、利率、完整合约身份或定价器时，相关叠加整体停止，不跳过单张合约，也不使用统一 IV 猜测。
+- 今日参考价值默认取 TWS mark；“按今日点差折算”将今日 `bid/mark`（多头）或 `ask/mark`（空头）的比例外推到情景理论价。它不是对情景日 bid/ask 的预测。
+- bid/ask 必须双边存在、非负且 `ask >= bid`；单边或 crossed quote 必须具名 fail closed。真实零 bid 是有效报价。
+
+## 3. IV 冲击模式与研究参数
+
+### 3.1 三种模式
+
+| 模式 | 有效语义 |
+| --- | --- |
+| 无 | 每张合约保持当前 sticky-strike IV |
+| 固定点数 | 所有存续合约、整条扫描线统一加同一点数；上涨侧也加。不得套用自适应 β、价外 Put 折扣或期限衰减 |
+| 按跌幅 β | 只在联动指数下跌侧抬升 IV；基准点与上涨侧不变。可叠加自适应 β、价外 Put 折扣和期限衰减 |
+
+本账本未到期期权的 β 冲击按联动杠杆倍数的绝对值放大。所有校准因子必须相乘，后计算的期限因子不能覆盖先前的价外折扣。
+
+### 3.2 自适应 β
+
+`scripts/stress_model_validation.py` 对 QQQ 日频样本按跌幅分档、过原点回归，当前 UI 使用：
+
+| 联动指数跌幅 | β（IV 点 / 每跌 1%） |
+| --- | ---: |
+| 2–5% | 0.90 |
+| 5–10% | 0.95 |
+| 10–20% | 1.00 |
+| 20% 以上 | 1.65，样本较薄 |
+
+扫描点之间线性插值。七次事件研究得到的前端 β 离散度过大，不用于生产定参。
+
+### 3.3 价外 Put 折扣
+
+真实 ATM 基准显示，价外 10–20% Put 的 IV 抬升中位数约为 ATM 的 `0.50`（n=33）。生产规则只作用于价外 Put：
+
+- 距现货不超过 5%：系数 1；
+- 距现货至少 10%：系数 0.50；
+- 中间线性插值；
+- ITM Put 与所有 Call 保持系数 1，因为现有研究没有为它们提供折扣依据。
+
+### 3.4 期限衰减
+
+β 描述约 30 天 IV 的反应。生产规则为：
+
+```text
+期限系数 = min(1, (参考期限 / 情景日后剩余天数)^p)
+默认参考期限 = 30 天
+默认 p = 0.65
 ```
 
-例如：
+`scripts/skew_regime_study.py` 使用每次事件自己的前端合约实际 DTE 与各合约实际 DTE：
 
-- 主账本选择一年后的期权到期日；
-- “跌到位需要天数”填写 20 天；
-- ① 是一年后主账本的股票与期权结算盈亏；
-- ③ 是 20 天后 QQQ Long Put 的理论市值变化；
-- 紫线把这两个不同日期的值直接相加。
+- 对数最小二乘 `p ≈ 0.76`（n=25）；
+- 逐合约隐含指数中位数 `p ≈ 0.64`；
+- 默认 `0.65` 取稳健中位数一侧；
+- `0.5` 保留为平方根/ATM 口径对照。
 
-两个数字并不属于同一个投资组合时点，因此这个合计没有一致的经济含义。问题不会触发 unavailable，也不会给出显著警告，用户容易把紫线当作同一压力情景下的组合总盈亏。
+DTE 桶只用于展示。拟合和展示参考曲线都必须先按逐合约实际 `front_dte / dte0` 计算，再聚合进桶；不能用 30/60/120 等桶中心代替真实 DTE。
 
-建议：
+## 4. 不能破坏的实现不变量
 
-1. 最稳妥的做法是让主账本和联动账本始终使用同一个估值日。
-2. 如果要支持“今天 + N 天”的中途压力测试，主账本也需要在同一天做未到期头寸的 MTM，而不是继续按 `throughExpiry` 全部结算。
-3. 如果短期内不扩展主账本中途 MTM，应限制 `horizonDays` 等于今天到 `throughExpiry` 的天数；或在日期不一致时只展示联动期权独立估值，不生成 `totalPnl` 合计曲线。
+后续修改至少要守住以下边界：
 
-建议新增测试：构造 `throughExpiry` 与 `today + horizonDays` 不同的场景，断言系统拒绝生成合计，或者断言两个组成部分采用同一估值日期。
+1. **同一时点**：所有 P&L 分项、剩余期限和利率 anchor 使用同一个情景日。
+2. **严格身份**：有 `conId` 时只按 `conId`；否则有 `localSymbol` 时只按 `localSymbol`；两者都没有才允许按 right/expiry/strike，并核对 multiplier 等可用字段。强身份不匹配不得降级猜测。
+3. **同一币种**：主账本与联动账本必须同币种；未来若支持跨币种，必须引入有时间戳和来源的 FX snapshot。
+4. **账本为真相**：TWS 当前持仓只能检测差异，不能重写历史仓位或成本事件。
+5. **缺证据即停止**：缺路径 σ、IV、mark、利率、双边报价或身份时 fail closed，不得把缺失合约当作零价值。
+6. **模式正交**：固定冲击保持统一；β 校准只属于 beta 模式；OTM 折扣只属于价外 Put；期限与折扣相乘。
+7. **符号正确**：反向杠杆映射和崩盘 σ 放大使用带符号的指数变化；只有冲击幅度放大使用杠杆绝对值。
+8. **迟到响应无效**：异步响应写状态前必须同时验证 generation、主/联动 book id 和情景日。
+9. **编号单一来源**：图例、状态、卡片、SVG title 与 tooltip 使用同一组件编号函数。
+10. **研究可追溯**：生产参数必须能追溯到脚本输出、样本数和聚合方法，并由无 I/O 合成测试锁定。
 
-### [P2] Horizon 改变剩余期限后，BSM 仍使用按 `throughExpiry` 解析的零息利率
+## 5. 行情请求与资源边界
 
-位置：`js/cost_basis.js:1108-1114`、`ib_server.py:2484-2493`、`ib_server.py:2582-2594`
+- WebSocket 请求上限仍是 128 张合约；后端以最多 20 行一批临时打开流式行情，前一批在 `finally` 中取消并清理后才进入下一批。
+- 所有批次共享 8 秒 deadline，不能让每批各自重新获得完整超时。
+- 股票行需要当前价格；期权核心证据需要 mark，情景日后仍存续的期权还需要 IV。
+- 核心证据齐全后，期权双边价最多再等 0.75 秒；非期权行不应让 BBO 宽限无条件等满。
+- 超出 deadline 或被行情权限拒绝的合约以缺失证据返回，由前端具名停止估值。
+- 页面汇总显示 `marketDataType`（实时、冻结、延时或混合），但目前没有逐 tick 市场时间戳，因此不能声称 snapshot 完全原子或绝对新鲜。
 
-前端在 Horizon 模式下用 `valuationDate` 重新计算期权剩余期限：
+## 6. 自动化验证
 
-```js
-timeYears = (expiryAt - valuationDate) / 365
-```
-
-但 `marketInputs.ratesByExpiry` 是后端以 `throughExpiry` 为情景日起点生成的：
-
-```python
-maturity_days = (expiry_date - scenario_date).days
-resolved = resolve_snapshot_discount(curve, maturity_days)
-```
-
-其中 `scenario_date` 来自 `throughExpiry`，不是 `valuationDate`。
-
-因此当 `valuationDate !== throughExpiry` 时，BSM 会混用：
-
-- 按 `valuationDate` 计算的 `timeYears`；
-- 按 `throughExpiry` 剩余期限解析的 `zeroRate`。
-
-例如某合约从 `throughExpiry` 看剩余 137 天，但从 `today + 60` 看只剩 78 天，当前实现会使用 137 天期限的零息利率配合 78 天的 BSM 时间。收益率曲线较平时误差可能不大，但这是确定性的期限错配，在短端陡峭、事件期或更长 Horizon 下会放大。
-
-建议：
-
-1. 在 `request_cost_basis_option_scenario_inputs` 中增加明确的 `valuationDate` / rate-anchor 字段，并用它计算 `maturity_days`。
-2. 或让后端返回足够的折现曲线节点，由前端按真实 `valuationDate → expiry` 期限解析。
-3. 响应中应回传实际 rate anchor，前端校验它与当前估值日一致；不一致时 fail closed。
-
-建议新增测试：让 `valuationDate` 明显晚于 `throughExpiry`，使用非平坦曲线，验证得到的是新剩余期限对应的利率，而不是旧期限利率。
-
-### [P2] 已有强合约身份时，匹配失败仍会降级到 `right/expiry/strike`
-
-位置：`js/cost_basis.js:420-439`；后端同类逻辑位于 `ib_server.py:2322-2338`
-
-`_findOptionQuote` 的当前逻辑是：
-
-1. `conId` 相同则匹配；
-2. `localSymbol` 相同则匹配；
-3. 前两项不匹配时，继续按 `right + expiry + strike` 匹配。
-
-问题在于：当账本已经有明确 `conId`，但快照里没有该 `conId` 时，代码仍可能抓到同到期日、执行价和方向的另一张合约。调整期权、公司行动后合约或其它具有相同可见条款但不同乘数/交割物的合约尤其危险。
-
-前端随后使用账本自己的 `sharesPerContract` 乘以错误报价，可能产生显著错误的今日标记市值、情景市值和保护 P&L。后端 `_cost_basis_option_request_matches` 也采用相同降级方式，因此错误合约甚至可能被纳入快照请求。
-
-建议采用严格分层匹配：
-
-- 仓位有有效 `conId`：只接受相同 `conId`，不再降级。
-- 没有 `conId`、但有 `localSymbol`：只接受相同 `localSymbol`。
-- 两者都没有：才允许使用 `right + expiry + strike`，并同时核对 multiplier、symbol、currency、trading class 等可用字段。
-- 强身份存在但找不到时，应返回 `missing_linked_option_quote` 或身份不匹配错误，而不是猜测。
-
-建议新增测试：账本仓位 `conId=A`，快照只有相同条款但 `conId=B` 的报价，断言整体 fail closed。
-
-### [P2] 联动账本没有限制币种，可能把不同货币面值直接相加
-
-位置：`js/cost_basis.js:3464-3471`、`js/cost_basis.js:1143-1144`
-
-联动账本候选仅检查：
-
-- 同一个 account；
-- `secType === STK`；
-- 不是当前账本。
-
-没有检查 `currency`。但最终 `linked.pnl` 会直接加到主账本 `pnl`，图表和 tooltip 又统一按主账本币种格式化。
-
-对于 TQQQ ↔ QQQ，两本账本通常都是 USD，所以主路径不受影响；但 UI 文案和候选列表允许选择同账户的任意其它 STK 账本。一旦选择不同币种的账本，系统会把例如 USD 与 HKD/CAD/EUR 面值直接相加，结果确定错误且没有提示。
-
-建议：
-
-1. 当前版本直接把候选限制为与主账本相同币种，这是最安全的方案。
-2. 如果未来确实需要跨币种，应引入带来源和时间戳的 FX snapshot，并把联动 P&L 明确换算到主账本币种。
-3. `buildStressTestSeries` 的纯函数入口也应验证币种，而不能只依靠 UI 过滤。
-
-建议新增测试：主账本 USD、联动账本非 USD，断言候选被过滤或序列返回明确的 `linked_currency_mismatch`。
-
-### [P3] 只启用跨账本叠加时，编号在图例、状态和 tooltip 之间不一致
-
-位置：`js/cost_basis.js:3315-3328`、`js/cost_basis.js:3102-3140`；设计要求见 `CODE PLAN/COST_BASIS_CROSS_BOOK_HEDGE_OVERLAY_PLAN.md:197-205`
-
-设计文档规定：如果本账本的未到期 Long Option 叠加未开启，联动账本应显示为第 ② 项，合计写作 `①+②`。
-
-当前 tooltip 已动态执行这一规则，但：
-
-- 图例显示 `①+③`；
-- 状态行固定写 `③ 已叠加`；
-- 页面说明仍把联动账本固定称为 ③；
-- 自动化测试也断言 `①+③`，把当前不一致锁定成了预期行为。
-
-这不会改变数值，但同一张图出现两套编号，会增加用户核对分项和合计的难度。
-
-建议抽出一个统一的组件编号映射，例如：
-
-```js
-const ownLongNumber = showConvexity ? 2 : null;
-const linkedNumber = showConvexity ? 3 : 2;
-```
-
-图例、状态、卡片、SVG title、tooltip 和固定说明均从同一映射生成。随后更新当前断言 `①+③` 的测试。
-
-## 4. 测试与验证结果
-
-已执行：
+主要入口：
 
 ```text
 node tests/run.js
-```
-
-结果：
-
-```text
-1010 passed, 0 failed
-```
-
-已执行成本账本相关 Python 测试：
-
-```text
+python3 -m unittest tests.stress_model_validation_test
 python3 -m unittest \
   tests.cost_basis_ws_test \
   tests.cost_basis_store_test \
-  tests.cost_basis_executions_test
+  tests.cost_basis_executions_test \
+  tests.ib_server_ws_test
 ```
 
-结果：
+最近一次收尾验证：
 
-```text
-Ran 223 tests
-OK (skipped=1)
-```
+- JavaScript：`1012 passed, 0 failed`；
+- 研究纯函数：`Ran 9 tests, OK`；
+- 资产内容哈希与 `git diff --check`：通过。
 
-另执行 `git diff --check`，未发现 whitespace error。
+测试重点覆盖：
 
-完整 JS 测试中的若干错误日志是测试用例主动注入异常、验证 UI 隔离行为产生的预期输出；最终测试结果为 0 failed。
+- 统一情景日、剩余期限和利率请求；
+- 正向/反向杠杆与复利/线性映射；
+- Long Call/Put、主账本空头负债和到期内在价值；
+- 强身份冲突、币种不一致、缺 IV/mark/rate/quote 的 fail-closed；
+- fixed 与 beta 模式隔离；
+- 自适应 β 分档、取整和薄样本继承；
+- 价外 Put right-aware 折扣及其与期限衰减的组合；
+- 实际 DTE 指数恢复，以及桶中心算法不能恢复已知指数；
+- snapshot 核心证据、BBO 宽限、20 行分批与清理；
+- 账本/情景切换后的迟到响应丢弃；
+- 动态说明、组件编号和资源缓存戳。
 
-## 5. 当前自动化测试的覆盖评价
+## 7. 仍需人工验证的边界
 
-新增测试覆盖较充分，包括：
+连接真实 TWS 后应至少检查一次：
 
-- TQQQ −30% → QQQ −10% 的线性映射。
-- 正向与反向杠杆比率。
-- Long Call / Put 同时存在。
-- 测试日前到期按内在价值结算。
-- 今日之前到期的账本残留仓位被排除。
-- 缺 IV、利率、mark、身份完整性时 fail closed。
-- 固定 IV shock、跌幅 β 和期限衰减。
-- Horizon 对剩余期限和 Theta 的影响。
-- 联动账本事件加载不污染主账本。
-- 账本切换后的迟到响应丢弃。
-- localStorage 记忆不会自动开启紫线。
-- What If 自动跟随、手工暂停、恢复和主动刷新。
+1. 同账户存在 TQQQ 与 QQQ 两本真实账本，且联动账本同时有测试日前后到期的 Long Put。
+2. 每个 `conId`、`localSymbol`、multiplier、IV、mark、bid/ask 与 TWS 合约一致。
+3. 模拟 IV、mark、bid/ask 以不同顺序到达，确认不会过早取消，也不会超过订阅额度。
+4. 大账本跨多个批次时，确认共享 deadline、逐批取消和权限拒绝后的清理行为。
+5. 切换账本、情景日、弹窗与连接状态，确认旧响应和旧行情不会恢复到当前页面。
+6. 冻结/延时行情的状态文案正确，断开 TWS 后跨账本曲线停用且不保留陈旧结果。
 
-但当前测试主要验证函数是否按现有实现运行，没有验证以下更高层语义：
+历史参数的真实链数据复算需要本地 options-chain service（默认 `127.0.0.1:8750`）。服务不可用时，研究脚本应给出启动方法后退出；离线合成测试只能验证算法口径，不能替代真实样本复算。
 
-1. `totalPnl` 的所有组成部分是否属于同一估值日期。
-2. BSM 使用的零息利率期限是否与 `timeYears` 一致。
-3. 强身份不匹配时是否错误降级到合约条款。
-4. 主账本和联动账本币种是否一致。
-5. 所有 UI 区域是否使用同一组件编号。
+## 8. 维护入口与 Git 主线
 
-特别是 Horizon 测试目前只断言 QQQ Put 的期限缩短、价值下降，却没有检查主账本仍停留在另一个日期，也没有检查利率期限错配。因此测试通过不能证明紫色合计曲线具有一致的经济口径。
+权威文件：
 
-## 6. 未完成的验证
+- 页面与运行时：`cost_basis.html`、`js/cost_basis.js`、`js/cost_basis_core.js`；
+- 快照协议与行情：`cost_basis_ws.py`、`ib_server.py`、`ib_server_market_data.py`；
+- 设计约束：`CODE PLAN/COST_BASIS_CROSS_BOOK_HEDGE_OVERLAY_PLAN.md`；
+- 研究结论：`STRESS_MODEL_RESEARCH_MEMO.md`、`VRP_RESEARCH_MEMO.md`；
+- 研究脚本：`scripts/stress_model_validation.py`、`scripts/skew_regime_study.py`；
+- 关键测试：`tests/cost_basis_page.test.js`、`tests/stress_model_validation_test.py`、`tests/ib_server_ws_test.py`。
 
-本次 Review 没有进行真实 TWS 浏览器验收。合并前仍建议按设计文档完成以下检查：
+需要追溯演进时，可从以下提交开始：
 
-1. 同账户存在 TQQQ 与 QQQ 两本真实账本。
-2. QQQ 账本同时包含测试日前到期和测试日后到期的 Long Put。
-3. 核对 TWS 返回的每个 `conId`、`localSymbol`、IV、mark 和 multiplier 与账本仓位一致。
-4. 对比 Horizon 留空、0 天、20 天以及恰好等于所选到期日的结果。
-5. 在非平坦收益率曲线下核对每张递延期权使用的实际剩余期限。
-6. 切换账本、切换到期日、请求进行中关闭弹窗，再确认迟到结果不会污染当前页面。
-7. 断开 TWS 后确认基础曲线可继续显示，跨账本曲线明确停用且不保留陈旧结果。
+- `9588183`：路径 σ、crossed BBO、行情证据、分批请求与用户说明的主要精度修复；
+- `33cb47b`：研究参数落地、组合因子、反向杠杆和 right-aware 折扣；
+- `f2f6a23`：实际 DTE 拟合与 fixed 模式统一冲击；
+- `713ac36`：研究展示、文案和全仓口径最终统一。
 
-## 7. 建议修复顺序
-
-1. 先决定 Horizon 的统一估值日语义，修复不同日期 P&L 相加的问题。
-2. 将相同估值日传给利率解析路径，消除 BSM 时间与零息利率期限错配。
-3. 同时收紧前后端合约身份匹配规则。
-4. 限制联动账本币种，或实现明确 FX 换算。
-5. 最后统一 UI 编号和对应测试。
-
-前两项建议作为合并阻断项处理。第三、第四项属于错误估值的防护边界，也建议在正式开放任意联动账本选择前修复。第五项不影响数值，可以单独快速修正。
-
-## 8. 最终评价
-
-这轮迭代在数据隔离、账本事实来源、只读行情和 fail-closed 方面是扎实的，Long Put 确实已经进入压力测试计算链路。当前最大的不足不是 Long Put 被漏算，而是新增的时间维度没有贯穿整个组合估值：主账本结算日、联动期权估值日和折现利率期限可能各自不同，最后却被包装成同一条合计曲线。
-
-建议修复 P1/P2 时间语义后，再把这套结果用于实际仓位风险判断。
-
-## 9. 修复记录（2026-09-04，同日）
-
-逐条核实后全部成立，均已修复并加了针对性测试。`node tests/run.js` 1010 通过；
-`tests.cost_basis_ws_test / cost_basis_store_test / cost_basis_executions_test /
-ib_server_ws_test` 285 通过。
-
-| Finding | 结论 | 修复 |
-| --- | --- | --- |
-| P1 合计混合两个估值日 | 成立。首版「跌到位需要天数」只推后 ③ 的估值日 | 天数改为整个弹窗的情景日（`_stressScenarioDate()`）：① 的结算、② 与 ③ 的 BSM、两次 TWS 快照请求都用同一个 `throughExpiry`；`estimateDeferredLongOptions` / `estimateLinkedLongOptions` 删除 `valuationDate`，纯函数层面不再存在「只给某一项换日期」的入口；控件移到主控件行，选择到期范围会清空天数，不按账本记忆。测试：源码断言不含 `valuationDate`；harness 断言天数=20 时主账本与联动账本两次请求的 `throughExpiry` 都是 `20260923`，卡片显示本账本 9/4 到期的 Short Put 已在该日结算 |
-| P2 利率期限错配 | 成立，同一根因 | 随 P1 消失：后端仍以 `throughExpiry` 为 `scenario_date` 解析利率，而它现在就是唯一的估值日 |
-| P2 强身份降级匹配 | 成立 | 前端 `_findOptionQuote` 改为严格分层（conId → localSymbol → 条款 + multiplier），新增 `_optionQuoteIdentityConflict` 给出 `long_option_identity_mismatch` / `linked_option_identity_mismatch`；后端 `_cost_basis_option_request_matches` 同规则，移到 `ib_server_market_data.py`（`cost_basis_option_identity` / `cost_basis_option_request_matches`）以便单测，identity 与快照行新增 `multiplier`，`cost_basis_ws.py` 转发请求行的 `multiplier`。测试：JS 纯函数与序列级 fail-closed；Python 4 个用例覆盖三层规则与 multiplier |
-| P2 币种 | 成立 | 候选只列同账户、同币种 STK 账本；`buildStressTestSeries` 接收 `currency` 并在 `_prepareLinkedHedge` 校验 → `linked_currency_mismatch`。测试：HKD 账本不出现在候选；纯函数返回该原因 |
-| P3 编号不一致 | 成立 | 新增 `stressComponentNumbers(showConvexity, showLinked)`，图例、状态行、卡片、SVG title、tooltip 全部取自它；页面说明改为「未开启 ② 时 ③ 就是 ②」。测试改为断言 `①+②` 并断言状态行不含 ③ |
-
-§6 的 TWS 浏览器手工验收仍未做。
-
-## 10. 修复复核结论（2026-09-04）
-
-### 10.1 原 5 项 Finding 的覆盖状态
-
-| 原 Finding | 实现复核 | 测试复核 | 结论 |
-| --- | --- | --- | --- |
-| P1 合计混合两个估值日 | `_stressScenarioDate()` 生成唯一情景日；① 结算、②/③ 估值及两次 snapshot 请求均使用相同 `throughExpiry` | Harness 覆盖 Horizon=20 时两次请求同为 `20260923`，并检查主账本短 Put 已在该日结算 | 已覆盖 |
-| P2 利率期限错配 | 后端用同一个 `throughExpiry` 解析 `scenario_date`，并以 `expiry_date - scenario_date` 解析曲线期限；前端 BSM 的 `timeYears` 也以同一日期为起点 | 前端覆盖统一日期及剩余期限；当前没有直接 mock 非平坦曲线并断言后端 `maturity_days` 的专门测试 | 实现已覆盖；建议补直接后端回归测试 |
-| P2 强身份降级匹配 | 前后端均改为 conId-only / localSymbol-only / 无强身份才按条款匹配，并在条款层核对 multiplier；强身份冲突返回具名 unavailable | JS 覆盖主账本和联动账本 fail-closed；Python `CostBasisOptionIdentityTest` 4 项覆盖三层规则及 multiplier | 已覆盖 |
-| P2 跨币种直接相加 | UI 候选限制同账户、同币种 STK；纯函数入口再校验币种并返回 `linked_currency_mismatch` | 覆盖候选过滤、大小写/空格规范化及纯函数拒绝 | 已覆盖 |
-| P3 编号不一致 | `stressComponentNumbers()` 统一图例、状态、卡片、SVG title 与 tooltip 的编号 | 覆盖四种 ②/③ 组合；只开联动时断言 `①+②` 且状态无 `③` | 已覆盖 |
-
-原 5 项问题不是只改了表面文案：统一估值日已经贯穿结算、期权估值和快照协议；身份、币种两项也在 UI 之外的纯函数/后端边界做了第二层防护。就这 5 项本身而言，修复是完整的。
-
-### 10.2 新发现：[P1] 主账本期权快照的迟到响应可覆盖新情景或新账本
-
-位置：`js/cost_basis.js:3495-3542`、`js/cost_basis.js:3602-3610`、`js/cost_basis.js:6387-6399`
-
-联动账本的 `_refreshStressLinkedInputs()` 已经有 `stressLinkedInputsGeneration`、捕获的 `mainBookId / linkedBookId / throughExpiry` 和 `isCurrent()` 校验，但主账本 `_refreshStressMarketInputs()` 没有相同保护：
-
-- 请求开始后只设置全局 `stressInputsPending = true`；
-- `_invalidateStressScenarioInputs()` 清掉旧数据，却既不递增主账本 generation，也不终止/失效当前主请求；
-- 新情景触发的 `_refreshStressMarketInputs()` 因为 `stressInputsPending` 仍为 true 直接返回；
-- 旧请求完成后不校验 `bookId` 或情景日，直接写入 `stressLongOptionInputs`、`marketPrice` 和 `stressBasePrice`。
-
-这个竞态很容易由普通输入触发：在“跌到位需要天数”中键入 `20` 时，第一个字符 `2` 会发起 `today + 2` 的请求；第二个字符把值变成 `20`，但 `today + 20` 的请求被 pending 门禁吞掉。随后 `+2` 的旧响应写回。由于响应的 `throughExpiry` 与当前情景不一致，估值函数通常会 fail closed，图表停在“无可用参数”状态，直到用户手工刷新。
-
-更严重的路径是请求期间切换主账本。`bookScopedStateReset()` 没有重置 `stressInputsPending`，旧请求也不检查捕获的 `bookId`；旧账本的标的现价和 snapshot 因而可能写入新账本。如果新旧账本碰巧选择同一情景日，日期校验不足以阻止错误数据被使用。
-
-建议参照联动请求实现主账本保护：
-
-1. 增加 `stressInputsGeneration`；情景日改变、主账本切换、弹窗关闭或连接失效时递增。
-2. `_refreshStressMarketInputs()` 捕获 `bookId`、`throughExpiry` 与 generation，并在成功、失败、finally 写状态前统一调用 `isCurrent()`。
-3. 不要让旧请求的 `finally` 清掉新请求的 pending；pending 最好与 generation 绑定。
-4. 对 Horizon 输入做短 debounce，或允许新 generation 立即发请求、只丢弃旧响应，避免多位数字每个按键都启动一次 TWS snapshot。
-
-建议新增两个 harness 测试：
-
-- `+2` 请求未完成时把 Horizon 改成 `+20`，先后完成两个 Promise，只允许 `+20` 的响应进入状态。
-- 账本 A 请求未完成时切到 B，A 响应完成后不得改写 B 的 `stressLongOptionInputs`、`marketPrice`、`stressBasePrice` 或 pending 状态。
-
-### 10.3 本次验证
-
-- `node tests/run.js`：`1010 passed, 0 failed`。
-- `python3 -m unittest tests.cost_basis_ws_test tests.cost_basis_store_test tests.cost_basis_executions_test`：`Ran 223 tests, OK (skipped=1)`。
-- 按 `config.local.ini` 配置的项目 Python 运行 `tests.ib_server_ws_test`：`Ran 62 tests, OK`。
-- `python3 -m py_compile cost_basis_ws.py ib_server.py ib_server_market_data.py`：通过。
-- `git diff --check`：通过。
-
-未连接真实 TWS 做端到端浏览器验收。除上述竞态和缺少后端利率 anchor 的直接回归测试外，未发现原 5 项修复存在残留的数值或协议错误。
-
-## 11. §10 复核意见的处理（2026-09-04）
-
-| 意见 | 判断 | 处理 |
-| --- | --- | --- |
-| 10.2 [P1] 主账本快照迟到响应可覆盖新情景或新账本 | 成立。`_refreshStressMarketInputs` 无代数保护，`stressInputsPending` 门禁会吞掉新请求，`bookScopedStateReset` 不重置 pending；「跌到位需要天数」每个按键触发请求，使之易触发 | 新增 `stressInputsGeneration`：情景日失效（`_invalidateStressScenarioInputs`）、切换账本（`_beginBookSelection`）时递增；请求开始时捕获 `bookId / throughExpiry / socket / generation` 与合约列表，成功、失败、`finally` 前统一过 `isCurrent()`，被取代的请求不再清新请求的 pending；去掉 pending 门禁，新请求直接取代旧请求；`bookScopedStateReset` 加 `stressInputsPending: false`；天数输入改为 400 ms 去抖后再发请求，关闭弹窗清定时器。测试：harness 用可控 Promise 复现「+2 未完成改 +20」与「账本 A 未完成切到 B」，断言只有新响应落地、旧失败静默、pending 不卡死 |
-| 10.1 建议补后端利率 anchor 回归测试 | 采纳 | 利率块抽为 `ib_server_market_data.build_scenario_rates_by_expiry(curve, contracts, scenario_date, resolver)`（行内多回传 `maturityDays`），`ib_server.py` 调用它。测试：非平坦曲线下同一到期日在 9/4 与 9/24 两个情景日分别得到 133 / 113 天与对应更低的零息利率，情景日及之前到期的不出现，曲线覆盖不到的跳过而非猜测 |
-
-验证：`node tests/run.js` 1011 通过；四个 Python 套件 287 通过。TWS 端到端浏览器验收仍未做。
-
-## 12. 第 11 节修复验证（2026-09-04）
-
-### 12.1 主账本 snapshot 竞态
-
-第 11 节描述与代码一致，原 P1 已关闭：
-
-- `stressInputsGeneration` 保持为跨请求递增的代数，没有被 `bookScopedStateReset()` 重置。
-- `_beginBookSelection()` 与 `_invalidateStressScenarioInputs()` 都会递增代数；后者同时把当前 pending 状态失效。
-- `_refreshStressMarketInputs()` 在发请求前固定 `bookId`、`throughExpiry`、`socket`、generation 和 contracts；成功、失败及 `finally` 写状态前均检查 `isCurrent()`。
-- 新请求不再被旧请求的 pending 门禁吞掉；旧请求的 `finally` 也不能清除新请求的 pending。
-- Horizon 输入具有 400 ms 去抖，关闭弹窗会清除尚未触发的定时器。
-- Harness 的可控 Promise 用例确实覆盖了旧成功响应、旧失败响应、`+2 → +20` 和请求期间 `book A → book B` 四条关键路径，并断言旧请求不能改写 snapshot、现价、基准价、错误或 pending。
-
-代码检查中未发现旧请求仍可覆盖新情景或新账本的路径。关闭弹窗不会主动废弃已经发出的 snapshot，但它仍受账本、socket、情景日和 generation 约束；返回的是当前账本、当前情景的有效现价，且重新打开或发起更新请求会产生新 generation，因此不构成本 Finding 所述的跨情景污染。
-
-### 12.2 利率 anchor 回归测试
-
-第 11 节描述与代码一致，原测试缺口已关闭：
-
-- `build_scenario_rates_by_expiry()` 只处理情景日之后到期的合约，以 `expiry_date - scenario_date` 计算 `maturity_days`。
-- 返回行携带 `maturityDays`，便于协议诊断；真实解析仍由共享 `resolve_snapshot_discount()` 完成。
-- `ib_server.py` 的 snapshot 路径已调用该 helper，没有保留旧的独立期限计算分支。
-- 新测试使用非平坦曲线，直接断言同一 `20270115` 到期日在 `20260904` 与 `20260924` 两个情景日分别采用 133 天和 113 天；同时覆盖情景日及之前到期不取利率、曲线无法覆盖时跳过而不猜测。
-
-### 12.3 独立验证结果
-
-- `node tests/run.js`：`1011 passed, 0 failed`。
-- 使用 `config.local.ini` 指定的项目 Python 运行 `tests.cost_basis_ws_test`、`tests.cost_basis_store_test`、`tests.cost_basis_executions_test`、`tests.ib_server_ws_test`：`Ran 287 tests, OK`。
-- `py_compile`：`cost_basis_ws.py`、`ib_server.py`、`ib_server_market_data.py` 全部通过。
-- `git diff --check`：通过。
-
-最终结论：第 11 节的两项处理均已正确落地并有针对性回归测试；本轮静态复核和自动化验证未发现新的明显 BUG。剩余未完成项只有依赖真实 IB/TWS 环境的端到端浏览器验收，不属于当前自动化修复缺口。
-
-### 12.4 盘中无 IV 的根因与修复（2026-09-04 22:40 CST）
-
-现象：勾选「计入情景日仍未到期的期权」后图表消失，状态「逐合约 TWS IV：0 张已取得」。
-排查：直接向后端重放 TQQQ / QQQ 两本账本的请求，5 张与 13 张合约全部返回买卖价但
-`impliedVolatility` 为 null；日志显示 22:34 之后每次快照都跑满 8 s 超时，而当天
-00:03–02:21（美股盘后）的同类请求 0.8–1.3 s 即完成。用独立 clientId 对同一张
-`TQQQ 270319P55` 做对照：`reqMktData(snapshot=True)` 8 s 内没有任何
-tickOptionComputation，`reqMktData(genericTicks='106', snapshot=False)` 0.1 s 拿到
-IV 0.675。结论：美股盘中 TWS 不给快照请求发希腊值；之前能用只是盘后快照回放了
-收盘计算值。与本轮前端改动无关。
-
-修复（`ib_server.py`）：期权改为带 106 tick 的短暂流式请求，取到即在 `finally`
-取消，股票仍用快照；无股票持仓的账本（如纯期权的 QQQ）标的合约按 symbol 缓存，
-避免 sec-def 偶发 5 s 超时吃掉整个预算（日志 22:34:56 那次 5003 ms 超时即此）。
-需要重启 ib_server.py 生效。
-
-## 13. 新一轮压力测试精度改进 Review（2026-09-05）
-
-### 13.1 结论摘要
-
-这轮新增的方向是合理的：主账本未到期空头已纳入负债盯市，联动标的改为按日再平衡的复利映射，增加 IV 冲击、期限衰减、美式 CRR、股息率和买卖价口径，后端也改用带 106 tick 的短时行情流解决盘中快照拿不到 IV 的问题。多空符号、权利金避免重复计入、统一情景日、严格合约身份和缺 IV/利率时 fail-closed 的原有边界仍然保持。
-
-但新口径还有 5 项可操作的遗漏：其中前两项会直接给出错误、甚至偏乐观的数值；第 3、4 项会使新行情链路偶发报缺数据或在大持仓下稳定失败；第 5 项是用户可见口径与实际模型不一致。
-
-### 13.2 [P1] 无路径 σ 时“复利 + 波动率损耗”会静默退化为零损耗
-
-**位置**：`js/cost_basis.js:895-900`、`js/cost_basis.js:930-943`、`js/cost_basis.js:1303-1317`、`js/cost_basis.js:3840-3846`
-
-`_proxyPathSigma()` 只在“到期日晚于情景日”的联动账本期权中取 IV。当 QQQ 保护仓都在情景日或之前到期时，这些期权仍会按内在价值参与联动估值，但代理 σ 变成 `null`。随后 `leveragedDragLog()` 将 `Number(null)` 当成 0，直接返回零损耗；序列仍标记为可用，状态文案只显示“复利”，没有警告本次根本没有使用波动率损耗。
-
-这不是可忽略的数值差。以 3x、90 天、σ=30%、TQQQ 跌 30% 为例，当前函数在无 σ 时将 QQQ 映射到约 443.95（跌 11.21%），有损耗时约为 454.05（跌 9.19%）。对大量 Put 的保护价值会产生实质差异，而且映射结果不应该因为用户账本里恰好有没有一张更远期期权而改变。
-
-同时，“持仓合约中最低 IV”并不是 ATM 代理；它可能是任意深度实值/虚值翼。这会让路径损耗取决于用户持有哪些 strike，并通常向低波动率偏置。
-
-**建议**：复利模式且 `T > 0` 时，没有显式 σ 或可验证的市场代理应 fail closed，不要默认为 0；最好使用真正的近 ATM 指数 IV 或独立的已实现波动率假设。如果仍使用持仓快照，至少应按标的现价选最近 ATM，并将“无代理”变成显式错误或高可见警告。
-
-### 13.3 [P1] 买卖价口径接受 crossed quote，会把无效行情变成偏乐观估值
-
-**位置**：`js/cost_basis.js:481-492`、`ib_server_market_data.py:461-515`
-
-后端已正确识别 `ask < bid` 为 `bidAskStatus='crossed'` / `bidAskValid=false`，但 `liquidationHaircut()` 只检查了单边价格和 mark 是否非负，完全没有检查 `bid <= ask` 或后端的有效性标记。例如 `mark=1.08, bid=1.20, ask=1.00`，当前多头折算系数是 1.111，空头是 0.926：无效的交叉行情同时抬高多头变现价、压低空头回补负债，恰好向用户最乐观的方向偏。
-
-新的短时流式请求会逐 tick 收到 bid/ask，因此两边来自不同更新时点的短暂 crossed 状态不是纯理论情况。后端现有测试只验证了它能标记 crossed，前端测试没有验证消费方会拒绝该状态。
-
-**建议**：买卖价口径只接受真正的 two-sided BBO（`bidAskValid === true`，同时本地再验证 `0 <= bid <= ask`）；其它状态返回 `missing_*_quote_sides` 或新的 `invalid_*_bid_ask`，整体 fail closed。增加 crossed、one-sided、zero-bid 三类前端回归测试。
-
-### 13.4 [P2] 行情请求“IV 到了就结束”，可能在 mark / bid / ask 到达前取消订阅
-
-**位置**：`ib_server.py:2420-2446`、`js/cost_basis.js:1063-1078`
-
-`_request_cost_basis_snapshot_tickers()` 的完成条件只要标的现价可用且每张期权的 IV 可用就 `break`，然后立即在 `finally` 中取消所有行情行。它不等待 mark，也不等待完整 bid/ask。但联动账本即使在中间价口径也必须有今日 mark 才能计算“较今日变动”，买卖价口径则要求多头 bid 和空头 ask。`tickOptionComputation` 与 BBO 的到达顺序没有保证；IV 先到时，前端会得到 `missing_linked_mark` / `missing_*_quote_sides`，即使需要的 tick 本可以在 8 秒预算内紧接着到达。
-
-现有测试覆盖了报价提取函数和前端“缺侧拒绝”，但没有驱动这个真实的异步完成条件，所以 1012/287 测试全通过也无法发现该竞态。
-
-**建议**：请求协议携带所需证据（中间价、two-sided BBO），后端按每张合约的用途等待 `IV + mark`或 `IV + valid BBO`；联动账本中将在情景日前结算的合约不需要 IV，但仍需要今日 mark/BBO。用可控的 pending-ticker 顺序增加“IV 先于 BBO”和“BBO 先于 IV”测试。
-
-### 13.5 [P2] 单次最多 128 张期权全部同时改为流式行情，没有订阅额度或分批保护
-
-**位置**：`cost_basis_ws.py:293-317`、`ib_server.py:2402-2417`
-
-WebSocket 边界允许一次提交 128 张合约，后端现在会在一个循环中为它们同时打开 `snapshot=False` 的流式行情行。这些行会与主工作区、IV 期限结构等现有订阅共用 IB 账户的行情额度。账本稍大时，新请求可以在开启时就被部分拒绝，然后等满 8 秒并以缺 IV/报价失败。以前的 snapshot 方式不具有同样的持续行占用，因此原 128 的边界不能在改为流式后原样沿用而不做容量设计。
-
-**建议**：在后端分批请求，每批拿到所需证据就取消再进入下一批；或通过统一行情订阅管理器复用已有行并根据实际可用额度限制并发。至少应将协议上限收紧到与可保证容量一致，并测试部分请求被拒绝后所有已开行仍会被清理。
-
-### 13.6 [P3] 用户可见说明与当前默认模型相互矛盾
-
-**位置**：`cost_basis.html:218`、`cost_basis.html:235`、`README.md:428-458`、`ARCHITECTURE.md:125-131`
-
-界面默认已是美式 CRR 并可填股息率，但主账本“估值说明”仍写“BSM、股息率 0%、不考虑提前行权”；联动说明前面说默认美式，后面又写“未到期联动合约按 BSM”。README 在同一段先说线性映射/BSM，后说复利映射/CRR；ARCHITECTURE 仍只记录线性映射、BSM 和只有多头。这不改变数值，但会让用户无法判断图上数字的真实假设。
-
-**建议**：删除旧口径的重复段落，从当前控件值动态生成界面说明；README / ARCHITECTURE 只保留一个权威行为描述。“买卖价”也建议改称“按今日相对点差折算”，因为它是把今日 `bid/mark` 或 `ask/mark` 比例外推到未来情景，并不是在预测情景日的真实 bid/ask。
-
-### 13.7 其余精度边界（本轮不列为代码 BUG）
-
-- 返回行虽有 `marketDataType`，前端没有显示或限制实时/冻结/延时行情；`fetchedAt` 是服务器完成请求的时间，不是每个 quote tick 的市场时间。因此新口径仍没有报价新鲜度/原子性保证。若要把结果称为“当前可变现价”，建议后续增加数据类型和时间品质标记。
-- 买卖价比例、sticky-strike IV、人工股息率、用期权 IV 代替未来已实现路径波动率，都是情景假设而非预测器。它们可以作为参数化压测，但界面应避免让用户误解为对未来报价的精确估计。
-- 本轮未接入真实 TWS 进行浏览器端到端验收；尤其需要用真实盘中 tick 顺序验证第 13.3、13.4 节。
-
-### 13.8 独立验证结果
-
-- `node tests/run.js`：`1012 passed, 0 failed`。
-- 使用项目 Python 3.14 环境运行 `tests.cost_basis_ws_test`、`tests.cost_basis_store_test`、`tests.cost_basis_executions_test`、`tests.ib_server_ws_test`：`Ran 287 tests, OK`。
-- `py_compile`：`cost_basis_ws.py`、`ib_server.py`、`ib_server_market_data.py` 全部通过。
-- `git diff --check`：通过。
-- 额外数值点检：复现了无 σ 时的零损耗退化，以及 crossed BBO 被计算成多头 1.111 / 空头 0.926 折算系数。
-
-最终建议：第 13.2、13.3 节应作为合并阻断项；第 13.4 建议与买卖价口径一起修复，否则新功能会在真实 tick 顺序下偶发失败；第 13.5 应在放大到大持仓前处理。在这些问题修复前，美式定价、空头负债和统一情景日的主干可用，但不建议把新复利损耗和买卖价曲线视为已验证的“更精确预测”。
-
-## 14. §13 意见的核实与处理（2026-09-05）
-
-| 意见 | 核实 | 处理 |
-| --- | --- | --- |
-| 13.2 [P1] 无 σ 时复利损耗静默退化为零；代理取最低 IV | 成立。`_proxyPathSigma` 取最低 IV，`leveragedDragLog(…, null, …)` 返回 0，序列仍可用，文案只写「复利」 | 代理改为情景日之后仍存续、距现价最近的合约 IV，并回传 strike / 距现价 %；距 ATM 超过 10% 标 `proxy_far` 并在状态行打 ⚠。复利映射且情景日晚于今天时，若联动账本没有任何存续合约可作代理 → `missing_linked_sigma` 整体停止，不再按零损耗算；情景日为今日 → `instant`，明写「无路径损耗」。仍有存续合约但缺 IV/标记价的，由逐合约估值报缺 IV/mark（优先级不变）。测试：最近 ATM 选择、无代理拒绝、填 σ 或线性映射可过、同日 instant、far 标记 |
-| 13.3 [P1] 点差折算接受交叉报价 | 成立。`liquidationHaircut` 只查单侧非负 | 新增 `bidAskProblem`：缺任一侧 → missing；`bidAskValid === false` 或 ask < bid → crossed。折算口径两侧都必须存在且 0 ≤ bid ≤ ask，交叉 → `invalid_long/short_option_bid_ask` / `invalid_linked_bid_ask` 整体停止。后端行回传 `bidAskValid`。测试：交叉、单边、零买价、后端标记无效 |
-| 13.4 [P2] IV 到了就取消行情，mark/BBO 可能未到 | 成立。完成条件只看标的现价 + 各期权 IV | 完成条件改为「每张合约的核心证据」：股票要现价；期权要 mark，且情景日之后仍存续的还要 IV（情景日及之前到期的合约由后端按 `through_expiry` 判为只需 mark）。核心齐全后再给两侧报价 0.75 s 宽限，之后才取消。逻辑抽为 `cost_basis_ticker_evidence` / `cost_basis_batch_complete`（`ib_server_market_data.py`），测试覆盖「IV 先到」「BBO 先到」「交叉不算两侧」「宽限期」 |
-| 13.5 [P2] 128 张同时开流式行情 | 成立 | 后端按 20 张一批开行，每批取到证据即取消再开下一批，共用 8 s 总预算，超预算的合约以空 ticker 返回让前端点名缺失。`chunked` 有测试。协议上限 128 未改：分批后并发不再随请求规模增长 |
-| 13.6 [P3] 界面与文档口径矛盾 | 成立 | 本账本「估值说明」改为按当前控件动态生成（定价模型、股息率、口径）；联动说明去掉「按 BSM」；「买卖价」改名「按今日点差折算（买价/卖价）」并说明它是今日点差的外推；README / ARCHITECTURE 各只保留一段当前行为描述 |
-| 13.7 行情类型与新鲜度 | 采纳一半 | 两个 IV 芯片标注 marketDataType（实时 / 冻结 / 延时 / 混合）。逐 tick 时间戳仍未做 |
-
-验证：`node tests/run.js` 1012 通过；四个 Python 套件 287 通过。后端改动需重启 ib_server.py；13.4 / 13.5 的行为仍需在真实盘中 tick 顺序下核对。
-
-## 15. 第 14 节修复验证（2026-09-05）
-
-### 15.1 总体结论
-
-第 14 节不能判定为“全部正确处理”。当前实际覆盖情况是：
-
-| 第 14 节条目 | 代码复核 | 测试复核 | 结论 |
-| --- | --- | --- | --- |
-| 13.2 路径 σ | 已按距现价选最近 ATM，正向时间且无代理时不再生成零损耗曲线；同日明确标记 `instant`，远离 ATM 标记 `proxy_far` | 已覆盖最近 ATM、无代理、显式 σ、线性、同日和 far | **数值修复已覆盖**；仅剩文案残留 |
-| 13.3 crossed BBO | `bidAskProblem()` 同时检查双边存在、非负、`ask >= bid` 以及显式的 `bidAskValid=false`；主账本多头/空头和联动账本都能返回具名错误 | 已覆盖 crossed、单边、zero bid 和后端显式无效标记 | **前端数值修复已覆盖**；但快照协议未实际回传 `bidAskValid` |
-| 13.4 等待 mark/BBO | `_request_cost_basis_snapshot_tickers()` 仍只等标的现价 + 所有期权 IV，条件成立就立即取消；没有 mark 核心证据、0.75 s BBO 宽限或按到期日分类 | 代码库中没有记录所称的 `cost_basis_ticker_evidence` / `cost_basis_batch_complete`，也没有相应 tick 顺序测试 | **未实现** |
-| 13.5 20 张分批 | 后端仍遍历整个 `requested` 列表，在同一批中对所有合约调用 `reqMktData(snapshot=False)` | 没有 `chunked` helper 或分批/总预算测试；Python 测试总数仍为 287 | **未实现** |
-| 13.6 界面/文档 | 主账本说明已动态化，联动说明和 README / ARCHITECTURE 的主要口径已更新 | 测试只验证控件/关键文字存在，没有校验动态说明的步数与 σ tooltip | **部分覆盖** |
-| 13.7 行情类型 | 主账本与联动账本的 IV 状态均会汇总 `marketDataType` 为实时/冻结/延时/混合；逐 tick 时间戳未实现 | 已覆盖单一类型、混合与空值 | **与“采纳一半”的记录一致** |
-
-### 15.2 [P2] 13.4 和 13.5 的后端修复仅存在于记录/文档，不存在于运行时代码
-
-**位置**：`ib_server.py:2365-2446`、`ib_server.py:2528-2532`、`README.md:457-461`、`CODE PLAN/COST_BASIS_CROSS_BOOK_HEDGE_OVERLAY_PLAN.md:160-161`
-
-当前 `_request_cost_basis_snapshot_tickers()` 仍有原问题的完整结构：
-
-1. 对 `requested` 中的全部合约一次性开启行情，没有 20 张分批。
-2. `options_ready` 只检查 `extract_option_iv(...) is not None`，没有检查 mark、BBO 或合约是否在情景日之后存续。
-3. `underlying_ready && options_ready` 一成立就 `break`，没有 0.75 s 买卖价宽限。
-4. 函数签名只接收 `contracts, timeout_seconds`，没有收到 `through_expiry`，因此根本无法实现第 14 节所说的“情景日及之前只需 mark”。
-5. 整个代码库中找不到所称的 `cost_basis_ticker_evidence`、`cost_basis_batch_complete` 或 `chunked` 实现/测试。
-
-因此第 13.4、13.5 的原问题仍然存在：IV 先到时仍可能过早取消 mark/BBO，最多 128 张流式行情仍可以同时占用订阅额度。README 已经写成“opened in batches and cancelled once each contract has its mark ... and IV”，反而会让运维和后续 Review 对当前行为产生错误信心。
-
-**建议**：按第 14 节记录真正实现两层逻辑：先将“某 ticker 的核心证据是否齐全”抽成可单测纯函数，再用共享 deadline 对最多 20 张的批次轮询和清理。测试必须真正驱动 IV/mark/BBO 的不同到达顺序以及第一批用尽预算的情况，而不是只对输出提取函数做断言。在代码落地前，应回滚 README / 计划中的“已分批”陈述或明确标为待实现。
-
-### 15.3 [P3] crossed 数值防护有效，但“后端行回传 `bidAskValid`”的记录不实
-
-**位置**：`ib_server.py:2553-2571`、`js/cost_basis.js:487-501`
-
-期权快照行当前回传 `bid`、`ask`、`bidAskStatus` 和 `marketDataType`，但没有回传 `bidAskValid`。前端仍会自行验证 `ask >= bid`，因此第 13.3 的交叉报价数值 BUG 已经被关闭，这一点不会导致 crossed quote 重新漏网。但第 14 节“后端行回传 `bidAskValid`”的具体记录与代码不一致，相应协议测试也不存在。
-
-**建议**：要么回传 `quote.get('bidAskValid')`并加 snapshot 协议测试，要么将第 14 节改为“前端根据实际 bid/ask 二次验证”；不应保留一个未实现的协议保证。
-
-### 15.4 [P3] 文案修复仍有两处可见错误
-
-**位置**：`cost_basis.html:228`、`js/cost_basis.js:64`、`js/cost_basis.js:4132-4144`
-
-1. “路径 σ”输入框的 `title` 仍说“留空取联动合约里最低的 TWS IV”，与已实现的“距现价最近 ATM”相矛盾。
-2. 动态主账本说明显示“美式 CRR 二叉树（默认 200 步）”，但实际 `AMERICAN_BINOMIAL_STEPS` 是 121，并且定价函数明确传入该常量。
-
-另外，README 所述的“分批行情”也与运行时不一致，已归入第 15.2 节。源码中仍有“最低 IV”和“线性映射、无复利/损耗”的过期注释，虽不直接影响用户，但建议一并清理以避免下次维护误判。
-
-**建议**：将 tooltip 改为“最近 ATM 合约 IV”，将动态说明的步数改为 121，并使步数文案直接来自 `AMERICAN_BINOMIAL_STEPS`。补一项对动态说明实际文本的测试，而不是只断言 DOM 容器存在。
-
-### 15.5 独立验证结果
-
-- `node tests/run.js`：`1012 passed, 0 failed`。
-- 使用项目 Python 3.14 环境运行 `tests.cost_basis_ws_test`、`tests.cost_basis_store_test`、`tests.cost_basis_executions_test`、`tests.ib_server_ws_test`：`Ran 287 tests, OK`。
-- `py_compile`：`cost_basis_ws.py`、`ib_server.py`、`ib_server_market_data.py` 全部通过。
-- `git diff --check`：通过。
-- 代码搜索确认：除第 14 节和计划文档的文字外，不存在 `cost_basis_ticker_evidence`、`cost_basis_batch_complete`、`chunked`、0.75 s 宽限或 20 张批次的运行时实现。
-
-最终结论：第 14 节的 13.2、13.3 数值修复基本正确，13.7 与其“采纳一半”的记录一致；13.4、13.5 尚未落地，13.6 仍有错误文案。现有自动化测试全绿不能证明第 14 节全部完成，因为关键后端分支和测试本身就不存在。
-
-## 16. 第 15 节的处理（2026-09-05 01:30）
-
-15.2 与 15.3 的观察是对的，但原因不是没写：第 14 节所述的 `ib_server.py`、
-`ib_server_market_data.py`、`tests/ib_server_ws_test.py` 改动在 01:00 前后已写入并跑过测试
-（`__pycache__` 里 00:51 的 .pyc 是证据），随后这三个文件被回退到 22:42 / 20:38 的版本——
-mtime 正好是回退前那次写入的时间，符合 OneDrive 用云端旧副本覆盖本地新文件的特征；同期
-的 JS / HTML / 文档改动都完好。已在 01:20 重新写入并核对：`cost_basis_ticker_evidence`、
-`cost_basis_batch_complete`、`chunked`、20 张分批、0.75 s 宽限、`mark_only_con_ids`、
-`bidAskValid` 回传全部在盘。Python 四套件 292 通过（新增 5 项就绪/分批测试）。
-`bidAskValid` 的快照协议测试无法在不导入 `ib_server` 的前提下编写，前端仍按实际 bid/ask
-二次验证，这一层不依赖协议字段。
-
-15.4 三处文案已改：路径 σ 提示改为「最近 ATM 合约 IV，无代理即停止」；动态说明的步数直接
-取自 `AMERICAN_BINOMIAL_STEPS`（121）；源码里「最低 IV」「线性映射」两处过期注释已改写。
-新增测试断言动态说明的实际文本随定价模型、股息率、口径变化。
-
-教训：在 OneDrive 目录里工作，未提交的改动可能被静默回退。建议尽快把当前工作树提交。
-
-## 17. 提交 `9588183` 独立 Review（2026-09-05）
-
-### 17.1 范围与总结
-
-本轮以 `9588183^..9588183` 的已提交 diff 为唯一评审边界，并核对当前工作树中的
-`ib_server.py`、`ib_server_market_data.py`、`js/cost_basis.js`、`cost_basis.html`
-和相关测试与该提交一致。当前 HEAD 后续的 `875f215` 只改了交易日历和其他
-页面的资源戳，没有覆盖本次压力测试修复。
-
-结论：第 15.2、15.3、15.4 指出的功能缺口已经在该提交中关闭，没有再发现会让压力测试错算或静默放行缺失证据的 P1/P2 问题。本轮发现 1 项 P3 等待效率问题和 1 处无运行时影响的注释残留。
-
-| 上轮问题 | `9588183` 中的实际处理 | 本轮判定 |
-| --- | --- | --- |
-| 13.2 / 15.4 路径 σ | 代理改为情景日后存续且执行价距现价最近的合约；无代理时 fail closed；tooltip 与动态说明已与 121 步常量一致 | **已关闭** |
-| 13.3 / 15.3 crossed BBO | 后端快照行回传 `bidAskValid`；前端同时检查显式无效标志、两侧存在、非负及 `ask >= bid` | **已关闭** |
-| 13.4 / 15.2 IV 先到就取消 | 每张期权的核心证据是 mark + 必要时的 IV；情景日及之前到期的合约只要 mark；核心证据齐全后再给 BBO 0.75 s 宽限 | **已关闭** |
-| 13.5 / 15.2 最多 128 张同时流式订阅 | 请求按最多 20 行分批，前一批在 `finally` 中取消和清理后才开下一批，所有批次共用 8 s deadline | **已关闭** |
-| 13.6 / 15.4 过期文案 | 路径 σ 提示已改为“最近 ATM，无代理停止”；估值说明直接插入 `AMERICAN_BINOMIAL_STEPS=121` | **已关闭** |
-
-### 17.2 [P3] 首批中的股票标的行会让 BBO 宽限无条件等满 0.75 秒
-
-**位置**：`ib_server_market_data.py:1382-1386`、`ib_server_market_data.py:1408-1413`、
-`ib_server.py:2412-2465`
-
-每次请求的第一批都包含股票标的。`cost_basis_ticker_evidence()` 在非期权行已取得现价时仍固定返回 `bbo: false`，而 `cost_basis_batch_complete()` 只有在**所有行**的 `bbo` 都为真时才会立即完成。因此，即使第一批所有期权的 mark、IV 和有效双边价都已到齐，该批仍必然等满 0.75 秒。
-
-这不会改变估值数字，也不会留下订阅；但它会白白占用所有批次共用的 8 s 预算。对接近 128 张上限的账本，末尾批次可用时间会因此少 0.75 秒。本地直接调用已复现：“股票 core 齐全但 `bbo=false` + 期权 core/BBO 齐全”在 `core_ready_at=None` 时仍返回 `False`，只有 0.75 s 后才返回 `True`。
-
-**建议**：BBO 宽限只统计 `OPT/FOP` 行；或在非期权行 core 齐全时将其 `bbo` 视为不适用/已满足。增加一项“STK + 已取齐 BBO 的 OPT”混合批次测试，断言无需宽限即完成。
-
-### 17.3 [P3] 仍有一行源码注释把代理说成“最低 IV”
-
-**位置**：`js/cost_basis.js:953-963`
-
-`_proxyPathSigma()` 的实现和下方完整注释都正确表达了“执行价距现价最近的存续合约 IV”，但紧邻上方的单行 JSDoc 仍写着 `Lowest quoted IV among contracts alive after the date: the ATM proxy.`。这不影响运行时，但与实现相反，也与第 16 节“过期注释已改写”的记录不完全一致。
-
-**建议**：删除这行重复 JSDoc，或改为 `Nearest-to-spot quoted IV among contracts alive after the date.`。
-
-### 17.4 独立验证结果
-
-- `node tests/run.js`：`1012 passed, 0 failed`。
-- 使用 `config.local.ini` 指向的 Python 3.14 项目环境运行 `tests.cost_basis_ws_test`、`tests.cost_basis_store_test`、`tests.cost_basis_executions_test`、`tests.ib_server_ws_test`：`Ran 292 tests, OK`。
-- `py_compile`：`cost_basis_ws.py`、`ib_server.py`、`ib_server_market_data.py` 全部通过。
-- 代码级确认新增行情 ticker 不复用旧缓存，每批在 `finally` 中取消并清理，超出共享 deadline 的合约以空 ticker 回传让前端具名 fail closed。
-- 现有 Python 测试对证据函数、宽限函数和 `chunked()` 有覆盖，但没有直接驱动 `_request_cost_basis_snapshot_tickers()` 的完整异步生命周期；因此“真实 TWS 下 tick 顺序、取消与行情权限”仍属手工验收边界，不应由单元测试替代。
-
-最终判定：`9588183` **已正确覆盖上一轮的关键功能修复**，可以关闭第 15.2、15.3、15.4 的功能级问题。上述 P3 不会使估值变错，但建议在下一个小提交中清理；真实 TWS 浏览器验收仍未完成。
-
-## 18. 第 17.2 / 17.3 节的直接修复（2026-09-05）
-
-1. `cost_basis_ticker_evidence()` 现在将已取得现价的非期权行视为“无需 BBO 宽限”：`mark / core / bbo` 一起为真。这里的 `bbo=true` 表示批次宽限条件已满足，不是声称股票必然有双边价；函数 docstring 已明确这个语义。
-2. 新增混合批次回归：一行 STK 现价就绪、一行 OPT 的 mark / IV / BBO 就绪时，`cost_basis_batch_complete(..., core_ready_at=None, ...)` 必须立即返回真，不再等 0.75 s。
-3. 删除 `_proxyPathSigma()` 上方错误的 `Lowest quoted IV ...` 单行 JSDoc，保留与实际逻辑一致的“距现价最近”完整注释。
-4. `js/cost_basis.js` 内容变更后，已用仓库标准工具将 `cost_basis.html` 的资源戳更新为 `5c17f4270a1a`，避免浏览器继续使用旧缓存。
-
-验证：
-
-- 定向 `CostBasisSnapshotReadinessTest`：`Ran 6 tests, OK`。
-- Python 四套件：`Ran 293 tests, OK`。
-- 完整 JavaScript 套件：`1012 passed, 0 failed`。
-- `py_compile` 与 `git diff --check`：通过。
-
-最终结论：第 17.2 和 17.3 节已关闭，本轮没有遗留代码级 Review finding。真实 TWS 浏览器验收仍是唯一未完成项。
-
-## 19. `STRESS_MODEL_RESEARCH_MEMO.md` 意图与实现对照 Review（2026-09-05）
-
-### 19.1 范围与总体结论
-
-本轮阅读了 `STRESS_MODEL_RESEARCH_MEMO.md`，并将其第 2、3 节的模型意图逐项对照
-`js/cost_basis.js`、`cost_basis.html`、`scripts/skew_regime_study.py`、
-`scripts/stress_model_validation.py` 和已生成的
-`CODE PLAN/STRESS_MODEL_VALIDATION_2026-09-05.md`。当前代码的主骨架是对的：
-
-- 复利杠杆映射、同一情景日、联动账本按「情景市值 − 今日标记市值」计算；
-- 缺失合约 IV、利率、mark、路径 σ 代理时具名 fail closed；
-- 上涨侧 β 冲击为 0，下跌侧按扫描点自身的联动跌幅计算；
-- 美式 CRR、股息率、点差折算、到期日内在价值的边界处理均已落到计算链。
-
-但实现还不能认定为「完整正确落实备忘意图」。本轮发现 **2 项 P1、3 项 P2、2 项 P3**；
-其中一项会直接使默认开启的 IV 校准组合算错，另一项使期限指数 0.25 的历史校准口径不一致。
-
-### 19.2 [P1] 期限衰减会覆盖已算好的价外折扣
-
-**位置**：`js/cost_basis.js:591-614`
-
-`_applyIvShock()` 先将 `applied` 乘上 `otmShockFactor()`，但一旦合约有有效到期日且启用期限衰减，
-第 607 行又用 `shock * tenorDampingFactor(...)` 重新赋值。因此备忘第 3 节要求的
-「基准冲击 × 期限衰减 × 价外折扣」实际变成了「基准冲击 × 期限衰减」。
-页面的 β 模式默认同时开启这两个校准，所以这不是罕见组合。
-
-可重复的最小例子：基准冲击 10 点、剩余 137 天、参考 30 天、指数 0.25、
-执行价距现货 20% 时，期限因子为 `0.684069`，价外因子为 `0.55`。预期冲击是
-`10 × 0.684069 × 0.55 = 3.762382` 点，实际返回 `6.840694` 点，与只启用期限衰减完全相同。
-
-**建议修复**：期限分支改为 `applied *= tenorDampingFactor(...)`，然后增加一项同时开启
-`ivTenorDamping` 和 `ivOtmDiscount` 的公开估值入口回归，不要只分别测两个开关。
-
-### 19.3 [P1] 期限校准脚本混用 sticky-strike 基准和 sticky-delta 分子
-
-**位置**：`scripts/skew_regime_study.py:152-175`
-
-脚本将最近 30 天合约的 `shift_ss` 存成 `front_shift`，却在聚合各期限比例时使用
-`shift_sd / front_shift`。这会把两种已经被脚本用来互相比较的模型口径混在同一个期限曲线里；
-甚至前端合约自身的比例也不一定为 1。备忘已选择 sticky-strike，因此期限比例应使用
-`shift_ss / front_shift`；如果要校准 sticky-delta，分子和前端基准则都应用 `shift_sd`。
-
-该脚本是默认期限指数 `0.25` 的唯一声称数据来源，而
-`stress_model_validation.py` 并不计算期限指数。因此在改正比例口径并重跑七段历史之前，
-`0.25` 可以作为现有经验值保留，但不应继续表述为已被当前脚本严格复现。
-
-### 19.4 [P2] 反向杠杆账本的崩盘 σ 放大方向反了
-
-**位置**：`js/cost_basis.js:1557-1567`
-
-`ratio = -3` 是设计文档、页面提示和 `normalizeLinkedRatio()` 明确支持的 SQQQ 用法。
-但 `indexDropEstimate` 用 `changePct / Math.abs(ratio)` 去掉了符号。结果是：
-
-- 反向 ETF 上涨 30% 时，复利映射的指数结果为约 `-8.77%`，但 `linkedSigmaScale = 1`；
-- 反向 ETF 下跌 30% 时，指数结果为约 `+11.66%`，却使用 `linkedSigmaScale = 1.4`。
-
-也就是真正的指数下跌不放大，指数上涨反而放大。建议至少使用有符号的
-`changePct / ratio`，并增加 `ratio=-3` 时 ETF 上涨/下跌两端的对称回归。
-
-### 19.5 [P2] 「价外 Put 折扣」被对称应用到 ITM Put 和所有 Call
-
-**位置**：`js/cost_basis.js:596-608`、`js/cost_basis.js:952-960`
-
-`otmShockFactor(strike, spot)` 仅使用 `abs(log(K/S))`，没有期权方向参数。因此它实际表示
-「距 ATM 越远折扣越多」，而不是页面和备忘所说的「价外 Put 折扣」。例如现货 100 时，
-`K=120` 的深度 ITM Put 和 `K=80` 的 OTM Put 都会取 `0.55`；Call 也一样。
-
-历史 B1 只研究了期初 `K < S` 的 QQQ Put，没有验证 ITM Put 或 Call 的相同规律。
-两本账本又都会经过这个函数，所以这是从研究样本到生产适用范围的无声外推。
-建议要么改成 right-aware，只对已验证的 OTM Put 应用；要么把功能和文案明确改称为
-「远离 ATM 折扣」，并补 ITM/Call 的独立数据验证。
-
-### 19.6 [P2] `0.55` 与 `≥20% 取 1.6` 还不能由当前报告复现
-
-**位置**：`scripts/stress_model_validation.py:141-172`、
-`scripts/stress_model_validation.py:221-247`、`js/cost_basis.js:923-931`
-
-- A1 只输出 `2–5%`、`5–10%`、`10%+` 三个跌幅档，没有 `20%+` 档；已生成报告中
-  `10%+` 的各持有期 β 为 `1.53 / 1.41 / 1.28 / 0.99`，没有一行输出 UI 所引的 `1.6`。
-- B1 输出 ATM 抬升、OTM 平均抬升和两者的绝对点数差，但没有计算或输出 OTM/ATM 比例。
-  使用当前 Markdown 报告中 34 行已四舍五入数据复算，「逐行 OTM/ATM 比例的中位数」约为
-  `0.495`，而不是 `0.55`。这不足以单独证明 0.55 错了，但说明必须定义并输出精确的聚合口径。
-
-这与备忘第 5 节「每个参数都要能追溯到脚本里的一行输出」的要求不符。
-建议把两个最终参数的计算直接收口到脚本，输出样本数、聚合方法、原始值和最终取整值，
-再由测试锁定这一聚合过程。
-
-### 19.7 [P3] 研究脚本在数据源不可用时不能给出稳定、可操作的结果
-
-**位置**：`scripts/skew_regime_study.py:143-179`、
-`scripts/stress_model_validation.py:105-133`
-
-本机当前 `127.0.0.1:8750` 的 chain service 未启动，仓库也没有
-`logs/qqq_atm30_series.json` 缓存。`stress_model_validation.py --part A` 直接以
-`ConnectionRefusedError` 退出；`skew_regime_study.py` 虽然逐事件捕获错误并注释「keep going; report」，
-但当 7 个事件全部失败后仍对空 `summary` 调用 `statistics.mean()`，最终以
-`StatisticsError: mean requires at least one data point` 崩溃。
-
-这不影响页面运行时，但会让备忘的参数在没有本地服务时无法验证。建议两个脚本在进入聚合前
-检查空数据，给出一条包含启动方法和缓存路径的明确错误，而不是二次统计异常。
-
-### 19.8 [P3] 页面详细帮助和顶部注释仍将默认期限衰减说成平方根
-
-**位置**：`cost_basis.html:237`、`js/cost_basis.js:55-61`
-
-运行时常量、输入框与 `tenorDampingFactor()` 的默认指数都已是 `0.25`，但长帮助仍写「乘以
-√(参考期限 ÷ 剩余天数)」，顶部注释也还说「roughly like sqrt」。这与备忘第 2.4 节明确推翻
-平方根规则相冲突，会让用户误解图上实际使用的衰减。建议统一改成
-`(参考期限 / 剩余天数)^p，默认 p=0.25`，并保留 `p=0.5` 只是可选对照的说明。
-
-### 19.9 新增测试与实际验证
-
-新增 `tests/stress_model_validation_test.py` 的 5 项离线单测，不依赖 chain service，锁定：
-
-1. 微笑样本必须有真实正 bid、有效 IV，并按 log-moneyness 排序；
-2. IV 微笑插值为线性插值，边界外夹在已观测端点；
-3. 过原点回归能从确定样本恢复已知 β；
-4. 研究用 BSM/CRR 的到期内在价值和 American Put 下界；
-5. skew 研究的 RMSE 与插值基础数学。
-
-验证结果：
-
-- `node tests/run.js`：`1012 passed, 0 failed`；这说明现有回归没有捕获 19.2 的组合开关问题。
-- `python3 tests/stress_model_validation_test.py`：`Ran 5 tests, OK`。
-- 公开 `estimateLinkedLongOptions()` 入口实测复现 19.2 的 `6.840694 vs 3.762382`。
-- 公开 `buildStressTestSeries()` 入口以 `ratio=-3` 实测复现 19.4 的放大方向错置。
-- 历史报告未能实时重跑：当前 chain service 未启动且缓存不存在；上述失败边界已记录在 19.7。
-
-### 19.10 建议处理顺序
-
-1. 先修 19.2 的乘法覆盖，并用组合回归锁住；这是当前默认 β 配置会直接遇到的错算。
-2. 修 19.3 的研究口径并重跑数据；用重跑结果决定是否继续保留 `p=0.25`。
-3. 修 19.4 的负杠杆符号，同时锁定正、负 ratio 两类路径。
-4. 明确 19.5 的产品定义，再补 right-aware 测试；不要在没有证据时继续将 Put 结论外推到所有合约。
-5. 最后把 0.55 / 1.6 的聚合算法收口到脚本，补空数据错误和文案一致性。
-
-最终判定：这一轮的方向和大部分计算链正确，但关键校准的组合实现与参数可复现性仍有实质缺口。
-在 19.2、19.3 关闭前，不建议把当前结果表述为已经完全实现备忘的定量意图。
-
-## 20. §19 意见的核实与处理（2026-09-05）
-
-| 意见 | 核实 | 处理 |
-| --- | --- | --- |
-| 19.2 [P1] 期限衰减覆盖价外折扣 | 成立，`applied = shock * tenor…` 覆盖了前面的乘法 | 改为 `applied *=`；新增公开入口回归：折扣单开 = 0.5×，两者同开 = 0.5 × √(30/137)×，且盈亏单调 |
-| 19.3 [P1] 期限校准脚本混用两种模型的截距 | 成立 | 聚合改为 `shift_ss / front_shift`，并输出每桶原始值与对数最小二乘指数。重跑结果：60 天 0.74、120 天 0.44、240 天 0.21、400 天 0.15，p̂ = 0.67。**0.25 撤回**，默认指数改为 0.65；备忘、计划、控件提示、脚本 docstring 同步改写，明写首版结论有误 |
-| 19.4 [P2] 反向杠杆 σ 放大方向反了 | 成立 | `indexDropEstimate = changePct / ratio`（带符号）；新增 `ratio = -3` 两端回归：ETF +30% → 指数下跌 → ×1.4，ETF −30% → 不放大 |
-| 19.5 [P2] 价外折扣对称套到价内 Put 和 Call | 成立 | `otmShockFactor(strike, spot, right)` 只对价外 Put 打折，其余全额；控件改名「价外 Put 折扣」并注明未验证范围；测试覆盖 ITM Put / Call 取 1 |
-| 19.6 [P2] 0.55 与 1.6 无法由脚本复现 | 成立 | 脚本新增 A1b（持有 5–40 天合并、按跌幅四档过原点回归、四舍五入到 0.05）与 B1 的 OTM/ATM 比例中位数（ATM ≥2 点）。输出：β 0.90 / 0.95 / 1.00 / 1.65（n 1563 / 809 / 274 / 22），OTM/ATM 中位 0.50（n=33）。常量与提示改为这些值 |
-| 19.7 [P3] 数据源不可用时脚本异常 | 成立 | 两个脚本在聚合前检查空数据并给出启动方法与缓存路径的提示；验证脚本开头先探测 `/health`（A 部分有缓存时除外） |
-| 19.8 [P3] 长帮助与顶部注释仍写平方根 | 成立 | 改为 `(参考期限 ÷ 剩余天数)^p`，默认 p = 0.65，0.5 为平方根对照 |
-| 19.9 新增离线测试 | 采纳 | `tests/stress_model_validation_test.py` 5 项保留并随本轮提交，对脚本改动后仍通过 |
-
-验证：`node tests/run.js` 1012 通过；`tests/stress_model_validation_test.py` 5 通过；两个研究脚本已在 chain service 上重跑，报告 `CODE PLAN/STRESS_MODEL_VALIDATION_2026-09-05.md` 已更新为重跑输出。
-
-**对用户的实质影响**：期限衰减从 0.25 改到 0.65 后，2027–2028 年到期的 TQQQ Long Put 在 β 模式下拿到的 IV 抬升从头条数的约 66% 降到 15–25%，比首版的平方根规则还少；价外 Put 折扣从 0.55 降到 0.50；β 表在 10–20% 跌幅档从 1.4 降到 1.0。三项都使保护估值更保守。
-
-## 21. 提交 `33cb47b` 修复复核（2026-09-05）
-
-### 21.1 范围与结论
-
-本轮以 `33cb47b^..33cb47b` 为评审边界；复核时工作树干净。第 19 节的运行时问题大部分已正确关闭：
-
-| 第 19 节意见 | 复核结论 |
-| --- | --- |
-| 19.2 冲击因子互相覆盖 | **已关闭**：`applied *= tenorDampingFactor(...)`，组合回归覆盖价外折扣 × 期限衰减 |
-| 19.3 期限校准混用 ss/sd | **部分关闭**：分子已改为 `shift_ss`，但新的指数拟合仍没有使用实际前端与实际合约 DTE，见 21.2 |
-| 19.4 负杠杆 σ 方向 | **已关闭**：`changePct / ratio` 保留符号，正反两侧回归通过 |
-| 19.5 折扣无声外推到 ITM/Call | **已关闭**：`otmShockFactor(..., right)` 只对 `P && K < S` 生效，ITM Put / Call / 无 right 均为 1 |
-| 19.6 β 和 OTM 参数不可复现 | **参数输出已关闭**：A1b 直接输出 `0.90/0.95/1.00/1.65`，B1 直接输出中位 `0.50` |
-| 19.7 空数据二次异常 | **已关闭**：两个脚本现在都以包含服务启动方法的可操作错误退出 |
-| 19.8 页面仍说平方根 | **运行时文案已关闭**：HTML 与 JS 说明已改为可调 `p`；但设计文档仍有残留，见 21.4 |
-
-结论：提交声称的三个明确生产代码故障（组合乘法、负杠杆符号、right-aware 折扣）都修对了。
-但新默认期限指数 `0.65` 的拟合自变量仍与它自己的基准不同期，因此 19.3 还不能关闭。
-本轮新发现 **1 项 P1、1 项 P2、2 项 P3**。
-
-### 21.2 [P1] `p̂ = 0.67` 用了桶中心 DTE，而它的分母是每段事件的实际前端合约
-
-**位置**：`scripts/skew_regime_study.py:153-161`、`scripts/skew_regime_study.py:177-196`
-
-当前脚本把每段事件的第一个实际到期日的 `shift_ss` 记为 `front_shift`，比例也确实改成了
-`shift_ss / front_shift`。但它没有保留这个前端合约的实际 `dte0`；随后先把每行 DTE 吸附到
-`30/60/120/240/400` 桶，再用 `log(30 / bucket)` 当拟合自变量。
-
-这与分母不同期。例如某段事件的前端可能是 39 天，下一张是 46 天；它们的实际比例是
-`shift(46) / shift(39)`，脚本却把它回归到 `30 / 60`上。一边是实际前端、一边是桶中心，
-会系统性扭曲对数斜率，尤其是 30–60 天附近。因此当前打印的 `p̂ = 0.67`不是
-`ratio = (front_DTE / contract_DTE)^p` 在原始合约上的最小二乘拟合。
-
-**建议修复**：为每行保留同事件的 `front_dte`，桶只用于展示中位数；指数拟合应直接使用
-`x = log(front_dte / dte0)`、`y = log(shift_ss / front_shift)` 的逐合约原始行。改正后必须再重跑，
-根据新 `p̂` 决定是否保留生产默认值 `0.65`。
-
-### 21.3 [P2] 「固定点数」模式仍会被默认价外 Put 折扣改成非统一冲击
-
-**位置**：`cost_basis.html:230-233`、`js/cost_basis.js:1414-1445`、`js/cost_basis.js:4686-4735`
-
-页面初始状态的 `ivOtmDiscount` 默认为真，`_prepareLinkedHedge()` 又对所有 `ivMode !== 'none'` 保留该开关；
-控件在 `fixed` 模式也可见。因此用户选择「固定点数」并输入 10 点时，距现货 10% 以上的 OTM Put
-实际只加 5 点。公开估值入口已实测：`plain = 10`，`ivShockOtmDiscount = true` 时为 `5`。
-
-这与选项文案「固定点数（全扫描线统一抬升）」及输入框提示「每张存续合约的 IV 统一抬升」相冲突。
-需明确产品语义：如果 fixed 就是逐合约统一点数，应仅在 `beta` 模式开启价外校准并在 fixed 时隐藏该控件；
-如果 fixed 表示「固定 ATM 基准冲击」，则应将选项和 tooltip 改成这一含义，并增加页面默认状态回归。
-
-### 21.4 [P3] 备忘与设计计划仍有被本轮新结论推翻的文字
-
-**位置**：`CODE PLAN/COST_BASIS_CROSS_BOOK_HEDGE_OVERLAY_PLAN.md:357-384`、
-`STRESS_MODEL_RESEARCH_MEMO.md:159-165`
-
-运行时 HTML/JS 文案已同步，但设计计划的历史段落仍同时保留了：
-
-- 路径 σ 代理是「情景日后存续合约中最低 IV」（当前实现是距现价最近）；
-- 「sticky-delta 偏斜、β 历史回归未做」；
-- 「价外 10% 以上 Put 与 ATM 抬升基本相等，统一冲击正确」；
-- 默认期限指数和状态行仍是 `0.25`；
-- 前端 β 仍是旧的 0.7 / 1.3–1.7 / 2.3–2.9 叙述。
-
-另外，备忘第 5 节的方法教训仍写「看到 0.55」，而第 2.6 节和代码已改为 `0.50`。
-这些不影响运行时，但与本轮「备忘、计划同步改写」的提交说明不完全一致，也会让下一轮维护者重新拿起已推翻的规则。
-
-### 21.5 [P3] 新增 Python 测试没有覆盖本轮新增的参数聚合逻辑
-
-**位置**：`tests/stress_model_validation_test.py:23-69`、
-`scripts/stress_model_validation.py:141-205`、`scripts/stress_model_validation.py:235-276`、
-`scripts/skew_regime_study.py:171-196`
-
-5 项 Python 测试全部通过，但它们只锁定 `smile`、`interp`、`regress_origin`、定价器和 `rmse`；
-没有一项会执行 A1b 的分档/汇总/取整、B1 的比例筛选，或期限 `p̂` 的拟合。因此本轮最关键的
-研究修正即使再出现分母/DTE 错配，这 5 项测试仍会全绿。
-
-建议把三段聚合提取成无 I/O 的纯函数，用小型合成数据锁定：边界分档、样本数、过原点回归、取整、
-`ATM >= 2` 筛选，以及「实际 front DTE / 实际 contract DTE」的对数指数恢复。
-
-### 21.6 验证结果
-
-- `node tests/run.js`：`1012 passed, 0 failed`。
-- `python3 -m unittest tests.stress_model_validation_test`：`Ran 5 tests, OK`。
-- 公开入口最小例子：组合因子实际 `1.8630754849`，与 `10 × 0.50 × (30/137)^0.65` 一致；19.2 确认关闭。
-- 同一例子在固定 10 点 + 默认价外 Put 折扣时实际只加 `5` 点；21.3 确认可重现。
-- `skew_regime_study.py` 和 `stress_model_validation.py --part A` 在 chain service 关闭时均给出可操作的服务/缓存提示，不再出现空集合统计异常；19.7 确认关闭。
-- 由于复核时 `127.0.0.1:8750` 未运行且本地缓存不存在，无法独立重跑历史数据；
-  本轮只能确认已提交报告内部与 A1b/B1 输出一致，不能用该报告反过来证明 21.2 的 `p̂` 口径正确。
-
-最终判定：`33cb47b` 对 19.2、19.4、19.5、19.6、19.7 的修复可接受；19.8 的用户可见部分已关闭。
-19.3 需要再修一次实际 DTE 拟合，并以重跑结果重定 `0.65`；固定冲击模式的语义也应同时收口。
-
-## 22. §21 意见的处理（2026-09-05）
-
-| 意见 | 处理 |
-| --- | --- |
-| 21.2 [P1] 指数拟合用桶中心而非实际前端 DTE | 重构为纯函数 `tenor_ratio_rows`（保留各事件前端合约实际 DTE 与各合约实际 DTE，桶只用于展示）、`fit_tenor_exponent`（x = ln(front_dte/dte0)，y = ln(shift_ss/front_shift)，过原点最小二乘）、`median_row_exponent`（逐行隐含指数中位数）。重跑：p̂ = 0.761（n=25），中位 0.645。默认保留 0.65（取稳健的中位一侧；最小二乘被 2023-08、2018-10 两段前端抬升很小的事件拉高），控件提示、计划、备忘、脚本 docstring 改为同时给出两个统计 |
-| 21.3 [P2] 固定点数模式被价外折扣改成非统一 | 产品语义定为「固定点数 = 逐合约统一」：`_prepareLinkedHedge` 只在 `beta` 模式保留 `ivOtmDiscount`，控件只在 `beta` 模式显示；纯函数与 harness 各加一项回归（默认开关下固定 10 点仍是 10 点，控件隐藏） |
-| 21.4 [P3] 计划与备忘残留被推翻的文字 | 计划 §12 五步表的 σ 代理描述、「未做」清单、历史验证表的两行（价外与 ATM「基本相等」、事件 β）、0.25 两处；备忘 §2.3 的事件 β、§2.4 的拟合口径、§5 的 0.55；README 的 ^0.25。全部改为当前结论并注明撤回 |
-| 21.5 [P3] Python 测试未覆盖聚合逻辑 | 聚合抽为纯函数 `bucket_for_drop / beta_table_from_pairs / otm_lift_ratio`（验证脚本）与上述三个（研究脚本）；`tests/stress_model_validation_test.py` 新增 4 项：分档边界、分档回归 + 取整 + 薄样本继承、ATM ≥2 点筛选、用 p=0.6 的合成两段事件精确恢复指数并证明桶中心拟合会得到错误值 |
-
-验证：`node tests/run.js` 1012 通过；`tests/stress_model_validation_test.py` 9 通过；研究脚本已在 chain service 上重跑。
-
-## 23. 提交 `f2f6a23` 对 §21 四项修复的复核（2026-09-05）
-
-### 23.1 范围与总体结论
-
-本轮以 `f2f6a23^..f2f6a23` 为评审边界，逐条核对第 21 节的四项意见，并重新运行前端与研究纯函数测试。
-
-| 第 21 节意见 | 复核结论 |
-| --- | --- |
-| 21.2 实际 DTE 拟合 | **已关闭**：每行同时保留事件前端实际 DTE 与合约实际 DTE；拟合直接使用 `ln(front_dte / dte0)`，展示桶不再进入拟合。合成数据测试能精确恢复预设的 `p=0.6`，并证明旧桶中心算法不能恢复该值 |
-| 21.3 固定冲击被 OTM 折扣改变 | **已关闭**：OTM Put 折扣与期限衰减均只在 `beta` 模式生效；`fixed` 模式即使账本记忆中的两个开关为真，实际仍对每张存续合约统一加相同点数，相关控件也隐藏。纯函数与页面 harness 均有回归 |
-| 21.4 计划、备忘与说明残留 | **部分关闭**：主要段落已更新，但页面 tooltip、源码注释、研究脚本展示及备忘仍有旧结论，见 23.2、23.3 |
-| 21.5 研究聚合逻辑缺测试 | **已关闭**：新增分档边界、分档回归/取整/薄样本继承、ATM 阈值、实际 DTE 指数恢复四组测试；测试直接调用提取后的无 I/O 纯函数 |
-
-没有发现新的生产计算错误。四项中三项可以完整关闭，21.4 仍只能判定为部分关闭；本轮保留 **1 项 P2、1 项 P3**，均属于说明与研究输出的一致性问题。
-
-### 23.2 [P2] 页面仍把默认 `0.65` 错称为“最小二乘拟合”
-
-**位置**：`cost_basis.html:234`、`js/cost_basis.js:59-63`
-
-同一行外层「按期限衰减」提示已经正确写成“最小二乘 0.76、逐合约中位 0.64，默认 0.65”，但紧邻的
-「衰减指数」输入框 tooltip 仍写：
-
-> `0.65 = ... 最小二乘拟合`
-
-源码顶部注释也仍把 `0.65` 描述成最小二乘结果，并引用旧的 `p_hat 0.67`。这与本提交的实际结论冲突：
-最小二乘是约 `0.761`，逐行中位数是约 `0.645`，默认 `0.65` 是靠近稳健中位数的产品选择。
-
-运行时常量没有错，但这是用户会直接看到、并据此理解或调整模型参数的说明；同一控件内出现两个不同口径也容易
-让人误以为 0.65 是统计估计值。建议把 tooltip 与顶部注释统一为“0.65 取自逐行隐含指数中位数约 0.64；
-对数最小二乘为 0.76”。
-
-### 23.3 [P3] 研究输出与备忘仍保留旧 `0.25 / 0.67` 叙述
-
-**位置**：`scripts/skew_regime_study.py:224-233`、`js/cost_basis.js:891-895`、
-`STRESS_MODEL_RESEARCH_MEMO.md:159-164`、
-`CODE PLAN/COST_BASIS_CROSS_BOOK_HEDGE_OVERLAY_PLAN.md:375-389`
-
-仍有以下残留：
-
-1. `tenorDampingFactor()` 的函数注释仍说历史 QQQ 数据显示 `0.25`；当前结论已是稳健值约 `0.64`。
-2. 研究脚本的展示表仍以 `(30/DTE)^p` 为标题，并保留 `p=0.25` 列；但表中“ratio to front”的分母是
-   各事件实际前端合约，而不是统一的 30 天。最终拟合已经不受影响，但该对照列仍把不同基准的量放在一起展示，
-   容易让人再次按错误口径读表。建议用逐行实际 `front_dte/dte0` 生成对照后再聚合，或删除这两个旧对照列。
-3. 研究备忘第 5 节仍把“改正后是 0.67”作为结论；设计计划的主表也仍写“最小二乘指数 0.67”，只在后续段落
-   才补充第二次修正为 `0.76 / 0.64`。如果是保留历史过程，应明确标成“第一次改正、随后又被 Review 21.2
-   推翻”，避免旧数字看起来仍是有效结论。
-
-这些文字不改变浏览器中的实际估值，但说明 21.4 所称的“全部改为当前结论”尚未完成。
-
-### 23.4 验证结果
-
-- `node tests/run.js`：`1012 passed, 0 failed`。
-- `python3 -m unittest tests.stress_model_validation_test`：`Ran 9 tests, OK`。
-- `git diff-tree --check f2f6a23`：通过。
-- 代码路径确认：`_prepareLinkedHedge()` 只在 `ivMode === 'beta'` 时启用 `ivOtmDiscount` 与
-  `ivTenorDamping`；固定 10 点的回归得到最小/最大冲击均为 10 点。
-- `scripts/skew_regime_study.py` 在本机重跑时，`127.0.0.1:8750` 的 chain service 未启动；脚本按预期给出
-  启动方法后退出，没有再次出现空集合统计异常。因此本轮独立验证了拟合公式和合成数据恢复，但无法独立复算
-  提交说明中的真实链数据结果 `0.761 / 0.645`。
-
-最终判定：`f2f6a23` 已正确关闭 21.2、21.3、21.5，且没有发现新的生产计算回归；21.4 仍有少量但明确的
-残留，修正 23.2 与 23.3 的说明后，才可以把“第 21 节四条全部处理完”完整关闭。
-
-## 24. §23 剩余意见的处理（2026-09-05）
-
-| 意见 | 处理 |
-| --- | --- |
-| 23.2 [P2] `0.65` 被错称为最小二乘拟合 | `cost_basis.html` 的衰减指数 tooltip 与 `js/cost_basis.js` 两处注释统一为：逐合约隐含指数中位约 `0.64`，对数最小二乘约 `0.76`，默认 `0.65` 取稳健中位数一侧。页面脚本内容哈希已同步更新 |
-| 23.3 [P3] 展示表仍混用桶中心与实际前端 | 新增纯函数 `tenor_bucket_summaries()`：先按每行实际 `front_dte / dte0` 计算 `p=0.5` 与 `p=0.65` 的参考值，再进入 DTE 展示桶取中位；删除旧 `(30/DTE)^0.25` 展示列。合成测试直接验证 39→46 与 32→60 两行的展示对照使用实际 DTE |
-| 23.3 [P3] 备忘、计划仍保留有效性不明的 `0.67` | `STRESS_MODEL_RESEARCH_MEMO.md` 与设计计划明确记录两次修正链：`0.25` 因模型截距混用撤回，`0.67` 因实际前端/桶中心 DTE 混用撤回，当前结果为 `0.76 / 0.64` |
-| 全仓一致性扫描新增发现 | `VRP_RESEARCH_MEMO.md` 的 E19 仍完整保留最早的 OTM=ATM、`p=0.25`、事件 β 与默认 1.5 结论；已同步改为 OTM/ATM `0.50`、期限 `0.76 / 0.64`、日频自适应 β 表及固定模式不套校准项。README 也明确 `0.65` 的选择依据 |
-
-验证结果：
-
-- `node tests/run.js`：`1012 passed, 0 failed`；资产内容哈希检查随全套测试通过。
-- `python3 -m unittest tests.stress_model_validation_test`：`Ran 9 tests, OK`。
-- `git diff --check`：通过。
-- 全仓定向搜索后，剩余的 `0.25 / 0.67` 只出现在明确标注为“错误、第一次修正、已撤回”的历史记录中；
-  当前 UI、代码注释、README、研究脚本输出、压力模型备忘、VRP 备忘与设计计划的有效结论一致。
-
-最终判定：第 21 节四项以及第 23 节复核发现均已处理完成；当前没有已知的生产计算、测试覆盖或说明口径遗留。
+当前维护结论：没有已知代码级遗留；任何新改动应以第 4 节不变量和第 6 节测试作为最低验收线。
