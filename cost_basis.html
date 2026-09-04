@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>综合成本账本 — Option Combo Simulator</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="cost_basis.css?v=82bbb741c8bc">
+    <link rel="stylesheet" href="cost_basis.css?v=dde1244f0bb5">
 </head>
 <body data-option-combo-page="cost-basis">
     <div class="app-shell">
@@ -80,10 +80,13 @@
                             <div class="what-if-controls">
                                 <div class="what-if-field"><label for="what-if-expiry">计算至</label><select id="what-if-expiry" disabled><option value="">等待未平期权</option></select></div>
                                 <div class="what-if-field"><label id="what-if-price-label" for="what-if-price">假设标的到期结算价</label><input id="what-if-price" type="number" step="0.01" min="0" autocomplete="off" placeholder="等待当前价"></div>
-                                <button id="btn-what-if-current" type="button">使用当前价</button><button id="btn-open-stress-test" class="primary" type="button" disabled>打开压力测试</button>
+                                <button id="btn-what-if-current" type="button" title="重新拉取 TWS 最新价并恢复自动跟随；清除手工参考价">使用当前价</button><button id="btn-open-stress-test" class="primary" type="button" disabled>打开压力测试</button>
                             </div>
                         </div>
-                        <p id="what-if-context" class="what-if-context">选择账本后，可模拟所有未平期权结算后的持股与综合成本。</p>
+                        <div class="what-if-context-row">
+                            <label class="checkbox" title="跟随上方参考价，收到 TWS 持仓价格更新即重算；手动输入假设价格会暂停跟随。不新增行情订阅或自动入账。"><input id="what-if-follow-reference" type="checkbox" checked>自动跟随参考价</label>
+                            <p id="what-if-context" class="what-if-context">选择账本后，可模拟所有未平期权结算后的持股与综合成本。</p>
+                        </div>
                         <div class="what-if-grid">
                             <article class="what-if-card what-if-card-primary"><span>情景综合成本 / 股</span><strong id="what-if-result">—</strong><small id="what-if-result-caption">按上方选中的成本口径</small></article>
                             <article class="what-if-card"><span>情景总成本</span><strong id="what-if-total-cost">—</strong><small id="what-if-total-caption">情景综合成本 × 结算后总股数</small></article>
@@ -200,26 +203,48 @@
             <div class="stress-controls">
                 <label for="stress-expiry">到期范围<select id="stress-expiry"><option value="">等待未平期权</option></select></label>
                 <label for="stress-base-price">基准现价<input id="stress-base-price" type="number" step="0.01" min="0" autocomplete="off" placeholder="输入现价"></label>
+                <label for="stress-horizon-days">跌到位需要天数<input id="stress-horizon-days" type="number" step="1" min="0" autocomplete="off" placeholder="同到期范围" title="留空 = 在所选到期日结算。填 N 表示情景在今天 +N 天发生：本账本 N 天内到期的期权按情景价结算，本账本与联动账本仍存续的多头期权都在同一天估值，剩余期限缩短带来的 Theta 计入；三项永远同一天"></label>
+                <label for="stress-pricing-model">定价模型<select id="stress-pricing-model" title="美式：CRR 二叉树，与 TWS 对美股期权报 IV 的模型一致，含提前行权价值；欧式：BSM 闭式解"><option value="american" selected>美式二叉树</option><option value="european">欧式 BSM</option></select></label>
+                <label for="stress-dividend-yield">股息率（%）<input id="stress-dividend-yield" type="number" step="0.1" min="0" autocomplete="off" placeholder="0" title="本账本标的的连续股息率，留空用默认值（QQQ 0.6%、TQQQ 1%，其它 0）"></label>
+                <label for="stress-liquidation">变现口径<select id="stress-liquidation" title="中间价：理论价按中间价计。按今日点差折算：把今日买价/中间价（多头）或卖价/中间价（空头）的比例外推到情景理论价，联动账本的今日市值直接取买价；这是今日点差的外推，不是对情景日买卖价的预测。交叉或单边报价整体拒绝"><option value="mid" selected>中间价</option><option value="bidask">按今日点差折算（买价/卖价）</option></select></label>
                 <label for="stress-range">价格扫描范围<select id="stress-range"><option value="10">上下 10%</option><option value="20">上下 20%</option><option value="30" selected>上下 30%</option><option value="50">上下 50%</option></select></label>
                 <button id="btn-stress-refresh-price" type="button">刷新 TWS 现价</button>
             </div>
             <div class="stress-protection-panel">
-                <label class="stress-protection-toggle" for="stress-include-long-options"><input id="stress-include-long-options" type="checkbox"><span><strong>计入测试日仍未到期的 Long Call / Put</strong><small>可选；将上行凸性与下行保护的理论市值、浮动盈亏一并纳入</small></span></label>
+                <label class="stress-protection-toggle" for="stress-include-long-options"><input id="stress-include-long-options" type="checkbox"><span><strong>计入情景日仍未到期的期权（多头浮动盈亏 + 空头负债盯市）</strong><small>可选；多头按理论市值相对买入权利金计浮动盈亏，空头按已收权利金减去理论负债，两者都用逐合约 TWS IV。不勾选时情景日后到期的期权一律不计</small></span></label>
                 <div id="stress-protection-inputs" class="stress-protection-inputs" hidden>
                     <span id="stress-option-iv-source">逐合约 TWS IV：等待拉取</span>
                     <span id="stress-option-rate-source">期限无风险利率：尚未读取</span>
-                    <p>BSM spot 简化估值 · 每张期权使用它当前的 TWS IV，并按剩余期限使用工程共享的 USD 折现曲线 · ACT/365 · 股息率 0% · 不考虑提前行权。这是情景估值，不是 TWS 报价。</p>
+                    <details class="stress-help"><summary>估值说明</summary><p id="stress-own-note">按当前控件生成。</p></details>
+                </div>
+            </div>
+            <div class="stress-protection-panel stress-linked-panel">
+                <label class="stress-protection-toggle" for="stress-include-linked-hedge"><input id="stress-include-linked-hedge" type="checkbox"><span><strong>叠加同账户其它账本的多头期权（TQQQ ↔ QQQ 跨标的保护）</strong><small id="stress-linked-toggle-hint">可选；把同账户联动账本里全部未平 Long Call / Put 按映射后的联动标的价估值，叠加为第四条曲线</small></span></label>
+                <div id="stress-linked-inputs" class="stress-protection-inputs" hidden>
+                    <label for="stress-linked-book">联动账本<select id="stress-linked-book"><option value="">请选择联动账本</option></select></label>
+                    <label for="stress-linked-ratio">杠杆倍数<input id="stress-linked-ratio" type="number" step="0.01" autocomplete="off" placeholder="3" title="本账本相对联动标的的日内杠杆倍数；反向杠杆填负数"></label>
+                    <label for="stress-linked-mapping">映射<select id="stress-linked-mapping" title="复利：(1+本账本涨跌) = (1+指数涨跌)^倍数 × exp(−损耗)，按指数反推；线性：指数涨跌 = 本账本涨跌 ÷ 倍数"><option value="compound" selected>复利（按日再平衡）</option><option value="linear">线性</option></select></label>
+                    <label for="stress-linked-dividend-yield">股息率（%）<input id="stress-linked-dividend-yield" type="number" step="0.1" min="0" autocomplete="off" placeholder="0.6" title="联动标的的连续股息率，留空用默认值（QQQ 0.6%）"></label>
+                    <label id="stress-linked-sigma-field" for="stress-linked-sigma">路径 σ（年化 %）<input id="stress-linked-sigma" type="number" step="1" min="0" autocomplete="off" placeholder="快照代理" title="多日波动损耗用的指数年化波动率；留空取情景日之后仍存续、距现价最近的联动合约 IV 作代理（离 ATM 超过 10% 会标 ⚠）；没有可用代理时整体停止，不按零损耗计算。损耗 = (倍数² − 倍数)/2 × σ² × T，情景日就是今天时为 0"></label>
+                    <label for="stress-linked-iv-mode">IV 模式<select id="stress-linked-iv-mode" title="联动合约在情景中的 IV 如何变化；只影响测试日后仍存续合约的情景市值，不改今日标记价"><option value="none" selected>无（IV 保持不变）</option><option value="fixed">固定点数（全扫描线统一抬升）</option><option value="beta">按跌幅 β（只在下跌侧抬升）</option></select></label>
+                    <label id="stress-linked-iv-shock-field" for="stress-linked-iv-shock" hidden>IV 冲击（点）<input id="stress-linked-iv-shock" type="number" step="1" autocomplete="off" placeholder="0" title="每张存续合约的 IV 统一抬升多少个百分点，例如 10 表示 30% 变 40%；上涨侧同样抬升，读图只看下跌侧"></label>
+                    <label id="stress-linked-iv-beta-field" for="stress-linked-iv-beta" hidden>β（点 / 每跌 1%）<input id="stress-linked-iv-beta" type="number" step="0.1" min="0" autocomplete="off" placeholder="1.5" title="联动标的每下跌 1%，存续合约 IV 抬升多少个百分点；基准点与上涨侧为 0。NDX/VXN 历史回归量级约 1 到 1.5，连续暴跌中更陡；这是起点值，不是预测"></label>
+                    <span id="stress-linked-iv-tenor-field" class="stress-linked-inline" hidden><label class="checkbox" for="stress-linked-iv-tenor" title="β 描述的是约 30 天 IV 的反应；越远期的 IV 抬升越少。勾选后每张合约的冲击 × √(参考期限 ÷ 剩余天数)，封顶 1"><input id="stress-linked-iv-tenor" type="checkbox" checked>按期限衰减</label><label for="stress-linked-iv-tenor-days">参考期限（天）<input id="stress-linked-iv-tenor-days" type="number" step="1" min="1" autocomplete="off" placeholder="30" title="β 所描述的 IV 期限；剩余天数不超过它的合约拿满额冲击"></label></span>
+                    <span id="stress-linked-book-status">联动账本：尚未选择</span>
+                    <span id="stress-linked-inputs-status">逐合约 TWS IV：尚未拉取</span>
+                    <details class="stress-help"><summary>映射与 IV 说明</summary><p id="stress-linked-note">叠加值 = 联动多头期权在情景日的理论市值 − 今日 TWS 标记价市值，即「相对今天多值多少」；已付权利金是沉没成本，不再扣除（悬停另给相对买入权利金的参考盈亏）。映射以指数为驱动变量：复利模式下本账本涨跌 ΔT 反推指数涨跌 R，满足 (1+ΔT) = (1+R)^倍数 × exp(−(倍数²−倍数)/2·σ²·T)，3 倍杠杆跌 30% 对应指数跌 11.2% 而非 10%；线性模式为 R = ΔT ÷ 倍数，仅供对照。本账本仍未到期期权的 IV 冲击随联动 β 按 |倍数| 放大。定价模型默认美式二叉树并计股息率；「按今日点差折算」口径把今日买价/中间价（多头）或卖价/中间价（空头）的比例外推到情景理论价，联动账本的今日市值直接取买价，结算价（内在价值）不折算；它是今日点差的外推，不是对情景日报价的预测。复利映射的路径 σ 留空时取快照里情景日之后最近 ATM 合约的 IV 作代理并注明距现价的距离，没有可用代理时整体停止而不是按零损耗计算。测试日之后仍未到期的联动合约按上方所选定价模型与其自身 TWS IV 估值，IV 沿扫描线固定，因此下跌情景的 Put 保护偏保守；「IV 模式」决定情景中的 IV：无 = 每张合约保持今天的 IV（sticky-strike，保守下限）；固定点数 = 全扫描线统一抬升 N 点，上涨侧也会被抬高，只适合回答「IV 整体变成 X 会怎样」；按跌幅 β = 每个扫描点抬升 β × 联动标的跌幅%，基准点与上涨侧为 0，对应现货与 IV 的负相关（本工程 VRP 备忘 E17：SPY/QQQ corr(ret, ΔIV) ≈ −0.7），β 只是历史量级，不是预测；「按期限衰减」把每张合约的冲击乘以 √(参考期限 ÷ 剩余天数)、封顶 1，因为 β 描述的是短期 IV，一年期 IV 在暴跌里只抬前端的三分之一到一半。任何模式都不改今日标记市值；联动账本只能选同账户、同币种的 STK 账本，两本账本的盈亏不做汇率换算；测试日或之前到期的按内在价值结算。只计联动账本的多头 Call / Put，空头腿与股票不计入。</p></details>
                 </div>
             </div>
             <p id="stress-status" class="stress-status">等待压力测试参数。</p>
-            <div class="stress-legend" aria-hidden="true"><span id="stress-legend-base-pnl" class="legend-pnl">到期后盈亏（左轴）</span><span id="stress-legend-protected-pnl" class="legend-protected-pnl" hidden>计入 Long Call / Put 后盈亏（左轴）</span><span class="legend-cost">综合成本 / 股（右轴）</span><span class="legend-strike">期权执行价</span></div>
-            <div class="stress-chart-wrap"><svg id="stress-chart" role="img" aria-label="标的价格变化与到期后盈亏、综合成本的压力测试图"></svg><div id="stress-tooltip" class="stress-tooltip" hidden><strong id="stress-tooltip-price">—</strong><dl><div><dt id="stress-tooltip-pnl-label">到期后盈亏</dt><dd id="stress-tooltip-pnl">—</dd></div><div id="stress-tooltip-base-row" hidden><dt>不含未到期多头期权</dt><dd id="stress-tooltip-base-pnl">—</dd></div><div id="stress-tooltip-long-option-value-row" hidden><dt>Long Call / Put 理论市值</dt><dd id="stress-tooltip-long-option-value">—</dd></div><div id="stress-tooltip-long-option-pnl-row" hidden><dt>Long Call / Put 浮动盈亏</dt><dd id="stress-tooltip-long-option-pnl">—</dd></div><div id="stress-tooltip-long-option-iv-row" hidden><dt>TWS IV（保持不变）</dt><dd id="stress-tooltip-long-option-iv">—</dd></div><div id="stress-tooltip-long-option-rate-row" hidden><dt>无风险利率 r(T)</dt><dd id="stress-tooltip-long-option-rate">—</dd></div><div><dt>综合成本 / 股</dt><dd id="stress-tooltip-cost">—</dd></div><div><dt>结算后持股</dt><dd id="stress-tooltip-shares">—</dd></div><div><dt>结算结果</dt><dd id="stress-tooltip-outcome">—</dd></div></dl></div></div>
+            <div class="stress-legend" aria-hidden="true"><span id="stress-legend-base-pnl" class="legend-pnl">到期结算盈亏（左轴）</span><span id="stress-legend-protected-pnl" class="legend-protected-pnl" hidden>①+② 计入未到期多头期权（左轴）</span><span id="stress-legend-linked-pnl" class="legend-linked-pnl" hidden>①+②+③ 计入联动账本多头期权较今日变动（左轴）</span><span class="legend-cost">综合成本 / 股（右轴）</span><span class="legend-strike">期权执行价</span></div>
+            <div class="stress-chart-wrap"><svg id="stress-chart" role="img" aria-label="标的价格变化与到期后盈亏、综合成本的压力测试图"></svg><div id="stress-tooltip" class="stress-tooltip" hidden><strong id="stress-tooltip-price">—</strong><p id="stress-tooltip-horizon-row" class="stress-tooltip-sub" hidden><span>情景日</span><span id="stress-tooltip-horizon">—</span></p><p id="stress-tooltip-linked-price-row" class="stress-tooltip-sub" hidden><span id="stress-tooltip-linked-price-label">联动标的映射价</span><span id="stress-tooltip-linked-price">—</span></p><dl class="stress-tooltip-components"><div><dt id="stress-tooltip-base-label">到期结算盈亏</dt><dd id="stress-tooltip-base-pnl">—</dd></div><div id="stress-tooltip-long-option-pnl-row" hidden><dt id="stress-tooltip-long-option-pnl-label">② 未到期多头期权浮动盈亏</dt><dd id="stress-tooltip-long-option-pnl">—</dd></div><div id="stress-tooltip-short-option-pnl-row" hidden><dt id="stress-tooltip-short-option-pnl-label">未到期空头期权</dt><dd id="stress-tooltip-short-option-pnl">—</dd></div><div id="stress-tooltip-linked-pnl-row" hidden><dt id="stress-tooltip-linked-pnl-label">③ 联动多头期权较今日变动</dt><dd id="stress-tooltip-linked-pnl">—</dd></div><div id="stress-tooltip-total-row" class="stress-tooltip-total" hidden><dt id="stress-tooltip-pnl-label">合计</dt><dd id="stress-tooltip-pnl">—</dd></div></dl><dl class="stress-tooltip-details"><div id="stress-tooltip-long-option-value-row" hidden><dt>② 理论市值</dt><dd id="stress-tooltip-long-option-value">—</dd></div><div id="stress-tooltip-long-option-iv-row" hidden><dt id="stress-tooltip-long-option-iv-label">② TWS IV（保持不变）</dt><dd id="stress-tooltip-long-option-iv">—</dd></div><div id="stress-tooltip-long-option-rate-row" hidden><dt>② 无风险利率 r(T)</dt><dd id="stress-tooltip-long-option-rate">—</dd></div><div id="stress-tooltip-short-option-liability-row" hidden><dt id="stress-tooltip-short-option-liability-label">空头负债市值</dt><dd id="stress-tooltip-short-option-liability">—</dd></div><div id="stress-tooltip-short-option-iv-row" hidden><dt id="stress-tooltip-short-option-iv-label">空头 TWS IV</dt><dd id="stress-tooltip-short-option-iv">—</dd></div><div id="stress-tooltip-linked-value-row" hidden><dt id="stress-tooltip-linked-value-label">联动多头期权 情景市值 / 今日市值</dt><dd id="stress-tooltip-linked-value">—</dd></div><div id="stress-tooltip-linked-iv-row" hidden><dt id="stress-tooltip-linked-iv-label">联动多头期权 IV</dt><dd id="stress-tooltip-linked-iv">—</dd></div><div id="stress-tooltip-linked-premium-row" hidden><dt id="stress-tooltip-linked-premium-label">联动多头期权较买入权利金（参考）</dt><dd id="stress-tooltip-linked-premium">—</dd></div><div><dt>综合成本 / 股</dt><dd id="stress-tooltip-cost">—</dd></div><div><dt>结算后持股</dt><dd id="stress-tooltip-shares">—</dd></div><div><dt>结算结果</dt><dd id="stress-tooltip-outcome">—</dd></div></dl></div></div>
             <div id="stress-key-points" class="stress-key-points"></div>
-            <p id="stress-note" class="stress-note">只结算所选到期日及以前的期权；更晚到期的仓位继续保留。默认不估计更晚期权的时间价值；勾选后，测试日仍未到期的所有多头 Call 与 Put 都会按情景价估值，并把理论市值和相对买入权利金的浮动盈亏叠加到图上。所有结果只在浏览器内测算，不写入账本。</p>
+            <details class="stress-help stress-note-details"><summary>分项口径与假设说明</summary><p id="stress-note" class="stress-note">盈亏按编号分项再加总：① 本账本到期结算盈亏（股票按情景价，情景日及以前的期权按指派 / 行权 / 归零结算）；本账本情景日仍未到期的期权分两项：多头按理论市值相对买入权利金的浮动盈亏，空头按已收权利金减去理论负债（综合成本口径本就不抵扣仍未到期的卖方权利金，所以这里计全额）；最后一项是联动账本多头期权相对今日标记价的变动。编号按实际开启的项顺序分配。三项永远在同一个情景日估值：默认是所选到期日，填了「跌到位需要天数」则是今天 +N 天，TWS 折现利率也按该日的剩余期限解析。只结算情景日及以前的期权；更晚到期的仓位继续保留。默认不估计更晚期权的时间价值；勾选后，测试日仍未到期的所有多头 Call 与 Put 都会按情景价估值，并把理论市值和相对买入权利金的浮动盈亏叠加到图上。跨账本叠加只读取同账户另一本账本的多头期权并按映射价估值，不合并两本账本，也不读取 TWS 持仓作为兜底。所有结果只在浏览器内测算，不写入账本。</p></details>
         </section>
     </div>
     <script src="js/cost_basis_core.js?v=94b986d85e5a"></script>
+    <script src="js/american_binomial.js?v=a49313f2567b"></script>
     <script src="js/cost_basis_import.js?v=1b0728076d84"></script>
-    <script src="js/cost_basis.js?v=9a3816139880"></script>
+    <script src="js/cost_basis.js?v=5c17f4270a1a"></script>
 </body>
 </html>

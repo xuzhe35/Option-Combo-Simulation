@@ -119,9 +119,20 @@ It currently:
   uniquely paired futures rolls
 - derives current positions from CSV/ledger replay even when TWS is offline,
   and labels the result as uncorroborated rather than rendering an empty table
-- provides expiry-bounded What If replay plus a modal multi-price stress test;
-  still-live Long Calls/Puts are an optional BSM overlay using per-contract TWS
-  IV and the shared discount curve, never a stored event
+- automatically feeds the hero reference price into What If from existing
+  portfolio-price pushes; manual scenario edits pause following, and resuming
+  needs no request. Explicit current-price refresh remains a one-shot quote
+- provides expiry-bounded What If replay plus a modal multi-price stress test
+  that values every still-open option of the book on one scenario date (live
+  longs as assets, live shorts as liabilities) with per-contract TWS IV, the
+  shared discount curve, a CRR American binomial by default and a mid or
+  today's-spread lens; nothing becomes a stored event
+- stacks an optional cross-book protection curve (TQQQ-first): a same-account,
+  same-currency sibling book's long options are valued at an index-driven,
+  compounding-mapped price (explicit or nearest-ATM proxy path sigma, refused
+  when absent) via the sibling's own ledger read and a bounded TWS quote
+  request; short legs are ignored, nothing is merged, and no new WebSocket
+  action is introduced
 - treats a negative share balance as supported state: the net-cash lens
   reports the short's buy-back break-even level, and the short notice is
   raised only from the final replayed balance, never from an intermediate

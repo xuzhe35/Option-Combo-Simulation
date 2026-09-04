@@ -311,6 +311,9 @@ async def build_cost_basis_response(store_env, websocket, data, *,
                 'expiry': ''.join(
                     character for character in str(raw.get('expiry') or '')
                     if character.isdigit())[:8],
+                # The deliverable size disambiguates same-terms contracts when
+                # the ledger row carries no conId / localSymbol.
+                'multiplier': _optional_positive_float(raw.get('multiplier')),
             })
         try:
             book = await asyncio.to_thread(
@@ -581,6 +584,16 @@ def _optional_int(data, field):
     if isinstance(value, bool) or not isinstance(value, int):
         raise InvalidRequestError(f'{field} must be an integer')
     return value
+
+
+def _optional_positive_float(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed or parsed <= 0:
+        return None
+    return parsed
 
 
 def _error_response(server_action, request_id, code, message):
