@@ -300,3 +300,17 @@
 - 分析脚本（session scratchpad，可按需入库）：`analyze_vrp.py`（分解）、`recenter_test.py`（再对中）、`reverse_composite.py`（反向组合）。
 - 交易明细 CSV：scratchpad `spy_base_v3.csv` / `qqq_base_v3.csv` / `*_off05/off10.csv` / `*_marks.csv`。
 - 数据服务：Options DB workspace `chain_service/chain_server.py`（SPY/QQQ/GLD/TLT/SLV/USO，2008~2026-06）。
+
+
+### E19 · 暴跌中的 IV 规则与期限衰减（2026-09-05，脚本 `scripts/skew_regime_study.py`）
+
+**问题**：压力测试给远期价外 Put 的 IV 抬升该用什么规则、远期抬多少。
+
+**数据**：QQQ EOD 链，七次暴跌（2015-08 −12%、2018-10 −12%、2020-02/03 −29%、2022-01 −15%、2023-08 −6%、2024-07/08 −13%、2025-04 −13%），每次取 30/60/120/240/400 天附近到期日，OTM Put 逐张比较。
+
+**结果**：
+1. sticky-strike + 每到期日一个平行抬升，在 34 个案例中 22 个优于 sticky-delta + 平行抬升（RMSE 2.26 vs 2.60 点）。价外 10% 以上 Put 的实际抬升与 ATM 几乎相等：暴跌时整条微笑近乎平行上移，固定行权价的 IV 不会因为「离 ATM 更近」而下降。
+2. 抬升按期限衰减：相对 30 天，120 天 0.88、240 天 0.57、400 天 0.48。√ 规则（0.50/0.35/0.27）低估远期一半左右；(30/DTE)^0.25 更贴近。
+3. 前端 β 随速度变化：慢跌 0.7，三到四周 1.3–1.7，数日暴跌 2.3–2.9。
+
+**落地**：压力测试保留 sticky-strike + 整体抬升，不做 sticky-delta；期限衰减指数默认 0.25，β 默认 1.5 并按速度提示。

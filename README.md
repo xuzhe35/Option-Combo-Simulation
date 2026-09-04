@@ -442,8 +442,11 @@ sigma is an explicit assumption or the IV of the nearest-the-money sibling
 contract still alive after the date (refused, never zero, when none exists);
 a linear ratio is kept for comparison. The sibling's contracts are valued at
 that price with their own IV, optionally lifted by a fixed shock or a
-spot-vol beta (downside only, tenor-damped), and this book's IV shock follows
-the same beta scaled by the leverage ratio. The stacked figure is the change
+spot-vol beta (downside only, tenor-damped by (30 / remaining days)^0.25, the
+exponent fitted to seven QQQ crashes 2015-2025 with
+`scripts/skew_regime_study.py`, which also showed sticky-strike plus a level
+shift beats sticky-delta on real crash chains), and this book's IV shock
+follows the same beta scaled by the leverage ratio. The stacked figure is the change
 against today's TWS mark, so premium already paid is sunk and a crash shows
 the protection as a gain; P&L versus the premium is a tooltip reference only.
 The overlay reads the sibling ledger and a bounded TWS quote request only,

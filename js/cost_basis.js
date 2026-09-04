@@ -55,6 +55,11 @@
     // Tenor damping: beta values describe ~30-day IV; longer-dated IV moves
     // less, roughly like sqrt(reference tenor / remaining days), capped at 1.
     const LINKED_IV_DEFAULT_TENOR_DAYS = 30;
+    // Damping exponent for (reference / remaining days)^p. 0.25 is the fit
+    // to seven QQQ crashes 2015-2025 (scripts/skew_regime_study.py): the
+    // level shift of ~1-year IV was about half the ~30-day shift, not the
+    // quarter a square-root rule (p = 0.5) would give.
+    const LINKED_IV_DEFAULT_TENOR_EXPONENT = 0.25;
     const LINKED_MAX_HORIZON_DAYS = 3650;
     const DAY_MS = 24 * 60 * 60 * 1000;
     // Typing "20" must not fire a TWS snapshot for "2" and then "20".
@@ -192,6 +197,7 @@
         stressLinkedIvBeta: LINKED_IV_DEFAULT_BETA,
         stressLinkedIvTenorDamping: true,
         stressLinkedIvTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
+        stressLinkedIvTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
         stressLinkedMapping: 'compound',
         stressLinkedSigma: null,
         stressLinkedDividendYield: null,
@@ -575,7 +581,7 @@
      * optionally damped by remaining tenor. Returns the shocked inputs and
      * whether any quote would be pushed to or below zero.
      */
-    function _applyIvShock(marketInputs, ivShock, tenorDays, scenarioAt) {
+    function _applyIvShock(marketInputs, ivShock, tenorDays, scenarioAt, exponent) {
         const shock = Number(ivShock) || 0;
         if (!marketInputs || shock === 0) return { inputs: marketInputs, breaksIv: false };
         const reference = tenorDays === null || tenorDays === undefined
@@ -590,7 +596,7 @@
                     const quoteExpiryAt = _dateUtcFromDigits(quote && quote.expiry);
                     if (quoteExpiryAt !== null && scenarioAt !== null) {
                         applied = shock * tenorDampingFactor(
-                            (quoteExpiryAt - scenarioAt) / DAY_MS, reference);
+                            (quoteExpiryAt - scenarioAt) / DAY_MS, reference, exponent);
                     }
                 }
                 if (iv + applied <= 0) breaksIv = true;
@@ -665,7 +671,8 @@
             || String(rawInputs.throughExpiry || '') !== throughExpiry) {
             return _emptyDeferredEstimate(false, reasons.inputs, eligible.length);
         }
-        const shocked = _applyIvShock(rawInputs, opts.ivShock, opts.ivShockTenorDays, scenarioAt);
+        const shocked = _applyIvShock(rawInputs, opts.ivShock, opts.ivShockTenorDays, scenarioAt,
+            opts.ivShockTenorExponent);
         if (shocked.breaksIv) return _emptyDeferredEstimate(false, reasons.shock, eligible.length);
         const marketInputs = shocked.inputs;
         const liquidation = normalizeLiquidation(opts.liquidation) || 'mid';
@@ -846,12 +853,25 @@
             + `${String(shifted.getUTCDate()).padStart(2, '0')}`;
     }
 
-    /** sqrt(reference / remaining days), never above 1, never below a day. */
-    function tenorDampingFactor(remainingDays, referenceDays) {
+    /**
+     * (reference / remaining days)^exponent, never above 1, never below a
+     * day. Exponent 0.5 is the textbook square-root rule; 0.25 is what the
+     * historical QQQ crashes actually show for the IV level shift by tenor.
+     */
+    function tenorDampingFactor(remainingDays, referenceDays, exponent) {
         const remaining = Math.max(1, Number(remainingDays));
         const reference = Number(referenceDays);
-        if (!Number.isFinite(remaining) || !Number.isFinite(reference) || reference <= 0) return 1;
-        return Math.min(1, Math.sqrt(reference / remaining));
+        const power = normalizeLinkedTenorExponent(exponent);
+        if (!Number.isFinite(remaining) || !Number.isFinite(reference) || reference <= 0
+            || power === null) return 1;
+        return Math.min(1, Math.pow(reference / remaining, power));
+    }
+
+    function normalizeLinkedTenorExponent(value) {
+        if (value === null || value === undefined || value === '') return LINKED_IV_DEFAULT_TENOR_EXPONENT;
+        const power = Number(value);
+        if (!Number.isFinite(power) || power < 0.05 || power > 1) return null;
+        return power;
     }
 
     function normalizeLinkedIvMode(value) {
@@ -1075,7 +1095,8 @@
         if (!Number.isFinite(ivShock)) {
             return _emptyLinkedEstimate(false, 'invalid_linked_iv_shock', eligible.length);
         }
-        const shocked = _applyIvShock(marketInputs, ivShock, opts.ivShockTenorDays, scenarioAt);
+        const shocked = _applyIvShock(marketInputs, ivShock, opts.ivShockTenorDays, scenarioAt,
+            opts.ivShockTenorExponent);
         if (shocked.breaksIv && deferred.length) {
             return _emptyLinkedEstimate(false, 'invalid_linked_iv_shock', eligible.length);
         }
@@ -1228,6 +1249,7 @@
             const ivShockPoints = normalizeIvShockPoints(remembered.ivShockPoints);
             const ivBeta = normalizeLinkedIvBeta(remembered.ivBeta);
             const ivTenorDays = normalizeLinkedTenorDays(remembered.ivTenorDays);
+            const ivTenorExponent = normalizeLinkedTenorExponent(remembered.ivTenorExponent);
             const mapping = normalizeLinkedMapping(remembered.mapping);
             const sigma = normalizeLinkedSigma(remembered.sigma);
             const rememberedYield = remembered.dividendYield === null
@@ -1244,6 +1266,8 @@
                 ivBeta: ivBeta === null ? LINKED_IV_DEFAULT_BETA : ivBeta,
                 ivTenorDamping: remembered.ivTenorDamping !== false,
                 ivTenorDays: ivTenorDays === null ? LINKED_IV_DEFAULT_TENOR_DAYS : ivTenorDays,
+                ivTenorExponent: ivTenorExponent === null
+                    ? LINKED_IV_DEFAULT_TENOR_EXPONENT : ivTenorExponent,
                 // The overlay is never on when the modal opens: the fourth
                 // curve appears only after a deliberate tick this session.
                 enabled: false,
@@ -1261,6 +1285,7 @@
             ivBeta: LINKED_IV_DEFAULT_BETA,
             ivTenorDamping: true,
             ivTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
+            ivTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
             mapping: 'compound',
             sigma: null,
             dividendYield: null,
@@ -1309,6 +1334,10 @@
         const ivTenorDays = ivTenorDamping
             ? normalizeLinkedTenorDays(linkedHedge.ivTenorDays) : LINKED_IV_DEFAULT_TENOR_DAYS;
         if (ivTenorDays === null) return { reason: 'invalid_linked_tenor_days' };
+        const ivTenorExponent = ivTenorDamping
+            ? normalizeLinkedTenorExponent(linkedHedge.ivTenorExponent)
+            : LINKED_IV_DEFAULT_TENOR_EXPONENT;
+        if (ivTenorExponent === null) return { reason: 'invalid_linked_tenor_exponent' };
         return {
             reason: '',
             ratio,
@@ -1318,6 +1347,7 @@
             ivBeta,
             ivTenorDamping,
             ivTenorDays,
+            ivTenorExponent,
             mapping,
             sigma,
             dividendYield,
@@ -1450,6 +1480,8 @@
                 ivShock: ownIvShockPoints / 100,
                 ivShockTenorDays: linkedHedge && !linkedHedge.reason && linkedHedge.ivTenorDamping
                     ? linkedHedge.ivTenorDays : null,
+                ivShockTenorExponent: linkedHedge && !linkedHedge.reason
+                    ? linkedHedge.ivTenorExponent : undefined,
             };
             const convexity = includeDeferredLongOptions
                 ? estimateDeferredLongOptions(scenario.deferredOptions, price, ownShockOptions)
@@ -1522,6 +1554,7 @@
                         liquidation, pricingModel, dividendYield: linkedHedge.dividendYield,
                         ivShock: ivShockPoints / 100,
                         ivShockTenorDays: linkedHedge.ivTenorDamping ? linkedHedge.ivTenorDays : null,
+                        ivShockTenorExponent: linkedHedge.ivTenorExponent,
                     });
                 Object.assign(point, {
                     linkedPrice: Number.isFinite(linkedPrice) ? linkedPrice : null,
@@ -1630,6 +1663,8 @@
                 linkedIvTenorDamping: linkedHedge.ivTenorDamping === true,
                 linkedIvTenorDays: linkedHedge.ivTenorDays === undefined
                     ? null : linkedHedge.ivTenorDays,
+                linkedIvTenorExponent: linkedHedge.ivTenorExponent === undefined
+                    ? null : linkedHedge.ivTenorExponent,
                 linkedMapping: linkedHedge.mapping || 'compound',
                 linkedDividendYield: linkedHedge.dividendYield === undefined
                     ? null : linkedHedge.dividendYield,
@@ -2381,6 +2416,7 @@
             stressDividendYield: null,
             stressLinkedIvTenorDamping: true,
             stressLinkedIvTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
+            stressLinkedIvTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
             stressLinkedMapping: 'compound',
             stressLinkedSigma: null,
             stressLinkedDividendYield: null,
@@ -3888,6 +3924,8 @@
             } else if (series.reason === 'linked_option_identity_mismatch') {
                 failure = `${linkedSymbol} 账本至少一张多头期权的 conId / localSymbol 与 TWS 快照不一致`
                     + '（快照里只有同条款的另一张合约），已停止叠加，请核对账本合约身份。';
+            } else if (series.reason === 'invalid_linked_tenor_exponent') {
+                failure = '衰减指数无效：请输入 0.05 到 1 之间的数字（0.25 = 历史拟合，0.5 = 平方根规则）。';
             } else if (series.reason === 'invalid_linked_tenor_days') {
                 failure = `参考期限无效：请输入 1 到 ${LINKED_MAX_HORIZON_DAYS} 天（β 所描述的 IV 期限，通常 30）。`;
             } else if (series.reason === 'invalid_linked_iv_shock') {
@@ -3960,7 +3998,8 @@
                                 : (series.linkedIvMode === 'beta'
                                     ? `（基准点；每跌 1% IV +${_money(series.linkedIvBeta, 2)} 点`
                                         + (series.linkedIvTenorDamping
-                                            ? `，按期限衰减 √(${_money(series.linkedIvTenorDays, 0)}/剩余天)`
+                                            ? `，按期限衰减 (${_money(series.linkedIvTenorDays, 0)}/剩余天)^${_money(
+                                                series.linkedIvTenorExponent, 2)}`
                                             : '')
                                         + '，上涨侧不变）'
                                     : ''))
@@ -4184,6 +4223,7 @@
                     ivBeta: state.stressLinkedIvBeta,
                     ivTenorDamping: state.stressLinkedIvTenorDamping,
                     ivTenorDays: state.stressLinkedIvTenorDays,
+                    ivTenorExponent: state.stressLinkedIvTenorExponent,
                     mapping: state.stressLinkedMapping,
                     sigma: state.stressLinkedSigma,
                     dividendYield: state.stressLinkedDividendYield,
@@ -4229,6 +4269,7 @@
         state.stressLinkedIvBeta = choice.ivBeta;
         state.stressLinkedIvTenorDamping = choice.ivTenorDamping;
         state.stressLinkedIvTenorDays = choice.ivTenorDays;
+        state.stressLinkedIvTenorExponent = choice.ivTenorExponent;
         state.stressLinkedMapping = choice.mapping;
         state.stressLinkedSigma = choice.sigma;
         state.stressLinkedDividendYield = choice.dividendYield;
@@ -4406,6 +4447,7 @@
             ivBeta: state.stressLinkedIvBeta,
             ivTenorDamping: state.stressLinkedIvTenorDamping,
             ivTenorDays: state.stressLinkedIvTenorDays,
+            ivTenorExponent: state.stressLinkedIvTenorExponent,
             mapping: state.stressLinkedMapping,
             sigma: state.stressLinkedSigma,
             dividendYield: _effectiveDividendYield(
@@ -4503,6 +4545,12 @@
         if (globalScope.document.activeElement !== tenorDaysInput) {
             tenorDaysInput.value = state.stressLinkedIvTenorDays === null
                 ? '' : String(state.stressLinkedIvTenorDays);
+        }
+        const tenorExponentInput = $('stress-linked-iv-tenor-exponent');
+        tenorExponentInput.disabled = !state.stressLinkedIvTenorDamping;
+        if (globalScope.document.activeElement !== tenorExponentInput) {
+            tenorExponentInput.value = state.stressLinkedIvTenorExponent === null
+                ? '' : String(state.stressLinkedIvTenorExponent);
         }
         const linkedBook = _stressLinkedBook();
         const symbol = linkedBook ? linkedBook.symbol : '联动账本';
@@ -7045,6 +7093,13 @@
             _writeStressLinkedMemory();
             _renderStressTest();
         });
+        $('stress-linked-iv-tenor-exponent').addEventListener('input', (inputEvent) => {
+            const raw = String(inputEvent.target.value || '').trim();
+            state.stressLinkedIvTenorExponent = raw === ''
+                ? LINKED_IV_DEFAULT_TENOR_EXPONENT : _numberOrNull(raw);
+            _writeStressLinkedMemory();
+            _renderStressTest();
+        });
         $('stress-liquidation').addEventListener('change', (changeEvent) => {
             state.stressLiquidation = normalizeLiquidation(changeEvent.target.value) || 'mid';
             _renderStressTest();
@@ -7227,6 +7282,7 @@
         normalizeLinkedIvBeta,
         normalizeStressHorizonDays,
         normalizeLinkedTenorDays,
+        normalizeLinkedTenorExponent,
         stressComponentNumbers,
         findOptionQuote: _findOptionQuote,
         optionQuoteIdentityConflict: _optionQuoteIdentityConflict,

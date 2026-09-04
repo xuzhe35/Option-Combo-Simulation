@@ -2102,13 +2102,31 @@ module.exports = {
                 // contract's lift shrinks by sqrt(reference / remaining days).
                 assert.equal(page.tenorDampingFactor(30, 30), 1);
                 assert.equal(page.tenorDampingFactor(10, 30), 1);
-                assert.ok(Math.abs(page.tenorDampingFactor(120, 30) - 0.5) < 1e-9);
+                // Default exponent is the historical fit (0.25); 0.5 is the
+                // square-root rule and stays available.
+                assert.ok(Math.abs(page.tenorDampingFactor(120, 30) - Math.pow(0.25, 0.25)) < 1e-9);
+                assert.ok(Math.abs(page.tenorDampingFactor(120, 30, 0.5) - 0.5) < 1e-9);
+                assert.ok(Math.abs(page.tenorDampingFactor(480, 30, 0.25) - 0.5) < 1e-9);
+                assert.equal(page.tenorDampingFactor(120, 30, 'bad'), 1);
                 assert.equal(page.tenorDampingFactor(0, 30), 1);
+                assert.equal(page.normalizeLinkedTenorExponent(''), 0.25);
+                assert.equal(page.normalizeLinkedTenorExponent('0.5'), 0.5);
+                assert.equal(page.normalizeLinkedTenorExponent(0), null);
+                assert.equal(page.normalizeLinkedTenorExponent(2), null);
                 assert.equal(page.normalizeLinkedTenorDays(''), 30);
                 assert.equal(page.normalizeLinkedTenorDays('60'), 60);
                 assert.equal(page.normalizeLinkedTenorDays(0), null);
                 const damped = withHedge({ ivMode: 'beta', ivBeta: 2, ivTenorDamping: true,
+                    ivTenorDays: 30, ivTenorExponent: 0.5 });
+                const dampedDefault = withHedge({ ivMode: 'beta', ivBeta: 2, ivTenorDamping: true,
                     ivTenorDays: 30 });
+                assert.equal(dampedDefault.linkedIvTenorExponent, 0.25);
+                assert.ok(Math.abs(dampedDefault.points[0].linkedIvShockPointsMax
+                    - dampedDefault.points[0].linkedIvShockPoints * Math.pow(30 / 137, 0.25)) < 1e-9);
+                assert.ok(dampedDefault.points[0].linkedIvShockPointsMax
+                    > damped.points[0].linkedIvShockPointsMax);
+                assert.equal(withHedge({ ivMode: 'beta', ivTenorDamping: true, ivTenorExponent: 3 })
+                    .reason, 'invalid_linked_tenor_exponent');
                 assert.equal(damped.available, true);
                 assert.equal(damped.linkedIvTenorDamping, true);
                 assert.equal(damped.linkedIvTenorDays, 30);
@@ -2365,6 +2383,7 @@ module.exports = {
                         symbol: 'QQQ', bookId: 'qqq', ratio: 3, basePrice: 500,
                         openOptions: linkedOptions, marketInputs: linkedInputs, asOf: '20260903',
                         ivMode: 'beta', ivBeta: 2, ivTenorDamping: true, ivTenorDays: 30,
+                        ivTenorExponent: 0.5,
                     },
                 });
                 assert.equal(shockedOwn.available, true);
@@ -2498,7 +2517,10 @@ module.exports = {
                     linkedBookId: 'b-tsm', ratio: 1.5, enabled: true,
                     ivMode: 'beta', ivShockPoints: 15, ivBeta: 2.5,
                     horizonDays: 20, ivTenorDamping: false, ivTenorDays: 45,
+                    ivTenorExponent: 0.4,
                 });
+                assert.equal(remembered.ivTenorExponent, 0.4);
+                assert.equal(seeded.ivTenorExponent, 0.25);
                 // A horizon is never remembered: it is a scenario, not a setting.
                 assert.equal('horizonDays' in remembered, false);
                 assert.equal(remembered.ivTenorDamping, false);
@@ -2824,7 +2846,7 @@ module.exports = {
                 assert.equal(h.node('stress-linked-iv-beta-field').hidden, false);
                 assert.equal(h.node('stress-linked-iv-shock-field').hidden, true);
                 assert.match(h.node('stress-status').textContent,
-                    /TWS IV 18\.00%–22\.00%（基准点；每跌 1% IV \+1\.50 点，按期限衰减 √\(30\/剩余天\)，上涨侧不变）/);
+                    /TWS IV 18\.00%–22\.00%（基准点；每跌 1% IV \+1\.50 点，按期限衰减 \(30\/剩余天\)\^0\.25，上涨侧不变）/);
                 assert.equal(h.node('stress-linked-iv-tenor-field').hidden, false);
                 assert.equal(h.node('stress-linked-iv-tenor').checked, true);
                 h.state.stressLinkedIvTenorDamping = false;
@@ -2917,6 +2939,7 @@ module.exports = {
                 assert.ok(html.includes('id="stress-linked-iv-beta"'));
                 assert.ok(html.includes('id="stress-linked-iv-tenor"'));
                 assert.ok(html.includes('id="stress-linked-iv-tenor-days"'));
+                assert.ok(html.includes('id="stress-linked-iv-tenor-exponent"'));
                 assert.ok(html.includes('id="stress-horizon-days"'));
                 assert.ok(html.includes('id="stress-tooltip-horizon"'));
                 assert.equal(html.includes('stress-linked-horizon-days'), false);
