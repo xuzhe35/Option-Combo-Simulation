@@ -1,15 +1,15 @@
 # `cost_basis.html` Long Put / 跨账本压力测试改动 Review 与修复复核
 
 > 最新复核日期：2026-09-05  
-> 最新复核结论：第 14 节的修复记录只有部分与当前实现一致；13.2 和 13.3 的前端数值边界已基本关闭，13.4 和 13.5 所述后端修复实际上尚未实现，13.6 仍有用户文案残留。  
-> 当前建议：不应将第 14 节视为全部修复完成；需先真正实现行情证据等待和分批请求，并补对应后端测试。
+> 最新复核结论：提交 `9588183` 已覆盖第 15 节的关键功能修复；第 17 节新发现的股票行 BBO 宽限浪费与错误“最低 IV”注释也已在第 18 节所述改动中修复并通过回归。
+> 当前建议：代码级问题已关闭；剩余事项只是在真实 TWS 连接下完成浏览器手工验收。
 
 > Review 日期：2026-09-04  
 > Review 范围：当前工作区相对 `HEAD` 的未提交改动  
 > Review 方式：代码与设计文档审查、现有自动化测试；未连接真实 TWS 做浏览器手工验收  
 > 结论：发现 5 项值得修正的问题，其中 1 项高优先级、3 项中优先级、1 项低优先级
 
-第 1–8 节保留初次 Review 的问题现场；第 9、11、12 节记录前两轮修复与验证；第 13 节是精度迭代 Review，第 14 节是修复记录，第 15 节是对该修复记录的最新独立验证。
+第 1–8 节保留初次 Review 的问题现场；第 9、11、12 节记录前两轮修复与验证；第 13 节是精度迭代 Review，第 14 节是修复记录，第 15 节保留提交前曾被回退的现场，第 16 节记录重新写入过程，第 17 节是对已提交快照 `9588183` 的独立 Review，第 18 节记录本轮直接修复。
 
 ## 1. 总体结论
 
@@ -562,3 +562,67 @@ mtime 正好是回退前那次写入的时间，符合 OneDrive 用云端旧副�
 新增测试断言动态说明的实际文本随定价模型、股息率、口径变化。
 
 教训：在 OneDrive 目录里工作，未提交的改动可能被静默回退。建议尽快把当前工作树提交。
+
+## 17. 提交 `9588183` 独立 Review（2026-09-05）
+
+### 17.1 范围与总结
+
+本轮以 `9588183^..9588183` 的已提交 diff 为唯一评审边界，并核对当前工作树中的
+`ib_server.py`、`ib_server_market_data.py`、`js/cost_basis.js`、`cost_basis.html`
+和相关测试与该提交一致。当前 HEAD 后续的 `875f215` 只改了交易日历和其他
+页面的资源戳，没有覆盖本次压力测试修复。
+
+结论：第 15.2、15.3、15.4 指出的功能缺口已经在该提交中关闭，没有再发现会让压力测试错算或静默放行缺失证据的 P1/P2 问题。本轮发现 1 项 P3 等待效率问题和 1 处无运行时影响的注释残留。
+
+| 上轮问题 | `9588183` 中的实际处理 | 本轮判定 |
+| --- | --- | --- |
+| 13.2 / 15.4 路径 σ | 代理改为情景日后存续且执行价距现价最近的合约；无代理时 fail closed；tooltip 与动态说明已与 121 步常量一致 | **已关闭** |
+| 13.3 / 15.3 crossed BBO | 后端快照行回传 `bidAskValid`；前端同时检查显式无效标志、两侧存在、非负及 `ask >= bid` | **已关闭** |
+| 13.4 / 15.2 IV 先到就取消 | 每张期权的核心证据是 mark + 必要时的 IV；情景日及之前到期的合约只要 mark；核心证据齐全后再给 BBO 0.75 s 宽限 | **已关闭** |
+| 13.5 / 15.2 最多 128 张同时流式订阅 | 请求按最多 20 行分批，前一批在 `finally` 中取消和清理后才开下一批，所有批次共用 8 s deadline | **已关闭** |
+| 13.6 / 15.4 过期文案 | 路径 σ 提示已改为“最近 ATM，无代理停止”；估值说明直接插入 `AMERICAN_BINOMIAL_STEPS=121` | **已关闭** |
+
+### 17.2 [P3] 首批中的股票标的行会让 BBO 宽限无条件等满 0.75 秒
+
+**位置**：`ib_server_market_data.py:1382-1386`、`ib_server_market_data.py:1408-1413`、
+`ib_server.py:2412-2465`
+
+每次请求的第一批都包含股票标的。`cost_basis_ticker_evidence()` 在非期权行已取得现价时仍固定返回 `bbo: false`，而 `cost_basis_batch_complete()` 只有在**所有行**的 `bbo` 都为真时才会立即完成。因此，即使第一批所有期权的 mark、IV 和有效双边价都已到齐，该批仍必然等满 0.75 秒。
+
+这不会改变估值数字，也不会留下订阅；但它会白白占用所有批次共用的 8 s 预算。对接近 128 张上限的账本，末尾批次可用时间会因此少 0.75 秒。本地直接调用已复现：“股票 core 齐全但 `bbo=false` + 期权 core/BBO 齐全”在 `core_ready_at=None` 时仍返回 `False`，只有 0.75 s 后才返回 `True`。
+
+**建议**：BBO 宽限只统计 `OPT/FOP` 行；或在非期权行 core 齐全时将其 `bbo` 视为不适用/已满足。增加一项“STK + 已取齐 BBO 的 OPT”混合批次测试，断言无需宽限即完成。
+
+### 17.3 [P3] 仍有一行源码注释把代理说成“最低 IV”
+
+**位置**：`js/cost_basis.js:953-963`
+
+`_proxyPathSigma()` 的实现和下方完整注释都正确表达了“执行价距现价最近的存续合约 IV”，但紧邻上方的单行 JSDoc 仍写着 `Lowest quoted IV among contracts alive after the date: the ATM proxy.`。这不影响运行时，但与实现相反，也与第 16 节“过期注释已改写”的记录不完全一致。
+
+**建议**：删除这行重复 JSDoc，或改为 `Nearest-to-spot quoted IV among contracts alive after the date.`。
+
+### 17.4 独立验证结果
+
+- `node tests/run.js`：`1012 passed, 0 failed`。
+- 使用 `config.local.ini` 指向的 Python 3.14 项目环境运行 `tests.cost_basis_ws_test`、`tests.cost_basis_store_test`、`tests.cost_basis_executions_test`、`tests.ib_server_ws_test`：`Ran 292 tests, OK`。
+- `py_compile`：`cost_basis_ws.py`、`ib_server.py`、`ib_server_market_data.py` 全部通过。
+- 代码级确认新增行情 ticker 不复用旧缓存，每批在 `finally` 中取消并清理，超出共享 deadline 的合约以空 ticker 回传让前端具名 fail closed。
+- 现有 Python 测试对证据函数、宽限函数和 `chunked()` 有覆盖，但没有直接驱动 `_request_cost_basis_snapshot_tickers()` 的完整异步生命周期；因此“真实 TWS 下 tick 顺序、取消与行情权限”仍属手工验收边界，不应由单元测试替代。
+
+最终判定：`9588183` **已正确覆盖上一轮的关键功能修复**，可以关闭第 15.2、15.3、15.4 的功能级问题。上述 P3 不会使估值变错，但建议在下一个小提交中清理；真实 TWS 浏览器验收仍未完成。
+
+## 18. 第 17.2 / 17.3 节的直接修复（2026-09-05）
+
+1. `cost_basis_ticker_evidence()` 现在将已取得现价的非期权行视为“无需 BBO 宽限”：`mark / core / bbo` 一起为真。这里的 `bbo=true` 表示批次宽限条件已满足，不是声称股票必然有双边价；函数 docstring 已明确这个语义。
+2. 新增混合批次回归：一行 STK 现价就绪、一行 OPT 的 mark / IV / BBO 就绪时，`cost_basis_batch_complete(..., core_ready_at=None, ...)` 必须立即返回真，不再等 0.75 s。
+3. 删除 `_proxyPathSigma()` 上方错误的 `Lowest quoted IV ...` 单行 JSDoc，保留与实际逻辑一致的“距现价最近”完整注释。
+4. `js/cost_basis.js` 内容变更后，已用仓库标准工具将 `cost_basis.html` 的资源戳更新为 `5c17f4270a1a`，避免浏览器继续使用旧缓存。
+
+验证：
+
+- 定向 `CostBasisSnapshotReadinessTest`：`Ran 6 tests, OK`。
+- Python 四套件：`Ran 293 tests, OK`。
+- 完整 JavaScript 套件：`1012 passed, 0 failed`。
+- `py_compile` 与 `git diff --check`：通过。
+
+最终结论：第 17.2 和 17.3 节已关闭，本轮没有遗留代码级 Review finding。真实 TWS 浏览器验收仍是唯一未完成项。

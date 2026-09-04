@@ -1375,14 +1375,14 @@ def cost_basis_ticker_evidence(ticker: Any, sec_type: str, needs_iv: bool) -> di
 
     ``core`` is what the stress test cannot do without: the underlying's
     price for a stock; for an option a mark plus, when the contract is still
-    alive on the scenario date, its implied volatility.  ``bbo`` is the
-    two-sided quote the bid/ask lens wants; it is waited for briefly, never
-    required, because an illiquid wing may simply have no bid.
+    alive on the scenario date, its implied volatility.  ``bbo`` means that
+    this row no longer needs BBO grace: an option has a valid two-sided quote,
+    or a non-option already has its price and BBO is not applicable.
     """
     normalized = str(sec_type or '').strip().upper()
     if normalized not in ('OPT', 'FOP'):
         price = extract_market_price(ticker) if ticker is not None else None
-        return {'iv': False, 'mark': price is not None, 'bbo': False,
+        return {'iv': False, 'mark': price is not None, 'bbo': price is not None,
                 'core': price is not None}
     quote = extract_quote_snapshot(ticker, normalized) if ticker is not None else None
     has_iv = extract_option_iv(ticker) is not None if ticker is not None else False

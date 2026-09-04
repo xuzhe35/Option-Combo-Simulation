@@ -150,6 +150,19 @@ class CostBasisSnapshotReadinessTest(unittest.TestCase):
             [{'core': False, 'bbo': True}], 10.0, 99.0))
         self.assertFalse(cost_basis_batch_complete([], 10.0, 99.0))
 
+    def test_ready_stock_does_not_force_bbo_grace_on_a_ready_option_batch(self):
+        stock = SimpleNamespace(
+            last=float('nan'), close=float('nan'), marketPrice=lambda: 500.0)
+        stock_evidence = cost_basis_ticker_evidence(stock, 'STK', False)
+        option_evidence = cost_basis_ticker_evidence(
+            self._option(bid=1.0, ask=1.2, iv=0.3), 'OPT', True)
+
+        self.assertEqual(stock_evidence, {
+            'iv': False, 'mark': True, 'bbo': True, 'core': True,
+        })
+        self.assertTrue(cost_basis_batch_complete(
+            [stock_evidence, option_evidence], None, 10.0))
+
     def test_batches_bound_concurrent_lines(self):
         self.assertEqual(chunked(range(45), 20), [list(range(20)), list(range(20, 40)),
                                                   list(range(40, 45))])

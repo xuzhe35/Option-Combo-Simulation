@@ -950,7 +950,6 @@
         return Math.max(0, base * indexGross);
     }
 
-    /** Lowest quoted IV among contracts alive after the date: the ATM proxy. */
     // A proxy further than this from the spot is still used, but flagged:
     // a deep wing's IV is a poor stand-in for realised index volatility.
     const PATH_SIGMA_PROXY_FAR_PCT = 10;
