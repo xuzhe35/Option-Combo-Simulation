@@ -176,6 +176,8 @@
         // the one date the settlement, this book's overlay and the linked
         // overlay all use; never remembered across opens.
         stressHorizonDays: null,
+        // Assumed weekly premium income (per book, remembered). 0 = none.
+        stressWeeklyPremium: 0,
         stressLiquidation: 'mid',
         stressPricingModel: 'american',
         stressDividendYield: null,
@@ -825,17 +827,35 @@
      * tooltip: ① is always this book's settlement; this book's live long
      * options are ② when shown; the linked book takes the next free number.
      */
-    function stressComponentNumbers(showConvexity, showShorts, showLinked) {
-        const circled = ['①', '②', '③', '④'];
+    function stressComponentNumbers(showConvexity, showShorts, showLinked, showPremium) {
+        const circled = ['①', '②', '③', '④', '⑤'];
         let next = 1;
         const own = showConvexity ? circled[next++] : '';
         const shorts = showShorts ? circled[next++] : '';
         const linked = showLinked ? circled[next++] : '';
+        const premium = showPremium ? circled[next++] : '';
         const parts = ['①'];
         if (own) parts.push(own);
         if (shorts) parts.push(shorts);
         if (linked) parts.push(linked);
-        return { own, shorts, linked, total: parts.join('+') };
+        if (premium) parts.push(premium);
+        return { own, shorts, linked, premium, total: parts.join('+') };
+    }
+
+    /** Assumed premium income per week; blank means none, negative is invalid. */
+    function normalizeWeeklyPremium(value) {
+        if (value === null || value === undefined || value === '') return 0;
+        const amount = Number(value);
+        if (!Number.isFinite(amount) || amount < 0) return null;
+        return amount;
+    }
+
+    /** Flat weekly income scaled by days / 7: an assumption, never a forecast. */
+    function premiumIncomeOver(weeklyPremium, scenarioDays) {
+        const weekly = Number(weeklyPremium) || 0;
+        const days = Number(scenarioDays);
+        if (weekly <= 0 || !Number.isFinite(days) || days <= 0) return 0;
+        return weekly * days / 7;
     }
 
     function normalizeStressHorizonDays(value) {
@@ -1445,6 +1465,15 @@
         const pricingModel = normalizePricingModel(opts.pricingModel);
         const dividendYield = normalizeDividendYield(opts.dividendYield);
         const linkedHedge = _prepareLinkedHedge(opts.linkedHedge, opts.currency);
+        // Assumed weekly premium income over the scenario horizon. It is
+        // flat across the scan (a user assumption, not a model of what new
+        // shorts would fetch at each price) and shown as its own component.
+        const weeklyPremium = normalizeWeeklyPremium(opts.weeklyPremium);
+        const premiumAsOfAt = _dateUtcFromDigits(String(opts.asOf || '').replace(/\D/g, '').slice(0, 8));
+        const premiumScenarioAt = _dateUtcFromDigits(throughExpiry);
+        const scenarioDays = premiumAsOfAt !== null && premiumScenarioAt !== null
+            ? Math.max(0, Math.round((premiumScenarioAt - premiumAsOfAt) / DAY_MS)) : 0;
+        const premiumIncome = weeklyPremium === null ? 0 : premiumIncomeOver(weeklyPremium, scenarioDays);
         // Path volatility for the leveraged drag: an explicit assumption, else
         // the IV of the linked book's quoted contract nearest the money among
         // those alive after the stress date, else none (fatal for a positive
@@ -1481,14 +1510,16 @@
             }
         }
         if (!Number.isFinite(centerPrice) || centerPrice <= 0 || !throughExpiry
-            || liquidation === null || pricingModel === null || dividendYield === null) {
+            || liquidation === null || pricingModel === null || dividendYield === null
+            || weeklyPremium === null) {
             return {
                 available: false,
                 reason: !throughExpiry ? 'missing_expiry'
+                    : (weeklyPremium === null ? 'invalid_weekly_premium'
                     : (liquidation === null ? 'invalid_liquidation'
                         : (pricingModel === null ? 'invalid_pricing_model'
                             : (dividendYield === null ? 'invalid_dividend_yield'
-                                : 'invalid_center_price'))),
+                                : 'invalid_center_price')))),
                 centerPrice: Number.isFinite(centerPrice) ? centerPrice : null,
                 rangePct,
                 throughExpiry,
@@ -1667,6 +1698,10 @@
                         ? pnl + linked.pnl : null,
                 });
             }
+            // The headline is everything switched on, plus the assumed income.
+            const stacked = linkedHedge ? point.totalPnl : point.pnl;
+            point.premiumIncome = premiumIncome;
+            point.headlinePnl = stacked === null || stacked === undefined ? null : stacked + premiumIncome;
             points.push(point);
         }
         const hasUnresolved = points.some((point) => point.unresolvedCount);
@@ -1776,6 +1811,10 @@
                     && linkedHedge.marketInputs.fetchedAt || ''),
             });
         }
+        series.weeklyPremium = weeklyPremium === null ? null : weeklyPremium;
+        series.scenarioDays = scenarioDays;
+        series.premiumIncome = premiumIncome;
+        series.premiumIncomeEnabled = premiumIncome > 0;
         return series;
     }
 
@@ -2494,6 +2533,7 @@
             stressLinkedIvShockPoints: 0,
             stressLinkedIvBeta: LINKED_IV_DEFAULT_BETA,
             stressHorizonDays: null,
+            stressWeeklyPremium: 0,
             stressLiquidation: 'mid',
             stressDividendYield: null,
             stressLinkedIvTenorDamping: true,
@@ -3365,7 +3405,8 @@
         const showShorts = Boolean(series.includeDeferredLongOptions
             && series.shortOptionCount);
         const showLinked = series.linkedHedgeEnabled === true && series.linkedCount > 0;
-        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked);
+        const showPremium = series.premiumIncomeEnabled === true;
+        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked, showPremium);
         const symbol = String(series.symbol || '');
         const linkedSymbol = String(series.linkedSymbol || '');
         const amount = (value) => (value === null || value === undefined
@@ -3388,9 +3429,9 @@
                     : '');
             card.appendChild(heading);
             // The headline is the sum of every component switched on.
-            const headline = showLinked ? point.totalPnl : point.pnl;
+            const headline = point.headlinePnl;
             const total = globalScope.document.createElement('strong');
-            const anyPart = showConvexity || showShorts || showLinked;
+            const anyPart = showConvexity || showShorts || showLinked || showPremium;
             total.textContent = `${anyPart ? '合计' : '到期结算盈亏'}`
                 + ` ${amount(headline)}`;
             if (headline > 0) total.className = 'metric-positive';
@@ -3410,6 +3451,10 @@
             if (showLinked) {
                 line(card, `${numbers.linked} ${linkedSymbol} 多头期权较今日 ${amount(point.linkedPnl)}`,
                     'stress-card-part');
+            }
+            if (showPremium) {
+                line(card, `${numbers.premium} 假设权利金 ${_money(series.scenarioDays / 7, 1)} 周 `
+                    + `${amount(point.premiumIncome)}`, 'stress-card-part');
             }
             line(card, `综合成本 ${point.cost === null ? '—' : _money(point.cost, 4)}`
                 + ` · ${point.shares === null ? '—' : _quantity(point.shares)} 股`);
@@ -3433,9 +3478,11 @@
         const showShorts = series.includeDeferredLongOptions && series.shortOptionCount > 0;
         const showLinked = series.linkedHedgeEnabled === true && series.linkedCount > 0;
         const linkedSymbol = series.linkedSymbol || '联动账本';
-        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked);
-        // The headline curve is the outermost overlay that is switched on.
-        const headlineKey = showLinked ? 'totalPnl' : 'pnl';
+        const showPremium = series.premiumIncomeEnabled === true;
+        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked, showPremium);
+        // The headline curve is the outermost overlay that is switched on,
+        // plus the assumed premium income when one is set.
+        const headlineKey = 'headlinePnl';
         const pnlValues = series.points.map((point) => point.pnl);
         if (showConvexity || showShorts) {
             series.points.forEach((point) => pnlValues.push(point.basePnl));
@@ -3443,6 +3490,7 @@
         if (showLinked) {
             series.points.forEach((point) => pnlValues.push(point.totalPnl));
         }
+        series.points.forEach((point) => pnlValues.push(point.headlinePnl));
         const pnlExtent = _stressExtent(pnlValues, true);
         const costExtent = _stressExtent(series.points.map((point) => point.cost), false);
         const x = (price) => margin.left
@@ -3545,19 +3593,21 @@
                 return `${command}${x(point.price).toFixed(2)},${scale(value).toFixed(2)}`;
             }).filter(Boolean).join(' ');
         }
+        // Whichever curve is outermost carries the assumed premium income.
+        const showOwnCurve = showConvexity || showShorts;
         svg.appendChild(_svgNode('path', {
-            d: pathFor(showConvexity || showShorts ? 'basePnl' : 'pnl', yPnl),
-            class: `stress-pnl-line${showConvexity || showShorts || showLinked ? ' with-protection' : ''}`,
+            d: pathFor(showOwnCurve ? 'basePnl' : (showLinked ? 'pnl' : 'headlinePnl'), yPnl),
+            class: `stress-pnl-line${showOwnCurve || showLinked ? ' with-protection' : ''}`,
         }));
-        if (showConvexity || showShorts) {
+        if (showOwnCurve) {
             svg.appendChild(_svgNode('path', {
-                d: pathFor('pnl', yPnl),
+                d: pathFor(showLinked ? 'pnl' : 'headlinePnl', yPnl),
                 class: `stress-protected-pnl-line${showLinked ? ' with-linked' : ''}`,
             }));
         }
         if (showLinked) {
             svg.appendChild(_svgNode('path', {
-                d: pathFor('totalPnl', yPnl), class: 'stress-linked-pnl-line',
+                d: pathFor('headlinePnl', yPnl), class: 'stress-linked-pnl-line',
             }));
         }
         svg.appendChild(_svgNode('path', {
@@ -3639,7 +3689,7 @@
             guide.style.display = '';
             guideLine.setAttribute('x1', pointX);
             guideLine.setAttribute('x2', pointX);
-            const headline = showLinked ? point.totalPnl : point.pnl;
+            const headline = point.headlinePnl;
             if (headline === null || headline === undefined) {
                 pnlMarker.style.display = 'none';
             } else {
@@ -3702,7 +3752,7 @@
                     ? '—' : _currencyAmount(book.currency, value, digits === undefined
                         ? 2 : digits, true));
             };
-            const anyOverlay = showConvexity || showShorts || showLinked;
+            const anyOverlay = showConvexity || showShorts || showLinked || showPremium;
             // ① is always there; ② and ③ appear with their overlays; the
             // total row exists only when there is something to add up.
             _text($('stress-tooltip-base-label'), anyOverlay
@@ -3756,6 +3806,12 @@
             $('stress-tooltip-linked-value-row').hidden = !showLinked;
             $('stress-tooltip-linked-iv-row').hidden = !showLinked;
             $('stress-tooltip-linked-premium-row').hidden = !showLinked;
+            $('stress-tooltip-premium-row').hidden = !showPremium;
+            if (showPremium) {
+                _text($('stress-tooltip-premium-label'),
+                    `${numbers.premium} 假设权利金 ${_money(series.scenarioDays / 7, 1)} 周`);
+                fill('stress-tooltip-premium', point.premiumIncome);
+            }
 
             if (showLinked) {
                 _text($('stress-tooltip-linked-pnl-label'),
@@ -3883,6 +3939,12 @@
                 || state.stressHorizonDays === undefined
                 ? '' : String(state.stressHorizonDays);
         }
+        const premiumInput = $('stress-weekly-premium');
+        if (globalScope.document.activeElement !== premiumInput) {
+            premiumInput.value = state.stressWeeklyPremium === null
+                || state.stressWeeklyPremium === undefined || state.stressWeeklyPremium === 0
+                ? '' : String(state.stressWeeklyPremium);
+        }
         const scenario = _stressScenarioDate();
         $('stress-liquidation').value = state.stressLiquidation;
         $('stress-pricing-model').value = state.stressPricingModel;
@@ -3916,6 +3978,8 @@
             includeDeferredLongOptions: state.stressIncludeLongOptions,
             longOptionInputs: state.stressLongOptionInputs,
             linkedHedge: _stressLinkedHedgeRequest(),
+            weeklyPremium: state.stressWeeklyPremium,
+            asOf: _todayDigits(),
             liquidation: state.stressLiquidation,
             pricingModel: state.stressPricingModel,
             dividendYield: _effectiveDividendYield(state.stressDividendYield, book.symbol),
@@ -4012,6 +4076,8 @@
             } else if (series.reason === 'linked_option_identity_mismatch') {
                 failure = `${linkedSymbol} 账本至少一张多头期权的 conId / localSymbol 与 TWS 快照不一致`
                     + '（快照里只有同条款的另一张合约），已停止叠加，请核对账本合约身份。';
+            } else if (series.reason === 'invalid_weekly_premium') {
+                failure = '每周权利金无效：请留空或输入不小于 0 的金额。';
             } else if (series.reason === 'invalid_linked_tenor_exponent') {
                 failure = '衰减指数无效：请输入 0.05 到 1 之间的数字（0.25 = 历史拟合，0.5 = 平方根规则）。';
             } else if (series.reason === 'invalid_linked_tenor_days') {
@@ -4037,17 +4103,23 @@
         const showLinked = series.linkedHedgeEnabled === true && series.linkedCount > 0;
         // Every curve is named by the numbered components it adds up, and
         // every surface takes its numbers from the same mapping.
-        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked);
+        const showPremium = series.premiumIncomeEnabled === true;
+        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked, showPremium);
         const ownParts = [numbers.own, numbers.shorts].filter(Boolean).join('+');
+        const premiumTag = showPremium ? `+${numbers.premium}` : '';
+        // The outermost curve carries the assumed premium income, so its
+        // legend names that component too.
         $('stress-legend-base-pnl').textContent = showOwn || showLinked
-            ? `① ${book.symbol} 到期结算盈亏（左轴）` : '到期结算盈亏（左轴）';
+            ? `① ${book.symbol} 到期结算盈亏（左轴）`
+            : (showPremium ? `①${premiumTag} 到期结算盈亏 + 假设权利金（左轴）` : '到期结算盈亏（左轴）');
         $('stress-legend-protected-pnl').hidden = !showOwn;
         _text($('stress-legend-protected-pnl'),
-            `①+${ownParts} 计入 ${book.symbol} 未到期期权（左轴）`);
+            `①+${ownParts}${showLinked ? '' : premiumTag} 计入 ${book.symbol} 未到期期权`
+            + `${showLinked || !showPremium ? '' : ' + 假设权利金'}（左轴）`);
         $('stress-legend-linked-pnl').hidden = !showLinked;
         _text($('stress-legend-linked-pnl'),
             `${numbers.total} 计入 ${series.linkedSymbol || linkedSymbol}`
-            + ' 多头期权较今日变动（左轴）');
+            + ` 多头期权较今日变动${showPremium ? ' + 假设权利金' : ''}（左轴）`);
         const ownShockNote = showLinked && series.linkedIvMode !== 'none' && showOwn
             ? `，IV 冲击随 ${series.linkedSymbol} β 按 ${_money(Math.abs(series.linkedRatio), 2)}× 放大`
             : '';
@@ -4118,7 +4190,12 @@
             : `${_stressDateLabel(series.throughExpiry)} 情景日`
                 + `（今天 +${_money(scenario.horizonDays, 0)} 天，含 Theta，覆盖到期范围；`
                 + '三项同日估值）';
-        _text($('stress-status'), dateLead
+        const premiumNote = showPremium
+            ? ` · ${numbers.premium} 假设权利金 ${_currencyAmount(currency, series.weeklyPremium, 0)}/周`
+                + ` × ${_money(series.scenarioDays / 7, 1)} 周（${_money(series.scenarioDays, 0)} 天 ÷ 7）`
+                + ` = ${_currencyAmount(currency, series.premiumIncome, 0)}，不随价格变化`
+            : (series.weeklyPremium > 0 ? ' · 假设权利金：情景日为今日，0 周，不计' : '');
+        _text($('stress-status'), dateLead + premiumNote
             + ` · 基准 ${_currencyAmount(currency, series.centerPrice, 4)}`
             + ` · 扫描 ±${_money(series.rangePct, 0)}%`
             + ` · ${BASIS_LABELS[series.basisMode] || series.basisMode}口径`
@@ -4309,6 +4386,7 @@
             globalScope.localStorage.setItem(
                 STRESS_LINKED_STORAGE_PREFIX + state.bookId, JSON.stringify({
                     enabled: state.stressIncludeLinkedHedge,
+                    weeklyPremium: state.stressWeeklyPremium,
                     linkedBookId: state.stressLinkedBookId,
                     ratio: state.stressLinkedRatio,
                     ivMode: state.stressLinkedIvMode,
@@ -4355,8 +4433,10 @@
     }
 
     function _restoreStressLinkedChoice(book) {
-        const choice = chooseLinkedBook(book, _stressLinkedBookCandidates(book),
-            _readStressLinkedMemory(book.bookId));
+        const remembered = _readStressLinkedMemory(book.bookId);
+        const rememberedPremium = normalizeWeeklyPremium(remembered && remembered.weeklyPremium);
+        state.stressWeeklyPremium = rememberedPremium === null ? 0 : rememberedPremium;
+        const choice = chooseLinkedBook(book, _stressLinkedBookCandidates(book), remembered);
         if (choice.bookId !== state.stressLinkedBookId) _clearStressLinkedData();
         state.stressLinkedBookId = choice.bookId;
         state.stressLinkedRatio = choice.ratio;
@@ -7171,6 +7251,13 @@
             _writeStressLinkedMemory();
             _renderStressTest();
         });
+        $('stress-weekly-premium').addEventListener('input', (inputEvent) => {
+            const raw = String(inputEvent.target.value || '').trim();
+            state.stressWeeklyPremium = raw === '' ? 0 : (_numberOrNull(raw) === null
+                ? NaN : _numberOrNull(raw));
+            _writeStressLinkedMemory();
+            _renderStressTest();
+        });
         $('stress-horizon-days').addEventListener('input', (inputEvent) => {
             const raw = String(inputEvent.target.value || '').trim();
             // Blank = settle on the selected expiry. A bad entry is kept so
@@ -7410,6 +7497,8 @@
         otmShockFactor,
         crashSigmaScale,
         stressComponentNumbers,
+        normalizeWeeklyPremium,
+        premiumIncomeOver,
         findOptionQuote: _findOptionQuote,
         optionQuoteIdentityConflict: _optionQuoteIdentityConflict,
         addDaysToDigits,

@@ -199,6 +199,7 @@ series 顶层新增：`linkedHedgeEnabled`、`linkedSymbol`、`linkedRatio`、
 | id | 控件 | 说明 |
 | --- | --- | --- |
 | `stress-include-linked-hedge` | checkbox | 「叠加同账户其它账本的多头期权」 |
+| `stress-weekly-premium` | number input（主控件行） | 每周权利金（假设，2026-09-05 新增）。情景日距今天数 ÷ 7 × 每周金额，作为独立分项（编号取下一个空位）计入合计与最外层曲线；不随扫描价格变化，也不从账本推算；留空 = 不计；负数 → `invalid_weekly_premium`。按账本记忆。序列新增 `weeklyPremium / scenarioDays / premiumIncome / premiumIncomeEnabled`，每点新增 `premiumIncome` 与 `headlinePnl`（= 已开启项之和 + 假设权利金，图表、卡片、悬停统一用它） |
 | `stress-linked-book` | select | 候选见 §3.1；空时禁用并显示原因 |
 | `stress-linked-ratio` | number input | 默认 3，step 0.01，允许负数 |
 | `stress-linked-iv-mode` | select | IV 模式，默认 `none`（IV 保持不变 = sticky-strike 保守下限）。`fixed`：全扫描线统一抬升 N 点（上涨侧也抬，只适合「IV 整体变成 X」的问题）。`beta`：每个扫描点抬升 β × max(0, −联动映射跌幅%)，基准点与上涨侧为 0，对应现货与 IV 的负相关（VRP 备忘 E17：SPY/QQQ corr(ret, ΔIV) ≈ −0.7）。按主账本记忆 |

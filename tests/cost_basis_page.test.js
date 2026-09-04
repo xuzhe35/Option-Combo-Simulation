@@ -1752,6 +1752,28 @@ module.exports = {
                     Object.assign({}, baseOptions, { linkedHedge: null })), baseline);
                 assert.equal('linkedHedgeEnabled' in baseline, false);
                 assert.equal('totalPnl' in baseline.points[0], false);
+                // No premium assumption: the headline is the plain P&L.
+                assert.equal(baseline.premiumIncomeEnabled, false);
+                assert.equal(baseline.points[0].premiumIncome, 0);
+                assert.equal(baseline.points[0].headlinePnl, baseline.points[0].pnl);
+                const withPremium = page.buildStressTestSeries(events, Object.assign({}, baseOptions, {
+                    weeklyPremium: 700, asOf: '20260817',
+                }));
+                assert.equal(withPremium.available, true);
+                assert.equal(withPremium.scenarioDays, 14);
+                assert.ok(Math.abs(withPremium.premiumIncome - 1400) < 1e-9);
+                assert.equal(withPremium.premiumIncomeEnabled, true);
+                withPremium.points.forEach((point, index) => {
+                    assert.equal(point.pnl, baseline.points[index].pnl);
+                    assert.ok(Math.abs(point.premiumIncome - 1400) < 1e-9);
+                    assert.ok(Math.abs(point.headlinePnl - (point.pnl + 1400)) < 1e-9);
+                });
+                assert.equal(page.buildStressTestSeries(events, Object.assign({}, baseOptions, {
+                    weeklyPremium: 700, asOf: '20260831',
+                })).premiumIncome, 0);
+                assert.equal(page.buildStressTestSeries(events, Object.assign({}, baseOptions, {
+                    weeklyPremium: -5, asOf: '20260817',
+                })).reason, 'invalid_weekly_premium');
 
                 const linkedOptions = [
                     { right: 'P', strike: 480, expiry: '20270115', contracts: 10,
@@ -1974,6 +1996,13 @@ module.exports = {
                 assert.equal(page.normalizeIvShockPoints('abc'), null);
                 assert.equal(page.normalizeIvShockPoints(600), null);
                 assert.equal(linked.linkedIvMode, 'none');
+                // With the overlay on, the assumed premium sits on top of the total.
+                const linkedWithPremium = page.buildStressTestSeries(events, Object.assign({}, baseOptions, {
+                    weeklyPremium: 700, asOf: '20260817', linkedHedge: hedge,
+                }));
+                assert.ok(Math.abs(linkedWithPremium.points[0].headlinePnl
+                    - (linkedWithPremium.points[0].totalPnl + 1400)) < 1e-9);
+                assert.equal(linked.points[0].headlinePnl, linked.points[0].totalPnl);
                 linked.points.forEach((point) => assert.equal(point.linkedIvShockPoints, 0));
                 // Points given without the 'fixed' mode are ignored, not applied.
                 assert.equal(withHedge({ ivShockPoints: 10 }).linkedIvShockPoints, 0);
@@ -2840,6 +2869,18 @@ module.exports = {
                 assert.equal(numbering(true, false, false).total, '①+②');
                 assert.equal(numbering(false, true, false).total, '①+②');
                 assert.equal(numbering(false, false, false).total, '①');
+                assert.equal(numbering(false, false, false, true).total, '①+②');
+                assert.equal(numbering(true, true, true, true).premium, '⑤');
+                assert.equal(numbering(true, false, true, true).total, '①+②+③+④');
+                // Assumed weekly premium: days / 7, flat across the scan, its
+                // own component, folded into the headline.
+                assert.equal(h.context.OptionComboCostBasisPage.normalizeWeeklyPremium(''), 0);
+                assert.equal(h.context.OptionComboCostBasisPage.normalizeWeeklyPremium('1500'), 1500);
+                assert.equal(h.context.OptionComboCostBasisPage.normalizeWeeklyPremium(-1), null);
+                assert.equal(h.context.OptionComboCostBasisPage.normalizeWeeklyPremium('x'), null);
+                assert.ok(Math.abs(h.context.OptionComboCostBasisPage.premiumIncomeOver(1400, 30) - 6000) < 1e-9);
+                assert.equal(h.context.OptionComboCostBasisPage.premiumIncomeOver(1400, 0), 0);
+                assert.equal(h.context.OptionComboCostBasisPage.premiumIncomeOver(0, 30), 0);
                 assert.equal(numbering(false, false, true).linked, '②');
                 assert.equal(numbering(true, false, true).linked, '③');
                 assert.equal(numbering(true, true, true).shorts, '③');
@@ -2974,6 +3015,27 @@ module.exports = {
                 assert.match(h.node('stress-status').textContent, /跌到位天数无效/);
                 assert.equal(h.node('stress-chart').children.length, 0);
                 h.state.stressHorizonDays = null;
+                // Weekly premium flows from state into the sweep, the caption
+                // and the cards, scaled by scenario days / 7.
+                // (linked inputs were just invalidated by the horizon change;
+                // the premium line does not need the overlay)
+                const linkedWasOn = h.state.stressIncludeLinkedHedge;
+                h.state.stressIncludeLinkedHedge = false;
+                h.state.stressWeeklyPremium = 1400;
+                h.state.stressHorizonDays = 30;
+                h.renderStress();
+                assert.match(h.node('stress-status').textContent,
+                    /假设权利金 \$1,400\/周 × 4\.3 周（30 天 ÷ 7） = \$6,000，不随价格变化/);
+                const premiumCards = h.node('stress-key-points').children;
+                const premiumLine = premiumCards[0].children.map((child) => child.textContent)
+                    .find((text) => /假设权利金/.test(text));
+                assert.match(premiumLine, /假设权利金 4\.3 周 \+\$6,000\.00/);
+                h.state.stressWeeklyPremium = NaN;
+                h.renderStress();
+                assert.match(h.node('stress-status').textContent, /每周权利金无效/);
+                h.state.stressWeeklyPremium = 0;
+                h.state.stressHorizonDays = null;
+                h.state.stressIncludeLinkedHedge = linkedWasOn;
                 // Back to the beta-mode scenario the next assertions expect;
                 // the snapshot keyed to the horizon date is stale by design.
                 h.state.stressLinkedIvMode = 'beta';
@@ -3024,9 +3086,11 @@ module.exports = {
                 assert.ok(html.includes('id="stress-linked-sigma-crash"'));
                 assert.match(html, /上涨侧价外 Put 的 IV 基本不变/);
                 assert.ok(html.includes('id="stress-horizon-days"'));
+                assert.ok(html.includes('id="stress-weekly-premium"'));
+                assert.ok(html.includes('id="stress-tooltip-premium"'));
                 assert.ok(html.includes('id="stress-tooltip-horizon"'));
                 assert.equal(html.includes('stress-linked-horizon-days'), false);
-                assert.match(html, /三项永远在同一个情景日估值/);
+                assert.match(html, /分项永远在同一个情景日估值/);
                 assert.match(html, /<option value="none" selected>/);
                 assert.ok(html.includes('id="stress-tooltip-linked-iv"'));
                 assert.ok(html.includes('id="stress-linked-book-status"'));
