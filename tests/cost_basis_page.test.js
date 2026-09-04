@@ -1999,6 +1999,27 @@ module.exports = {
                 assert.equal(page.linkedIvShockPointsAt('beta', 8, 0, 1.5), 0);
                 assert.equal(page.linkedIvShockPointsAt('fixed', -10, 7, 1.5), 7);
                 assert.equal(page.linkedIvShockPointsAt('none', -10, 7, 1.5), 0);
+                // Historical calibrations: beta by drop size, OTM discount,
+                // crash scaling of the path sigma.
+                assert.ok(Math.abs(page.autoBetaForDrop(-3) - 0.93) < 1e-9);
+                assert.ok(Math.abs(page.autoBetaForDrop(-7.5) - 1.05) < 1e-9);
+                assert.ok(Math.abs(page.autoBetaForDrop(-12) - 1.4) < 1e-9);
+                assert.ok(Math.abs(page.autoBetaForDrop(-16) - 1.5) < 1e-9);
+                assert.ok(Math.abs(page.autoBetaForDrop(-40) - 1.6) < 1e-9);
+                assert.ok(Math.abs(page.linkedIvShockPointsAt('beta', -12, 0, 9, true) - 16.8) < 1e-9);
+                assert.equal(page.linkedIvShockPointsAt('beta', -12, 0, 1.5, false), 18);
+                assert.equal(page.otmShockFactor(500, 500), 1);
+                assert.equal(page.otmShockFactor(480, 500), 1);
+                assert.ok(Math.abs(page.otmShockFactor(450, 500) - 0.55) < 1e-9);
+                assert.ok(Math.abs(page.otmShockFactor(560, 500) - 0.55) < 1e-9);
+                const mid = page.otmShockFactor(500 * Math.exp(-0.075), 500);
+                assert.ok(mid > 0.55 && mid < 1);
+                assert.equal(page.otmShockFactor('x', 500), 1);
+                assert.equal(page.crashSigmaScale(0), 1);
+                assert.equal(page.crashSigmaScale(5), 1);
+                assert.ok(Math.abs(page.crashSigmaScale(-4) - 1.2) < 1e-9);
+                assert.ok(Math.abs(page.crashSigmaScale(-8) - 1.4) < 1e-9);
+                assert.ok(Math.abs(page.crashSigmaScale(-20) - 1.4) < 1e-9);
                 assert.equal(page.normalizeLinkedIvMode(''), 'none');
                 assert.equal(page.normalizeLinkedIvMode('BETA'), 'beta');
                 assert.equal(page.normalizeLinkedIvMode('wild'), null);
@@ -2127,6 +2148,42 @@ module.exports = {
                     > damped.points[0].linkedIvShockPointsMax);
                 assert.equal(withHedge({ ivMode: 'beta', ivTenorDamping: true, ivTenorExponent: 3 })
                     .reason, 'invalid_linked_tenor_exponent');
+                // Flags off by default in the pure API: identical to before.
+                assert.equal(betaSeries.linkedIvBetaAuto, false);
+                assert.equal(betaSeries.linkedIvOtmDiscount, false);
+                assert.equal(betaSeries.linkedSigmaCrashScale, false);
+                assert.equal(betaSeries.points[0].linkedSigmaScale, 1);
+                // Auto beta follows the point's own index drop.
+                const autoBeta = withHedge({ ivMode: 'beta', ivBeta: 9, ivBetaAuto: true,
+                    ivTenorDamping: false });
+                const autoDown = autoBeta.points[0];
+                assert.equal(autoBeta.linkedIvBetaAuto, true);
+                assert.ok(Math.abs(autoDown.linkedIvBetaApplied - page.autoBetaForDrop(autoDown.linkedChangePct)) < 1e-9);
+                assert.ok(Math.abs(autoDown.linkedIvShockPoints
+                    - autoDown.linkedIvBetaApplied * (-autoDown.linkedChangePct)) < 1e-9);
+                assert.equal(autoBeta.points[5].linkedIvBetaApplied, null);
+                assert.ok(autoDown.linkedIvShockPoints < 9 * (-autoDown.linkedChangePct));
+                // OTM discount: the 480 put (4% away at spot 500) keeps the
+                // full shock, the 560 call (11% away) gets 0.55 of it.
+                const discounted = withHedge({ ivMode: 'beta', ivBeta: 2, ivTenorDamping: false,
+                    ivOtmDiscount: true });
+                const plainBeta = withHedge({ ivMode: 'beta', ivBeta: 2, ivTenorDamping: false });
+                assert.equal(discounted.linkedIvOtmDiscount, true);
+                const dDown = discounted.points[0];
+                const pDown = plainBeta.points[0];
+                assert.ok(Math.abs(dDown.linkedIvShockPointsMax - pDown.linkedIvShockPointsMax) < 1e-9);
+                assert.ok(Math.abs(dDown.linkedIvShockPointsMin - 0.55 * pDown.linkedIvShockPointsMax) < 1e-9);
+                assert.ok(dDown.linkedPnl < pDown.linkedPnl);
+                assert.ok(dDown.linkedPnl > linked.points[0].linkedPnl);
+                // Crash sigma: only the drag term moves, only on the downside.
+                const crash = withHedge({ sigmaCrashScale: true });
+                assert.equal(crash.linkedSigmaCrashScale, true);
+                assert.ok(Math.abs(crash.points[0].linkedSigmaScale - 1.4) < 1e-9);
+                assert.equal(crash.points[5].linkedSigmaScale, 1);
+                assert.equal(crash.points[10].linkedSigmaScale, 1);
+                assert.ok(Math.abs(crash.points[0].linkedSigmaApplied - 1.4 * linked.linkedSigma) < 1e-9);
+                assert.ok(crash.points[0].linkedPrice > linked.points[0].linkedPrice);
+                assert.ok(Math.abs(crash.points[10].linkedPrice - linked.points[10].linkedPrice) < 1e-9);
                 assert.equal(damped.available, true);
                 assert.equal(damped.linkedIvTenorDamping, true);
                 assert.equal(damped.linkedIvTenorDays, 30);
@@ -2517,9 +2574,15 @@ module.exports = {
                     linkedBookId: 'b-tsm', ratio: 1.5, enabled: true,
                     ivMode: 'beta', ivShockPoints: 15, ivBeta: 2.5,
                     horizonDays: 20, ivTenorDamping: false, ivTenorDays: 45,
-                    ivTenorExponent: 0.4,
+                    ivTenorExponent: 0.4, ivBetaAuto: false, ivOtmDiscount: false,
                 });
                 assert.equal(remembered.ivTenorExponent, 0.4);
+                assert.equal(remembered.ivBetaAuto, false);
+                assert.equal(remembered.ivOtmDiscount, false);
+                assert.equal(remembered.sigmaCrashScale, true);
+                assert.equal(seeded.ivBetaAuto, true);
+                assert.equal(seeded.ivOtmDiscount, true);
+                assert.equal(seeded.sigmaCrashScale, true);
                 assert.equal(seeded.ivTenorExponent, 0.25);
                 // A horizon is never remembered: it is a scenario, not a setting.
                 assert.equal('horizonDays' in remembered, false);
@@ -2833,6 +2896,9 @@ module.exports = {
                 assert.equal(h.node('stress-linked-iv-beta-field').hidden, true);
                 h.state.stressLinkedIvMode = 'fixed';
                 h.state.stressLinkedIvShockPoints = 20;
+                // The fixed-shock plumbing is checked without the OTM discount
+                // (on by default), which would take the 560 call to 0.55x.
+                h.state.stressLinkedIvOtmDiscount = false;
                 h.renderStress();
                 assert.equal(h.node('stress-linked-iv-shock').value, '20');
                 assert.equal(h.node('stress-linked-iv-shock-field').hidden, false);
@@ -2842,7 +2908,20 @@ module.exports = {
                 assert.notEqual(shockedTotal, calmTotal);
                 h.state.stressLinkedIvMode = 'beta';
                 h.state.stressLinkedIvBeta = 1.5;
+                // Calibrations are on by default in the page; the caption
+                // says so, and the manual beta field is disabled.
+                h.state.stressLinkedIvOtmDiscount = true;
                 h.renderStress();
+                assert.equal(h.node('stress-linked-iv-beta-auto').checked, true);
+                assert.equal(h.node('stress-linked-iv-beta').disabled, true);
+                assert.match(h.node('stress-status').textContent,
+                    /β 按跌幅自适应 0\.93–1\.6 点\/1%（历史回归），价外 ≥10% 取 0\.55（历史）/);
+                assert.match(h.node('stress-status').textContent, /σ ×1\.4（历史 RV\/IV）/);
+                h.state.stressLinkedIvBetaAuto = false;
+                h.state.stressLinkedIvOtmDiscount = false;
+                h.state.stressLinkedSigmaCrashScale = false;
+                h.renderStress();
+                assert.equal(h.node('stress-linked-iv-beta').disabled, false);
                 assert.equal(h.node('stress-linked-iv-beta-field').hidden, false);
                 assert.equal(h.node('stress-linked-iv-shock-field').hidden, true);
                 assert.match(h.node('stress-status').textContent,
@@ -2940,6 +3019,10 @@ module.exports = {
                 assert.ok(html.includes('id="stress-linked-iv-tenor"'));
                 assert.ok(html.includes('id="stress-linked-iv-tenor-days"'));
                 assert.ok(html.includes('id="stress-linked-iv-tenor-exponent"'));
+                assert.ok(html.includes('id="stress-linked-iv-beta-auto"'));
+                assert.ok(html.includes('id="stress-linked-iv-otm"'));
+                assert.ok(html.includes('id="stress-linked-sigma-crash"'));
+                assert.match(html, /上涨侧价外 Put 的 IV 基本不变/);
                 assert.ok(html.includes('id="stress-horizon-days"'));
                 assert.ok(html.includes('id="stress-tooltip-horizon"'));
                 assert.equal(html.includes('stress-linked-horizon-days'), false);

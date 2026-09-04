@@ -198,6 +198,11 @@
         stressLinkedIvTenorDamping: true,
         stressLinkedIvTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
         stressLinkedIvTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
+        // Historical calibrations (scripts/stress_model_validation.py); on by
+        // default in the page, opt-in for the pure API.
+        stressLinkedIvBetaAuto: true,
+        stressLinkedIvOtmDiscount: true,
+        stressLinkedSigmaCrashScale: true,
         stressLinkedMapping: 'compound',
         stressLinkedSigma: null,
         stressLinkedDividendYield: null,
@@ -581,17 +586,19 @@
      * optionally damped by remaining tenor. Returns the shocked inputs and
      * whether any quote would be pushed to or below zero.
      */
-    function _applyIvShock(marketInputs, ivShock, tenorDays, scenarioAt, exponent) {
+    function _applyIvShock(marketInputs, ivShock, tenorDays, scenarioAt, exponent, otmDiscount) {
         const shock = Number(ivShock) || 0;
         if (!marketInputs || shock === 0) return { inputs: marketInputs, breaksIv: false };
         const reference = tenorDays === null || tenorDays === undefined
             ? null : Number(tenorDays);
+        const spot = Number(marketInputs.underlyingPrice);
         let breaksIv = false;
         const options = (Array.isArray(marketInputs.options) ? marketInputs.options : [])
             .map((quote) => {
                 const iv = Number(quote && quote.impliedVolatility);
                 if (!Number.isFinite(iv) || iv <= 0) return quote;
                 let applied = shock;
+                if (otmDiscount === true) applied *= otmShockFactor(quote && quote.strike, spot);
                 if (reference !== null) {
                     const quoteExpiryAt = _dateUtcFromDigits(quote && quote.expiry);
                     if (quoteExpiryAt !== null && scenarioAt !== null) {
@@ -672,7 +679,7 @@
             return _emptyDeferredEstimate(false, reasons.inputs, eligible.length);
         }
         const shocked = _applyIvShock(rawInputs, opts.ivShock, opts.ivShockTenorDays, scenarioAt,
-            opts.ivShockTenorExponent);
+            opts.ivShockTenorExponent, opts.ivShockOtmDiscount === true);
         if (shocked.breaksIv) return _emptyDeferredEstimate(false, reasons.shock, eligible.length);
         const marketInputs = shocked.inputs;
         const liquidation = normalizeLiquidation(opts.liquidation) || 'mid';
@@ -892,12 +899,59 @@
      * basis point and every rally get zero, so nothing on the upside is
      * invented.
      */
-    function linkedIvShockPointsAt(mode, linkedChangePct, fixedPoints, beta) {
+    // Spot-vol beta by size of the index drop, from the QQQ daily series
+    // 2012-2026 (scripts/stress_model_validation.py, part A1): ~0.93 vol
+    // points per 1% for 2-5% drops, ~1.05 for 5-10%, ~1.4 above 10%, and
+    // the largest multi-week crashes reach ~1.6. Holding period mattered far
+    // less than size, so the table is keyed on the drop alone.
+    const AUTO_BETA_TABLE = Object.freeze([[0, 0.93], [5, 0.93], [7.5, 1.05], [12, 1.4], [20, 1.6]]);
+    // OTM puts rose less than ATM in every crash: 10-20% OTM got a median
+    // 0.55 of the ATM shift (part B1). Full shock inside 5% of the money,
+    // linear down to 0.55 at 10% away, flat beyond.
+    const OTM_SHOCK_FLOOR = 0.55;
+    // Realised vol ran 1.43x the starting ATM IV in 20-day windows that fell
+    // 8% or more (part A2); the compounding drag uses sigma^2, so the proxy
+    // is scaled up as the index drop approaches that size.
+    const CRASH_SIGMA_SCALE = 1.4;
+    const CRASH_SIGMA_FULL_DROP_PCT = 8;
+
+    function autoBetaForDrop(dropPct) {
+        const drop = Math.abs(Number(dropPct));
+        if (!Number.isFinite(drop)) return AUTO_BETA_TABLE[0][1];
+        const table = AUTO_BETA_TABLE;
+        if (drop <= table[0][0]) return table[0][1];
+        if (drop >= table[table.length - 1][0]) return table[table.length - 1][1];
+        for (let index = 1; index < table.length; index += 1) {
+            const [x0, y0] = table[index - 1];
+            const [x1, y1] = table[index];
+            if (drop <= x1) return y0 + (y1 - y0) * (drop - x0) / (x1 - x0);
+        }
+        return table[table.length - 1][1];
+    }
+
+    function otmShockFactor(strike, spot) {
+        const k = Number(strike);
+        const s = Number(spot);
+        if (!Number.isFinite(k) || !Number.isFinite(s) || k <= 0 || s <= 0) return 1;
+        const moneyness = Math.abs(Math.log(k / s));
+        if (moneyness <= 0.05) return 1;
+        if (moneyness >= 0.10) return OTM_SHOCK_FLOOR;
+        return 1 - (1 - OTM_SHOCK_FLOOR) * (moneyness - 0.05) / 0.05;
+    }
+
+    function crashSigmaScale(indexDropPct) {
+        const drop = Math.max(0, -Number(indexDropPct));
+        if (!Number.isFinite(drop)) return 1;
+        return 1 + (CRASH_SIGMA_SCALE - 1) * Math.min(1, drop / CRASH_SIGMA_FULL_DROP_PCT);
+    }
+
+    function linkedIvShockPointsAt(mode, linkedChangePct, fixedPoints, beta, betaAuto) {
         if (mode === 'fixed') return Number(fixedPoints) || 0;
         if (mode === 'beta') {
             const drop = Number(linkedChangePct);
             if (!Number.isFinite(drop) || drop >= 0) return 0;
-            return (Number(beta) || 0) * (-drop);
+            const applied = betaAuto === true ? autoBetaForDrop(drop) : (Number(beta) || 0);
+            return applied * (-drop);
         }
         return 0;
     }
@@ -1096,7 +1150,7 @@
             return _emptyLinkedEstimate(false, 'invalid_linked_iv_shock', eligible.length);
         }
         const shocked = _applyIvShock(marketInputs, ivShock, opts.ivShockTenorDays, scenarioAt,
-            opts.ivShockTenorExponent);
+            opts.ivShockTenorExponent, opts.ivShockOtmDiscount === true);
         if (shocked.breaksIv && deferred.length) {
             return _emptyLinkedEstimate(false, 'invalid_linked_iv_shock', eligible.length);
         }
@@ -1268,6 +1322,9 @@
                 ivTenorDays: ivTenorDays === null ? LINKED_IV_DEFAULT_TENOR_DAYS : ivTenorDays,
                 ivTenorExponent: ivTenorExponent === null
                     ? LINKED_IV_DEFAULT_TENOR_EXPONENT : ivTenorExponent,
+                ivBetaAuto: remembered.ivBetaAuto !== false,
+                ivOtmDiscount: remembered.ivOtmDiscount !== false,
+                sigmaCrashScale: remembered.sigmaCrashScale !== false,
                 // The overlay is never on when the modal opens: the fourth
                 // curve appears only after a deliberate tick this session.
                 enabled: false,
@@ -1286,6 +1343,9 @@
             ivTenorDamping: true,
             ivTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
             ivTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
+            ivBetaAuto: true,
+            ivOtmDiscount: true,
+            sigmaCrashScale: true,
             mapping: 'compound',
             sigma: null,
             dividendYield: null,
@@ -1345,6 +1405,9 @@
             ivMode,
             ivShockPoints,
             ivBeta,
+            ivBetaAuto: ivMode === 'beta' && linkedHedge.ivBetaAuto === true,
+            ivOtmDiscount: ivMode !== 'none' && linkedHedge.ivOtmDiscount === true,
+            sigmaCrashScale: linkedHedge.sigmaCrashScale === true,
             ivTenorDamping,
             ivTenorDays,
             ivTenorExponent,
@@ -1463,15 +1526,26 @@
             // Steps 2-3: the linked index price and the IV shock are derived
             // first, because this book's own open options follow them - its IV
             // moves |ratio| times as much as the index's.
+            // Crash scaling of the path sigma keys off the index drop the
+            // linear ratio implies, so the mapping itself is not circular.
+            const indexDropEstimate = linkedHedge && !linkedHedge.reason
+                ? changePct / Math.abs(linkedHedge.ratio) : 0;
+            const pointSigmaScale = linkedHedge && !linkedHedge.reason && linkedHedge.sigmaCrashScale
+                ? crashSigmaScale(indexDropEstimate) : 1;
+            const pointSigma = linkedSigma === null || linkedSigma === undefined
+                ? linkedSigma : linkedSigma * pointSigmaScale;
             const linkedPrice = linkedHedge && !linkedHedge.reason
                 ? mapLinkedUnderlyingPrice(linkedHedge.basePrice, changePct, linkedHedge.ratio, {
-                    mapping: linkedHedge.mapping, sigma: linkedSigma, timeYears: linkedTimeYears,
+                    mapping: linkedHedge.mapping, sigma: pointSigma, timeYears: linkedTimeYears,
                 }) : null;
             const linkedChangePct = Number.isFinite(linkedPrice) && linkedHedge && linkedHedge.basePrice
                 ? ((linkedPrice / linkedHedge.basePrice) - 1) * 100 : null;
             const linkedIvShockPoints = linkedHedge && !linkedHedge.reason ? linkedIvShockPointsAt(
                 linkedHedge.ivMode, linkedChangePct,
-                linkedHedge.ivShockPoints, linkedHedge.ivBeta) : 0;
+                linkedHedge.ivShockPoints, linkedHedge.ivBeta, linkedHedge.ivBetaAuto) : 0;
+            const linkedIvBetaApplied = linkedHedge && !linkedHedge.reason
+                && linkedHedge.ivMode === 'beta' && Number.isFinite(linkedChangePct) && linkedChangePct < 0
+                ? (linkedHedge.ivBetaAuto ? autoBetaForDrop(linkedChangePct) : linkedHedge.ivBeta) : null;
             const ownIvShockPoints = linkedHedge && !linkedHedge.reason
                 ? Math.abs(linkedHedge.ratio) * linkedIvShockPoints : 0;
             const ownShockOptions = {
@@ -1482,6 +1556,7 @@
                     ? linkedHedge.ivTenorDays : null,
                 ivShockTenorExponent: linkedHedge && !linkedHedge.reason
                     ? linkedHedge.ivTenorExponent : undefined,
+                ivShockOtmDiscount: Boolean(linkedHedge && !linkedHedge.reason && linkedHedge.ivOtmDiscount),
             };
             const convexity = includeDeferredLongOptions
                 ? estimateDeferredLongOptions(scenario.deferredOptions, price, ownShockOptions)
@@ -1555,11 +1630,15 @@
                         ivShock: ivShockPoints / 100,
                         ivShockTenorDays: linkedHedge.ivTenorDamping ? linkedHedge.ivTenorDays : null,
                         ivShockTenorExponent: linkedHedge.ivTenorExponent,
+                        ivShockOtmDiscount: linkedHedge.ivOtmDiscount,
                     });
                 Object.assign(point, {
                     linkedPrice: Number.isFinite(linkedPrice) ? linkedPrice : null,
                     linkedChangePct,
                     linkedIvShockPoints: ivShockPoints,
+                    linkedIvBetaApplied,
+                    linkedSigmaApplied: Number.isFinite(pointSigma) ? pointSigma : null,
+                    linkedSigmaScale: pointSigmaScale,
                     linkedIvShockPointsMin: Number.isFinite(linked.ivShockPointsMin)
                         ? linked.ivShockPointsMin : null,
                     linkedIvShockPointsMax: Number.isFinite(linked.ivShockPointsMax)
@@ -1665,6 +1744,9 @@
                     ? null : linkedHedge.ivTenorDays,
                 linkedIvTenorExponent: linkedHedge.ivTenorExponent === undefined
                     ? null : linkedHedge.ivTenorExponent,
+                linkedIvBetaAuto: linkedHedge.ivBetaAuto === true,
+                linkedIvOtmDiscount: linkedHedge.ivOtmDiscount === true,
+                linkedSigmaCrashScale: linkedHedge.sigmaCrashScale === true,
                 linkedMapping: linkedHedge.mapping || 'compound',
                 linkedDividendYield: linkedHedge.dividendYield === undefined
                     ? null : linkedHedge.dividendYield,
@@ -2417,6 +2499,9 @@
             stressLinkedIvTenorDamping: true,
             stressLinkedIvTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
             stressLinkedIvTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
+            stressLinkedIvBetaAuto: true,
+            stressLinkedIvOtmDiscount: true,
+            stressLinkedSigmaCrashScale: true,
             stressLinkedMapping: 'compound',
             stressLinkedSigma: null,
             stressLinkedDividendYield: null,
@@ -3603,7 +3688,10 @@
                 _text($('stress-tooltip-linked-price-label'), `${linkedSymbol} 映射价`);
                 _text($('stress-tooltip-linked-price'), point.linkedPrice === null ? '—'
                     : `${_money(point.linkedPrice, 2)}（${point.linkedChangePct > 0 ? '+' : ''}`
-                        + `${_money(point.linkedChangePct, 1)}%）`);
+                        + `${_money(point.linkedChangePct, 1)}%）`
+                        + (point.linkedIvBetaApplied ? ` · β ${_money(point.linkedIvBetaApplied, 2)}` : '')
+                        + (point.linkedSigmaScale && point.linkedSigmaScale > 1.001
+                            ? ` · σ ×${_money(point.linkedSigmaScale, 2)}` : ''));
             }
             const signClass = (value) => (value > 0
                 ? 'metric-positive' : (value < 0 ? 'metric-negative' : ''));
@@ -3971,8 +4059,10 @@
                     + `，距现价 ${_money(series.linkedSigmaProxyDistancePct, 1)}%`
                     + `${series.linkedSigmaSource === 'proxy_far' ? '，⚠ 离 ATM 较远' : ''}）`;
             return `，路径 σ ${_money((series.linkedSigma || 0) * 100, 1)}%${origin}`
+                + (series.linkedSigmaCrashScale ? `，跌 ≥${CRASH_SIGMA_FULL_DROP_PCT}% 时 σ ×${_money(
+                    CRASH_SIGMA_SCALE, 1)}（历史 RV/IV）` : '')
                 + `，${_money(series.linkedTimeYears * 365, 0)} 天损耗 ${_money(
-                    series.linkedDragLog * 100, 2)}%`;
+                    series.linkedDragLog * 100, 2)}%（基准 σ）`;
         })();
         const mappingNote = series.linkedMapping === 'linear' ? '线性' : `复利${sigmaNote}`;
         const linkedParts = [];
@@ -3996,7 +4086,10 @@
                                 ? `（已含固定 IV 冲击 ${series.linkedIvShockPoints > 0 ? '+' : ''}`
                                     + `${_money(series.linkedIvShockPoints, 0)} 点）`
                                 : (series.linkedIvMode === 'beta'
-                                    ? `（基准点；每跌 1% IV +${_money(series.linkedIvBeta, 2)} 点`
+                                    ? `（基准点；${series.linkedIvBetaAuto
+                                        ? 'β 按跌幅自适应 0.93–1.6 点/1%（历史回归）'
+                                        : `每跌 1% IV +${_money(series.linkedIvBeta, 2)} 点`}`
+                                        + (series.linkedIvOtmDiscount ? '，价外 ≥10% 取 0.55（历史）' : '')
                                         + (series.linkedIvTenorDamping
                                             ? `，按期限衰减 (${_money(series.linkedIvTenorDays, 0)}/剩余天)^${_money(
                                                 series.linkedIvTenorExponent, 2)}`
@@ -4224,6 +4317,9 @@
                     ivTenorDamping: state.stressLinkedIvTenorDamping,
                     ivTenorDays: state.stressLinkedIvTenorDays,
                     ivTenorExponent: state.stressLinkedIvTenorExponent,
+                    ivBetaAuto: state.stressLinkedIvBetaAuto,
+                    ivOtmDiscount: state.stressLinkedIvOtmDiscount,
+                    sigmaCrashScale: state.stressLinkedSigmaCrashScale,
                     mapping: state.stressLinkedMapping,
                     sigma: state.stressLinkedSigma,
                     dividendYield: state.stressLinkedDividendYield,
@@ -4270,6 +4366,9 @@
         state.stressLinkedIvTenorDamping = choice.ivTenorDamping;
         state.stressLinkedIvTenorDays = choice.ivTenorDays;
         state.stressLinkedIvTenorExponent = choice.ivTenorExponent;
+        state.stressLinkedIvBetaAuto = choice.ivBetaAuto;
+        state.stressLinkedIvOtmDiscount = choice.ivOtmDiscount;
+        state.stressLinkedSigmaCrashScale = choice.sigmaCrashScale;
         state.stressLinkedMapping = choice.mapping;
         state.stressLinkedSigma = choice.sigma;
         state.stressLinkedDividendYield = choice.dividendYield;
@@ -4448,6 +4547,9 @@
             ivTenorDamping: state.stressLinkedIvTenorDamping,
             ivTenorDays: state.stressLinkedIvTenorDays,
             ivTenorExponent: state.stressLinkedIvTenorExponent,
+            ivBetaAuto: state.stressLinkedIvBetaAuto,
+            ivOtmDiscount: state.stressLinkedIvOtmDiscount,
+            sigmaCrashScale: state.stressLinkedSigmaCrashScale,
             mapping: state.stressLinkedMapping,
             sigma: state.stressLinkedSigma,
             dividendYield: _effectiveDividendYield(
@@ -4546,6 +4648,12 @@
             tenorDaysInput.value = state.stressLinkedIvTenorDays === null
                 ? '' : String(state.stressLinkedIvTenorDays);
         }
+        const betaAutoToggle = $('stress-linked-iv-beta-auto');
+        betaAutoToggle.checked = state.stressLinkedIvBetaAuto;
+        betaInput.disabled = state.stressLinkedIvBetaAuto;
+        $('stress-linked-iv-otm').checked = state.stressLinkedIvOtmDiscount;
+        $('stress-linked-iv-otm-field').hidden = state.stressLinkedIvMode === 'none';
+        $('stress-linked-sigma-crash').checked = state.stressLinkedSigmaCrashScale;
         const tenorExponentInput = $('stress-linked-iv-tenor-exponent');
         tenorExponentInput.disabled = !state.stressLinkedIvTenorDamping;
         if (globalScope.document.activeElement !== tenorExponentInput) {
@@ -7093,6 +7201,21 @@
             _writeStressLinkedMemory();
             _renderStressTest();
         });
+        $('stress-linked-iv-beta-auto').addEventListener('change', (changeEvent) => {
+            state.stressLinkedIvBetaAuto = changeEvent.target.checked;
+            _writeStressLinkedMemory();
+            _renderStressTest();
+        });
+        $('stress-linked-iv-otm').addEventListener('change', (changeEvent) => {
+            state.stressLinkedIvOtmDiscount = changeEvent.target.checked;
+            _writeStressLinkedMemory();
+            _renderStressTest();
+        });
+        $('stress-linked-sigma-crash').addEventListener('change', (changeEvent) => {
+            state.stressLinkedSigmaCrashScale = changeEvent.target.checked;
+            _writeStressLinkedMemory();
+            _renderStressTest();
+        });
         $('stress-linked-iv-tenor-exponent').addEventListener('input', (inputEvent) => {
             const raw = String(inputEvent.target.value || '').trim();
             state.stressLinkedIvTenorExponent = raw === ''
@@ -7283,6 +7406,9 @@
         normalizeStressHorizonDays,
         normalizeLinkedTenorDays,
         normalizeLinkedTenorExponent,
+        autoBetaForDrop,
+        otmShockFactor,
+        crashSigmaScale,
         stressComponentNumbers,
         findOptionQuote: _findOptionQuote,
         optionQuoteIdentityConflict: _optionQuoteIdentityConflict,
