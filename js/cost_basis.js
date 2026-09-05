@@ -436,21 +436,46 @@
         return globalScope.OptionComboCostBasisStressCore.buildStressTestSeries(events, options);
     }
 
-    const stressJob = { generation: 0, key: '', worker: null, series: null, status: '', sliceIndex: null };
+    const stressJob = { generation: 0, key: '', worker: null, series: null, status: '', sliceIndex: null,
+        unavailable: new Map() };
+    // Off-hours stock snapshots from TWS sometimes deliver no price inside the
+    // server's window while every option line is fine. One automatic retry
+    // covers that without asking the user to click refresh.
+    const STRESS_UNDERLYING_RETRY_LIMIT = 1;
+    const STRESS_UNDERLYING_RETRY_MS = 1500;
+    // Series failures that only mean "no usable quotes yet": the settlement-
+    // only curve (what the page shows with deferred options unticked) is still
+    // valid and is drawn as a clearly labelled fallback.
+    const STRESS_FALLBACK_REASONS = Object.freeze([
+        'missing_long_option_market_inputs', 'missing_short_option_market_inputs']);
     const stressRefreshJob = { generation: 0, pending: false };
     function _cancelStressJob() {
         stressJob.generation += 1;
         if (stressJob.worker) stressJob.worker.terminate();
         Object.assign(stressJob, { worker: null, key: '', series: null, status: '', sliceIndex: null });
     }
-    function _stressSeries(events, options) {
+    function _stressSeries(events, options, { skipBand = false } = {}) {
         const key = JSON.stringify([state.bookId, state.stressInputsGeneration,
             state.stressLinkedInputsGeneration, events, options, state.stressBandEnabled, state.stressBandFlatIv]);
         if (key === stressJob.key) return stressJob.series;
+        // An unavailable primary series is rebuilt on every render while its
+        // fallback is on screen; remember the verdict instead of recomputing.
+        if (stressJob.unavailable.has(key)) return stressJob.unavailable.get(key);
         _cancelStressJob();
         const series = buildStressTestSeries(events, options);
+        if (!series.available) {
+            stressJob.unavailable.set(key, series);
+            while (stressJob.unavailable.size > 4) {
+                stressJob.unavailable.delete(stressJob.unavailable.keys().next().value);
+            }
+            return series;
+        }
         Object.assign(stressJob, { key, series });
-        if (!series.available || !state.stressBandEnabled) return series;
+        if (skipBand) {
+            stressJob.status = '仅到期结算曲线，不生成区间。';
+            return series;
+        }
+        if (!state.stressBandEnabled) return series;
         if (!globalScope.Worker || !globalScope.document.querySelectorAll) {
             stressJob.status = '当前环境不支持后台计算，区间未生成；中线仍可用。';
             return series;
@@ -2649,6 +2674,22 @@
         }, `情景结算后成本 / 股（${_currencySymbol(book.currency)}）`));
     }
 
+    /**
+     * When the only thing wrong is that no usable TWS quotes have arrived,
+     * draw the settlement-only curve (deferred options, the linked book and
+     * IV shocks excluded) instead of nothing. Caller labels it as degraded.
+     */
+    function _stressSettlementFallback(series, options) {
+        if (!STRESS_FALLBACK_REASONS.includes(series.reason)) return null;
+        if (state.stressInputsPending || options.pnlBasis === 'change') return null;
+        if (options.includeDeferredLongOptions !== true) return null;
+        const fallback = _stressSeries(state.allEvents, {
+            ...options, includeDeferredLongOptions: false, longOptionInputs: null,
+            linkedHedge: null, ivDriver: null,
+        }, { skipBand: true });
+        return fallback.available ? fallback : null;
+    }
+
     function _renderStressTest() {
         if (!state.stressOpen) return;
         $('stress-tooltip').hidden = true;
@@ -2756,7 +2797,7 @@
             _clear($('stress-chart')); _clear($('stress-key-points'));
             return;
         }
-        const series = _stressSeries(state.allEvents, {
+        const seriesOptions = {
             symbol: book.symbol,
             currency: book.currency || 'USD',
             centerPrice: state.stressBasePrice,
@@ -2780,8 +2821,10 @@
             liquidation: state.stressLiquidation,
             pricingModel: state.stressPricingModel,
             dividendYield: _effectiveDividendYield(state.stressDividendYield, book.symbol),
-        });
+        };
+        let series = _stressSeries(state.allEvents, seriesOptions);
         series.horizonDays = scenario.horizonDays;
+        let degraded = '';
         if (!series.available) {
             $('stress-legend-linked-pnl').hidden = true;
             $('stress-legend-protected-pnl').hidden = true;
@@ -2907,11 +2950,18 @@
             const identity = series.contract;
             const contractNote = identity ? ` · ${identity.linked ? linkedSymbol : book.symbol} ${identity.localSymbol
                 || `${identity.expiry} ${identity.right}${identity.strike}`}${identity.conId ? ` (#${identity.conId})` : ''}` : '';
-            _text($('stress-status'), (reasons[series.reason] || `${failure} [${series.reason}]`) + contractNote);
-            _text($('stress-band-status'), '中线不可用，区间不生成。');
-            _clear($('stress-chart'));
-            _clear($('stress-key-points'));
-            return;
+            const message = (reasons[series.reason] || `${failure} [${series.reason}]`) + contractNote;
+            const fallback = _stressSettlementFallback(series, seriesOptions);
+            if (!fallback) {
+                _text($('stress-status'), message);
+                _text($('stress-band-status'), '中线不可用，区间不生成。');
+                _clear($('stress-chart'));
+                _clear($('stress-key-points'));
+                return;
+            }
+            series = fallback;
+            series.horizonDays = scenario.horizonDays;
+            degraded = message;
         }
         const currency = book.currency || 'USD';
         const showConvexity = Boolean(series.includeDeferredLongOptions
@@ -2939,8 +2989,16 @@
         _text($('stress-legend-linked-pnl'),
             `${numbers.total} 计入 ${series.linkedSymbol || linkedSymbol}`
             + ` 多头期权较今日变动${showPremium ? ' + 假设权利金' : ''}（左轴）`);
-        _text($('stress-band-status'), state.stressBandEnabled ? stressJob.status : '区间已关闭。');
-        _text($('stress-status'), `${book.symbol} · ${series.pnlBasis === 'change' ? '相对当前快照的市值变化' : (showLinked ? '本账本现金流成本盈亏 + 联动多头较快照变化（混合口径，非账户 ΔNAV）' : '本账本现金流成本盈亏')}`
+        if (degraded) {
+            $('stress-legend-base-pnl').textContent = '到期结算盈亏（未到期期权未计入，左轴）';
+            $('stress-legend-protected-pnl').hidden = true;
+            $('stress-legend-linked-pnl').hidden = true;
+        }
+        _text($('stress-band-status'), degraded ? '中线降级为到期结算曲线，区间不生成。'
+            : (state.stressBandEnabled ? stressJob.status : '区间已关闭。'));
+        _text($('stress-status'), (degraded
+            ? `⚠ 仅显示到期结算曲线：未到期期权、联动账本与 IV 冲击都未计入 · ${degraded} · `
+            : '') + `${book.symbol} · ${series.pnlBasis === 'change' ? '相对当前快照的市值变化' : (showLinked ? '本账本现金流成本盈亏 + 联动多头较快照变化（混合口径，非账户 ΔNAV）' : '本账本现金流成本盈亏')}`
             + ` · 参考 ${series.asOfInstant} → 情景 ${series.targetInstant}`
             + ` · ${series.path === 'gradual' ? '线性渐变路径' : '立即冲击并保持'}`
             + (series.warnings.length ? ` · 注意：${series.warnings.map(w => ({
@@ -3048,15 +3106,27 @@
             && state.stressInputsGeneration === generation
             && _stressScenarioDate().date === throughExpiry;
         try {
-            const response = await request('request_cost_basis_option_scenario_inputs', {
-                bookId,
-                throughExpiry,
-                contracts,
-            });
-            if (!isCurrent()) return;
-            const price = Number(response.underlyingPrice);
-            if (!Number.isFinite(price) || price <= 0) {
-                throw new Error('TWS 返回的标的现价无效');
+            let response = null;
+            let price = NaN;
+            for (let attempt = 0; ; attempt += 1) {
+                response = await request('request_cost_basis_option_scenario_inputs', {
+                    bookId,
+                    throughExpiry,
+                    contracts,
+                });
+                if (!isCurrent()) return;
+                price = Number(response.underlyingPrice);
+                if (Number.isFinite(price) && price > 0) {
+                    state.stressInputsError = '';
+                    break;
+                }
+                if (attempt >= STRESS_UNDERLYING_RETRY_LIMIT) {
+                    throw new Error('TWS 返回的标的现价无效');
+                }
+                state.stressInputsError = '标的现价暂缺，正在自动重试…';
+                _renderStressTest();
+                await new Promise((resolve) => globalScope.setTimeout(resolve, STRESS_UNDERLYING_RETRY_MS));
+                if (!isCurrent()) return;
             }
             state.stressLongOptionInputs = response;
             state.marketPrice = price;

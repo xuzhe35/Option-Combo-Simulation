@@ -2713,5 +2713,116 @@ module.exports = {
                 assert.match(css, /\.nav-item-settings\.active, \.nav-item-stress\.active/);
             },
         },
+        {
+            name: 'missing TWS quotes degrade to a labelled settlement-only curve instead of a blank chart',
+            run() {
+                const h = loadPriceHarness();
+                const core = h.context.OptionComboCostBasisCore;
+                const doc = h.context.document;
+                h.state.status = { features: { optionScenarioInputs: true } };
+                h.state.allEvents.push({
+                    kind: 'option_trade', account: 'U1', tradeDate: '2026-09-01',
+                    right: 'P', strike: 46, expiry: '20270319', sharesPerContract: 100,
+                    contracts: 5, price: 3, cashAmount: -1500,
+                });
+                h.state.ledger = core.computeLedger(h.state.allEvents, { referencePrice: 70, secType: 'STK' });
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904', stressBasePrice: 70,
+                    stressIncludeLongOptions: true, stressLongOptionInputs: null, stressInputsPending: false,
+                    stressInputsError: '拉取失败：TWS 返回的标的现价无效', stressPnlBasis: 'cost' });
+                const svgNode = () => ({
+                    children: [], textContent: '', style: {}, attributes: {},
+                    appendChild(child) { this.children.push(child); return child; },
+                    removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
+                    get firstChild() { return this.children[0]; },
+                    setAttribute(name, value) { this.attributes[name] = value; },
+                });
+                doc.createElementNS = svgNode;
+                const byId = doc.getElementById;
+                doc.getElementById = (id) => {
+                    const found = byId(id);
+                    if (!found.setAttribute) {
+                        found.attributes = {};
+                        found.style = {};
+                        found.setAttribute = function set(name, value) { this.attributes[name] = value; };
+                    }
+                    return found;
+                };
+                h.configure({ today: () => '2026-09-03', request: () => new Promise(() => {}) });
+                h.renderStress();
+                const status = doc.getElementById('stress-status').textContent;
+                assert.ok(status.startsWith('⚠ 仅显示到期结算曲线'), status);
+                assert.match(status, /标的现价无效/);
+                assert.match(status, /\[missing_(long|short)_option_market_inputs\]/);
+                assert.match(status, /TQQQ · 本账本现金流成本盈亏/);
+                assert.ok(doc.getElementById('stress-chart').children.length > 0, 'chart is drawn');
+                assert.equal(doc.getElementById('stress-key-points').children.length, 3);
+                assert.equal(doc.getElementById('stress-band-status').textContent, '中线降级为到期结算曲线，区间不生成。');
+                assert.equal(doc.getElementById('stress-legend-base-pnl').textContent, '到期结算盈亏（未到期期权未计入，左轴）');
+                assert.equal(doc.getElementById('stress-legend-protected-pnl').hidden, true);
+                assert.ok(h.stressJob.series.warnings.includes('partial_portfolio_excludes_deferred'));
+                assert.match(status, /已排除更晚到期的期权/);
+                // The unavailable primary verdict is memoised; a second render
+                // does not rebuild it or disturb the fallback on screen.
+                const shown = h.stressJob.series;
+                h.renderStress();
+                assert.equal(h.stressJob.series, shown);
+                assert.ok(h.stressJob.unavailable.size >= 1);
+                // While a fetch is in flight the chart waits rather than flickering.
+                h.state.stressInputsPending = true;
+                h.renderStress();
+                assert.ok(doc.getElementById('stress-status').textContent.startsWith('正在从 TWS 拉取'));
+                assert.equal(doc.getElementById('stress-chart').children.length, 0);
+                // Change-since-snapshot has no valid baseline without quotes: no fallback.
+                h.state.stressInputsPending = false;
+                h.state.stressPnlBasis = 'change';
+                h.renderStress();
+                assert.doesNotMatch(doc.getElementById('stress-status').textContent, /⚠/);
+                assert.equal(doc.getElementById('stress-chart').children.length, 0);
+                // With deferred options unticked there is nothing to degrade from.
+                h.state.stressPnlBasis = 'cost';
+                h.state.stressIncludeLongOptions = false;
+                h.renderStress();
+                assert.doesNotMatch(doc.getElementById('stress-status').textContent, /⚠/);
+                assert.ok(doc.getElementById('stress-chart').children.length > 0);
+            },
+        },
+        {
+            name: 'an off-hours snapshot without an underlying price is retried once before failing',
+            async run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                h.state.status = { features: { optionScenarioInputs: true } };
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904',
+                    stressIncludeLongOptions: true, stressBasePrice: 70 });
+                const calls = [];
+                const replies = [];
+                h.configure({ today: () => '2026-09-03', request: async (action, fields) => {
+                    calls.push({ action, fields });
+                    return replies.shift();
+                } });
+                const waits = [];
+                h.context.setTimeout = (fn, ms) => { waits.push(ms); fn(); return 1; };
+                const snapshot = (price) => ({ underlyingPrice: price, throughExpiry: '20260904',
+                    fetchedAt: 's', options: [], ratesByExpiry: [] });
+                replies.push(snapshot(null), snapshot(72));
+                await h.refreshStressInputs(false);
+                assert.equal(calls.length, 2);
+                assert.deepEqual(waits, [1500]);
+                assert.equal(h.state.marketPrice, 72);
+                assert.equal(h.state.stressInputsError, '');
+                assert.equal(h.state.stressInputsPending, false);
+                // Two misses in a row: give up with the explicit message, no third request.
+                replies.push(snapshot(-1), snapshot(undefined));
+                await h.refreshStressInputs(false);
+                assert.equal(calls.length, 4);
+                assert.equal(h.state.stressInputsError, '拉取失败：TWS 返回的标的现价无效');
+                assert.equal(h.state.stressLongOptionInputs, null);
+                // A scenario change during the wait abandons the retry.
+                replies.push(snapshot(null), snapshot(73));
+                h.context.setTimeout = (fn) => { h.state.stressHorizonDays = 5; h.invalidateScenario(); fn(); return 1; };
+                await h.refreshStressInputs(false);
+                assert.equal(calls.length, 5);
+                assert.equal(h.state.marketPrice, 72);
+            },
+        },
     ],
 };

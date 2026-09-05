@@ -427,7 +427,9 @@ time value; it never records the synthetic settlement rows.
 
 The stress-test view (a page view beside the ledger and settings views, entered
 from the sidebar or the What If panel; leaving it cancels its worker and snapshot
-batch) values every still-open option of this book on ONE
+batch; when TWS delivers no usable quotes it draws the settlement-only curve
+with a ⚠ label and retries a missing underlying price once) values every
+still-open option of this book on ONE
 scenario date (the selected expiry, or today + "days to reach the drop"):
 options expiring by then settle at intrinsic value, live longs are marked as
 assets and live shorts as liabilities (premium received minus model value),
