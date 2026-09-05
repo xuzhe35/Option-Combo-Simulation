@@ -61,6 +61,13 @@ SERVER_ACTIONS = {
 }
 
 COST_BASIS_CLIENT_ACTIONS = frozenset(SERVER_ACTIONS)
+# The stress view refreshes its own book and the linked book as one pair and
+# sends both snapshot requests at once. Per-connection dispatch is otherwise
+# sequential, which would queue the second request behind the first's 8-second
+# quote window; the browser's 20-second timeout can then expire before this
+# handler's own 15-second deadline has even started. These read-only actions
+# run as tasks so paired requests overlap. Ledger writes stay ordered.
+CONCURRENT_CLIENT_ACTIONS = frozenset({'request_cost_basis_option_scenario_inputs'})
 
 
 def create_store_env(config=None):

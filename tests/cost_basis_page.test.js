@@ -2984,5 +2984,65 @@ module.exports = {
                 assert.equal(h.state.marketPrice, 72);
             },
         },
+        {
+            name: 'a linked snapshot failure drops only the overlay; own quotes missing too falls back to settlement',
+            run() {
+                const { h, quote } = loadStressPairHarness(); enableStressChartDom(h);
+                const doc = h.context.document;
+                const core = h.context.OptionComboCostBasisCore;
+                Object.assign(h.state, { stressOpen: true, stressLongOptionInputs: quote('book-test'),
+                    stressLinkedInputs: null, stressLinkedInputsPending: false,
+                    stressLinkedInputsError: '拉取失败：请求超时', stressInputsPending: false });
+                h.renderStress();
+                let status = doc.getElementById('stress-status').textContent;
+                assert.ok(status.startsWith('⚠ QQQ 联动账本未计入，本账本期权仍按快照估值'), status);
+                assert.match(status, /请求超时 \[missing_linked_market_inputs\]/);
+                assert.ok(doc.getElementById('stress-chart').children.length > 0);
+                assert.equal(h.stressJob.series.linkedHedgeEnabled, false);
+                assert.equal(doc.getElementById('stress-legend-linked-pnl').hidden, true);
+                assert.equal(doc.getElementById('stress-band-status').textContent, '中线降级为本账本曲线（联动未计入），区间不生成。');
+                // The linked fetch still running: wait, do not draw a half result.
+                h.state.stressLinkedInputsPending = true;
+                h.renderStress();
+                assert.doesNotMatch(doc.getElementById('stress-status').textContent, /⚠/);
+                assert.equal(doc.getElementById('stress-chart').children.length, 0);
+                h.state.stressLinkedInputsPending = false;
+                // Own quotes gone as well, with a deferred long: two-step degrade.
+                h.state.allEvents.push({ kind: 'option_trade', account: 'U1', tradeDate: '2026-09-01',
+                    right: 'P', strike: 46, expiry: '20270319', sharesPerContract: 100,
+                    contracts: 5, price: 3, cashAmount: -1500 });
+                h.state.ledger = core.computeLedger(h.state.allEvents, { referencePrice: 70, secType: 'STK' });
+                Object.assign(h.state, { stressLongOptionInputs: null, stressIncludeLongOptions: true,
+                    stressInputsError: '拉取失败：TWS 返回的标的现价无效' });
+                h.renderStress();
+                status = doc.getElementById('stress-status').textContent;
+                assert.ok(status.startsWith('⚠ 仅显示到期结算曲线'), status);
+                assert.match(status, /\[missing_linked_market_inputs\]/);
+                assert.ok(doc.getElementById('stress-chart').children.length > 0);
+                assert.equal(doc.getElementById('stress-legend-base-pnl').textContent, '到期结算盈亏（未到期期权未计入，左轴）');
+            },
+        },
+        {
+            name: 'an emptied chart drops its pointer handlers so no stale tooltip can reappear',
+            run() {
+                const h = loadPriceHarness(); enableStressChartDom(h);
+                const doc = h.context.document;
+                h.configure({ today: () => '2026-09-03', request: () => new Promise(() => {}) });
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904', stressBasePrice: 70,
+                    stressIncludeLongOptions: false, stressBandEnabled: false });
+                h.renderStress();
+                const svg = doc.getElementById('stress-chart');
+                assert.equal(typeof svg.onpointermove, 'function');
+                assert.equal(typeof svg.onpointerleave, 'function');
+                doc.getElementById('stress-tooltip').hidden = false;
+                h.stressRefreshJob.pending = true;
+                h.renderStress();
+                assert.equal(svg.children.length, 0);
+                assert.equal(svg.onpointermove, null);
+                assert.equal(svg.onpointerleave, null);
+                assert.equal(doc.getElementById('stress-tooltip').hidden, true);
+                assert.equal(doc.getElementById('stress-slice').hidden, true);
+            },
+        },
     ],
 };

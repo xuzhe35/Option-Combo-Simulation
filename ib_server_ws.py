@@ -922,13 +922,22 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
             send=env['send_message_safe'],
         )
     elif action in cost_basis_ws.COST_BASIS_CLIENT_ACTIONS:
-        await cost_basis_ws.handle_cost_basis_action(
+        handling = cost_basis_ws.handle_cost_basis_action(
             env.get('cost_basis_store_env'),
             websocket,
             data,
             client_ip=client_ip,
             send=env['send_message_safe'],
         )
+        if action in cost_basis_ws.CONCURRENT_CLIENT_ACTIONS:
+            # Paired quote snapshots must overlap instead of queueing behind
+            # each other; the handler sends its own response and never raises.
+            tasks = env.setdefault('cost_basis_snapshot_tasks', set())
+            task = asyncio.create_task(handling)
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+        else:
+            await handling
     else:
         payload = await dispatch_execution_action(
             env,

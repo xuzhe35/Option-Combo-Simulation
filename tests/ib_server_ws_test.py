@@ -305,6 +305,50 @@ class _FakeIB:
 
 
 class IbServerWsHandlerTests(unittest.TestCase):
+    def test_paired_scenario_snapshot_requests_overlap_but_ledger_actions_stay_ordered(self):
+        import ib_server_ws as ws_module
+        from unittest import mock
+        env = self._build_env()[0]
+        websocket = _FakeWebSocket()
+        started, finished = [], []
+        release = None
+
+        async def fake_handler(store_env, ws, data, *, client_ip='Unknown', send=None):
+            started.append(data['action'])
+            if data['action'] == 'request_cost_basis_option_scenario_inputs':
+                await release.wait()
+            finished.append(data['action'])
+            return True
+
+        async def scenario():
+            nonlocal release
+            release = asyncio.Event()
+            with mock.patch.object(ws_module.cost_basis_ws, 'handle_cost_basis_action', fake_handler):
+                # Both snapshot requests are dispatched before either can finish.
+                for _ in range(2):
+                    await dispatch_client_message(
+                        env, websocket,
+                        {'action': 'request_cost_basis_option_scenario_inputs', 'bookId': 'b'})
+                await asyncio.sleep(0)
+                self.assertEqual(started, ['request_cost_basis_option_scenario_inputs'] * 2)
+                self.assertEqual(finished, [])
+                self.assertEqual(len(env['cost_basis_snapshot_tasks']), 2)
+                # A ledger action is still awaited inline, in order.
+                await dispatch_client_message(
+                    env, websocket, {'action': 'list_cost_basis_books'})
+                self.assertEqual(finished, ['list_cost_basis_books'])
+                release.set()
+                await asyncio.gather(*env['cost_basis_snapshot_tasks'])
+                self.assertEqual(finished, ['list_cost_basis_books']
+                                 + ['request_cost_basis_option_scenario_inputs'] * 2)
+                self.assertEqual(env['cost_basis_snapshot_tasks'], set())
+
+        asyncio.run(scenario())
+        self.assertIn('request_cost_basis_option_scenario_inputs',
+                      ws_module.cost_basis_ws.CONCURRENT_CLIENT_ACTIONS)
+        self.assertNotIn('append_cost_basis_event',
+                         ws_module.cost_basis_ws.CONCURRENT_CLIENT_ACTIONS)
+
     def _build_env(self):
         sent_messages = []
         snapshot_calls = []

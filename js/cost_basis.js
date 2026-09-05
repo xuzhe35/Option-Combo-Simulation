@@ -448,6 +448,9 @@
     // valid and is drawn as a clearly labelled fallback.
     const STRESS_FALLBACK_REASONS = Object.freeze([
         'missing_long_option_market_inputs', 'missing_short_option_market_inputs']);
+    // The linked overlay failing to quote is not a reason to hide the own
+    // book: drop the overlay first, and only then fall back further.
+    const STRESS_LINKED_FALLBACK_REASONS = Object.freeze(['missing_linked_market_inputs']);
     const stressRefreshJob = { generation: 0, pending: false };
     function _cancelStressJob() {
         stressJob.generation += 1;
@@ -2690,19 +2693,45 @@
     }
 
     /**
-     * When the only thing wrong is that no usable TWS quotes have arrived,
-     * draw the settlement-only curve (deferred options, the linked book and
-     * IV shocks excluded) instead of nothing. Caller labels it as degraded.
+     * When the only thing wrong is that usable TWS quotes have not arrived,
+     * draw something true instead of nothing, in two steps: first the own
+     * book without the linked overlay, then the settlement-only curve
+     * (deferred options, the linked book and IV shocks excluded). The caller
+     * labels the result as degraded; nothing is drawn while a fetch is
+     * pending or for change-since-snapshot, which has no baseline.
      */
-    function _stressSettlementFallback(series, options) {
-        if (!STRESS_FALLBACK_REASONS.includes(series.reason)) return null;
-        if (state.stressInputsPending || options.pnlBasis === 'change') return null;
-        if (options.includeDeferredLongOptions !== true) return null;
-        const fallback = _stressSeries(state.allEvents, {
-            ...options, includeDeferredLongOptions: false, longOptionInputs: null,
-            linkedHedge: null, ivDriver: null,
-        }, { skipBand: true });
-        return fallback.available ? fallback : null;
+    function _stressDegradedSeries(series, options) {
+        if (state.stressInputsPending || state.stressLinkedInputsPending
+            || options.pnlBasis === 'change') return null;
+        let reason = series.reason;
+        if (STRESS_LINKED_FALLBACK_REASONS.includes(reason) && options.linkedHedge) {
+            const ownOnly = _stressSeries(state.allEvents, { ...options, linkedHedge: null }, { skipBand: true });
+            if (ownOnly.available) return { level: 'linked', series: ownOnly };
+            reason = ownOnly.reason;
+        }
+        if (STRESS_FALLBACK_REASONS.includes(reason) && options.includeDeferredLongOptions === true) {
+            const settlement = _stressSeries(state.allEvents, {
+                ...options, includeDeferredLongOptions: false, longOptionInputs: null,
+                linkedHedge: null, ivDriver: null,
+            }, { skipBand: true });
+            if (settlement.available) return { level: 'settlement', series: settlement };
+        }
+        return null;
+    }
+
+    /**
+     * Empty the chart and detach its pointer handlers: they close over the
+     * series they drew, and without this a hover over the emptied chart
+     * brings that series' tooltip back.
+     */
+    function _clearStressChart() {
+        const svg = $('stress-chart');
+        _clear(svg);
+        if (svg) {
+            svg.onpointermove = null;
+            svg.onpointerleave = null;
+        }
+        $('stress-tooltip').hidden = true;
     }
 
     function _renderStressTest() {
@@ -2721,7 +2750,7 @@
         if (!book || !state.ledger || !expiries.length) {
             _cancelStressJob();
             _text($('stress-status'), '当前账本没有可用于压力测试的未平股票期权。');
-            _clear($('stress-chart'));
+            _clearStressChart();
             _clear($('stress-key-points'));
             return;
         }
@@ -2729,7 +2758,7 @@
             _cancelStressJob();
             _text($('stress-status'), '账本事件尚未完整载入，压力测试已停止；不能用截断头寸生成范围。');
             _text($('stress-band-status'), '账本不完整，区间不生成。');
-            _clear($('stress-chart')); _clear($('stress-key-points'));
+            _clearStressChart(); _clear($('stress-key-points'));
             return;
         }
         if (globalScope.document.activeElement !== baseInput) {
@@ -2793,7 +2822,7 @@
             _cancelStressJob();
             _text($('stress-status'), '跌到位天数无效：请留空（在所选到期日结算）'
                 + `或输入 0 到 ${LINKED_MAX_HORIZON_DAYS} 的整数天。`);
-            _clear($('stress-chart'));
+            _clearStressChart();
             _clear($('stress-key-points'));
             return;
         }
@@ -2809,7 +2838,7 @@
                 : state.stressIncludeLinkedHedge ? '正在同步刷新本账本与联动账本行情，完成后生成叠加曲线…'
                     : '正在刷新本账本行情…');
             _text($('stress-band-status'), '行情刷新中，完成后重新计算范围。');
-            _clear($('stress-chart')); _clear($('stress-key-points'));
+            _clearStressChart(); _clear($('stress-key-points'));
             return;
         }
         const seriesOptions = {
@@ -2839,7 +2868,7 @@
         };
         let series = _stressSeries(state.allEvents, seriesOptions);
         series.horizonDays = scenario.horizonDays;
-        let degraded = '';
+        let degraded = null;
         if (!series.available) {
             $('stress-legend-linked-pnl').hidden = true;
             $('stress-legend-protected-pnl').hidden = true;
@@ -2966,17 +2995,17 @@
             const contractNote = identity ? ` · ${identity.linked ? linkedSymbol : book.symbol} ${identity.localSymbol
                 || `${identity.expiry} ${identity.right}${identity.strike}`}${identity.conId ? ` (#${identity.conId})` : ''}` : '';
             const message = (reasons[series.reason] || `${failure} [${series.reason}]`) + contractNote;
-            const fallback = _stressSettlementFallback(series, seriesOptions);
+            const fallback = _stressDegradedSeries(series, seriesOptions);
             if (!fallback) {
                 _text($('stress-status'), message);
                 _text($('stress-band-status'), '中线不可用，区间不生成。');
-                _clear($('stress-chart'));
+                _clearStressChart();
                 _clear($('stress-key-points'));
                 return;
             }
-            series = fallback;
+            series = fallback.series;
             series.horizonDays = scenario.horizonDays;
-            degraded = message;
+            degraded = { level: fallback.level, message };
         }
         const currency = book.currency || 'USD';
         const showConvexity = Boolean(series.includeDeferredLongOptions
@@ -3004,15 +3033,18 @@
         _text($('stress-legend-linked-pnl'),
             `${numbers.total} 计入 ${series.linkedSymbol || linkedSymbol}`
             + ` 多头期权较今日变动${showPremium ? ' + 假设权利金' : ''}（左轴）`);
-        if (degraded) {
+        if (degraded && degraded.level === 'settlement') {
             $('stress-legend-base-pnl').textContent = '到期结算盈亏（未到期期权未计入，左轴）';
             $('stress-legend-protected-pnl').hidden = true;
             $('stress-legend-linked-pnl').hidden = true;
         }
-        _text($('stress-band-status'), degraded ? '中线降级为到期结算曲线，区间不生成。'
+        _text($('stress-band-status'), degraded
+            ? (degraded.level === 'settlement' ? '中线降级为到期结算曲线，区间不生成。' : '中线降级为本账本曲线（联动未计入），区间不生成。')
             : (state.stressBandEnabled ? stressJob.status : '区间已关闭。'));
         _text($('stress-status'), (degraded
-            ? `⚠ 仅显示到期结算曲线：未到期期权、联动账本与 IV 冲击都未计入 · ${degraded} · `
+            ? `⚠ ${degraded.level === 'settlement'
+                ? '仅显示到期结算曲线：未到期期权、联动账本与 IV 冲击都未计入'
+                : `${linkedSymbol} 联动账本未计入，本账本期权仍按快照估值`} · ${degraded.message} · `
             : '') + `${book.symbol} · ${series.pnlBasis === 'change' ? '相对当前快照的市值变化' : (showLinked ? '本账本现金流成本盈亏 + 联动多头较快照变化（混合口径，非账户 ΔNAV）' : '本账本现金流成本盈亏')}`
             + ` · 参考 ${series.asOfInstant} → 情景 ${series.targetInstant}`
             + ` · ${series.path === 'gradual' ? '线性渐变路径' : '立即冲击并保持'}`
