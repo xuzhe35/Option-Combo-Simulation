@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>综合成本账本 — Option Combo Simulator</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="cost_basis.css?v=1e03cbfa479c">
+    <link rel="stylesheet" href="cost_basis.css?v=612d2ca47422">
 </head>
 <body data-option-combo-page="cost-basis">
     <div class="app-shell">
@@ -183,27 +183,27 @@
                 </div>
                 <div id="stress-view" class="page-view stress-view" aria-labelledby="stress-title" hidden>
                     <header class="stress-view-header">
-                        <div><span class="eyebrow">What If · 多价格情景</span><h2 id="stress-title">到期压力测试</h2></div>
+                        <div><span class="eyebrow">What If · 多价格情景</span><h2 id="stress-title" tabindex="-1">到期压力测试</h2></div>
                         <button id="btn-close-stress-test" class="stress-back" type="button">← 返回账本</button>
                     </header>
                     <aside class="stress-params" aria-label="压力测试参数">
                         <details class="stress-param-group" open><summary>情景</summary>
                             <div class="stress-controls">
                                 <label for="stress-expiry">到期范围<select id="stress-expiry"><option value="">等待未平期权</option></select></label>
-                                <label for="stress-base-price">基准现价<input id="stress-base-price" type="number" step="0.01" min="0" autocomplete="off" placeholder="输入现价"></label>
-                                <button id="btn-stress-refresh-price" type="button">刷新 TWS 现价</button>
-                                <label for="stress-horizon-days">跌到位需要天数<input id="stress-horizon-days" type="number" step="1" min="0" autocomplete="off" placeholder="同到期范围" title="留空为所选日期纽约收盘假设；填 N 表示在快照时刻后 N×24 小时估值，0 为同一时刻。途中到期按所选路径处理，未到期期权使用同一目标时刻"></label>
-                                <label for="stress-range">价格扫描范围<select id="stress-range"><option value="10">上下 10%</option><option value="20">上下 20%</option><option value="30" selected>上下 30%</option><option value="50">上下 50%</option></select></label>
+                                <label class="half" for="stress-base-price">基准现价<input id="stress-base-price" type="number" step="0.01" min="0" autocomplete="off" placeholder="输入现价"></label>
+                                <button id="btn-stress-refresh-price" class="half" type="button">刷新 TWS 现价</button>
+                                <label class="half" for="stress-horizon-days">跌到位需要天数<input id="stress-horizon-days" type="number" step="1" min="0" autocomplete="off" placeholder="同到期范围" title="留空为所选日期纽约收盘假设；填 N 表示在快照时刻后 N×24 小时估值，0 为同一时刻。途中到期按所选路径处理，未到期期权使用同一目标时刻"></label>
+                                <label class="half" for="stress-range">价格扫描范围<select id="stress-range"><option value="10">上下 10%</option><option value="20">上下 20%</option><option value="30" selected>上下 30%</option><option value="50">上下 50%</option></select></label>
                                 <label for="stress-path">到位路径<select id="stress-path"><option value="immediate">立即冲击并保持</option><option value="gradual">逐日渐变至终值</option></select></label>
                             </div>
                         </details>
                         <details class="stress-param-group" open><summary>估值与口径</summary>
                             <div class="stress-controls">
-                                <label for="stress-pricing-model">定价模型<select id="stress-pricing-model" title="美式：CRR 二叉树近似，计提前行权价值但不预测实际指派；欧式：BSM 闭式解。两者均从当前 mark 反解本地 IV"><option value="american" selected>美式二叉树</option><option value="european">欧式 BSM</option></select></label>
-                                <label for="stress-dividend-yield">股息率（%）<input id="stress-dividend-yield" type="number" step="0.1" min="0" autocomplete="off" placeholder="0" title="本账本标的的连续股息率，留空用默认值（QQQ 0.6%、TQQQ 1%，其它 0）"></label>
+                                <label class="half" for="stress-pricing-model">定价模型<select id="stress-pricing-model" title="美式：CRR 二叉树近似，计提前行权价值但不预测实际指派；欧式：BSM 闭式解。两者均从当前 mark 反解本地 IV"><option value="american" selected>美式二叉树</option><option value="european">欧式 BSM</option></select></label>
+                                <label class="half" for="stress-dividend-yield">股息率（%）<input id="stress-dividend-yield" type="number" step="0.1" min="0" autocomplete="off" placeholder="0" title="本账本标的的连续股息率，留空用默认值（QQQ 0.6%、TQQQ 1%，其它 0）"></label>
                                 <label for="stress-liquidation">变现口径<select id="stress-liquidation" title="中间价：理论价按中间价计。按今日点差折算：把今日买价/中间价（多头）或卖价/中间价（空头）的比例外推到情景理论价，联动账本的今日市值直接取买价；这是今日点差的外推，不是对情景日买卖价的预测。交叉或单边报价整体拒绝"><option value="mid" selected>中间价</option><option value="bidask">按今日点差折算（买价/卖价）</option></select></label>
                                 <label for="stress-pnl-basis">盈亏口径<select id="stress-pnl-basis"><option value="cost">现金流成本盈亏（联动另计较今日变化）</option><option value="change">全部相对当前快照变化</option></select></label>
-                                <label for="stress-weekly-premium">每周额外净收入（假设）<input id="stress-weekly-premium" type="number" step="1" min="0" autocomplete="off" placeholder="0" title="额外净收入假设，按情景经过天数除以 7 计算；不模拟新增期权的负债或保证卖方利润，留空为零"></label>
+                                <label class="half" for="stress-weekly-premium">每周额外净收入（假设）<input id="stress-weekly-premium" type="number" step="1" min="0" autocomplete="off" placeholder="0" title="额外净收入假设，按情景经过天数除以 7 计算；不模拟新增期权的负债或保证卖方利润，留空为零"></label>
                             </div>
                         </details>
                         <details class="stress-param-group"><summary>采样情景范围</summary>
@@ -229,15 +229,15 @@
                                 <label class="stress-protection-toggle" for="stress-include-linked-hedge"><input id="stress-include-linked-hedge" type="checkbox"><span><strong>叠加同账户其它账本的多头期权（TQQQ ↔ QQQ 跨标的保护）</strong><small id="stress-linked-toggle-hint">可选；把同账户联动账本里全部未平 Long Call / Put 按映射后的联动标的价估值，叠加为第四条曲线</small></span></label>
                                 <div id="stress-linked-inputs" class="stress-protection-inputs" hidden>
                                     <label for="stress-linked-book">联动账本<select id="stress-linked-book"><option value="">请选择联动账本</option></select></label>
-                                    <label for="stress-linked-ratio">杠杆倍数<input id="stress-linked-ratio" type="number" step="0.01" autocomplete="off" placeholder="3" title="本账本相对联动标的的日内杠杆倍数；反向杠杆填负数"></label>
+                                    <label class="half" for="stress-linked-ratio">杠杆倍数<input id="stress-linked-ratio" type="number" step="0.01" autocomplete="off" placeholder="3" title="本账本相对联动标的的日内杠杆倍数；反向杠杆填负数"></label>
+                                    <label class="half" for="stress-linked-dividend-yield">股息率（%）<input id="stress-linked-dividend-yield" type="number" step="0.1" min="0" autocomplete="off" placeholder="0.6" title="联动标的的连续股息率，留空用默认值（QQQ 0.6%）"></label>
                                     <label for="stress-linked-mapping">映射<select id="stress-linked-mapping" title="日内/一天内用简单收益近似；多日为给定路径方差的连续再平衡近似。线性模式始终使用指数涨跌=本账本涨跌/倍数"><option value="compound" selected>多日连续近似（日内线性）</option><option value="linear">线性</option></select></label>
-                                    <label for="stress-linked-dividend-yield">股息率（%）<input id="stress-linked-dividend-yield" type="number" step="0.1" min="0" autocomplete="off" placeholder="0.6" title="联动标的的连续股息率，留空用默认值（QQQ 0.6%）"></label>
-                                    <label id="stress-linked-sigma-field" for="stress-linked-sigma">路径 σ（年化 %）<input id="stress-linked-sigma" type="number" step="1" min="0" autocomplete="off" placeholder="快照代理" title="多日连续近似的指数年化路径波动率假设；留空取当前存续、距现价最近的合约的有效 IV 代理；TWS 未提供 IV 时尝试从 mark 本地反解。没有代理时停止，不按零损耗计算；日内/一天内不用方差损耗"></label>
                                     <label for="stress-linked-iv-mode">IV 模式<select id="stress-linked-iv-mode" title="联动合约在情景中的 IV 如何变化；只影响测试日后仍存续合约的情景市值，不改今日标记价"><option value="none" selected>无（IV 保持不变）</option><option value="fixed">固定点数（全扫描线统一抬升）</option><option value="beta">按跌幅 β（只在下跌侧抬升）</option></select></label>
-                                    <label id="stress-linked-iv-shock-field" for="stress-linked-iv-shock" hidden>IV 冲击（点）<input id="stress-linked-iv-shock" type="number" step="1" autocomplete="off" placeholder="0" title="每张存续合约的 IV 统一抬升多少个百分点，例如 10 表示 30% 变 40%；上涨侧同样抬升，读图只看下跌侧"></label>
-                                    <label id="stress-linked-iv-beta-field" for="stress-linked-iv-beta" hidden>β（点 / 每跌 1%）<input id="stress-linked-iv-beta" type="number" step="0.1" min="0" autocomplete="off" placeholder="1.5" title="手填 β：联动标的每下跌 1%，30 天期 IV 抬升多少个百分点；基准点与上涨侧为 0。勾选「β 按跌幅自适应」时不用此值。QQQ 2012–2026 日频回归（scripts/stress_model_validation.py A1b）：跌 2–5% 约 0.90，5–10% 0.95，10–20% 1.00，>20% 1.65；持有天数影响很小"></label>
+                                    <label class="half" id="stress-linked-sigma-field" for="stress-linked-sigma">路径 σ（年化 %）<input id="stress-linked-sigma" type="number" step="1" min="0" autocomplete="off" placeholder="快照代理" title="多日连续近似的指数年化路径波动率假设；留空取当前存续、距现价最近的合约的有效 IV 代理；TWS 未提供 IV 时尝试从 mark 本地反解。没有代理时停止，不按零损耗计算；日内/一天内不用方差损耗"></label>
+                                    <label class="half" id="stress-linked-iv-shock-field" for="stress-linked-iv-shock" hidden>IV 冲击（点）<input id="stress-linked-iv-shock" type="number" step="1" autocomplete="off" placeholder="0" title="每张存续合约的 IV 统一抬升多少个百分点，例如 10 表示 30% 变 40%；上涨侧同样抬升，读图只看下跌侧"></label>
+                                    <label class="half" id="stress-linked-iv-beta-field" for="stress-linked-iv-beta" hidden>β（点 / 每跌 1%）<input id="stress-linked-iv-beta" type="number" step="0.1" min="0" autocomplete="off" placeholder="1.5" title="手填 β：联动标的每下跌 1%，30 天期 IV 抬升多少个百分点；基准点与上涨侧为 0。勾选「β 按跌幅自适应」时不用此值。QQQ 2012–2026 日频回归（scripts/stress_model_validation.py A1b）：跌 2–5% 约 0.90，5–10% 0.95，10–20% 1.00，>20% 1.65；持有天数影响很小"></label>
                                     <span id="stress-linked-iv-calib-field" class="stress-linked-inline"><label class="checkbox" for="stress-linked-iv-beta-auto" title="β 随每个扫描点的联动跌幅取历史回归值（A1b，持有 5–40 天合并）：跌 ≤3.5% 0.90，7.5% 0.95，15% 1.00，≥25% 1.65，线性插值"><input id="stress-linked-iv-beta-auto" type="checkbox" checked>β 按跌幅自适应</label><label id="stress-linked-iv-otm-field" class="checkbox" for="stress-linked-iv-otm" title="七次暴跌里价外 10–20% Put 的 IV 抬升只有 ATM 的约 0.50 倍（B1，中位，n=33）。勾选后只对价外 Put 打折：距现货 ≤5% 取 1，≥10% 取 0.50，中间线性；价内 Put 与 Call 未做验证，保持全额"><input id="stress-linked-iv-otm" type="checkbox" checked>价外 Put 折扣</label><label class="checkbox" for="stress-linked-sigma-crash" title="跌幅 ≥8% 的 20 日窗口里实现波动率是起始 ATM IV 的 1.43 倍（A2）。勾选后复利损耗用的路径 σ 随该点指数跌幅从 ×1 线性放大到 ×1.4（≥8%）"><input id="stress-linked-sigma-crash" type="checkbox" checked>暴跌 σ 放大</label></span>
-                                    <span id="stress-linked-iv-tenor-field" class="stress-linked-inline" hidden><label class="checkbox" for="stress-linked-iv-tenor" title="β 描述的是约 30 天 IV 的反应；越远期的 IV 抬升越少。勾选后每张合约的冲击 × (参考期限 ÷ 剩余天数)^指数，封顶 1。2015–2025 七次 QQQ 暴跌里价外 Put 的实测：相对各事件前端合约，60 天约 0.74、120 天 0.44、240 天 0.21、400 天 0.15；按实际到期天数拟合，最小二乘指数 0.76、逐合约中位 0.64，默认取 0.65；ATM 抬升的衰减更接近平方根（0.5）"><input id="stress-linked-iv-tenor" type="checkbox" checked>按期限衰减</label><label for="stress-linked-iv-tenor-days">参考期限（天）<input id="stress-linked-iv-tenor-days" type="number" step="1" min="1" autocomplete="off" placeholder="30" title="β 所描述的 IV 期限；剩余天数不超过它的合约拿满额冲击"></label><label for="stress-linked-iv-tenor-exponent">衰减指数<input id="stress-linked-iv-tenor-exponent" type="number" step="0.05" min="0.05" max="1" autocomplete="off" placeholder="0.65" title="(参考期限 ÷ 剩余天数) 的指数。0.65 取自七次 QQQ 暴跌中逐合约隐含指数的中位数约 0.64；对数最小二乘为 0.76（一年期约拿 30 天冲击的 0.15–0.2）；0.5 = 平方根规则，接近 ATM 抬升的衰减；1 = 与剩余天数成反比"></label></span>
+                                    <span id="stress-linked-iv-tenor-field" class="stress-linked-inline" hidden><label class="checkbox" for="stress-linked-iv-tenor" title="β 描述的是约 30 天 IV 的反应；越远期的 IV 抬升越少。勾选后每张合约的冲击 × (参考期限 ÷ 剩余天数)^指数，封顶 1。2015–2025 七次 QQQ 暴跌里价外 Put 的实测：相对各事件前端合约，60 天约 0.74、120 天 0.44、240 天 0.21、400 天 0.15；按实际到期天数拟合，最小二乘指数 0.76、逐合约中位 0.64，默认取 0.65；ATM 抬升的衰减更接近平方根（0.5）"><input id="stress-linked-iv-tenor" type="checkbox" checked>按期限衰减</label><label class="half" for="stress-linked-iv-tenor-days">参考期限（天）<input id="stress-linked-iv-tenor-days" type="number" step="1" min="1" autocomplete="off" placeholder="30" title="β 所描述的 IV 期限；剩余天数不超过它的合约拿满额冲击"></label><label class="half" for="stress-linked-iv-tenor-exponent">衰减指数<input id="stress-linked-iv-tenor-exponent" type="number" step="0.05" min="0.05" max="1" autocomplete="off" placeholder="0.65" title="(参考期限 ÷ 剩余天数) 的指数。0.65 取自七次 QQQ 暴跌中逐合约隐含指数的中位数约 0.64；对数最小二乘为 0.76（一年期约拿 30 天冲击的 0.15–0.2）；0.5 = 平方根规则，接近 ATM 抬升的衰减；1 = 与剩余天数成反比"></label></span>
                                     <div class="stress-iv-profile">
                                         <strong id="stress-iv-profile-label">IV 参数来源</strong>
                                         <span id="stress-iv-profile-note"></span>
@@ -303,6 +303,6 @@
     <script src="js/cost_basis_stress_core.js?v=432adb4ed00d"></script>
     <script src="js/cost_basis_stress_band.js?v=40c9f4c63510"></script>
     <script src="js/cost_basis_stress_worker.js?v=3d63d7e54061"></script>
-    <script src="js/cost_basis.js?v=989cae01f5b0"></script>
+    <script src="js/cost_basis.js?v=382517ea688d"></script>
 </body>
 </html>

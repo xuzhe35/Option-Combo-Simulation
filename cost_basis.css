@@ -448,6 +448,7 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
 .premium-expiry-dialog .warnings { margin: 1rem 1.25rem; }
 .premium-expiry-note { margin: 1rem 0 0; padding: 1rem 1.25rem; border-top: 1px solid var(--border); background: var(--panel-soft); color: var(--muted); font-size: .78rem; line-height: 1.7; }
 .stress-view {
+    scroll-margin-top: calc(78px + 1rem);
     grid-template-columns: minmax(300px, 330px) minmax(0, 1fr);
     align-items: start;
     gap: 1.25rem;
@@ -480,14 +481,19 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
 .stress-param-group[open] > summary { border-bottom: 1px solid var(--border); }
 .stress-controls {
     display: grid;
-    gap: .6rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .6rem .7rem;
     padding: .7rem 0 .85rem;
 }
+/* Long selects and free text take the full row; short numbers and their
+   neighbours share one (class "half"). */
+.stress-controls > * { grid-column: 1 / -1; min-width: 0; }
+.stress-controls > .half { grid-column: auto; }
 .stress-controls label { display: grid; gap: .3rem; color: var(--muted); font-size: .73rem; }
 .stress-controls select, .stress-controls input { width: 100%; min-width: 0; }
 .stress-controls label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: .4rem; }
 .stress-controls input[type="checkbox"] { width: auto; }
-.stress-controls button { justify-self: start; }
+.stress-controls button { justify-self: stretch; align-self: end; height: 36px; padding: 0 .5rem; white-space: nowrap; }
 .stress-param-group > .stress-status { margin: -.35rem 0 .85rem; }
 .stress-protection-panel { margin: .7rem 0 .85rem; padding: .75rem .85rem; border: 1px solid #d9e4f7; border-radius: 11px; background: #f7faff; }
 .stress-protection-toggle { display: flex; align-items: flex-start; gap: .65rem; color: #33425a; cursor: pointer; }
@@ -495,11 +501,15 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
 .stress-protection-toggle span { display: grid; gap: .13rem; }
 .stress-protection-toggle strong { font-size: .76rem; }
 .stress-protection-toggle small { color: var(--muted); font-size: .72rem; }
-.stress-protection-inputs { display: grid; gap: .55rem; margin: .7rem 0 0; padding-top: .7rem; border-top: 1px solid #e0e8f6; }
+.stress-protection-inputs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem .7rem; margin: .7rem 0 0; padding-top: .7rem; border-top: 1px solid #e0e8f6; }
+.stress-protection-inputs > * { grid-column: 1 / -1; min-width: 0; }
+.stress-protection-inputs > .half { grid-column: auto; }
 .stress-protection-inputs label { display: grid; gap: .28rem; color: var(--muted); font-size: .73rem; }
 .stress-protection-inputs input { width: 100%; height: 34px; }
 .stress-protection-inputs select { width: 100%; min-width: 0; height: 34px; }
-.stress-protection-inputs .stress-linked-inline { display: grid; gap: .55rem; padding: 0; border: 0; background: transparent; }
+.stress-protection-inputs .stress-linked-inline { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem .7rem; padding: 0; border: 0; background: transparent; }
+.stress-protection-inputs .stress-linked-inline > .half { grid-column: auto; }
+#stress-linked-iv-tenor-field > .checkbox { grid-column: 1 / -1; }
 .stress-protection-inputs .stress-linked-inline .checkbox { display: inline-flex; align-items: center; gap: .3rem; height: 34px; color: var(--accent-text); font-size: .73rem; white-space: nowrap; }
 .stress-protection-inputs .stress-linked-inline .checkbox input { width: 15px; height: 15px; }
 .stress-protection-inputs > span { padding: .38rem .55rem; border: 1px solid #d9e4f7; border-radius: 7px; color: #4f6078; background: #fff; font-size: .72rem; }

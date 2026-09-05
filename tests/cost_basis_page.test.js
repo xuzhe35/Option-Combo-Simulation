@@ -37,7 +37,8 @@ function loadReconciliationHarness() {
             message: _handleMessage, renderWhatIf: _renderWhatIf,
             editPrice: _editWhatIfPrice, followPrice: _setWhatIfFollowReference,
             refreshPrice: _refreshWhatIfMarketPrice, invalidate: _invalidatePositions,
-            selectPriceBook: _beginBookSelection,
+            selectPriceBook: _beginBookSelection, loadEvents: _loadEvents,
+            configureEventLoad() { _syncBookMode = () => {}; },
             renderStress: _renderStressTest,
             stressSeries: _stressSeries, stressJob, cancelStressJob: _cancelStressJob,
             silenceStressRender() { _renderStressTest = () => {}; },
@@ -94,7 +95,8 @@ function loadReconciliationHarness() {
             removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
             get firstChild() { return this.children[0]; },
             addEventListener(name, callback) { this.handlers[name] = callback; },
-            focus() { context.document.activeElement = this; },
+            focus(options) { this.focusOptions = options; context.document.activeElement = this; },
+            scrollIntoView(options) { this.scrollOptions = options; },
             querySelector() { return this.body || (this.body = node()); },
             querySelectorAll() { return []; },
         };
@@ -176,6 +178,21 @@ function loadStressPairHarness() {
         linkedHedge: h.linkedRequest(), requireSnapshotVersion: 2,
     });
     return { h, pending, quote, compile, events };
+}
+
+function enableStressChartDom(h) {
+    const doc = h.context.document;
+    doc.createElementNS = () => ({ children: [], attributes: {}, style: {},
+        appendChild(child) { this.children.push(child); return child; },
+        setAttribute(name, value) { this.attributes[name] = value; },
+    });
+    const byId = doc.getElementById;
+    doc.getElementById = (id) => {
+        const node = byId(id);
+        node.style ||= {};
+        node.setAttribute ||= function set(name, value) { this[name] = value; };
+        return node;
+    };
 }
 
 module.exports = {
@@ -2555,7 +2572,12 @@ module.exports = {
                 assert.equal(h.state.stressOpen, true);
                 assert.equal(h.state.activeView, 'stress');
                 assert.equal(doc.body.classList.contains('sidebar-open'), false);
-                assert.equal(doc.activeElement, doc.getElementById('stress-expiry'));
+                assert.equal(doc.activeElement, doc.getElementById('stress-title'));
+                assert.equal(doc.activeElement.focusOptions.preventScroll, true);
+                assert.equal(doc.getElementById('stress-view').scrollOptions.block, 'start');
+                assert.match(readPage(), /id="stress-title" tabindex="-1"/);
+                const css = fs.readFileSync(path.join(PROJECT_ROOT, 'cost_basis.css'), 'utf8');
+                assert.match(css, /\.stress-view \{\s*scroll-margin-top: calc\(78px \+ 1rem\)/);
                 assert.equal(h.state.stressHorizonDays, null);
                 const events = [{ kind: 'opening_balance', account: 'U1', tradeDate: '2026-01-01',
                     shares: 100, cashAmount: -10000, price: 100 }];
@@ -2575,6 +2597,138 @@ module.exports = {
                 assert.equal(h.stressJob.series, null, 'late band result is dropped');
                 h.closeStress();
                 assert.equal(h.state.activeView, 'ledger', 'closing twice is harmless');
+            },
+        },
+        {
+            name: 'repeated stress navigation preserves the scenario, worker, snapshots and pending refresh',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                h.configure({ request: () => { throw new Error('navigation must not request quotes'); } });
+                Object.assign(h.state, { stressOpen: true, activeView: 'stress', stressBasePrice: 65,
+                    stressHorizonDays: 10, stressExpiry: '20270319', stressLinkedIvTenorExponent: 0.25 });
+                const snapshot = { underlyingPrice: 72 };
+                h.state.stressLongOptionInputs = snapshot;
+                const worker = { terminate() { throw new Error('navigation must not cancel work'); } };
+                h.stressJob.worker = worker;
+                h.stressRefreshJob.pending = true;
+                const generation = h.stressRefreshJob.generation;
+                h.node('stress-linked-group').dataset.manual = '1';
+                h.context.document.body.classList.add('sidebar-open');
+                h.openStress();
+                assert.equal(h.state.stressBasePrice, 65);
+                assert.equal(h.state.stressHorizonDays, 10);
+                assert.equal(h.state.stressExpiry, '20270319');
+                assert.equal(h.state.stressLinkedIvTenorExponent, 0.25);
+                assert.equal(h.state.stressLongOptionInputs, snapshot);
+                assert.equal(h.stressJob.worker, worker);
+                assert.equal(h.stressRefreshJob.pending, true);
+                assert.equal(h.stressRefreshJob.generation, generation);
+                assert.equal(h.node('stress-linked-group').dataset.manual, '1');
+                assert.equal(h.context.document.body.classList.contains('sidebar-open'), false);
+                assert.equal(h.node('stress-view').scrollOptions, undefined, 'no unexpected scrolling');
+            },
+        },
+        {
+            name: 'same-book event reload redraws settlement results and invalidates old quotes and workers',
+            async run() {
+                const h = loadPriceHarness(); h.configureEventLoad(); enableStressChartDom(h);
+                const events = h.state.allEvents.concat({ kind: 'share_trade', account: 'U1',
+                    tradeDate: '2026-09-02', shares: 100, price: 70, cashAmount: -7000 });
+                h.configure({ today: () => '2026-09-03', request: async action => {
+                    assert.equal(action, 'list_cost_basis_events');
+                    return { events, total: events.length };
+                } });
+                Object.assign(h.state, { stressOpen: true, activeView: 'stress', stressExpiry: '20260904',
+                    stressBasePrice: 70, stressIncludeLongOptions: false, stressBandEnabled: false });
+                h.renderStress();
+                assert.equal(h.stressJob.series.points.at(-1).shares, 200);
+                assert.equal(h.stressJob.series.points.at(-1).headlinePnl, 4400);
+                const old = h.stressJob.series;
+                const worker = { terminate() { this.terminated = true; } };
+                h.stressJob.worker = worker;
+                h.state.stressLongOptionInputs = { stale: true };
+                h.state.stressLinkedInputs = { stale: true };
+                await h.loadEvents();
+                assert.equal(worker.terminated, true);
+                assert.equal(h.state.stressLongOptionInputs, null);
+                assert.equal(h.state.stressLinkedInputs, null);
+                assert.notEqual(h.stressJob.series, old);
+                assert.equal(h.stressJob.series.points.at(-1).shares, 300);
+                assert.equal(h.stressJob.series.points.at(-1).headlinePnl, 6500);
+                assert.equal(h.state.activeView, 'stress');
+                assert.equal(h.state.stressBasePrice, 70);
+                assert.equal(h.node('stress-chart').children.length > 0, true);
+            },
+        },
+        {
+            name: 'same-book reload refreshes the linked ledger and quotes the newly loaded contracts together',
+            async run() {
+                const { h, pending, quote, events } = loadStressPairHarness(); h.configureEventLoad(); enableStressChartDom(h);
+                h.state.stressOpen = true;
+                h.state.stressLongOptionInputs = { stale: true };
+                h.state.stressLinkedInputs = { stale: true };
+                const updated = h.state.allEvents.concat({ kind: 'option_trade', account: 'U1',
+                    tradeDate: '2026-09-02', right: 'P', strike: 60, expiry: '20270319',
+                    sharesPerContract: 100, contracts: 1, price: 3, cashAmount: -300 });
+                const reload = h.loadEvents();
+                pending[0].resolve({ events: updated, total: updated.length }); await reload;
+                assert.equal(h.state.stressLongOptionInputs, null);
+                assert.equal(h.state.stressLinkedInputs, null);
+                assert.equal(h.stressRefreshJob.pending, true);
+                assert.equal(pending[1].action, 'list_cost_basis_events');
+                assert.equal(pending[1].fields.bookId, 'book-qqq');
+                pending[1].resolve({ events, total: events.length });
+                await new Promise(resolve => setImmediate(resolve));
+                assert.deepEqual(pending.slice(2).map(p => p.fields.bookId), ['book-test', 'book-qqq']);
+                assert.ok(pending[2].fields.contracts.some(p => p.strike === 60 && p.expiry === '20270319'));
+                assert.ok(pending[3].fields.contracts.some(p => p.strike === 480));
+                pending[2].resolve(quote('book-test')); pending[3].resolve(quote('book-qqq'));
+                await new Promise(resolve => setImmediate(resolve));
+                assert.equal(h.stressRefreshJob.pending, false);
+                assert.equal(h.state.stressLinkedMapping, 'linear');
+                assert.equal(h.state.stressLinkedRatio, 3);
+            },
+        },
+        {
+            name: 'obsolete event reloads cannot invalidate the latest stress results or restart quotes',
+            async run() {
+                const h = loadPriceHarness(); h.configureEventLoad(); enableStressChartDom(h);
+                const pending = [];
+                h.configure({ today: () => '2026-09-03', request: (action) => {
+                    assert.equal(action, 'list_cost_basis_events');
+                    return new Promise(resolve => pending.push(resolve));
+                } });
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904', stressBasePrice: 70,
+                    stressIncludeLongOptions: false, stressBandEnabled: false });
+                const events = h.state.allEvents;
+                const first = h.loadEvents(), second = h.loadEvents();
+                pending[1]({ events, total: events.length }); await second;
+                const latest = h.stressJob.series, generation = h.stressJob.generation;
+                pending[0]({ events: [], total: 0 });
+                assert.equal(await first, false);
+                assert.equal(h.stressJob.series, latest);
+                assert.equal(h.stressJob.generation, generation);
+                assert.equal(h.state.allEvents.length, 2);
+            },
+        },
+        {
+            name: 'event reload with no remaining options clears the stress chart without requesting quotes',
+            async run() {
+                const h = loadPriceHarness(); h.configureEventLoad(); enableStressChartDom(h);
+                h.configure({ today: () => '2026-09-03', request: async action => {
+                    assert.equal(action, 'list_cost_basis_events');
+                    return { events: [], total: 0 };
+                } });
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904', stressBasePrice: 70,
+                    stressIncludeLongOptions: false, stressBandEnabled: false });
+                h.renderStress();
+                h.state.stressIncludeLongOptions = true;
+                await h.loadEvents();
+                assert.equal(h.stressJob.series, null);
+                assert.equal(h.node('stress-chart').children.length, 0);
+                assert.equal(h.node('stress-key-points').children.length, 0);
+                assert.equal(h.node('stress-slice').hidden, true);
+                assert.match(h.node('stress-status').textContent, /没有可用于压力测试/);
             },
         },
         {

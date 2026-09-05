@@ -1366,12 +1366,27 @@
             state.bookId, bookId, state.eventLoadGeneration, generation)) {
             return false;
         }
+        // A same-book refresh is reachable from the stress view's topbar.
+        // Its old worker and quotes describe the previous event stream.
+        if (state.stressOpen) _invalidateStressScenarioInputs();
         state.allEvents = collected;
         state.eventsTotal = total;
         state.flowPage = 1;
         _syncBookMode();
         _renderBookMeta();
         _recompute();
+        if (state.stressOpen) {
+            const expiries = _renderStressExpiryOptions();
+            if (expiries.length && state.eventsTotal <= state.allEvents.length
+                && (state.stressIncludeLongOptions || state.stressIncludeLinkedHedge
+                    || state.stressPnlBasis === 'change')) {
+                // Reload the linked ledger too, then quote the new contract sets
+                // as one pair. Do not reinitialize the user's scenario controls.
+                void _refreshStressScenarioInputs(false, true);
+            } else {
+                _renderStressTest();
+            }
+        }
         // A preview is a calculation over the ledger state at that moment.
         // Manual entries, voids, or a refresh can change the opening-position
         // arithmetic after the file was selected, so never leave an old
@@ -3018,6 +3033,11 @@
     function _openStressTest() {
         const book = _currentBook();
         if (!book || !state.ledger) return;
+        if (state.stressOpen) {
+            // Navigating to the current view is not a new scenario or refresh.
+            _showView('stress');
+            return;
+        }
         state.stressOpen = true;
         state.stressExpiry = state.whatIfExpiry;
         state.stressHorizonDays = null;
@@ -3027,7 +3047,10 @@
         _setStressGroupOpen('stress-own-group', state.stressIncludeLongOptions, true);
         _setStressGroupOpen('stress-linked-group', state.stressIncludeLinkedHedge, true);
         _renderStressTest();
-        $('stress-expiry').focus();
+        // In the stacked layout parameters follow the results. Focus the view
+        // heading, not an input below the chart, and enter at the results top.
+        $('stress-title').focus({ preventScroll: true });
+        $('stress-view').scrollIntoView({ block: 'start' });
         if (state.stressIncludeLongOptions || state.stressIncludeLinkedHedge || state.stressPnlBasis === 'change') {
             void _refreshStressScenarioInputs(false);
         }

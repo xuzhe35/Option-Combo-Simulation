@@ -76,13 +76,14 @@ CSS `cost_basis.css`：
 ## 4. 行为契约
 
 1. `_showView` 增加 `stress` 分支：`state.activeView = 'stress'`，三个视图互斥显示，侧栏压力测试项 `active`。
-2. `_openStressTest()` 去掉弹层显示和 body 类，改调 `_showView('stress')`；其余（重置情景日期、基准价、恢复联动记忆、渲染、按需刷新）不变；焦点仍落到 `#stress-expiry`。
+2. 首次 `_openStressTest()` 调 `_showView('stress')`，初始化情景日期、基准价、联动记忆并按需刷新。已经打开时重复点击导航只保持当前视图并关闭侧栏抽屉，不重置参数、快照、Worker 或折叠状态。首次进入将焦点放在 `#stress-title`（`tabindex="-1"`、`preventScroll`），再将视图顶部滚入屏幕，预留固定顶栏空间；不聚焦堆叠布局中位于图表下方的到期控件。
 3. `_closeStressTest()` 去掉弹层隐藏和 body 类，改调 `_showView('ledger')`；取消 Worker、失效快照、清定时器、焦点回 `#btn-open-stress-test` 不变。
 4. **离开视图即关闭**：`_showView(next)` 在 `next !== 'stress' && state.stressOpen` 时先执行 `_closeStressTest` 的拆除部分（不递归调用 `_showView`）。这样侧栏切账本、点设置、`_fillForm`、`book-select` change 都会取消进行中的批次，迟到结果被 `stressOpen === false` 门禁丢弃。弹层时代这些入口被遮罩挡住，视图时代必须显式处理。
 5. 切换账本（`_selectBook`）不会自动重开压力测试；用户回到账本后再点入口，`_openStressTest` 按新账本重新初始化。不持久化 `activeView`，页面刷新总是回到账本视图。
 6. `Escape` 只在 `state.stressOpen` 时返回账本视图（现有行为不变）；遮罩点击关闭的监听删除。
 7. `body.stress-modal-open` 滚动锁定删除；页面正常滚动，左栏 sticky。
 8. 在 900px 以下的窄屏，侧栏抽屉 `sidebar-open` 由 `_showView` 统一关闭，压力测试视图不例外。
+9. 压力测试打开时，顶栏刷新成功载入同一本账本的新事件后，旧 Worker 与两边快照立即失效；纯结算情景直接重画，需要行情则重读联动账本并成对刷新新合约集合。过期的事件载入响应不能触发此流程。刷新后无未平期权或事件不完整时撤下旧图，不继续显示旧持仓结果。
 
 ## 5. 样式
 
@@ -117,7 +118,7 @@ tooltip 现有 20 行，其中八行是估值明细（② 期权/交割净值、
 全部加在 `tests/cost_basis_page.test.js`，沿用现有 harness（真实 HTML 建 DOM、`h.state`、`h.renderStress`、假 Worker 记录 `terminated`）。
 
 1. **视图互斥**：`_showView('stress')` 后 `#stress-view` 可见、`#ledger-view` 与 `#settings-view` 隐藏，`state.activeView === 'stress'`，顶栏 eyebrow/标题为压力测试文案；再 `_showView('ledger')` 三者复原。
-2. **入口门禁**：无 `state.ledger` 时点击 `#btn-open-stress-test` 和 `#btn-open-stress-view` 均不改变 `activeView` 与 `stressOpen`；载入账本后点击进入 stress 视图，`stressOpen === true`，`document.activeElement` 为 `#stress-expiry`。
+2. **入口门禁**：无 `state.ledger` 时点击两个入口均不改变 `activeView` 与 `stressOpen`；载入账本后进入 stress 视图，`stressOpen === true`，焦点为 `#stress-title`，视图顶部可见。重复点击当前导航不重置情景或启动新请求。
 3. **返回与 Escape**：点击 `#btn-close-stress-test` 或派发 `Escape`：`stressOpen === false`、`activeView === 'ledger'`、假 Worker `terminated === true`、`stressLongOptionInputs`/`stressLinkedInputs` 已失效、焦点回 `#btn-open-stress-test`。
 4. **离开视图即关闭**：压力测试打开且有进行中的 Worker 时，分别调用 `_showView('settings')`、点击侧栏另一账本按钮、触发 `book-select` change：`stressOpen === false`，Worker 已终止；随后向假 Worker 投递一条迟到的 series 结果，断言 `#stress-chart` 仍为空、`#stress-status` 未被改写。
 5. **重新进入按新账本初始化**：切换账本后再次进入，`stressExpiry === state.whatIfExpiry`、`stressHorizonDays === null`、`stressBasePrice` 等于新账本的参考价、联动记忆按新 bookId 恢复。
