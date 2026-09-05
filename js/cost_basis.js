@@ -970,20 +970,27 @@
     }
 
     function _showView(view) {
-        const next = view === 'settings' ? 'settings' : 'ledger';
+        const next = view === 'settings' || view === 'stress' ? view : 'ledger';
+        // The stress test lives in its own view. Leaving that view for any
+        // reason (sidebar, settings, form fill, book switch) tears it down so
+        // no worker or snapshot batch keeps running behind another view.
+        if (next !== 'stress' && state.stressOpen) _teardownStressTest();
         state.activeView = next;
         $('ledger-view').hidden = next !== 'ledger';
         $('settings-view').hidden = next !== 'settings';
+        $('stress-view').hidden = next !== 'stress';
         $('btn-open-settings').classList.toggle('active', next === 'settings');
+        $('btn-open-stress-view').classList.toggle('active', next === 'stress');
         Array.from($('book-sidebar-list').querySelectorAll('[data-book-id]'))
             .forEach((button) => button.classList.toggle(
                 'active', next === 'ledger' && button.dataset.bookId === state.bookId));
         const book = _currentBook();
+        const bookTitle = book ? `${book.account || '旧版账户'} / ${book.symbol}` : '请选择账本';
         _text($('page-eyebrow'), next === 'settings'
-            ? '系统管理' : '综合成本账本');
+            ? '系统管理' : (next === 'stress' ? 'What If · 多价格情景' : '综合成本账本'));
         _text($('page-title'), next === 'settings'
             ? '设置与新建账本'
-            : (book ? `${book.account || '旧版账户'} / ${book.symbol}` : '请选择账本'));
+            : (next === 'stress' ? `${bookTitle} · 到期压力测试` : bookTitle));
         globalScope.document.body.classList.remove('sidebar-open');
     }
 
@@ -1235,6 +1242,11 @@
     }
 
     function _beginBookSelection(bookId) {
+        // A stress view still open belongs to the previous book.
+        if (state.stressOpen) {
+            _teardownStressTest();
+            _showView('ledger');
+        }
         _cancelStressJob();
         _invalidateStressScenarioInputs();
         state.whatIfEditGeneration += 1;
@@ -1785,6 +1797,7 @@
         const followInput = $('what-if-follow-reference');
         followInput.checked = state.whatIfPriceSource !== 'custom';
         const stressButton = $('btn-open-stress-test');
+        const stressNavButton = $('btn-open-stress-view');
         const resultNode = $('what-if-result');
         const totalCostNode = $('what-if-total-cost');
         const finalSharesNode = $('what-if-final-shares');
@@ -1804,6 +1817,7 @@
             currentButton.disabled = true;
             followInput.disabled = true;
             stressButton.disabled = true;
+            stressNavButton.disabled = true;
             _text($('what-if-price-label'), '假设标的到期结算价');
             _text($('what-if-context'), '选择账本后，可模拟所有未平期权结算后的持股与综合成本。');
             _text($('what-if-result-caption'), '按上方选中的成本口径');
@@ -1819,6 +1833,7 @@
         currentButton.disabled = futures || !expiries.length
             || state.marketPriceRefreshPending || state.connection !== 'connected';
         stressButton.disabled = futures || !expiries.length;
+        stressNavButton.disabled = stressButton.disabled;
         _text($('what-if-price-label'), `${book.symbol} 假设到期结算价`);
         if (futures) {
             input.value = '';
@@ -2950,8 +2965,9 @@
         state.stressHorizonDays = null;
         state.stressBasePrice = _stressReferencePrice();
         _restoreStressLinkedChoice(book);
-        $('stress-modal').hidden = false;
-        globalScope.document.body.classList.add('stress-modal-open');
+        _showView('stress');
+        _setStressGroupOpen('stress-own-group', state.stressIncludeLongOptions, true);
+        _setStressGroupOpen('stress-linked-group', state.stressIncludeLinkedHedge, true);
         _renderStressTest();
         $('stress-expiry').focus();
         if (state.stressIncludeLongOptions || state.stressIncludeLinkedHedge || state.stressPnlBasis === 'change') {
@@ -2959,16 +2975,44 @@
         }
     }
 
-    function _closeStressTest() {
+    /**
+     * Stop everything the stress view owns without touching which view is
+     * shown. Late worker results and snapshot responses are dropped by the
+     * stressOpen gate once this has run.
+     */
+    function _teardownStressTest() {
         if (!state.stressOpen) return;
         state.stressOpen = false;
         _cancelStressJob();
         _invalidateStressScenarioInputs();
         globalScope.clearTimeout(state.stressHorizonTimer);
         state.stressHorizonTimer = null;
-        $('stress-modal').hidden = true;
-        globalScope.document.body.classList.remove('stress-modal-open');
+    }
+
+    function _closeStressTest() {
+        if (!state.stressOpen) return;
+        _teardownStressTest();
+        _showView('ledger');
         $('btn-open-stress-test').focus();
+    }
+
+    /**
+     * Parameter groups in the stress view follow their master checkbox:
+     * ticking opens the group, unticking closes it, unless the user has
+     * toggled the group by hand since the view opened (`force` resets that).
+     */
+    function _setStressGroupOpen(groupId, open, force = false) {
+        const group = $(groupId);
+        if (!group) return;
+        if (force) delete group.dataset.manual;
+        if (!open && group.dataset.manual === '1') return;
+        group.dataset.expected = open ? '1' : '0';
+        group.open = Boolean(open);
+    }
+
+    function _noteStressGroupToggle(toggleEvent) {
+        const group = toggleEvent.target;
+        if ((group.open ? '1' : '0') !== group.dataset.expected) group.dataset.manual = '1';
     }
 
     /**
@@ -6026,9 +6070,9 @@
             if (field === 'stressPnlBasis') void _refreshStressScenarioInputs(false);
         });
         $('btn-close-stress-test').addEventListener('click', _closeStressTest);
-        $('stress-modal').addEventListener('click', (clickEvent) => {
-            if (clickEvent.target === $('stress-modal')) _closeStressTest();
-        });
+        $('btn-open-stress-view').addEventListener('click', _openStressTest);
+        $('stress-own-group').addEventListener('toggle', _noteStressGroupToggle);
+        $('stress-linked-group').addEventListener('toggle', _noteStressGroupToggle);
         $('stress-expiry').addEventListener('change', (changeEvent) => {
             state.stressExpiry = changeEvent.target.value;
             // Picking an expiry is an explicit choice of the scenario date.
@@ -6041,6 +6085,7 @@
         });
         $('stress-include-linked-hedge').addEventListener('change', (changeEvent) => {
             state.stressIncludeLinkedHedge = changeEvent.target.checked;
+            _setStressGroupOpen('stress-linked-group', state.stressIncludeLinkedHedge);
             _invalidateStressScenarioInputs();
             _writeStressLinkedMemory();
             _renderStressTest();
@@ -6070,7 +6115,7 @@
         $('stress-horizon-days').addEventListener('input', (inputEvent) => {
             const raw = String(inputEvent.target.value || '').trim();
             // Blank = settle on the selected expiry. A bad entry is kept so
-            // the modal can say so instead of silently using the expiry.
+            // the view can say so instead of silently using the expiry.
             state.stressHorizonDays = raw === '' ? null : (_numberOrNull(raw) === null
                 ? NaN : _numberOrNull(raw));
             // The scenario date moved: every snapshot keyed to it is stale.
@@ -6185,6 +6230,7 @@
         });
         $('stress-include-long-options').addEventListener('change', (changeEvent) => {
             state.stressIncludeLongOptions = changeEvent.target.checked;
+            _setStressGroupOpen('stress-own-group', state.stressIncludeLongOptions);
             _renderStressTest();
             if (state.stressIncludeLongOptions && !state.stressLongOptionInputs) {
                 void _refreshStressScenarioInputs(false);

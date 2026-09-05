@@ -52,6 +52,9 @@ function loadReconciliationHarness() {
             loadLinked: _loadStressLinkedEvents,
             ensureLinked: _ensureStressLinkedData,
             linkedRequest: _stressLinkedHedgeRequest,
+            showView: _showView, openStress: _openStressTest, closeStress: _closeStressTest,
+            teardownStress: _teardownStressTest, setStressGroup: _setStressGroupOpen,
+            noteStressGroupToggle: _noteStressGroupToggle,
             configurePrice() {
                 _renderAll = _renderWhatIf;
                 _renderPositionsStatus = () => {};
@@ -74,13 +77,26 @@ function loadReconciliationHarness() {
         };
         globalScope.OptionComboCostBasisPage = {`), context);
     function node() {
+        const classes = new Set();
         return {
-            children: [], handlers: {}, textContent: '',
+            children: [], handlers: {}, textContent: '', dataset: {},
+            classList: {
+                add(...names) { names.forEach((name) => classes.add(name)); },
+                remove(...names) { names.forEach((name) => classes.delete(name)); },
+                contains(name) { return classes.has(name); },
+                toggle(name, force) {
+                    const on = force === undefined ? !classes.has(name) : Boolean(force);
+                    if (on) classes.add(name); else classes.delete(name);
+                    return on;
+                },
+            },
             appendChild(child) { this.children.push(child); return child; },
             removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
             get firstChild() { return this.children[0]; },
             addEventListener(name, callback) { this.handlers[name] = callback; },
+            focus() { context.document.activeElement = this; },
             querySelector() { return this.body || (this.body = node()); },
+            querySelectorAll() { return []; },
         };
     }
     const nodes = new Map();
@@ -91,6 +107,7 @@ function loadReconciliationHarness() {
             if (!nodes.has(id)) nodes.set(id, node());
             return nodes.get(id);
         },
+        body: node(),
     };
     context.alert = (message) => alerts.push(message);
     const harness = context.pageHarness;
@@ -2489,6 +2506,211 @@ module.exports = {
                     /async function _adoptTwsPosition[\s\S]{0,1600}import_cost_basis_events/);
                 assert.match(source, /events:\s*\[copy\]/);
                 assert.match(source, /TWS 均价不可用/);
+            },
+        },
+        {
+            name: 'the stress test is a page view: showView switches the three views and the topbar',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                const doc = h.context.document;
+                h.showView('stress');
+                assert.equal(h.state.activeView, 'stress');
+                assert.equal(doc.getElementById('stress-view').hidden, false);
+                assert.equal(doc.getElementById('ledger-view').hidden, true);
+                assert.equal(doc.getElementById('settings-view').hidden, true);
+                assert.equal(doc.getElementById('page-eyebrow').textContent, 'What If · 多价格情景');
+                assert.equal(doc.getElementById('page-title').textContent, 'U1 / TQQQ · 到期压力测试');
+                assert.equal(doc.getElementById('btn-open-stress-view').classList.contains('active'), true);
+                h.showView('ledger');
+                assert.equal(h.state.activeView, 'ledger');
+                assert.equal(doc.getElementById('stress-view').hidden, true);
+                assert.equal(doc.getElementById('ledger-view').hidden, false);
+                assert.equal(doc.getElementById('page-title').textContent, 'U1 / TQQQ');
+                assert.equal(doc.getElementById('btn-open-stress-view').classList.contains('active'), false);
+                h.showView('settings');
+                assert.equal(doc.getElementById('settings-view').hidden, false);
+                assert.equal(doc.getElementById('stress-view').hidden, true);
+            },
+        },
+        {
+            name: 'opening the stress test enters the view; closing returns to the ledger and drops late worker results',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                const doc = h.context.document;
+                const workers = [];
+                h.context.Worker = class {
+                    constructor() { workers.push(this); }
+                    postMessage(message) { this.message = message; }
+                    terminate() { this.terminated = true; }
+                };
+                doc.querySelectorAll = () => [{ src: 'http://localhost/js/cost_basis_stress_worker.js?v=hash' }];
+                h.configure({ request: () => new Promise(() => {}) });
+                doc.body.classList.add('sidebar-open');
+                h.state.ledger = null;
+                h.openStress();
+                assert.equal(h.state.stressOpen, false, 'no ledger: nothing opens');
+                assert.equal(h.state.activeView, 'ledger');
+                h.state.ledger = h.context.OptionComboCostBasisCore.computeLedger(h.state.allEvents);
+                h.openStress();
+                assert.equal(h.state.stressOpen, true);
+                assert.equal(h.state.activeView, 'stress');
+                assert.equal(doc.body.classList.contains('sidebar-open'), false);
+                assert.equal(doc.activeElement, doc.getElementById('stress-expiry'));
+                assert.equal(h.state.stressHorizonDays, null);
+                const events = [{ kind: 'opening_balance', account: 'U1', tradeDate: '2026-01-01',
+                    shares: 100, cashAmount: -10000, price: 100 }];
+                const options = { centerPrice: 100, asOfInstant: '2026-09-08T16:00:00Z',
+                    targetInstant: '2026-09-08T16:00:00Z', throughExpiry: '20260908' };
+                h.stressSeries(events, options);
+                assert.equal(workers.length, 1);
+                h.closeStress();
+                assert.equal(h.state.stressOpen, false);
+                assert.equal(h.state.activeView, 'ledger');
+                assert.equal(doc.getElementById('stress-view').hidden, true);
+                assert.equal(workers[0].terminated, true);
+                assert.equal(h.stressJob.series, null);
+                assert.equal(doc.activeElement, doc.getElementById('btn-open-stress-test'));
+                workers[0].onmessage({ data: { generation: workers[0].message.generation,
+                    band: { available: true, members: [], points: [] } } });
+                assert.equal(h.stressJob.series, null, 'late band result is dropped');
+                h.closeStress();
+                assert.equal(h.state.activeView, 'ledger', 'closing twice is harmless');
+            },
+        },
+        {
+            name: 'leaving the stress view by the settings entry or a book switch tears the job down',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                const doc = h.context.document;
+                const workers = [];
+                h.context.Worker = class {
+                    constructor() { workers.push(this); }
+                    postMessage(message) { this.message = message; }
+                    terminate() { this.terminated = true; }
+                };
+                doc.querySelectorAll = () => [{ src: 'http://localhost/js/cost_basis_stress_worker.js?v=hash' }];
+                h.configure({ request: () => new Promise(() => {}) });
+                const events = [{ kind: 'opening_balance', account: 'U1', tradeDate: '2026-01-01',
+                    shares: 100, cashAmount: -10000, price: 100 }];
+                const options = { centerPrice: 100, asOfInstant: '2026-09-08T16:00:00Z',
+                    targetInstant: '2026-09-08T16:00:00Z', throughExpiry: '20260908' };
+                h.openStress();
+                h.stressSeries(events, options);
+                h.showView('settings');
+                assert.equal(h.state.stressOpen, false);
+                assert.equal(workers[0].terminated, true);
+                assert.equal(h.stressJob.series, null);
+                assert.equal(h.state.activeView, 'settings');
+                h.showView('ledger');
+                h.openStress();
+                h.stressSeries(events, options);
+                assert.equal(workers.length, 2);
+                assert.equal(workers[1].terminated, undefined);
+                h.state.books.push({ bookId: 'book-qqq', account: 'U1', symbol: 'QQQ', secType: 'STK' });
+                h.selectPriceBook('book-qqq');
+                assert.equal(h.state.stressOpen, false);
+                assert.equal(h.state.activeView, 'ledger');
+                assert.equal(doc.getElementById('stress-view').hidden, true);
+                assert.equal(workers[1].terminated, true);
+                assert.equal(h.stressJob.series, null);
+                workers[1].onmessage({ data: { generation: workers[1].message.generation,
+                    band: { available: true, members: [], points: [] } } });
+                assert.equal(h.stressJob.series, null);
+            },
+        },
+        {
+            name: 'parameter groups follow their master checkbox unless the user toggled them by hand',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                const doc = h.context.document;
+                h.configure({ request: () => new Promise(() => {}) });
+                const own = doc.getElementById('stress-own-group');
+                const linked = doc.getElementById('stress-linked-group');
+                h.state.stressIncludeLongOptions = true;
+                h.state.stressIncludeLinkedHedge = false;
+                h.openStress();
+                assert.equal(own.open, true);
+                assert.equal(linked.open, false);
+                h.setStressGroup('stress-linked-group', true);
+                assert.equal(linked.open, true);
+                h.setStressGroup('stress-linked-group', false);
+                assert.equal(linked.open, false);
+                // The user opens the group by hand: unticking no longer closes it.
+                linked.open = true;
+                h.noteStressGroupToggle({ target: linked });
+                assert.equal(linked.dataset.manual, '1');
+                h.setStressGroup('stress-linked-group', false);
+                assert.equal(linked.open, true);
+                // A programmatic change is not a manual toggle.
+                h.setStressGroup('stress-own-group', false);
+                h.noteStressGroupToggle({ target: own });
+                assert.equal(own.dataset.manual, undefined);
+                // Re-entering the view resets the manual flags to the checkboxes.
+                h.closeStress();
+                h.openStress();
+                assert.equal(linked.open, false);
+                assert.equal(linked.dataset.manual, undefined);
+                assert.equal(own.open, true);
+            },
+        },
+        {
+            name: 'the sidebar stress entry mirrors the What If button',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                const doc = h.context.document;
+                h.renderWhatIf();
+                assert.equal(doc.getElementById('btn-open-stress-test').disabled, false);
+                assert.equal(doc.getElementById('btn-open-stress-view').disabled, false);
+                h.state.ledger = null;
+                h.renderWhatIf();
+                assert.equal(doc.getElementById('btn-open-stress-test').disabled, true);
+                assert.equal(doc.getElementById('btn-open-stress-view').disabled, true);
+                const html = readPage();
+                assert.match(html, /<button id="btn-open-stress-view" class="nav-item nav-item-stress" type="button" disabled>/);
+                assert.match(html, /<p class="nav-label nav-label-system">情景<\/p>\s*<button id="btn-open-stress-view"/);
+            },
+        },
+        {
+            name: 'every stress element the page script addresses exists exactly once in the view markup',
+            run() {
+                const html = readPage();
+                const source = readScript();
+                const ids = new Set(Array.from(source.matchAll(/\$\('((?:stress-|btn-[a-z-]*stress)[a-z0-9-]*)'\)/g), (m) => m[1]));
+                assert.ok(ids.size > 60, `expected many stress ids, got ${ids.size}`);
+                const missing = [];
+                for (const id of ids) {
+                    const count = html.split(`id="${id}"`).length - 1;
+                    if (count !== 1) missing.push(`${id}×${count}`);
+                }
+                assert.deepEqual(missing, []);
+                assert.match(html, /<div id="stress-view" class="page-view stress-view" aria-labelledby="stress-title" hidden>/);
+                assert.match(html, /<aside class="stress-params"[\s\S]*?<\/aside>\s*<section class="stress-results"/);
+                const view = html.slice(html.indexOf('id="stress-view"'), html.indexOf('</main>'));
+                for (const id of ['stress-status', 'stress-chart', 'stress-key-points', 'stress-slice']) {
+                    assert.ok(view.indexOf(`id="${id}"`) > view.indexOf('class="stress-results"'), `${id} lives in the results column`);
+                }
+                assert.ok(view.indexOf('id="stress-linked-group"') < view.indexOf('</aside>'));
+                assert.doesNotMatch(html, /stress-modal|stress-dialog|stress-close|aria-modal/);
+                assert.doesNotMatch(source, /stress-modal/);
+            },
+        },
+        {
+            name: 'stress view styles: two sticky columns, stacked below 1360px, no modal shell left',
+            run() {
+                const css = fs.readFileSync(path.join(PROJECT_ROOT, 'cost_basis.css'), 'utf8');
+                assert.doesNotMatch(css, /\.stress-modal|\.stress-dialog|stress-modal-open|\.stress-header|\.stress-close/);
+                assert.match(css, /\.stress-view\s*\{[^}]*grid-template-columns:\s*minmax\(300px, 330px\) minmax\(0, 1fr\)/);
+                assert.match(css, /\.stress-params\s*\{[^}]*position:\s*sticky/);
+                assert.match(css, /\.stress-params\s*\{[^}]*overflow:\s*auto/);
+                assert.match(css, /\.stress-view-header\s*\{[^}]*grid-column:\s*1 \/ -1/);
+                const stacked = css.match(/@media \(max-width: 1360px\)\s*\{([\s\S]*?)\n\}/);
+                assert.ok(stacked, 'stacked breakpoint exists');
+                assert.match(stacked[1], /\.stress-view \{ grid-template-columns: 1fr; \}/);
+                assert.match(stacked[1], /\.stress-results \{ order: 1; \}/);
+                assert.match(stacked[1], /\.stress-params \{[^}]*position: static/);
+                assert.match(css, /\.stress-chart-wrap \{ position: relative; margin: 0; overflow-x: auto;/);
+                assert.match(css, /#stress-chart \{ display: block; width: 100%; min-width: 760px; min-height: 390px;/);
+                assert.match(css, /\.nav-item-settings\.active, \.nav-item-stress\.active/);
             },
         },
     ],

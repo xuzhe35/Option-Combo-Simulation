@@ -425,7 +425,9 @@ at risk. For example, an ITM short put becomes an assignment while an ATM/OTM
 put expires. This is an expiry outcome with zero settlement fees and no option
 time value; it never records the synthetic settlement rows.
 
-The stress-test modal values every still-open option of this book on ONE
+The stress-test view (a page view beside the ledger and settings views, entered
+from the sidebar or the What If panel; leaving it cancels its worker and snapshot
+batch) values every still-open option of this book on ONE
 scenario date (the selected expiry, or today + "days to reach the drop"):
 options expiring by then settle at intrinsic value, live longs are marked as
 assets and live shorts as liabilities (premium received minus model value),
@@ -566,7 +568,7 @@ quantity; it never writes directly because AvgCost may blend opens and closes.
 
 ### The three cost lenses
 
-The stress modal uses a separate cash/position valuation kernel; it never derives
+The stress view uses a separate cash/position valuation kernel; it never derives
 portfolio P&L from a per-share cost lens. It supports current-market-change versus
 cash-flow-cost P&L, immediate/gradual delivery paths, and a background-computed
 sampled sensitivity band (not a confidence interval). Its cost line is the

@@ -136,7 +136,9 @@ It currently:
 - automatically feeds the hero reference price into What If from existing
   portfolio-price pushes; manual scenario edits pause following, and resuming
   needs no request. Explicit current-price refresh remains a one-shot quote
-- provides expiry-bounded What If replay plus a modal multi-price stress test
+- provides expiry-bounded What If replay plus a multi-price stress test in its
+  own page view (parameters in a sticky left column, chart and cards on the right;
+  any view switch or book change tears the stress job down)
   that values every still-open option of the book on one scenario date (live
   longs as assets, live shorts as liabilities) with per-contract TWS IV, the
   shared discount curve, a CRR American binomial by default and a mid or

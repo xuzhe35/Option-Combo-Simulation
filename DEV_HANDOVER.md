@@ -200,6 +200,8 @@ Persistence and ledger modules, mounted by BOTH backends:
 - reviewed recent TWS fills import by `execId`; same-batch duplicates block in
   preview, and a later CSV is accepted as the same fill only after strict
   cross-source economics and broker-time matching
+- the stress test is a page view (`#stress-view`, `_showView('stress')`), not a
+  modal; see `CODE PLAN/STRESS_VIEW_LAYOUT_PLAN.md` for the layout contract
 - expiry-bounded What If replay is unchanged; stress now lives in the DOM-free
   `cost_basis_stress_*` modules with one cash/position valuation path, local-IV
   calibration, explicit instants/delivery paths and a worker sensitivity band

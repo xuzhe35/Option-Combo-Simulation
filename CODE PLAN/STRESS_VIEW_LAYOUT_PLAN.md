@@ -1,6 +1,6 @@
 # 压力测试从弹层改为独立页面视图（实施方案）
 
-> 2026-09-05 立项。目标是把 `cost_basis.html` 里的 `#stress-modal` 弹层改成本页第三个 `.page-view`，与 `ledger-view`、`settings-view` 并列。
+> 2026-09-05 立项，同日实施完成（阶段 1、2、4；阶段 3 tooltip 瘦身未做）。目标是把 `cost_basis.html` 里的 `#stress-modal` 弹层改成本页第三个 `.page-view`，与 `ledger-view`、`settings-view` 并列。
 > 不新建 HTML 页面，不改任何估值代码（`js/cost_basis_stress_*.js` 一行不动），不改任何 `stress-*` 元素 id。
 > 内核契约见 [STRESS_KERNEL_REFACTOR.md](STRESS_KERNEL_REFACTOR.md)，区间见 [STRESS_CALIBRATION_BAND_PLAN.md](STRESS_CALIBRATION_BAND_PLAN.md)。
 
@@ -60,7 +60,7 @@ CSS `cost_basis.css`：
 └─ section.stress-results
     ├─ #stress-status
     ├─ .stress-legend
-    ├─ .stress-chart-wrap（#stress-chart 高度改为 min(62vh, 560px)，viewBox 不变）
+    ├─ .stress-chart-wrap（#stress-chart 高度由 viewBox 比例决定，min-height 390px；实施时试过固定 min(62vh, 560px)，因 SVG 等比缩放只会留白而撤回）
     ├─ #stress-key-points
     └─ #stress-slice
 ```
@@ -90,7 +90,7 @@ CSS `cost_basis.css`：
 - `.stress-params { position: sticky; top: calc(78px + 1rem); max-height: calc(100vh - 78px - 2rem); overflow: auto; }`
 - `.stress-param-group > summary` 复用 `.stress-help > summary` 的按钮外观，但通栏显示并带展开箭头；组内元素间距 .55rem。
 - `.stress-results` 各块沿用现有 `.stress-legend`、`.stress-chart-wrap`、`.stress-key-points`、`.stress-slice` 规则，去掉它们的 `margin: 0 1.25rem` 外边距（原为对话框内边距）。
-- `@media (max-width: 1360px)`：`.stress-view` 单列，`.stress-params` 取消 sticky 和高度限制，结果列在下。
+- `@media (max-width: 1360px)`：`.stress-view` 单列，`.stress-params` 取消 sticky 和高度限制。实施时改为**结果列在上、参数在下**：堆叠后参数栏高约 1300 像素，放在上面会把图推到首屏之外，而参数组可折叠、图不能。
 - `@media (max-width: 680px)`：删除 `.stress-modal` / `.stress-dialog` 规则；控件 100% 宽规则保留并改挂到 `.stress-params` 下。
 - `.stress-tooltip` 定位逻辑用 `.stress-chart-wrap` 的 `getBoundingClientRect` 和 `clientWidth`（约 2608–2614 行），与容器无关，不改。
 
