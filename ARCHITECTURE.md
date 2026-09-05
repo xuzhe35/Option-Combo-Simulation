@@ -95,8 +95,22 @@ It currently:
 ### `cost_basis.html`
 
 The blended-cost ledger is standalone and never loads the trading shell. It
-loads only `js/cost_basis_core.js`, `js/cost_basis_import.js`, and
-`js/cost_basis.js`.
+loads the ledger/import/page scripts plus DOM-free `american_binomial.js`,
+`market_curves.js`, and `cost_basis_stress_{models,core,band,worker}.js`.
+The stress core compiles the ledger once, calibrates quotes to the selected
+pricer, and values both books through one instrument valuation path. Scenario
+costs are computed separately by replaying in-memory settlement rows through the
+ledger engine in expiry order, cached per distinct delivery outcome and reused
+by band members. These costs never feed back into the P&L calculation. The page
+only transports inputs and renders results. The worker receives the exact
+versioned dependency URLs loaded by the page; its generation and full input key
+prevent stale bands from landing after a parameter, book or snapshot change.
+No stress computation writes events or calls the trading shell.
+Cross-book quote refreshes share a generation: load the linked ledger first,
+request both snapshots concurrently, and only render after both complete.
+Enabling a cached overlay also refreshes the main book; the 60-second quote-skew
+gate is never bypassed. A missing broker IV can use a labelled local-IV path-sigma
+proxy derived from valid marks, not a fabricated default volatility.
 
 It currently:
 

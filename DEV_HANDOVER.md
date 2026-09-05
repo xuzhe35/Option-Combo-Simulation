@@ -200,9 +200,12 @@ Persistence and ledger modules, mounted by BOTH backends:
 - reviewed recent TWS fills import by `execId`; same-batch duplicates block in
   preview, and a later CSV is accepted as the same fill only after strict
   cross-source economics and broker-time matching
-- expiry-bounded What If replay plus a modal multi-price pressure test; the
-  optional still-live Long Call/Put overlay uses per-contract TWS IV and the
-  shared discount curve, and never persists synthetic events
+- expiry-bounded What If replay is unchanged; stress now lives in the DOM-free
+  `cost_basis_stress_*` modules with one cash/position valuation path, local-IV
+  calibration, explicit instants/delivery paths and a worker sensitivity band
+- restart the backend to obtain version-2 stress snapshots (curve + receipt-time
+  metadata); old snapshots fail closed. Stress is USD STK only, not a restriction
+  on ledger/import. See `CODE PLAN/STRESS_KERNEL_REFACTOR.md` for assumptions
 - full-cash running cost intentionally includes long-option cash while the
   headline blended-cost lens excludes the complete Long Call/Put lifecycle
 - book switching is request-generation scoped, clears the old rows before the

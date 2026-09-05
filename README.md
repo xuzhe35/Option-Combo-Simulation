@@ -171,8 +171,8 @@ Default configured symbols:
 
 ### `cost_basis.html`
 
-Standalone per-underlying blended-cost ledger. It loads only
-`js/cost_basis_core.js`, `js/cost_basis_import.js`, and `js/cost_basis.js` —
+Standalone per-underlying blended-cost ledger. It loads the ledger/import/page
+scripts plus DOM-free American pricing, market curves and `cost_basis_stress_*` —
 never the trading shell — and writes its own `cost_basis.db`. It cannot place
 an order or subscribe to market data. Full details in
 [Blended Cost Ledger](#blended-cost-ledger-cost_basishtml) below.
@@ -565,6 +565,20 @@ the fallback button only fills a clearly marked manual draft for the missing
 quantity; it never writes directly because AvgCost may blend opens and closes.
 
 ### The three cost lenses
+
+The stress modal uses a separate cash/position valuation kernel; it never derives
+portfolio P&L from a per-share cost lens. It supports current-market-change versus
+cash-flow-cost P&L, immediate/gradual delivery paths, and a background-computed
+sampled sensitivity band (not a confidence interval). Its cost line is the
+scenario post-settlement cost in the selected ledger lens, recalculated from
+read-only virtual deliveries along the chosen path. It can be flat within one
+delivery outcome and changes across outcomes; zero shares have no per-share cost.
+IV marks, linked hedges and hypothetical weekly income affect P&L, not this cost.
+All surviving own options are included by default. The
+backend must be restarted after upgrading: version-2 snapshots supply the frozen
+discount curve and timing metadata. Only USD STK books are supported by stress
+valuation; ledger/import support for other currencies is unchanged. See
+`COST_BASIS_LONG_PUT_STRESS_REVIEW.md` and `CODE PLAN/STRESS_KERNEL_REFACTOR.md`.
 
 All three come off the same event stream, because the number that matches
 your broker and the number you actually care about are not the same one:

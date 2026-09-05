@@ -39,42 +39,25 @@
     // whole book is in hand.
     const LEDGER_FETCH_SIZE = 2000;
     const MAX_LEDGER_EVENTS = 100000;
-    // Cross-book protection seeds (see the linked-hedge section below).
-    const LINKED_HEDGE_DEFAULTS = Object.freeze({
-        TQQQ: Object.freeze({ symbol: 'QQQ', ratio: 3 }),
-    });
-    const LINKED_HEDGE_DEFAULT_RATIO = 3;
-    const LINKED_HEDGE_MIN_ABS_RATIO = 0.01;
-    // IV response modes for the linked overlay. 'beta' is the spot-vol beta:
-    // vol points of IV lift per 1% drop of the linked underlying, applied on
-    // the downside only. 1.5 is the order of magnitude NDX/VXN regressions
-    // give (steeper inside real crashes); it is a starting value, not a fit.
-    const LINKED_IV_MODES = Object.freeze(['none', 'fixed', 'beta']);
-    const LINKED_IV_DEFAULT_BETA = 1.5;
-    const LINKED_IV_MAX_BETA = 20;
-    // Tenor damping: beta values describe ~30-day IV; longer-dated IV moves
-    // less, like (reference tenor / remaining days)^p capped at 1; p defaults
-    // to the historical fit below (sqrt would be p = 0.5).
-    const LINKED_IV_DEFAULT_TENOR_DAYS = 30;
-    // Damping exponent for (reference / remaining days)^p. Across seven QQQ
-    // crashes in 2015-2025, per-contract implied p has median 0.64 while the
-    // log least-squares fit is 0.76 (scripts/skew_regime_study.py); 0.65 keeps
-    // the robust median-side estimate. OTM put IV at ~1 year moved only
-    // ~0.15-0.2 of the front shift. ATM-only shifts decay closer to the
-    // square-root rule (p = 0.5), kept as an option.
-    // (An earlier 0.25 default came from a numerator mix-up in the study and
-    // was withdrawn - Review 19.3.)
-    const LINKED_IV_DEFAULT_TENOR_EXPONENT = 0.65;
-    const LINKED_MAX_HORIZON_DAYS = 3650;
-    const DAY_MS = 24 * 60 * 60 * 1000;
-    // Typing "20" must not fire a TWS snapshot for "2" and then "20".
-    const STRESS_HORIZON_DEBOUNCE_MS = 400;
-    const STRESS_LIQUIDATIONS = Object.freeze(['mid', 'bidask']);
-    const STRESS_PRICING_MODELS = Object.freeze(['american', 'european']);
-    const AMERICAN_BINOMIAL_STEPS = 121;
-    // Continuous dividend yields used by the pricers, by symbol. Unknown
-    // symbols carry none; the user can override either book in the modal.
-    const DIVIDEND_YIELD_DEFAULTS = Object.freeze({ QQQ: 0.006, TQQQ: 0.01 });
+    // Parameter defaults are owned by the DOM-free model module.
+    const {
+        LINKED_HEDGE_DEFAULTS,
+        LINKED_HEDGE_DEFAULT_RATIO,
+        LINKED_HEDGE_MIN_ABS_RATIO,
+        LINKED_IV_MODES,
+        LINKED_IV_DEFAULT_BETA,
+        LINKED_IV_MAX_BETA,
+        LINKED_IV_DEFAULT_TENOR_DAYS,
+        LINKED_IV_DEFAULT_TENOR_EXPONENT,
+        IV_RESEARCH_PROFILE,
+        LINKED_MAX_HORIZON_DAYS,
+        DAY_MS,
+        STRESS_HORIZON_DEBOUNCE_MS,
+        STRESS_LIQUIDATIONS,
+        STRESS_PRICING_MODELS,
+        AMERICAN_BINOMIAL_STEPS,
+        DIVIDEND_YIELD_DEFAULTS
+    } = globalScope.OptionComboCostBasisStressModels;
     const STRESS_LINKED_STORAGE_PREFIX = 'optionComboStressLinkedHedge:';
 
     const KIND_LABELS = {
@@ -188,7 +171,12 @@
         stressDividendYield: null,
         stressRangePct: 30,
         stressBasePrice: null,
-        stressIncludeLongOptions: false,
+        stressIncludeLongOptions: true,
+        stressPnlBasis: 'cost',
+        stressPath: 'immediate',
+        stressBandEnabled: true,
+        stressBandFlatIv: true,
+        stressOwnIvBeta: false,
         stressLongOptionInputs: null,
         stressInputsPending: false,
         stressInputsError: '',
@@ -205,6 +193,7 @@
         stressLinkedIvTenorDamping: true,
         stressLinkedIvTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
         stressLinkedIvTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
+        stressIvResearchReviewedVersion: IV_RESEARCH_PROFILE.version,
         // Historical calibrations (scripts/stress_model_validation.py); on by
         // default in the page, opt-in for the pure API.
         stressLinkedIvBetaAuto: true,
@@ -397,1444 +386,103 @@
         return { marketValue, dilutedPnl };
     }
 
-    function _normalCdf(value) {
-        const x = Number(value);
-        if (!Number.isFinite(x)) return x > 0 ? 1 : 0;
-        const absolute = Math.abs(x);
-        const t = 1 / (1 + 0.2316419 * absolute);
-        const density = Math.exp(-0.5 * absolute * absolute) / Math.sqrt(2 * Math.PI);
-        const tail = density * t * (0.319381530
-            + t * (-0.356563782
-                + t * (1.781477937
-                    + t * (-1.821255978 + t * 1.330274429))));
-        const cdf = 1 - tail;
-        return x >= 0 ? cdf : 1 - cdf;
-    }
+    const {
+        _normalCdf,
+        calculateBsmOptionPrice,
+        normalizePricingModel,
+        normalizeLiquidation,
+        normalizeDividendYield,
+        priceScenarioOption,
+        bidAskProblem,
+        liquidationHaircut,
+        calculateBsmPutPrice,
+        _dateUtcFromDigits,
+        _quoteMatchesTerms,
+        _findOptionQuote,
+        _optionQuoteIdentityConflict,
+        normalizeIvShockPoints,
+        stressComponentNumbers,
+        normalizeWeeklyPremium,
+        premiumIncomeOver,
+        normalizeStressHorizonDays,
+        normalizeLinkedTenorDays,
+        addDaysToDigits,
+        tenorDampingFactor,
+        normalizeLinkedTenorExponent,
+        normalizeLinkedIvMode,
+        normalizeLinkedIvBeta,
+        AUTO_BETA_TABLE,
+        OTM_SHOCK_FLOOR,
+        CRASH_SIGMA_SCALE,
+        CRASH_SIGMA_FULL_DROP_PCT,
+        autoBetaForDrop,
+        otmShockFactor,
+        crashSigmaScale,
+        linkedIvShockPointsAt,
+        normalizeLinkedRatio,
+        LINKED_MAPPINGS,
+        normalizeLinkedMapping,
+        normalizeLinkedSigma,
+        leveragedDragLog,
+        mapLinkedUnderlyingPrice,
+        PATH_SIGMA_PROXY_FAR_PCT,
+        marketDataTypeLabel,
+        _proxyPathSigma,
+        chooseLinkedBook,
+        _prepareLinkedHedge
+    } = globalScope.OptionComboCostBasisStressModels;
 
-    /**
-     * European BSM value with a continuous dividend yield (default 0), used
-     * by the read-only option overlays.
-     */
-    function calculateBsmOptionPrice(right, spot, strike, timeYears, rate, volatility, dividendYield) {
-        const optionRight = String(right || '').toUpperCase().slice(0, 1);
-        const s = Number(spot);
-        const k = Number(strike);
-        const t = Number(timeYears);
-        const r = Number(rate);
-        const sigma = Number(volatility);
-        const q = dividendYield === undefined || dividendYield === null ? 0 : Number(dividendYield);
-        if ((optionRight !== 'C' && optionRight !== 'P')
-            || ![s, k, t, r, sigma, q].every(Number.isFinite) || s < 0 || k <= 0 || t < 0) {
-            return null;
-        }
-        if (t <= 0) return optionRight === 'C'
-            ? Math.max(s - k, 0) : Math.max(k - s, 0);
-        const forwardSpot = s * Math.exp(-q * t);
-        if (s <= 0) return optionRight === 'C' ? 0 : k * Math.exp(-r * t);
-        if (sigma <= 0) return optionRight === 'C'
-            ? Math.max(forwardSpot - k * Math.exp(-r * t), 0)
-            : Math.max(k * Math.exp(-r * t) - forwardSpot, 0);
-        const rootT = Math.sqrt(t);
-        const d1 = (Math.log(s / k) + (r - q + 0.5 * sigma * sigma) * t)
-            / (sigma * rootT);
-        const d2 = d1 - sigma * rootT;
-        if (optionRight === 'C') {
-            return forwardSpot * _normalCdf(d1) - k * Math.exp(-r * t) * _normalCdf(d2);
-        }
-        return k * Math.exp(-r * t) * _normalCdf(-d2) - forwardSpot * _normalCdf(-d1);
-    }
-
-    function normalizePricingModel(value) {
-        const model = String(value || 'european').trim().toLowerCase();
-        return STRESS_PRICING_MODELS.includes(model) ? model : null;
-    }
-
-    function normalizeLiquidation(value) {
-        const lens = String(value || 'mid').trim().toLowerCase();
-        return STRESS_LIQUIDATIONS.includes(lens) ? lens : null;
-    }
-
-    function normalizeDividendYield(value) {
-        if (value === null || value === undefined || value === '') return 0;
-        const yieldValue = Number(value);
-        if (!Number.isFinite(yieldValue) || yieldValue < 0 || yieldValue > 0.5) return null;
-        return yieldValue;
-    }
-
-    /**
-     * Price one option under the selected model. 'american' uses the CRR
-     * binomial pricer (the model TWS itself quotes US equity options with),
-     * 'european' the closed form; both honour the dividend yield. Returns
-     * null when the American pricer is not loaded rather than quietly
-     * falling back, so the caption never claims a model that was not used.
-     */
-    function priceScenarioOption(right, spot, strike, timeYears, rate, volatility, options) {
-        const opts = options || {};
-        const model = normalizePricingModel(opts.pricingModel) || 'european';
-        const dividendYield = Number(opts.dividendYield) || 0;
-        if (model === 'european') {
-            return calculateBsmOptionPrice(right, spot, strike, timeYears, rate, volatility, dividendYield);
-        }
-        const pricer = globalScope.OptionComboAmericanBinomial;
-        if (!pricer || typeof pricer.calculateAmericanOptionPrice !== 'function') return null;
-        const optionRight = String(right || '').toUpperCase().slice(0, 1);
-        if (optionRight !== 'C' && optionRight !== 'P') return null;
-        if (Number(timeYears) <= 0 || Number(spot) <= 0) {
-            return calculateBsmOptionPrice(right, spot, strike, timeYears, rate, volatility, dividendYield);
-        }
-        const value = pricer.calculateAmericanOptionPrice({
-            type: optionRight === 'C' ? 'call' : 'put',
-            spot, strike, varianceTime: timeYears, rateTime: timeYears,
-            riskFreeRate: rate, volatility, dividendYield,
-            steps: AMERICAN_BINOMIAL_STEPS,
-        });
-        return Number.isFinite(value) ? value : null;
-    }
-
-    /**
-     * Liquidation haircut from today's quote: a long is sold at the bid, a
-     * short is bought back at the ask, so the scenario mark is scaled by
-     * bid/mark or ask/mark. Returns null when the quote has no usable side.
-     */
-    /**
-     * '' when the quote is a real two-sided BBO, 'missing' when a side is
-     * absent, 'crossed' when bid > ask or the backend flagged it invalid. A
-     * crossed pair from two tick instants must never become a price: it
-     * would lift the long's bid and cut the short's ask at the same time.
-     */
-    function bidAskProblem(quote) {
-        const present = (value) => !(value === null || value === undefined || value === '')
-            && Number.isFinite(Number(value)) && Number(value) >= 0;
-        if (!quote || !present(quote.bid) || !present(quote.ask)) return 'missing';
-        if (quote.bidAskValid === false || Number(quote.ask) < Number(quote.bid)) return 'crossed';
-        return '';
-    }
-
-    function liquidationHaircut(quote, side, lens) {
-        if (lens !== 'bidask') return 1;
-        if (bidAskProblem(quote)) return null;
-        const mark = Number(quote.mark);
-        if (!Number.isFinite(mark) || mark <= 0) return null;
-        const sideValue = Number(side === 'short' ? quote.ask : quote.bid);
-        return Math.max(0, sideValue / mark);
-    }
-
-    function calculateBsmPutPrice(spot, strike, timeYears, rate, volatility) {
-        return calculateBsmOptionPrice('P', spot, strike, timeYears, rate, volatility);
-    }
-
-    function _dateUtcFromDigits(value) {
-        const digits = String(value || '').replace(/\D/g, '').slice(0, 8);
-        if (digits.length !== 8) return null;
-        const year = Number(digits.slice(0, 4));
-        const month = Number(digits.slice(4, 6));
-        const day = Number(digits.slice(6, 8));
-        const milliseconds = Date.UTC(year, month - 1, day);
-        const date = new Date(milliseconds);
-        if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1
-            || date.getUTCDate() !== day) return null;
-        return milliseconds;
-    }
-
-    function _quoteMatchesTerms(quote, position) {
-        const right = String(position.right || '').toUpperCase().slice(0, 1);
-        const strike = Number(position.strike);
-        const expiry = String(position.expiry || '').replace(/\D/g, '').slice(0, 8);
-        if (String(quote && quote.right || '').toUpperCase().slice(0, 1) !== right
-            || String(quote && quote.expiry || '').replace(/\D/g, '').slice(0, 8) !== expiry
-            || !(Math.abs(Number(quote && quote.strike) - strike) <= 1e-8)) return false;
-        // Same visible terms can still be a different deliverable (adjusted
-        // contracts): when both sides know the multiplier it must agree.
-        const quoteMultiplier = Number(quote && quote.multiplier);
-        const positionMultiplier = Math.abs(Number(position.sharesPerContract));
-        if (Number.isFinite(quoteMultiplier) && quoteMultiplier > 0
-            && Number.isFinite(positionMultiplier) && positionMultiplier > 0
-            && Math.abs(quoteMultiplier - positionMultiplier) > 1e-8) return false;
-        return true;
-    }
-
-    /**
-     * Match a TWS snapshot row to a ledger position. Identity is strict and
-     * layered: a position that carries a conId is matched by conId only, one
-     * that carries only a localSymbol by localSymbol only, and terms (right,
-     * expiry, strike, multiplier) are used solely when the ledger has neither.
-     * A strong identity that is absent from the snapshot never falls back to
-     * "a contract that looks the same".
-     */
-    function _findOptionQuote(optionInputs, position) {
-        const quotes = Array.isArray(optionInputs) ? optionInputs : [];
-        const positionConId = Number(position.conId);
-        if (Number.isFinite(positionConId) && positionConId > 0) {
-            return quotes.find((candidate) => (
-                Number(candidate && candidate.conId) === positionConId)) || null;
-        }
-        const positionLocalSymbol = String(position.localSymbol || '').trim();
-        if (positionLocalSymbol) {
-            return quotes.find((candidate) => (
-                String(candidate && candidate.localSymbol || '').trim()
-                    === positionLocalSymbol)) || null;
-        }
-        return quotes.find((candidate) => _quoteMatchesTerms(candidate, position)) || null;
-    }
-
-    /** True when the strict lookup failed although a same-terms quote exists. */
-    function _optionQuoteIdentityConflict(optionInputs, position) {
-        const quotes = Array.isArray(optionInputs) ? optionInputs : [];
-        const positionConId = Number(position.conId);
-        const positionLocalSymbol = String(position.localSymbol || '').trim();
-        const hasStrongIdentity = (Number.isFinite(positionConId) && positionConId > 0)
-            || Boolean(positionLocalSymbol);
-        if (!hasStrongIdentity || _findOptionQuote(quotes, position)) return false;
-        return quotes.some((candidate) => _quoteMatchesTerms(candidate, position));
-    }
-
-    /**
-     * Shift every quoted IV by `ivShock` (a fraction, 0.10 = +10 vol points),
-     * optionally damped by remaining tenor. Returns the shocked inputs and
-     * whether any quote would be pushed to or below zero.
-     */
-    function _applyIvShock(marketInputs, ivShock, tenorDays, scenarioAt, exponent, otmDiscount) {
-        const shock = Number(ivShock) || 0;
-        if (!marketInputs || shock === 0) return { inputs: marketInputs, breaksIv: false };
-        const reference = tenorDays === null || tenorDays === undefined
-            ? null : Number(tenorDays);
-        const spot = Number(marketInputs.underlyingPrice);
-        let breaksIv = false;
-        const options = (Array.isArray(marketInputs.options) ? marketInputs.options : [])
-            .map((quote) => {
-                const iv = Number(quote && quote.impliedVolatility);
-                if (!Number.isFinite(iv) || iv <= 0) return quote;
-                // base shock × tenor damping × OTM-put discount: each factor
-                // multiplies what is already there, none overwrites it.
-                let applied = shock;
-                if (otmDiscount === true) {
-                    applied *= otmShockFactor(quote && quote.strike, spot, quote && quote.right);
-                }
-                if (reference !== null) {
-                    const quoteExpiryAt = _dateUtcFromDigits(quote && quote.expiry);
-                    if (quoteExpiryAt !== null && scenarioAt !== null) {
-                        applied *= tenorDampingFactor(
-                            (quoteExpiryAt - scenarioAt) / DAY_MS, reference, exponent);
-                    }
-                }
-                if (iv + applied <= 0) breaksIv = true;
-                return Object.assign({}, quote, {
-                    impliedVolatility: iv + applied, ivShockPoints: applied * 100,
-                });
-            });
-        return { inputs: Object.assign({}, marketInputs, { options }), breaksIv };
-    }
-
-    const DEFERRED_REASONS = Object.freeze({
-        long: Object.freeze({
-            inputs: 'missing_long_option_market_inputs',
-            incomplete: 'incomplete_long_option',
-            identity: 'long_option_identity_mismatch',
-            iv: 'missing_long_option_iv',
-            rate: 'missing_discount_rate',
-            shock: 'invalid_long_option_iv_shock',
-            sides: 'missing_long_option_quote_sides',
-            crossed: 'invalid_long_option_bid_ask',
-            pricer: 'missing_american_pricer',
-        }),
-        short: Object.freeze({
-            inputs: 'missing_short_option_market_inputs',
-            incomplete: 'incomplete_short_option',
-            identity: 'short_option_identity_mismatch',
-            iv: 'missing_short_option_iv',
-            rate: 'missing_discount_rate',
-            shock: 'invalid_short_option_iv_shock',
-            sides: 'missing_short_option_quote_sides',
-            crossed: 'invalid_short_option_bid_ask',
-            pricer: 'missing_american_pricer',
-        }),
-    });
-
-    function _emptyDeferredEstimate(available, reason, count) {
-        return {
-            available, reason: reason || '', count: count || 0, contracts: 0,
-            callContracts: 0, putContracts: 0,
-            marketValue: available ? 0 : null,
-            liability: available ? 0 : null,
-            pnl: available ? 0 : null,
-            ivMin: null, ivMax: null, rateMin: null, rateMax: null, details: [],
-        };
-    }
-
-    /**
-     * Mark the options that remain open after the stress date, one side at
-     * a time. `marketValue` is signed (a short is a liability, negative) and
-     * `pnl = marketValue + openPremium` works for both sides because the
-     * ledger's `openPremium` is signed cash: paid for a long, received for a
-     * short. Under every cost lens the premium of a still-open short is NOT
-     * inside the settlement figure ① (the conservative blended cost adds the
-     * open short premium back), so a short's full premium-minus-liability
-     * belongs here, exactly as a long's mark-minus-premium does.
-     */
-    function _estimateDeferredOptions(deferredOptions, scenarioPrice, options, side) {
-        const opts = options || {};
-        const reasons = DEFERRED_REASONS[side] || DEFERRED_REASONS.long;
-        const wantLong = side !== 'short';
-        const throughExpiry = String(opts.throughExpiry || '').replace(/\D/g, '').slice(0, 8);
-        const scenarioAt = _dateUtcFromDigits(throughExpiry);
-        const rawInputs = opts.marketInputs && typeof opts.marketInputs === 'object'
-            ? opts.marketInputs : null;
-        const eligible = (Array.isArray(deferredOptions) ? deferredOptions : []).filter(
-            (position) => (wantLong
-                ? Number(position.contracts) > 0 : Number(position.contracts) < 0)
-                && ['C', 'P'].includes(
-                    String(position.right || '').toUpperCase().slice(0, 1)));
-        if (!eligible.length) return _emptyDeferredEstimate(true, '', 0);
-        if (scenarioAt === null || !rawInputs
-            || String(rawInputs.throughExpiry || '') !== throughExpiry) {
-            return _emptyDeferredEstimate(false, reasons.inputs, eligible.length);
-        }
-        const shocked = _applyIvShock(rawInputs, opts.ivShock, opts.ivShockTenorDays, scenarioAt,
-            opts.ivShockTenorExponent, opts.ivShockOtmDiscount === true);
-        if (shocked.breaksIv) return _emptyDeferredEstimate(false, reasons.shock, eligible.length);
-        const marketInputs = shocked.inputs;
-        const liquidation = normalizeLiquidation(opts.liquidation) || 'mid';
-        const pricing = {
-            pricingModel: normalizePricingModel(opts.pricingModel) || 'european',
-            dividendYield: Number(opts.dividendYield) || 0,
-        };
-        const optionInputs = Array.isArray(marketInputs.options) ? marketInputs.options : [];
-        const ratesByExpiry = Array.isArray(marketInputs.ratesByExpiry)
-            ? marketInputs.ratesByExpiry : [];
-        const details = [];
-        for (const position of eligible) {
-            const expiryAt = _dateUtcFromDigits(position.expiry);
-            const right = String(position.right || '').toUpperCase().slice(0, 1);
-            const strike = Number(position.strike);
-            const contracts = Number(position.contracts);
-            const multiplier = Math.abs(Number(position.sharesPerContract));
-            const openPremium = Number(position.openPremium);
-            if (expiryAt === null || expiryAt <= scenarioAt || !Number.isFinite(strike)
-                || strike <= 0 || !Number.isFinite(contracts) || contracts === 0
-                || !Number.isFinite(multiplier) || multiplier <= 0
-                || !Number.isFinite(openPremium) || position.identityConflict) {
-                return _emptyDeferredEstimate(false, reasons.incomplete, eligible.length);
-            }
-            const quote = _findOptionQuote(optionInputs, position);
-            if (!quote && _optionQuoteIdentityConflict(optionInputs, position)) {
-                return _emptyDeferredEstimate(false, reasons.identity, eligible.length);
-            }
-            const impliedVolatility = Number(quote && quote.impliedVolatility);
-            if (!quote || !Number.isFinite(impliedVolatility) || impliedVolatility <= 0) {
-                return _emptyDeferredEstimate(false, reasons.iv, eligible.length);
-            }
-            const rateInput = ratesByExpiry.find((candidate) => (
-                String(candidate && candidate.expiry || '').replace(/\D/g, '').slice(0, 8)
-                    === String(position.expiry || '').replace(/\D/g, '').slice(0, 8)));
-            const zeroRate = Number(rateInput && rateInput.zeroRate);
-            if (!rateInput || !Number.isFinite(zeroRate)) {
-                return _emptyDeferredEstimate(false, reasons.rate, eligible.length);
-            }
-            const timeYears = (expiryAt - scenarioAt) / (365 * 24 * 60 * 60 * 1000);
-            const modelPerShare = priceScenarioOption(
-                right, scenarioPrice, strike, timeYears,
-                zeroRate, impliedVolatility, pricing);
-            if (modelPerShare === null && pricing.pricingModel === 'american') {
-                return _emptyDeferredEstimate(false, reasons.pricer, eligible.length);
-            }
-            if (!Number.isFinite(modelPerShare)) {
-                return _emptyDeferredEstimate(false, reasons.incomplete, eligible.length);
-            }
-            const haircut = liquidationHaircut(quote, wantLong ? 'long' : 'short', liquidation);
-            if (haircut === null) {
-                return _emptyDeferredEstimate(false, bidAskProblem(quote) === 'crossed'
-                    ? reasons.crossed : reasons.sides, eligible.length);
-            }
-            const markPerShare = modelPerShare * haircut;
-            const marketValue = markPerShare * contracts * multiplier;
-            details.push({
-                expiry: String(position.expiry), right, strike, contracts, multiplier,
-                timeYears, markPerShare, modelPerShare, haircut, marketValue,
-                pricingModel: pricing.pricingModel, dividendYield: pricing.dividendYield,
-                liability: marketValue < 0 ? -marketValue : 0,
-                impliedVolatility, ivSource: String(quote.ivSource || ''),
-                ivShockPoints: Number(quote.ivShockPoints) || 0,
-                zeroRate, rateSource: String(rateInput.source || ''),
-                openPremium, pnl: marketValue + openPremium,
-            });
-        }
-        const result = details.reduce((total, detail) => ({
-            available: true,
-            reason: '',
-            count: total.count + 1,
-            contracts: total.contracts + Math.abs(detail.contracts),
-            callContracts: total.callContracts
-                + (detail.right === 'C' ? Math.abs(detail.contracts) : 0),
-            putContracts: total.putContracts
-                + (detail.right === 'P' ? Math.abs(detail.contracts) : 0),
-            marketValue: total.marketValue + detail.marketValue,
-            liability: total.liability + detail.liability,
-            pnl: total.pnl + detail.pnl,
-            details: total.details.concat([detail]),
-        }), {
-            available: true, reason: '', count: 0, contracts: 0,
-            callContracts: 0, putContracts: 0,
-            marketValue: 0, liability: 0, pnl: 0, details: [],
-        });
-        result.ivMin = Math.min(...details.map((detail) => detail.impliedVolatility));
-        result.ivMax = Math.max(...details.map((detail) => detail.impliedVolatility));
-        result.rateMin = Math.min(...details.map((detail) => detail.zeroRate));
-        result.rateMax = Math.max(...details.map((detail) => detail.zeroRate));
-        // The shock each contract actually received (tenor damping makes it
-        // differ by expiry), so captions never quote the undamped figure.
-        result.ivShockPointsMin = Math.min(...details.map((detail) => detail.ivShockPoints));
-        result.ivShockPointsMax = Math.max(...details.map((detail) => detail.ivShockPoints));
-        return result;
-    }
-
-    /** Long Calls / Puts still open after the stress date: mark + premium paid. */
-    function estimateDeferredLongOptions(deferredOptions, scenarioPrice, options) {
-        return _estimateDeferredOptions(deferredOptions, scenarioPrice, options, 'long');
-    }
-
-    /** Short Calls / Puts still open after the stress date: premium received − liability. */
-    function estimateDeferredShortOptions(deferredOptions, scenarioPrice, options) {
-        return _estimateDeferredOptions(deferredOptions, scenarioPrice, options, 'short');
-    }
-
-    // ------------------------------------------------------------------
-    // Cross-book protection (TQQQ-first)
-    // ------------------------------------------------------------------
-    //
-    // A leveraged ETF book can borrow protection from the same account's
-    // unleveraged book: every TQQQ stress point is mapped onto a QQQ price
-    // and the QQQ book's Long Calls / Puts are valued there. The index is the
-    // driver: the default mapping inverts daily-rebalanced compounding with a
-    // volatility-drag term (see mapLinkedUnderlyingPrice), and the plain
-    // linear ratio is kept only for comparison. The mapping lives in exactly
-    // one function so a better model replaces it without touching the sweep.
-    // Only TQQQ has a seeded default today; any other leveraged fund works
-    // the same way once the user picks a linked book and a ratio.
-    const LINKED_REASON_BY_DEFERRED_REASON = Object.freeze({
-        missing_long_option_market_inputs: 'missing_linked_market_inputs',
-        missing_long_option_iv: 'missing_linked_option_iv',
-        missing_discount_rate: 'missing_linked_discount_rate',
-        incomplete_long_option: 'incomplete_linked_option',
-        long_option_identity_mismatch: 'linked_option_identity_mismatch',
-        missing_long_option_quote_sides: 'missing_linked_quote_sides',
-        invalid_long_option_bid_ask: 'invalid_linked_bid_ask',
-        invalid_long_option_iv_shock: 'invalid_linked_iv_shock',
-        missing_american_pricer: 'missing_american_pricer',
-    });
-
-    /** IV shock in vol points (10 = +10 percentage points); blank/0 means none. */
-    function normalizeIvShockPoints(value) {
-        if (value === null || value === undefined || value === '') return 0;
-        const points = Number(value);
-        if (!Number.isFinite(points) || Math.abs(points) > 500) return null;
-        return points;
-    }
-
-    /** Days the drop takes; blank means "use the selected expiry as the day". */
-    /**
-     * Component numbers shared by legend, status, cards, SVG titles and the
-     * tooltip: ① is always this book's settlement; this book's live long
-     * options are ② when shown; the linked book takes the next free number.
-     */
-    function stressComponentNumbers(showConvexity, showShorts, showLinked, showPremium) {
-        const circled = ['①', '②', '③', '④', '⑤'];
-        let next = 1;
-        const own = showConvexity ? circled[next++] : '';
-        const shorts = showShorts ? circled[next++] : '';
-        const linked = showLinked ? circled[next++] : '';
-        const premium = showPremium ? circled[next++] : '';
-        const parts = ['①'];
-        if (own) parts.push(own);
-        if (shorts) parts.push(shorts);
-        if (linked) parts.push(linked);
-        if (premium) parts.push(premium);
-        return { own, shorts, linked, premium, total: parts.join('+') };
-    }
-
-    /** Assumed premium income per week; blank means none, negative is invalid. */
-    function normalizeWeeklyPremium(value) {
-        if (value === null || value === undefined || value === '') return 0;
-        const amount = Number(value);
-        if (!Number.isFinite(amount) || amount < 0) return null;
-        return amount;
-    }
-
-    /** Flat weekly income scaled by days / 7: an assumption, never a forecast. */
-    function premiumIncomeOver(weeklyPremium, scenarioDays) {
-        const weekly = Number(weeklyPremium) || 0;
-        const days = Number(scenarioDays);
-        if (weekly <= 0 || !Number.isFinite(days) || days <= 0) return 0;
-        return weekly * days / 7;
-    }
-
-    function normalizeStressHorizonDays(value) {
-        if (value === null || value === undefined || value === '') return null;
-        const days = Number(value);
-        if (!Number.isInteger(days) || days < 0 || days > LINKED_MAX_HORIZON_DAYS) return undefined;
-        return days;
-    }
-
-    function normalizeLinkedTenorDays(value) {
-        if (value === null || value === undefined || value === '') return LINKED_IV_DEFAULT_TENOR_DAYS;
-        const days = Number(value);
-        if (!Number.isFinite(days) || days < 1 || days > LINKED_MAX_HORIZON_DAYS) return null;
-        return days;
-    }
-
-    function addDaysToDigits(digits, days) {
-        const at = _dateUtcFromDigits(digits);
-        if (at === null || !Number.isFinite(Number(days))) return '';
-        const shifted = new Date(at + Number(days) * DAY_MS);
-        return `${shifted.getUTCFullYear()}${String(shifted.getUTCMonth() + 1).padStart(2, '0')}`
-            + `${String(shifted.getUTCDate()).padStart(2, '0')}`;
-    }
-
-    /**
-     * (reference / remaining days)^exponent, never above 1, never below a
-     * day. Exponent 0.5 is the textbook square-root rule; the historical QQQ
-     * crash sample gives a per-contract median near 0.64 and log least-squares
-     * fit near 0.76 for the OTM-put IV level shift by tenor.
-     */
-    function tenorDampingFactor(remainingDays, referenceDays, exponent) {
-        const remaining = Math.max(1, Number(remainingDays));
-        const reference = Number(referenceDays);
-        const power = normalizeLinkedTenorExponent(exponent);
-        if (!Number.isFinite(remaining) || !Number.isFinite(reference) || reference <= 0
-            || power === null) return 1;
-        return Math.min(1, Math.pow(reference / remaining, power));
-    }
-
-    function normalizeLinkedTenorExponent(value) {
-        if (value === null || value === undefined || value === '') return LINKED_IV_DEFAULT_TENOR_EXPONENT;
-        const power = Number(value);
-        if (!Number.isFinite(power) || power < 0.05 || power > 1) return null;
-        return power;
-    }
-
-    function normalizeLinkedIvMode(value) {
-        const mode = String(value || 'none').trim().toLowerCase();
-        return LINKED_IV_MODES.includes(mode) ? mode : null;
-    }
-
-    function normalizeLinkedIvBeta(value) {
-        if (value === null || value === undefined || value === '') return LINKED_IV_DEFAULT_BETA;
-        const beta = Number(value);
-        if (!Number.isFinite(beta) || beta < 0 || beta > LINKED_IV_MAX_BETA) return null;
-        return beta;
-    }
-
-    /**
-     * Vol points to add to the linked contracts' IV at one scan point.
-     * 'beta' lifts IV only while the mapped price is below today's: the
-     * basis point and every rally get zero, so nothing on the upside is
-     * invented.
-     */
-    // Spot-vol beta by size of the index drop, from the QQQ daily series
-    // 2012-2026 pooled over 5-40 day holding periods (part A1b of
-    // scripts/stress_model_validation.py, rounded to 0.05): 0.90 for 2-5%
-    // drops (n=1563), 0.95 for 5-10% (n=809), 1.00 for 10-20% (n=274),
-    // 1.65 above 20% (n=22, thin). Keyed on bucket midpoints.
-    const AUTO_BETA_TABLE = Object.freeze([[0, 0.9], [3.5, 0.9], [7.5, 0.95], [15, 1.0], [25, 1.65]]);
-    // OTM puts rose less than ATM in every crash: 10-20% OTM got a median
-    // 0.50 of the ATM shift where ATM rose >= 2 points (part B1, n=33).
-    // Full shock inside 5% of the money, linear down to the floor at 10%
-    // away, flat beyond. Measured on puts only - see otmShockFactor.
-    const OTM_SHOCK_FLOOR = 0.5;
-    // Realised vol ran 1.43x the starting ATM IV in 20-day windows that fell
-    // 8% or more (part A2); the compounding drag uses sigma^2, so the proxy
-    // is scaled up as the index drop approaches that size.
-    const CRASH_SIGMA_SCALE = 1.4;
-    const CRASH_SIGMA_FULL_DROP_PCT = 8;
-
-    function autoBetaForDrop(dropPct) {
-        const drop = Math.abs(Number(dropPct));
-        if (!Number.isFinite(drop)) return AUTO_BETA_TABLE[0][1];
-        const table = AUTO_BETA_TABLE;
-        if (drop <= table[0][0]) return table[0][1];
-        if (drop >= table[table.length - 1][0]) return table[table.length - 1][1];
-        for (let index = 1; index < table.length; index += 1) {
-            const [x0, y0] = table[index - 1];
-            const [x1, y1] = table[index];
-            if (drop <= x1) return y0 + (y1 - y0) * (drop - x0) / (x1 - x0);
-        }
-        return table[table.length - 1][1];
-    }
-
-    /**
-     * Discount on the IV shock for OUT-OF-THE-MONEY PUTS only: that is the
-     * population the crash study measured (part B1). ITM puts and calls of
-     * either side keep the full shock; nothing is extrapolated to them.
-     */
-    function otmShockFactor(strike, spot, right) {
-        const k = Number(strike);
-        const s = Number(spot);
-        if (!Number.isFinite(k) || !Number.isFinite(s) || k <= 0 || s <= 0) return 1;
-        if (String(right || '').toUpperCase().slice(0, 1) !== 'P' || k >= s) return 1;
-        const moneyness = Math.abs(Math.log(k / s));
-        if (moneyness <= 0.05) return 1;
-        if (moneyness >= 0.10) return OTM_SHOCK_FLOOR;
-        return 1 - (1 - OTM_SHOCK_FLOOR) * (moneyness - 0.05) / 0.05;
-    }
-
-    function crashSigmaScale(indexDropPct) {
-        const drop = Math.max(0, -Number(indexDropPct));
-        if (!Number.isFinite(drop)) return 1;
-        return 1 + (CRASH_SIGMA_SCALE - 1) * Math.min(1, drop / CRASH_SIGMA_FULL_DROP_PCT);
-    }
-
-    function linkedIvShockPointsAt(mode, linkedChangePct, fixedPoints, beta, betaAuto) {
-        if (mode === 'fixed') return Number(fixedPoints) || 0;
-        if (mode === 'beta') {
-            const drop = Number(linkedChangePct);
-            if (!Number.isFinite(drop) || drop >= 0) return 0;
-            const applied = betaAuto === true ? autoBetaForDrop(drop) : (Number(beta) || 0);
-            return applied * (-drop);
-        }
-        return 0;
-    }
-
-    function normalizeLinkedRatio(value) {
-        const ratio = Number(value);
-        if (!Number.isFinite(ratio) || Math.abs(ratio) < LINKED_HEDGE_MIN_ABS_RATIO) {
-            return null;
-        }
-        return ratio;
-    }
-
-    const LINKED_MAPPINGS = Object.freeze(['compound', 'linear']);
-
-    function normalizeLinkedMapping(value) {
-        const mapping = String(value || 'compound').trim().toLowerCase();
-        return LINKED_MAPPINGS.includes(mapping) ? mapping : null;
-    }
-
-    function normalizeLinkedSigma(value) {
-        if (value === null || value === undefined || value === '') return null;
-        const sigma = Number(value);
-        if (!Number.isFinite(sigma) || sigma < 0 || sigma > 5) return undefined;
-        return sigma;
-    }
-
-    /**
-     * Volatility drag of a daily-rebalanced leveraged fund over `timeYears`,
-     * as a log-return: (ratio² − ratio) / 2 × σ² × T. Zero for an instant
-     * move, for an unlevered ratio, or without a path volatility.
-     */
-    function leveragedDragLog(ratio, sigma, timeYears) {
-        const beta = Number(ratio);
-        const vol = Number(sigma);
-        const years = Number(timeYears);
-        if (![beta, vol, years].every(Number.isFinite) || vol <= 0 || years <= 0) return 0;
-        return ((beta * beta) - beta) / 2 * vol * vol * years;
-    }
-
-    /**
-     * Map a scan point of the leveraged book onto the price of the index it
-     * tracks. The index is the driver, so the book's move is inverted:
-     *
-     *   compound (default): (1 + ΔT) = (1 + R)^ratio × exp(−drag)
-     *                       ⇒ 1 + R = ((1 + ΔT) × exp(drag))^(1 / ratio)
-     *   linear:             R = ΔT / ratio
-     *
-     * A daily-rebalanced 3× fund really does compound, so at −30% the index
-     * is down 11.2%, not 10%; the drag term is the multi-day volatility cost
-     * and is zero for an instantaneous move. The ratio is signed so an
-     * inverse fund (SQQQ = −3) maps a rally onto a decline. A price can never
-     * go below zero.
-     */
-    function mapLinkedUnderlyingPrice(basePrice, changePct, ratio, options) {
-        const opts = options || {};
-        const base = Number(basePrice);
-        const change = Number(changePct);
-        const normalizedRatio = normalizeLinkedRatio(ratio);
-        if (!Number.isFinite(base) || base <= 0 || !Number.isFinite(change)
-            || normalizedRatio === null) return null;
-        const mapping = normalizeLinkedMapping(opts.mapping) || 'compound';
-        if (mapping === 'linear') {
-            return Math.max(0, base * (1 + change / 100 / normalizedRatio));
-        }
-        const gross = 1 + change / 100;
-        if (gross <= 0) return 0;
-        const drag = leveragedDragLog(normalizedRatio, opts.sigma, opts.timeYears);
-        const indexGross = Math.pow(gross * Math.exp(drag), 1 / normalizedRatio);
-        if (!Number.isFinite(indexGross)) return null;
-        return Math.max(0, base * indexGross);
-    }
-
-    // A proxy further than this from the spot is still used, but flagged:
-    // a deep wing's IV is a poor stand-in for realised index volatility.
-    const PATH_SIGMA_PROXY_FAR_PCT = 10;
-
-    /**
-     * Market proxy for the path volatility of the drag term: the IV of the
-     * quoted contract nearest the money among those alive after the stress
-     * date. Never the lowest IV (that is whichever wing the ledger happens to
-     * hold). Returns null when nothing qualifies; the caller decides whether
-     * that is fatal (it is whenever a positive horizon needs a drag).
-     */
-    /** TWS marketDataType per quote row → one honest word for the chip. */
-    function marketDataTypeLabel(rows) {
-        const names = { 1: '实时', 2: '冻结', 3: '延时', 4: '延时冻结' };
-        const kinds = Array.from(new Set((Array.isArray(rows) ? rows : [])
-            .map((row) => Number(row && row.marketDataType))
-            .filter((kind) => Number.isFinite(kind) && names[kind])));
-        if (!kinds.length) return '';
-        return kinds.length === 1 ? names[kinds[0]] : `混合：${kinds.map((k) => names[k]).join('/')}`;
-    }
-
-    function _proxyPathSigma(marketInputs, throughExpiry) {
-        const quotes = marketInputs && Array.isArray(marketInputs.options) ? marketInputs.options : [];
-        const spot = Number(marketInputs && marketInputs.underlyingPrice);
-        const alive = quotes.filter((quote) => (
-            String(quote && quote.expiry || '').replace(/\D/g, '').slice(0, 8) > throughExpiry
-            && Number(quote && quote.impliedVolatility) > 0
-            && Number(quote && quote.strike) > 0));
-        if (!alive.length) return null;
-        const distance = (quote) => (Number.isFinite(spot) && spot > 0
-            ? Math.abs(Number(quote.strike) - spot) / spot * 100 : Infinity);
-        const nearest = alive.reduce((best, quote) => (
-            distance(quote) < distance(best) ? quote : best), alive[0]);
-        const distancePct = distance(nearest);
-        return {
-            sigma: Number(nearest.impliedVolatility),
-            strike: Number(nearest.strike),
-            expiry: String(nearest.expiry || '').replace(/\D/g, '').slice(0, 8),
-            distancePct: Number.isFinite(distancePct) ? distancePct : null,
-            far: !Number.isFinite(distancePct) || distancePct > PATH_SIGMA_PROXY_FAR_PCT,
-        };
-    }
-
-    function _emptyLinkedEstimate(available, reason, count) {
-        return {
-            available, reason: reason || '', count: count || 0, contracts: 0,
-            callContracts: 0, putContracts: 0,
-            settledContracts: 0, deferredContracts: 0, expiredContracts: 0,
-            marketValue: available ? 0 : null,
-            referenceValue: available ? 0 : null,
-            pnl: available ? 0 : null,
-            premiumPnl: available ? 0 : null,
-            ivMin: null, ivMax: null, rateMin: null, rateMax: null, details: [],
-        };
-    }
-
-    /**
-     * Value the linked book's Long Calls / Puts at the mapped price on the
-     * stress date and report the CHANGE against what they are worth today.
-     *
-     * The premium already paid is sunk: it does not move with the scenario,
-     * so subtracting it would push the whole protection curve down by a
-     * constant and hide the very effect this overlay exists to show. Today's
-     * value is the TWS mark from the same one-shot snapshot that supplied the
-     * IV; the scenario value is BSM at that IV for contracts still alive after
-     * the stress date and intrinsic value for contracts that expire on or
-     * before it. `premiumPnl` (mark + openPremium) is kept for reference
-     * only. Short legs and shares of the linked book are ignored: this
-     * answers "how much more are those long options worth", not "merge two
-     * books". Contracts already expired on the valuation date protect
-     * nothing and are counted, not valued.
-     */
-    function estimateLinkedLongOptions(openOptions, linkedPrice, options) {
-        const opts = options || {};
-        const throughExpiry = String(opts.throughExpiry || '').replace(/\D/g, '').slice(0, 8);
-        // One scenario date for the whole modal: the linked book is valued
-        // on the same day this book settles, so the stacked total is one
-        // portfolio at one moment and every rate is resolved from that day.
-        const scenarioAt = _dateUtcFromDigits(throughExpiry);
-        const asOfAt = _dateUtcFromDigits(opts.asOf);
-        const marketInputs = opts.marketInputs && typeof opts.marketInputs === 'object'
-            ? opts.marketInputs : null;
-        const optionInputs = marketInputs && Array.isArray(marketInputs.options)
-            ? marketInputs.options : [];
-        const price = Number(linkedPrice);
-        const eligible = (Array.isArray(openOptions) ? openOptions : []).filter(
-            (position) => Number(position.contracts) > 0
-                && ['C', 'P'].includes(
-                    String(position.right || '').toUpperCase().slice(0, 1)));
-        if (!eligible.length) return _emptyLinkedEstimate(true, '', 0);
-        if (scenarioAt === null) {
-            return _emptyLinkedEstimate(false, 'missing_linked_market_inputs', eligible.length);
-        }
-        if (!Number.isFinite(price) || price < 0) {
-            return _emptyLinkedEstimate(false, 'invalid_linked_underlying_price', eligible.length);
-        }
-        const alive = [];
-        let expiredContracts = 0;
-        for (const position of eligible) {
-            const expiryAt = _dateUtcFromDigits(position.expiry);
-            if (expiryAt === null) {
-                return _emptyLinkedEstimate(false, 'incomplete_linked_option', eligible.length);
-            }
-            if (asOfAt !== null && expiryAt <= asOfAt) {
-                expiredContracts += Number(position.contracts);
-                continue;
-            }
-            alive.push({ position, expiryAt });
-        }
-        if (!alive.length) {
-            return Object.assign(_emptyLinkedEstimate(true, '', 0), { expiredContracts });
-        }
-        if (!marketInputs || String(marketInputs.throughExpiry || '') !== throughExpiry) {
-            return _emptyLinkedEstimate(false, 'missing_linked_market_inputs', eligible.length);
-        }
-        const deferred = alive.filter((entry) => entry.expiryAt > scenarioAt)
-            .map((entry) => entry.position);
-        // An IV shock is a scenario assumption: it moves the scenario value
-        // of contracts still alive after the stress date and nothing else.
-        // Today's marks stay what TWS says they are. Tenor damping shrinks a
-        // quote's lift with its remaining life.
-        const ivShock = Number(opts.ivShock || 0);
-        if (!Number.isFinite(ivShock)) {
-            return _emptyLinkedEstimate(false, 'invalid_linked_iv_shock', eligible.length);
-        }
-        const shocked = _applyIvShock(marketInputs, ivShock, opts.ivShockTenorDays, scenarioAt,
-            opts.ivShockTenorExponent, opts.ivShockOtmDiscount === true);
-        if (shocked.breaksIv && deferred.length) {
-            return _emptyLinkedEstimate(false, 'invalid_linked_iv_shock', eligible.length);
-        }
-        const scenarioInputs = shocked.inputs;
-        const liquidation = normalizeLiquidation(opts.liquidation) || 'mid';
-        let deferredResult = null;
-        if (deferred.length) {
-            deferredResult = estimateDeferredLongOptions(deferred, price, {
-                throughExpiry, marketInputs: scenarioInputs, liquidation,
-                pricingModel: opts.pricingModel, dividendYield: opts.dividendYield,
-            });
-            if (!deferredResult.available) {
-                return _emptyLinkedEstimate(false,
-                    LINKED_REASON_BY_DEFERRED_REASON[deferredResult.reason]
-                        || 'incomplete_linked_option', eligible.length);
-            }
-        }
-        const details = [];
-        let deferredIndex = 0;
-        for (const { position, expiryAt } of alive) {
-            const right = String(position.right || '').toUpperCase().slice(0, 1);
-            const strike = Number(position.strike);
-            const contracts = Number(position.contracts);
-            const multiplier = Math.abs(Number(position.sharesPerContract));
-            const openPremium = Number(position.openPremium);
-            if (!Number.isFinite(strike) || strike <= 0 || !Number.isFinite(contracts)
-                || contracts <= 0 || !Number.isFinite(multiplier) || multiplier <= 0
-                || !Number.isFinite(openPremium) || position.identityConflict) {
-                return _emptyLinkedEstimate(false, 'incomplete_linked_option', eligible.length);
-            }
-            const quote = _findOptionQuote(optionInputs, position);
-            if (!quote && _optionQuoteIdentityConflict(optionInputs, position)) {
-                return _emptyLinkedEstimate(false, 'linked_option_identity_mismatch', eligible.length);
-            }
-            // A null mark is "no quote", never a free option worth zero.
-            const rawMark = quote ? quote.mark : null;
-            const midMarkPerShare = Number(rawMark);
-            if (!quote || rawMark === null || rawMark === undefined || rawMark === ''
-                || !Number.isFinite(midMarkPerShare) || midMarkPerShare < 0) {
-                return _emptyLinkedEstimate(false, 'missing_linked_mark', eligible.length);
-            }
-            // Under the bid/ask lens today's value is what the bid pays and
-            // the scenario mark is scaled by the same bid/mark ratio.
-            const haircut = liquidationHaircut(quote, 'long', liquidation);
-            if (haircut === null) {
-                return _emptyLinkedEstimate(false, bidAskProblem(quote) === 'crossed'
-                    ? 'invalid_linked_bid_ask' : 'missing_linked_quote_sides', eligible.length);
-            }
-            const referenceMarkPerShare = liquidation === 'bidask'
-                ? Number(quote.bid) : midMarkPerShare;
-            const referenceValue = referenceMarkPerShare * contracts * multiplier;
-            let scenario;
-            if (expiryAt > scenarioAt) {
-                const deferredDetail = deferredResult.details[deferredIndex];
-                deferredIndex += 1;
-                const shockedQuote = ivShock === 0 ? null
-                    : _findOptionQuote(scenarioInputs.options, position);
-                scenario = {
-                    timeYears: deferredDetail.timeYears,
-                    markPerShare: deferredDetail.markPerShare,
-                    modelPerShare: deferredDetail.modelPerShare,
-                    pricingModel: deferredDetail.pricingModel,
-                    dividendYield: deferredDetail.dividendYield,
-                    marketValue: deferredDetail.marketValue,
-                    impliedVolatility: deferredDetail.impliedVolatility,
-                    ivShockPoints: shockedQuote ? Number(shockedQuote.ivShockPoints) || 0 : 0,
-                    ivSource: deferredDetail.ivSource,
-                    zeroRate: deferredDetail.zeroRate,
-                    rateSource: deferredDetail.rateSource,
-                    settled: false,
-                };
-            } else {
-                // Settlement value needs no haircut: it is exercised, not sold.
-                const intrinsic = right === 'C'
-                    ? Math.max(price - strike, 0) : Math.max(strike - price, 0);
-                scenario = {
-                    timeYears: 0, markPerShare: intrinsic,
-                    marketValue: intrinsic * contracts * multiplier,
-                    impliedVolatility: null, ivShockPoints: 0, ivSource: 'intrinsic',
-                    zeroRate: null, rateSource: '', settled: true,
-                };
-            }
-            details.push(Object.assign({
-                expiry: String(position.expiry), right, strike, contracts, multiplier,
-            }, scenario, {
-                referenceMarkPerShare, referenceValue, haircut,
-                markSource: String(quote.markSource || ''),
-                openPremium,
-                pnl: scenario.marketValue - referenceValue,
-                premiumPnl: scenario.marketValue + openPremium,
-            }));
-        }
-        const result = details.reduce((total, detail) => ({
-            available: true,
-            reason: '',
-            count: total.count + 1,
-            contracts: total.contracts + detail.contracts,
-            callContracts: total.callContracts
-                + (detail.right === 'C' ? detail.contracts : 0),
-            putContracts: total.putContracts
-                + (detail.right === 'P' ? detail.contracts : 0),
-            settledContracts: total.settledContracts
-                + (detail.settled ? detail.contracts : 0),
-            deferredContracts: total.deferredContracts
-                + (detail.settled ? 0 : detail.contracts),
-            expiredContracts,
-            marketValue: total.marketValue + detail.marketValue,
-            referenceValue: total.referenceValue + detail.referenceValue,
-            pnl: total.pnl + detail.pnl,
-            premiumPnl: total.premiumPnl + detail.premiumPnl,
-            details: total.details.concat([detail]),
-        }), {
-            available: true, reason: '', count: 0, contracts: 0,
-            callContracts: 0, putContracts: 0,
-            settledContracts: 0, deferredContracts: 0, expiredContracts,
-            marketValue: 0, referenceValue: 0, pnl: 0, premiumPnl: 0, details: [],
-        });
-        result.ivShockPointsMin = details.reduce((best, detail) => (
-            detail.settled ? best : Math.min(best, detail.ivShockPoints)), Infinity);
-        result.ivShockPointsMax = details.reduce((best, detail) => (
-            detail.settled ? best : Math.max(best, detail.ivShockPoints)), -Infinity);
-        if (!Number.isFinite(result.ivShockPointsMin)) result.ivShockPointsMin = null;
-        if (!Number.isFinite(result.ivShockPointsMax)) result.ivShockPointsMax = null;
-        result.ivMin = deferredResult && Number.isFinite(deferredResult.ivMin)
-            ? deferredResult.ivMin : null;
-        result.ivMax = deferredResult && Number.isFinite(deferredResult.ivMax)
-            ? deferredResult.ivMax : null;
-        result.rateMin = deferredResult && Number.isFinite(deferredResult.rateMin)
-            ? deferredResult.rateMin : null;
-        result.rateMax = deferredResult && Number.isFinite(deferredResult.rateMax)
-            ? deferredResult.rateMax : null;
-        return result;
-    }
-
-    /**
-     * Decide which sibling book the stress test should borrow protection
-     * from. A remembered choice wins when that book still exists; otherwise
-     * the seeded default (TQQQ -> QQQ) is preselected but left switched off,
-     * so nothing is ever overlaid without the user opting in.
-     */
-    function chooseLinkedBook(book, candidates, remembered) {
-        const pool = Array.isArray(candidates) ? candidates : [];
-        const hasCandidate = (bookId) => pool.some(
-            (candidate) => String(candidate.bookId) === String(bookId));
-        const rememberedBookId = remembered && remembered.linkedBookId
-            ? String(remembered.linkedBookId) : '';
-        if (rememberedBookId && hasCandidate(rememberedBookId)) {
-            const ratio = normalizeLinkedRatio(remembered.ratio);
-            const ivMode = normalizeLinkedIvMode(remembered.ivMode);
-            const ivShockPoints = normalizeIvShockPoints(remembered.ivShockPoints);
-            const ivBeta = normalizeLinkedIvBeta(remembered.ivBeta);
-            const ivTenorDays = normalizeLinkedTenorDays(remembered.ivTenorDays);
-            const ivTenorExponent = normalizeLinkedTenorExponent(remembered.ivTenorExponent);
-            const mapping = normalizeLinkedMapping(remembered.mapping);
-            const sigma = normalizeLinkedSigma(remembered.sigma);
-            const rememberedYield = remembered.dividendYield === null
-                || remembered.dividendYield === undefined
-                ? null : normalizeDividendYield(remembered.dividendYield);
-            return {
-                mapping: mapping === null ? 'compound' : mapping,
-                sigma: sigma === undefined ? null : sigma,
-                dividendYield: rememberedYield,
-                bookId: rememberedBookId,
-                ratio: ratio === null ? LINKED_HEDGE_DEFAULT_RATIO : ratio,
-                ivMode: ivMode === null ? 'none' : ivMode,
-                ivShockPoints: ivShockPoints === null ? 0 : ivShockPoints,
-                ivBeta: ivBeta === null ? LINKED_IV_DEFAULT_BETA : ivBeta,
-                ivTenorDamping: remembered.ivTenorDamping !== false,
-                ivTenorDays: ivTenorDays === null ? LINKED_IV_DEFAULT_TENOR_DAYS : ivTenorDays,
-                ivTenorExponent: ivTenorExponent === null
-                    ? LINKED_IV_DEFAULT_TENOR_EXPONENT : ivTenorExponent,
-                ivBetaAuto: remembered.ivBetaAuto !== false,
-                ivOtmDiscount: remembered.ivOtmDiscount !== false,
-                sigmaCrashScale: remembered.sigmaCrashScale !== false,
-                // The overlay is never on when the modal opens: the fourth
-                // curve appears only after a deliberate tick this session.
-                enabled: false,
-            };
-        }
-        const seed = book && LINKED_HEDGE_DEFAULTS[
-            String(book.symbol || '').toUpperCase()];
-        const seeded = seed ? pool.find((candidate) => (
-            String(candidate.symbol || '').toUpperCase() === seed.symbol)) : null;
-        return {
-            bookId: seeded ? String(seeded.bookId) : '',
-            ratio: seed ? seed.ratio : LINKED_HEDGE_DEFAULT_RATIO,
-            ivMode: 'none',
-            ivShockPoints: 0,
-            ivBeta: LINKED_IV_DEFAULT_BETA,
-            ivTenorDamping: true,
-            ivTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
-            ivTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
-            ivBetaAuto: true,
-            ivOtmDiscount: true,
-            sigmaCrashScale: true,
-            mapping: 'compound',
-            sigma: null,
-            dividendYield: null,
-            enabled: false,
-        };
-    }
-
-    /**
-     * Validate the linked-hedge request once per sweep. Returns either the
-     * inputs the per-point valuation needs or the reason nothing can be
-     * valued; a null request means the overlay is simply off.
-     */
-    function _prepareLinkedHedge(linkedHedge, bookCurrency) {
-        if (!linkedHedge || typeof linkedHedge !== 'object') return null;
-        // Two books add up only in one currency; there is no FX here.
-        const ownCurrency = String(bookCurrency || '').trim().toUpperCase();
-        const linkedCurrency = String(linkedHedge.currency || '').trim().toUpperCase();
-        if (ownCurrency && linkedCurrency && ownCurrency !== linkedCurrency) {
-            return { reason: 'linked_currency_mismatch' };
-        }
-        const ratio = normalizeLinkedRatio(linkedHedge.ratio);
-        if (ratio === null) return { reason: 'invalid_linked_ratio' };
-        if (!Array.isArray(linkedHedge.openOptions)) return { reason: 'missing_linked_book' };
-        const marketInputs = linkedHedge.marketInputs
-            && typeof linkedHedge.marketInputs === 'object' ? linkedHedge.marketInputs : null;
-        if (!marketInputs) return { reason: 'missing_linked_market_inputs' };
-        const basePrice = Number(linkedHedge.basePrice);
-        if (!Number.isFinite(basePrice) || basePrice <= 0) {
-            return { reason: 'invalid_linked_underlying_price' };
-        }
-        const ivMode = normalizeLinkedIvMode(linkedHedge.ivMode);
-        if (ivMode === null) return { reason: 'invalid_linked_iv_mode' };
-        const ivShockPoints = ivMode === 'fixed'
-            ? normalizeIvShockPoints(linkedHedge.ivShockPoints) : 0;
-        if (ivShockPoints === null) return { reason: 'invalid_linked_iv_shock' };
-        const ivBeta = ivMode === 'beta'
-            ? normalizeLinkedIvBeta(linkedHedge.ivBeta) : LINKED_IV_DEFAULT_BETA;
-        if (ivBeta === null) return { reason: 'invalid_linked_iv_beta' };
-        const mapping = normalizeLinkedMapping(linkedHedge.mapping);
-        if (mapping === null) return { reason: 'invalid_linked_mapping' };
-        const dividendYield = normalizeDividendYield(linkedHedge.dividendYield);
-        if (dividendYield === null) return { reason: 'invalid_linked_dividend_yield' };
-        const sigma = normalizeLinkedSigma(linkedHedge.sigma);
-        if (sigma === undefined) return { reason: 'invalid_linked_sigma' };
-        const ivTenorDamping = ivMode === 'beta' && linkedHedge.ivTenorDamping === true;
-        const ivTenorDays = ivTenorDamping
-            ? normalizeLinkedTenorDays(linkedHedge.ivTenorDays) : LINKED_IV_DEFAULT_TENOR_DAYS;
-        if (ivTenorDays === null) return { reason: 'invalid_linked_tenor_days' };
-        const ivTenorExponent = ivTenorDamping
-            ? normalizeLinkedTenorExponent(linkedHedge.ivTenorExponent)
-            : LINKED_IV_DEFAULT_TENOR_EXPONENT;
-        if (ivTenorExponent === null) return { reason: 'invalid_linked_tenor_exponent' };
-        return {
-            reason: '',
-            ratio,
-            basePrice,
-            ivMode,
-            ivShockPoints,
-            ivBeta,
-            ivBetaAuto: ivMode === 'beta' && linkedHedge.ivBetaAuto === true,
-            // 'fixed' means the same points on every contract, so the OTM
-            // discount belongs to the beta mode only (Review 21.3).
-            ivOtmDiscount: ivMode === 'beta' && linkedHedge.ivOtmDiscount === true,
-            sigmaCrashScale: linkedHedge.sigmaCrashScale === true,
-            ivTenorDamping,
-            ivTenorDays,
-            ivTenorExponent,
-            mapping,
-            sigma,
-            dividendYield,
-            symbol: String(linkedHedge.symbol || ''),
-            bookId: String(linkedHedge.bookId || ''),
-            openOptions: linkedHedge.openOptions,
-            marketInputs,
-            asOf: String(linkedHedge.asOf || '').replace(/\D/g, '').slice(0, 8),
-        };
-    }
-
-    /**
-     * Sweep one expiry-settlement scenario across a symmetric underlying
-     * range. This is deliberately pure and read-only: every point is a fresh
-     * replay with synthetic settlement rows that are never persisted.
-     */
     function buildStressTestSeries(events, options) {
-        const opts = options || {};
-        const centerPrice = Number(opts.centerPrice);
-        const rawRange = Number(opts.rangePct);
-        const rangePct = Number.isFinite(rawRange)
-            ? Math.min(90, Math.max(1, Math.abs(rawRange))) : 30;
-        const rawPointCount = Number(opts.pointCount);
-        const pointCount = Number.isInteger(rawPointCount)
-            ? Math.min(121, Math.max(11, rawPointCount)) : 61;
-        const throughExpiry = String(opts.throughExpiry || '').replace(/\D/g, '').slice(0, 8);
-        const basisMode = core.BASIS_MODES.includes(opts.basisMode)
-            ? opts.basisMode : 'net_cash';
-        const includeDeferredLongOptions = opts.includeDeferredLongOptions === true;
-        const longOptionInputs = opts.longOptionInputs || null;
-        const liquidation = normalizeLiquidation(opts.liquidation);
-        const pricingModel = normalizePricingModel(opts.pricingModel);
-        const dividendYield = normalizeDividendYield(opts.dividendYield);
-        const linkedHedge = _prepareLinkedHedge(opts.linkedHedge, opts.currency);
-        // Assumed weekly premium income over the scenario horizon. It is
-        // flat across the scan (a user assumption, not a model of what new
-        // shorts would fetch at each price) and shown as its own component.
-        const weeklyPremium = normalizeWeeklyPremium(opts.weeklyPremium);
-        const premiumAsOfAt = _dateUtcFromDigits(String(opts.asOf || '').replace(/\D/g, '').slice(0, 8));
-        const premiumScenarioAt = _dateUtcFromDigits(throughExpiry);
-        const scenarioDays = premiumAsOfAt !== null && premiumScenarioAt !== null
-            ? Math.max(0, Math.round((premiumScenarioAt - premiumAsOfAt) / DAY_MS)) : 0;
-        const premiumIncome = weeklyPremium === null ? 0 : premiumIncomeOver(weeklyPremium, scenarioDays);
-        // Path volatility for the leveraged drag: an explicit assumption, else
-        // the IV of the linked book's quoted contract nearest the money among
-        // those alive after the stress date, else none (fatal for a positive
-        // horizon, see below). Time is today → scenario date.
-        const linkedScenarioAt = _dateUtcFromDigits(throughExpiry);
-        const linkedAsOfAt = linkedHedge && !linkedHedge.reason
-            ? _dateUtcFromDigits(linkedHedge.asOf) : null;
-        const linkedTimeYears = linkedScenarioAt !== null && linkedAsOfAt !== null
-            ? Math.max(0, (linkedScenarioAt - linkedAsOfAt) / (365 * DAY_MS)) : 0;
-        const linkedProxy = linkedHedge && !linkedHedge.reason && linkedHedge.sigma === null
-            ? _proxyPathSigma(linkedHedge.marketInputs, throughExpiry) : null;
-        const linkedSigma = linkedHedge && !linkedHedge.reason
-            ? (linkedHedge.sigma !== null ? linkedHedge.sigma
-                : (linkedProxy ? linkedProxy.sigma : null)) : null;
-        let linkedSigmaSource = '';
-        if (linkedHedge && !linkedHedge.reason) {
-            if (linkedTimeYears <= 0) linkedSigmaSource = 'instant';
-            else if (linkedHedge.sigma !== null) linkedSigmaSource = 'assumption';
-            else if (linkedProxy) linkedSigmaSource = linkedProxy.far ? 'proxy_far' : 'proxy';
-            else linkedSigmaSource = 'none';
-            // A positive horizon under the compound mapping needs a path
-            // volatility; a missing one must not quietly become "no drag".
-            // When the book still holds contracts alive after the date, the
-            // per-contract valuation names their missing IV or mark itself;
-            // only a book whose contracts all settle has nothing to proxy with.
-            const aliveOptions = (Array.isArray(linkedHedge.openOptions)
-                ? linkedHedge.openOptions : []).filter((position) => (
-                Number(position && position.contracts) > 0
-                && String(position && position.expiry || '').replace(/\D/g, '').slice(0, 8)
-                    > throughExpiry));
-            if (linkedHedge.mapping !== 'linear' && linkedSigmaSource === 'none'
-                && !aliveOptions.length) {
-                linkedHedge.reason = 'missing_linked_sigma';
-            }
-        }
-        if (!Number.isFinite(centerPrice) || centerPrice <= 0 || !throughExpiry
-            || liquidation === null || pricingModel === null || dividendYield === null
-            || weeklyPremium === null) {
-            return {
-                available: false,
-                reason: !throughExpiry ? 'missing_expiry'
-                    : (weeklyPremium === null ? 'invalid_weekly_premium'
-                    : (liquidation === null ? 'invalid_liquidation'
-                        : (pricingModel === null ? 'invalid_pricing_model'
-                            : (dividendYield === null ? 'invalid_dividend_yield'
-                                : 'invalid_center_price')))),
-                centerPrice: Number.isFinite(centerPrice) ? centerPrice : null,
-                rangePct,
-                throughExpiry,
-                basisMode,
-                includeDeferredLongOptions,
-                points: [],
-            };
-        }
+        return globalScope.OptionComboCostBasisStressCore.buildStressTestSeries(events, options);
+    }
 
-        const low = Math.max(0, centerPrice * (1 - rangePct / 100));
-        const high = centerPrice * (1 + rangePct / 100);
-        const points = [];
-        for (let index = 0; index < pointCount; index += 1) {
-            const ratio = pointCount === 1 ? 0 : index / (pointCount - 1);
-            const price = low + (high - low) * ratio;
-            const scenario = core.computeOptionSettlementScenario(events, price, {
-                secType: opts.secType || 'STK',
-                throughExpiry,
-            });
-            const summary = scenario.ledger && scenario.ledger.combined;
-            const rendered = summary ? core.summarizeCost(summary, basisMode) : null;
-            const cost = rendered && rendered.available ? Number(rendered.value) : null;
-            const shares = summary ? Number(summary.shares) : null;
-            let basePnl = cost !== null && Number.isFinite(shares)
-                ? (price - cost) * shares : null;
-            // If the selected expiry closes the entire position, cumulative
-            // net cash is the locked-in result. Do not use that shortcut while
-            // a later option remains open because its mark is intentionally
-            // absent from this expiry-only model.
-            if (basePnl === null && rendered && rendered.state === 'no_shares'
-                && scenario.ledger && !(scenario.ledger.openOptions || []).length) {
-                basePnl = Number(summary.lifetimeNetCash);
-            }
-            const changePct = ((price / centerPrice) - 1) * 100;
-            // Steps 2-3: the linked index price and the IV shock are derived
-            // first, because this book's own open options follow them - its IV
-            // moves |ratio| times as much as the index's.
-            // Crash scaling of the path sigma keys off the index drop the
-            // linear ratio implies, so the mapping itself is not circular.
-            // Signed: an inverse fund (ratio < 0) rallying means the index fell.
-            const indexDropEstimate = linkedHedge && !linkedHedge.reason
-                ? changePct / linkedHedge.ratio : 0;
-            const pointSigmaScale = linkedHedge && !linkedHedge.reason && linkedHedge.sigmaCrashScale
-                ? crashSigmaScale(indexDropEstimate) : 1;
-            const pointSigma = linkedSigma === null || linkedSigma === undefined
-                ? linkedSigma : linkedSigma * pointSigmaScale;
-            const linkedPrice = linkedHedge && !linkedHedge.reason
-                ? mapLinkedUnderlyingPrice(linkedHedge.basePrice, changePct, linkedHedge.ratio, {
-                    mapping: linkedHedge.mapping, sigma: pointSigma, timeYears: linkedTimeYears,
-                }) : null;
-            const linkedChangePct = Number.isFinite(linkedPrice) && linkedHedge && linkedHedge.basePrice
-                ? ((linkedPrice / linkedHedge.basePrice) - 1) * 100 : null;
-            const linkedIvShockPoints = linkedHedge && !linkedHedge.reason ? linkedIvShockPointsAt(
-                linkedHedge.ivMode, linkedChangePct,
-                linkedHedge.ivShockPoints, linkedHedge.ivBeta, linkedHedge.ivBetaAuto) : 0;
-            const linkedIvBetaApplied = linkedHedge && !linkedHedge.reason
-                && linkedHedge.ivMode === 'beta' && Number.isFinite(linkedChangePct) && linkedChangePct < 0
-                ? (linkedHedge.ivBetaAuto ? autoBetaForDrop(linkedChangePct) : linkedHedge.ivBeta) : null;
-            const ownIvShockPoints = linkedHedge && !linkedHedge.reason
-                ? Math.abs(linkedHedge.ratio) * linkedIvShockPoints : 0;
-            const ownShockOptions = {
-                throughExpiry, marketInputs: longOptionInputs,
-                liquidation, pricingModel, dividendYield,
-                ivShock: ownIvShockPoints / 100,
-                ivShockTenorDays: linkedHedge && !linkedHedge.reason && linkedHedge.ivTenorDamping
-                    ? linkedHedge.ivTenorDays : null,
-                ivShockTenorExponent: linkedHedge && !linkedHedge.reason
-                    ? linkedHedge.ivTenorExponent : undefined,
-                ivShockOtmDiscount: Boolean(linkedHedge && !linkedHedge.reason && linkedHedge.ivOtmDiscount),
-            };
-            const convexity = includeDeferredLongOptions
-                ? estimateDeferredLongOptions(scenario.deferredOptions, price, ownShockOptions)
-                : _emptyDeferredEstimate(true, '', 0);
-            const shorts = includeDeferredLongOptions
-                ? estimateDeferredShortOptions(scenario.deferredOptions, price, ownShockOptions)
-                : _emptyDeferredEstimate(true, '', 0);
-            const pnl = basePnl !== null && convexity.available && shorts.available
-                ? basePnl + convexity.pnl + shorts.pnl : basePnl;
-            const point = {
-                price,
-                changePct,
-                ownIvShockPoints,
-                cost: Number.isFinite(cost) ? cost : null,
-                basePnl: Number.isFinite(basePnl) ? basePnl : null,
-                pnl: Number.isFinite(pnl) ? pnl : null,
-                longOptionMarketValue: Number.isFinite(convexity.marketValue)
-                    ? convexity.marketValue : null,
-                longOptionPnl: Number.isFinite(convexity.pnl) ? convexity.pnl : null,
-                longOptionCount: Number(convexity.count || 0),
-                longOptionContracts: Number(convexity.contracts || 0),
-                longCallContracts: Number(convexity.callContracts || 0),
-                longPutContracts: Number(convexity.putContracts || 0),
-                longOptionIvMin: Number.isFinite(convexity.ivMin)
-                    ? convexity.ivMin : null,
-                longOptionIvMax: Number.isFinite(convexity.ivMax)
-                    ? convexity.ivMax : null,
-                longOptionRateMin: Number.isFinite(convexity.rateMin)
-                    ? convexity.rateMin : null,
-                longOptionRateMax: Number.isFinite(convexity.rateMax)
-                    ? convexity.rateMax : null,
-                longOptionIvShockMin: Number.isFinite(convexity.ivShockPointsMin)
-                    ? convexity.ivShockPointsMin : null,
-                longOptionIvShockMax: Number.isFinite(convexity.ivShockPointsMax)
-                    ? convexity.ivShockPointsMax : null,
-                shortOptionIvShockMin: Number.isFinite(shorts.ivShockPointsMin)
-                    ? shorts.ivShockPointsMin : null,
-                shortOptionIvShockMax: Number.isFinite(shorts.ivShockPointsMax)
-                    ? shorts.ivShockPointsMax : null,
-                convexityReason: String(convexity.reason || ''),
-                convexityAvailable: convexity.available,
-                shortOptionLiability: Number.isFinite(shorts.liability) ? shorts.liability : null,
-                shortOptionPnl: Number.isFinite(shorts.pnl) ? shorts.pnl : null,
-                shortOptionCount: Number(shorts.count || 0),
-                shortOptionContracts: Number(shorts.contracts || 0),
-                shortCallContracts: Number(shorts.callContracts || 0),
-                shortPutContracts: Number(shorts.putContracts || 0),
-                shortOptionIvMin: Number.isFinite(shorts.ivMin) ? shorts.ivMin : null,
-                shortOptionIvMax: Number.isFinite(shorts.ivMax) ? shorts.ivMax : null,
-                shortOptionRateMin: Number.isFinite(shorts.rateMin) ? shorts.rateMin : null,
-                shortOptionRateMax: Number.isFinite(shorts.rateMax) ? shorts.rateMax : null,
-                shortReason: String(shorts.reason || ''),
-                shortAvailable: shorts.available,
-                shares: Number.isFinite(shares) ? shares : null,
-                assignedContracts: Number(scenario.assignedContracts || 0),
-                exercisedContracts: Number(scenario.exercisedContracts || 0),
-                expiredContracts: Number(scenario.expiredContracts || 0),
-                unresolvedCount: (scenario.unresolvedOptions || []).length,
-            };
-            if (linkedHedge) {
-                // Same stress date, other underlying: the linked book's long
-                // options are marked at the mapped price and added on top of
-                // this book's own result. `pnl` keeps its meaning above.
-                const ivShockPoints = linkedIvShockPoints;
-                const linked = linkedHedge.reason
-                    ? _emptyLinkedEstimate(false, linkedHedge.reason, 0)
-                    : estimateLinkedLongOptions(linkedHedge.openOptions, linkedPrice, {
-                        throughExpiry, marketInputs: linkedHedge.marketInputs,
-                        asOf: linkedHedge.asOf,
-                        liquidation, pricingModel, dividendYield: linkedHedge.dividendYield,
-                        ivShock: ivShockPoints / 100,
-                        ivShockTenorDays: linkedHedge.ivTenorDamping ? linkedHedge.ivTenorDays : null,
-                        ivShockTenorExponent: linkedHedge.ivTenorExponent,
-                        ivShockOtmDiscount: linkedHedge.ivOtmDiscount,
-                    });
-                Object.assign(point, {
-                    linkedPrice: Number.isFinite(linkedPrice) ? linkedPrice : null,
-                    linkedChangePct,
-                    linkedIvShockPoints: ivShockPoints,
-                    linkedIvBetaApplied,
-                    linkedSigmaApplied: Number.isFinite(pointSigma) ? pointSigma : null,
-                    linkedSigmaScale: pointSigmaScale,
-                    linkedIvShockPointsMin: Number.isFinite(linked.ivShockPointsMin)
-                        ? linked.ivShockPointsMin : null,
-                    linkedIvShockPointsMax: Number.isFinite(linked.ivShockPointsMax)
-                        ? linked.ivShockPointsMax : null,
-                    linkedMarketValue: Number.isFinite(linked.marketValue)
-                        ? linked.marketValue : null,
-                    linkedReferenceValue: Number.isFinite(linked.referenceValue)
-                        ? linked.referenceValue : null,
-                    linkedPnl: Number.isFinite(linked.pnl) ? linked.pnl : null,
-                    linkedPremiumPnl: Number.isFinite(linked.premiumPnl)
-                        ? linked.premiumPnl : null,
-                    linkedExpiredContracts: Number(linked.expiredContracts || 0),
-                    linkedCount: Number(linked.count || 0),
-                    linkedContracts: Number(linked.contracts || 0),
-                    linkedCallContracts: Number(linked.callContracts || 0),
-                    linkedPutContracts: Number(linked.putContracts || 0),
-                    linkedSettledContracts: Number(linked.settledContracts || 0),
-                    linkedDeferredContracts: Number(linked.deferredContracts || 0),
-                    linkedIvMin: Number.isFinite(linked.ivMin) ? linked.ivMin : null,
-                    linkedIvMax: Number.isFinite(linked.ivMax) ? linked.ivMax : null,
-                    linkedRateMin: Number.isFinite(linked.rateMin) ? linked.rateMin : null,
-                    linkedRateMax: Number.isFinite(linked.rateMax) ? linked.rateMax : null,
-                    linkedAvailable: linked.available === true,
-                    linkedReason: String(linked.reason || ''),
-                    totalPnl: pnl !== null && linked.available && Number.isFinite(linked.pnl)
-                        ? pnl + linked.pnl : null,
-                });
-            }
-            // The headline is everything switched on, plus the assumed income.
-            const stacked = linkedHedge ? point.totalPnl : point.pnl;
-            point.premiumIncome = premiumIncome;
-            point.headlinePnl = stacked === null || stacked === undefined ? null : stacked + premiumIncome;
-            points.push(point);
+    const stressJob = { generation: 0, key: '', worker: null, series: null, status: '', sliceIndex: null };
+    const stressRefreshJob = { generation: 0, pending: false };
+    function _cancelStressJob() {
+        stressJob.generation += 1;
+        if (stressJob.worker) stressJob.worker.terminate();
+        Object.assign(stressJob, { worker: null, key: '', series: null, status: '', sliceIndex: null });
+    }
+    function _stressSeries(events, options) {
+        const key = JSON.stringify([state.bookId, state.stressInputsGeneration,
+            state.stressLinkedInputsGeneration, events, options, state.stressBandEnabled, state.stressBandFlatIv]);
+        if (key === stressJob.key) return stressJob.series;
+        _cancelStressJob();
+        const series = buildStressTestSeries(events, options);
+        Object.assign(stressJob, { key, series });
+        if (!series.available || !state.stressBandEnabled) return series;
+        if (!globalScope.Worker || !globalScope.document.querySelectorAll) {
+            stressJob.status = '当前环境不支持后台计算，区间未生成；中线仍可用。';
+            return series;
         }
-        const hasUnresolved = points.some((point) => point.unresolvedCount);
-        const hasInvalidConvexity = includeDeferredLongOptions
-            && points.some((point) => !point.convexityAvailable);
-        const convexityFailure = points.find((point) => !point.convexityAvailable);
-        const hasInvalidShorts = includeDeferredLongOptions
-            && points.some((point) => !point.shortAvailable);
-        const shortFailure = points.find((point) => !point.shortAvailable);
-        const hasInvalidLinked = Boolean(linkedHedge)
-            && points.some((point) => !point.linkedAvailable);
-        const linkedFailure = points.find((point) => !point.linkedAvailable);
-        const series = {
-            symbol: String(opts.symbol || ''),
-            liquidation,
-            pricingModel,
-            dividendYield,
-            available: !hasUnresolved && !hasInvalidConvexity && !hasInvalidShorts
-                && !hasInvalidLinked
-                && points.some((point) => point.pnl !== null || point.cost !== null),
-            reason: hasUnresolved ? 'unresolved_options'
-                : (hasInvalidConvexity
-                    ? convexityFailure.convexityReason || 'invalid_long_option_inputs'
-                    : (hasInvalidShorts
-                        ? shortFailure.shortReason || 'invalid_short_option_inputs'
-                        : (hasInvalidLinked
-                            ? linkedFailure.linkedReason || 'missing_linked_book' : ''))),
-            centerPrice,
-            rangePct,
-            throughExpiry,
-            basisMode,
-            includeDeferredLongOptions,
-            longOptionCount: points.length ? points[0].longOptionCount : 0,
-            longOptionContracts: points.length ? points[0].longOptionContracts : 0,
-            longCallContracts: points.length ? points[0].longCallContracts : 0,
-            longPutContracts: points.length ? points[0].longPutContracts : 0,
-            longOptionIvMin: points.length ? points[0].longOptionIvMin : null,
-            longOptionIvMax: points.length ? points[0].longOptionIvMax : null,
-            longOptionRateMin: points.length ? points[0].longOptionRateMin : null,
-            longOptionRateMax: points.length ? points[0].longOptionRateMax : null,
-            shortOptionCount: points.length ? points[0].shortOptionCount : 0,
-            shortOptionContracts: points.length ? points[0].shortOptionContracts : 0,
-            shortCallContracts: points.length ? points[0].shortCallContracts : 0,
-            shortPutContracts: points.length ? points[0].shortPutContracts : 0,
-            shortOptionIvMin: points.length ? points[0].shortOptionIvMin : null,
-            shortOptionIvMax: points.length ? points[0].shortOptionIvMax : null,
-            shortOptionRateMin: points.length ? points[0].shortOptionRateMin : null,
-            shortOptionRateMax: points.length ? points[0].shortOptionRateMax : null,
-            inputsFetchedAt: String(longOptionInputs && longOptionInputs.fetchedAt || ''),
-            curveAsOf: String(longOptionInputs && (
-                longOptionInputs.curveEffectiveDate || longOptionInputs.curveAsOf) || ''),
-            low,
-            high,
-            points,
-        };
-        if (linkedHedge) {
-            const first = points.length ? points[0] : null;
-            // IV ranges are quoted at the basis point: with a beta shock the
-            // extremes of the scan carry their own, larger, lift.
-            const centerIndex = points.reduce((best, point, index) => (
-                Math.abs(point.changePct) < Math.abs(points[best].changePct) ? index : best
-            ), 0);
-            const center = points.length ? points[centerIndex] : null;
-            Object.assign(series, {
-                linkedHedgeEnabled: true,
-                linkedSymbol: linkedHedge.symbol || '',
-                linkedBookId: linkedHedge.bookId || '',
-                linkedRatio: linkedHedge.ratio === undefined ? null : linkedHedge.ratio,
-                linkedIvMode: linkedHedge.ivMode || 'none',
-                linkedIvShockPoints: linkedHedge.ivShockPoints === undefined
-                    ? null : linkedHedge.ivShockPoints,
-                linkedIvBeta: linkedHedge.ivBeta === undefined ? null : linkedHedge.ivBeta,
-                linkedIvTenorDamping: linkedHedge.ivTenorDamping === true,
-                linkedIvTenorDays: linkedHedge.ivTenorDays === undefined
-                    ? null : linkedHedge.ivTenorDays,
-                linkedIvTenorExponent: linkedHedge.ivTenorExponent === undefined
-                    ? null : linkedHedge.ivTenorExponent,
-                linkedIvBetaAuto: linkedHedge.ivBetaAuto === true,
-                linkedIvOtmDiscount: linkedHedge.ivOtmDiscount === true,
-                linkedSigmaCrashScale: linkedHedge.sigmaCrashScale === true,
-                linkedMapping: linkedHedge.mapping || 'compound',
-                linkedDividendYield: linkedHedge.dividendYield === undefined
-                    ? null : linkedHedge.dividendYield,
-                linkedSigma: linkedSigma === undefined ? null : linkedSigma,
-                linkedSigmaSource,
-                linkedSigmaProxyStrike: linkedProxy ? linkedProxy.strike : null,
-                linkedSigmaProxyExpiry: linkedProxy ? linkedProxy.expiry : null,
-                linkedSigmaProxyDistancePct: linkedProxy ? linkedProxy.distancePct : null,
-                linkedTimeYears,
-                linkedDragLog: linkedHedge.reason ? 0
-                    : leveragedDragLog(linkedHedge.ratio, linkedSigma, linkedTimeYears),
-                centerIndex,
-                linkedBasePrice: linkedHedge.basePrice === undefined ? null : linkedHedge.basePrice,
-                linkedCount: first ? first.linkedCount : 0,
-                linkedContracts: first ? first.linkedContracts : 0,
-                linkedCallContracts: first ? first.linkedCallContracts : 0,
-                linkedPutContracts: first ? first.linkedPutContracts : 0,
-                linkedSettledContracts: first ? first.linkedSettledContracts : 0,
-                linkedDeferredContracts: first ? first.linkedDeferredContracts : 0,
-                linkedExpiredContracts: first ? first.linkedExpiredContracts : 0,
-                linkedReferenceValue: first ? first.linkedReferenceValue : null,
-                linkedIvMin: center ? center.linkedIvMin : null,
-                linkedIvMax: center ? center.linkedIvMax : null,
-                linkedRateMin: first ? first.linkedRateMin : null,
-                linkedRateMax: first ? first.linkedRateMax : null,
-                linkedInputsFetchedAt: String(linkedHedge.marketInputs
-                    && linkedHedge.marketInputs.fetchedAt || ''),
-            });
-        }
-        series.weeklyPremium = weeklyPremium === null ? null : weeklyPremium;
-        series.scenarioDays = scenarioDays;
-        series.premiumIncome = premiumIncome;
-        series.premiumIncomeEnabled = premiumIncome > 0;
+        const scripts = [...globalScope.document.querySelectorAll('script[src]')];
+        const source = scripts.find(s => /\/cost_basis_stress_worker\.js(?:\?|$)/.test(s.src));
+        const dependencies = scripts.filter(s => /\/(cost_basis_core|american_binomial|market_curves|cost_basis_stress_models|cost_basis_stress_core|cost_basis_stress_band)\.js(?:\?|$)/.test(s.src)).map(s => s.src);
+        const generation = stressJob.generation;
+        try {
+            if (!source) throw new Error('worker_source_missing');
+            const worker = new globalScope.Worker(source.src);
+            stressJob.worker = worker;
+            stressJob.status = '后台计算采样情景范围…';
+            worker.onmessage = event => {
+                if (generation !== stressJob.generation || key !== stressJob.key || !state.stressOpen) return;
+                if (event.data.generation !== generation) return;
+                series.band = event.data.band;
+                stressJob.status = series.band && series.band.available
+                    ? `采样情景范围：${series.band.members.length} 个完整组合情景；非置信区间，不保证连续参数极值。`
+                    : `区间不可用：${series.band && series.band.reason || '计算失败'}；保留中线。`;
+                worker.terminate(); stressJob.worker = null;
+                _renderStressTest();
+            };
+            worker.onerror = () => {
+                if (generation !== stressJob.generation) return;
+                stressJob.status = '后台区间计算失败；保留中线。';
+                worker.terminate(); stressJob.worker = null;
+                _renderStressTest();
+            };
+            worker.postMessage({ generation, dependencies, events, options,
+                bandOptions: { includeFlatIv: state.stressBandFlatIv } });
+        } catch (error) { stressJob.status = `区间不可用：${error.message}；保留中线。`; }
         return series;
     }
 
@@ -1937,6 +585,8 @@
             _invalidatePositions();
             _invalidateManagedAccounts();
             _setConnection('disconnected');
+            _invalidateStressScenarioInputs();
+            _renderStressTest();
             _scheduleReconnect();
         };
         socket.onerror = () => {
@@ -2046,6 +696,7 @@
             // an empty array into a trusted zero-position snapshot.
             state.positionsConnected = data.ibConnected === true
                 && data.positionsReady === true;
+            if (data.ibConnected === false) _invalidateStressScenarioInputs();
             // The server stamps this in TWS's configured timezone. Browser
             // local time must never be compared with broker-local CSV rows.
             state.positionsTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/
@@ -2559,6 +1210,7 @@
             stressLinkedIvTenorDamping: true,
             stressLinkedIvTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
             stressLinkedIvTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
+            stressIvResearchReviewedVersion: IV_RESEARCH_PROFILE.version,
             stressLinkedIvBetaAuto: true,
             stressLinkedIvOtmDiscount: true,
             stressLinkedSigmaCrashScale: true,
@@ -2583,6 +1235,8 @@
     }
 
     function _beginBookSelection(bookId) {
+        _cancelStressJob();
+        _invalidateStressScenarioInputs();
         state.whatIfEditGeneration += 1;
         // Snapshots and linked-book loads in flight belong to the previous book.
         state.stressInputsGeneration += 1;
@@ -2782,6 +1436,7 @@
     }
 
     function _invalidatePositions() {
+        _cancelStressJob();
         if (state.positionsTimer) {
             globalScope.clearTimeout(state.positionsTimer);
             state.positionsTimer = null;
@@ -3308,7 +1963,7 @@
         if (days === undefined || days === null) {
             return { date: '', horizonDays: horizon, error: 'invalid_horizon' };
         }
-        const date = addDaysToDigits(_todayDigits(), days);
+        const date = addDaysToDigits(globalScope.OptionComboCostBasisStressCore.exchangeDate(), days);
         return { date, horizonDays: days, error: date ? '' : 'invalid_horizon' };
     }
 
@@ -3316,7 +1971,7 @@
         // This book marks BOTH sides after the scenario date, so every open
         // contract alive on it is quoted; the linked book stays long-only.
         return _deferredLongOptionRequests(
-            state.ledger && state.ledger.openOptions, _stressScenarioDate().date,
+            state.ledger && state.ledger.openOptions, globalScope.OptionComboCostBasisStressCore.exchangeDate(),
             { includeShorts: true });
     }
 
@@ -3326,7 +1981,7 @@
             (includeShorts ? Number(option.contracts) !== 0 : Number(option.contracts) > 0)
             && ['C', 'P'].includes(String(option.right || '').toUpperCase().slice(0, 1))
             && String(option.expiry || '').replace(/\D/g, '').slice(0, 8)
-                > throughExpiry
+                >= throughExpiry
         )).map((option) => ({
             conId: option.conId || null,
             localSymbol: option.localSymbol || '',
@@ -3458,14 +2113,14 @@
             else if (headline < 0) total.className = 'metric-negative';
             card.appendChild(total);
             if (anyPart) {
-                line(card, `① ${symbol} 到期结算 ${amount(point.basePnl)}`, 'stress-card-part');
+                line(card, `① ${symbol} 股票与现金 ${amount(point.basePnl)}`, 'stress-card-part');
             }
             if (showConvexity) {
-                line(card, `${numbers.own} ${symbol} 未到期多头期权 ${amount(point.longOptionPnl)}`,
+                line(card, `${numbers.own} ${symbol} 多头期权（含交割） ${amount(point.longOptionPnl)}`,
                     'stress-card-part');
             }
             if (showShorts) {
-                line(card, `${numbers.shorts} ${symbol} 未到期空头期权 ${amount(point.shortOptionPnl)}`,
+                line(card, `${numbers.shorts} ${symbol} 空头期权（含交割） ${amount(point.shortOptionPnl)}`,
                     'stress-card-part');
             }
             if (showLinked) {
@@ -3476,10 +2131,63 @@
                 line(card, `${numbers.premium} 假设权利金 ${_money(series.scenarioDays / 7, 1)} 周 `
                     + `${amount(point.premiumIncome)}`, 'stress-card-part');
             }
-            line(card, `综合成本 ${point.cost === null ? '—' : _money(point.cost, 4)}`
+            const bandPoint = series.band && series.band.available ? series.band.points.find(p => p.price === point.price) : null;
+            if (bandPoint) line(card, `采样范围 ${amount(bandPoint.lower)} ～ ${amount(bandPoint.upper)}（非置信区间）`);
+            line(card, `情景结算后每股成本 ${point.cost === null ? '—' : _money(point.cost, 4)}`
                 + ` · ${point.shares === null ? '—' : _quantity(point.shares)} 股`);
             wrap.appendChild(card);
         });
+    }
+
+    function _stressBandMemberLabel(series, member) {
+        if (member.flatIv) return 'IV 保持不变；价格、日期及其他假设相同';
+        const d = series.ivAssumptions || {};
+        if (d.ivMode === 'none' || !d.ivMode) return 'IV 保持不变';
+        if (d.ivMode === 'fixed') return `固定 IV 冲击 ${_money(d.ivShockPoints || 0, 2)} 点`;
+        const beta = d.ivBetaAuto ? '当前自适应 β' : `手填 β ${_money(d.ivBeta ?? 1.5, 2)}`;
+        return `${beta} × ${_money(member.betaScale ?? 1, 2)}`
+            + (d.ivTenorDamping ? `；期限 ${d.ivTenorDays} 天 / 指数 ${member.tenorExponent ?? d.ivTenorExponent}` : '；期限衰减关闭')
+            + (d.ivOtmDiscount ? `；价外 Put 折扣底值 ${_money(member.otmFloor ?? 0.5, 2)}` : '；价外 Put 折扣关闭');
+    }
+
+    function _renderStressSlice(series, index, book) {
+        const panel = $('stress-slice');
+        if (!panel) return;
+        panel.hidden = !series || !series.available || !book;
+        if (panel.hidden) return;
+        index = Math.max(0, Math.min(series.points.length - 1, Math.round(Number(index) || 0)));
+        stressJob.sliceIndex = index;
+        const p = series.points[index], currency = book.currency || 'USD';
+        const amount = value => Number.isFinite(value) ? _currencyAmount(currency, value, 2, true) : '不可用';
+        const fill = (id, value) => {
+            const node = $(id);
+            node.className = Number.isFinite(value) ? (value > 0 ? 'metric-positive' : value < 0 ? 'metric-negative' : '') : '';
+            _text(node, amount(value));
+        };
+        $('stress-slice-index').max = String(series.points.length - 1);
+        $('stress-slice-index').value = String(index);
+        _text($('stress-slice-price'), `${book.symbol} ${_currencyAmount(currency, p.price, 2)}（${p.changePct >= 0 ? '+' : ''}${_money(p.changePct, 1)}%）`);
+        _text($('stress-slice-cost-label'), series.linkedHedgeEnabled ? '本账本成本盈亏 + 联动变化' : '本账本现金流成本盈亏');
+        fill('stress-slice-cost-pnl', p.cashflowPnl);
+        fill('stress-slice-change-pnl', p.snapshotChangePnl);
+        _text($('stress-slice-scope'), `仅纳入本次开启的持仓${series.linkedHedgeEnabled ? '；联动账本仅多头期权，不含其股票及空头' : ''}，不是完整账户损益。`);
+        _text($('stress-slice-reference-note'), series.referenceChangeReason
+            ? '较快照变化不可用：缺少有效的当前标的/期权报价；未按零补齐。可刷新 TWS 参数，现有到期成本结果仍保留。'
+            : (!series.costComplete ? '历史成本不完整，成本盈亏不可用；较快照变化不依赖历史成本。' : '两种口径使用同一份快照和同一组情景估值。'));
+        fill('stress-slice-flat-pnl', p.flatIvPnl);
+        fill('stress-slice-iv-contribution', p.ivContribution);
+        _text($('stress-slice-iv-note'), series.ivExplanationReason
+            ? `IV 对照不可用（${series.ivExplanationReason}）；不影响有效中线。`
+            : `沿用图中${series.pnlBasis === 'change' ? '较快照变化' : '成本盈亏'}口径；仅关闭 IV 冲击，保留价格、日期、交割及变现假设。两项相加等于图中合计减去假设收入。`);
+        _text($('stress-slice-cash-gross'), `${_currencyAmount(currency, p.settlementCashPaid, 2)} / ${_currencyAmount(currency, p.settlementCashReceived, 2)}`);
+        fill('stress-slice-cash-net', p.settlementCashNet);
+        _text($('stress-slice-shares'), `${_quantity(p.shares)} 股`);
+        const band = series.band, bp = band && band.available && band.points[index];
+        for (const edge of ['lower', 'upper']) {
+            _text($(`stress-slice-band-${edge}`), bp
+                ? `${edge === 'lower' ? '下沿' : '上沿'} ${amount(bp[edge])}：${_stressBandMemberLabel(series, band.members[bp[`${edge}Member`]])}`
+                : (stressJob.status || '采样范围未生成；可开启上方“显示采样情景范围”。'));
+        }
     }
 
     function _renderStressChart(series, book) {
@@ -3511,6 +2219,9 @@
             series.points.forEach((point) => pnlValues.push(point.totalPnl));
         }
         series.points.forEach((point) => pnlValues.push(point.headlinePnl));
+        if (series.band && series.band.available) {
+            series.band.points.forEach(point => pnlValues.push(point.lower, point.upper));
+        }
         const pnlExtent = _stressExtent(pnlValues, true);
         const costExtent = _stressExtent(series.points.map((point) => point.cost), false);
         const x = (price) => margin.left
@@ -3613,6 +2324,13 @@
                 return `${command}${x(point.price).toFixed(2)},${scale(value).toFixed(2)}`;
             }).filter(Boolean).join(' ');
         }
+        if (series.band && series.band.available) {
+            const envelope = series.band.points;
+            const path = envelope.map((p, i) => `${i ? 'L' : 'M'}${x(p.price)},${yPnl(p.upper)}`)
+                .concat([...envelope].reverse().map(p => `L${x(p.price)},${yPnl(p.lower)}`)).join(' ') + ' Z';
+            svg.appendChild(_svgNode('path', { d: path, fill: '#7c83ff', 'fill-opacity': '0.18',
+                stroke: 'none', class: 'stress-sensitivity-band', 'pointer-events': 'none' }));
+        }
         // Whichever curve is outermost carries the assumed premium income.
         const showOwnCurve = showConvexity || showShorts;
         svg.appendChild(_svgNode('path', {
@@ -3705,6 +2423,7 @@
             const pointIndex = Math.max(0, Math.min(series.points.length - 1,
                 Math.round(ratio * (series.points.length - 1))));
             const point = series.points[pointIndex];
+            _renderStressSlice(series, pointIndex, book);
             const pointX = x(point.price);
             guide.style.display = '';
             guideLine.setAttribute('x1', pointX);
@@ -3803,7 +2522,7 @@
                 _text($('stress-tooltip-long-option-value'), _currencyAmount(
                     book.currency, point.longOptionMarketValue, 2));
                 _text($('stress-tooltip-long-option-iv-label'),
-                    `${numbers.own} TWS IV${point.ownIvShockPoints ? '（本点含冲击）' : '（保持不变）'}`);
+                    `${numbers.own} 本地 IV${point.ownIvShockPoints ? '（本点含冲击）' : '（保持不变）'}`);
                 _text($('stress-tooltip-long-option-iv'), _stressPercentRange(
                     point.longOptionIvMin, point.longOptionIvMax) + ownShock);
                 _text($('stress-tooltip-long-option-rate'), _stressPercentRange(
@@ -3818,7 +2537,7 @@
                 _text($('stress-tooltip-short-option-liability'), _currencyAmount(
                     book.currency, point.shortOptionLiability, 2));
                 _text($('stress-tooltip-short-option-iv-label'),
-                    `${numbers.shorts} TWS IV`);
+                    `${numbers.shorts} 本地 IV`);
                 _text($('stress-tooltip-short-option-iv'), _stressPercentRange(
                     point.shortOptionIvMin, point.shortOptionIvMax) + ownShortShock);
             }
@@ -3876,6 +2595,14 @@
                 + `${_quantity(point.exercisedContracts)} 张行权 · `
                 + `${_quantity(point.expiredContracts)} 张归零`);
 
+            _text($('stress-tooltip-base-label'), series.pnlBasis === 'change' ? '① 股票较快照变动' : '① 股票与历史现金（未平权利金另列）');
+            _text($('stress-tooltip-long-option-pnl-label'), `${numbers.own || ''} 本账本多头期权（含已交割）`);
+            _text($('stress-tooltip-short-option-pnl-label'), `${numbers.shorts || ''} 本账本空头期权（含已交割）`);
+            const bandPoint = series.band && series.band.available
+                ? series.band.points.find(p => p.price === point.price) : null;
+            $('stress-tooltip-band-row').hidden = !bandPoint;
+            _text($('stress-tooltip-band'), bandPoint
+                ? `${_currencyAmount(book.currency, bandPoint.lower, 2)} ～ ${_currencyAmount(book.currency, bandPoint.upper, 2)}` : '—');
             tooltip.hidden = false;
             const wrap = tooltip.parentElement;
             const wrapRect = wrap.getBoundingClientRect();
@@ -3894,32 +2621,44 @@
             tooltip.style.top = `${top}px`;
         };
         svg.onpointerleave = hideTooltip;
+        _renderStressSlice(series, stressJob.sliceIndex ?? series.centerIndex, book);
         svg.appendChild(_svgNode('text', {
             x: 18, y: margin.top + plotHeight / 2,
             transform: `rotate(-90 18 ${margin.top + plotHeight / 2})`,
             'text-anchor': 'middle', class: 'stress-axis-title axis-pnl',
-        }, `到期后盈亏（${_currencySymbol(book.currency)}）`));
+        }, `${series.pnlBasis === 'change' ? '较快照市值变化' : (showLinked ? '成本盈亏 + 联动变化' : '现金流成本盈亏')}（${_currencySymbol(book.currency)}）`));
         svg.appendChild(_svgNode('text', {
             x: width - 18, y: margin.top + plotHeight / 2,
             transform: `rotate(90 ${width - 18} ${margin.top + plotHeight / 2})`,
             'text-anchor': 'middle', class: 'stress-axis-title axis-cost',
-        }, `综合成本 / 股（${_currencySymbol(book.currency)}）`));
+        }, `情景结算后成本 / 股（${_currencySymbol(book.currency)}）`));
     }
 
     function _renderStressTest() {
         if (!state.stressOpen) return;
+        $('stress-tooltip').hidden = true;
+        $('stress-tooltip-band-row').hidden = true;
+        if ($('stress-slice')) $('stress-slice').hidden = true;
         const book = _currentBook();
         const expiries = _renderStressExpiryOptions();
         const baseInput = $('stress-base-price');
         const refreshButton = $('btn-stress-refresh-price');
-        refreshButton.disabled = state.stressInputsPending
+        refreshButton.disabled = stressRefreshJob.pending || state.stressInputsPending
             || state.connection !== 'connected';
-        refreshButton.textContent = state.stressInputsPending
+        refreshButton.textContent = stressRefreshJob.pending || state.stressInputsPending
             ? '拉取中…' : '刷新 TWS 现价与期权参数';
         if (!book || !state.ledger || !expiries.length) {
+            _cancelStressJob();
             _text($('stress-status'), '当前账本没有可用于压力测试的未平股票期权。');
             _clear($('stress-chart'));
             _clear($('stress-key-points'));
+            return;
+        }
+        if (state.eventsTotal > state.allEvents.length) {
+            _cancelStressJob();
+            _text($('stress-status'), '账本事件尚未完整载入，压力测试已停止；不能用截断头寸生成范围。');
+            _text($('stress-band-status'), '账本不完整，区间不生成。');
+            _clear($('stress-chart')); _clear($('stress-key-points'));
             return;
         }
         if (globalScope.document.activeElement !== baseInput) {
@@ -3980,13 +2719,29 @@
         const linkedBook = _stressLinkedBook();
         const linkedSymbol = linkedBook ? linkedBook.symbol : '联动账本';
         if (scenario.error) {
+            _cancelStressJob();
             _text($('stress-status'), '跌到位天数无效：请留空（在所选到期日结算）'
                 + `或输入 0 到 ${LINKED_MAX_HORIZON_DAYS} 的整数天。`);
             _clear($('stress-chart'));
             _clear($('stress-key-points'));
             return;
         }
-        const series = buildStressTestSeries(state.allEvents, {
+        $('stress-pnl-basis').value = state.stressPnlBasis;
+        $('stress-path').value = state.stressPath;
+        $('stress-band-enabled').checked = state.stressBandEnabled;
+        $('stress-band-flat-iv').checked = state.stressBandFlatIv;
+        $('stress-own-iv-beta').checked = state.stressOwnIvBeta;
+        if (stressRefreshJob.pending) {
+            _cancelStressJob();
+            _text($('stress-status'), state.stressLinkedEventsPending
+                ? `正在读取 ${linkedSymbol} 账本，随后同步刷新两边行情…`
+                : state.stressIncludeLinkedHedge ? '正在同步刷新本账本与联动账本行情，完成后生成叠加曲线…'
+                    : '正在刷新本账本行情…');
+            _text($('stress-band-status'), '行情刷新中，完成后重新计算范围。');
+            _clear($('stress-chart')); _clear($('stress-key-points'));
+            return;
+        }
+        const series = _stressSeries(state.allEvents, {
             symbol: book.symbol,
             currency: book.currency || 'USD',
             centerPrice: state.stressBasePrice,
@@ -3999,13 +2754,22 @@
             longOptionInputs: state.stressLongOptionInputs,
             linkedHedge: _stressLinkedHedgeRequest(),
             weeklyPremium: state.stressWeeklyPremium,
-            asOf: _todayDigits(),
+            asOf: globalScope.OptionComboCostBasisStressCore.exchangeDate(),
+            horizonDays: scenario.horizonDays,
+            requireSnapshotVersion: 2,
+            pnlBasis: state.stressPnlBasis,
+            path: state.stressPath,
+            ivDriver: state.stressOwnIvBeta ? { ivMode: 'beta', ivBeta: 1.5,
+                ivBetaAuto: false, ivTenorDamping: true, ivTenorDays: 30,
+                ivTenorExponent: 0.65, ivOtmDiscount: true } : null,
             liquidation: state.stressLiquidation,
             pricingModel: state.stressPricingModel,
             dividendYield: _effectiveDividendYield(state.stressDividendYield, book.symbol),
         });
         series.horizonDays = scenario.horizonDays;
         if (!series.available) {
+            $('stress-legend-linked-pnl').hidden = true;
+            $('stress-legend-protected-pnl').hidden = true;
             let failure = '当前期权资料不完整，无法生成压力测试。';
             if (series.reason === 'invalid_center_price') {
                 failure = '请输入大于 0 的基准现价，或连接 TWS 后刷新现价。';
@@ -4035,8 +2799,8 @@
             } else if (series.reason === 'invalid_linked_mapping') {
                 failure = '映射方式无效，请重新选择。';
             } else if (series.reason === 'missing_linked_sigma') {
-                failure = `复利映射在情景日晚于今天时需要路径波动率，但 ${linkedSymbol} 快照里没有`
-                    + '情景日之后仍存续、可作代理的合约。请在「路径 σ」填入年化波动率，或改用线性映射。';
+                failure = `多日映射需要路径波动率，但 ${linkedSymbol} 当前存续合约既无有效 TWS IV，`
+                    + '也无法从报价反解可用的 IV 代理。请刷新行情，在「路径 σ」填入假设，或改用线性映射。';
             } else if (series.reason === 'missing_long_option_quote_sides'
                 || series.reason === 'missing_short_option_quote_sides') {
                 failure = '买卖价口径需要每张本账本合约都有 TWS 买价与卖价，至少一张缺失，已停止叠加。改回中间价或刷新。';
@@ -4109,7 +2873,27 @@
                 failure = `${linkedSymbol} 账本至少一张多头期权没有取得 TWS 当前标记价，`
                     + '无法计算相对今日的变动，已停止叠加。';
             }
-            _text($('stress-status'), failure);
+            const reasons = {
+                snapshot_upgrade_required: '快照版本过旧，请重启更新后的后端并刷新；新内核需要原始利率曲线和时刻元数据。',
+                invalid_snapshot_time: '快照缺少有效的带时区时间戳，请刷新。',
+                unsupported_stress_currency: '压力测试目前仅支持 USD 股票/ETF；不会把美元利率套用于其它币种。',
+                scenario_before_snapshot: '情景时刻早于快照，请选择未来日期或刷新。',
+                expired_open_position_reconcile: '账本有已过交易截止时间但尚未处理的期权，请先对账/记录到期结果。',
+                snapshot_time_mismatch: '两本账本或各报价的接收时刻相差超过 60 秒，请同时刷新后重试。',
+                stale_scenario_snapshot: '快照属于旧情景日期，请刷新。',
+                quote_outside_model_bounds: '至少一张报价不在所选模型可定价范围内，不能反解 IV；请核对报价、股息率和定价模型。',
+                calibration_failed: '当前报价的本地 IV 反解未收敛，已停止。',
+                missing_option_mark: '缺少期权当前标记价，无法建立一致的估值基线。',
+                quote_identity_conflict: '合约身份与条款/乘数冲突，请先核对。',
+                invalid_option_bid_ask: '存在交叉/不合理买卖报价，已停止。',
+                missing_option_quote_sides: '点差口径缺少双边报价，请刷新或选中间价。',
+                incomplete_cost_basis: '成本资料不完整；请补齐账本后使用成本盈亏。',
+            };
+            const identity = series.contract;
+            const contractNote = identity ? ` · ${identity.linked ? linkedSymbol : book.symbol} ${identity.localSymbol
+                || `${identity.expiry} ${identity.right}${identity.strike}`}${identity.conId ? ` (#${identity.conId})` : ''}` : '';
+            _text($('stress-status'), (reasons[series.reason] || `${failure} [${series.reason}]`) + contractNote);
+            _text($('stress-band-status'), '中线不可用，区间不生成。');
             _clear($('stress-chart'));
             _clear($('stress-key-points'));
             return;
@@ -4130,120 +2914,30 @@
         // The outermost curve carries the assumed premium income, so its
         // legend names that component too.
         $('stress-legend-base-pnl').textContent = showOwn || showLinked
-            ? `① ${book.symbol} 到期结算盈亏（左轴）`
-            : (showPremium ? `①${premiumTag} 到期结算盈亏 + 假设权利金（左轴）` : '到期结算盈亏（左轴）');
+            ? `① ${book.symbol} 股票与现金（左轴）`
+            : (showPremium ? `①${premiumTag} 股票现金 + 假设净收入（左轴）` : '股票与现金盈亏（左轴）');
         $('stress-legend-protected-pnl').hidden = !showOwn;
         _text($('stress-legend-protected-pnl'),
-            `①+${ownParts}${showLinked ? '' : premiumTag} 计入 ${book.symbol} 未到期期权`
-            + `${showLinked || !showPremium ? '' : ' + 假设权利金'}（左轴）`);
+            `①+${ownParts}${showLinked ? '' : premiumTag} 计入 ${book.symbol} 期权（含交割）`
+            + `${showLinked || !showPremium ? '' : ' + 假设净收入'}（左轴）`);
         $('stress-legend-linked-pnl').hidden = !showLinked;
         _text($('stress-legend-linked-pnl'),
             `${numbers.total} 计入 ${series.linkedSymbol || linkedSymbol}`
             + ` 多头期权较今日变动${showPremium ? ' + 假设权利金' : ''}（左轴）`);
-        const ownShockNote = showLinked && series.linkedIvMode !== 'none' && showOwn
-            ? `，IV 冲击随 ${series.linkedSymbol} β 按 ${_money(Math.abs(series.linkedRatio), 2)}× 放大`
-            : '';
-        const sigmaNote = (() => {
-            if (series.linkedSigmaSource === 'instant') return '，情景日为今日，无路径损耗';
-            if (series.linkedSigmaSource === 'none') return '';
-            const origin = series.linkedSigmaSource === 'assumption' ? '（假设）'
-                : `（快照代理：最近 ATM 合约 K${_quantity(series.linkedSigmaProxyStrike)}`
-                    + `，距现价 ${_money(series.linkedSigmaProxyDistancePct, 1)}%`
-                    + `${series.linkedSigmaSource === 'proxy_far' ? '，⚠ 离 ATM 较远' : ''}）`;
-            return `，路径 σ ${_money((series.linkedSigma || 0) * 100, 1)}%${origin}`
-                + (series.linkedSigmaCrashScale ? `，跌 ≥${CRASH_SIGMA_FULL_DROP_PCT}% 时 σ ×${_money(
-                    CRASH_SIGMA_SCALE, 1)}（历史 RV/IV）` : '')
-                + `，${_money(series.linkedTimeYears * 365, 0)} 天损耗 ${_money(
-                    series.linkedDragLog * 100, 2)}%（基准 σ）`;
-        })();
-        const mappingNote = series.linkedMapping === 'linear' ? '线性' : `复利${sigmaNote}`;
-        const linkedParts = [];
-        if (showLinked && series.linkedCallContracts) {
-            linkedParts.push(`${_quantity(series.linkedCallContracts)} 张 Long Call`);
-        }
-        if (showLinked && series.linkedPutContracts) {
-            linkedParts.push(`${_quantity(series.linkedPutContracts)} 张 Long Put`);
-        }
-        const linkedSummary = !series.linkedHedgeEnabled ? ''
-            : (showLinked
-                ? ` · ${numbers.linked} 已叠加 ${series.linkedSymbol} 账本 ${linkedParts.join(' + ')}`
-                    + `（映射 1 : ${_money(series.linkedRatio, 2)} ${mappingNote}`
-                    + ` · ${series.linkedSymbol} 基准 ${_currencyAmount(
-                        linkedBook && linkedBook.currency || 'USD', series.linkedBasePrice, 2)}`
-                    + ` · 今日标记市值 ${_currencyAmount(
-                        linkedBook && linkedBook.currency || 'USD', series.linkedReferenceValue, 0)}`
-                    + (series.linkedDeferredContracts
-                        ? ` · TWS IV ${_stressPercentRange(series.linkedIvMin, series.linkedIvMax)}`
-                            + (series.linkedIvMode === 'fixed' && series.linkedIvShockPoints
-                                ? `（已含固定 IV 冲击 ${series.linkedIvShockPoints > 0 ? '+' : ''}`
-                                    + `${_money(series.linkedIvShockPoints, 0)} 点）`
-                                : (series.linkedIvMode === 'beta'
-                                    ? `（基准点；${series.linkedIvBetaAuto
-                                        ? 'β 按跌幅自适应 0.90–1.65 点/1%（历史回归）'
-                                        : `每跌 1% IV +${_money(series.linkedIvBeta, 2)} 点`}`
-                                        + (series.linkedIvOtmDiscount ? '，价外 Put ≥10% 取 0.50（历史）' : '')
-                                        + (series.linkedIvTenorDamping
-                                            ? `，按期限衰减 (${_money(series.linkedIvTenorDays, 0)}/剩余天)^${_money(
-                                                series.linkedIvTenorExponent, 2)}`
-                                            : '')
-                                        + '，上涨侧不变）'
-                                    : ''))
-                        : ' · 全部按内在价值结算')
-                    + '）'
-                : ` · ${series.linkedSymbol || linkedSymbol} 账本没有未平多头期权可叠加`);
-        const longOptionParts = [];
-        if (series.longCallContracts) {
-            longOptionParts.push(`${_quantity(series.longCallContracts)} 张 Long Call`);
-        }
-        if (series.longPutContracts) {
-            longOptionParts.push(`${_quantity(series.longPutContracts)} 张 Long Put`);
-        }
-        const shortOptionParts = [];
-        if (series.shortCallContracts) {
-            shortOptionParts.push(`${_quantity(series.shortCallContracts)} 张 Short Call`);
-        }
-        if (series.shortPutContracts) {
-            shortOptionParts.push(`${_quantity(series.shortPutContracts)} 张 Short Put`);
-        }
-        const dateLead = scenario.horizonDays === null
-            ? `${_stressDateLabel(series.throughExpiry)} 到期后`
-            : `${_stressDateLabel(series.throughExpiry)} 情景日`
-                + `（今天 +${_money(scenario.horizonDays, 0)} 天，含 Theta，覆盖到期范围；`
-                + '三项同日估值）';
-        const premiumNote = showPremium
-            ? ` · ${numbers.premium} 假设权利金 ${_currencyAmount(currency, series.weeklyPremium, 0)}/周`
-                + ` × ${_money(series.scenarioDays / 7, 1)} 周（${_money(series.scenarioDays, 0)} 天 ÷ 7）`
-                + ` = ${_currencyAmount(currency, series.premiumIncome, 0)}，不随价格变化`
-            : (series.weeklyPremium > 0 ? ' · 假设权利金：情景日为今日，0 周，不计' : '');
-        _text($('stress-status'), dateLead + premiumNote
-            + ` · 基准 ${_currencyAmount(currency, series.centerPrice, 4)}`
-            + ` · 扫描 ±${_money(series.rangePct, 0)}%`
-            + ` · ${BASIS_LABELS[series.basisMode] || series.basisMode}口径`
-            + ` · ${series.pricingModel === 'american' ? '美式二叉树' : '欧式 BSM'}`
-            + `（${book.symbol} 股息率 ${_money((series.dividendYield || 0) * 100, 2)}%`
-            + (series.linkedHedgeEnabled && series.linkedDividendYield !== null
-                ? `，${series.linkedSymbol} ${_money((series.linkedDividendYield || 0) * 100, 2)}%` : '')
-            + '）'
-            + (series.liquidation === 'bidask' ? ' · 变现口径：买卖价（多头按买价、空头按卖价折算）' : '')
-            + (showOwn || showLinked ? ` · ① ${book.symbol} 到期结算` : '')
-            + (series.includeDeferredLongOptions
-                ? (series.longOptionCount
-                    ? ` · ${numbers.own} 已计入 ${longOptionParts.join(' + ')}`
-                        + `（逐合约 TWS IV ${_stressPercentRange(
-                            series.longOptionIvMin, series.longOptionIvMax)}`
-                        + `，曲线 r(T) ${_stressPercentRange(
-                            series.longOptionRateMin, series.longOptionRateMax)}${ownShockNote}）`
-                    : '')
-                    + (series.shortOptionCount
-                        ? ` · ${numbers.shorts} 已盯市 ${shortOptionParts.join(' + ')} 的负债`
-                            + `（逐合约 TWS IV ${_stressPercentRange(
-                                series.shortOptionIvMin, series.shortOptionIvMax)}`
-                            + `，已收权利金已计入${ownShockNote}）`
-                        : '')
-                    + (!series.longOptionCount && !series.shortOptionCount
-                        ? ' · 情景日之后没有仍未到期的期权' : '')
-                : '')
-            + linkedSummary);
+        _text($('stress-band-status'), state.stressBandEnabled ? stressJob.status : '区间已关闭。');
+        _text($('stress-status'), `${book.symbol} · ${series.pnlBasis === 'change' ? '相对当前快照的市值变化' : (showLinked ? '本账本现金流成本盈亏 + 联动多头较快照变化（混合口径，非账户 ΔNAV）' : '本账本现金流成本盈亏')}`
+            + ` · 参考 ${series.asOfInstant} → 情景 ${series.targetInstant}`
+            + ` · ${series.path === 'gradual' ? '线性渐变路径' : '立即冲击并保持'}`
+            + (series.warnings.length ? ` · 注意：${series.warnings.map(w => ({
+                expiry_close_assumption: '缺少精确截止时间的合约按纽约 16:00 假设',
+                reference_time_assumption: '参考时刻为假设', non_live_or_unknown_quotes: '含冻结、延时报价或未知类型',
+                quote_receipt_time_missing: '部分报价缺少接收时刻，无法证明同步性',
+                partial_portfolio_excludes_deferred: '部分组合：已排除更晚到期的期权及其开仓权利金',
+                path_sigma_local_iv_proxy: `路径 σ 使用本地反解 IV 代理 ${_money(series.linkedSigma * 100, 2)}%（非实现波动率预测）`,
+            }[w] || w)).join('；')}` : ''));
+        _text($('stress-note'), '盈亏直接从现金、股票和期权计算，不从每股成本反推。成本口径含历史现金流，未平期权的权利金只在对应腿计一次；市值变化口径以同一快照为基线。'
+            + '本账本到期交割按路径价格决定，交割后的股票持有到情景时点；联动多头在到期变现、现金不计息。现金利息、融资成本、未来股票分红、提前指派时机、费用和成交滑点未模拟。'
+            + '橙线是按所选账本成本口径计算的情景结算后每股成本：随交割结果变化，结果相同的价格区间可保持水平；无持股时无每股成本。未到期期权市值、联动保护和每周假设净收入只进入盈亏，不混入本账本成本。每周输入不是卖出新期权的保证利润。区间是完整组合的参数采样范围，非概率或保证边界。');
         _renderStressChart(series, book);
         _renderStressCards(series, currency);
     }
@@ -4260,15 +2954,16 @@
         globalScope.document.body.classList.add('stress-modal-open');
         _renderStressTest();
         $('stress-expiry').focus();
-        if (state.stressIncludeLongOptions) {
-            _refreshStressMarketInputs(false);
+        if (state.stressIncludeLongOptions || state.stressIncludeLinkedHedge || state.stressPnlBasis === 'change') {
+            void _refreshStressScenarioInputs(false);
         }
-        _ensureStressLinkedData(false);
     }
 
     function _closeStressTest() {
         if (!state.stressOpen) return;
         state.stressOpen = false;
+        _cancelStressJob();
+        _invalidateStressScenarioInputs();
         globalScope.clearTimeout(state.stressHorizonTimer);
         state.stressHorizonTimer = null;
         $('stress-modal').hidden = true;
@@ -4347,11 +3042,44 @@
         }
     }
 
-    async function _refreshStressPrice() {
-        await _refreshStressMarketInputs(true);
-        if (state.stressIncludeLinkedHedge && state.stressLinkedBookId) {
-            await _loadStressLinkedEvents(true);
+    // One refresh owns BOTH snapshots. Resolve the linked ledger first, then
+    // start both quote requests together; never combine a new linked quote
+    // with the old main-book baseline (including re-enabling a cached overlay).
+    async function _refreshStressScenarioInputs(showAlert, reloadLinkedEvents = false) {
+        const bookId = state.bookId;
+        const throughExpiry = _stressScenarioDate().date;
+        if (!bookId || !throughExpiry) return;
+        const linked = state.stressIncludeLinkedHedge;
+        const linkedBookId = state.stressLinkedBookId;
+        const socket = state.ws;
+        _invalidateStressScenarioInputs();
+        const generation = stressRefreshJob.generation;
+        const isCurrent = () => stressRefreshJob.generation === generation
+            && state.bookId === bookId && state.ws === socket
+            && _stressScenarioDate().date === throughExpiry
+            && state.stressIncludeLinkedHedge === linked
+            && state.stressLinkedBookId === linkedBookId;
+        stressRefreshJob.pending = true;
+        _renderStressTest();
+        try {
+            if (linked && linkedBookId && (reloadLinkedEvents || !state.stressLinkedLedger)) {
+                await _loadStressLinkedEvents(showAlert, false);
+            }
+            if (!isCurrent()) return;
+            await Promise.all([
+                _refreshStressMarketInputs(showAlert),
+                linked && linkedBookId ? _refreshStressLinkedInputs(showAlert) : Promise.resolve(),
+            ]);
+        } finally {
+            if (isCurrent()) {
+                stressRefreshJob.pending = false;
+                _renderStressTest();
+            }
         }
+    }
+
+    async function _refreshStressPrice() {
+        await _refreshStressScenarioInputs(true, true);
     }
 
     // ------------------------------------------------------------------
@@ -4369,8 +3097,8 @@
         const lens = state.stressLiquidation === 'bidask'
             ? '按今日点差折算：多头理论价 × 今日买价/中间价，空头理论价 × 今日卖价/中间价；交叉或单边报价拒绝'
             : '中间价：理论价按 TWS 中间价口径计';
-        return `${model} · 每张合约用它当前的 TWS IV · 无风险利率按情景日到到期日的期限从共享 USD 折现曲线解析`
-            + ` · ACT/365 · ${dividend} · ${lens}。这是情景估值，不是对情景日报价的预测。`;
+        return `${model} · 从当前标记价用所选模型反解逐合约本地 IV（不是直接套用 TWS IV） · 无风险利率按当前与情景剩余期限从同一共享 USD 折现曲线解析`
+            + ` · 沿用今日期限曲线形状（静态滚动假设，非未来利率预测） · ACT/365 · ${dividend} · ${lens}。这是情景估值，不是对情景日报价的预测。`;
     }
 
     function _stressLinkedBookCandidates(book) {
@@ -4405,6 +3133,9 @@
         try {
             globalScope.localStorage.setItem(
                 STRESS_LINKED_STORAGE_PREFIX + state.bookId, JSON.stringify({
+                    kernel: { pnlBasis: state.stressPnlBasis, path: state.stressPath,
+                        band: state.stressBandEnabled, flatIv: state.stressBandFlatIv,
+                        ownBeta: state.stressOwnIvBeta },
                     enabled: state.stressIncludeLinkedHedge,
                     weeklyPremium: state.stressWeeklyPremium,
                     linkedBookId: state.stressLinkedBookId,
@@ -4415,6 +3146,7 @@
                     ivTenorDamping: state.stressLinkedIvTenorDamping,
                     ivTenorDays: state.stressLinkedIvTenorDays,
                     ivTenorExponent: state.stressLinkedIvTenorExponent,
+                    ivResearchReviewedVersion: state.stressIvResearchReviewedVersion,
                     ivBetaAuto: state.stressLinkedIvBetaAuto,
                     ivOtmDiscount: state.stressLinkedIvOtmDiscount,
                     sigmaCrashScale: state.stressLinkedSigmaCrashScale,
@@ -4429,6 +3161,11 @@
 
     /** Drop every snapshot that was keyed to the previous scenario date. */
     function _invalidateStressScenarioInputs() {
+        _cancelStressJob();
+        stressRefreshJob.generation += 1;
+        stressRefreshJob.pending = false;
+        state.stressLinkedLoadGeneration += 1;
+        state.stressLinkedEventsPending = false;
         state.stressInputsGeneration += 1;
         state.stressLongOptionInputs = null;
         state.stressInputsPending = false;
@@ -4454,6 +3191,14 @@
 
     function _restoreStressLinkedChoice(book) {
         const remembered = _readStressLinkedMemory(book.bookId);
+        state.stressIvResearchReviewedVersion = remembered
+            ? (remembered.ivResearchReviewedVersion || null) : IV_RESEARCH_PROFILE.version;
+        const kernel = remembered && remembered.kernel || {};
+        state.stressPnlBasis = kernel.pnlBasis === 'change' ? 'change' : 'cost';
+        state.stressPath = kernel.path === 'gradual' ? 'gradual' : 'immediate';
+        state.stressBandEnabled = kernel.band !== false;
+        state.stressBandFlatIv = kernel.flatIv !== false;
+        state.stressOwnIvBeta = kernel.ownBeta === true;
         const rememberedPremium = normalizeWeeklyPremium(remembered && remembered.weeklyPremium);
         state.stressWeeklyPremium = rememberedPremium === null ? 0 : rememberedPremium;
         const choice = chooseLinkedBook(book, _stressLinkedBookCandidates(book), remembered);
@@ -4480,13 +3225,14 @@
      * on the side. Nothing here touches state.allEvents or state.ledger; the
      * current book keeps its own view while the sibling is read.
      */
-    async function _loadStressLinkedEvents(showAlert) {
+    async function _loadStressLinkedEvents(showAlert, refreshInputs = true) {
         const linkedBookId = state.stressLinkedBookId;
         const mainBookId = state.bookId;
         if (!linkedBookId || !mainBookId) return;
         state.stressLinkedLoadGeneration += 1;
         state.stressLinkedInputsGeneration += 1;
         const generation = state.stressLinkedLoadGeneration;
+        const socket = state.ws;
         state.stressLinkedEventsPending = true;
         state.stressLinkedEventsError = '';
         state.stressLinkedEvents = [];
@@ -4496,6 +3242,7 @@
         state.stressLinkedInputsError = '';
         _renderStressTest();
         const isCurrent = () => state.bookId === mainBookId
+            && state.ws === socket
             && state.stressLinkedBookId === linkedBookId
             && state.stressLinkedLoadGeneration === generation;
         try {
@@ -4535,8 +3282,8 @@
                 _renderStressTest();
             }
         }
-        if (isCurrent() && state.stressLinkedLedger && state.stressIncludeLinkedHedge) {
-            await _refreshStressLinkedInputs(showAlert);
+        if (refreshInputs && isCurrent() && state.stressLinkedLedger && state.stressIncludeLinkedHedge) {
+            await _refreshStressScenarioInputs(showAlert);
         }
     }
 
@@ -4562,17 +3309,20 @@
         }
         state.stressLinkedInputsGeneration += 1;
         const generation = state.stressLinkedInputsGeneration;
+        const socket = state.ws;
         // Every long contract still alive today needs a quote: the mark is
         // the reference value, and contracts that expire between today and
         // the stress date still settle at intrinsic against it. Resolve the
         // list now, before any render can normalise the selected expiry.
         const contracts = _deferredLongOptionRequests(
-            state.stressLinkedLedger.openOptions, _todayDigits());
+            state.stressLinkedLedger.openOptions, globalScope.OptionComboCostBasisStressCore.exchangeDate());
         state.stressLinkedInputsPending = true;
         state.stressLinkedInputsError = '';
         state.stressLinkedInputs = null;
         _renderStressTest();
         const isCurrent = () => state.bookId === mainBookId
+            && state.ws === socket
+            && state.stressIncludeLinkedHedge
             && state.stressLinkedBookId === linkedBookId
             && _stressScenarioDate().date === throughExpiry
             && state.stressLinkedInputsGeneration === generation;
@@ -4608,16 +3358,10 @@
         }
     }
 
-    /** Load whatever the linked overlay still lacks, in order, once. */
+    /** Enabling even a previously cached overlay needs a fresh matched pair. */
     function _ensureStressLinkedData(showAlert) {
         if (!state.stressIncludeLinkedHedge || !state.stressLinkedBookId) return;
-        if (!state.stressLinkedLedger) {
-            if (!state.stressLinkedEventsPending) void _loadStressLinkedEvents(showAlert);
-            return;
-        }
-        if (!state.stressLinkedInputs && !state.stressLinkedInputsPending) {
-            void _refreshStressLinkedInputs(showAlert);
-        }
+        return _refreshStressScenarioInputs(showAlert);
     }
 
     function _countLongOptions(openOptions) {
@@ -4658,7 +3402,7 @@
             basePrice: state.stressLinkedInputs
                 ? state.stressLinkedInputs.underlyingPrice : null,
             marketInputs: state.stressLinkedInputs,
-            asOf: _todayDigits(),
+            asOf: globalScope.OptionComboCostBasisStressCore.exchangeDate(),
         };
     }
 
@@ -4674,12 +3418,40 @@
         return _todayIso().replace(/\D/g, '').slice(0, 8);
     }
 
+    function _reviewStressIvSettings(restoreBaseline) {
+        if (restoreBaseline) {
+            for (const [key, value] of Object.entries(IV_RESEARCH_PROFILE.settings)) {
+                state[`stressLinked${key[0].toUpperCase()}${key.slice(1)}`] = value;
+            }
+        }
+        state.stressIvResearchReviewedVersion = IV_RESEARCH_PROFILE.version;
+        _writeStressLinkedMemory();
+        _renderStressTest();
+    }
+
+    function _renderStressIvProfile() {
+        const settings = Object.fromEntries(Object.keys(IV_RESEARCH_PROFILE.settings).map(key =>
+            [key, state[`stressLinked${key[0].toUpperCase()}${key.slice(1)}`]]));
+        const profile = globalScope.OptionComboCostBasisStressModels.ivResearchProfileStatus(settings, state.stressIvResearchReviewedVersion);
+        const symbol = (_stressLinkedBook() || {}).symbol;
+        _text($('stress-iv-profile-label'), profile.kind === 'none' ? 'IV 冲击未开启'
+            : profile.baseline ? 'QQQ IV 研究基准' : '自定义 IV 参数');
+        const note = $('stress-iv-profile-note');
+        note.className = profile.needsReview ? 'needs-review' : '';
+        _text(note, profile.needsReview
+            ? '已有配置尚未确认当前研究版（2026-09-05）；参数原样保留，请选择保留或恢复。'
+            : `已确认研究版 2026-09-05${symbol && symbol !== 'QQQ' ? '；用于本联动标的是额外假设' : ''}；非预测保证。`);
+        $('btn-stress-iv-keep').hidden = !profile.needsReview;
+        $('btn-stress-iv-baseline').disabled = profile.baseline && !profile.needsReview;
+    }
+
     function _renderStressLinkedControls(book) {
         const toggle = $('stress-include-linked-hedge');
         const wrap = $('stress-linked-inputs');
         const select = $('stress-linked-book');
         const ratioInput = $('stress-linked-ratio');
         const candidates = _stressLinkedBookCandidates(book);
+        _renderStressIvProfile();
         toggle.checked = state.stressIncludeLinkedHedge;
         toggle.disabled = !candidates.length;
         wrap.hidden = !state.stressIncludeLinkedHedge;
@@ -7238,6 +6010,21 @@
             }
         });
         $('btn-open-stress-test').addEventListener('click', _openStressTest);
+        $('btn-stress-iv-baseline').addEventListener('click', () => _reviewStressIvSettings(true));
+        $('btn-stress-iv-keep').addEventListener('click', () => _reviewStressIvSettings(false));
+        $('stress-slice-index').addEventListener('input', event => {
+            _renderStressSlice(stressJob.series, event.target.value, _currentBook());
+        });
+        for (const [id, field, checkbox] of [
+            ['stress-pnl-basis', 'stressPnlBasis', false], ['stress-path', 'stressPath', false],
+            ['stress-band-enabled', 'stressBandEnabled', true], ['stress-band-flat-iv', 'stressBandFlatIv', true],
+            ['stress-own-iv-beta', 'stressOwnIvBeta', true],
+        ]) $(id).addEventListener('change', event => {
+            state[field] = checkbox ? event.target.checked : event.target.value;
+            _writeStressLinkedMemory();
+            _renderStressTest();
+            if (field === 'stressPnlBasis') void _refreshStressScenarioInputs(false);
+        });
         $('btn-close-stress-test').addEventListener('click', _closeStressTest);
         $('stress-modal').addEventListener('click', (clickEvent) => {
             if (clickEvent.target === $('stress-modal')) _closeStressTest();
@@ -7248,18 +6035,20 @@
             state.stressHorizonDays = null;
             _invalidateStressScenarioInputs();
             _renderStressTest();
-            if (state.stressIncludeLongOptions) {
-                _refreshStressMarketInputs(false);
+            if (state.stressIncludeLongOptions || state.stressIncludeLinkedHedge || state.stressPnlBasis === 'change') {
+                void _refreshStressScenarioInputs(false);
             }
-            _ensureStressLinkedData(false);
         });
         $('stress-include-linked-hedge').addEventListener('change', (changeEvent) => {
             state.stressIncludeLinkedHedge = changeEvent.target.checked;
+            _invalidateStressScenarioInputs();
             _writeStressLinkedMemory();
             _renderStressTest();
-            _ensureStressLinkedData(false);
+            if (state.stressIncludeLinkedHedge) _ensureStressLinkedData(false);
+            else if (state.stressIncludeLongOptions || state.stressPnlBasis === 'change') void _refreshStressScenarioInputs(false);
         });
         $('stress-linked-book').addEventListener('change', (changeEvent) => {
+            _invalidateStressScenarioInputs();
             state.stressLinkedBookId = String(changeEvent.target.value || '');
             _clearStressLinkedData();
             _writeStressLinkedMemory();
@@ -7292,8 +6081,9 @@
             state.stressHorizonTimer = globalScope.setTimeout(() => {
                 state.stressHorizonTimer = null;
                 if (!state.stressOpen || _stressScenarioDate().error) return;
-                if (state.stressIncludeLongOptions) _refreshStressMarketInputs(false);
-                _ensureStressLinkedData(false);
+                if (state.stressIncludeLongOptions || state.stressIncludeLinkedHedge || state.stressPnlBasis === 'change') {
+                    void _refreshStressScenarioInputs(false);
+                }
             }, STRESS_HORIZON_DEBOUNCE_MS);
         });
         $('stress-linked-iv-tenor').addEventListener('change', (changeEvent) => {
@@ -7397,7 +6187,7 @@
             state.stressIncludeLongOptions = changeEvent.target.checked;
             _renderStressTest();
             if (state.stressIncludeLongOptions && !state.stressLongOptionInputs) {
-                _refreshStressMarketInputs(false);
+                void _refreshStressScenarioInputs(false);
             }
         });
         $('btn-stress-refresh-price').addEventListener('click', _refreshStressPrice);
@@ -7491,8 +6281,6 @@
         computeMarketMetrics,
         calculateBsmOptionPrice,
         calculateBsmPutPrice,
-        estimateDeferredLongOptions,
-        estimateDeferredShortOptions,
         priceScenarioOption,
         liquidationHaircut,
         bidAskProblem,
@@ -7501,7 +6289,6 @@
         normalizeLiquidation,
         normalizeDividendYield,
         DIVIDEND_YIELD_DEFAULTS,
-        estimateLinkedLongOptions,
         leveragedDragLog,
         normalizeLinkedMapping,
         normalizeLinkedSigma,

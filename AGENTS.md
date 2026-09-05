@@ -42,8 +42,10 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
 
 - `cost_basis.html`
   - standalone blended-cost ledger for one underlying at a time
-  - loads only `js/cost_basis_core.js`, `js/cost_basis_import.js`, and
-    `js/cost_basis.js`; never the trading shell
+  - loads ledger/import/page scripts plus DOM-free `american_binomial.js`,
+    `market_curves.js`, and `cost_basis_stress_{models,core,band,worker}.js`;
+    never the trading shell. Read `CODE PLAN/STRESS_KERNEL_REFACTOR.md` before
+    changing stress valuation. Do not derive stress P&L from the per-share cost.
   - reads TWS positions through the existing
     `request_portfolio_positions_snapshot` /
     `request_portfolio_avg_cost_snapshot` actions and writes its own
