@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>综合成本账本 — Option Combo Simulator</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="cost_basis.css?v=612d2ca47422">
+    <link rel="stylesheet" href="cost_basis.css?v=bdbbf0bc2f55">
 </head>
 <body data-option-combo-page="cost-basis">
     <div class="app-shell">
@@ -191,7 +191,7 @@
                             <div class="stress-controls">
                                 <label for="stress-expiry">到期范围<select id="stress-expiry"><option value="">等待未平期权</option></select></label>
                                 <label class="half" for="stress-base-price">基准现价<input id="stress-base-price" type="number" step="0.01" min="0" autocomplete="off" placeholder="输入现价"></label>
-                                <button id="btn-stress-refresh-price" class="half" type="button">刷新 TWS 现价</button>
+                                <button id="btn-stress-refresh-price" class="half" type="button" title="重新拉取 TWS 现价、逐合约期权参数和利率曲线；联动开启时两边一起刷新">刷新 TWS 行情</button>
                                 <label class="half" for="stress-horizon-days">跌到位需要天数<input id="stress-horizon-days" type="number" step="1" min="0" autocomplete="off" placeholder="同到期范围" title="留空为所选日期纽约收盘假设；填 N 表示在快照时刻后 N×24 小时估值，0 为同一时刻。途中到期按所选路径处理，未到期期权使用同一目标时刻"></label>
                                 <label class="half" for="stress-range">价格扫描范围<select id="stress-range"><option value="10">上下 10%</option><option value="20">上下 20%</option><option value="30" selected>上下 30%</option><option value="50">上下 50%</option></select></label>
                                 <label for="stress-path">到位路径<select id="stress-path"><option value="immediate">立即冲击并保持</option><option value="gradual">逐日渐变至终值</option></select></label>
@@ -303,6 +303,6 @@
     <script src="js/cost_basis_stress_core.js?v=432adb4ed00d"></script>
     <script src="js/cost_basis_stress_band.js?v=40c9f4c63510"></script>
     <script src="js/cost_basis_stress_worker.js?v=3d63d7e54061"></script>
-    <script src="js/cost_basis.js?v=382517ea688d"></script>
+    <script src="js/cost_basis.js?v=4dab4f974eef"></script>
 </body>
 </html>

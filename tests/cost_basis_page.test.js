@@ -2855,7 +2855,6 @@ module.exports = {
                 assert.doesNotMatch(css, /\.stress-modal|\.stress-dialog|stress-modal-open|\.stress-header|\.stress-close/);
                 assert.match(css, /\.stress-view\s*\{[^}]*grid-template-columns:\s*minmax\(300px, 330px\) minmax\(0, 1fr\)/);
                 assert.match(css, /\.stress-params\s*\{[^}]*position:\s*sticky/);
-                assert.match(css, /\.stress-params\s*\{[^}]*overflow:\s*auto/);
                 assert.match(css, /\.stress-view-header\s*\{[^}]*grid-column:\s*1 \/ -1/);
                 const stacked = css.match(/@media \(max-width: 1360px\)\s*\{([\s\S]*?)\n\}/);
                 assert.ok(stacked, 'stacked breakpoint exists');
@@ -2865,6 +2864,13 @@ module.exports = {
                 assert.match(css, /\.stress-chart-wrap \{ position: relative; margin: 0; overflow-x: auto;/);
                 assert.match(css, /#stress-chart \{ display: block; width: 100%; min-width: 760px; min-height: 390px;/);
                 assert.match(css, /\.nav-item-settings\.active, \.nav-item-stress\.active/);
+                // A half-width cell is ~135px: the refresh label must fit or wrap,
+                // never push a horizontal scrollbar onto the parameter column.
+                assert.match(css, /\.stress-controls button \{[^}]*white-space: normal/);
+                assert.match(css, /\.stress-params\s*\{[^}]*overflow: hidden auto/);
+                const labels = Array.from(readScript().matchAll(/'拉取中…' : '([^']+)'/g), (m) => m[1]);
+                assert.deepEqual(labels, ['刷新 TWS 行情']);
+                assert.match(readPage(), /<button id="btn-stress-refresh-price" class="half" type="button" title="[^"]+">刷新 TWS 行情<\/button>/);
             },
         },
         {

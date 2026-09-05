@@ -2717,7 +2717,7 @@
         refreshButton.disabled = stressRefreshJob.pending || state.stressInputsPending
             || state.connection !== 'connected';
         refreshButton.textContent = stressRefreshJob.pending || state.stressInputsPending
-            ? '拉取中…' : '刷新 TWS 现价与期权参数';
+            ? '拉取中…' : '刷新 TWS 行情';
         if (!book || !state.ledger || !expiries.length) {
             _cancelStressJob();
             _text($('stress-status'), '当前账本没有可用于压力测试的未平股票期权。');

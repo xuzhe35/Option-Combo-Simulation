@@ -469,7 +469,7 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
     display: grid;
     gap: .6rem;
     max-height: calc(100vh - 78px - 2rem);
-    overflow: auto;
+    overflow: hidden auto;
     min-width: 0;
 }
 .stress-results { display: grid; gap: .85rem; min-width: 0; }
@@ -493,7 +493,7 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
 .stress-controls select, .stress-controls input { width: 100%; min-width: 0; }
 .stress-controls label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: .4rem; }
 .stress-controls input[type="checkbox"] { width: auto; }
-.stress-controls button { justify-self: stretch; align-self: end; height: 36px; padding: 0 .5rem; white-space: nowrap; }
+.stress-controls button { justify-self: stretch; align-self: end; min-height: 36px; padding: 0 .5rem; white-space: normal; line-height: 1.2; }
 .stress-param-group > .stress-status { margin: -.35rem 0 .85rem; }
 .stress-protection-panel { margin: .7rem 0 .85rem; padding: .75rem .85rem; border: 1px solid #d9e4f7; border-radius: 11px; background: #f7faff; }
 .stress-protection-toggle { display: flex; align-items: flex-start; gap: .65rem; color: #33425a; cursor: pointer; }
