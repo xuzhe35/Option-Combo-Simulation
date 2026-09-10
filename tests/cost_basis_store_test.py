@@ -30,7 +30,9 @@ from cost_basis_store import (
     BookNotFoundError,
     EventAlreadyVoidedError,
     EventNotFoundError,
+    ImportRevisionConflictError,
     InvalidRequestError,
+    LedgerChangedError,
     PositionOverdrawError,
     SCHEMA_USER_VERSION,
     StoreUnavailableError,
@@ -81,6 +83,24 @@ class CostBasisStoreTestBase(unittest.TestCase):
         self.book = self.store.create_book(
             account='U1111111', symbol='TQQQ', start_date='2026-01-01')
         self.book_id = self.book['bookId']
+
+    def _reviewed_write(self, method, book_id, *args, **kwargs):
+        kwargs.setdefault('expected_ledger_version', self.store.ledger_version(book_id))
+        identity = next(book for book in self.store.list_books(include_archived=True) if book['bookId'] == book_id)
+        kwargs.setdefault('book_identity', identity)
+        return getattr(self.store, method)(book_id, *args, **kwargs)
+
+    def reviewed_import_events(self, book_id, *args, **kwargs):
+        return self._reviewed_write('import_events', book_id, *args, **kwargs)
+
+    def reviewed_rebuild_book(self, book_id, *args, **kwargs):
+        return self._reviewed_write('rebuild_book', book_id, *args, **kwargs)
+
+    def reviewed_reset_book(self, book_id, *args, **kwargs):
+        return self._reviewed_write('reset_book', book_id, *args, **kwargs)
+
+    def reviewed_restore_book_reset(self, book_id, *args, **kwargs):
+        return self._reviewed_write('restore_book_reset', book_id, *args, **kwargs)
 
     def append(self, event, *, token=None, allow_overdraw=False):
         return self.store.append_event(
@@ -542,7 +562,7 @@ class ImportTests(CostBasisStoreTestBase):
         ]
 
     def test_import_inserts_a_batch(self):
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, self._rows(),
             import_batch_id=_token('batch'), client_token_prefix=_token('imp'))
         self.assertEqual(result['inserted'], 2)
@@ -560,7 +580,7 @@ class ImportTests(CostBasisStoreTestBase):
             'expiry': '20260717', 'contracts': 1, 'cashAmount': 0.0,
             'source': 'csv_import', 'externalRef': 'adjusted-expiry-130',
         }
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, [close], import_batch_id=_token('batch'),
             client_token_prefix=_token('imp'))
         self.assertEqual(result['inserted'], 1)
@@ -583,13 +603,13 @@ class ImportTests(CostBasisStoreTestBase):
                 'fees': 0, 'source': 'csv_import', 'externalRef': 'shares-2',
             },
         ]
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, rows,
             import_batch_id=_token('batch'), client_token_prefix=_token('imp'))
         self.assertNotIn('net_short_shares', result['warnings'])
 
     def test_import_reports_a_supported_final_short_position(self):
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, [{
                 'kind': 'share_trade', 'tradeDate': '2026-08-28',
                 'account': 'U1111111', 'shares': -100, 'price': 70,
@@ -600,14 +620,14 @@ class ImportTests(CostBasisStoreTestBase):
         self.assertIn('net_short_shares', result['warnings'])
 
     def test_overlapping_statement_skips_already_imported_rows(self):
-        self.store.import_events(
+        self.reviewed_import_events(
             self.book_id, self._rows(),
             import_batch_id=_token('batch'), client_token_prefix=_token('imp'))
         overlapping = self._rows() + [
             {**self.short_put(date='2026-06-03', strike=43.0), 'source': 'csv_import',
              'externalRef': 'trade-1003'},
         ]
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, overlapping,
             import_batch_id=_token('batch2'), client_token_prefix=_token('imp2'))
         self.assertEqual(result['inserted'], 1)
@@ -616,10 +636,10 @@ class ImportTests(CostBasisStoreTestBase):
 
     def test_replaying_a_batch_id_is_a_no_op(self):
         batch = _token('batch')
-        self.store.import_events(
+        self.reviewed_import_events(
             self.book_id, self._rows(),
             import_batch_id=batch, client_token_prefix=_token('imp'))
-        replay = self.store.import_events(
+        replay = self.reviewed_import_events(
             self.book_id, self._rows(),
             import_batch_id=batch, client_token_prefix=_token('imp2'))
         self.assertTrue(replay['idempotentReplay'])
@@ -630,7 +650,7 @@ class ImportTests(CostBasisStoreTestBase):
         rows.append({**self.put_assignment(date='2026-06-05', contracts=99),
                      'source': 'csv_import', 'externalRef': 'trade-1004'})
         with self.assertRaises(PositionOverdrawError):
-            self.store.import_events(
+            self.reviewed_import_events(
                 self.book_id, rows,
                 import_batch_id=_token('batch'), client_token_prefix=_token('imp'))
         self.assertEqual(self.store.list_events(self.book_id)['total'], 0)
@@ -638,12 +658,12 @@ class ImportTests(CostBasisStoreTestBase):
     def test_same_external_ref_in_a_different_account_book_is_kept(self):
         other = self.store.create_book(
             account='U2222222', symbol='TQQQ', start_date='2026-01-01')
-        first = self.store.import_events(
+        first = self.reviewed_import_events(
             self.book_id,
             [{**self.short_put(account='U1111111'), 'source': 'csv_import',
               'externalRef': 'trade-1001'}],
             import_batch_id=_token('batch'), client_token_prefix=_token('imp'))
-        second = self.store.import_events(
+        second = self.reviewed_import_events(
             other['bookId'],
             [{**self.short_put(account='U2222222'), 'source': 'csv_import',
               'externalRef': 'trade-1001'}],
@@ -664,7 +684,7 @@ class ImportTests(CostBasisStoreTestBase):
             'note': 'IBKR 2026-06-03, 10:00:00',
         }
         batch = _token('batch')
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, [actual], import_batch_id=batch,
             client_token_prefix=_token('imp'),
             supersede_tws_event_ids=[adopted['eventId']])
@@ -678,7 +698,7 @@ class ImportTests(CostBasisStoreTestBase):
         old = next(item for item in audit if item['eventId'] == adopted['eventId'])
         self.assertIsNotNone(old['voidedAtUtc'])
         self.assertIn('complete broker execution history', old['voidReason'])
-        replay = self.store.import_events(
+        replay = self.reviewed_import_events(
             self.book_id, [actual], import_batch_id=batch,
             client_token_prefix=_token('different-imp'),
             supersede_tws_event_ids=[adopted['eventId']])
@@ -698,7 +718,7 @@ class ImportTests(CostBasisStoreTestBase):
             'externalRef': 'ibkr-exec-real-option',
             'brokerTimestamp': '2026-06-03T10:00:00',
         }
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, [execution], import_batch_id=_token('batch'),
             client_token_prefix=_token('imp'),
             supersede_tws_event_ids=[adopted['eventId']])
@@ -722,7 +742,7 @@ class ImportTests(CostBasisStoreTestBase):
             'brokerTimestamp': '2026-06-03T10:00:00',
         }
         with self.assertRaises(InvalidRequestError) as ctx:
-            self.store.import_events(
+            self.reviewed_import_events(
                 self.book_id, [partial], import_batch_id=_token('batch'),
                 client_token_prefix=_token('imp'))
         self.assertIn('overlaps an adopted TWS baseline', str(ctx.exception))
@@ -748,7 +768,7 @@ class ImportTests(CostBasisStoreTestBase):
             'externalRef': 'ibkr-exec-later-fill',
             'brokerTimestamp': '2026-06-03T11:00:00',
         }
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, [represented, later], import_batch_id=_token('batch'),
             client_token_prefix=_token('imp'),
             supersede_tws_event_ids=[adopted['eventId']])
@@ -787,7 +807,7 @@ class ImportTests(CostBasisStoreTestBase):
         }
         # Reverse request order: storage persists broker timestamps, and the
         # ledger listing must still replay them in broker order.
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, [second, first], import_batch_id=_token('batch'),
             client_token_prefix=_token('imp'),
             supersede_tws_event_ids=[adopted['eventId']],
@@ -819,7 +839,7 @@ class ImportTests(CostBasisStoreTestBase):
             'ledgerContracts': -2, 'twsContracts': -2,
         }
         with self.assertRaises(InvalidRequestError) as ctx:
-            self.store.import_events(
+            self.reviewed_import_events(
                 self.book_id, [execution], import_batch_id=_token('batch'),
                 client_token_prefix=_token('imp'),
                 supersede_tws_event_ids=[adopted['eventId']],
@@ -841,7 +861,7 @@ class ImportTests(CostBasisStoreTestBase):
             'note': 'IBKR 2026-06-03, 13:00:00',
         }
         with self.assertRaises(InvalidRequestError):
-            self.store.import_events(
+            self.reviewed_import_events(
                 self.book_id, [later], import_batch_id=_token('batch'),
                 client_token_prefix=_token('imp'),
                 supersede_tws_event_ids=[adopted['eventId']])
@@ -862,7 +882,7 @@ class ImportTests(CostBasisStoreTestBase):
             'source': 'csv_import', 'externalRef': 'stmt-later-increment',
             'note': 'IBKR 2026-06-03, 13:00:00',
         }
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, [later], import_batch_id=_token('batch'),
             client_token_prefix=_token('imp'))
         self.assertEqual(result['inserted'], 1)
@@ -888,7 +908,7 @@ class ImportTests(CostBasisStoreTestBase):
             'note': 'IBKR 2026-06-03, 10:00:00',
         }
         with self.assertRaises(InvalidRequestError):
-            self.store.import_events(
+            self.reviewed_import_events(
                 self.book_id, [actual], import_batch_id=_token('batch'),
                 client_token_prefix=_token('imp'),
                 supersede_tws_event_ids=[adopted['eventId']])
@@ -911,7 +931,7 @@ class ImportTests(CostBasisStoreTestBase):
             'note': 'IBKR 2026-06-03, 13:00:00',
         }
         with self.assertRaisesRegex(InvalidRequestError, 'overlaps'):
-            self.store.import_events(
+            self.reviewed_import_events(
                 self.book_id, [later], import_batch_id=_token('batch'),
                 client_token_prefix=_token('imp'))
         live = self.store.list_events(self.book_id)['events']
@@ -932,7 +952,7 @@ class ImportTests(CostBasisStoreTestBase):
             'note': 'IBKR 2026-06-03, 10:00:00',
         }
         with self.assertRaises(InvalidRequestError):
-            self.store.import_events(
+            self.reviewed_import_events(
                 self.book_id, [wrong_quantity], import_batch_id=_token('batch'),
                 client_token_prefix=_token('imp'),
                 supersede_tws_event_ids=[adopted['eventId']])
@@ -953,7 +973,7 @@ class ImportTests(CostBasisStoreTestBase):
             'note': 'IBKR 2026-06-03, 10:00:00',
         }
         with self.assertRaises(InvalidRequestError) as ctx:
-            self.store.import_events(
+            self.reviewed_import_events(
                 self.book_id, [partial], import_batch_id=_token('batch'),
                 client_token_prefix=_token('imp'))
         self.assertIn('overlaps an adopted TWS baseline', str(ctx.exception))
@@ -976,7 +996,7 @@ class ImportTests(CostBasisStoreTestBase):
             'externalRef': 'stmt-real-shares-1',
             'note': 'IBKR 2026-06-03, 10:00:00',
         }
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, [actual], import_batch_id=_token('batch'),
             client_token_prefix=_token('imp'),
             supersede_tws_event_ids=[adopted['eventId']])
@@ -1193,14 +1213,14 @@ class ResetTests(CostBasisStoreTestBase):
 
     def test_reset_empties_the_book(self):
         plan = self.store.reset_confirmation(self.book_id)
-        result = self.store.reset_book(
+        result = self.reviewed_reset_book(
             self.book_id, confirmation=plan['phrase'], client_token=_token())
         self.assertEqual(result['removedEvents'], 2)
         self.assertEqual(self.store.list_events(self.book_id)['total'], 0)
 
     def test_a_wrong_phrase_destroys_nothing(self):
         with self.assertRaises(ResetConfirmationError):
-            self.store.reset_book(
+            self.reviewed_reset_book(
                 self.book_id, confirmation='RESET TQQQ 99 EVENTS',
                 client_token=_token())
         self.assertEqual(self.store.list_events(self.book_id)['total'], 2)
@@ -1211,13 +1231,13 @@ class ResetTests(CostBasisStoreTestBase):
         # operator would be deleting a row they never saw.
         self.append(self.short_put(date='2026-06-02', strike=44.0))
         with self.assertRaises(ResetConfirmationError):
-            self.store.reset_book(
+            self.reviewed_reset_book(
                 self.book_id, confirmation=plan['phrase'], client_token=_token())
         self.assertEqual(self.store.list_events(self.book_id)['total'], 3)
 
     def test_the_wiped_rows_are_archived_not_lost(self):
         plan = self.store.reset_confirmation(self.book_id)
-        self.store.reset_book(
+        self.reviewed_reset_book(
             self.book_id, confirmation=plan['phrase'], client_token=_token(),
             reason='rebuild from statements')
         archived = self.store.list_book_resets(self.book_id, include_events=True)
@@ -1231,10 +1251,10 @@ class ResetTests(CostBasisStoreTestBase):
     def test_reset_is_idempotent_per_client_token(self):
         plan = self.store.reset_confirmation(self.book_id)
         token = _token()
-        first = self.store.reset_book(
+        first = self.reviewed_reset_book(
             self.book_id, confirmation=plan['phrase'], client_token=token)
         self.append(self.short_put(date='2026-06-03', strike=43.0))
-        replay = self.store.reset_book(
+        replay = self.reviewed_reset_book(
             self.book_id, confirmation='anything', client_token=token)
         self.assertTrue(replay['idempotentReplay'])
         self.assertEqual(replay['resetId'], first['resetId'])
@@ -1243,10 +1263,10 @@ class ResetTests(CostBasisStoreTestBase):
 
     def test_a_rebuilt_book_accepts_the_same_import_again(self):
         plan = self.store.reset_confirmation(self.book_id)
-        self.store.reset_book(
+        self.reviewed_reset_book(
             self.book_id, confirmation=plan['phrase'], client_token=_token())
         rows = [{**self.short_put(), 'source': 'csv_import', 'externalRef': 'stmt-1'}]
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.book_id, rows, import_batch_id=_token('batch'),
             client_token_prefix=_token('imp'))
         self.assertEqual(result['inserted'], 1)
@@ -1257,7 +1277,7 @@ class ResetTests(CostBasisStoreTestBase):
         self.store.append_event(
             other['bookId'], self.short_put(), client_token=_token())
         plan = self.store.reset_confirmation(self.book_id)
-        self.store.reset_book(
+        self.reviewed_reset_book(
             self.book_id, confirmation=plan['phrase'], client_token=_token())
         self.assertEqual(self.store.list_events(other['bookId'])['total'], 1)
 
@@ -1269,7 +1289,7 @@ class DeleteBookTests(CostBasisStoreTestBase):
         self.store.save_snapshot(
             self.book_id, as_of_date='2026-06-30', summary={'netCash': 596.75})
         reset_plan = self.store.reset_confirmation(self.book_id)
-        self.store.reset_book(
+        self.reviewed_reset_book(
             self.book_id, confirmation=reset_plan['phrase'],
             client_token=_token(), reason='test archive')
         self.append(self.short_put(date='2026-06-02', strike=44.0))
@@ -1564,7 +1584,7 @@ class RebuildTests(CostBasisStoreTestBase):
         return self.store.reset_confirmation(self.book_id)['phrase']
 
     def test_rebuild_replaces_the_book_in_one_step(self):
-        result = self.store.rebuild_book(
+        result = self.reviewed_rebuild_book(
             self.book_id, [self.short_put(date='2026-07-01', strike=43.0)],
             confirmation=self._phrase(), client_token=_token(),
             import_batch_id=_token('batch'))
@@ -1584,7 +1604,7 @@ class RebuildTests(CostBasisStoreTestBase):
             'account': 'U1111111', 'right': 'P', 'strike': 46.0,
             'expiry': '20260717', 'contracts': 1, 'cashAmount': 0.0,
         }
-        result = self.store.rebuild_book(
+        result = self.reviewed_rebuild_book(
             self.book_id, [opening, expiry], confirmation=self._phrase(),
             client_token=_token(), import_batch_id=_token('batch'))
         self.assertEqual(result['inserted'], 2)
@@ -1595,7 +1615,7 @@ class RebuildTests(CostBasisStoreTestBase):
     def test_a_replacement_that_fails_validation_keeps_the_old_book(self):
         stranded = self.put_assignment(contracts=5)
         with self.assertRaises(PositionOverdrawError):
-            self.store.rebuild_book(
+            self.reviewed_rebuild_book(
                 self.book_id, [stranded], confirmation=self._phrase(),
                 client_token=_token(), import_batch_id=_token('batch'))
         self.assertEqual(self.store.list_events(self.book_id)['total'], 2)
@@ -1603,7 +1623,7 @@ class RebuildTests(CostBasisStoreTestBase):
 
     def test_a_malformed_replacement_never_reaches_the_delete(self):
         with self.assertRaises(InvalidRequestError):
-            self.store.rebuild_book(
+            self.reviewed_rebuild_book(
                 self.book_id, [{'kind': 'option_trade', 'tradeDate': 'not-a-date'}],
                 confirmation=self._phrase(), client_token=_token(),
                 import_batch_id=_token('batch'))
@@ -1611,14 +1631,14 @@ class RebuildTests(CostBasisStoreTestBase):
 
     def test_a_wrong_phrase_keeps_the_old_book(self):
         with self.assertRaises(ResetConfirmationError):
-            self.store.rebuild_book(
+            self.reviewed_rebuild_book(
                 self.book_id, [self.short_put(date='2026-07-01', strike=43.0)],
                 confirmation='RESET TQQQ 99 EVENTS', client_token=_token(),
                 import_batch_id=_token('batch'))
         self.assertEqual(self.store.list_events(self.book_id)['total'], 2)
 
     def test_rebuild_archives_what_it_removed(self):
-        self.store.rebuild_book(
+        self.reviewed_rebuild_book(
             self.book_id, [self.short_put(date='2026-07-01', strike=43.0)],
             confirmation=self._phrase(), client_token=_token(),
             import_batch_id=_token('batch'))
@@ -1628,11 +1648,11 @@ class RebuildTests(CostBasisStoreTestBase):
 
     def test_rebuild_is_idempotent_per_client_token(self):
         token = _token()
-        first = self.store.rebuild_book(
+        first = self.reviewed_rebuild_book(
             self.book_id, [self.short_put(date='2026-07-01', strike=43.0)],
             confirmation=self._phrase(), client_token=token,
             import_batch_id=_token('batch'))
-        replay = self.store.rebuild_book(
+        replay = self.reviewed_rebuild_book(
             self.book_id, [self.short_put(date='2026-07-01', strike=43.0)],
             confirmation='anything', client_token=token,
             import_batch_id=_token('batch2'))
@@ -1657,11 +1677,11 @@ class ResetCountTests(CostBasisStoreTestBase):
 
         # The old phrase, which counted only live rows, must no longer work.
         with self.assertRaises(ResetConfirmationError):
-            self.store.reset_book(
+            self.reviewed_reset_book(
                 self.book_id, confirmation='RESET TQQQ 1 EVENTS',
                 client_token=_token())
 
-        result = self.store.reset_book(
+        result = self.reviewed_reset_book(
             self.book_id, confirmation=plan['phrase'], client_token=_token())
         self.assertEqual(result['removedEvents'], 2)
         self.assertEqual(appended['event']['bookId'], self.book_id)
@@ -1795,7 +1815,7 @@ class FuturesLedgerStoreTests(CostBasisStoreTestBase):
         imported = self.future_trade(
             tradeDate='2026-08-25', source='csv_import',
             externalRef='csv-fut-1', note='IBKR 2026-08-25, 10:00:00')
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.future_book_id, [imported], import_batch_id=_token('batch'),
             client_token_prefix=_token('prefix'),
             supersede_tws_event_ids=[adopted['eventId']])
@@ -1813,7 +1833,7 @@ class FuturesLedgerStoreTests(CostBasisStoreTestBase):
         imported = self.future_trade(
             tradeDate='2026-08-27', futureContracts=-1, source='csv_import',
             externalRef='csv-fut-close', note='IBKR 2026-08-27, 10:00:00')
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.future_book_id, [imported], import_batch_id=_token('batch'),
             client_token_prefix=_token('prefix'))
         self.assertEqual(result['inserted'], 1)
@@ -1842,7 +1862,7 @@ class FuturesLedgerStoreTests(CostBasisStoreTestBase):
             'source': 'csv_import', 'externalRef': 'csv-roll-target',
             'note': 'IBKR 2026-08-24, 10:00:00',
         }
-        result = self.store.import_events(
+        result = self.reviewed_import_events(
             self.future_book_id, [old, roll], import_batch_id=_token('batch'),
             client_token_prefix=_token('prefix'),
             supersede_tws_event_ids=[adopted['eventId']])
@@ -2125,6 +2145,198 @@ class DescribeTests(CostBasisStoreTestBase):
         self.assertEqual(described['bookCount'], 1)
         self.assertEqual(described['eventCount'], 1)
         self.assertGreater(described['allocatedBytes'], 0)
+
+
+
+
+
+class ImportIntegrityReviewTests(CostBasisStoreTestBase):
+    """Fixes from the 2026-09-10 import integrity review, at the store layer."""
+
+    def _import(self, events, **kwargs):
+        return self.reviewed_import_events(
+            self.book_id, events,
+            import_batch_id=kwargs.pop('batch', None) or _token('batch'),
+            client_token_prefix=_token('imp'), **kwargs)
+
+    def _csv_put(self, **overrides):
+        event = {**self.short_put(), 'source': 'csv_import', 'tag': 'ibkr_open',
+                 'externalRef': 'stmt-1'}
+        event.update(overrides)
+        return event
+
+    # R14 / R06 ---------------------------------------------------------
+    def test_positive_fee_needs_a_refund_tag_and_negative_dividend_a_reversal_tag(self):
+        rebate = {'kind': 'fee', 'tradeDate': '2026-06-01', 'account': 'U1111111',
+                  'cashAmount': 0.1, 'fees': 0, 'source': 'execution_report',
+                  'externalRef': 'ibkr-exec-1-rebate'}
+        with self.assertRaises(InvalidRequestError):
+            self.append(rebate)
+        stored = self.append({**rebate, 'tag': 'ibkr_rebate'})
+        self.assertEqual(stored['event']['cashAmount'], 0.1)
+        refund = self.append({**rebate, 'tag': 'withholding_tax_refund',
+                              'externalRef': 'stmt-refund', 'cashAmount': 3})
+        self.assertEqual(refund['event']['tag'], 'withholding_tax_refund')
+        reversal = {'kind': 'dividend', 'tradeDate': '2026-06-30', 'account': 'U1111111',
+                    'cashAmount': -10, 'fees': 0, 'source': 'csv_import',
+                    'externalRef': 'stmt-div-rev'}
+        with self.assertRaises(InvalidRequestError):
+            self.append(reversal)
+        stored = self.append({**reversal, 'tag': 'dividend_reversal'})
+        self.assertEqual(stored['event']['cashAmount'], -10)
+
+    # R10 ---------------------------------------------------------------
+    def test_an_excluded_opening_cannot_back_a_close(self):
+        self.append({**self.short_put(), 'includeInCost': False})
+        with self.assertRaises(PositionOverdrawError):
+            self.append({**self.short_put(date='2026-06-10', contracts=5, price=0.5),
+                         'cashAmount': -253.25, 'tag': 'ibkr_close',
+                         'source': 'csv_import', 'externalRef': 'stmt-close'})
+        # Once the opening participates, the same close is accepted.
+        self.append(self.short_put(date='2026-06-02'))
+        closed = self.append({**self.short_put(date='2026-06-10', contracts=5, price=0.5),
+                              'cashAmount': -253.25, 'tag': 'ibkr_close',
+                              'source': 'csv_import', 'externalRef': 'stmt-close-2'})
+        self.assertEqual(closed['event']['contracts'], 5)
+
+    # R11 / R12: ledger version --------------------------------------------
+    def test_ledger_version_tracks_rows_and_voids_and_is_listed(self):
+        empty = self.store.ledger_version(self.book_id)
+        self.assertEqual(empty['eventCount'], 0)
+        appended = self.append(self.short_put())
+        one = self.store.ledger_version(self.book_id)
+        self.assertNotEqual(empty['digest'], one['digest'])
+        self.assertEqual(one['liveEventCount'], 1)
+        self.store.void_event(self.book_id, appended['event']['eventId'],
+                              reason='typo', client_token=_token())
+        voided = self.store.ledger_version(self.book_id)
+        self.assertNotEqual(one['digest'], voided['digest'])
+        self.assertEqual(voided['eventCount'], 1)
+        self.assertEqual(voided['liveEventCount'], 0)
+        listed = self.store.list_events(self.book_id, include_voided=True)
+        self.assertEqual(listed['ledgerVersion']['digest'], voided['digest'])
+
+    def test_import_refuses_a_stale_ledger_version(self):
+        planned = self.store.ledger_version(self.book_id)
+        self.append(self.short_put())
+        with self.assertRaises(LedgerChangedError):
+            self._import([self._csv_put(tradeDate='2026-06-05')],
+                         expected_ledger_version=planned)
+        current = self.store.ledger_version(self.book_id)
+        result = self._import([self._csv_put(tradeDate='2026-06-05')],
+                              expected_ledger_version=current)
+        self.assertEqual(result['inserted'], 1)
+        self.assertEqual(result['ledgerVersion']['liveEventCount'], 2)
+
+    def test_rebuild_with_a_stale_digest_is_refused_even_at_the_same_count(self):
+        first = self.append(self.short_put())
+        plan = self.store.reset_confirmation(self.book_id)
+        # Voiding keeps the count (the phrase) but changes the digest.
+        self.store.void_event(self.book_id, first['event']['eventId'],
+                              reason='typo', client_token=_token())
+        with self.assertRaises(ResetConfirmationError):
+            self.reviewed_rebuild_book(
+                self.book_id, [self._csv_put()], confirmation=plan['phrase'],
+                client_token=_token(), import_batch_id=_token('batch'),
+                expected_ledger_version=plan['ledgerVersion'])
+        self.assertEqual(self.store.list_events(self.book_id, include_voided=True)['total'], 1)
+        fresh = self.store.reset_confirmation(self.book_id)
+        self.assertIn('firstTradeDate', fresh)
+        rebuilt = self.reviewed_rebuild_book(
+            self.book_id, [self._csv_put()], confirmation=fresh['phrase'],
+            client_token=_token(), import_batch_id=_token('batch'),
+            expected_ledger_version=fresh['ledgerVersion'])
+        self.assertEqual(rebuilt['inserted'], 1)
+
+    # R08 ---------------------------------------------------------------
+    def test_same_reference_with_different_economics_is_a_revision_conflict(self):
+        self._import([self._csv_put()])
+        replay = self._import([self._csv_put()])
+        self.assertEqual((replay['inserted'], replay['skipped']), (0, 1))
+        with self.assertRaises(ImportRevisionConflictError) as caught:
+            self._import([self._csv_put(price=1.30, cashAmount=646.75)])
+        self.assertIn('stmt-1', str(caught.exception))
+        self.assertIn('price', str(caught.exception))
+        self.assertEqual(self.store.list_events(self.book_id)['total'], 1)
+
+    # R02 ---------------------------------------------------------------
+    def test_import_refuses_rows_prepared_for_another_book(self):
+        with self.assertRaises(InvalidRequestError) as caught:
+            self._import([self._csv_put()], book_identity={**self.book,
+                'account': 'U1111111', 'symbol': 'QQQ', 'secType': 'STK', 'currency': 'USD'})
+        self.assertIn('symbol', str(caught.exception))
+        with self.assertRaises(InvalidRequestError):
+            self._import([self._csv_put()], book_identity={**self.book, 'currency': 'EUR'})
+        result = self._import([self._csv_put()], book_identity={**self.book,
+            'account': 'u1111111', 'symbol': 'tqqq', 'secType': 'STK', 'currency': 'USD'})
+        self.assertEqual(result['inserted'], 1)
+
+    # R04 ---------------------------------------------------------------
+    def test_real_opening_supersedes_a_prior_stub_only_when_it_matches_exactly(self):
+        stub = self._import([{
+            'kind': 'option_trade', 'tradeDate': '2026-08-31', 'account': 'U1111111',
+            'right': 'P', 'strike': 45.0, 'expiry': '20260717', 'contracts': -2,
+            'sharesPerContract': 100, 'price': 0, 'fees': 0, 'cashAmount': 0,
+            'source': 'csv_import', 'tag': 'prior_open', 'externalRef': 'prior-x',
+        }, {**self.short_put(date='2026-09-03', contracts=2, price=0.4),
+            'cashAmount': -83.25, 'tag': 'ibkr_close', 'source': 'csv_import',
+            'externalRef': 'stmt-close'}])
+        self.assertEqual(stub['inserted'], 2)
+        stub_id = next(event['eventId'] for event in
+                       self.store.list_events(self.book_id)['events']
+                       if event['tag'] == 'prior_open')
+        real = {**self.short_put(date='2026-08-20', contracts=-1, price=1.0),
+                'cashAmount': 96.75, 'source': 'csv_import', 'tag': 'ibkr_open',
+                'externalRef': 'stmt-real-a'}
+        with self.assertRaises(InvalidRequestError):
+            self._import([real], supersede_prior_stub_event_ids=[stub_id])
+        second = {**real, 'externalRef': 'stmt-real-b', 'tradeDate': '2026-08-21'}
+        result = self._import([real, second], supersede_prior_stub_event_ids=[stub_id])
+        self.assertEqual(result['supersededPriorStubs'], 1)
+        live = self.store.list_events(self.book_id)['events']
+        self.assertEqual(sum(1 for event in live if event['tag'] == 'prior_open'), 0)
+        self.assertEqual(sum(float(event['contracts'] or 0) for event in live), 0)
+
+    # R13 / R16 ---------------------------------------------------------
+    def test_a_statement_with_no_rows_still_registers_its_period(self):
+        statement = {'format': 'activity', 'fileName': 'sep.csv', 'fileSha256': 'abc',
+                     'account': 'U1111111', 'periodFrom': '2026-09-01',
+                     'periodThrough': '2026-09-30',
+                     'checks': {'openPositions': True, 'trades': False}}
+        batch = _token('batch')
+        result = self._import([], batch=batch, statement=statement)
+        self.assertEqual(result['inserted'], 0)
+        replay = self._import([], batch=batch, statement=statement)
+        self.assertTrue(replay['idempotentReplay'])
+        batches = self.store.list_import_batches(self.book_id)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]['periodThrough'], '2026-09-30')
+        self.assertEqual(batches[0]['checks'], {'openPositions': True, 'trades': False})
+        with self.assertRaises(InvalidRequestError):
+            self._import([])
+
+    # R20: restore -------------------------------------------------------
+    def test_a_rebuild_archive_can_be_restored_and_the_current_ledger_is_archived_first(self):
+        first = self.append(self.short_put())
+        second = self.append(self.short_put(date='2026-06-02', strike=44.0))
+        plan = self.store.reset_confirmation(self.book_id)
+        rebuilt = self.reviewed_rebuild_book(
+            self.book_id, [self._csv_put(tradeDate='2026-07-01', strike=40.0)],
+            confirmation=plan['phrase'], client_token=_token(),
+            import_batch_id=_token('batch'), expected_ledger_version=plan['ledgerVersion'])
+        self.assertEqual(self.store.list_events(self.book_id)['total'], 1)
+        archives = self.store.list_book_resets(self.book_id)
+        self.assertEqual(len(archives), 1)
+        plan = self.store.reset_confirmation(self.book_id)
+        restored = self.reviewed_restore_book_reset(
+            self.book_id, rebuilt['resetId'], confirmation=plan['phrase'],
+            client_token=_token(), expected_ledger_version=plan['ledgerVersion'])
+        self.assertEqual(restored['restoredEvents'], 2)
+        events = self.store.list_events(self.book_id)['events']
+        self.assertEqual({event['eventId'] for event in events},
+                         {first['event']['eventId'], second['event']['eventId']})
+        self.assertEqual(len(self.store.list_book_resets(self.book_id)), 2)
+        self.assertEqual(self.store.ledger_version(self.book_id)['liveEventCount'], 2)
 
 
 if __name__ == '__main__':

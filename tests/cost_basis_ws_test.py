@@ -62,6 +62,17 @@ class CostBasisWsTestBase(unittest.IsolatedAsyncioTestCase):
         self.ws = FakeWebSocket()
 
     async def call(self, action, ws=None, **fields):
+        # Existing behavior tests represent a fresh reviewed client. Tests
+        # for missing credentials call handle_cost_basis_action directly.
+        if action in ('import_cost_basis_events', 'rebuild_cost_basis_book',
+                      'reset_cost_basis_book', 'restore_cost_basis_reset') and fields.get('bookId'):
+            store = self.env.get('store')
+            if store:
+                identity = next((book for book in store.list_books(include_archived=True)
+                                 if book['bookId'] == fields['bookId']), None)
+                if identity:
+                    fields.setdefault('expectedLedgerVersion', store.ledger_version(fields['bookId']))
+                    fields.setdefault('bookIdentity', identity)
         socket = ws or FakeWebSocket()
         handled = await handle_cost_basis_action(
             self.env, socket, {'action': action, 'requestId': 'req-1', **fields})
@@ -744,6 +755,125 @@ class BackendWiringTests(unittest.TestCase):
         except Exception as exc:  # pragma: no cover - bridge deps absent
             self.skipTest(f'ib_server_ws unavailable: {exc}')
         self.assertTrue(hasattr(ib_server_ws, 'cost_basis_ws'))
+
+
+
+
+
+class ImportIntegrityProtocolTests(CostBasisWsTestBase):
+    """The review fixes are reachable over the protocol with the same gates."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        created = await self.call(
+            'create_cost_basis_book', account='U1111111', symbol='TQQQ',
+            startDate='2026-01-01')
+        self.book_id = created['book']['bookId']
+
+    def short_put(self, **overrides):
+        event = {
+            'kind': 'option_trade', 'tradeDate': '2026-06-01', 'account': 'U1111111',
+            'right': 'P', 'strike': 45.0, 'expiry': '20260717', 'contracts': -5,
+            'price': 1.20, 'sharesPerContract': 100, 'fees': 3.25,
+            'cashAmount': 596.75,
+        }
+        event.update(overrides)
+        return event
+
+    async def test_import_carries_version_identity_and_statement_registration(self):
+        listed = await self.call('list_cost_basis_events', bookId=self.book_id)
+        version = listed['ledgerVersion']
+        stale = await self.call(
+            'import_cost_basis_events', bookId=self.book_id,
+            importBatchId=_token('batch'), clientTokenPrefix=_token('imp'),
+            expectedLedgerVersion={'digest': 'not-the-ledger'},
+            events=[{**self.short_put(), 'source': 'csv_import', 'externalRef': 'tr-1'}])
+        self.assertFalse(stale['success'])
+        self.assertEqual(stale['code'], 'ledger_changed')
+        wrong_book = await self.call(
+            'import_cost_basis_events', bookId=self.book_id,
+            importBatchId=_token('batch'), clientTokenPrefix=_token('imp'),
+            bookIdentity={'symbol': 'QQQ'},
+            events=[{**self.short_put(), 'source': 'csv_import', 'externalRef': 'tr-1'}])
+        self.assertFalse(wrong_book['success'])
+        self.assertEqual(wrong_book['code'], 'invalid_request')
+        accepted = await self.call(
+            'import_cost_basis_events', bookId=self.book_id,
+            importBatchId=_token('batch'), clientTokenPrefix=_token('imp'),
+            expectedLedgerVersion=version,
+            bookIdentity={'account': 'U1111111', 'symbol': 'TQQQ', 'secType': 'STK',
+                          'currency': 'USD'},
+            statement={'format': 'activity', 'fileName': 'jun.csv', 'periodFrom': '2026-06-01',
+                       'periodThrough': '2026-06-30', 'checks': {'trades': True}},
+            events=[{**self.short_put(), 'source': 'csv_import', 'externalRef': 'tr-1'}])
+        self.assertTrue(accepted['success'], accepted)
+        self.assertEqual(accepted['inserted'], 1)
+        self.assertNotEqual(accepted['ledgerVersion']['digest'], version['digest'])
+        batches = await self.call('list_cost_basis_import_batches', bookId=self.book_id)
+        self.assertEqual(len(batches['batches']), 1)
+        self.assertEqual(batches['batches'][0]['periodFrom'], '2026-06-01')
+        revised = await self.call(
+            'import_cost_basis_events', bookId=self.book_id,
+            importBatchId=_token('batch'), clientTokenPrefix=_token('imp'),
+            events=[{**self.short_put(price=1.25, cashAmount=621.75),
+                     'source': 'csv_import', 'externalRef': 'tr-1'}])
+        self.assertFalse(revised['success'])
+        self.assertEqual(revised['code'], 'import_revision_conflict')
+
+    async def test_rebuild_archives_can_be_listed_and_restored(self):
+        await self.call('append_cost_basis_event', bookId=self.book_id,
+                        event=self.short_put(), clientToken=_token())
+        plan = await self.call('request_cost_basis_reset_plan', bookId=self.book_id)
+        self.assertIn('ledgerVersion', plan)
+        rebuilt = await self.call(
+            'rebuild_cost_basis_book', bookId=self.book_id,
+            confirmation=plan['phrase'], expectedLedgerVersion=plan['ledgerVersion'],
+            clientToken=_token(), importBatchId=_token('batch'),
+            events=[{**self.short_put(tradeDate='2026-07-01', strike=40.0),
+                     'source': 'csv_import', 'externalRef': 'tr-9'}])
+        self.assertTrue(rebuilt['success'], rebuilt)
+        resets = await self.call('list_cost_basis_resets', bookId=self.book_id)
+        self.assertEqual(len(resets['resets']), 1)
+        plan = await self.call('request_cost_basis_reset_plan', bookId=self.book_id)
+        restored = await self.call(
+            'restore_cost_basis_reset', bookId=self.book_id,
+            resetId=resets['resets'][0]['resetId'], confirmation=plan['phrase'],
+            expectedLedgerVersion=plan['ledgerVersion'], clientToken=_token())
+        self.assertTrue(restored['success'], restored)
+        self.assertEqual(restored['restoredEvents'], 1)
+        listed = await self.call('list_cost_basis_events', bookId=self.book_id)
+        self.assertEqual(listed['events'][0]['strike'], 45.0)
+
+
+class BackupAndMandatoryGateTests(CostBasisWsTestBase):
+    async def test_protocol_file_backup_round_trip_and_identity_gate(self):
+        book_id=await self.make_book()
+        store=self.env['store']
+        await self.call('append_cost_basis_event',bookId=book_id,event=self.short_put(),clientToken=_token())
+        exported=await self.call('export_cost_basis_backup',bookId=book_id)
+        self.assertTrue(exported['success'],exported)
+        self.assertEqual(exported['format'],'cost-basis-backup')
+        self.assertEqual(len(exported['payload']['events']),1)
+        plan=store.reset_confirmation(book_id)
+        restored=await self.call('restore_cost_basis_backup',bookId=book_id,backup=exported,
+            confirmation=plan['phrase'],clientToken=_token(),
+            expectedLedgerVersion=plan['ledgerVersion'],bookIdentity=store.get_book(book_id))
+        self.assertTrue(restored['success'],restored)
+        self.assertEqual(restored['restoredEvents'],1)
+        remote=await self.call('export_cost_basis_backup',bookId=book_id,ws=FakeWebSocket(REMOTE))
+        self.assertFalse(remote['success'])
+
+    async def test_missing_credentials_rejected_by_raw_protocol(self):
+        book_id=await self.make_book()
+        for action in ('import_cost_basis_events','rebuild_cost_basis_book','reset_cost_basis_book'):
+            socket=FakeWebSocket()
+            plan=self.env['store'].reset_confirmation(book_id)
+            await handle_cost_basis_action(self.env,socket,dict(action=action,bookId=book_id,
+                requestId='missing-credentials',events=[self.short_put()],confirmation=plan['phrase'],
+                clientToken=_token(),importBatchId=_token(),clientTokenPrefix=_token()))
+            response=json.loads(socket.sent[0])
+            self.assertFalse(response['success'],action)
+            self.assertEqual(response['code'],'invalid_request')
 
 
 if __name__ == '__main__':

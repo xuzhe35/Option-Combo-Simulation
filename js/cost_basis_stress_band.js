@@ -13,6 +13,16 @@
             result.push({ betaScale, tenorExponent, otmFloor });
         }
         if (options.includeFlatIv !== false) result.push({ flatIv: true });
+        // A separate level sensitivity also covers flat/rising price points.
+        // This is an explicit user assumption, not a calibrated coverage band.
+        const range = Number(options.ivRangePct ?? 0);
+        if (!Number.isFinite(range) || range < 0 || range > 50) throw new Error('invalid_iv_range');
+        if (range > 0) for (const ivScale of [1 - range / 100, 1 + range / 100]) {
+            result.push({ ivScale });
+            if (beta) result.push({ ivScale, betaScale: ivScale < 1 ? 0.8 : 1.25,
+                tenorExponent: driver.ivTenorDamping ? (ivScale < 1 ? 0.76 : 0.5) : undefined,
+                otmFloor: driver.ivOtmDiscount ? (ivScale < 1 ? 0.35 : 0.65) : undefined });
+        }
         return result;
     }
     function calculate(compiled, options = {}, suppliedCenter) {

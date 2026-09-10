@@ -407,7 +407,13 @@ module.exports = {
                 const result = parser.parse(text, {
                     symbol: 'TQQQ', externalRefAliases: aliases,
                 });
-                assert.equal(result.events[0].externalRef, 'ibkr-exec-987654321');
+                // A proven duplicate is reported, never offered as an event:
+                // committing it would rely on the store skipping it.
+                assert.equal(result.events.length, 0);
+                assert.equal(result.confirmedDuplicates.length, 1);
+                assert.equal(result.confirmedDuplicates[0].sourceRef, '987654321');
+                assert.equal(result.confirmedDuplicates[0].externalRef, 'ibkr-exec-987654321');
+                assert.equal(result.summary.confirmedDuplicates, 1);
             },
         },
         {
@@ -476,11 +482,11 @@ module.exports = {
             name: 'unmapped columns are reported so a mapping UI can offer them',
             run() {
                 const parser = loadImport();
-                const result = parser.parse(activity(
-                    'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-01, 09:35:00",'
-                    + '100,45,-4500,-1,O',
-                ), { symbol: 'TQQQ' });
-                assert.ok(result.unmappedColumns.includes('currency'));
+                const result = parser.parse(`${ACTIVITY_HEADER},Exchange\n`
+                    + 'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-01, 09:35:00",'
+                    + '100,45,-4500,-1,O,ARCA', { symbol: 'TQQQ' });
+                assert.ok(result.unmappedColumns.includes('exchange'));
+                assert.ok(!result.unmappedColumns.includes('currency'));
             },
         },
         {
@@ -802,11 +808,19 @@ module.exports = {
                         '未平仓持仓,Data,Summary,股票,USD,TQQQ,200,1',
                     ],
                 });
+                // The called-away shares were held before the period; the
+                // ledger already carries them, so nothing is missing.
                 const result = parser.parse(text, {
                     symbol: 'GLD', openingDate: '2026-08-02',
+                    existingSharesByAccount: { U1111111: 100 },
                 });
                 assert.equal(result.problems.length, 0, JSON.stringify(result.problems));
                 assert.equal(result.events[0].kind, 'option_assignment');
+                // Without that history the 100 shares have no cost anywhere
+                // and the import must stop rather than book a short lot.
+                const bare = parser.parse(text, { symbol: 'GLD', openingDate: '2026-08-02' });
+                assert.equal(bare.problems.length, 1);
+                assert.match(bare.problems[0].reason, /begins with 100 shares/);
                 assert.equal(result.openings.drafts.length, 1);
                 const opening = result.openings.drafts[0];
                 assert.equal(opening.contracts, -1);
@@ -1590,6 +1604,339 @@ module.exports = {
                     assert.equal(result.events.length, 0);
                     assert.ok(result.problems.length >= 1);
                 }
+            },
+        },
+        // ------------------------------------------------------------------
+        // 2026-09-10 import integrity review
+        // ------------------------------------------------------------------
+        {
+            name: 'a cell that is not entirely a number is a problem, never parsed as one',
+            run() {
+                const parser = loadImport();
+                const result = parser.parse(activity(
+                    'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-01, 09:35:00",'
+                    + '10abc,45,-450,-1,O',
+                ), { symbol: 'TQQQ' });
+                assert.equal(result.events.length, 0);
+                assert.match(result.problems[0].reason, /not a number/);
+                const price = parser.parse(activity(
+                    'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-01, 09:35:00",'
+                    + '10,45x,-450,-1,O',
+                ), { symbol: 'TQQQ' });
+                assert.match(price.problems[0].reason, /price "45x" is not a number/);
+            },
+        },
+        {
+            name: 'an unterminated quoted field refuses the whole file',
+            run() {
+                const parser = loadImport();
+                const result = parser.parse(activity(
+                    'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-01, 09:35:00,'
+                    + '10,45,-450,-1,O',
+                    'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-02, 09:35:00",'
+                    + '10,45,-450,-1,O',
+                ), { symbol: 'TQQQ' });
+                assert.equal(result.events.length, 0);
+                assert.match(result.problems[0].reason, /unterminated quoted field/);
+            },
+        },
+        {
+            name: 'a row in another currency is refused for a single-currency book',
+            run() {
+                const parser = loadImport();
+                const text = activity(
+                    'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-01, 09:35:00",'
+                    + '10,45,-450,-1,O',
+                    'Trades,Data,Order,Stocks,EUR,TQQQ,"2026-06-02, 09:35:00",'
+                    + '10,50,-500,-1,O',
+                );
+                const result = parser.parse(text, { symbol: 'TQQQ', currency: 'USD' });
+                assert.equal(result.events.length, 1);
+                assert.equal(result.events[0].currency, 'USD');
+                assert.equal(result.problems.length, 1);
+                assert.match(result.problems[0].reason, /currency EUR does not match/);
+                // A book that states no currency keeps the historical behaviour.
+                assert.equal(parser.parse(text, { symbol: 'TQQQ' }).events.length, 2);
+            },
+        },
+        {
+            name: 'a blank commission on a trade row is a missing figure, not zero',
+            run() {
+                const parser = loadImport();
+                const blank = parser.parse(activity(
+                    'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-01, 09:35:00",'
+                    + '10,45,-450,,O',
+                ), { symbol: 'TQQQ' });
+                assert.equal(blank.events.length, 0);
+                assert.match(blank.problems[0].reason, /commission cell is blank/);
+                const zero = parser.parse(activity(
+                    'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-01, 09:35:00",'
+                    + '10,45,-450,0,O',
+                ), { symbol: 'TQQQ' });
+                assert.equal(zero.problems.length, 0);
+                assert.equal(zero.events[0].fees, 0);
+                // A row of a statement template without a proceeds column is
+                // derived and says so.
+                const flexNoProceeds = parser.parse(
+                    'ClientAccountID,Symbol,AssetClass,TradeDate,Quantity,TradePrice,'
+                    + 'IBCommission,TradeID,Notes/Codes\n'
+                    + 'U1,TQQQ,STK,2026-06-01,10,45,-1,t1,O', { symbol: 'TQQQ' });
+                assert.equal(flexNoProceeds.problems.length, 0);
+                assert.equal(flexNoProceeds.events[0].cashDerived, true);
+                assert.equal(flexNoProceeds.events[0].cashAmount, -451);
+            },
+        },
+        {
+            name: 'dividend reversals and withholding refunds keep their statement sign',
+            run() {
+                const parser = loadImport();
+                const text = activity(
+                    'Trades,Data,Order,Stocks,USD,QQQ,"2026-06-01, 09:35:00",'
+                    + '100,45,-4500,-1,O',
+                ) + '\nDividends,Header,Currency,Date,Description,Amount'
+                  + '\nDividends,Data,USD,2026-06-30,QQQ(US46090E1038) Cash Dividend,10.00'
+                  + '\nDividends,Data,USD,2026-07-02,QQQ(US46090E1038) Cash Dividend,-10.00'
+                  + '\nDividends,Data,USD,2026-07-03,QQQ(US46090E1038) Cash Dividend,abc'
+                  + '\nWithholding Tax,Header,Currency,Date,Description,Amount'
+                  + '\nWithholding Tax,Data,USD,2026-06-30,QQQ(US46090E1038) Cash Dividend,-3.00'
+                  + '\nWithholding Tax,Data,USD,2026-07-02,QQQ(US46090E1038) Cash Dividend,3.00';
+                const result = parser.parse(text, { symbol: 'QQQ' });
+                const dividends = result.events.filter((item) => item.kind === 'dividend');
+                assert.deepEqual(Array.from(dividends.map((item) => item.cashAmount)), [10, -10]);
+                assert.equal(dividends[1].tag, 'dividend_reversal');
+                const taxes = result.events.filter((item) => item.kind === 'fee');
+                assert.deepEqual(Array.from(taxes.map((item) => item.cashAmount)), [-3, 3]);
+                assert.equal(taxes[0].tag, 'withholding_tax');
+                assert.equal(taxes[1].tag, 'withholding_tax_refund');
+                assert.equal(taxes[1].fees, 0);
+                // The damaged dividend row for this underlying is reported.
+                assert.equal(result.problems.length, 1);
+                assert.match(result.problems[0].reason, /unreadable amount/);
+                assert.equal(result.checks.dividends, true);
+            },
+        },
+        {
+            name: 'order rows carry their fill rows and can be split around stored fills',
+            run() {
+                const parser = loadImport();
+                const text = activity(
+                    'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-01, 09:35:00",'
+                    + '10,45,-450,-1,O',
+                    'Trades,Data,Trade,Stocks,USD,TQQQ,"2026-06-01, 09:35:00",'
+                    + '3,45,-135,-0.3,O',
+                    'Trades,Data,Trade,Stocks,USD,TQQQ,"2026-06-01, 09:35:07",'
+                    + '7,45,-315,-0.7,O',
+                );
+                const first = parser.parse(text, { symbol: 'TQQQ' });
+                assert.equal(first.events.length, 1);
+                assert.equal(first.events[0].fills.length, 2);
+                assert.equal(first.events[0].fills[1].brokerTimestamp, '2026-06-01T09:35:07');
+                assert.equal(first.events[0].fills[1].cashAmount, -315.7);
+                const sourceRef = first.events[0].sourceRef;
+                const split = parser.parse(text, {
+                    symbol: 'TQQQ',
+                    fillSplits: {
+                        [`U1111111\u0000${sourceRef}`]: {
+                            keep: [1], matched: [{ index: 0, externalRef: 'ibkr-exec-E1' }],
+                        },
+                    },
+                    accountFallback: 'U1111111',
+                });
+                assert.equal(split.events.length, 1);
+                assert.equal(split.events[0].shares, 7);
+                assert.equal(split.events[0].cashAmount, -315.7);
+                assert.equal(split.events[0].fees, 0.7);
+                assert.equal(split.events[0].externalRef, `${sourceRef}-fill-2`);
+                assert.equal(split.events[0].fillOf, sourceRef);
+                assert.equal(split.confirmedDuplicates.length, 1);
+                assert.equal(split.confirmedDuplicates[0].externalRef, 'ibkr-exec-E1');
+            },
+        },
+        {
+            name: 'two identical rows keep two identities after cross-source aliasing',
+            run() {
+                const parser = loadImport();
+                const row = 'Trades,Data,Order,Stocks,USD,TQQQ,"2026-06-01, 09:35:00",'
+                    + '10,50,-500,-1,O';
+                const discovery = parser.parse(activity(row, row), {
+                    symbol: 'TQQQ', accountFallback: 'U1111111',
+                });
+                const [one, two] = discovery.events.map((event) => event.sourceRef);
+                assert.equal(two, `${one}-2`);
+                const aliased = parser.parse(activity(row, row), {
+                    symbol: 'TQQQ', accountFallback: 'U1111111',
+                    externalRefAliases: {
+                        [`U1111111\u0000${one}`]: 'ibkr-exec-fill1',
+                        [`U1111111\u0000${two}`]: 'ibkr-exec-fill2',
+                    },
+                });
+                // Both rows are proven duplicates: nothing is left to import,
+                // and neither becomes a brand-new "fill1-2".
+                assert.equal(aliased.events.length, 0);
+                assert.deepEqual(
+                    Array.from(aliased.confirmedDuplicates.map((item) => item.externalRef)).sort(),
+                    ['ibkr-exec-fill1', 'ibkr-exec-fill2']);
+            },
+        },
+        {
+            name: 'a FUT roll whose legs TWS already delivered is a duplicate; half a roll blocks',
+            run() {
+                const parser = loadImport();
+                const text = flex(
+                    'U1,ES,ESU6,FUT,"2026-08-24, 10:00:00",-1,5100,0,-2,,,202609,50,old-fill,C',
+                    'U1,ES,ESZ6,FUT,"2026-08-24, 10:00:00",1,5120,0,-2,,,202612,50,new-fill,O',
+                );
+                const options = { symbol: 'ES', secType: 'FUT', defaultSharesPerContract: 50 };
+                const plain = parser.parse(text, options);
+                assert.equal(plain.events[0].sourceLegs.length, 2);
+                assert.equal(plain.events[0].sourceLegs[0].sourceRef, 'old-fill');
+                const both = parser.parse(text, Object.assign({}, options, {
+                    externalRefAliases: {
+                        'U1\u0000old-fill': 'ibkr-exec-A', 'U1\u0000new-fill': 'ibkr-exec-B',
+                    },
+                }));
+                assert.equal(both.events.length, 0);
+                assert.equal(both.confirmedDuplicates.length, 2);
+                const half = parser.parse(text, Object.assign({}, options, {
+                    externalRefAliases: { 'U1\u0000old-fill': 'ibkr-exec-A' },
+                }));
+                assert.equal(half.events.length, 0);
+                assert.ok(half.problems.length >= 1);
+                assert.match(half.problems[0].reason, /one leg of this FUT roll/);
+            },
+        },
+        {
+            name: 'a contract the ledger holds but the statement neither lists nor trades blocks',
+            run() {
+                const parser = loadImport();
+                const rows = parser.parseCsv([
+                    '未平仓持仓,Header,DataDiscriminator,资产分类,货币,代码,数量,合约乘数',
+                    '未平仓持仓,Data,Summary,股票和指数期权,USD,GLD 19AUG26 399 C,-1,100',
+                ].join('\n'));
+                const result = parser.deriveOpeningPositions(rows, [], {
+                    symbol: 'GLD', defaultSharesPerContract: 100, accountFallback: 'U1',
+                    openingDate: '2026-08-01',
+                    existingOpen: [
+                        { account: 'U1', right: 'C', strike: 399, expiry: '20260819',
+                          contracts: -1, sharesPerContract: 100 },
+                        { account: 'U1', right: 'C', strike: 410, expiry: '20260819',
+                          contracts: -3, sharesPerContract: 100 },
+                    ],
+                });
+                assert.equal(result.drafts.length, 0);
+                assert.equal(result.problems.length, 1);
+                assert.match(result.problems[0].reason, /ledger holds -3 contract/);
+                assert.match(result.problems[0].raw, /410/);
+            },
+        },
+        {
+            name: 'a re-derived opening stub that disagrees with the stored stub blocks',
+            run() {
+                const parser = loadImport();
+                const rows = parser.parseCsv([
+                    '未平仓持仓,Header,DataDiscriminator,资产分类,货币,代码,数量,合约乘数',
+                    '未平仓持仓,Data,Summary,股票和指数期权,USD,GLD 19AUG26 399 C,-2,100',
+                ].join('\n'));
+                const options = {
+                    symbol: 'GLD', defaultSharesPerContract: 100, accountFallback: 'U1',
+                    openingDate: '2026-08-01',
+                };
+                const first = parser.deriveOpeningPositions(rows, [], options);
+                assert.equal(first.drafts.length, 1);
+                const stubRef = first.drafts[0].externalRef;
+                const again = parser.deriveOpeningPositions(rows, [], Object.assign({}, options, {
+                    existingExternalRefs: [{ account: 'U1', externalRef: stubRef, contracts: -5 }],
+                }));
+                assert.equal(again.drafts.length, 0);
+                assert.match(again.problems[0].reason, /opening stub of -5/);
+                const same = parser.deriveOpeningPositions(rows, [], Object.assign({}, options, {
+                    existingExternalRefs: [{ account: 'U1', externalRef: stubRef, contracts: -2 }],
+                }));
+                assert.equal(same.problems.length, 0);
+            },
+        },
+        {
+            name: 'a statement without a Trades section is still checked and registers its period',
+            run() {
+                const parser = loadImport();
+                const text = chinese({ trades: [] }).replace(`${CN_TRADES_HEADER}`, '')
+                    + '\n未平仓持仓,Header,DataDiscriminator,资产分类,货币,代码,数量,合约乘数'
+                    + '\n未平仓持仓,Data,Summary,股票,USD,TQQQ,200,1';
+                const result = parser.parse(text, { symbol: 'GLD' });
+                assert.equal(result.problems.length, 0, JSON.stringify(result.problems));
+                assert.equal(result.events.length, 0);
+                assert.equal(result.checks.trades, false);
+                assert.equal(result.checks.openPositions, true);
+                assert.equal(result.checks.period, true);
+                assert.equal(result.statementPeriod.from, '2026-08-03');
+                assert.equal(result.statementPeriod.through, '2026-08-24');
+                assert.equal(result.statementPeriod.source, 'period');
+                // The same file with the ledger holding shares this statement
+                // does not list is an inconsistency, not a quiet month.
+                const extra = parser.parse(text, {
+                    symbol: 'GLD', existingSharesByAccount: { U1111111: 100 },
+                });
+                assert.match(extra.problems[0].reason, /ledger holds 100 shares/);
+            },
+        },
+        {
+            name: 'Open Positions without Summary rows cannot be read as an inventory',
+            run() {
+                const parser = loadImport();
+                const rows = parser.parseCsv([
+                    '未平仓持仓,Header,DataDiscriminator,资产分类,货币,代码,数量,合约乘数',
+                    '未平仓持仓,Data,Lot,股票和指数期权,USD,GLD 19AUG26 399 C,-1,100',
+                ].join('\n'));
+                const result = parser.deriveOpeningPositions(rows, [], {
+                    symbol: 'GLD', defaultSharesPerContract: 100, accountFallback: 'U1',
+                });
+                assert.equal(result.unreadable, true);
+                assert.match(result.problems[0].reason, /no Summary rows/);
+                const conflict = parser.parseCsv([
+                    '金融产品信息,Header,资产分类,代码,描述,合约编号,底层,上市交易所,乘数,到期,类型,执行',
+                    '金融产品信息,Data,股票和指数期权,GLD 19AUG26 399 C,GLD 19AUG26 399 C,99,GLD,CBOE,10,2026-08-19,C,399',
+                    '未平仓持仓,Header,DataDiscriminator,资产分类,货币,代码,数量,合约乘数',
+                    '未平仓持仓,Data,Summary,股票和指数期权,USD,GLD 19AUG26 399 C,-1,100',
+                ].join('\n'));
+                const mismatch = parser.deriveOpeningPositions(conflict, [], {
+                    symbol: 'GLD', defaultSharesPerContract: 100, accountFallback: 'U1',
+                    instruments: parser.extractInstruments(conflict),
+                });
+                assert.equal(mismatch.drafts.length, 0);
+                assert.match(mismatch.problems[0].reason, /multiplier 100 contradicts/);
+            },
+        },
+        {
+            name: 'a date-only cell is not broker evidence and a named-but-unparsed contract is reported',
+            run() {
+                const parser = loadImport();
+                const dated = parser.parse(flex(
+                    'U1111111,TQQQ,TQQQ,STK,2026-06-01,100,45,-4500,-1,,,,,111,O',
+                ), { symbol: 'TQQQ' });
+                assert.equal(dated.events[0].brokerTimestamp, '');
+                assert.equal(dated.events[0].tradeDate, '2026-06-01');
+                const named = parser.parse(activity(
+                    'Trades,Data,Order,Equity and Index Options,USD,TQQQ WEIRD ROW,'
+                    + '"2026-06-01, 09:35:00",-1,1.2,120,-1,O',
+                ), { symbol: 'TQQQ' });
+                assert.equal(named.summary.skipped, 0);
+                assert.match(named.problems[0].reason, /mentions TQQQ but its contract could not be parsed/);
+            },
+        },
+        {
+            name: 'the statement period reads both ends',
+            run() {
+                const parser = loadImport();
+                const rows = parser.parseCsv(
+                    'Statement,Header,Field Name,Field Value\n'
+                    + 'Statement,Data,Period,"August 3, 2026 - August 24, 2026"\n');
+                assert.deepEqual(JSON.parse(JSON.stringify(parser.extractStatementPeriod(rows))),
+                    { from: '2026-08-03', through: '2026-08-24' });
+                const single = parser.parseCsv(
+                    'Statement,Header,Field Name,Field Value\n'
+                    + 'Statement,Data,Period,"September 8, 2026"\n');
+                assert.deepEqual(JSON.parse(JSON.stringify(parser.extractStatementPeriod(single))),
+                    { from: '2026-09-08', through: '2026-09-08' });
             },
         },
     ],

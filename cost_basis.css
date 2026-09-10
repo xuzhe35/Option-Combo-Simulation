@@ -494,6 +494,27 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
 .stress-controls label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: .4rem; }
 .stress-controls input[type="checkbox"] { width: auto; }
 .stress-controls button { justify-self: stretch; align-self: end; min-height: 36px; padding: 0 .5rem; white-space: normal; line-height: 1.2; }
+.stress-horizon-control { display: grid; gap: .45rem; padding: .7rem; border: 1px solid var(--border); border-radius: 10px; background: #f5f7ff; }
+.stress-path-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .55rem; align-items: center; }
+.stress-controls .stress-assignment-toggle { display: flex; flex-direction: row; align-items: flex-start; gap: .4rem; line-height: 1.5; }
+.stress-assignment-toggle input { flex: 0 0 auto; margin-top: .2rem; accent-color: #6366f1; }
+.stress-path-controls > small { grid-column: 1 / -1; color: var(--muted); line-height: 1.6; }
+.stress-quantity-rows { display: grid; gap: .55rem; margin: .75rem 0; max-height: 340px; overflow-y: auto; }
+.stress-quantity-row { display: grid; grid-template-columns: minmax(0, 1fr) 78px; align-items: center; gap: .5rem; font-size: .73rem; line-height: 1.5; }
+.stress-quantity-row input { width: 100%; min-width: 0; padding: .4rem; }
+.stress-nav-input { display: grid; gap: .4rem; font-size: .73rem; margin-top: .7rem; }
+.stress-nav-input input { min-width: 0; width: 100%; }
+.stress-nav-result { font-weight: 650; color: #4338ca; line-height: 1.6; }
+.stress-current-quantity-line { stroke: #64748b; stroke-width: 2; stroke-dasharray: 3 5; fill: none; }
+.stress-horizon-heading, .stress-horizon-scale { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.stress-horizon-heading output { font-size: .8rem; font-weight: 700; color: #3949ab; white-space: nowrap; }
+.stress-controls .stress-horizon-control input[type="range"] { padding: 0; min-height: 28px; margin: 0; accent-color: #5966d8; cursor: pointer; }
+.stress-horizon-scale, .stress-horizon-control small, .stress-range-explanation { color: var(--muted); font-size: .69rem; line-height: 1.55; }
+.stress-controls .stress-horizon-exact { display: grid; grid-template-columns: 1fr minmax(70px, 100px); align-items: center; }
+.stress-range-explanation { margin: .65rem 0; }
+.stress-slice-range { display: grid; gap: .3rem; margin: .65rem 0; padding: .7rem .85rem; border-radius: 8px; background: #eef0ff; color: #3949ab; }
+.stress-slice-range span, .stress-slice-range small { font-size: .72rem; line-height: 1.5; }
+.stress-slice-range strong { font-variant-numeric: tabular-nums; }
 .stress-param-group > .stress-status { margin: -.35rem 0 .85rem; }
 .stress-protection-panel { margin: .7rem 0 .85rem; padding: .75rem .85rem; border: 1px solid #d9e4f7; border-radius: 11px; background: #f7faff; }
 .stress-protection-toggle { display: flex; align-items: flex-start; gap: .65rem; color: #33425a; cursor: pointer; }
@@ -553,7 +574,11 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
 .stress-legend .legend-protected-pnl::before { background: var(--teal); }
 .stress-legend .legend-linked-pnl::before { background: var(--linked); }
 .stress-legend .legend-strike::before { height: 0; border-top: 2px dashed #b9c2d0; background: transparent; }
-.stress-chart-wrap { position: relative; margin: 0; overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: #fbfcff; }
+/* The hover card is absolutely positioned inside this box, so any height it
+   cannot fit would turn into a vertical scrollbar (overflow-x: auto forces
+   overflow-y to compute as auto). The card is sized to fit - see
+   .stress-tooltip - and the chart itself never scrolls vertically. */
+.stress-chart-wrap { position: relative; margin: 0; overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 12px; background: #fbfcff; }
 #stress-chart { display: block; width: 100%; min-width: 760px; min-height: 390px; cursor: crosshair; }
 .stress-grid line { stroke: #e8edf5; stroke-width: 1; }
 .stress-grid text, .stress-strike-label, .stress-axis-title { font-family: inherit; font-size: 11px; fill: #8994a5; }
@@ -567,6 +592,7 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
 .stress-strike-label { fill: #8e99aa; font-size: 9px; }
 .stress-pnl-line, .stress-protected-pnl-line, .stress-linked-pnl-line, .stress-cost-line { fill: none; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .stress-linked-pnl-line { stroke: var(--linked); stroke-width: 3; }
+.stress-pnl-line.stress-reference-line, .stress-protected-pnl-line.stress-reference-line, .stress-linked-pnl-line.stress-reference-line { stroke-width: 2; stroke-dasharray: 5 4; }
 .stress-protected-pnl-line.with-linked { stroke-width: 2; opacity: .85; }
 .stress-pnl-line { stroke: var(--accent); stroke-width: 3; }
 .stress-protected-pnl-line { stroke: var(--teal); stroke-width: 3; }
@@ -582,11 +608,21 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
 .stress-hover-guide .guide-own-pnl { fill: #fff; stroke: var(--accent); stroke-width: 2; }
 .stress-hover-guide .guide-base-pnl { fill: #fff; stroke: var(--accent); stroke-width: 2; }
 .stress-hover-guide .guide-cost { fill: #fff; stroke: var(--warn); stroke-width: 3; }
+/* Two columns: the signed components on the left, the supporting numbers on
+   the right. One column at 310px ran ~570px tall on a fully populated book -
+   taller than the chart box (960x470 viewBox, min 390px), which is what put a
+   scrollbar on .stress-chart-wrap and cut the card off. Side by side it lands
+   around 350px and stays inside the plot at every width. */
 .stress-tooltip {
     position: absolute;
     z-index: 4;
-    width: 310px;
-    padding: .72rem .78rem;
+    display: grid;
+    grid-template-columns: minmax(0, max-content) minmax(0, max-content);
+    align-content: start;
+    gap: 0 .9rem;
+    width: max-content;
+    max-width: min(620px, calc(100% - 16px));
+    padding: .62rem .7rem;
     border: 1px solid #cfd9e8;
     border-radius: 10px;
     color: #293346;
@@ -594,17 +630,21 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
     box-shadow: 0 12px 30px rgba(30, 48, 78, .18);
     pointer-events: none;
 }
+/* Header, the two sub lines and the sampling band run the full width; only the
+   two definition lists sit in columns. */
+.stress-tooltip > strong, .stress-tooltip-sub, #stress-tooltip-band-row { grid-column: 1 / -1; }
 .stress-tooltip > strong { display: block; margin-bottom: .2rem; font-size: .82rem; font-variant-numeric: tabular-nums; }
-.stress-tooltip-sub { display: flex; justify-content: space-between; gap: .7rem; margin: 0 0 .42rem; color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; }
-.stress-tooltip-components { padding-bottom: .4rem; margin-bottom: .4rem !important; border-bottom: 1px solid #e3e9f3; }
+.stress-tooltip-sub { display: flex; justify-content: space-between; gap: .7rem; margin: 0 0 .28rem; color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; }
+#stress-tooltip-band-row { margin: 0 0 .3rem; color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; }
+.stress-tooltip-components { padding: 0 .9rem .1rem 0; margin-bottom: 0 !important; border-right: 1px solid #e3e9f3; }
 .stress-tooltip-components dt { color: #33425a; }
 .stress-tooltip-total { margin-top: .15rem; padding-top: .3rem; border-top: 1px dashed #cfd9e8; }
 .stress-tooltip-total dt, .stress-tooltip-total dd { font-size: .78rem !important; font-weight: 700; color: #202735; }
 .stress-key-points small.stress-card-part { color: #33425a; font-variant-numeric: tabular-nums; }
-.stress-tooltip dl { display: grid; gap: .25rem; margin: 0; }
+.stress-tooltip dl { display: grid; align-content: start; gap: .16rem; margin: 0; }
 .stress-tooltip dl > div { display: flex; justify-content: space-between; gap: .7rem; }
-.stress-tooltip dt { color: var(--muted); font-size: .73rem; }
-.stress-tooltip dd { margin: 0; text-align: right; font-size: .73rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stress-tooltip dt { color: var(--muted); font-size: .73rem; line-height: 1.3; }
+.stress-tooltip dd { margin: 0; text-align: right; font-size: .73rem; font-weight: 700; line-height: 1.3; font-variant-numeric: tabular-nums; }
 .stress-tooltip dd.metric-positive { color: var(--teal-text); }
 .stress-tooltip dd.metric-negative { color: var(--bad-text); }
 .stress-key-points { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; padding: 0; }
@@ -686,6 +726,7 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
 .new-book-form { margin: .4rem 1.2rem 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .new-book-form .field:first-child, .new-book-form .form-hint { grid-column: 1 / -1; }
 .new-book-form .field small { margin-top: .08rem; }
+.new-book-form .field small.warn { color: var(--warn-text); }
 .danger-zone { grid-column: 1; }
 .danger-zone p { margin: .1rem 1.2rem 1rem; color: var(--muted); }
 .danger-zone button { margin-left: 1.2rem; }
@@ -776,3 +817,10 @@ tr.row-excluded td { color: #9aa3b0; font-style: italic; }
     .topbar-actions .icon-button { display: grid; }
     .hero-value { font-size: 2.75rem; }
 }
+
+.book-coverage { font-size: .82rem; }
+.book-coverage.has-gaps { color: #9b6414; }
+.import-binding, .import-checks, .import-counts { margin-top: .1rem; margin-bottom: .35rem; font-size: .8rem; }
+.import-filter-row { margin: .4rem 0 .3rem; }
+.reset-archive-list { display: grid; gap: .45rem; font-size: .82rem; }
+.reset-archive-row { display: flex; justify-content: space-between; align-items: center; gap: .8rem; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--panel-soft); }

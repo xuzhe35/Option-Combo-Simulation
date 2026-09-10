@@ -54,6 +54,10 @@
         symbol: ['symbol', '代码'],
         assetClass: ['assetclass', 'asset class', 'asset category', 'assetcategory',
                      '资产分类'],
+        // The statement prints every row's settlement currency. A ledger is
+        // single-currency, so a row in another currency is a foreign amount
+        // that must never be added to this book's cash as if it were local.
+        currency: ['currencyprimary', 'currency', '货币'],
         tradeDate: ['tradedate', 'trade date', 'date/time', 'datetime', 'date',
                     '日期/时间', '日期'],
         quantity: ['quantity', 'qty', '数量'],
@@ -151,6 +155,14 @@
         }
         row.push(field);
         if (row.some((value) => value !== '')) rows.push(row);
+        if (quoted) {
+            // The file ended inside a quoted field: every row after the
+            // opening quote has been swallowed into one cell. Reporting the
+            // rows read so far as a valid statement would silently drop
+            // trades, so the reader marks the result as damaged.
+            rows.error = `unterminated quoted field; the file ended inside quotes `
+                + `that opened around row ${rows.length + 1}`;
+        }
         return rows;
     }
 
@@ -164,15 +176,28 @@
             .trim().replace(/\s+/g, ' ').toUpperCase();
     }
 
+    const NUMBER_RE = /^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$/;
+
     function _number(value) {
         if (value === null || value === undefined) return null;
         // Statements ship thousands separators and parenthesised negatives.
         const text = String(value).trim().replace(/,/g, '');
         if (!text) return null;
         const negated = /^\((.*)\)$/.exec(text);
-        const parsed = parseFloat(negated ? negated[1] : text);
+        const body = (negated ? negated[1] : text).trim();
+        // parseFloat would read "10abc" as 10 and "1e5x" as 100000; a cell
+        // that is not entirely a number is a damaged cell, not a number.
+        if (!NUMBER_RE.test(body)) return null;
+        const parsed = parseFloat(body);
         if (!Number.isFinite(parsed)) return null;
         return negated ? -parsed : parsed;
+    }
+
+    /** True when a cell holds text that is not a readable number. */
+    function _malformedNumber(value) {
+        if (value === null || value === undefined) return false;
+        const text = String(value).trim();
+        return text !== '' && _number(text) === null;
     }
 
     function _isoDate(value) {
@@ -193,7 +218,12 @@
      * IBKR timestamps are account-local wall-clock values. Keep them that
      * way: converting through Date would silently move a trade to another
      * day on machines in a different timezone. The fixed-width result sorts
-     * lexicographically. Date-only records describe an end-of-day balance.
+     * lexicographically.
+     *
+     * A date-only cell yields '' rather than a fabricated 23:59:59: that
+     * second would otherwise be offered as broker evidence when matching
+     * against TWS fills or ordering against an adopted snapshot. Callers
+     * that only need a sort key use _sortStamp.
      */
     function _brokerTimestamp(value) {
         const text = String(value === null || value === undefined ? '' : value).trim();
@@ -208,8 +238,16 @@
         // that as an end-of-day date would break second-level reconciliation.
         const compact = /(?:^|[\s,T;])(\d{2})(\d{2})(\d{2})(?:\D|$)/.exec(text)
             || /^\D*\d{8}(\d{2})(\d{2})(\d{2})\D*$/.exec(text);
-        if (!compact) return `${date}T23:59:59`;
+        if (!compact) return '';
         return `${date}T${compact[1]}:${compact[2]}:${compact[3]}`;
+    }
+
+    /** Sort key: the broker second when known, else the end of the day. */
+    function _sortStamp(event) {
+        const exact = String((event && event.brokerTimestamp) || '');
+        if (exact) return exact;
+        const date = String((event && event.tradeDate) || '');
+        return date ? `${date}T23:59:59` : '';
     }
 
     const PERIOD_MONTHS = Object.freeze({
@@ -238,17 +276,48 @@
         return dates.length ? dates[dates.length - 1] : '';
     }
 
-    /** End of the reporting period, independent of the selected symbol. */
-    function extractStatementThrough(rows) {
-        let found = '';
+    function _periodDates(value) {
+        const text = String(value === null || value === undefined ? '' : value).trim();
+        const dates = [];
+        const words = /(January|February|March|April|May|June|July|August|September|October|November|December|一月|二月|三月|四月|五月|六月|七月|八月|九月|十月|十一月|十二月)\s+(\d{1,2}),\s*(\d{4})/gi;
+        let match = words.exec(text);
+        while (match) {
+            const month = PERIOD_MONTHS[match[1].toLowerCase()] || PERIOD_MONTHS[match[1]];
+            dates.push(`${match[3]}-${String(month).padStart(2, '0')}-${match[2].padStart(2, '0')}`);
+            match = words.exec(text);
+        }
+        const iso = /(\d{4})-(\d{2})-(\d{2})/g;
+        match = iso.exec(text);
+        while (match) {
+            dates.push(`${match[1]}-${match[2]}-${match[3]}`);
+            match = iso.exec(text);
+        }
+        return dates;
+    }
+
+    /**
+     * The statement's own reporting period, independent of the selected
+     * symbol. `from` is the first date printed and `through` the last; a
+     * single-day statement prints one date and gets it for both.
+     */
+    function extractStatementPeriod(rows) {
+        let found = { from: '', through: '' };
         (rows || []).forEach((row) => {
             if (_normalizeHeader(row[0]) !== 'statement'
                 || _normalizeHeader(row[1]) !== 'data'
                 || _normalizeHeader(row[2]) !== 'period') return;
-            const end = _periodEndDate(row[3]);
-            if (end) found = `${end}T23:59:59`;
+            const dates = _periodDates(row[3]);
+            if (dates.length) {
+                found = { from: dates[0], through: dates[dates.length - 1] };
+            }
         });
         return found;
+    }
+
+    /** End of the reporting period as a cutoff timestamp. */
+    function extractStatementThrough(rows) {
+        const period = extractStatementPeriod(rows);
+        return period.through ? `${period.through}T23:59:59` : '';
     }
 
     function _expiryDigits(value) {
@@ -384,6 +453,11 @@
                 (record) => _normalizeHeader(record.values[discriminator]) === 'trade');
             if (orders.length) {
                 group.records = orders;
+                // The per-fill rows are kept beside the order rows: they are
+                // the statement's own evidence of how an order filled, which
+                // is what lets a partially imported order be matched fill by
+                // fill against TWS instead of blocked as a whole.
+                group.fillRecords = trades;
             } else if (trades.length) {
                 group.records = trades;
             }
@@ -648,22 +722,59 @@
         const brokerBasis = _number(record.basis);
         const brokerRealizedPnl = _number(record.realizedPnl);
         const brokerCodes = _codes(record.codes);
+        const currency = _upper(record.currency);
         // A Flex export has a real trade id; an Activity Statement does not,
-        // and then the row's own content is the identity.
-        const originalExternalRef = String(record.externalRef || '').trim()
+        // and then the row's own content is the identity. Cross-source
+        // aliases are applied by parse() AFTER duplicate-row occurrence
+        // numbering, never here: numbering an already-aliased reference
+        // would turn the second of two identical rows into a brand-new id.
+        const externalRef = String(record.externalRef || '').trim()
             || _contentKey(record);
-        const aliasKey = `${account}\u0000${originalExternalRef}`;
-        const aliases = options.externalRefAliases || {};
-        const externalRef = Object.prototype.hasOwnProperty.call(aliases, aliasKey)
-            ? String(aliases[aliasKey] || originalExternalRef)
-            : originalExternalRef;
 
         if (!tradeDate) {
             return { problem: 'trade date could not be read' };
         }
+        if (_malformedNumber(record.quantity)) {
+            return { problem: `quantity "${record.quantity}" is not a number` };
+        }
         if (quantity === null || Math.abs(quantity) < SHARE_EPSILON) {
             return { problem: 'quantity is missing or zero' };
         }
+        if (_malformedNumber(record.price)) {
+            return { problem: `price "${record.price}" is not a number` };
+        }
+        if (_malformedNumber(record.proceeds)) {
+            return { problem: `proceeds "${record.proceeds}" is not a number` };
+        }
+        if (_malformedNumber(record.commission)) {
+            return { problem: `commission "${record.commission}" is not a number` };
+        }
+        if (options.currency && !currency) return { problem: 'row currency is missing; export the currency column before importing' };
+        if (options.currency && currency && currency !== _upper(options.currency)) {
+            return { problem: `row currency ${currency} does not match the ledger `
+                + `currency ${_upper(options.currency)}; foreign amounts cannot be `
+                + 'added to this book' };
+        }
+        const isTradeRow = classification === 'share_trade'
+            || classification === 'option_trade' || classification === 'future_leg';
+        // A blank fee cell on a real trade is a missing figure, not a zero:
+        // IBKR prints 0 when nothing was charged. Booking it as free would
+        // understate the cost forever, and TWS imports already refuse to.
+        if (isTradeRow && String(record.commission === undefined
+            ? '' : record.commission).trim() === '' && record.commission !== undefined) {
+            return { problem: 'commission cell is blank; the statement prints 0 when '
+                + 'nothing was charged, so a blank is a missing figure' };
+        }
+        if (isTradeRow && record.commission === undefined) {
+            return { problem: 'the export has no commission column; fees cannot be '
+                + 'assumed to be zero' };
+        }
+        if (isTradeRow && record.proceeds !== undefined
+            && String(record.proceeds).trim() === '') {
+            return { problem: 'proceeds cell is blank on a trade row' };
+        }
+        const cashDerived = isTradeRow && record.proceeds === undefined;
+        const priceText = String(record.price === undefined ? '' : record.price).trim();
 
         if (classification === 'share_trade') {
             if (price === null) return { problem: 'share price is missing' };
@@ -690,6 +801,10 @@
                         ? _round(-(quantity * Math.abs(price)) - fees, 6)
                         : cash,
                     externalRef,
+                    sourceRef: externalRef,
+                    currency: currency || null,
+                    priceText,
+                    cashDerived,
                     note: `IBKR ${record.tradeDate || ''}`.trim(),
                 },
             };
@@ -738,6 +853,9 @@
                     cash,
                     codes: _codes(record.codes),
                     externalRef,
+                    sourceRef: externalRef,
+                    currency: currency || null,
+                    priceText,
                     contentKey: _contentKey(record),
                     lineNumber,
                     symbol: resolveUnderlying(record, options),
@@ -788,6 +906,10 @@
                             * Math.abs(price)) - fees, 6)
                         : cash,
                     externalRef,
+                    sourceRef: externalRef,
+                    currency: currency || null,
+                    priceText,
+                    cashDerived,
                     note: `IBKR ${record.tradeDate || ''}`.trim(),
                 },
             };
@@ -820,6 +942,8 @@
                     brokerCodes,
                     brokerCloseCash: _round(-fees, 6),
                     externalRef,
+                    sourceRef: externalRef,
+                    currency: currency || null,
                     note: `IBKR expired ${record.tradeDate || ''}`.trim(),
                 },
             };
@@ -1024,6 +1148,7 @@
         });
 
         const remainingFutures = futureLegs.filter((leg) => !consumed.has(leg));
+        const duplicates = [];
         const groups = new Map();
         remainingFutures.forEach((leg) => {
             const key = [leg.account, leg.brokerTimestamp || leg.tradeDate, leg.symbol].join('|');
@@ -1038,6 +1163,31 @@
             if (rollCandidate) {
                 const oldLeg = closes[0];
                 const newLeg = opens[0];
+                // The roll is derived from two broker legs. When TWS already
+                // delivered both legs as real fills, the whole roll is a
+                // duplicate; when it delivered only one, importing the roll
+                // would book the other leg twice and the batch must stop.
+                const aliasedLegs = legs.filter((leg) => leg.aliased);
+                if (aliasedLegs.length === legs.length) {
+                    legs.forEach((leg) => duplicates.push({
+                        sourceRef: leg.sourceRef || leg.externalRef,
+                        externalRef: leg.aliased,
+                        account: leg.account,
+                        kind: 'futures_trade',
+                        lineNumber: leg.lineNumber,
+                    }));
+                    return;
+                }
+                if (aliasedLegs.length) {
+                    legs.forEach((leg) => problems.push({
+                        lineNumber: leg.lineNumber,
+                        reason: 'one leg of this FUT roll is already stored as a TWS '
+                            + 'fill and the other is not; import is blocked so the '
+                            + 'roll is not booked on top of a real leg',
+                        raw: `${leg.account} ${leg.rawTradeDate} ${leg.identity.localSymbol}`,
+                    }));
+                    return;
+                }
                 const provesRoll = oldLeg !== newLeg
                     && oldLeg.quantity * newLeg.quantity < 0
                     && Math.abs(oldLeg.identity.sharesPerContract
@@ -1082,6 +1232,24 @@
                     cashAmount: _round(-fees, 6),
                     source: 'csv_import',
                     externalRef: rollGroup,
+                    sourceRef: rollGroup,
+                    // The broker legs behind the derived event, so a later
+                    // TWS fill can be reconciled against each leg.
+                    sourceLegs: [oldLeg, newLeg].map((leg) => ({
+                        sourceRef: leg.sourceRef || leg.externalRef,
+                        account: leg.account,
+                        tradeDate: leg.tradeDate,
+                        brokerTimestamp: leg.brokerTimestamp,
+                        futureExpiry: leg.identity.expiry,
+                        futureConId: leg.identity.conId,
+                        futureLocalSymbol: leg.identity.localSymbol,
+                        sharesPerContract: leg.identity.sharesPerContract,
+                        futureContracts: leg.quantity,
+                        price: leg.price,
+                        fees: leg.fees,
+                        cashAmount: _round(-leg.fees, 6),
+                    })),
+                    currency: oldLeg.currency || newLeg.currency || null,
                     note: `IBKR FUT roll ${oldLeg.rawTradeDate || oldLeg.tradeDate}; `
                         + `spread ${_round(newLeg.price - oldLeg.price, 6)}`,
                     lineNumber: Math.min(oldLeg.lineNumber, newLeg.lineNumber),
@@ -1136,27 +1304,42 @@
                 }));
                 return;
             }
-            legs.forEach((leg) => events.push({
-                kind: 'futures_trade',
-                tradeDate: leg.tradeDate,
-                brokerTimestamp: leg.brokerTimestamp,
-                account: leg.account,
-                futureExpiry: leg.identity.expiry,
-                futureConId: leg.identity.conId,
-                futureLocalSymbol: leg.identity.localSymbol,
-                futureContracts: leg.quantity,
-                sharesPerContract: leg.identity.sharesPerContract,
-                price: leg.price,
-                fees: leg.fees,
-                cashAmount: _round(-leg.fees, 6),
-                source: 'csv_import',
-                externalRef: leg.externalRef,
-                note: `IBKR FUT ${leg.rawTradeDate || leg.tradeDate}`,
-                lineNumber: leg.lineNumber,
-            }));
+            legs.forEach((leg) => {
+                if (leg.aliased) {
+                    duplicates.push({
+                        sourceRef: leg.sourceRef || leg.externalRef,
+                        externalRef: leg.aliased,
+                        account: leg.account,
+                        kind: 'futures_trade',
+                        lineNumber: leg.lineNumber,
+                    });
+                    return;
+                }
+                events.push({
+                    kind: 'futures_trade',
+                    tradeDate: leg.tradeDate,
+                    brokerTimestamp: leg.brokerTimestamp,
+                    account: leg.account,
+                    futureExpiry: leg.identity.expiry,
+                    futureConId: leg.identity.conId,
+                    futureLocalSymbol: leg.identity.localSymbol,
+                    futureContracts: leg.quantity,
+                    sharesPerContract: leg.identity.sharesPerContract,
+                    price: leg.price,
+                    fees: leg.fees,
+                    cashAmount: _round(-leg.fees, 6),
+                    source: 'csv_import',
+                    externalRef: leg.externalRef,
+                    sourceRef: leg.sourceRef || leg.externalRef,
+                    currency: leg.currency || null,
+                    priceText: leg.priceText || '',
+                    note: `IBKR FUT ${leg.rawTradeDate || leg.tradeDate}`,
+                    lineNumber: leg.lineNumber,
+                });
+            });
         });
 
-        return { events, problems };
+        return { events, problems, duplicates };
     }
 
     /**
@@ -1326,6 +1509,8 @@
                 states.set(key, {
                     voided: Boolean(item.voidedAtUtc),
                     excluded: item.includeInCost === false,
+                    contracts: item.contracts === undefined ? null : item.contracts,
+                    shares: item.shares === undefined ? null : item.shares,
                 });
             } else if (typeof item === 'string' && item) {
                 // Backwards-compatible input used by callers that only know
@@ -1362,39 +1547,84 @@
         return problems;
     }
 
-    function _buildDividends(rows, options) {
-        const section = extractSection(rows, 'dividends');
-        if (!section) return [];
-        const events = [];
+    /**
+     * A cash section row is either unrelated, related and readable, or
+     * related and damaged. The third case is reported: silently dropping a
+     * dividend whose amount did not parse would understate income with no
+     * trace, and a total row that slipped past the section filter would
+     * double it.
+     */
+    function _cashSectionRows(rows, sectionKey, options) {
+        const section = extractSection(rows, sectionKey);
+        if (!section) return { present: false, records: [], problems: [] };
+        const records = [];
+        const problems = [];
         section.groups.forEach((group) => {
-        const mapping = group.built.mapping;
-        group.records.forEach((record) => {
-            const values = _cellsToRecord(record.values, mapping);
-            const amount = _number(values.amount);
-            const tradeDate = _isoDate(values.tradeDate);
-            const description = String(values.description || '');
-            if (amount === null || !tradeDate) return;
-            if (!_cashDescriptionMatchesSymbol(description, options.symbol)) {
-                return;
-            }
-            if (amount <= 0) return;
-            events.push({
-                kind: 'dividend',
-                tradeDate,
-                brokerTimestamp: _brokerTimestamp(values.tradeDate),
-                account: String(values.account || options.accountFallback || '').trim(),
-                cashAmount: _round(amount, 6),
-                fees: 0,
-                source: 'csv_import',
-                externalRef: `stmt-${_hash16([
-                    _upper(values.account), tradeDate, description, String(amount),
-                ].join('|'))}`,
-                note: description.slice(0, 200),
-                lineNumber: record.lineNumber,
+            const mapping = group.built.mapping;
+            group.records.forEach((record) => {
+                const values = _cellsToRecord(record.values, mapping);
+                const description = String(values.description || '');
+                if (!_cashDescriptionMatchesSymbol(description, options.symbol)) return;
+                const amount = _number(values.amount);
+                const tradeDate = _isoDate(values.tradeDate);
+                const currency = _upper(values.currency);
+                if (amount === null || !tradeDate) {
+                    problems.push({
+                        lineNumber: record.lineNumber,
+                        reason: `${sectionKey} row for this underlying has an unreadable `
+                            + `${amount === null ? 'amount' : 'date'}`,
+                        raw: record.values.join(','),
+                    });
+                    return;
+                }
+                if (options.currency && (!currency
+                    || currency !== _upper(options.currency))) {
+                    problems.push({
+                        lineNumber: record.lineNumber,
+                        reason: `${sectionKey} row currency ${currency} does not match the `
+                            + `ledger currency ${_upper(options.currency)}`,
+                        raw: record.values.join(','),
+                    });
+                    return;
+                }
+                if (Math.abs(amount) < 1e-9) return;
+                records.push({
+                    values, amount, tradeDate, description, currency,
+                    lineNumber: record.lineNumber,
+                });
             });
         });
-        });
-        return events;
+        return { present: true, records, problems };
+    }
+
+    /**
+     * Dividends keep the statement's sign. A negative row is a reversal of a
+     * dividend the broker later corrected; it is booked as a negative
+     * dividend tagged `dividend_reversal` so the income total nets to what
+     * was actually received, instead of being dropped.
+     */
+    function _buildDividends(rows, options) {
+        const section = _cashSectionRows(rows, 'dividends', options);
+        const events = section.records.map((item) => ({
+            kind: 'dividend',
+            tradeDate: item.tradeDate,
+            brokerTimestamp: _brokerTimestamp(item.values.tradeDate),
+            account: String(item.values.account || options.accountFallback || '').trim(),
+            cashAmount: _round(item.amount, 6),
+            fees: 0,
+            source: 'csv_import',
+            tag: item.amount < 0 ? 'dividend_reversal' : '',
+            currency: item.currency || null,
+            externalRef: `stmt-${_hash16([
+                _upper(item.values.account), item.tradeDate, item.description,
+                String(item.amount),
+            ].join('|'))}`,
+            sourceRef: '',
+            note: item.description.slice(0, 200),
+            lineNumber: item.lineNumber,
+        }));
+        events.forEach((event) => { event.sourceRef = event.externalRef; });
+        return { events, problems: section.problems, present: section.present };
     }
 
     function _cashDescriptionMatchesSymbol(description, symbol) {
@@ -1409,39 +1639,39 @@
         return new RegExp(`(^|[^A-Z0-9.\\-])${escaped}(?=$|[^A-Z0-9.\\-])`).test(text);
     }
 
+    /**
+     * Withholding tax keeps the statement's sign too: a negative row is tax
+     * withheld (a fee), a positive row is the broker refunding tax it had
+     * withheld and is booked as a positive-cash fee tagged
+     * `withholding_tax_refund`. Taking the absolute value here once turned a
+     * +3 refund into a -3 charge, six dollars away from the statement.
+     */
     function _buildWithholdingTaxes(rows, options) {
-        const section = extractSection(rows, 'withholdingTax');
-        if (!section) return [];
-        const events = [];
-        section.groups.forEach((group) => {
-            const mapping = group.built.mapping;
-            group.records.forEach((record) => {
-                const values = _cellsToRecord(record.values, mapping);
-                const amount = _number(values.amount);
-                const tradeDate = _isoDate(values.tradeDate);
-                const description = String(values.description || '');
-                if (amount === null || Math.abs(amount) < 1e-9 || !tradeDate) return;
-                if (!_cashDescriptionMatchesSymbol(description, options.symbol)) return;
-                const withheld = Math.abs(amount);
-                events.push({
-                    kind: 'fee',
-                    tradeDate,
-                    brokerTimestamp: _brokerTimestamp(values.tradeDate),
-                    account: String(values.account || options.accountFallback || '').trim(),
-                    cashAmount: _round(-withheld, 6),
-                    fees: _round(withheld, 6),
-                    source: 'csv_import',
-                    tag: 'withholding_tax',
-                    externalRef: `stmt-${_hash16([
-                        'withholding-tax', _upper(values.account), tradeDate,
-                        description, String(amount),
-                    ].join('|'))}`,
-                    note: `IBKR withholding tax: ${description}`.slice(0, 200),
-                    lineNumber: record.lineNumber,
-                });
-            });
+        const section = _cashSectionRows(rows, 'withholdingTax', options);
+        const events = section.records.map((item) => {
+            const refund = item.amount > 0;
+            const event = {
+                kind: 'fee',
+                tradeDate: item.tradeDate,
+                brokerTimestamp: _brokerTimestamp(item.values.tradeDate),
+                account: String(item.values.account || options.accountFallback || '').trim(),
+                cashAmount: _round(item.amount, 6),
+                fees: refund ? 0 : _round(-item.amount, 6),
+                source: 'csv_import',
+                tag: refund ? 'withholding_tax_refund' : 'withholding_tax',
+                currency: item.currency || null,
+                externalRef: `stmt-${_hash16([
+                    'withholding-tax', _upper(item.values.account), item.tradeDate,
+                    item.description, String(item.amount),
+                ].join('|'))}`,
+                note: `IBKR withholding tax${refund ? ' refund' : ''}: ${item.description}`
+                    .slice(0, 200),
+                lineNumber: item.lineNumber,
+            };
+            event.sourceRef = event.externalRef;
+            return event;
         });
-        return events;
+        return { events, problems: section.problems, present: section.present };
     }
 
     function _corporateActionProblems(rows, options) {
@@ -1482,9 +1712,25 @@
             // of a zero balance, not proof that the section had no data.
             hasData: true, shares: 0, shareCostBasis: null,
             options: new Map(), futures: new Map(),
+            problems: [],
         };
         section.groups.forEach((group) => {
             const mapping = group.built.mapping;
+            if (mapping.discriminator !== undefined && group.records.length
+                && !group.records.some((record) => (
+                    _normalizeHeader(record.values[mapping.discriminator]) === 'summary'))) {
+                // Rows exist but none is a Summary row: a lot-level export
+                // or a translated discriminator. Reading it as "no
+                // positions" would turn every open contract into a close.
+                result.problems.push({
+                    lineNumber: group.records[0].lineNumber,
+                    reason: 'Open Positions section has no Summary rows; the '
+                        + 'end-of-period inventory cannot be read from this export',
+                    raw: group.records[0].values.join(','),
+                });
+                result.hasData = false;
+                return;
+            }
             group.records.forEach((record) => {
                 if (mapping.discriminator !== undefined
                     && _normalizeHeader(record.values[mapping.discriminator]) !== 'summary') {
@@ -1492,11 +1738,37 @@
                 }
                 const values = _cellsToRecord(record.values, mapping);
                 const quantity = _number(values.quantity);
-                if (quantity === null) return;
+                const rowUnderlying = resolveUnderlying(values, options);
+                if (quantity === null) {
+                    if (!wanted || rowUnderlying === wanted
+                        || _upper(values.symbol).indexOf(wanted) >= 0) {
+                        result.problems.push({
+                            lineNumber: record.lineNumber,
+                            reason: 'Open Positions row for this underlying has an '
+                                + 'unreadable quantity',
+                            raw: record.values.join(','),
+                        });
+                    }
+                    return;
+                }
+                if (options.currency && _upper(values.currency) !== _upper(options.currency)
+                    && (!wanted || rowUnderlying === wanted || _upper(values.symbol).startsWith(wanted + ' '))) {
+                    result.problems.push({
+                        lineNumber: record.lineNumber,
+                        reason: `Open Positions row currency ${_upper(values.currency)} `
+                            + `does not match the ledger currency ${_upper(options.currency)}`,
+                        raw: record.values.join(','),
+                    });
+                    return;
+                }
                 const assetKind = _assetKind(values.assetClass);
                 if (assetKind === 'future') {
                     const identity = _futureIdentity(values, options);
-                    if (!identity.expiry) return;
+                    if (!identity.expiry && (!wanted || rowUnderlying === wanted || _upper(values.symbol).startsWith(wanted))) {
+                        result.problems.push({ lineNumber: record.lineNumber, reason: 'Open Positions FUT contract for this underlying could not be parsed', raw: record.values.join(',') });
+                        result.hasData = false;
+                        return;
+                    }
                     if (wanted && identity.underlying !== wanted) return;
                     const brokerIdentity = identity.conId !== null
                         && identity.conId !== undefined
@@ -1518,6 +1790,14 @@
                 }
                 const parsed = parseOptionSymbol(values.symbol);
                 const underlying = parsed ? parsed.underlying : _upper(values.symbol);
+                if (!parsed && (assetKind === 'option' || assetKind === 'fop')
+                    && (!wanted || rowUnderlying === wanted || _upper(values.symbol).startsWith(wanted + ' '))) {
+                    result.problems.push({ lineNumber: record.lineNumber,
+                        reason: 'Open Positions option contract for this underlying could not be parsed; the closing inventory is unknown',
+                        raw: record.values.join(',') });
+                    result.hasData = false;
+                    return;
+                }
                 if (wanted && underlying !== wanted) return;
                 if (!parsed || assetKind === 'stock') {
                     result.shares = _round(result.shares + quantity, 6);
@@ -1528,13 +1808,28 @@
                     }
                     return;
                 }
-                const perContract = Math.abs(_number(values.multiplier) || 0)
-                    || options.defaultSharesPerContract;
+                // Same resolution as a trade row: the column, then the
+                // instrument table, then the book default. Reading the
+                // default here while trade rows read the table would split
+                // one adjusted contract into two positions.
+                const optionIdentity = _optionIdentity(values, options);
+                const perContract = optionIdentity.sharesPerContract;
                 const localSymbol = _upper(values.symbol);
                 const exactDetail = options.instruments
                     ? options.instruments.get(`SYM|${localSymbol}`) : null;
-                const conId = exactDetail && !exactDetail.ambiguous
-                    ? exactDetail.conId : null;
+                const conId = optionIdentity.conId;
+                if (exactDetail && !exactDetail.ambiguous && exactDetail.multiplier
+                    && _number(values.multiplier) !== null
+                    && Math.abs(exactDetail.multiplier - Math.abs(_number(values.multiplier))) > 1e-9) {
+                    result.problems.push({
+                        lineNumber: record.lineNumber,
+                        reason: `Open Positions multiplier ${values.multiplier} contradicts `
+                            + `the instrument table (${exactDetail.multiplier}) for the same `
+                            + 'contract; contract identity is inconsistent',
+                        raw: record.values.join(','),
+                    });
+                    return;
+                }
                 const identity = conId !== null && conId !== undefined
                     ? `con:${conId}` : (localSymbol ? `local:${localSymbol}` : '');
                 const structuralKey = _instrumentKey(
@@ -1590,7 +1885,13 @@
         const symbol = _upper(opts.symbol);
         if (!symbol) return null;
         const end = extractEndPositions(rows, opts);
-        if (!end || !end.hasData) return null;
+        if (!end) return null;
+        if (!end.hasData) {
+            return {
+                drafts: [], shareDrafts: [], problems: end.problems || [],
+                openingShares: 0, closingShares: 0, unreadable: true,
+            };
+        }
 
         // A statement covers ONE account. Netting it against every account's
         // holdings would let one account's position cancel another's - the
@@ -1673,7 +1974,32 @@
         });
 
         const drafts = [];
-        const problems = [];
+        const problems = (end.problems || []).slice();
+        // A contract the ledger holds at the cutoff but the statement
+        // neither lists at period end nor moves during the period is extra
+        // ledger history, or a statement for another account or period. It
+        // is reported, never "corrected" with an invented closing stub.
+        const structuralOf = (key) => String(key).split('|#')[0];
+        const statementStructures = new Set(
+            [...endByKey.keys(), ...delta.keys()].map(structuralOf));
+        alreadyOpen.forEach((held, key) => {
+            if (Math.abs(held) < SHARE_EPSILON) return;
+            if (endByKey.has(key) || delta.has(key)) return;
+            // The statement does mention this strike/expiry/multiplier but
+            // under an identity the position section cannot resolve; that
+            // is the ambiguity problem reported below, not extra history.
+            if (statementStructures.has(structuralOf(key))) return;
+            const sample = existingItems.find((item) => identityKeys.get(item) === key) || {};
+            problems.push({
+                lineNumber: 0,
+                reason: `the ledger holds ${held} contract(s) of this option at the `
+                    + 'statement cutoff, but the statement neither lists it at period '
+                    + 'end nor trades it; the ledger carries history this statement '
+                    + 'does not know about (wrong account, period, or an extra row)',
+                raw: `${symbol} ${sample.expiry || ''} ${sample.right || ''}`
+                    + `${sample.strike === undefined ? '' : sample.strike}`,
+            });
+        });
         const keys = new Set([...endByKey.keys(), ...delta.keys()]);
         keys.forEach((key) => {
             const closing = endByKey.get(key);
@@ -1783,6 +2109,33 @@
                         + `${descriptor.strike === undefined ? '' : descriptor.strike}`,
                 });
             }
+            const stubRef = `prior-${_hash16([
+                _upper(opts.accountFallback), symbol, descriptor.expiry,
+                descriptor.right, String(descriptor.strike),
+                String(descriptor.sharesPerContract || ''),
+                descriptor.conId === null || descriptor.conId === undefined
+                    ? _upper(descriptor.localSymbol) : `con:${descriptor.conId}`,
+            ].join('|'))}`;
+            // The stored stub keeps its reference for all time, so a
+            // re-derived stub with a different quantity would be skipped at
+            // commit and the ledger would keep the old, now-wrong figure.
+            // That disagreement has to stop the batch.
+            const stored = knownRefStates.get(
+                `${String(opts.accountFallback || '')}\u0000${stubRef}`);
+            if (stored && !stored.voided && !stored.excluded
+                && stored.contracts !== null && stored.contracts !== undefined
+                && Math.abs(_number(stored.contracts) - opening) >= SHARE_EPSILON) {
+                problems.push({
+                    lineNumber: 0,
+                    reason: `this statement implies an opening of ${opening} contract(s) `
+                        + `but the ledger already holds an opening stub of ${stored.contracts} `
+                        + 'for the same contract; the stub cannot be corrected by append, '
+                        + 'import the covering earlier statement or rebuild',
+                    raw: `${symbol} ${descriptor.expiry || ''} ${descriptor.right || ''}`
+                        + `${descriptor.strike === undefined ? '' : descriptor.strike}`,
+                });
+                return;
+            }
             drafts.push({
                 kind: 'option_trade',
                 optionSecType: _upper(opts.secType) === 'FUT' ? 'FOP' : 'OPT',
@@ -1804,18 +2157,15 @@
                 // stub per contract per account, so importing a later
                 // statement that re-derives the same opening cannot add a
                 // second one.
-                externalRef: `prior-${_hash16([
-                    _upper(opts.accountFallback), symbol, descriptor.expiry,
-                    descriptor.right, String(descriptor.strike),
-                    String(descriptor.sharesPerContract || ''),
-                    descriptor.conId === null || descriptor.conId === undefined
-                        ? _upper(descriptor.localSymbol) : `con:${descriptor.conId}`,
-                ].join('|'))}`,
-                note: usesBrokerBasis
+                externalRef: stubRef,
+                sourceRef: stubRef,
+                note: (usesBrokerBasis
                     ? 'Held before this statement period; opening cash reconstructed '
                         + 'from IBKR Basis on the complete closing rows.'
                     : 'Held before this statement period; premium is not in this '
-                        + 'file - fill it in or import the earlier statement.',
+                        + 'file - fill it in or import the earlier statement.')
+                    + ' Dated the day before the first row of the statement that '
+                    + 'revealed it, not on the real opening date.',
             });
         });
         drafts.sort((left, right) => (
@@ -1877,6 +2227,23 @@
                         + 'P/L); use a complete earlier statement',
                     raw: `${symbol} shares`,
                 });
+            } else {
+                // No Basis evidence at all. The residual is real shares
+                // whose cost this file does not know; committing the closes
+                // anyway would book a short position the account never held.
+                const ledgerExtra = Math.abs(end.shares) < SHARE_EPSILON
+                    && shareMovements.length === 0 && Math.abs(alreadyShares) >= SHARE_EPSILON;
+                problems.push({
+                    lineNumber: shareMovements[0] ? shareMovements[0].lineNumber : 0,
+                    reason: ledgerExtra
+                        ? `the ledger holds ${alreadyShares} shares at the statement cutoff `
+                            + 'but the statement lists none and trades none; the ledger '
+                            + 'carries share history this statement does not know about'
+                        : `the statement begins with ${openingShares} shares whose cost is `
+                            + 'not in this file; import an earlier covering statement or '
+                            + 'record a reviewed opening balance before appending',
+                    raw: `${symbol} shares`,
+                });
             }
         }
 
@@ -1886,6 +2253,14 @@
             problems,
             openingShares,
             closingShares: end.shares,
+            // The statement's own end-of-period inventory, so the preview
+            // can show ledger-after-import beside what the broker reports.
+            closingOptions: endItems.map((item) => ({
+                right: item.right, strike: item.strike, expiry: item.expiry,
+                sharesPerContract: item.sharesPerContract, conId: item.conId,
+                localSymbol: item.localSymbol, quantity: item.quantity,
+                account: opts.accountFallback || '',
+            })),
         };
     }
 
@@ -2042,6 +2417,7 @@
         return {
             drafts: [], problems, openingShares: 0, closingShares: 0,
             openingFutures,
+            closingFutures: ending.map((item) => Object.assign({}, item, { futureExpiry: item.expiry, futureConId: item.conId, futureLocalSymbol: item.localSymbol })),
         };
     }
 
@@ -2056,14 +2432,127 @@
             openingShares: 0,
             closingShares: 0,
             openingFutures: futureOpenings ? futureOpenings.openingFutures : [],
+            closingFutures: futureOpenings ? futureOpenings.closingFutures : null,
+            closingOptions: optionOpenings ? optionOpenings.closingOptions : null,
+            unreadable: Boolean(optionOpenings?.unreadable || futureOpenings?.unreadable),
         };
+    }
+
+    function _emptyResult(format, problems, extra) {
+        return Object.assign({
+            format,
+            events: [],
+            problems,
+            summary: { total: 0, drafted: 0, problems: problems.length, skipped: 0, byKind: {} },
+            unmappedColumns: [],
+            confirmedDuplicates: [],
+            statementThrough: '',
+            statementPeriod: { from: '', through: '', source: '' },
+            checks: {},
+        }, extra || {});
+    }
+
+    /**
+     * The per-fill rows an Activity Statement prints under one Order row.
+     *
+     * IBKR lists an order's Trade rows immediately after the Order row.
+     * Every child is validated as a trade; account, contract, currency,
+     * quantity, signed commission, net cash and weighted price must agree
+     * with its parent. Inconsistent children block the entire import.
+     */
+    function _attachOrderFills(group, ordersByLine, options, problems) {
+        const fillRecords = group.fillRecords || [];
+        const result = new Map();
+        if (!fillRecords.length) return result;
+        const mapping = group.built.mapping;
+        const orders = Array.from(ordersByLine.keys()).sort((a, b) => a - b);
+        orders.forEach((line, index) => {
+            const order = ordersByLine.get(line);
+            if (options.symbol && resolveUnderlying(order, options) !== options.symbol) return;
+            if (options.targetAccount && String(order.account || options.accountFallback || '') !== options.targetAccount) return;
+            const nextLine = index + 1 < orders.length ? orders[index + 1] : Infinity;
+            const children = fillRecords.filter((record) => record.lineNumber > line && record.lineNumber < nextLine);
+            if (!children.length) return;
+            const fail = (reason) => problems.push({ lineNumber: line,
+                reason: `Order / Trade rows cannot be reconciled: ${reason}`, raw: order.symbol });
+            const fills = [];
+            for (const record of children) {
+                const values = _cellsToRecord(record.values, mapping);
+                const account = String(values.account || options.accountFallback || '');
+                if (_upper(values.symbol) !== _upper(order.symbol)
+                    || account !== String(order.account || options.accountFallback || '')
+                    || _upper(values.currency) !== _upper(order.currency)) {
+                    fail('child contract, account or currency differs'); return;
+                }
+                const built = _buildDraft(values, _classifyTrade(values, options), options, record.lineNumber);
+                if (built.problem || !_brokerTimestamp(values.tradeDate)) {
+                    fail(built.problem || 'child broker timestamp is missing'); return;
+                }
+                fills.push({ brokerTimestamp: _brokerTimestamp(values.tradeDate),
+                    tradeDate: _isoDate(values.tradeDate), quantity: _number(values.quantity),
+                    price: Math.abs(_number(values.price)), priceText: String(values.price),
+                    cashAmount: _cash(values), fees: _fees(values), commission: _number(values.commission), lineNumber: record.lineNumber });
+            }
+            const quantity = fills.reduce((sum, fill) => sum + fill.quantity, 0);
+            const size = fills.reduce((sum, fill) => sum + Math.abs(fill.quantity), 0);
+            const cash = fills.reduce((sum, fill) => sum + fill.cashAmount, 0);
+            const commission = fills.reduce((sum, fill) => sum + fill.commission, 0);
+            const average = fills.reduce((sum, fill) => sum + fill.price * Math.abs(fill.quantity), 0) / size;
+            const decimals = (String(order.price).split('.')[1] || '').length;
+            const tolerance = Math.max(1e-8, 0.5 * 10 ** -decimals);
+            if (Math.abs(quantity - _number(order.quantity)) >= SHARE_EPSILON
+                || fills.some((fill) => fill.quantity * _number(order.quantity) <= 0)
+                || Math.abs(cash - _cash(order)) > 0.011 * fills.length
+                || Math.abs(commission - _number(order.commission)) > 0.011 * fills.length
+                || Math.abs(average - Math.abs(_number(order.price))) > tolerance) {
+                fail('quantity, net cash, fees or weighted price differs from the parent Order'); return;
+            }
+            result.set(line, fills);
+        });
+        return result;
+    }
+
+    /**
+     * Replace one order-level event with per-fill events for the fills the
+     * caller still needs, dropping the fills it proved are already stored.
+     * Every emitted fill event keeps a deterministic reference derived from
+     * the order's source reference and the fill's position in the order.
+     */
+    function _splitOrderEvent(event, split) {
+        const kept = new Set(split.keep || []);
+        const events = [];
+        (event.fills || []).forEach((fill, index) => {
+            if (!kept.has(index)) return;
+            const quantityField = event.kind === 'share_trade' ? 'shares' : 'contracts';
+            events.push(Object.assign({}, event, {
+                [quantityField]: fill.quantity,
+                price: fill.price,
+                priceText: fill.priceText,
+                fees: fill.fees,
+                cashAmount: fill.cashAmount,
+                brokerCloseCash: fill.cashAmount,
+                brokerTimestamp: fill.brokerTimestamp,
+                tradeDate: fill.tradeDate || event.tradeDate,
+                externalRef: `${event.sourceRef}-fill-${index + 1}`,
+                sourceRef: `${event.sourceRef}-fill-${index + 1}`,
+                fills: undefined,
+                fillOf: event.sourceRef,
+                lineNumber: fill.lineNumber,
+                note: `${event.note}; fill ${index + 1} of ${event.fills.length}`,
+            }));
+        });
+        return events;
     }
 
     /**
      * Parse a statement into reviewable drafts.
      *
-     * Returns { format, events, problems, summary, unmappedColumns }. Every
-     * event is a draft: the caller previews them and a human commits.
+     * Returns { format, events, problems, summary, unmappedColumns,
+     * confirmedDuplicates, checks, statementPeriod }. Every event is a draft:
+     * the caller previews them and a human commits. Rows the caller has
+     * proved are already in the ledger under another reference (see
+     * externalRefAliases) are returned in confirmedDuplicates, never as
+     * events.
      */
     function parse(text, options) {
         const opts = Object.assign({
@@ -2072,52 +2561,73 @@
             defaultSharesPerContract: 100,
             accountFallback: '',
             targetAccount: '',
+            currency: '',
         }, options || {});
         opts.symbol = _upper(opts.symbol);
         opts.targetAccount = String(opts.targetAccount || '').trim();
+        opts.currency = _upper(opts.currency);
+        const aliases = opts.externalRefAliases || {};
+        const fillSplits = opts.fillSplits || {};
 
         const rows = parseCsv(text);
-        const format = detectFormat(rows);
-        const periodThrough = format === 'activity' ? extractStatementThrough(rows) : '';
-        if (format === 'unknown') {
-            return {
-                format,
-                events: [],
-                problems: [{
-                    lineNumber: 0,
-                    reason: 'file is neither a Flex Query nor an Activity Statement CSV',
-                    raw: '',
-                }],
-                summary: { total: 0, drafted: 0, problems: 1, skipped: 0, byKind: {} },
-                unmappedColumns: [],
-                statementThrough: '',
-            };
+        if (rows.error) {
+            return _emptyResult('unknown', [{
+                lineNumber: 0, reason: `CSV could not be read: ${rows.error}`, raw: '',
+            }]);
         }
+        const format = detectFormat(rows);
+        if (format === 'unknown') {
+            return _emptyResult(format, [{
+                lineNumber: 0,
+                reason: 'file is neither a Flex Query nor an Activity Statement CSV',
+                raw: '',
+            }]);
+        }
+        const period = format === 'activity'
+            ? extractStatementPeriod(rows) : { from: '', through: '' };
+        const periodThrough = period.through ? `${period.through}T23:59:59` : '';
+        if (!opts.openingDate && period.from) {
+            const day = new Date(`${period.from}T00:00:00Z`);
+            day.setUTCDate(day.getUTCDate() - 1);
+            opts.openingDate = day.toISOString().slice(0, 10);
+        }
+        opts.accountFallback = opts.accountFallback || opts.targetAccount;
+        const checks = {
+            period: Boolean(period.through),
+            account: false,
+            instruments: false,
+            trades: false,
+            openPositions: false,
+            dividends: false,
+            withholdingTax: false,
+        };
 
         let groups;
         if (format === 'activity') {
             // The account lives in its own section, and the multipliers in
             // another; both are read before any row is classified.
-            opts.accountFallback = extractAccount(rows) || opts.accountFallback;
+            const statementAccount = extractAccount(rows);
+            checks.account = Boolean(statementAccount);
+            opts.accountFallback = statementAccount || opts.accountFallback;
             opts.instruments = extractInstruments(rows);
+            checks.instruments = opts.instruments.size > 0;
             const section = extractSection(rows, 'trades');
-            if (!section) {
-                return {
-                    format,
-                    events: _buildDividends(rows, opts).concat(
-                        _buildWithholdingTaxes(rows, opts)),
-                    problems: [{
-                        lineNumber: 0,
-                        reason: 'no Trades section found in the statement',
-                        raw: '',
-                    }],
-                    summary: { total: 0, drafted: 0, problems: 1, skipped: 0, byKind: {} },
-                    unmappedColumns: [],
-                    account: opts.accountFallback,
-                    statementThrough: periodThrough,
-                };
+            if (section) {
+                groups = section.groups;
+                checks.trades = true;
+            } else if (period.through || extractSection(rows, 'openPositions')) {
+                // A month with no trades is still a statement: its cash
+                // sections and end-of-period inventory can be checked and
+                // the period registered as covered.
+                groups = [];
+            } else {
+                return _emptyResult(format, [{
+                    lineNumber: 0,
+                    reason: 'no Trades section found in the statement',
+                    raw: '',
+                }], { account: opts.accountFallback, statementThrough: periodThrough,
+                    statementPeriod: Object.assign({ source: 'period' }, period), checks });
             }
-            groups = section.groups;
         } else {
             groups = [{
                 built: buildMapping(rows[0]),
@@ -2125,78 +2635,74 @@
                     values: row, lineNumber: index + 2,
                 })),
             }];
+            checks.trades = true;
         }
 
         const mappedAccount = groups.some(
             (group) => group.built.mapping.account !== undefined);
         if (opts.targetAccount && !opts.accountFallback && !mappedAccount) {
-            return {
-                format,
-                events: [],
-                problems: [{
-                    lineNumber: 0,
-                    reason: `statement account could not be verified for ledger ${opts.targetAccount}`,
-                    raw: '',
-                }],
-                summary: { total: 0, drafted: 0, problems: 1, skipped: 0, byKind: {} },
-                unmappedColumns: [],
-                account: '',
-                statementThrough: periodThrough,
-            };
+            return _emptyResult(format, [{
+                lineNumber: 0,
+                reason: `statement account could not be verified for ledger ${opts.targetAccount}`,
+                raw: '',
+            }], { account: '', statementThrough: periodThrough,
+                statementPeriod: Object.assign({ source: 'period' }, period), checks });
         }
         if (opts.targetAccount && opts.accountFallback
             && _upper(opts.accountFallback) !== _upper(opts.targetAccount)) {
-            return {
-                format,
-                events: [],
-                problems: [{
-                    lineNumber: 0,
-                    reason: `statement account ${opts.accountFallback} does not match ledger account ${opts.targetAccount}`,
-                    raw: '',
-                }],
-                summary: { total: 0, drafted: 0, problems: 1, skipped: 0, byKind: {} },
-                unmappedColumns: [],
-                account: opts.accountFallback,
-                statementThrough: periodThrough,
-            };
+            return _emptyResult(format, [{
+                lineNumber: 0,
+                reason: `statement account ${opts.accountFallback} does not match ledger account ${opts.targetAccount}`,
+                raw: '',
+            }], { account: opts.accountFallback, statementThrough: periodThrough,
+                statementPeriod: Object.assign({ source: 'period' }, period), checks });
         }
 
         for (let index = 0; index < groups.length; index += 1) {
             const missing = REQUIRED_TRADE_COLUMNS.filter(
                 (field) => groups[index].built.mapping[field] === undefined);
             if (missing.length) {
-                return {
-                    format,
-                    events: [],
-                    problems: [{
-                        lineNumber: 1,
-                        reason: `required columns could not be identified: ${missing.join(', ')}`,
-                        raw: groups[index].built.headers.join(','),
-                    }],
-                    summary: { total: 0, drafted: 0, problems: 1, skipped: 0, byKind: {} },
-                    unmappedColumns: groups[index].built.unmapped,
-                    account: opts.accountFallback,
-                    statementThrough: periodThrough,
-                };
+                return _emptyResult(format, [{
+                    lineNumber: 1,
+                    reason: `required columns could not be identified: ${missing.join(', ')}`,
+                    raw: groups[index].built.headers.join(','),
+                }], { unmappedColumns: groups[index].built.unmapped,
+                    account: opts.accountFallback, statementThrough: periodThrough,
+                    statementPeriod: Object.assign({ source: 'period' }, period), checks });
             }
         }
 
         const events = [];
         const problems = [];
         const pendings = [];
+        const confirmedDuplicates = [];
         const contentRefOccurrences = new Map();
         const brokerRefLines = new Map();
         let skipped = 0;
         let total = 0;
         const unmapped = [];
+        const wantedPattern = opts.symbol
+            ? new RegExp(`(^|[^A-Z0-9.\\-])${opts.symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[^A-Z0-9.\\-])`)
+            : null;
+
+        function aliasFor(account, sourceRef) {
+            const key = `${account}\u0000${sourceRef}`;
+            return Object.prototype.hasOwnProperty.call(aliases, key)
+                ? String(aliases[key] || '') : '';
+        }
 
         groups.forEach((group) => {
         total += group.records.length;
         group.built.unmapped.forEach((name) => {
             if (unmapped.indexOf(name) < 0) unmapped.push(name);
         });
+        const orderLines = new Map();
         group.records.forEach((record) => {
-            const values = _cellsToRecord(record.values, group.built.mapping);
+            orderLines.set(record.lineNumber, _cellsToRecord(record.values, group.built.mapping));
+        });
+        const fillsByLine = _attachOrderFills(group, orderLines, opts, problems);
+        group.records.forEach((record) => {
+            const values = orderLines.get(record.lineNumber);
             const rowAccount = String(values.account || opts.accountFallback || '').trim();
             if (opts.targetAccount
                 && _upper(rowAccount) !== _upper(opts.targetAccount)) {
@@ -2205,6 +2711,21 @@
             }
             const symbol = resolveUnderlying(values, opts);
             if (opts.symbol && symbol !== opts.symbol) {
+                const kind = _assetKind(values.assetClass);
+                // A row that names this underlying but whose contract could
+                // not be parsed is a row for this book that the parser does
+                // not understand, not a row for another book.
+                if (wantedPattern && wantedPattern.test(_upper(values.symbol))
+                    && (kind === 'option' || kind === 'fop')
+                    && !parseOptionSymbol(values.symbol)) {
+                    problems.push({
+                        lineNumber: record.lineNumber,
+                        reason: `row mentions ${opts.symbol} but its contract could not `
+                            + 'be parsed; it would otherwise be skipped as another underlying',
+                        raw: record.values.join(','),
+                    });
+                    return;
+                }
                 skipped += 1;
                 return;
             }
@@ -2241,22 +2762,61 @@
                 });
                 return;
             }
+            // Source identity first (with the occurrence suffix for repeated
+            // identical rows), then the cross-source alias for THAT identity.
             _assignContentOccurrenceRef(built1, values, contentRefOccurrences);
+            const item = built1.event || built1.pending;
+            item.sourceRef = item.externalRef;
+            const alias = aliasFor(item.account, item.sourceRef);
             if (built1.pending) {
+                if (alias) built1.pending.aliased = alias;
                 pendings.push(built1.pending);
                 return;
             }
-            events.push(Object.assign({ lineNumber: record.lineNumber }, built1.event));
+            const event = Object.assign({ lineNumber: record.lineNumber }, built1.event);
+            const fills = fillsByLine.get(record.lineNumber);
+            if (fills && (event.kind === 'share_trade' || event.kind === 'option_trade')) {
+                event.fills = fills;
+            }
+            if (alias) {
+                confirmedDuplicates.push({
+                    sourceRef: event.sourceRef, externalRef: alias, account: event.account,
+                    kind: event.kind, lineNumber: event.lineNumber,
+                    tradeDate: event.tradeDate, contracts: event.contracts,
+                    shares: event.shares, cashAmount: event.cashAmount,
+                });
+                return;
+            }
+            const splitKey = `${event.account}\u0000${event.sourceRef}`;
+            if (Object.prototype.hasOwnProperty.call(fillSplits, splitKey) && event.fills) {
+                const split = fillSplits[splitKey];
+                (split.matched || []).forEach((entry) => confirmedDuplicates.push({
+                    sourceRef: `${event.sourceRef}-fill-${entry.index + 1}`,
+                    externalRef: entry.externalRef, account: event.account,
+                    kind: event.kind, lineNumber: event.fills[entry.index].lineNumber,
+                    tradeDate: event.tradeDate,
+                    contracts: event.kind === 'option_trade'
+                        ? event.fills[entry.index].quantity : undefined,
+                    shares: event.kind === 'share_trade'
+                        ? event.fills[entry.index].quantity : undefined,
+                    cashAmount: event.fills[entry.index].cashAmount,
+                }));
+                events.push(..._splitOrderEvent(event, split));
+                return;
+            }
+            events.push(event);
         });
         });
 
         const paired = _pairDeliveries(pendings, opts);
+        confirmedDuplicates.push(...(paired.duplicates || []));
         const allEvents = events.concat(paired.events);
         const openings = format === 'activity'
             ? (_upper(opts.secType) === 'FUT'
                 ? deriveFuturesBookOpenings(rows, allEvents, opts)
                 : deriveOpeningPositions(rows, allEvents, opts))
             : null;
+        checks.openPositions = Boolean(openings && !openings.unreadable);
         if (openings && openings.problems && openings.problems.length) {
             // These block the commit like any other unresolved row: an
             // unattributable opening is exactly the kind of guess this
@@ -2264,8 +2824,12 @@
             problems.push(...openings.problems);
         }
         if (format === 'activity' && _upper(opts.secType) !== 'FUT') {
-            allEvents.push(..._buildDividends(rows, opts));
-            allEvents.push(..._buildWithholdingTaxes(rows, opts));
+            const dividends = _buildDividends(rows, opts);
+            const taxes = _buildWithholdingTaxes(rows, opts);
+            checks.dividends = dividends.present;
+            checks.withholdingTax = taxes.present;
+            allEvents.push(...dividends.events, ...taxes.events);
+            problems.push(...dividends.problems, ...taxes.problems);
         }
         problems.push(..._corporateActionProblems(rows, opts));
         // A void/exclusion removes the row from the active ledger but the
@@ -2274,8 +2838,8 @@
         // replacement rebuild is the only coherent recovery path.
         problems.push(..._blockedSuppressedRows(allEvents, opts));
         allEvents.sort((left, right) => {
-            const leftTimestamp = left.brokerTimestamp || _brokerTimestamp(left.tradeDate);
-            const rightTimestamp = right.brokerTimestamp || _brokerTimestamp(right.tradeDate);
+            const leftTimestamp = _sortStamp(left);
+            const rightTimestamp = _sortStamp(right);
             if (leftTimestamp !== rightTimestamp) {
                 return leftTimestamp < rightTimestamp ? -1 : 1;
             }
@@ -2283,8 +2847,12 @@
         });
 
         const eventThrough = allEvents.reduce((latest, event) => {
-            const timestamp = event.brokerTimestamp || _brokerTimestamp(event.tradeDate);
+            const timestamp = _sortStamp(event);
             return timestamp > latest ? timestamp : latest;
+        }, '');
+        const eventFrom = allEvents.reduce((earliest, event) => {
+            const date = String(event.tradeDate || '');
+            return date && (!earliest || date < earliest) ? date : earliest;
         }, '');
 
         const byKind = {};
@@ -2301,11 +2869,20 @@
                 drafted: allEvents.length,
                 problems: problems.length + paired.problems.length,
                 skipped,
+                confirmedDuplicates: confirmedDuplicates.length,
                 byKind,
             },
             unmappedColumns: unmapped,
             account: opts.accountFallback,
+            currency: opts.currency,
             openings,
+            confirmedDuplicates,
+            checks,
+            statementPeriod: {
+                from: period.from || eventFrom,
+                through: period.through || (eventThrough ? eventThrough.slice(0, 10) : ''),
+                source: period.through ? 'period' : (eventThrough ? 'events' : ''),
+            },
             statementThrough: periodThrough || eventThrough,
         };
     }
@@ -2317,6 +2894,7 @@
         extractSection,
         extractAccount,
         extractStatementThrough,
+        extractStatementPeriod,
         extractInstruments,
         extractEndPositions,
         deriveOpeningPositions,

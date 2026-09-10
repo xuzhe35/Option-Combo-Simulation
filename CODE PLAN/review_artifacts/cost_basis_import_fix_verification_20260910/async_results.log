@@ -1,0 +1,5 @@
+FIXED_TWS_BOOK_SWITCH stale response discarded; no import request
+FIXED_FILE_READ old preview cleared immediately; no import request
+MIXED_PAGE_VERSIONS accepted 1000 old rows + 1 new row, carrying the new digest
+COVERAGE_AFTER_REBUILD_UI 报表覆盖 2026-08-01 至 2026-09-30
+Observed-state async assertions passed; remaining holes intentionally demonstrated.

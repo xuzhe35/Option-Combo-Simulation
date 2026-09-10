@@ -223,6 +223,53 @@ test('cross-expiry physical delivery depends on the chosen path', () => {
     near(gradual.headlinePnl, -500); // expiry spot 90, OTM. Cannot revive the expired put.
     assert.equal(gradual.cost, null); near(gradual.shares, 0);
 });
+test('conservative short-put assignment defaults on and shares one cash/cost outcome with the band', () => {
+    const f = setup([stock,
+        option({ seq: 2, expiry: '20260910', strike: 80, contracts: -1 }),
+        option({ seq: 3, expiry: '20260911', strike: 90, contracts: -1 }),
+    ], { centerPrice: 60, path: 'gradual', throughExpiry: '20261023',
+        targetInstant: '2026-10-23T16:00:00Z' });
+    const result = run(f), p = middle(result);
+    assert.equal(result.conservativeShortPutAssignment, true);
+    near(p.shares, 400); near(p.settlementCashPaid, 17000);
+    near(p.assignedContracts, 2); near(p.headlinePnl, -12000); near(p.cost, 90);
+    const c = K.compile(f.events, f.options);
+    const band = B.calculate(c);
+    assert.equal(band.available, true);
+    near(band.points[5].lower, -12000); near(band.points[5].upper, -12000);
+    f.options.path = 'immediate';
+    near(middle(run(f)).cost, p.cost);
+    f.options.path = 'gradual'; f.options.conservativeShortPutAssignment = false;
+    const off = middle(run(f));
+    near(off.shares, 200); near(off.assignedContracts, 0);
+    near(off.headlinePnl, -7000); near(off.cost, 95);
+});
+test('conservative assignment respects strict strike and horizon boundaries and only affects own short puts', () => {
+    const f = setup([stock, option({ expiry: '20260910', strike: 80, contracts: -1 })],
+        { centerPrice: 80, path: 'gradual', throughExpiry: '20261023', targetInstant: '2026-10-23T16:00:00Z' });
+    near(middle(run(f)).assignedContracts, 0); // equality does not force delivery
+    f.options.centerPrice = 79;
+    near(middle(run(f)).assignedContracts, 1);
+    for (const leg of [option({ expiry, strike: 80, contracts: -1 }),
+        option({ expiry: '20260910', strike: 80, contracts: 1 }),
+        option({ expiry: '20260910', right: 'C', strike: 110, contracts: -1 })]) {
+        f.events = [stock, leg]; f.options.longOptionInputs = snapshot(f.events, f.options);
+        f.options.conservativeShortPutAssignment = true;
+        const on = middle(run(f));
+        f.options.conservativeShortPutAssignment = false;
+        const off = middle(run(f));
+        near(on.headlinePnl, off.headlinePnl); near(on.shares, off.shares);
+    }
+    // Expiry exactly at the horizon is settled; the override does not remove
+    // assignments already required by the path during a subsequent rebound.
+    f.events = [stock, option({ expiry: '20260910', strike: 105, contracts: -1 })];
+    Object.assign(f.options, { centerPrice: 110, conservativeShortPutAssignment: true });
+    f.options.longOptionInputs = snapshot(f.events, f.options);
+    near(middle(run(f)).assignedContracts, 1);
+    Object.assign(f.options, { centerPrice: 80, targetInstant: '2026-09-10T20:00:00Z', throughExpiry: '20260910' });
+    f.options.longOptionInputs = snapshot(f.events, f.options);
+    near(middle(run(f)).assignedContracts, 1);
+});
 test('turning off surviving options excludes their cash as well as their value', () => {
     const f = setup([stock, option()], { includeDeferredLongOptions: false, longOptionInputs: null });
     const result = run(f);
@@ -327,6 +374,47 @@ test('frozen curve resolves separate fractional current and scenario tenors', ()
     const c = K.compile(f.events, f.options);
     assert.equal(c.available, true, c.reason); assert.notEqual(c.own[0].rate, c.own[0].futureRate);
 });
+test('horizon scrubbing keeps both frozen snapshots and reprices time without rewriting provenance', () => {
+    const f = linkedFixture({ ivMode: 'none' });
+    const snapshots = [f.options.longOptionInputs, f.options.linkedHedge.marketInputs];
+    snapshots.forEach(s => Object.assign(s, { snapshotVersion: 2, snapshotId: 'frozen',
+        discountCurve: { schemaVersion: 2, currency: 'USD', effectiveDate: '2026-09-08',
+            points: [{ tenorDays: 1, zeroRate: 0 }, { tenorDays: 365, zeroRate: 0 }, { tenorDays: 730, zeroRate: 0 }] } }));
+    const before = JSON.stringify(snapshots);
+    f.options.pnlBasis = 'change';
+    near(middle(run(f)).headlinePnl, 0);
+    Object.assign(f.options, { throughExpiry: '20260918', snapshotThroughExpiry: '20260908',
+        targetInstant: undefined, horizonDays: 10 });
+    const rolled = run(f);
+    assert.equal(rolled.available, true, rolled.reason);
+    assert.equal(rolled.asOfInstant, new Date(asOf).toISOString());
+    assert.equal(rolled.targetInstant, '2026-09-18T16:00:00.000Z');
+    assert.equal(rolled.snapshotThroughExpiry, '20260908');
+    assert.ok(middle(rolled).headlinePnl < 0, 'unchanged spot still loses long-option time value');
+    assert.equal(JSON.stringify(snapshots), before);
+    // Reverse the scrub: exactly the original market baseline, no drift.
+    Object.assign(f.options, { throughExpiry: '20260908', horizonDays: 0 });
+    near(middle(run(f)).headlinePnl, 0);
+});
+test('a rolled horizon never bypasses source date, full curve or quote synchronization gates', () => {
+    const f = linkedFixture();
+    Object.assign(f.options, { throughExpiry: '20260918', snapshotThroughExpiry: '20260908',
+        targetInstant: undefined, horizonDays: 10 });
+    for (const s of [f.options.longOptionInputs, f.options.linkedHedge.marketInputs]) {
+        Object.assign(s, { snapshotVersion: 2, discountCurve: { schemaVersion: 2, currency: 'USD',
+            effectiveDate: '2026-09-08', points: [{ tenorDays: 1, zeroRate: 0 }, { tenorDays: 365, zeroRate: 0 }, { tenorDays: 730, zeroRate: 0 }] } });
+    }
+    assert.equal(run(f).available, true);
+    const linked = f.options.linkedHedge.marketInputs, curve = linked.discountCurve;
+    linked.discountCurve = null;
+    assert.equal(run(f).reason, 'missing_discount_rate', 'old scenario-specific rates cannot be reused');
+    linked.discountCurve = curve;
+    linked.throughExpiry = '20260909';
+    assert.equal(run(f).reason, 'stale_scenario_snapshot');
+    linked.throughExpiry = '20260908';
+    linked.options[0].observedAt = '2026-09-08T15:57:00Z';
+    assert.equal(run(f).reason, 'snapshot_time_mismatch');
+});
 test('band includes every sampled whole portfolio, its center and flat IV on BOTH sides', () => {
     const events = [stock, option({ strike: 90, contracts: 3 }), option({ seq: 3, strike: 120, contracts: -4, price: 35 })];
     const f = setup(events, { ivDriver: { ivMode: 'beta', ivBeta: 1.5, ivTenorDamping: true,
@@ -370,6 +458,66 @@ test('stress compilation and band never mutate events, snapshots or ledger', () 
     const f = linkedFixture(); const before = JSON.stringify(f);
     B.calculate(K.compile(f.events, f.options));
     assert.equal(JSON.stringify(f), before);
+});
+test('quantity drafts reprice size from the same snapshot without manufacturing cash profit or historical cost', () => {
+    const f = setup([stock, option()], { pnlBasis: 'change' });
+    const p = L.computeLedger(f.events).openOptions[0], key = K.quantityKey(p);
+    const before = JSON.stringify(f);
+    const original = run(f);
+    f.options.quantityOverrides = { shares: 100, own: { [key]: 2 } };
+    const sized = run(f); middle(sized);
+    assert.equal(sized.quantitiesChanged, true);
+    near(middle(sized).headlinePnl, 0);
+    for (let i = 0; i < sized.points.length; i++) {
+        near(sized.points[i].basePnl, original.points[i].basePnl / 2);
+        near(sized.points[i].longOptionPnl, original.points[i].longOptionPnl * 2);
+        assert.equal(sized.points[i].cost, null);
+        assert.equal(sized.points[i].cashflowPnl, null);
+    }
+    near(sized.fundingChange, -10000 + f.options.longOptionInputs.options[0].mark * 100);
+    delete f.options.quantityOverrides; assert.equal(JSON.stringify(f), before);
+});
+test('resizing short puts preserves assignment cash and validates quantities and contract identities', () => {
+    const f = setup([stock, option({ expiry: '20260910', strike: 90, contracts: -2 })],
+        { pnlBasis: 'change', path: 'gradual', throughExpiry: '20261023', targetInstant: '2026-10-23T16:00:00Z', centerPrice: 80 });
+    const key = K.quantityKey(L.computeLedger(f.events).openOptions[0]);
+    f.options.quantityOverrides = { own: { [key]: 1 } };
+    const p = middle(run(f)); near(p.shares, 300); near(p.settlementCashPaid, 9000); near(p.assignedContracts, 1);
+    f.options.quantityOverrides.own[key] = 0;
+    const zero = middle(run(f)); near(zero.shares, 200); near(zero.shortOptionPnl, 0);
+    for (const value of [-1, 0.5, null, NaN, 1000001]) {
+        f.options.quantityOverrides.own[key] = value;
+        assert.equal(run(f).reason, 'invalid_simulated_quantity');
+    }
+    f.options.quantityOverrides = { own: { unrelated: 1 } };
+    assert.equal(run(f).reason, 'stale_quantity_override');
+    f.options.quantityOverrides = { own: { [key]: 1 } }; f.options.pnlBasis = 'cost';
+    assert.equal(run(f).reason, 'quantity_requires_change_basis');
+});
+test('linked protection resizing keeps its price mapping and the own-book IV model fixed', () => {
+    const f = linkedFixture(); f.options.pnlBasis = 'change';
+    const original = run(f); middle(original);
+    const key = K.quantityKey(f.options.linkedHedge.openOptions[0]);
+    f.options.quantityOverrides = { linked: { [key]: 0 } };
+    const removed = run(f); middle(removed);
+    removed.points.forEach((p, i) => {
+        near(p.linkedPrice, original.points[i].linkedPrice);
+        near(p.longOptionPnl, original.points[i].longOptionPnl);
+        near(p.linkedPnl, 0);
+        near(p.headlinePnl, original.points[i].headlinePnl - original.points[i].linkedPnl);
+    });
+});
+test('IV level sensitivity covers flat and rising future prices but keeps same-time same-price value anchored', () => {
+    const f = setup([stock, option()], { pnlBasis: 'change', ivDriver: { ivMode: 'none' } });
+    let c = K.compile(f.events, f.options), band = B.calculate(c, { ivRangePct: 20 });
+    assert.equal(band.available, true);
+    near(band.points[5].lower, 0); near(band.points[5].upper, 0);
+    Object.assign(f.options, { targetInstant: '2026-10-08T16:00:00Z', throughExpiry: '20261008' });
+    f.options.longOptionInputs.throughExpiry = f.options.throughExpiry;
+    c = K.compile(f.events, f.options); band = B.calculate(c, { ivRangePct: 20 });
+    assert.ok(band.points[5].upper > band.points[5].lower);
+    assert.ok(band.points[10].upper > band.points[10].lower);
+    assert.throws(() => B.members(c, { ivRangePct: 99 }), /invalid_iv_range/);
 });
 test('compiled snapshots are isolated from subsequent caller mutations', () => {
     const f = linkedFixture(); const c = K.compile(f.events, f.options);

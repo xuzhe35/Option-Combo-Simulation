@@ -37,6 +37,51 @@ IV_TERM_STRUCTURE_PROTOCOL_VERSION = '20260719.5'
 # Floors a misconfigured 0/negative timeout so catalog resolution always gets a
 # usable window. Tests that stall the handler must outlast this, not undercut it.
 IV_TERM_STRUCTURE_CATALOG_TIMEOUT_SECONDS_FLOOR = 1.0
+# Admit a pair per connection, at most two pairs across this server handler.
+# Reject excess work immediately: an unbounded semaphore queue would merely
+# move the browser timeout in front of the broker deadline again.
+COST_BASIS_SNAPSHOT_LIMIT_PER_CLIENT = 2
+COST_BASIS_SNAPSHOT_LIMIT_GLOBAL = 4
+
+
+async def _dispatch_cost_basis_snapshot(env, websocket, data, client_ip):
+    tasks = env.setdefault('cost_basis_snapshot_tasks', set())
+    by_client = env.setdefault('cost_basis_snapshot_tasks_by_client', {})
+    owned = by_client.get(websocket, set())
+    if (len(owned) >= COST_BASIS_SNAPSHOT_LIMIT_PER_CLIENT
+            or len(tasks) >= COST_BASIS_SNAPSHOT_LIMIT_GLOBAL):
+        await env['send_message_safe'](websocket, json.dumps(
+            cost_basis_ws.build_scenario_inputs_busy_response(data)))
+        return
+    by_client[websocket] = owned
+    task = asyncio.create_task(cost_basis_ws.handle_cost_basis_action(
+        env.get('cost_basis_store_env'), websocket, data, client_ip=client_ip,
+        send=env['send_message_safe']))
+    tasks.add(task)
+    owned.add(task)
+
+    def finished(done):
+        tasks.discard(done)
+        owned.discard(done)
+        if not owned and by_client.get(websocket) is owned:
+            by_client.pop(websocket, None)
+        if not done.cancelled():
+            error = done.exception()
+            if error is not None:
+                logging.error('Cost-basis snapshot task failed',
+                              exc_info=(type(error), error, error.__traceback__))
+
+    task.add_done_callback(finished)
+
+
+async def _cancel_cost_basis_snapshots(env, websocket):
+    # Only this connection's read-only work belongs to this cleanup. Other
+    # clients and live-order supervision must remain untouched.
+    owned = tuple(env.get('cost_basis_snapshot_tasks_by_client', {}).get(websocket, ()))
+    for task in owned:
+        task.cancel()
+    if owned:
+        await asyncio.gather(*owned, return_exceptions=True)
 
 
 def purge_combo_order_tracking_for_websocket(
@@ -922,22 +967,12 @@ async def dispatch_client_message(env, websocket, data, client_ip='Unknown'):
             send=env['send_message_safe'],
         )
     elif action in cost_basis_ws.COST_BASIS_CLIENT_ACTIONS:
-        handling = cost_basis_ws.handle_cost_basis_action(
-            env.get('cost_basis_store_env'),
-            websocket,
-            data,
-            client_ip=client_ip,
-            send=env['send_message_safe'],
-        )
         if action in cost_basis_ws.CONCURRENT_CLIENT_ACTIONS:
-            # Paired quote snapshots must overlap instead of queueing behind
-            # each other; the handler sends its own response and never raises.
-            tasks = env.setdefault('cost_basis_snapshot_tasks', set())
-            task = asyncio.create_task(handling)
-            tasks.add(task)
-            task.add_done_callback(tasks.discard)
+            await _dispatch_cost_basis_snapshot(env, websocket, data, client_ip)
         else:
-            await handling
+            await cost_basis_ws.handle_cost_basis_action(
+                env.get('cost_basis_store_env'), websocket, data,
+                client_ip=client_ip, send=env['send_message_safe'])
     else:
         payload = await dispatch_execution_action(
             env,
@@ -985,6 +1020,7 @@ async def handle_ws_client(env, websocket):
         pass
     finally:
         logging.info(f"Client disconnected: {client_ip}")
+        await _cancel_cost_basis_snapshots(env, websocket)
         await env['cancel_iv_term_structure_sync_task'](websocket)
         env['unsubscribe_client_safely'](websocket)
         purge_combo_order_tracking_for_websocket(

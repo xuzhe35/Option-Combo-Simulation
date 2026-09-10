@@ -4,6 +4,7 @@ import asyncio
 import pathlib
 import unittest
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
@@ -72,6 +73,50 @@ class StressSnapshotTest(unittest.IsolatedAsyncioTestCase):
             await env['_request_cost_basis_option_scenario_inputs']({
                 'account': 'U1', 'symbol': 'QQQ', 'currency': 'CAD', 'throughExpiry': '20260909'})
         env['_request_cost_basis_snapshot_tickers'].assert_not_called()
+
+    async def test_cancelled_no_data_fetch_cleans_only_its_own_broker_lines(self):
+        # Exercise the production fetcher's finally block without booting IB.
+        source = pathlib.Path(__file__).resolve().parents[1] / 'ib_server.py'
+        tree = ast.parse(source.read_text())
+        function = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+                        and n.name == '_request_cost_basis_snapshot_tickers')
+
+        class Event:
+            def __init__(self): self.handlers = []
+            def __iadd__(self, handler): self.handlers.append(handler); return self
+            def __isub__(self, handler): self.handlers.remove(handler); return self
+
+        class Ticker:
+            def __init__(self, contract, **kwargs): self.contract = contract
+
+        request_ids = iter([1, 2])
+        opened, cancelled = [], []
+        wrapper = NS(defaults={}, reqId2Ticker={999: 'existing workspace ticker'},
+                     _reqId2Contract={999: 'existing workspace contract'},
+                     ticker2ReqId=defaultdict(dict))
+        wrapper.endTicker = lambda ticker, key: wrapper.ticker2ReqId[key].pop(ticker, None)
+        ib = NS(wrapper=wrapper, pendingTickersEvent=Event(), client=NS(
+            getReqId=lambda: next(request_ids),
+            reqMktData=lambda *args: opened.append(args[0]),
+            cancelMktData=lambda req_id: cancelled.append(req_id)))
+        env = {'asyncio': asyncio, 'uuid': uuid, 'ib': ib, 'Ticker': Ticker,
+               'COST_BASIS_SNAPSHOT_BATCH_SIZE': 20,
+               'chunked': lambda items, size: [items],
+               '_positive_contract_id': lambda value: value,
+               'cost_basis_batch_complete': lambda *args: False}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), env)
+        task = asyncio.create_task(env['_request_cost_basis_snapshot_tickers']([
+            NS(secType='STK', conId=1), NS(secType='OPT', conId=2)]))
+        await asyncio.sleep(0)
+        self.assertEqual(opened, [1, 2])
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(cancelled, [1, 2])
+        self.assertEqual(wrapper.reqId2Ticker, {999: 'existing workspace ticker'})
+        self.assertEqual(wrapper._reqId2Contract, {999: 'existing workspace contract'})
+        self.assertEqual(dict(wrapper.ticker2ReqId), {})
+        self.assertEqual(ib.pendingTickersEvent.handlers, [])
 
 
 if __name__ == '__main__':

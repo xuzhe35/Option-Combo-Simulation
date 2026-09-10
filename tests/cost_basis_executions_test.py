@@ -119,3 +119,13 @@ class CostBasisExecutionSerializationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ExecutionCurrencyTests(unittest.TestCase):
+    def test_contract_currency_travels_with_the_fill(self):
+        from cost_basis_executions import serialize_fill
+        fill = _fill()
+        fill.contract.currency = 'EUR'
+        row, reason = serialize_fill(fill)
+        self.assertEqual(reason, '')
+        self.assertEqual(row['currency'], 'EUR')

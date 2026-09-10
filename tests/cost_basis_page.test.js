@@ -34,6 +34,9 @@ function loadReconciliationHarness() {
     vm.runInContext(readScript().replace('globalScope.OptionComboCostBasisPage = {', `
         globalScope.pageHarness = {
             state, render: _renderReconciliationTable, fetch: _fetchTwsExecutions,
+            handleImportFile: _handleImportFile, commitImport: _commitImport,
+            parseImport: _parseImportText, bindingProblem: _importBindingProblem,
+            beginBook: _beginBookSelection,
             message: _handleMessage, renderWhatIf: _renderWhatIf,
             editPrice: _editWhatIfPrice, followPrice: _setWhatIfFollowReference,
             refreshPrice: _refreshWhatIfMarketPrice, invalidate: _invalidatePositions,
@@ -46,6 +49,10 @@ function loadReconciliationHarness() {
             refreshStressPair: _refreshStressScenarioInputs, stressRefreshJob,
             invalidateScenario: _invalidateStressScenarioInputs,
             scenarioDate: _stressScenarioDate,
+            setHorizon: _setStressHorizon, applyHorizon: _applyStressHorizon,
+            syncHorizon: _syncStressHorizonControls, frozenBatch: _stressFrozenSnapshotBatch,
+            renderStressCards: _renderStressCards,
+            navText: _stressNavText,
             restoreLinked: _restoreStressLinkedChoice,
             reviewIv: _reviewStressIvSettings, renderIvProfile: _renderStressIvProfile,
             writeLinked: _writeStressLinkedMemory, renderSlice: _renderStressSlice,
@@ -53,6 +60,8 @@ function loadReconciliationHarness() {
             loadLinked: _loadStressLinkedEvents,
             ensureLinked: _ensureStressLinkedData,
             linkedRequest: _stressLinkedHedgeRequest,
+            renderAccounts: _renderManagedAccounts,
+            accountHint: _renderNewBookAccountHint,
             showView: _showView, openStress: _openStressTest, closeStress: _closeStressTest,
             teardownStress: _teardownStressTest, setStressGroup: _setStressGroupOpen,
             noteStressGroupToggle: _noteStressGroupToggle,
@@ -63,7 +72,11 @@ function loadReconciliationHarness() {
             },
             configure(handlers) {
                 if (handlers.adopt) _adoptTwsPosition = handlers.adopt;
-                if (handlers.request) request = handlers.request;
+                if (handlers.request) request = async (action, payload) => {
+                    const response = await handlers.request(action, payload);
+                    return action === 'list_cost_basis_events' && response && !response.ledgerVersion
+                        ? { ...response, ledgerVersion: { digest: 'test-reviewed-history' } } : response;
+                };
                 if (handlers.today) {
                     _todayIso = handlers.today;
                     globalScope.OptionComboCostBasisStressCore = {
@@ -95,6 +108,7 @@ function loadReconciliationHarness() {
             removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
             get firstChild() { return this.children[0]; },
             addEventListener(name, callback) { this.handlers[name] = callback; },
+            setAttribute(name, value) { this[name] = String(value); },
             focus(options) { this.focusOptions = options; context.document.activeElement = this; },
             scrollIntoView(options) { this.scrollOptions = options; },
             querySelector() { return this.body || (this.body = node()); },
@@ -127,6 +141,9 @@ function loadReconciliationHarness() {
 function loadPriceHarness() {
     const h = loadReconciliationHarness();
     h.configurePrice();
+    // Existing ledger/fallback cases explicitly exercise the historical lens.
+    // Portfolio workflow tests opt into the change lens below.
+    h.state.stressPnlBasis = 'cost';
     h.state.connection = 'connected';
     h.state.allEvents = [
         {kind:'share_trade',account:'U1',tradeDate:'2026-09-01',shares:200,
@@ -155,6 +172,7 @@ function loadStressPairHarness() {
     h.state.books.push({ bookId: 'book-qqq', account: 'U1', symbol: 'QQQ', secType: 'STK' });
     h.restoreLinked(h.state.books[0]);
     Object.assign(h.state, { stressIncludeLinkedHedge: true, stressExpiry: '20260904',
+        stressPnlBasis: 'cost',
         stressIncludeLongOptions: false, stressBasePrice: 70, stressLinkedMapping: 'linear',
         status: { features: { optionScenarioInputs: true } } });
     const events = [{ kind: 'option_trade', tradeDate: '2026-08-01', account: 'U1',
@@ -198,6 +216,87 @@ function enableStressChartDom(h) {
 module.exports = {
     name: 'cost_basis page',
     tests: [
+        {
+            name: 'portfolio workflow migrates old mixed-basis settings and leaves hypothetical future income out',
+            run() {
+                const h = loadPriceHarness();
+                h.context.localStorage = { getItem: () => JSON.stringify({ weeklyPremium: 3500,
+                    kernel: { pnlBasis: 'cost' } }) };
+                h.restoreLinked(h.state.books[0]);
+                assert.equal(h.state.stressPnlBasis, 'change');
+                assert.equal(h.state.stressIncludeIncome, false);
+                assert.equal(h.state.stressWeeklyPremium, 3500, 'retained as an explicit optional assumption');
+                assert.equal(h.state.stressIvRangePct, 20);
+            },
+        },
+        {
+            name: 'quantity editing compares against current holdings, keeps quotes and clears stale drafts on ledger change',
+            run() {
+                const h = loadPriceHarness(); enableStressChartDom(h);
+                h.configure({ today: () => '2026-09-03' });
+                h.context.setTimeout = () => 1; h.context.clearTimeout = () => {};
+                const snapshot = { snapshotVersion: 2, fetchedAt: '2026-09-03T14:00:00Z',
+                    underlyingObservedAt: '2026-09-03T14:00:00Z', underlyingPrice: 70,
+                    throughExpiry: '20260904', currency: 'USD',
+                    discountCurve: { schemaVersion: 2, effectiveDate: '2026-09-03', currency: 'USD',
+                        points: [{tenorDays:1,zeroRate:0.03},{tenorDays:365,zeroRate:0.03}] },
+                    options: [{right:'P', strike:71, expiry:'20260904', multiplier:100, mark:2,
+                        marketDataType:1, observedAt:'2026-09-03T14:00:00Z'}] };
+                Object.assign(h.state, { stressOpen:true, stressExpiry:'20260904', stressBasePrice:70,
+                    stressPnlBasis:'change', stressIncludeLongOptions:true, stressLongOptionInputs:snapshot,
+                    stressBandEnabled:false, stressWeeklyPremium:3500, stressIncludeIncome:false });
+                h.renderStress();
+                const original = h.stressJob.series;
+                assert.equal(original.available, true);
+                assert.equal(original.premiumIncome, 0);
+                const input = h.node('stress-quantity-rows').children[1].children[1];
+                input.value = '1'; h.context.document.activeElement = input; input.handlers.input();
+                h.renderStress();
+                const draft = h.stressJob.series;
+                assert.equal(draft.quantitiesChanged, true);
+                assert.equal(draft.points[0].currentHoldingsPnl, original.points[0].headlinePnl);
+                assert.ok(draft.points[0].quantityEffect > 0);
+                assert.equal(h.state.stressLongOptionInputs, snapshot);
+                assert.equal(h.state.ledger.openOptions[0].contracts, -2);
+                assert.equal(h.node('stress-legend-cost').hidden, true);
+                h.state.stressNavBase = 100000;
+                const text = h.navText(draft, draft.points[0], {lower:-10000,upper:-5000});
+                assert.match(text, /90,000.*95,000/);
+                assert.match(text, /-10.0%.*-5.0%/);
+                h.state.stressNavBase = -1; assert.equal(h.navText(draft, draft.points[0], null), '');
+                h.context.document.activeElement = null;
+                h.state.allEvents = h.state.allEvents.concat({ kind:'share_trade', account:'U1', tradeDate:'2026-09-02', shares:100, price:70, cashAmount:-7000 });
+                h.state.ledger = h.context.OptionComboCostBasisCore.computeLedger(h.state.allEvents);
+                h.renderStress();
+                assert.equal(Object.keys(h.state.stressQuantityDraft.own).length, 0);
+                assert.equal(h.state.stressNavBase, null);
+            },
+        },
+        {
+            name: 'conservative short-put delivery defaults on, reaches valuation and remembers explicit opt-out per book',
+            run() {
+                const h = loadPriceHarness(); enableStressChartDom(h);
+                h.configure({ today: () => '2026-09-03' });
+                const memory = {};
+                h.context.localStorage = { getItem: key => memory[key] || null,
+                    setItem: (key, value) => { memory[key] = value; } };
+                h.restoreLinked(h.state.books[0]);
+                assert.equal(h.state.stressConservativeShortPutAssignment, true);
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904',
+                    stressBasePrice: 70, stressIncludeLongOptions: false, stressBandEnabled: false, stressPnlBasis: 'cost' });
+                h.renderStress();
+                assert.equal(h.node('stress-conservative-short-put').checked, true);
+                assert.equal(h.stressJob.series.conservativeShortPutAssignment, true);
+                const oldSeries = h.stressJob.series;
+                h.state.stressConservativeShortPutAssignment = false;
+                h.writeLinked(); h.restoreLinked(h.state.books[0]); h.renderStress();
+                assert.equal(h.node('stress-conservative-short-put').checked, false);
+                assert.equal(h.stressJob.series.conservativeShortPutAssignment, false);
+                assert.notEqual(h.stressJob.series, oldSeries);
+                h.restoreLinked({ ...h.state.books[0], bookId: 'another-book' });
+                assert.equal(h.state.stressConservativeShortPutAssignment, true);
+            },
+        },
         {
             name: 'legacy IV settings are retained until explicitly kept or restored, without touching threefold assumptions',
             run() {
@@ -728,7 +827,7 @@ module.exports = {
                 assert.ok(html.includes('id="new-book-account-manual"'));
                 assert.match(source, /data\.action === 'managed_accounts_update'/);
                 assert.match(source, /_sendOneWay\('request_managed_accounts_snapshot'\)/);
-                assert.match(source, /state\.managedAccounts\.includes\(account\)/);
+                assert.match(source, /newBookAccountNotice\(account, state\.managedAccounts\)/);
                 assert.match(source, /knownBookAccounts/);
                 assert.match(source, /MANUAL_ACCOUNT_VALUE/);
                 assert.match(source, /account:\s*account\.toUpperCase\(\)/);
@@ -739,6 +838,67 @@ module.exports = {
                     /positions:\s*_positionsForBook\(book\)/);
                 assert.match(source,
                     /field-account'\)\.readOnly = Boolean\(book && book\.account\)/);
+            },
+        },
+        {
+            name: 'the account dropdown offers manual entry while TWS is connected',
+            run() {
+                const h = loadReconciliationHarness();
+                const node = (id) => h.context.document.getElementById(id);
+                h.state.connection = 'connected';
+                h.state.status = { available: true };
+                h.state.managedAccounts = ['U17775528'];
+                h.state.managedAccountsConnected = true;
+                h.renderAccounts('');
+                const select = node('new-book-account');
+                const values = select.children.map((option) => option.value);
+                // The single live account is still chosen for the common case.
+                assert.equal(select.value, 'U17775528');
+                assert.ok(values.includes('U17775528'));
+                assert.ok(values.includes('__manual_account__'));
+                assert.equal(node('new-book-account-manual').hidden, true);
+
+                // Choosing manual entry opens the field even while connected.
+                h.renderAccounts('__manual_account__');
+                const manual = node('new-book-account-manual');
+                assert.equal(manual.hidden, false);
+                assert.equal(manual.disabled, false);
+                const hint = node('new-book-account-hint');
+                assert.equal(hint.classList.contains('warn'), false);
+
+                // A remote account is allowed, and says what it gives up.
+                manual.value = 'u9999999';
+                h.accountHint();
+                assert.match(hint.textContent, /U9999999/);
+                assert.equal(hint.classList.contains('warn'), true);
+
+                // Typing a live account back is not a mismatch.
+                manual.value = 'U17775528';
+                h.accountHint();
+                assert.equal(hint.classList.contains('warn'), false);
+            },
+        },
+        {
+            name: 'a book can be kept for an account this TWS does not report',
+            run() {
+                const context = loadPage();
+                const page = context.OptionComboCostBasisPage;
+                const source = readScript();
+                const live = ['U1777552'];
+                // Accounts traded on another machine are booked here anyway;
+                // only the local position matching is given up.
+                const notice = page.newBookAccountNotice('u9999999', live);
+                assert.match(notice, /U9999999/);
+                assert.match(notice, /行情/);
+                assert.equal(page.newBookAccountNotice('u1777552', live), '');
+                assert.equal(page.newBookAccountNotice('', live), '');
+                // Nothing to check against is not a mismatch.
+                assert.equal(page.newBookAccountNotice('U9999999', []), '');
+                // The manual option is offered whether or not TWS answered,
+                // and a mismatch only asks for a confirmation.
+                assert.doesNotMatch(source,
+                    /if \(!hasLiveAccounts\) \{\s*const manualOption/);
+                assert.match(source, /accountNotice && !globalScope\.confirm/);
             },
         },
         {
@@ -1512,6 +1672,167 @@ module.exports = {
             },
         },
         {
+            name: 'a CSV order row aliases the run of TWS partial fills it aggregates',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const base = {
+                    kind: 'option_trade', tradeDate: '2026-09-08', account: 'U1',
+                    right: 'P', strike: 72, expiry: '20260918', sharesPerContract: 100,
+                    conId: 123, source: 'execution_report', tag: 'ibkr_exec',
+                };
+                const fills = [
+                    Object.assign({}, base, { eventId: 'f1', externalRef: 'ibkr-exec-E1',
+                        brokerTimestamp: '2026-09-08T10:00:00', contracts: -3,
+                        price: 1.01, fees: 1.95, cashAmount: 301.05 }),
+                    Object.assign({}, base, { eventId: 'f2', externalRef: 'ibkr-exec-E2',
+                        brokerTimestamp: '2026-09-08T10:00:07', contracts: -5,
+                        price: 1.02, fees: 3.25, cashAmount: 506.75 }),
+                    Object.assign({}, base, { eventId: 'f3', externalRef: 'ibkr-exec-E3',
+                        brokerTimestamp: '2026-09-08T10:01:30', contracts: -2,
+                        price: 1.03, fees: 1.30, cashAmount: 204.70 }),
+                ];
+                // The statement prints one Order line: 10 contracts at the
+                // size-weighted average (1.021) rounded to its display
+                // precision, with the summed commission, at the first fill's second.
+                const orderRow = Object.assign({}, base, {
+                    source: 'csv_import', tag: 'ibkr_open', externalRef: 'stmt-order',
+                    brokerTimestamp: '2026-09-08T10:00:00', contracts: -10,
+                    price: 1.02, fees: 6.5, cashAmount: 1012.5, lineNumber: 9,
+                });
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [orderRow],
+                }, fills);
+                assert.equal(plan.problems.length, 0);
+                assert.equal(plan.matched.length, 1);
+                assert.equal(plan.matched[0].executions.length, 3);
+                assert.equal(plan.aliases['U1\u0000stmt-order'], 'ibkr-exec-E1');
+
+                // The Order line may also print the last fill's second.
+                const lastSecond = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, orderRow, {
+                        brokerTimestamp: '2026-09-08T10:01:30',
+                    })],
+                }, fills);
+                assert.equal(lastSecond.problems.length, 0);
+                assert.equal(lastSecond.matched[0].executions.length, 3);
+
+                // Same quantity but the summed cash disagrees: blocked, not guessed.
+                const cashOff = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, orderRow, {
+                        cashAmount: 1012.0,
+                    })],
+                }, fills);
+                assert.equal(cashOff.matched.length, 0);
+                assert.equal(cashOff.problems.length, 1);
+                assert.match(cashOff.problems[0].reason, /spans 3 stored TWS fills/);
+
+                // A quantity no run of fills reaches keeps the old exact-second blocker.
+                const noRun = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, orderRow, {
+                        contracts: -9, cashAmount: 911.25,
+                    })],
+                }, fills);
+                assert.equal(noRun.matched.length, 0);
+                assert.match(noRun.problems[0].reason, /quantity, price, or net cash differs/);
+            },
+        },
+        {
+            name: 'two orders on one contract each claim their own fills in time order',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const base = {
+                    kind: 'share_trade', tradeDate: '2026-09-08', account: 'U1',
+                    source: 'execution_report', tag: 'ibkr_exec',
+                };
+                const fills = [
+                    Object.assign({}, base, { eventId: 'a1', externalRef: 'ibkr-exec-A1',
+                        brokerTimestamp: '2026-09-08T09:35:00', shares: 100,
+                        price: 45, fees: 0.5, cashAmount: -4500.5 }),
+                    Object.assign({}, base, { eventId: 'a2', externalRef: 'ibkr-exec-A2',
+                        brokerTimestamp: '2026-09-08T09:35:02', shares: 200,
+                        price: 45, fees: 0.5, cashAmount: -9000.5 }),
+                    Object.assign({}, base, { eventId: 'b1', externalRef: 'ibkr-exec-B1',
+                        brokerTimestamp: '2026-09-08T14:10:00', shares: 300,
+                        price: 44, fees: 1, cashAmount: -13201 }),
+                ];
+                const orderA = Object.assign({}, base, {
+                    source: 'csv_import', tag: 'ibkr_open', externalRef: 'stmt-a',
+                    brokerTimestamp: '2026-09-08T09:35:00', shares: 300,
+                    price: 45, fees: 1, cashAmount: -13501, lineNumber: 3,
+                });
+                const orderB = Object.assign({}, base, {
+                    source: 'csv_import', tag: 'ibkr_open', externalRef: 'stmt-b',
+                    brokerTimestamp: '2026-09-08T14:10:00', shares: 300,
+                    price: 44, fees: 1, cashAmount: -13201, lineNumber: 4,
+                });
+                // Later order listed first in the file: time order still wins.
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [orderB, orderA],
+                }, fills);
+                assert.equal(plan.problems.length, 0);
+                assert.equal(plan.aliases['U1\u0000stmt-a'], 'ibkr-exec-A1');
+                assert.equal(plan.aliases['U1\u0000stmt-b'], 'ibkr-exec-B1');
+                assert.equal(plan.matched.map(
+                    (item) => item.executions.length).sort().join(','), '1,2');
+
+                // Two different runs of equal size that both touch the order's
+                // second are ambiguous and block instead of picking one.
+                const twin = fills.concat([
+                    Object.assign({}, base, { eventId: 'a0', externalRef: 'ibkr-exec-A0',
+                        brokerTimestamp: '2026-09-08T09:34:58', shares: 200,
+                        price: 45, fees: 0.5, cashAmount: -9000.5 }),
+                ]);
+                const ambiguous = page.planExecutionReportAliases({
+                    format: 'activity', events: [orderA],
+                }, twin);
+                assert.equal(ambiguous.matched.length, 0);
+                assert.match(ambiguous.problems[0].reason, /more than one group/);
+            },
+        },
+        {
+            name: 'a TWS fill dated one day away from the CSV row blocks with a timezone hint',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const stored = {
+                    eventId: 'api-fill-1', kind: 'option_trade',
+                    tradeDate: '2026-09-09', brokerTimestamp: '2026-09-09T03:30:00',
+                    account: 'U1', right: 'P', strike: 72, expiry: '20260918',
+                    contracts: -1, sharesPerContract: 100, conId: 123,
+                    price: 1.01, cashAmount: 100.44, fees: 0.56,
+                    source: 'execution_report', tag: 'ibkr_exec',
+                    externalRef: 'ibkr-exec-E1',
+                };
+                // The statement prints the same fill in New York time, on the
+                // previous calendar day.
+                const csvEvent = Object.assign({}, stored, {
+                    eventId: undefined, source: 'csv_import', tag: 'ibkr_open',
+                    tradeDate: '2026-09-08', brokerTimestamp: '2026-09-08T15:30:00',
+                    externalRef: 'stmt-shifted', lineNumber: 4,
+                });
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [csvEvent],
+                }, [stored]);
+                assert.equal(plan.matched.length, 0);
+                assert.equal(plan.problems.length, 1);
+                assert.match(plan.problems[0].reason, /one day away/);
+                assert.match(plan.problems[0].reason, /\[tws\] timezone/);
+
+                // Two days apart is a different trade, not a clock skew.
+                const farApart = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, csvEvent, {
+                        tradeDate: '2026-09-07', brokerTimestamp: '2026-09-07T15:30:00',
+                    })],
+                }, [stored]);
+                assert.equal(farApart.problems.length, 0);
+
+                // A different contract on the adjacent day is not a candidate either.
+                const otherContract = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, csvEvent, { strike: 70 })],
+                }, [stored]);
+                assert.equal(otherContract.problems.length, 0);
+            },
+        },
+        {
             name: 'replacement rebuild ignores overlap checks against rows it will remove',
             run() {
                 const page = loadPage().OptionComboCostBasisPage;
@@ -1739,6 +2060,93 @@ module.exports = {
                 assert.equal(page.liquidationHaircut({mark: 10, bid: 9, ask: 11}, 'long', 'bidask'), 0.9);
                 assert.equal(page.liquidationHaircut({mark: 10, bid: 9, ask: 11}, 'short', 'bidask'), 1.1);
                 assert.equal(page.bidAskProblem({bid: 12, ask: 11}), 'crossed');
+            },
+        },
+        {
+            name: 'horizon slider and exact input share frozen paired quotes and cancel stale estimates',
+            run() {
+                const { h, quote } = loadStressPairHarness();
+                h.state.stressOpen = true;
+                h.state.stressLongOptionInputs = { ...quote('book-test'), snapshotId: 'own-frozen' };
+                h.state.stressLinkedInputs = { ...quote('book-qqq'), snapshotId: 'linked-frozen' };
+                const original = JSON.stringify([h.state.stressLongOptionInputs, h.state.stressLinkedInputs]);
+                const jobs = new Map(); let next = 0, requests = 0, terminated = 0;
+                h.context.setTimeout = (fn, delay) => { jobs.set(++next, { fn, delay }); return next; };
+                h.context.clearTimeout = id => jobs.delete(id);
+                h.configure({ request: () => { requests++; return Promise.resolve({}); } });
+                h.silenceStressRender();
+                h.stressJob.worker = { terminate() { terminated++; } };
+                h.node('stress-chart').appendChild(h.context.document.createElement('path'));
+                h.node('stress-slice').hidden = false;
+                h.setHorizon('2', true);
+                h.setHorizon('20', true);
+                assert.equal(jobs.size, 1);
+                assert.equal([...jobs.values()][0].delay, 100);
+                assert.equal(terminated, 1);
+                assert.equal(h.node('stress-horizon-days').value, '20');
+                assert.equal(h.node('stress-horizon-slider').value, '20');
+                assert.equal(h.node('stress-horizon-value').textContent, '20 天后');
+                assert.equal(h.node('stress-chart').children.length, 0);
+                assert.equal(h.node('stress-slice').hidden, true);
+                h.applyHorizon();
+                assert.equal(requests, 0);
+                assert.equal(jobs.size, 0);
+                assert.equal(JSON.stringify([h.state.stressLongOptionInputs, h.state.stressLinkedInputs]), original);
+                assert.equal(h.frozenBatch().throughExpiry, '20260904');
+                h.setHorizon('730');
+                assert.equal(h.node('stress-horizon-slider').max, '730');
+                h.setHorizon('0', true);
+                assert.equal(h.node('stress-horizon-value').textContent, '现在 · 0 天');
+                h.setHorizon('1.5');
+                assert.equal(h.node('stress-horizon-value').textContent, '天数无效');
+                assert.equal(h.scenarioDate().error, 'invalid_horizon');
+                h.setHorizon('');
+                assert.equal(h.state.stressHorizonDays, null);
+                assert.match(h.node('stress-horizon-value').textContent, /同到期范围/);
+                h.teardownStress();
+                assert.equal(jobs.size, 0);
+            },
+        },
+        {
+            name: 'incomplete or mismatched quote batches cannot be reused by the horizon slider',
+            run() {
+                const { h, quote } = loadStressPairHarness();
+                h.context.setTimeout = () => 1; h.context.clearTimeout = () => {};
+                h.state.stressLongOptionInputs = { ...quote('book-test'), snapshotId: 'own' };
+                h.state.stressLinkedInputs = { ...quote('book-qqq'), snapshotId: 'linked' };
+                h.state.stressLinkedInputs.throughExpiry = '20260905';
+                assert.equal(h.frozenBatch(), null);
+                h.state.stressLinkedInputs.throughExpiry = '20260904';
+                h.state.stressLinkedInputs.discountCurve = null;
+                assert.equal(h.frozenBatch(), null);
+                h.setHorizon('10', true);
+                assert.equal(h.state.stressLongOptionInputs, null);
+                assert.equal(h.state.stressLinkedInputs, null);
+                assert.equal(h.node('stress-tooltip').hidden, true);
+            },
+        },
+        {
+            name: 'range cards put the full portfolio envelope ahead of the reference number',
+            run() {
+                const h = loadPriceHarness();
+                const p = { price: 100, changePct: 0, headlinePnl: 100, cost: null, shares: 200 };
+                const series = { symbol: 'TQQQ', centerPrice: 100, points: [p],
+                    band: { available: true, points: [{ price: 100, lower: -200, upper: 300 }] } };
+                h.renderStressCards(series, 'USD');
+                let card = h.node('stress-key-points').children[0];
+                assert.match(card.children[1].textContent, /估值范围 -\$200\.00 ～ \+\$300\.00/);
+                assert.equal(card.children[1].className, undefined, 'a range spanning zero is not styled as a gain');
+                assert.match(card.children[2].textContent, /参考情景合计 \+\$100\.00/);
+                series.band.points[0] = { price: 100, lower: 100, upper: 100 };
+                h.renderStressCards(series, 'USD');
+                card = h.node('stress-key-points').children[0];
+                assert.ok(card.children.some(n => /不代表实际估值没有不确定性/.test(n.textContent)));
+                delete series.band;
+                h.renderStressCards(series, 'USD');
+                assert.match(h.node('stress-key-points').children[0].children[1].textContent, /参考情景/);
+                const html = readPage();
+                assert.match(html, /id="stress-horizon-slider" type="range"/);
+                assert.match(html, /不保证覆盖所有 Skew/);
             },
         },
         {
@@ -2118,6 +2526,7 @@ module.exports = {
 
                 const book = h.state.books[0];
                 h.restoreLinked(book);
+                h.state.stressPnlBasis = 'cost';
                 assert.equal(h.state.stressLinkedBookId, 'book-qqq');
                 assert.equal(h.state.stressLinkedRatio, 3);
                 assert.equal(h.state.stressIncludeLinkedHedge, false);
@@ -2395,10 +2804,13 @@ module.exports = {
                 const html = readPage();
                 const source = readScript();
                 assert.match(html, /<th>操作<\/th>/);
-                assert.match(html, /显示已删除记录/);
-                assert.match(source, /button\.textContent = '删除'/);
+                assert.match(html, /显示已冲销记录/);
+                assert.match(source, /button\.textContent = '冲销'/);
                 assert.match(source, /request\('void_cost_basis_event'/);
-                assert.match(source, /保留一条可审计的冲销记录/);
+                assert.match(source, /原行保留为可审计记录/);
+                // The wording must say what a void does NOT do: re-importing
+                // the same statement row will not bring it back.
+                assert.match(source, /重新导入同一份报表不会把它加回来/);
                 assert.doesNotMatch(source, /delete_cost_basis_event/);
             },
         },
@@ -2578,7 +2990,7 @@ module.exports = {
                 assert.match(readPage(), /id="stress-title" tabindex="-1"/);
                 const css = fs.readFileSync(path.join(PROJECT_ROOT, 'cost_basis.css'), 'utf8');
                 assert.match(css, /\.stress-view \{\s*scroll-margin-top: calc\(78px \+ 1rem\)/);
-                assert.equal(h.state.stressHorizonDays, null);
+                assert.equal(h.state.stressHorizonDays, 45);
                 const events = [{ kind: 'opening_balance', account: 'U1', tradeDate: '2026-01-01',
                     shares: 100, cashAmount: -10000, price: 100 }];
                 const options = { centerPrice: 100, asOfInstant: '2026-09-08T16:00:00Z',
@@ -3023,6 +3435,113 @@ module.exports = {
             },
         },
         {
+            name: 'partial linked quotes preserve the validated own-book options instead of blanking the chart',
+            run() {
+                for (const missing of ['rows', 'mark', 'sides']) {
+                    const { h, quote } = loadStressPairHarness(); enableStressChartDom(h);
+                    const own = quote('book-test'), linked = quote('book-qqq');
+                    const extra = { kind: 'option_trade', account: 'U1', tradeDate: '2026-09-01',
+                        right: 'P', strike: 60, expiry: '20270319', sharesPerContract: 100,
+                        contracts: 1, price: 2, cashAmount: -200 };
+                    h.state.allEvents.push(extra);
+                    h.state.ledger = h.context.OptionComboCostBasisCore.computeLedger(h.state.allEvents);
+                    own.options.push({right:'P',strike:60,expiry:'20270319',mark:2,bid:1.9,ask:2.1,
+                        marketDataType:1,observedAt:own.fetchedAt});
+                    if (missing === 'rows') linked.options = [];
+                    if (missing === 'mark') linked.options[0].mark = null;
+                    Object.assign(h.state, {stressOpen:true,stressIncludeLongOptions:true,
+                        stressLongOptionInputs:own,stressLinkedInputs:linked,
+                        stressLiquidation:missing === 'sides' ? 'bidask' : 'mid'});
+                    h.renderStress();
+                    assert.match(h.node('stress-status').textContent, /^⚠ QQQ 联动账本未计入/);
+                    assert.ok(h.node('stress-chart').children.length > 0, missing);
+                    assert.equal(h.stressJob.series.linkedHedgeEnabled, false);
+                    assert.equal(h.stressJob.series.includeDeferredLongOptions, true);
+                    assert.equal(h.stressJob.series.longOptionCount, 1, 'valid own long is retained');
+                    assert.equal(h.node('stress-legend-protected-pnl').hidden, false);
+                    assert.equal(h.node('stress-legend-linked-pnl').hidden, true);
+                    assert.equal(h.stressJob.worker, null);
+                    assert.equal(h.stressJob.series.band, undefined);
+                }
+            },
+        },
+        {
+            name: 'missing own option mark can degrade to settlement but never values the missing leg at zero',
+            run() {
+                const h = loadPriceHarness(); enableStressChartDom(h);
+                h.configure({today:()=> '2026-09-03'});
+                h.state.allEvents.push({kind:'option_trade',account:'U1',tradeDate:'2026-09-01',
+                    right:'P',strike:60,expiry:'20270319',contracts:1,sharesPerContract:100,price:2,cashAmount:-200});
+                h.state.ledger = h.context.OptionComboCostBasisCore.computeLedger(h.state.allEvents);
+                const {quote} = loadStressPairHarness();
+                const own = quote('book-test');
+                own.options.push({right:'P',strike:60,expiry:'20270319',mark:null,observedAt:own.fetchedAt});
+                Object.assign(h.state,{stressOpen:true,stressExpiry:'20260904',stressBasePrice:70,
+                    stressIncludeLongOptions:true,stressLongOptionInputs:own});
+                h.renderStress();
+                assert.match(h.node('stress-status').textContent, /^⚠ 仅显示到期结算曲线/);
+                assert.equal(h.stressJob.series.longOptionCount, 0);
+                assert.ok(h.stressJob.series.warnings.includes('partial_portfolio_excludes_deferred'));
+                // At the upper end only the 200 shares and settled short premium
+                // remain. The missing long's -$200 premium is excluded too.
+                assert.equal(h.stressJob.series.points.at(-1).headlinePnl, 4400);
+            },
+        },
+        {
+            name: 'partial quote fallback remains disabled while pending or using the change lens',
+            run() {
+                for (const mode of ['own_pending','linked_pending','change']) {
+                    const {h,quote} = loadStressPairHarness(); enableStressChartDom(h);
+                    const linked=quote('book-qqq'); linked.options=[];
+                    Object.assign(h.state,{stressOpen:true,stressLongOptionInputs:quote('book-test'),
+                        stressLinkedInputs:linked,stressInputsPending:mode==='own_pending',
+                        stressLinkedInputsPending:mode==='linked_pending',stressPnlBasis:mode==='change'?'change':'cost'});
+                    h.renderStress();
+                    assert.equal(h.node('stress-chart').children.length,0,mode);
+                    assert.doesNotMatch(h.node('stress-status').textContent,/^⚠/,mode);
+                }
+            },
+        },
+        {
+            name: 'linked identity conflicts, crossed quotes and impossible marks are not masked by fallback',
+            run() {
+                for (const invalid of ['identity','crossed','arbitrage']) {
+                    const {h,quote} = loadStressPairHarness(); enableStressChartDom(h);
+                    const linked=quote('book-qqq');
+                    if(invalid==='identity') {
+                        h.state.stressLinkedLedger.openOptions[0].conId=123;
+                        Object.assign(linked.options[0],{conId:123,multiplier:10});
+                    }
+                    if(invalid==='crossed') Object.assign(linked.options[0],{bid:30,ask:20});
+                    if(invalid==='arbitrage') linked.options[0].mark=1000;
+                    Object.assign(h.state,{stressOpen:true,stressLongOptionInputs:quote('book-test'),stressLinkedInputs:linked});
+                    h.renderStress();
+                    assert.equal(h.node('stress-chart').children.length,0,invalid);
+                    assert.doesNotMatch(h.node('stress-status').textContent,/^⚠/,invalid);
+                }
+            },
+        },
+        {
+            name: 'busy paired snapshot requests finish pending state and allow a later successful retry',
+            async run() {
+                const {h,pending,quote} = loadStressPairHarness();
+                const first=h.refreshStressPair(false);
+                for(const p of pending) p.reject(Object.assign(new Error('busy'),{code:'broker_option_scenario_inputs_busy'}));
+                await first;
+                assert.equal(h.stressRefreshJob.pending,false);
+                assert.equal(h.state.stressInputsPending,false);
+                assert.equal(h.state.stressLinkedInputsPending,false);
+                assert.match(h.state.stressInputsError,/繁忙.*重试/);
+                assert.match(h.state.stressLinkedInputsError,/繁忙.*重试/);
+                const retry=h.refreshStressPair(false);
+                pending[2].resolve(quote('book-test')); pending[3].resolve(quote('book-qqq'));
+                await retry;
+                assert.equal(h.stressRefreshJob.pending,false);
+                assert.equal(h.state.stressInputsError,'');
+                assert.equal(h.state.stressLinkedInputsError,'');
+            },
+        },
+        {
             name: 'an emptied chart drops its pointer handlers so no stale tooltip can reappear',
             run() {
                 const h = loadPriceHarness(); enableStressChartDom(h);
@@ -3042,6 +3561,313 @@ module.exports = {
                 assert.equal(svg.onpointerleave, null);
                 assert.equal(doc.getElementById('stress-tooltip').hidden, true);
                 assert.equal(doc.getElementById('stress-slice').hidden, true);
+            },
+        },
+        // ------------------------------------------------------------------
+        // 2026-09-10 import integrity review
+        // ------------------------------------------------------------------
+        {
+            name: 'rows already stored under their own reference are a replay, not a match',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const stored = {
+                    eventId: 'csv-1', kind: 'option_trade', tradeDate: '2026-09-01',
+                    brokerTimestamp: '2026-09-01T10:00:00', account: 'U1', right: 'P',
+                    strike: 72, expiry: '20260918', contracts: -1, sharesPerContract: 100,
+                    price: 1.01, cashAmount: 100.44, fees: 0.56, source: 'csv_import',
+                    tag: 'ibkr_open', externalRef: 'stmt-known',
+                };
+                const twsNextDay = Object.assign({}, stored, {
+                    eventId: 'api-1', tradeDate: '2026-09-02',
+                    brokerTimestamp: '2026-09-02T10:00:00', source: 'execution_report',
+                    tag: 'ibkr_exec', externalRef: 'ibkr-exec-E2',
+                });
+                const csvRow = Object.assign({}, stored, {
+                    eventId: undefined, sourceRef: 'stmt-known', lineNumber: 3,
+                });
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [csvRow],
+                }, [stored, twsNextDay]);
+                assert.equal(plan.problems.length, 0);
+                assert.equal(Object.keys(plan.aliases).length, 0);
+                assert.equal(plan.unmatchedExecutions.length, 1);
+            },
+        },
+        {
+            name: 'fill rows split an order that TWS delivered only partly',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const base = {
+                    kind: 'option_trade', tradeDate: '2026-09-08', account: 'U1',
+                    right: 'P', strike: 72, expiry: '20260918', sharesPerContract: 100,
+                    conId: 123,
+                };
+                const storedFill = Object.assign({}, base, {
+                    eventId: 'f1', source: 'execution_report', tag: 'ibkr_exec',
+                    externalRef: 'ibkr-exec-E1', brokerTimestamp: '2026-09-08T10:00:00',
+                    contracts: -3, price: 1.01, fees: 1.95, cashAmount: 301.05,
+                });
+                const orderRow = Object.assign({}, base, {
+                    source: 'csv_import', tag: 'ibkr_open', externalRef: 'stmt-order',
+                    sourceRef: 'stmt-order', brokerTimestamp: '2026-09-08T10:00:00',
+                    contracts: -10, price: 1.02, priceText: '1.02', fees: 6.5,
+                    cashAmount: 1013.5, lineNumber: 9,
+                    fills: [
+                        { brokerTimestamp: '2026-09-08T10:00:00', tradeDate: '2026-09-08',
+                          quantity: -3, price: 1.01, priceText: '1.01', cashAmount: 301.05,
+                          fees: 1.95, lineNumber: 10 },
+                        { brokerTimestamp: '2026-09-08T10:00:07', tradeDate: '2026-09-08',
+                          quantity: -7, price: 1.02, priceText: '1.02', cashAmount: 712.45,
+                          fees: 4.55, lineNumber: 11 },
+                    ],
+                });
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [orderRow],
+                }, [storedFill]);
+                assert.equal(plan.problems.length, 0);
+                assert.equal(Object.keys(plan.aliases).length, 0);
+                const split = plan.fillSplits['U1\u0000stmt-order'];
+                assert.deepEqual(Array.from(split.keep), [1]);
+                assert.deepEqual(JSON.parse(JSON.stringify(split.matched)),
+                    [{ index: 0, externalRef: 'ibkr-exec-E1' }]);
+                assert.equal(plan.matched[0].partial, true);
+                // A fill row that disagrees with the stored fill is not
+                // claimed, and the whole order is imported as usual.
+                const disagree = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, orderRow, {
+                        fills: [Object.assign({}, orderRow.fills[0], { cashAmount: 300 }),
+                            orderRow.fills[1]],
+                    })],
+                }, [storedFill]);
+                assert.equal(Object.keys(disagree.fillSplits).length, 0);
+                assert.equal(disagree.problems.length, 1);
+            },
+        },
+        {
+            name: 'stored fills carrying an order id group by order, not by adjacency',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const base = {
+                    kind: 'share_trade', tradeDate: '2026-09-08', account: 'U1',
+                    source: 'execution_report', tag: 'ibkr_exec',
+                };
+                const fill = (id, time, shares, permId) => Object.assign({}, base, {
+                    eventId: id, externalRef: `ibkr-exec-${id}`, brokerTimestamp: time,
+                    shares, price: 45, fees: 0.5, cashAmount: -(shares * 45) - 0.5,
+                    note: `Imported from TWS API execution ${id}; permId ${permId}`,
+                });
+                const fills = [
+                    fill('A0', '2026-09-08T09:34:58', 200, 7001),
+                    fill('A1', '2026-09-08T09:35:00', 100, 7002),
+                    fill('A2', '2026-09-08T09:35:02', 200, 7002),
+                ];
+                const orderA = Object.assign({}, base, {
+                    source: 'csv_import', tag: 'ibkr_open', externalRef: 'stmt-a', sourceRef: 'stmt-a',
+                    brokerTimestamp: '2026-09-08T09:35:00', shares: 300,
+                    price: 45, priceText: '45', fees: 1, cashAmount: -13501, lineNumber: 3,
+                });
+                // Without order ids two runs of 300 touch 09:35:00; with them
+                // only order 7002 does.
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [orderA],
+                }, fills);
+                assert.equal(plan.problems.length, 0);
+                assert.equal(plan.aliases['U1\u0000stmt-a'], 'ibkr-exec-A1');
+                assert.deepEqual(Array.from(plan.matched[0].executions.map((item) => item.eventId)), ['A1', 'A2']);
+            },
+        },
+        {
+            name: 'a revised statement row and a hand-entered twin block instead of doubling',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const stored = {
+                    eventId: 'csv-1', kind: 'share_trade', tradeDate: '2026-09-01',
+                    brokerTimestamp: '2026-09-01T10:00:00', account: 'U1', shares: 10,
+                    price: 50, fees: 0, cashAmount: -500, source: 'csv_import',
+                    externalRef: 'stmt-old',
+                };
+                const revised = Object.assign({}, stored, {
+                    eventId: undefined, fees: 1, cashAmount: -501,
+                    externalRef: 'stmt-new', sourceRef: 'stmt-new', lineNumber: 2,
+                });
+                const plan = page.planStatementRevisionConflicts({
+                    events: [revised],
+                }, [stored], {});
+                assert.equal(plan.problems.length, 1);
+                assert.match(plan.problems[0].reason, /different identity/);
+                assert.match(plan.problems[0].reason, /fees 0; this file .* fees 1/);
+                const manual = Object.assign({}, stored, {
+                    eventId: 'man-1', source: 'manual', externalRef: null,
+                    brokerTimestamp: null,
+                });
+                const csv = Object.assign({}, stored, {
+                    eventId: undefined, externalRef: 'stmt-x', sourceRef: 'stmt-x', lineNumber: 4,
+                });
+                const twin = page.planStatementRevisionConflicts({ events: [csv] }, [manual], {});
+                assert.match(twin.problems[0].reason, /hand-entered ledger row/);
+                const dividend = { kind: 'dividend', tradeDate: '2026-06-30', account: 'U1',
+                    cashAmount: 25, externalRef: 'stmt-div', sourceRef: 'stmt-div', lineNumber: 8 };
+                const manualDividend = Object.assign({}, dividend, {
+                    eventId: 'man-2', source: 'manual', externalRef: null });
+                const cash = page.planStatementRevisionConflicts(
+                    { events: [dividend] }, [manualDividend], {});
+                assert.match(cash.problems[0].reason, /hand-entered dividend/);
+                // An aliased or already-known row is not a revision.
+                const known = page.planStatementRevisionConflicts(
+                    { events: [Object.assign({}, csv, { sourceRef: 'stmt-old' })] }, [stored], {});
+                assert.equal(known.problems.length, 0);
+            },
+        },
+        {
+            name: 'TWS fills inside the statement period with no statement row block the batch',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const fill = {
+                    eventId: 'api-1', kind: 'option_trade', tradeDate: '2026-09-15',
+                    account: 'U1', right: 'P', strike: 72, expiry: '20260918',
+                    contracts: -1, price: 1, externalRef: 'ibkr-exec-E9',
+                    source: 'execution_report', tag: 'ibkr_exec',
+                };
+                const inside = page.planStatementCoverageGaps({
+                    format: 'activity', account: 'U1', checks: { trades: true },
+                    statementPeriod: { from: '2026-09-01', through: '2026-09-30', source: 'period' },
+                }, [fill]);
+                assert.equal(inside.checked, true);
+                assert.equal(inside.problems.length, 1);
+                assert.match(inside.problems[0].reason, /ibkr-exec-E9/);
+                const outside = page.planStatementCoverageGaps({
+                    format: 'activity', account: 'U1', checks: { trades: true },
+                    statementPeriod: { from: '2026-08-01', through: '2026-08-31', source: 'period' },
+                }, [fill]);
+                assert.equal(outside.problems.length, 0);
+                const noPeriod = page.planStatementCoverageGaps({
+                    format: 'activity', account: 'U1', checks: { trades: true },
+                    statementPeriod: { from: '2026-09-01', through: '2026-09-30', source: 'events' },
+                }, [fill]);
+                assert.equal(noPeriod.checked, false);
+            },
+        },
+        {
+            name: 'real openings supersede an opening stub only when they sum exactly',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const stub = {
+                    eventId: 'stub-1', kind: 'option_trade', tradeDate: '2026-08-31',
+                    account: 'U1', right: 'P', strike: 45, expiry: '20260717',
+                    sharesPerContract: 100, contracts: -2, price: 0, cashAmount: 0,
+                    source: 'csv_import', tag: 'prior_open', externalRef: 'prior-x',
+                };
+                const opening = (date, contracts, ref) => ({
+                    kind: 'option_trade', tradeDate: date, account: 'U1', right: 'P',
+                    strike: 45, expiry: '20260717', sharesPerContract: 100, contracts,
+                    price: 1, cashAmount: -contracts * 100, source: 'csv_import',
+                    tag: 'ibkr_open', externalRef: ref, sourceRef: ref, lineNumber: 2,
+                });
+                const exact = page.planPriorStubSupersession({
+                    format: 'activity', account: 'U1',
+                    events: [opening('2026-08-20', -1, 'a'), opening('2026-08-21', -1, 'b')],
+                }, [stub]);
+                assert.deepEqual(Array.from(exact.eventIds), ['stub-1']);
+                assert.equal(exact.problems.length, 0);
+                const partial = page.planPriorStubSupersession({
+                    format: 'activity', account: 'U1', events: [opening('2026-08-20', -1, 'a')],
+                }, [stub]);
+                assert.deepEqual(Array.from(partial.eventIds), []);
+                assert.match(partial.problems[0].reason, /does not exactly replace the stub/);
+                const unrelated = page.planPriorStubSupersession({
+                    format: 'activity', account: 'U1',
+                    events: [Object.assign(opening('2026-08-20', -2, 'c'), { strike: 50 })],
+                }, [stub]);
+                assert.deepEqual(Array.from(unrelated.eventIds), []);
+                assert.equal(unrelated.problems.length, 0);
+            },
+        },
+        {
+            name: 'a TWS reply that lands after a book switch is dropped',
+            async run() {
+                const h = loadReconciliationHarness();
+                h.state.allEvents = [];
+                h.configure({ request: async () => {
+                    // The operator switches books while the query is out.
+                    h.state.bookId = 'other-book';
+                    return { fetchedAt: '2026-09-03T11:00:00', executions: [{
+                        account: 'U1', symbol: 'TQQQ', secType: 'STK', execId: 'source-A',
+                        side: 'BOT', quantity: 10, price: 50, commission: 1,
+                        commissionAvailable: true, brokerTimestamp: '2026-09-01T10:00:00',
+                    }] };
+                } });
+                await h.fetch();
+                assert.equal(h.state.importResult, null);
+                assert.equal(h.alerts.length, 0);
+            },
+        },
+        {
+            name: 'a preview bound to an older ledger version, generation or mode cannot be committed',
+            run() {
+                const h = loadReconciliationHarness();
+                h.state.ledgerVersion = { digest: 'v1' };
+                h.state.importGeneration = 4;
+                h.state.importResult = { binding: {
+                    bookId: 'book-test', generation: 4, mode: 'append', ledgerVersion: 'v1',
+                } };
+                assert.equal(h.bindingProblem(), '');
+                h.state.ledgerVersion = { digest: 'v2' };
+                assert.match(h.bindingProblem(), /账本在预览后发生了变化/);
+                h.state.ledgerVersion = { digest: 'v1' };
+                h.state.importGeneration = 5;
+                assert.match(h.bindingProblem(), /预览已过期/);
+                h.state.importGeneration = 4;
+                h.state.importResult.binding.bookId = 'another';
+                assert.match(h.bindingProblem(), /另一本账本/);
+            },
+        },
+        {
+            name: 'reading a new file invalidates the old preview and a late read is dropped',
+            run() {
+                const h = loadReconciliationHarness();
+                const readers = [];
+                h.context.FileReader = function FakeReader() {
+                    readers.push(this);
+                    this.readAsText = () => {};
+                };
+                h.state.importResult = { binding: {}, problems: [], events: [] };
+                h.state.importText = 'old file';
+                h.handleImportFile({ target: { files: [{ name: 'new.csv' }] } });
+                assert.equal(h.state.importResult, null);
+                assert.equal(h.state.importText, '');
+                assert.equal(h.state.importReading, 'new.csv');
+                const first = readers[0];
+                // A second selection supersedes the first before it finished.
+                h.handleImportFile({ target: { files: [{ name: 'newer.csv' }] } });
+                first.result = 'stale bytes';
+                first.onload();
+                assert.equal(h.state.importText, '');
+                assert.equal(h.state.importReading, 'newer.csv');
+                const second = readers[1];
+                second.error = { message: 'disk' };
+                second.onerror();
+                assert.equal(h.state.importReading, false);
+                assert.match(h.state.importResult.problems[0].reason, /文件读取失败/);
+            },
+        },
+        {
+            name: 'statement coverage lists contiguous spans and the gaps between them',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const coverage = page.describeStatementCoverage([
+                    { checks: { period: true, account: true, openPositions: true, revision: true, twsCoverage: true }, periodFrom: '2026-08-01', periodThrough: '2026-08-31' },
+                    { checks: { period: true, account: true, openPositions: true, revision: true, twsCoverage: true }, periodFrom: '2026-09-01', periodThrough: '2026-09-30' },
+                    { checks: { period: true, account: true, openPositions: true, revision: true, twsCoverage: true }, periodFrom: '2026-11-01', periodThrough: '2026-11-30' },
+                    { checks: { period: true, account: true, openPositions: true, revision: true, twsCoverage: true }, periodFrom: '', periodThrough: '' },
+                ]);
+                assert.deepEqual(JSON.parse(JSON.stringify(coverage.covered)), [
+                    { from: '2026-08-01', through: '2026-09-30' },
+                    { from: '2026-11-01', through: '2026-11-30' },
+                ]);
+                assert.deepEqual(JSON.parse(JSON.stringify(coverage.gaps)),
+                    [{ from: '2026-10-01', through: '2026-10-31' }]);
+                assert.match(coverage.text, /缺口 2026-10-01 至 2026-10-31/);
+                assert.equal(page.describeStatementCoverage([]).text, '');
             },
         },
     ],

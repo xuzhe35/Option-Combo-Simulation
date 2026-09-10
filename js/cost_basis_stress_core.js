@@ -19,6 +19,34 @@
             : Object.fromEntries(Object.entries(value).map(([key, item]) => [key, immutable(item)])));
     }
 
+    function quantityKey(p) {
+        return JSON.stringify([p.account || '', p.conId || p.localSymbol || '',
+            p.expiry, p.right, Number(p.strike), Number(p.sharesPerContract)]);
+    }
+
+    // A self-financed, current-mark what-if. Quotes and IV calibration retain
+    // their original identities; changing size cannot change the market model.
+    function resizePositions(positions, overrides) {
+        const sizes = overrides || {};
+        if (Object.keys(sizes).some(key => !positions.some(p => quantityKey(p) === key))) fail('stale_quantity_override');
+        let funding = 0, changed = false;
+        const resized = positions.map(p => {
+            const key = quantityKey(p);
+            if (!Object.prototype.hasOwnProperty.call(sizes, key)) return p;
+            const size = number(sizes[key], 'invalid_simulated_quantity');
+            if (!Number.isInteger(size) || size < 0 || size > 1000000) fail('invalid_simulated_quantity');
+            const contracts = Math.sign(p.contracts) * size;
+            if (contracts === p.contracts) return p;
+            if (p.referenceValue === null) fail('missing_reference_quotes');
+            changed = true;
+            const unit = p.referenceValue / p.contracts;
+            funding += (contracts - p.contracts) * unit;
+            return { ...p, contracts, referenceValue: contracts * unit,
+                openPremium: p.openPremium * contracts / p.contracts };
+        }).filter(p => p.contracts !== 0);
+        return { positions: resized, funding, changed };
+    }
+
     function exchangeDate(instant = Date.now()) {
         const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York',
             year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(instant));
@@ -221,12 +249,20 @@
                 || cutoff(p, M._findOptionQuote(inputs && inputs.options, p), warnings) <= target);
             if (included.length !== all.length) warnings.add('partial_portfolio_excludes_deferred');
             const snapshots = [inputs, linked && linked.marketInputs].filter(Boolean);
+            // A horizon scrub may reuse a frozen quote batch. Keep its original
+            // scenario tag as provenance; never rewrite a response to look new.
+            // Only a full v2 curve can be rolled to another scenario date:
+            // legacy ratesByExpiry were resolved for the original horizon.
+            const snapshotThroughExpiry = opts.snapshotThroughExpiry || opts.throughExpiry;
+            const rolledSnapshot = snapshotThroughExpiry !== opts.throughExpiry;
             if (linked && (!finite(linked.marketInputs.underlyingPrice)
                 || Math.abs(linked.basePrice - Number(linked.marketInputs.underlyingPrice)) > 1e-8)) fail('invalid_linked_underlying_price');
             for (const snapshot of snapshots) {
                 if (opts.requireSnapshotVersion && !(snapshot.snapshotVersion >= opts.requireSnapshotVersion)) fail('snapshot_upgrade_required');
                 if (snapshot.currency && snapshot.currency !== 'USD') fail('unsupported_stress_currency');
-                if (snapshot.throughExpiry && snapshot.throughExpiry !== opts.throughExpiry) fail('stale_scenario_snapshot');
+                if ((snapshot.throughExpiry || opts.snapshotThroughExpiry)
+                    && snapshot.throughExpiry !== snapshotThroughExpiry) fail('stale_scenario_snapshot');
+                if (rolledSnapshot && (!(snapshot.snapshotVersion >= 2) || !snapshot.discountCurve)) fail('missing_discount_rate');
                 if (snapshot.snapshotVersion >= 2 && !snapshot.discountCurve && included.some(p => digits(p.expiry) > opts.throughExpiry)) fail('missing_discount_rate');
                 const at = instant(snapshot.fetchedAt);
                 if (snapshot.snapshotVersion >= 2 && at === null) fail('invalid_snapshot_time');
@@ -237,8 +273,8 @@
                     .map(instant).filter(t => t !== null);
                 if (quoteTimes.some(t => Math.abs(t - asOf) > 60000)) fail('snapshot_time_mismatch');
             }
-            const own = compilePositions(included, inputs, settings, asOf, target, warnings, false);
-            const linkedPositions = linked ? compilePositions(linked.openOptions.filter(p => Number(p.contracts) > 0),
+            let own = compilePositions(included, inputs, settings, asOf, target, warnings, false);
+            let linkedPositions = linked ? compilePositions(linked.openOptions.filter(p => Number(p.contracts) > 0),
                 linked.marketInputs, { ...settings, dividendYield: linked.dividendYield }, asOf, target, warnings, true) : [];
             const referenceSpot = inputs && finite(inputs.underlyingPrice) ? Number(inputs.underlyingPrice) : centerPrice;
             const baseCash = number(ledger.combined.lifetimeNetCash, 'incomplete_cost_basis')
@@ -270,12 +306,27 @@
             }
             const sigma = linked ? (linked.sigma ?? (proxy && proxy.sigma)) : null;
             if (linked && linked.mapping === 'compound' && target - asOf > DAY && sigma === null) fail('missing_linked_sigma');
+            const quantities = opts.quantityOverrides || {};
+            const ownSized = resizePositions(own, quantities.own);
+            const linkedSized = resizePositions(linkedPositions, quantities.linked);
+            let shares = Number(ledger.combined.shares), fundingChange = ownSized.funding + linkedSized.funding;
+            if (quantities.shares !== undefined && quantities.shares !== null) {
+                const desired = number(quantities.shares, 'invalid_simulated_quantity');
+                if (Math.abs(desired) > 10000000) fail('invalid_simulated_quantity');
+                fundingChange += (desired - shares) * referenceSpot;
+                shares = desired;
+            }
+            const quantitiesChanged = ownSized.changed || linkedSized.changed || shares !== Number(ledger.combined.shares);
+            if (quantitiesChanged && settings.pnlBasis !== 'change') fail('quantity_requires_change_basis');
+            if (quantitiesChanged && !(inputs && Number(inputs.underlyingPrice) > 0)) fail('missing_reference_quotes');
+            own = ownSized.positions; linkedPositions = linkedSized.positions;
             const weekly = M.normalizeWeeklyPremium(opts.weeklyPremium);
             if (weekly === null) fail('invalid_weekly_premium');
             const days = (target - asOf) / DAY;
             const compiled = { available: true, version: VERSION, opts, settings, path, warnings: [...warnings], asOf, target,
                 centerPrice, referenceSpot, own, linkedPositions, linked, sigma, proxy, baseCash,
-                shares: Number(ledger.combined.shares), costComplete: !ledger.combined.costIncomplete,
+                shares, quantitiesChanged, fundingChange,
+                costComplete: !ledger.combined.costIncomplete && !quantitiesChanged,
                 referenceChangeReason: own.some(p => p.referenceValue === null)
                     ? 'missing_reference_quotes' : (Number(ledger.combined.shares) !== 0
                         && !(inputs && finite(inputs.underlyingPrice) && Number(inputs.underlyingPrice) > 0)
@@ -304,7 +355,12 @@
     function valuePosition(p, end, start, c, shockPoints, driver, member, linked) {
         if (p.expiryAt <= c.target) {
             const spot = pathSpot(start, end, p.expiryAt, c);
-            const itm = p.right === 'C' ? spot > p.strike : spot < p.strike;
+            // Conservative delivery overlay, not a predicted price path:
+            // own short puts that expire within the horizon also assign when
+            // the terminal price is below strike. Surviving options are untouched.
+            const conservativeAssignment = !linked && c.opts.conservativeShortPutAssignment !== false
+                && p.right === 'P' && p.contracts < 0 && end < p.strike;
+            const itm = conservativeAssignment || (p.right === 'C' ? spot > p.strike : spot < p.strike);
             const delivered = itm ? p.contracts * p.multiplier * (p.right === 'C' ? 1 : -1) : 0;
             const payoff = p.contracts * p.multiplier * Math.max(p.right === 'C' ? spot - p.strike : p.strike - spot, 0);
             const value = linked ? payoff : delivered * (end - p.strike);
@@ -322,7 +378,8 @@
                 shock *= 1 - Math.min(1, Math.max(0, (distance - 0.05) / 0.05)) * (1 - floor);
             }
         }
-        const iv = p.iv + shock;
+        const atReference = c.target === c.asOf && Math.abs(end - start) < 1e-10;
+        const iv = (p.iv + shock) * (atReference ? 1 : (member.ivScale ?? 1));
         if (!Number.isFinite(iv) || iv < 0) fail('invalid_option_iv_shock');
         const price = M.priceScenarioOption(p.right, end, p.strike, (p.expiryAt - c.target) / YEAR,
             p.futureRate, iv, { pricingModel: c.settings.pricingModel, dividendYield: p.dividendYield });
@@ -332,6 +389,11 @@
     }
 
     function scenarioCost(c, price) {
+        // Historical blended cost cannot be transplanted onto a resized draft.
+        // Keep the draft purely as a current-value what-if; never invent a cost.
+        if (c.quantitiesChanged) return { cost: null, costState: 'simulated_quantities',
+            shares: c.shares + c.own.reduce((sum, p) => sum + valuePosition(p, price,
+                c.referenceSpot, c, 0, null, {}, false).delivered, 0) };
         const projection = costProjections.get(c);
         if (!projection) fail('missing_cost_projection');
         const outcomes = projection.settled.map(p => valuePosition(p, price, c.referenceSpot,
@@ -469,6 +531,9 @@
                 ivAssumptions: Object.fromEntries(['ivMode', 'ivBeta', 'ivBetaAuto', 'ivShockPoints',
                     'ivTenorDamping', 'ivTenorDays', 'ivTenorExponent', 'ivOtmDiscount'].map(key => [key, driver[key]])),
                 targetInstant: new Date(c.target).toISOString(), path: c.path,
+                conservativeShortPutAssignment: o.conservativeShortPutAssignment !== false,
+                quantitiesChanged: c.quantitiesChanged, fundingChange: c.fundingChange,
+                snapshotThroughExpiry: o.snapshotThroughExpiry || o.throughExpiry,
                 throughExpiry: o.throughExpiry, basisMode: o.basisMode || 'net_cash',
                 centerPrice: c.centerPrice, referenceSpot: c.referenceSpot, rangePct, low, high, points,
                 includeDeferredLongOptions: c.own.length > 0, linkedHedgeEnabled: Boolean(linked),
@@ -517,5 +582,5 @@
         return series;
     }
     g.OptionComboCostBasisStressCore = Object.freeze({ VERSION, compile, sweep, buildStressTestSeries,
-        calibrate, exchangeDate, exchangeTime, instant, resolveRate, pathSpot, valuePosition });
+        calibrate, exchangeDate, exchangeTime, instant, resolveRate, pathSpot, valuePosition, quantityKey });
 })(typeof globalThis !== 'undefined' ? globalThis : this);
