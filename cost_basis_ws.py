@@ -55,12 +55,32 @@ SERVER_ACTIONS = {
     'reset_cost_basis_book': 'cost_basis_book_reset',
     'rebuild_cost_basis_book': 'cost_basis_book_rebuilt',
     'list_cost_basis_resets': 'cost_basis_resets_list',
+    'restore_cost_basis_reset': 'cost_basis_reset_restored',
+    'export_cost_basis_backup': 'cost_basis_backup',
+    'restore_cost_basis_backup': 'cost_basis_backup_restored',
+    'list_cost_basis_import_batches': 'cost_basis_import_batches_list',
     'request_cost_basis_executions': 'cost_basis_executions',
     'request_cost_basis_market_price': 'cost_basis_market_price',
     'request_cost_basis_option_scenario_inputs': 'cost_basis_option_scenario_inputs',
 }
 
 COST_BASIS_CLIENT_ACTIONS = frozenset(SERVER_ACTIONS)
+# The stress view refreshes its own book and the linked book as one pair and
+# sends both snapshot requests at once. Per-connection dispatch is otherwise
+# sequential, which would queue the second request behind the first's 8-second
+# quote window; the browser's 20-second timeout can then expire before this
+# handler's own 15-second deadline has even started. These read-only actions
+# run as tasks so paired requests overlap. Ledger writes stay ordered.
+CONCURRENT_CLIENT_ACTIONS = frozenset({'request_cost_basis_option_scenario_inputs'})
+
+
+def build_scenario_inputs_busy_response(data):
+    """Keep overload replies correlated and identical to normal endpoint errors."""
+    return _error_response(
+        SERVER_ACTIONS['request_cost_basis_option_scenario_inputs'], _request_id(data),
+        'broker_option_scenario_inputs_busy',
+        'Scenario quote requests are busy; retry after the current requests finish',
+    )
 
 
 def create_store_env(config=None):
@@ -454,11 +474,14 @@ async def _dispatch_store_call(store, action, data):
     if action == 'import_cost_basis_events':
         events = data.get('events')
         supersede_tws_event_ids = data.get('supersedeTwsEventIds', [])
+        supersede_prior_stub_event_ids = data.get('supersedePriorStubEventIds', [])
         tws_reconciliation = data.get('twsReconciliation')
         if not isinstance(events, list):
             raise InvalidRequestError('events must be a list')
         if not isinstance(supersede_tws_event_ids, list):
             raise InvalidRequestError('supersedeTwsEventIds must be a list')
+        if not isinstance(supersede_prior_stub_event_ids, list):
+            raise InvalidRequestError('supersedePriorStubEventIds must be a list')
         if len(events) > MAX_IMPORT_EVENTS:
             raise InvalidRequestError(
                 f'an import batch is limited to {MAX_IMPORT_EVENTS} rows')
@@ -471,6 +494,12 @@ async def _dispatch_store_call(store, action, data):
                 allow_overdraw=data.get('allowOverdraw') is True,
                 supersede_tws_event_ids=supersede_tws_event_ids,
                 tws_reconciliation=tws_reconciliation,
+                # The browser states which ledger version and identity it
+                # prepared the batch for; the store holds it to both.
+                expected_ledger_version=data.get('expectedLedgerVersion'),
+                book_identity=data.get('bookIdentity'),
+                supersede_prior_stub_event_ids=supersede_prior_stub_event_ids,
+                statement=data.get('statement'),
             )
         )
 
@@ -482,14 +511,16 @@ async def _dispatch_store_call(store, action, data):
     if action == 'reset_cost_basis_book':
         # The recoverable path that deletes active events. Whole-book
         # deletion is a separate, explicitly permanent operation. This
-        # phrase is still validated inside the write transaction against the
-        # live count, so a stale plan cannot lose unseen rows.
+        # identity, version and phrase are rechecked in the write transaction;
+        # a stale plan cannot remove a different history of the same size.
         return await asyncio.to_thread(
             lambda: store.reset_book(
                 _required_str(data, 'bookId'),
                 confirmation=_required_str(data, 'confirmation'),
                 client_token=_required_str(data, 'clientToken'),
                 reason=data.get('reason') or '',
+                expected_ledger_version=data.get('expectedLedgerVersion'),
+                book_identity=data.get('bookIdentity'),
             )
         )
 
@@ -511,8 +542,45 @@ async def _dispatch_store_call(store, action, data):
                 import_batch_id=_required_str(data, 'importBatchId'),
                 allow_overdraw=data.get('allowOverdraw') is True,
                 reason=data.get('reason') or '',
+                expected_ledger_version=data.get('expectedLedgerVersion'),
+                book_identity=data.get('bookIdentity'),
+                statement=data.get('statement'),
             )
         )
+
+    if action == 'restore_cost_basis_reset':
+        # Put an archived ledger back. Same phrase-and-digest gate as a
+        # rebuild: the live rows are archived first inside one transaction.
+        return await asyncio.to_thread(
+            lambda: store.restore_book_reset(
+                _required_str(data, 'bookId'),
+                _required_str(data, 'resetId'),
+                confirmation=_required_str(data, 'confirmation'),
+                client_token=_required_str(data, 'clientToken'),
+                expected_ledger_version=data.get('expectedLedgerVersion'),
+                book_identity=data.get('bookIdentity'),
+            )
+        )
+
+    if action == 'export_cost_basis_backup':
+        return await asyncio.to_thread(store.export_backup, _required_str(data, 'bookId'))
+
+    if action == 'restore_cost_basis_backup':
+        return await asyncio.to_thread(lambda: store.restore_backup(
+            _required_str(data, 'bookId'), _required_object(data, 'backup'),
+            confirmation=_required_str(data, 'confirmation'),
+            client_token=_required_str(data, 'clientToken'),
+            expected_ledger_version=data.get('expectedLedgerVersion'),
+            book_identity=data.get('bookIdentity')))
+
+    if action == 'list_cost_basis_import_batches':
+        batches = await asyncio.to_thread(
+            lambda: store.list_import_batches(
+                _required_str(data, 'bookId'),
+                limit=_optional_int(data, 'limit') or 60,
+            )
+        )
+        return {'batches': batches}
 
     if action == 'list_cost_basis_resets':
         resets = await asyncio.to_thread(

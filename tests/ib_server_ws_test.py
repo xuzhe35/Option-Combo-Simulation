@@ -305,6 +305,168 @@ class _FakeIB:
 
 
 class IbServerWsHandlerTests(unittest.TestCase):
+    def test_paired_scenario_snapshot_requests_overlap_but_ledger_actions_stay_ordered(self):
+        import ib_server_ws as ws_module
+        from unittest import mock
+        env = self._build_env()[0]
+        websocket = _FakeWebSocket()
+        started, finished = [], []
+        release = None
+
+        async def fake_handler(store_env, ws, data, *, client_ip='Unknown', send=None):
+            started.append(data['action'])
+            if data['action'] == 'request_cost_basis_option_scenario_inputs':
+                await release.wait()
+            finished.append(data['action'])
+            return True
+
+        async def scenario():
+            nonlocal release
+            release = asyncio.Event()
+            with mock.patch.object(ws_module.cost_basis_ws, 'handle_cost_basis_action', fake_handler):
+                # Both snapshot requests are dispatched before either can finish.
+                for _ in range(2):
+                    await dispatch_client_message(
+                        env, websocket,
+                        {'action': 'request_cost_basis_option_scenario_inputs', 'bookId': 'b'})
+                await asyncio.sleep(0)
+                self.assertEqual(started, ['request_cost_basis_option_scenario_inputs'] * 2)
+                self.assertEqual(finished, [])
+                self.assertEqual(len(env['cost_basis_snapshot_tasks']), 2)
+                # A ledger action is still awaited inline, in order.
+                await dispatch_client_message(
+                    env, websocket, {'action': 'list_cost_basis_books'})
+                self.assertEqual(finished, ['list_cost_basis_books'])
+                release.set()
+                await asyncio.gather(*env['cost_basis_snapshot_tasks'])
+                self.assertEqual(finished, ['list_cost_basis_books']
+                                 + ['request_cost_basis_option_scenario_inputs'] * 2)
+                self.assertEqual(env['cost_basis_snapshot_tasks'], set())
+
+        asyncio.run(scenario())
+        self.assertIn('request_cost_basis_option_scenario_inputs',
+                      ws_module.cost_basis_ws.CONCURRENT_CLIENT_ACTIONS)
+        self.assertNotIn('append_cost_basis_event',
+                         ws_module.cost_basis_ws.CONCURRENT_CLIENT_ACTIONS)
+
+    def test_snapshot_limits_reject_excess_immediately_and_release_capacity(self):
+        import ib_server_ws as ws_module
+
+        async def scenario():
+            env, sent, *_ = self._build_env()
+            sockets = [_FakeWebSocket() for _ in range(3)]
+            release = asyncio.Event()
+            started = []
+
+            async def pending_handler(store_env, socket, data, **kwargs):
+                started.append(data['requestId'])
+                await release.wait()
+
+            async def dispatch(socket, request_id):
+                await dispatch_client_message(env, socket, {
+                    'action': 'request_cost_basis_option_scenario_inputs',
+                    'requestId': request_id, 'bookId': 'b', 'contracts': []})
+
+            with patch.object(ws_module.cost_basis_ws, 'handle_cost_basis_action', pending_handler):
+                await dispatch(sockets[0], 'a1'); await dispatch(sockets[0], 'a2')
+                await dispatch(sockets[0], 'a3')  # per-client cap
+                await dispatch(sockets[1], 'b1'); await dispatch(sockets[1], 'b2')
+                await dispatch(sockets[2], 'c1')  # global cap
+                await asyncio.sleep(0)
+                self.assertEqual(started, ['a1', 'a2', 'b1', 'b2'])
+                self.assertEqual(len(env['cost_basis_snapshot_tasks']), 4)
+                self.assertEqual([message['requestId'] for _, message in sent], ['a3', 'c1'])
+                for _, message in sent:
+                    self.assertEqual(message['action'], 'cost_basis_option_scenario_inputs')
+                    self.assertFalse(message['success'])
+                    self.assertEqual(message['code'], 'broker_option_scenario_inputs_busy')
+                self.assertNotIn(sockets[2], env['cost_basis_snapshot_tasks_by_client'])
+                release.set()
+                await asyncio.gather(*env['cost_basis_snapshot_tasks'])
+                self.assertEqual(env['cost_basis_snapshot_tasks_by_client'], {})
+                await dispatch(sockets[2], 'retry')
+                await asyncio.gather(*env['cost_basis_snapshot_tasks'])
+                self.assertEqual(started[-1], 'retry')
+                self.assertEqual(env['cost_basis_snapshot_tasks'], set())
+
+        asyncio.run(scenario())
+
+    def test_disconnect_awaits_own_snapshot_cleanup_without_cancelling_other_clients(self):
+        import ib_server_ws as ws_module
+
+        class YieldingSocket(_FakeWebSocket):
+            async def __anext__(self):
+                await asyncio.sleep(0)
+                return await super().__anext__()
+
+        async def scenario():
+            env = self._build_env()[0]
+            other = _FakeWebSocket()
+            socket = YieldingSocket(messages=[json.dumps({
+                'action': 'request_cost_basis_option_scenario_inputs',
+                'requestId': str(i), 'bookId': 'b'}) for i in range(2)])
+            started, cleaned = [], []
+            release = asyncio.Event()
+
+            async def pending_handler(store_env, owner, data, **kwargs):
+                started.append(owner)
+                try:
+                    await release.wait()
+                finally:
+                    # Model the broker fetcher's asynchronous resource cleanup.
+                    await asyncio.sleep(0)
+                    cleaned.append(owner)
+
+            with patch.object(ws_module.cost_basis_ws, 'handle_cost_basis_action', pending_handler):
+                await dispatch_client_message(env, other, {
+                    'action': 'request_cost_basis_option_scenario_inputs', 'bookId': 'other'})
+                await ws_module.handle_ws_client(env, socket)
+                self.assertEqual(started.count(socket), 2)
+                self.assertEqual(cleaned, [socket, socket])
+                self.assertNotIn(socket, env['cost_basis_snapshot_tasks_by_client'])
+                self.assertNotIn(socket, env['connected_clients'])
+                self.assertEqual(len(env['cost_basis_snapshot_tasks']), 1)
+                self.assertFalse(next(iter(env['cost_basis_snapshot_tasks'])).done())
+                release.set()
+                await asyncio.gather(*env['cost_basis_snapshot_tasks'])
+                self.assertEqual(cleaned.count(other), 1)
+                self.assertEqual(env['cost_basis_snapshot_tasks_by_client'], {})
+
+        asyncio.run(scenario())
+
+    def test_disconnect_before_snapshot_task_starts_releases_all_admitted_slots(self):
+        import ib_server_ws as ws_module
+
+        async def scenario():
+            env = self._build_env()[0]
+            socket = _FakeWebSocket(messages=[json.dumps({
+                'action': 'request_cost_basis_option_scenario_inputs', 'bookId': 'b'})] * 2)
+            handler = AsyncMock()
+            with patch.object(ws_module.cost_basis_ws, 'handle_cost_basis_action', handler):
+                await ws_module.handle_ws_client(env, socket)
+            handler.assert_not_awaited()
+            self.assertEqual(env['cost_basis_snapshot_tasks'], set())
+            self.assertEqual(env['cost_basis_snapshot_tasks_by_client'], {})
+
+        asyncio.run(scenario())
+
+    def test_snapshot_task_failure_is_observed_and_releases_its_slot(self):
+        import ib_server_ws as ws_module
+
+        async def scenario():
+            env = self._build_env()[0]
+            handler = AsyncMock(side_effect=RuntimeError('test failure'))
+            with patch.object(ws_module.cost_basis_ws, 'handle_cost_basis_action', handler):
+                with self.assertLogs(level='ERROR') as logs:
+                    await dispatch_client_message(env, _FakeWebSocket(), {
+                        'action': 'request_cost_basis_option_scenario_inputs', 'bookId': 'b'})
+                    await asyncio.gather(*env['cost_basis_snapshot_tasks'], return_exceptions=True)
+                self.assertIn('Cost-basis snapshot task failed', logs.output[0])
+            self.assertEqual(env['cost_basis_snapshot_tasks'], set())
+            self.assertEqual(env['cost_basis_snapshot_tasks_by_client'], {})
+
+        asyncio.run(scenario())
+
     def _build_env(self):
         sent_messages = []
         snapshot_calls = []

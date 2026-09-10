@@ -39,6 +39,11 @@
         'save_cost_basis_snapshot',
         'request_cost_basis_reset_plan',
         'rebuild_cost_basis_book',
+        'list_cost_basis_resets',
+        'restore_cost_basis_reset',
+        'export_cost_basis_backup',
+        'restore_cost_basis_backup',
+        'list_cost_basis_import_batches',
         // Read-only corroboration from the live backend. The market-price
         // action is a one-shot TWS snapshot and leaves no live subscription.
         'request_portfolio_positions_snapshot',
@@ -2429,6 +2434,22 @@
                 problem(`成交 ${execId} 的方向、数量或价格无效`);
                 return;
             }
+            // The ledger is single-currency. A contract quoted in another
+            // currency, or a fee charged in one, is a foreign amount: adding
+            // it to this book's cash as if it were local misstates the cost
+            // by the whole exchange rate.
+            const bookCurrency = _upper(opts.currency);
+            const contractCurrency = _upper(row.currency);
+            const feeCurrency = _upper(row.commissionCurrency);
+            if (bookCurrency && contractCurrency && contractCurrency !== bookCurrency) {
+                problem(`成交 ${execId} 的合约币种 ${contractCurrency} 与账本币种 ${bookCurrency} 不同`);
+                return;
+            }
+            if (bookCurrency && feeCurrency && feeCurrency !== bookCurrency) {
+                problem(`成交 ${execId} 的手续费币种 ${feeCurrency} 与账本币种 ${bookCurrency} 不同；`
+                    + '外币手续费不能直接计入本币现金');
+                return;
+            }
 
             const signedQuantity = (side === 'BOT' || side === 'BUY')
                 ? quantity : -quantity;
@@ -2444,7 +2465,12 @@
                 tag: 'ibkr_exec',
                 externalRef,
                 lineNumber,
+                // The order id lets a later statement Order row be matched
+                // to exactly the fills of that order, not to a guess about
+                // which fills sat next to each other in time.
                 note: `Imported from TWS API execution ${execId}`
+                    + (row.permId !== null && row.permId !== undefined && row.permId !== ''
+                        ? `; permId ${row.permId}` : '')
                     + (row.orderRef ? `; orderRef ${row.orderRef}` : ''),
             };
             let event;

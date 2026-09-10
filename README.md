@@ -171,8 +171,8 @@ Default configured symbols:
 
 ### `cost_basis.html`
 
-Standalone per-underlying blended-cost ledger. It loads only
-`js/cost_basis_core.js`, `js/cost_basis_import.js`, and `js/cost_basis.js` —
+Standalone per-underlying blended-cost ledger. It loads the ledger/import/page
+scripts plus DOM-free American pricing, market curves and `cost_basis_stress_*` —
 never the trading shell — and writes its own `cost_basis.db`. It cannot place
 an order or subscribe to market data. Full details in
 [Blended Cost Ledger](#blended-cost-ledger-cost_basishtml) below.
@@ -425,7 +425,20 @@ at risk. For example, an ITM short put becomes an assignment while an ATM/OTM
 put expires. This is an expiry outcome with zero settlement fees and no option
 time value; it never records the synthetic settlement rows.
 
-The stress-test modal values every still-open option of this book on ONE
+When TWS quotes are missing, the cost-lens stress chart can show a labelled
+partial result: first the validated own book without linked protection, then
+settlement only if own quotes are missing too. Empty option lists and missing
+marks count as missing evidence, never as zero prices. No band is shown for
+these partial results; conflicting identities, crossed quotes and calibration
+failures still stop valuation. A missing own-underlying price is retried once. The live backend
+allows two concurrent snapshot requests per connection and four total, returns
+an immediate busy/retry response above those limits, and cancels that client's
+requests when its connection closes. Restart the backend to apply this change.
+
+The stress-test view (a page view beside the ledger and settings views, entered
+from the sidebar or the What If panel; leaving it cancels its worker and discards
+the pending snapshot batch) values every
+still-open option of this book on ONE
 scenario date (the selected expiry, or today + "days to reach the drop"):
 options expiring by then settle at intrinsic value, live longs are marked as
 assets and live shorts as liabilities (premium received minus model value),
@@ -442,8 +455,12 @@ sigma is an explicit assumption or the IV of the nearest-the-money sibling
 contract still alive after the date (refused, never zero, when none exists);
 a linear ratio is kept for comparison. The sibling's contracts are valued at
 that price with their own IV, optionally lifted by a fixed shock or a
-spot-vol beta (downside only, tenor-damped), and this book's IV shock follows
-the same beta scaled by the leverage ratio. The stacked figure is the change
+spot-vol beta (downside only, tenor-damped by (30 / remaining days)^0.65, the
+default chosen near the 0.64 per-contract median from seven QQQ crashes
+2015-2025; the log least-squares fit is 0.76 in
+`scripts/skew_regime_study.py`, which also showed sticky-strike plus a level
+shift beats sticky-delta on real crash chains), and this book's IV shock
+follows the same beta scaled by the leverage ratio. The stacked figure is the change
 against today's TWS mark, so premium already paid is sunk and a crash shows
 the protection as a gain; P&L versus the premium is a tooltip reference only.
 The overlay reads the sibling ledger and a bounded TWS quote request only,
@@ -467,9 +484,13 @@ the latest activity is always on page 1.
 Creating a book uses the same managed-account selector as the main page's
 `Enable Trade` controls. One TWS account is selected automatically; multiple
 accounts require an explicit choice. When IB API is unavailable, the same
-selector falls back to accounts already present in the ledger and a clearly
-labelled manual-account option, so the page still works with the historical
-backend. Once TWS supplies managed accounts, new books must use that live list.
+selector falls back to accounts already present in the ledger. Manual entry
+stays available in both cases, because accounts traded from another machine
+never appear in this TWS's list and their ledgers are still kept here: an
+account the live list does not contain only warns and asks for a confirmation.
+Such a book records and prices normally — the underlying's quotes come from
+this same local TWS connection — but it matches no local position, execution
+or AvgCost row, so reconciliation against TWS is meaningless for it.
 
 ### Why it is an event ledger and not a snapshot tool
 
@@ -561,6 +582,49 @@ the fallback button only fills a clearly marked manual draft for the missing
 quantity; it never writes directly because AvgCost may blend opens and closes.
 
 ### The three cost lenses
+
+The stress view uses a separate cash/position valuation kernel; it never derives
+portfolio P&L from a per-share cost lens. It supports current-market-change versus
+cash-flow-cost P&L, immediate/gradual delivery paths, and a background-computed
+sampled sensitivity band (not a confidence interval). Its cost line is the
+scenario post-settlement cost in the selected ledger lens, recalculated from
+read-only virtual deliveries along the chosen path. It can be flat within one
+delivery outcome and changes across outcomes; zero shares have no per-share cost.
+IV marks, linked hedges and hypothetical weekly income affect P&L, not this cost.
+All surviving own options are included by default. The
+backend must be restarted after upgrading: version-2 snapshots supply the frozen
+discount curve and timing metadata. Only USD STK books are supported by stress
+valuation; ledger/import support for other currencies is unchanged. See
+`COST_BASIS_LONG_PUT_STRESS_REVIEW.md` and `CODE PLAN/STRESS_KERNEL_REFACTOR.md`.
+
+The primary workflow now defaults to change from the current quote snapshot.
+Edit simulated share counts and individual option sizes (zero removes a leg),
+then compare the draft against the actual holdings at the same price and horizon.
+Sizing uses current valuation as its funding reference; it never writes ledger
+events or treats newly purchased protection as free NAV. Draft sizing hides the
+historical cost line until actual sizes are restored. An optional current NAV
+input adds absolute scenario NAV and percentage change to the result cards and
+slice. Future weekly income requires an explicit opt-in each time the view opens.
+The IV band includes a configurable level sensitivity, initially ±20% relative
+to scenario IV, in addition to downside/tenor/OTM assumptions. It is not a
+historically calibrated confidence interval. See `CODE PLAN/STRESS_PORTFOLIO_WORKFLOW.md`.
+
+Use the days slider (or exact-day input) to compare valuation horizons. Zero
+means now; the slider starts at 0–365 days and expands for longer exact inputs.
+A complete, synchronized v2 quote batch and its discount curve stay frozen
+while scrubbing; refresh quotes explicitly to update that baseline. Cards and
+slices put the sampled range first and label the center as a reference scenario.
+The range varies downside IV response, tenor damping and out-of-the-money Put
+discount assumptions; it does not cover every possible IV/skew movement. Equal
+sampled bounds are explicitly labelled and do not imply certainty.
+
+The checked-by-default conservative Short Put control beside the path selector
+assumes assignment for own-book short puts expiring by the horizon whenever the
+target price is below their strike, even if the selected path would leave them
+unassigned. Delivery cash, shares, P&L and the cost line use the same outcome.
+Uncheck it to use only the selected path; the choice is remembered per book.
+Surviving options and other legs keep their existing rules. This assumption is
+an assignment stress overlay, not a claim about the whole portfolio's worst case.
 
 All three come off the same event stream, because the number that matches
 your broker and the number you actually care about are not the same one:
@@ -745,17 +809,28 @@ archive. Configure under `[cost_basis]` in `config.ini`; a one-off
 override is `OPTION_COMBO_COST_BASIS_DB_PATH`. Loopback-only, like every
 other persistence surface.
 
+The page can export a checksummed JSON event backup and restore it after identity
+and version checks, archiving the current events first. File recovery preserves
+void states; statement coverage must be re-verified afterward. Legacy JSON exports
+without a checksum are not accepted by the file recovery action. The page recovery
+limit is 7 MiB; use a SQLite-consistent backup for larger databases.
+
 There is currently no dedicated `backup_cost_basis_store.py` command and no
 automatic cost-ledger backup scheduler. Back up this database with a
 SQLite-consistent backup while the backend is stopped (or with an external
 SQLite backup tool); do not copy only the main `.db` file while its WAL is
 active. The workspace archive/backup commands do not include `cost_basis.db`.
 
-Databases created before schema v7 are migrated in place. Schema v5's account
+Databases created before schema v9 are migrated in place. Schema v5's account
 migration does not rewrite event rows; schema v6 adds the per-event
 `allow_overdraw` audit flag and marks only legacy closing rows that demonstrably
 used that explicit exception. Schema v7 clears broker timestamps that older
-builds inferred from untrusted manual free-form notes.
+builds inferred from untrusted manual free-form notes. Schema v8 added statement
+registration; v9 archives that evidence with each rebuilt history. Migration
+retains v8 audit registrations but marks coverage unverified until statements
+are checked again; it does not change event data.
+Import/rebuild/reset/restore clients must provide both book identity and a ledger
+version. See `CODE PLAN/COST_BASIS_IMPORT_INTEGRITY.md` for the current checks.
 If all account-bearing rows in an old book agree on one account (apart from
 book-wide split rows), that account is adopted as its book identity. A
 genuinely mixed- or unlabelled-account old book remains

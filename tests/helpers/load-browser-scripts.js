@@ -7,6 +7,14 @@ function loadBrowserScripts(relativePaths, overrides = {}) {
     const scriptQueue = [];
     const seenPaths = new Set();
     for (const relativePath of relativePaths) {
+        if (relativePath === 'js/cost_basis.js' || relativePath === 'js/cost_basis_stress_core.js'
+            || relativePath === 'js/cost_basis_stress_band.js') {
+            for (const dependency of ['js/market_curves.js', 'js/cost_basis_stress_models.js',
+                'js/cost_basis_stress_core.js', 'js/cost_basis_stress_band.js']) {
+                if (dependency === relativePath) break;
+                if (!seenPaths.has(dependency)) { scriptQueue.push(dependency); seenPaths.add(dependency); }
+            }
+        }
         if (relativePath === 'js/market_holidays.js'
             && !Object.prototype.hasOwnProperty.call(overrides, 'OptionComboOfficialExchangeCalendars')
             && !seenPaths.has('js/official_exchange_calendars.generated.js')) {

@@ -136,6 +136,9 @@ def serialize_fill(
         'account': account,
         'symbol': symbol,
         'secType': sec_type,
+        # The contract's quote currency travels with the fill so the browser
+        # can refuse a foreign-currency execution for a single-currency book.
+        'currency': _upper(getattr(contract, 'currency', '')),
         'conId': getattr(contract, 'conId', None),
         'localSymbol': _text(getattr(contract, 'localSymbol', '')),
         'expiry': _contract_date(

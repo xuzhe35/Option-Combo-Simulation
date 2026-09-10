@@ -95,8 +95,43 @@ It currently:
 ### `cost_basis.html`
 
 The blended-cost ledger is standalone and never loads the trading shell. It
-loads only `js/cost_basis_core.js`, `js/cost_basis_import.js`, and
-`js/cost_basis.js`.
+loads the ledger/import/page scripts plus DOM-free `american_binomial.js`,
+`market_curves.js`, and `cost_basis_stress_{models,core,band,worker}.js`.
+The stress core compiles the ledger once, calibrates quotes to the selected
+pricer, and values both books through one instrument valuation path. Scenario
+costs are computed separately by replaying in-memory settlement rows through the
+ledger engine in expiry order, cached per distinct delivery outcome and reused
+by band members. These costs never feed back into the P&L calculation. The page
+only transports inputs and renders results. The worker receives the exact
+versioned dependency URLs loaded by the page; its generation and full input key
+prevent stale bands from landing after a parameter, book or snapshot change.
+No stress computation writes events or calls the trading shell.
+Quantity drafts are identity-keyed inputs to the stress core, applied after
+quote calibration and mapping-proxy selection. Current sizes are repriced as a
+same-scenario comparison. Resized drafts expose current-value funding and ΔNAV,
+never transplanted historical costs; optional user NAV is a display baseline.
+The page defaults to ΔNAV and disables implicit future income. Its IV band adds
+explicit level-sensitivity members without recalibrating the current snapshot.
+Cross-book quote refreshes share a generation: load the linked ledger first,
+request both snapshots concurrently, and only render after both complete.
+Horizon-only scrubbing reuses a completed synchronized v2 batch with full curves,
+pinning the valuation baseline to its receipt time. The core checks the original
+snapshot date via `snapshotThroughExpiry` separately from the target date;
+legacy/incomplete batches still require refresh. Each input cancels the prior
+worker generation and clears the old chart, cards and slice before recomputing.
+The live dispatcher admits at most two cost-basis snapshot tasks per connection
+and four in total, rejects excess requests immediately with a correlated busy
+response (no waiting queue), and cancels/awaits only the disconnected client's
+tasks. Broker quote cleanup runs in the fetcher's finally block; ledger actions
+remain ordered. Leaving a view only invalidates its browser-side batch.
+Missing linked snapshots, marks or required quote sides can drop the linked
+layer after independently validating the own book; missing own quotes can then
+fall back to settlement only. Degraded results are labelled, have no band and
+are disabled while fetching or in the change lens. Identity conflicts, crossed
+quotes and calibration failures remain errors, never zero-valued legs.
+Enabling a cached overlay also refreshes the main book; the 60-second quote-skew
+gate is never bypassed. A missing broker IV can use a labelled local-IV path-sigma
+proxy derived from valid marks, not a fabricated default volatility.
 
 It currently:
 
@@ -122,7 +157,9 @@ It currently:
 - automatically feeds the hero reference price into What If from existing
   portfolio-price pushes; manual scenario edits pause following, and resuming
   needs no request. Explicit current-price refresh remains a one-shot quote
-- provides expiry-bounded What If replay plus a modal multi-price stress test
+- provides expiry-bounded What If replay plus a multi-price stress test in its
+  own page view (parameters in a sticky left column, chart and cards on the right;
+  any view switch or book change tears the stress job down)
   that values every still-open option of the book on one scenario date (live
   longs as assets, live shorts as liabilities) with per-contract TWS IV, the
   shared discount curve, a CRR American binomial by default and a mid or
@@ -142,7 +179,10 @@ Two invariants are load-bearing and easy to break by "improving" the code:
 the ledger is the source of truth, and an assignment row's cash is the share
 delivery at the strike only, because the contract's premium was already
 recorded when it was opened. See
-`CODE PLAN/COST_BASIS_LEDGER_PAGE_PLAN.md`.
+`CODE PLAN/COST_BASIS_LEDGER_PAGE_PLAN.md`. The import pipeline's identity
+keys, opening-position arithmetic, CSV-vs-TWS cross-source matching and the
+monthly append workflow are written up in
+`CODE PLAN/COST_BASIS_IMPORT_INTEGRITY.md`.
 
 ### `workspace_db_admin.html`
 
@@ -874,7 +914,7 @@ execution actions.
 
 ### Blended-cost ledger (shared by both backends)
 
-`cost_basis_store.py` is the pure SQLite store (schema v7) behind
+`cost_basis_store.py` is the pure SQLite store (schema v9) behind
 `cost_basis.html`: append-oriented money events keyed per book, one derivation
 for every event's cash amount, per-kind field validation, client-token
 idempotency, external-ref import de-duplication, voiding that replays the
@@ -882,6 +922,13 @@ contract timeline rather than deleting, and snapshot hashing. Ordering is
 `trade_date -> broker_timestamp -> seq` in both the store and the browser
 engine, so the two agree on replay. Every write runs under BEGIN IMMEDIATE
 on its own short-lived connection.
+
+Schema v9 ties statement coverage to reset archives, checks both archive digests
+on restoration, and invalidates prior coverage after historical changes.
+Import/reset/rebuild/restore require identity and version credentials. Event
+pagination reads rows and digest in one transaction; the page rejects mixed
+versions. JSON backup export uses a single read snapshot and file restoration
+uses the same atomic archive-and-restore transaction.
 
 `cost_basis_ws.py` is the shared protocol layer both `ib_server.py` and
 `historical_server.py` mount, so Live and Historical answer with identical

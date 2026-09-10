@@ -2258,7 +2258,6 @@ async def _request_cost_basis_market_price(request):
     currency = str((request or {}).get('currency') or 'USD').strip().upper()
     if not account or not symbol or sec_type != 'STK' or len(currency) != 3:
         raise ValueError('a stock/ETF cost-basis book is required')
-
     contract = None
     for position in list(ib.positions() or []):
         candidate = getattr(position, 'contract', None)
@@ -2498,6 +2497,8 @@ async def _request_cost_basis_option_scenario_inputs(request):
     requested_contracts = data.get('contracts') or []
     if not account or not symbol or sec_type != 'STK' or len(currency) != 3:
         raise ValueError('a stock/ETF cost-basis book is required')
+    if currency != 'USD':
+        raise ValueError('stress valuation currently requires a USD book')
     try:
         scenario_date = datetime.strptime(through_expiry, '%Y%m%d').date()
     except ValueError as exc:
@@ -2513,7 +2514,8 @@ async def _request_cost_basis_option_scenario_inputs(request):
             getattr(contract, 'symbol', '') or '').strip().upper()
         contract_sec_type = str(
             getattr(contract, 'secType', '') or '').strip().upper()
-        if position_account != account or contract_symbol != symbol:
+        contract_currency = str(getattr(contract, 'currency', '') or '').strip().upper()
+        if position_account != account or contract_symbol != symbol or contract_currency != currency:
             continue
         if contract_sec_type == 'STK':
             underlying_contract = _cost_basis_stock_snapshot_contract(
@@ -2595,7 +2597,13 @@ async def _request_cost_basis_option_scenario_inputs(request):
         quote = extract_quote_snapshot(ticker, 'OPT') if ticker is not None else None
         iv = extract_option_iv(ticker) if ticker is not None else None
         option_rows.append({
+            **option_contract_timing_by_con_id.get(identity['conId'], {}),
             **identity,
+            'currency': str(getattr(_contract, 'currency', '') or ''),
+            # Local receipt time of this isolated one-shot ticker, not exchange
+            # execution time and not the time this response finishes assembling.
+            'observedAt': getattr(ticker, 'time', None).isoformat()
+                if ticker is not None and getattr(ticker, 'time', None) is not None else None,
             'position': float(getattr(position, 'position', 0) or 0),
             'impliedVolatility': float(iv) if iv is not None else None,
             'ivSource': _cost_basis_option_iv_source(ticker) if ticker is not None else '',
@@ -2624,6 +2632,12 @@ async def _request_cost_basis_option_scenario_inputs(request):
         'throughExpiry': through_expiry,
         'underlyingPrice': float(underlying_price)
             if underlying_price is not None else None,
+        'underlyingObservedAt': getattr(underlying_ticker, 'time', None).isoformat()
+            if underlying_ticker is not None and getattr(underlying_ticker, 'time', None) is not None else None,
+        'snapshotVersion': 2,
+        'snapshotId': uuid.uuid4().hex,
+        'timestampSemantics': 'local_ticker_receipt_not_exchange_time',
+        'discountCurve': curve,
         'options': option_rows,
         'ratesByExpiry': rates_by_expiry,
         'curveAsOf': str((curve or {}).get('curveAsOf') or ''),

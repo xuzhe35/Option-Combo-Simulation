@@ -39,32 +39,25 @@
     // whole book is in hand.
     const LEDGER_FETCH_SIZE = 2000;
     const MAX_LEDGER_EVENTS = 100000;
-    // Cross-book protection seeds (see the linked-hedge section below).
-    const LINKED_HEDGE_DEFAULTS = Object.freeze({
-        TQQQ: Object.freeze({ symbol: 'QQQ', ratio: 3 }),
-    });
-    const LINKED_HEDGE_DEFAULT_RATIO = 3;
-    const LINKED_HEDGE_MIN_ABS_RATIO = 0.01;
-    // IV response modes for the linked overlay. 'beta' is the spot-vol beta:
-    // vol points of IV lift per 1% drop of the linked underlying, applied on
-    // the downside only. 1.5 is the order of magnitude NDX/VXN regressions
-    // give (steeper inside real crashes); it is a starting value, not a fit.
-    const LINKED_IV_MODES = Object.freeze(['none', 'fixed', 'beta']);
-    const LINKED_IV_DEFAULT_BETA = 1.5;
-    const LINKED_IV_MAX_BETA = 20;
-    // Tenor damping: beta values describe ~30-day IV; longer-dated IV moves
-    // less, roughly like sqrt(reference tenor / remaining days), capped at 1.
-    const LINKED_IV_DEFAULT_TENOR_DAYS = 30;
-    const LINKED_MAX_HORIZON_DAYS = 3650;
-    const DAY_MS = 24 * 60 * 60 * 1000;
-    // Typing "20" must not fire a TWS snapshot for "2" and then "20".
-    const STRESS_HORIZON_DEBOUNCE_MS = 400;
-    const STRESS_LIQUIDATIONS = Object.freeze(['mid', 'bidask']);
-    const STRESS_PRICING_MODELS = Object.freeze(['american', 'european']);
-    const AMERICAN_BINOMIAL_STEPS = 121;
-    // Continuous dividend yields used by the pricers, by symbol. Unknown
-    // symbols carry none; the user can override either book in the modal.
-    const DIVIDEND_YIELD_DEFAULTS = Object.freeze({ QQQ: 0.006, TQQQ: 0.01 });
+    // Parameter defaults are owned by the DOM-free model module.
+    const {
+        LINKED_HEDGE_DEFAULTS,
+        LINKED_HEDGE_DEFAULT_RATIO,
+        LINKED_HEDGE_MIN_ABS_RATIO,
+        LINKED_IV_MODES,
+        LINKED_IV_DEFAULT_BETA,
+        LINKED_IV_MAX_BETA,
+        LINKED_IV_DEFAULT_TENOR_DAYS,
+        LINKED_IV_DEFAULT_TENOR_EXPONENT,
+        IV_RESEARCH_PROFILE,
+        LINKED_MAX_HORIZON_DAYS,
+        DAY_MS,
+        STRESS_HORIZON_DEBOUNCE_MS,
+        STRESS_LIQUIDATIONS,
+        STRESS_PRICING_MODELS,
+        AMERICAN_BINOMIAL_STEPS,
+        DIVIDEND_YIELD_DEFAULTS
+    } = globalScope.OptionComboCostBasisStressModels;
     const STRESS_LINKED_STORAGE_PREFIX = 'optionComboStressLinkedHedge:';
 
     const KIND_LABELS = {
@@ -171,12 +164,26 @@
         // the one date the settlement, this book's overlay and the linked
         // overlay all use; never remembered across opens.
         stressHorizonDays: null,
+        // Assumed weekly premium income (per book, remembered). 0 = none.
+        stressWeeklyPremium: 0,
         stressLiquidation: 'mid',
         stressPricingModel: 'american',
         stressDividendYield: null,
         stressRangePct: 30,
         stressBasePrice: null,
-        stressIncludeLongOptions: false,
+        stressIncludeLongOptions: true,
+        stressPnlBasis: 'change',
+        stressIncludeIncome: false,
+        stressNavBase: null,
+        stressQuantityDraft: { own: {}, linked: {} },
+        stressQuantityOwnKey: '', stressQuantityLinkedKey: '',
+        stressDraftTimer: null,
+        stressPath: 'immediate',
+        stressConservativeShortPutAssignment: true,
+        stressBandEnabled: true,
+        stressBandFlatIv: true,
+        stressIvRangePct: 20,
+        stressOwnIvBeta: false,
         stressLongOptionInputs: null,
         stressInputsPending: false,
         stressInputsError: '',
@@ -192,6 +199,13 @@
         stressLinkedIvBeta: LINKED_IV_DEFAULT_BETA,
         stressLinkedIvTenorDamping: true,
         stressLinkedIvTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
+        stressLinkedIvTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
+        stressIvResearchReviewedVersion: IV_RESEARCH_PROFILE.version,
+        // Historical calibrations (scripts/stress_model_validation.py); on by
+        // default in the page, opt-in for the pure API.
+        stressLinkedIvBetaAuto: true,
+        stressLinkedIvOtmDiscount: true,
+        stressLinkedSigmaCrashScale: true,
         stressLinkedMapping: 'compound',
         stressLinkedSigma: null,
         stressLinkedDividendYield: null,
@@ -208,6 +222,18 @@
         marketPriceFetchedAt: '',
         importResult: null,
         importText: '',
+        importMeta: null,
+        // Bumped on every file read, clear, commit and book switch: a
+        // result that arrives for an older generation is dropped, and a
+        // preview from an older generation cannot be committed.
+        importGeneration: 0,
+        importReading: false,
+        importCommitPending: false,
+        importCommitTokens: null,
+        importFilter: 'all',
+        ledgerVersion: null,
+        importBatches: [],
+        bookResets: [],
         executionFetchPending: false,
         resetPlan: null,
         reconcileOpenSignature: '',
@@ -379,1286 +405,143 @@
         return { marketValue, dilutedPnl };
     }
 
-    function _normalCdf(value) {
-        const x = Number(value);
-        if (!Number.isFinite(x)) return x > 0 ? 1 : 0;
-        const absolute = Math.abs(x);
-        const t = 1 / (1 + 0.2316419 * absolute);
-        const density = Math.exp(-0.5 * absolute * absolute) / Math.sqrt(2 * Math.PI);
-        const tail = density * t * (0.319381530
-            + t * (-0.356563782
-                + t * (1.781477937
-                    + t * (-1.821255978 + t * 1.330274429))));
-        const cdf = 1 - tail;
-        return x >= 0 ? cdf : 1 - cdf;
-    }
+    const {
+        _normalCdf,
+        calculateBsmOptionPrice,
+        normalizePricingModel,
+        normalizeLiquidation,
+        normalizeDividendYield,
+        priceScenarioOption,
+        bidAskProblem,
+        liquidationHaircut,
+        calculateBsmPutPrice,
+        _dateUtcFromDigits,
+        _quoteMatchesTerms,
+        _findOptionQuote,
+        _optionQuoteIdentityConflict,
+        normalizeIvShockPoints,
+        stressComponentNumbers,
+        normalizeWeeklyPremium,
+        premiumIncomeOver,
+        normalizeStressHorizonDays,
+        normalizeLinkedTenorDays,
+        addDaysToDigits,
+        tenorDampingFactor,
+        normalizeLinkedTenorExponent,
+        normalizeLinkedIvMode,
+        normalizeLinkedIvBeta,
+        AUTO_BETA_TABLE,
+        OTM_SHOCK_FLOOR,
+        CRASH_SIGMA_SCALE,
+        CRASH_SIGMA_FULL_DROP_PCT,
+        autoBetaForDrop,
+        otmShockFactor,
+        crashSigmaScale,
+        linkedIvShockPointsAt,
+        normalizeLinkedRatio,
+        LINKED_MAPPINGS,
+        normalizeLinkedMapping,
+        normalizeLinkedSigma,
+        leveragedDragLog,
+        mapLinkedUnderlyingPrice,
+        PATH_SIGMA_PROXY_FAR_PCT,
+        marketDataTypeLabel,
+        _proxyPathSigma,
+        chooseLinkedBook,
+        _prepareLinkedHedge
+    } = globalScope.OptionComboCostBasisStressModels;
 
-    /**
-     * European BSM value with a continuous dividend yield (default 0), used
-     * by the read-only option overlays.
-     */
-    function calculateBsmOptionPrice(right, spot, strike, timeYears, rate, volatility, dividendYield) {
-        const optionRight = String(right || '').toUpperCase().slice(0, 1);
-        const s = Number(spot);
-        const k = Number(strike);
-        const t = Number(timeYears);
-        const r = Number(rate);
-        const sigma = Number(volatility);
-        const q = dividendYield === undefined || dividendYield === null ? 0 : Number(dividendYield);
-        if ((optionRight !== 'C' && optionRight !== 'P')
-            || ![s, k, t, r, sigma, q].every(Number.isFinite) || s < 0 || k <= 0 || t < 0) {
-            return null;
-        }
-        if (t <= 0) return optionRight === 'C'
-            ? Math.max(s - k, 0) : Math.max(k - s, 0);
-        const forwardSpot = s * Math.exp(-q * t);
-        if (s <= 0) return optionRight === 'C' ? 0 : k * Math.exp(-r * t);
-        if (sigma <= 0) return optionRight === 'C'
-            ? Math.max(forwardSpot - k * Math.exp(-r * t), 0)
-            : Math.max(k * Math.exp(-r * t) - forwardSpot, 0);
-        const rootT = Math.sqrt(t);
-        const d1 = (Math.log(s / k) + (r - q + 0.5 * sigma * sigma) * t)
-            / (sigma * rootT);
-        const d2 = d1 - sigma * rootT;
-        if (optionRight === 'C') {
-            return forwardSpot * _normalCdf(d1) - k * Math.exp(-r * t) * _normalCdf(d2);
-        }
-        return k * Math.exp(-r * t) * _normalCdf(-d2) - forwardSpot * _normalCdf(-d1);
-    }
-
-    function normalizePricingModel(value) {
-        const model = String(value || 'european').trim().toLowerCase();
-        return STRESS_PRICING_MODELS.includes(model) ? model : null;
-    }
-
-    function normalizeLiquidation(value) {
-        const lens = String(value || 'mid').trim().toLowerCase();
-        return STRESS_LIQUIDATIONS.includes(lens) ? lens : null;
-    }
-
-    function normalizeDividendYield(value) {
-        if (value === null || value === undefined || value === '') return 0;
-        const yieldValue = Number(value);
-        if (!Number.isFinite(yieldValue) || yieldValue < 0 || yieldValue > 0.5) return null;
-        return yieldValue;
-    }
-
-    /**
-     * Price one option under the selected model. 'american' uses the CRR
-     * binomial pricer (the model TWS itself quotes US equity options with),
-     * 'european' the closed form; both honour the dividend yield. Returns
-     * null when the American pricer is not loaded rather than quietly
-     * falling back, so the caption never claims a model that was not used.
-     */
-    function priceScenarioOption(right, spot, strike, timeYears, rate, volatility, options) {
-        const opts = options || {};
-        const model = normalizePricingModel(opts.pricingModel) || 'european';
-        const dividendYield = Number(opts.dividendYield) || 0;
-        if (model === 'european') {
-            return calculateBsmOptionPrice(right, spot, strike, timeYears, rate, volatility, dividendYield);
-        }
-        const pricer = globalScope.OptionComboAmericanBinomial;
-        if (!pricer || typeof pricer.calculateAmericanOptionPrice !== 'function') return null;
-        const optionRight = String(right || '').toUpperCase().slice(0, 1);
-        if (optionRight !== 'C' && optionRight !== 'P') return null;
-        if (Number(timeYears) <= 0 || Number(spot) <= 0) {
-            return calculateBsmOptionPrice(right, spot, strike, timeYears, rate, volatility, dividendYield);
-        }
-        const value = pricer.calculateAmericanOptionPrice({
-            type: optionRight === 'C' ? 'call' : 'put',
-            spot, strike, varianceTime: timeYears, rateTime: timeYears,
-            riskFreeRate: rate, volatility, dividendYield,
-            steps: AMERICAN_BINOMIAL_STEPS,
-        });
-        return Number.isFinite(value) ? value : null;
-    }
-
-    /**
-     * Liquidation haircut from today's quote: a long is sold at the bid, a
-     * short is bought back at the ask, so the scenario mark is scaled by
-     * bid/mark or ask/mark. Returns null when the quote has no usable side.
-     */
-    /**
-     * '' when the quote is a real two-sided BBO, 'missing' when a side is
-     * absent, 'crossed' when bid > ask or the backend flagged it invalid. A
-     * crossed pair from two tick instants must never become a price: it
-     * would lift the long's bid and cut the short's ask at the same time.
-     */
-    function bidAskProblem(quote) {
-        const present = (value) => !(value === null || value === undefined || value === '')
-            && Number.isFinite(Number(value)) && Number(value) >= 0;
-        if (!quote || !present(quote.bid) || !present(quote.ask)) return 'missing';
-        if (quote.bidAskValid === false || Number(quote.ask) < Number(quote.bid)) return 'crossed';
-        return '';
-    }
-
-    function liquidationHaircut(quote, side, lens) {
-        if (lens !== 'bidask') return 1;
-        if (bidAskProblem(quote)) return null;
-        const mark = Number(quote.mark);
-        if (!Number.isFinite(mark) || mark <= 0) return null;
-        const sideValue = Number(side === 'short' ? quote.ask : quote.bid);
-        return Math.max(0, sideValue / mark);
-    }
-
-    function calculateBsmPutPrice(spot, strike, timeYears, rate, volatility) {
-        return calculateBsmOptionPrice('P', spot, strike, timeYears, rate, volatility);
-    }
-
-    function _dateUtcFromDigits(value) {
-        const digits = String(value || '').replace(/\D/g, '').slice(0, 8);
-        if (digits.length !== 8) return null;
-        const year = Number(digits.slice(0, 4));
-        const month = Number(digits.slice(4, 6));
-        const day = Number(digits.slice(6, 8));
-        const milliseconds = Date.UTC(year, month - 1, day);
-        const date = new Date(milliseconds);
-        if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1
-            || date.getUTCDate() !== day) return null;
-        return milliseconds;
-    }
-
-    function _quoteMatchesTerms(quote, position) {
-        const right = String(position.right || '').toUpperCase().slice(0, 1);
-        const strike = Number(position.strike);
-        const expiry = String(position.expiry || '').replace(/\D/g, '').slice(0, 8);
-        if (String(quote && quote.right || '').toUpperCase().slice(0, 1) !== right
-            || String(quote && quote.expiry || '').replace(/\D/g, '').slice(0, 8) !== expiry
-            || !(Math.abs(Number(quote && quote.strike) - strike) <= 1e-8)) return false;
-        // Same visible terms can still be a different deliverable (adjusted
-        // contracts): when both sides know the multiplier it must agree.
-        const quoteMultiplier = Number(quote && quote.multiplier);
-        const positionMultiplier = Math.abs(Number(position.sharesPerContract));
-        if (Number.isFinite(quoteMultiplier) && quoteMultiplier > 0
-            && Number.isFinite(positionMultiplier) && positionMultiplier > 0
-            && Math.abs(quoteMultiplier - positionMultiplier) > 1e-8) return false;
-        return true;
-    }
-
-    /**
-     * Match a TWS snapshot row to a ledger position. Identity is strict and
-     * layered: a position that carries a conId is matched by conId only, one
-     * that carries only a localSymbol by localSymbol only, and terms (right,
-     * expiry, strike, multiplier) are used solely when the ledger has neither.
-     * A strong identity that is absent from the snapshot never falls back to
-     * "a contract that looks the same".
-     */
-    function _findOptionQuote(optionInputs, position) {
-        const quotes = Array.isArray(optionInputs) ? optionInputs : [];
-        const positionConId = Number(position.conId);
-        if (Number.isFinite(positionConId) && positionConId > 0) {
-            return quotes.find((candidate) => (
-                Number(candidate && candidate.conId) === positionConId)) || null;
-        }
-        const positionLocalSymbol = String(position.localSymbol || '').trim();
-        if (positionLocalSymbol) {
-            return quotes.find((candidate) => (
-                String(candidate && candidate.localSymbol || '').trim()
-                    === positionLocalSymbol)) || null;
-        }
-        return quotes.find((candidate) => _quoteMatchesTerms(candidate, position)) || null;
-    }
-
-    /** True when the strict lookup failed although a same-terms quote exists. */
-    function _optionQuoteIdentityConflict(optionInputs, position) {
-        const quotes = Array.isArray(optionInputs) ? optionInputs : [];
-        const positionConId = Number(position.conId);
-        const positionLocalSymbol = String(position.localSymbol || '').trim();
-        const hasStrongIdentity = (Number.isFinite(positionConId) && positionConId > 0)
-            || Boolean(positionLocalSymbol);
-        if (!hasStrongIdentity || _findOptionQuote(quotes, position)) return false;
-        return quotes.some((candidate) => _quoteMatchesTerms(candidate, position));
-    }
-
-    /**
-     * Shift every quoted IV by `ivShock` (a fraction, 0.10 = +10 vol points),
-     * optionally damped by remaining tenor. Returns the shocked inputs and
-     * whether any quote would be pushed to or below zero.
-     */
-    function _applyIvShock(marketInputs, ivShock, tenorDays, scenarioAt) {
-        const shock = Number(ivShock) || 0;
-        if (!marketInputs || shock === 0) return { inputs: marketInputs, breaksIv: false };
-        const reference = tenorDays === null || tenorDays === undefined
-            ? null : Number(tenorDays);
-        let breaksIv = false;
-        const options = (Array.isArray(marketInputs.options) ? marketInputs.options : [])
-            .map((quote) => {
-                const iv = Number(quote && quote.impliedVolatility);
-                if (!Number.isFinite(iv) || iv <= 0) return quote;
-                let applied = shock;
-                if (reference !== null) {
-                    const quoteExpiryAt = _dateUtcFromDigits(quote && quote.expiry);
-                    if (quoteExpiryAt !== null && scenarioAt !== null) {
-                        applied = shock * tenorDampingFactor(
-                            (quoteExpiryAt - scenarioAt) / DAY_MS, reference);
-                    }
-                }
-                if (iv + applied <= 0) breaksIv = true;
-                return Object.assign({}, quote, {
-                    impliedVolatility: iv + applied, ivShockPoints: applied * 100,
-                });
-            });
-        return { inputs: Object.assign({}, marketInputs, { options }), breaksIv };
-    }
-
-    const DEFERRED_REASONS = Object.freeze({
-        long: Object.freeze({
-            inputs: 'missing_long_option_market_inputs',
-            incomplete: 'incomplete_long_option',
-            identity: 'long_option_identity_mismatch',
-            iv: 'missing_long_option_iv',
-            rate: 'missing_discount_rate',
-            shock: 'invalid_long_option_iv_shock',
-            sides: 'missing_long_option_quote_sides',
-            crossed: 'invalid_long_option_bid_ask',
-            pricer: 'missing_american_pricer',
-        }),
-        short: Object.freeze({
-            inputs: 'missing_short_option_market_inputs',
-            incomplete: 'incomplete_short_option',
-            identity: 'short_option_identity_mismatch',
-            iv: 'missing_short_option_iv',
-            rate: 'missing_discount_rate',
-            shock: 'invalid_short_option_iv_shock',
-            sides: 'missing_short_option_quote_sides',
-            crossed: 'invalid_short_option_bid_ask',
-            pricer: 'missing_american_pricer',
-        }),
-    });
-
-    function _emptyDeferredEstimate(available, reason, count) {
-        return {
-            available, reason: reason || '', count: count || 0, contracts: 0,
-            callContracts: 0, putContracts: 0,
-            marketValue: available ? 0 : null,
-            liability: available ? 0 : null,
-            pnl: available ? 0 : null,
-            ivMin: null, ivMax: null, rateMin: null, rateMax: null, details: [],
-        };
-    }
-
-    /**
-     * Mark the options that remain open after the stress date, one side at
-     * a time. `marketValue` is signed (a short is a liability, negative) and
-     * `pnl = marketValue + openPremium` works for both sides because the
-     * ledger's `openPremium` is signed cash: paid for a long, received for a
-     * short. Under every cost lens the premium of a still-open short is NOT
-     * inside the settlement figure ① (the conservative blended cost adds the
-     * open short premium back), so a short's full premium-minus-liability
-     * belongs here, exactly as a long's mark-minus-premium does.
-     */
-    function _estimateDeferredOptions(deferredOptions, scenarioPrice, options, side) {
-        const opts = options || {};
-        const reasons = DEFERRED_REASONS[side] || DEFERRED_REASONS.long;
-        const wantLong = side !== 'short';
-        const throughExpiry = String(opts.throughExpiry || '').replace(/\D/g, '').slice(0, 8);
-        const scenarioAt = _dateUtcFromDigits(throughExpiry);
-        const rawInputs = opts.marketInputs && typeof opts.marketInputs === 'object'
-            ? opts.marketInputs : null;
-        const eligible = (Array.isArray(deferredOptions) ? deferredOptions : []).filter(
-            (position) => (wantLong
-                ? Number(position.contracts) > 0 : Number(position.contracts) < 0)
-                && ['C', 'P'].includes(
-                    String(position.right || '').toUpperCase().slice(0, 1)));
-        if (!eligible.length) return _emptyDeferredEstimate(true, '', 0);
-        if (scenarioAt === null || !rawInputs
-            || String(rawInputs.throughExpiry || '') !== throughExpiry) {
-            return _emptyDeferredEstimate(false, reasons.inputs, eligible.length);
-        }
-        const shocked = _applyIvShock(rawInputs, opts.ivShock, opts.ivShockTenorDays, scenarioAt);
-        if (shocked.breaksIv) return _emptyDeferredEstimate(false, reasons.shock, eligible.length);
-        const marketInputs = shocked.inputs;
-        const liquidation = normalizeLiquidation(opts.liquidation) || 'mid';
-        const pricing = {
-            pricingModel: normalizePricingModel(opts.pricingModel) || 'european',
-            dividendYield: Number(opts.dividendYield) || 0,
-        };
-        const optionInputs = Array.isArray(marketInputs.options) ? marketInputs.options : [];
-        const ratesByExpiry = Array.isArray(marketInputs.ratesByExpiry)
-            ? marketInputs.ratesByExpiry : [];
-        const details = [];
-        for (const position of eligible) {
-            const expiryAt = _dateUtcFromDigits(position.expiry);
-            const right = String(position.right || '').toUpperCase().slice(0, 1);
-            const strike = Number(position.strike);
-            const contracts = Number(position.contracts);
-            const multiplier = Math.abs(Number(position.sharesPerContract));
-            const openPremium = Number(position.openPremium);
-            if (expiryAt === null || expiryAt <= scenarioAt || !Number.isFinite(strike)
-                || strike <= 0 || !Number.isFinite(contracts) || contracts === 0
-                || !Number.isFinite(multiplier) || multiplier <= 0
-                || !Number.isFinite(openPremium) || position.identityConflict) {
-                return _emptyDeferredEstimate(false, reasons.incomplete, eligible.length);
-            }
-            const quote = _findOptionQuote(optionInputs, position);
-            if (!quote && _optionQuoteIdentityConflict(optionInputs, position)) {
-                return _emptyDeferredEstimate(false, reasons.identity, eligible.length);
-            }
-            const impliedVolatility = Number(quote && quote.impliedVolatility);
-            if (!quote || !Number.isFinite(impliedVolatility) || impliedVolatility <= 0) {
-                return _emptyDeferredEstimate(false, reasons.iv, eligible.length);
-            }
-            const rateInput = ratesByExpiry.find((candidate) => (
-                String(candidate && candidate.expiry || '').replace(/\D/g, '').slice(0, 8)
-                    === String(position.expiry || '').replace(/\D/g, '').slice(0, 8)));
-            const zeroRate = Number(rateInput && rateInput.zeroRate);
-            if (!rateInput || !Number.isFinite(zeroRate)) {
-                return _emptyDeferredEstimate(false, reasons.rate, eligible.length);
-            }
-            const timeYears = (expiryAt - scenarioAt) / (365 * 24 * 60 * 60 * 1000);
-            const modelPerShare = priceScenarioOption(
-                right, scenarioPrice, strike, timeYears,
-                zeroRate, impliedVolatility, pricing);
-            if (modelPerShare === null && pricing.pricingModel === 'american') {
-                return _emptyDeferredEstimate(false, reasons.pricer, eligible.length);
-            }
-            if (!Number.isFinite(modelPerShare)) {
-                return _emptyDeferredEstimate(false, reasons.incomplete, eligible.length);
-            }
-            const haircut = liquidationHaircut(quote, wantLong ? 'long' : 'short', liquidation);
-            if (haircut === null) {
-                return _emptyDeferredEstimate(false, bidAskProblem(quote) === 'crossed'
-                    ? reasons.crossed : reasons.sides, eligible.length);
-            }
-            const markPerShare = modelPerShare * haircut;
-            const marketValue = markPerShare * contracts * multiplier;
-            details.push({
-                expiry: String(position.expiry), right, strike, contracts, multiplier,
-                timeYears, markPerShare, modelPerShare, haircut, marketValue,
-                pricingModel: pricing.pricingModel, dividendYield: pricing.dividendYield,
-                liability: marketValue < 0 ? -marketValue : 0,
-                impliedVolatility, ivSource: String(quote.ivSource || ''),
-                ivShockPoints: Number(quote.ivShockPoints) || 0,
-                zeroRate, rateSource: String(rateInput.source || ''),
-                openPremium, pnl: marketValue + openPremium,
-            });
-        }
-        const result = details.reduce((total, detail) => ({
-            available: true,
-            reason: '',
-            count: total.count + 1,
-            contracts: total.contracts + Math.abs(detail.contracts),
-            callContracts: total.callContracts
-                + (detail.right === 'C' ? Math.abs(detail.contracts) : 0),
-            putContracts: total.putContracts
-                + (detail.right === 'P' ? Math.abs(detail.contracts) : 0),
-            marketValue: total.marketValue + detail.marketValue,
-            liability: total.liability + detail.liability,
-            pnl: total.pnl + detail.pnl,
-            details: total.details.concat([detail]),
-        }), {
-            available: true, reason: '', count: 0, contracts: 0,
-            callContracts: 0, putContracts: 0,
-            marketValue: 0, liability: 0, pnl: 0, details: [],
-        });
-        result.ivMin = Math.min(...details.map((detail) => detail.impliedVolatility));
-        result.ivMax = Math.max(...details.map((detail) => detail.impliedVolatility));
-        result.rateMin = Math.min(...details.map((detail) => detail.zeroRate));
-        result.rateMax = Math.max(...details.map((detail) => detail.zeroRate));
-        // The shock each contract actually received (tenor damping makes it
-        // differ by expiry), so captions never quote the undamped figure.
-        result.ivShockPointsMin = Math.min(...details.map((detail) => detail.ivShockPoints));
-        result.ivShockPointsMax = Math.max(...details.map((detail) => detail.ivShockPoints));
-        return result;
-    }
-
-    /** Long Calls / Puts still open after the stress date: mark + premium paid. */
-    function estimateDeferredLongOptions(deferredOptions, scenarioPrice, options) {
-        return _estimateDeferredOptions(deferredOptions, scenarioPrice, options, 'long');
-    }
-
-    /** Short Calls / Puts still open after the stress date: premium received − liability. */
-    function estimateDeferredShortOptions(deferredOptions, scenarioPrice, options) {
-        return _estimateDeferredOptions(deferredOptions, scenarioPrice, options, 'short');
-    }
-
-    // ------------------------------------------------------------------
-    // Cross-book protection (TQQQ-first)
-    // ------------------------------------------------------------------
-    //
-    // A leveraged ETF book can borrow protection from the same account's
-    // unleveraged book: every TQQQ stress point is mapped onto a QQQ price
-    // and the QQQ book's Long Calls / Puts are valued there. The index is the
-    // driver: the default mapping inverts daily-rebalanced compounding with a
-    // volatility-drag term (see mapLinkedUnderlyingPrice), and the plain
-    // linear ratio is kept only for comparison. The mapping lives in exactly
-    // one function so a better model replaces it without touching the sweep.
-    // Only TQQQ has a seeded default today; any other leveraged fund works
-    // the same way once the user picks a linked book and a ratio.
-    const LINKED_REASON_BY_DEFERRED_REASON = Object.freeze({
-        missing_long_option_market_inputs: 'missing_linked_market_inputs',
-        missing_long_option_iv: 'missing_linked_option_iv',
-        missing_discount_rate: 'missing_linked_discount_rate',
-        incomplete_long_option: 'incomplete_linked_option',
-        long_option_identity_mismatch: 'linked_option_identity_mismatch',
-        missing_long_option_quote_sides: 'missing_linked_quote_sides',
-        invalid_long_option_bid_ask: 'invalid_linked_bid_ask',
-        invalid_long_option_iv_shock: 'invalid_linked_iv_shock',
-        missing_american_pricer: 'missing_american_pricer',
-    });
-
-    /** IV shock in vol points (10 = +10 percentage points); blank/0 means none. */
-    function normalizeIvShockPoints(value) {
-        if (value === null || value === undefined || value === '') return 0;
-        const points = Number(value);
-        if (!Number.isFinite(points) || Math.abs(points) > 500) return null;
-        return points;
-    }
-
-    /** Days the drop takes; blank means "use the selected expiry as the day". */
-    /**
-     * Component numbers shared by legend, status, cards, SVG titles and the
-     * tooltip: ① is always this book's settlement; this book's live long
-     * options are ② when shown; the linked book takes the next free number.
-     */
-    function stressComponentNumbers(showConvexity, showShorts, showLinked) {
-        const circled = ['①', '②', '③', '④'];
-        let next = 1;
-        const own = showConvexity ? circled[next++] : '';
-        const shorts = showShorts ? circled[next++] : '';
-        const linked = showLinked ? circled[next++] : '';
-        const parts = ['①'];
-        if (own) parts.push(own);
-        if (shorts) parts.push(shorts);
-        if (linked) parts.push(linked);
-        return { own, shorts, linked, total: parts.join('+') };
-    }
-
-    function normalizeStressHorizonDays(value) {
-        if (value === null || value === undefined || value === '') return null;
-        const days = Number(value);
-        if (!Number.isInteger(days) || days < 0 || days > LINKED_MAX_HORIZON_DAYS) return undefined;
-        return days;
-    }
-
-    function normalizeLinkedTenorDays(value) {
-        if (value === null || value === undefined || value === '') return LINKED_IV_DEFAULT_TENOR_DAYS;
-        const days = Number(value);
-        if (!Number.isFinite(days) || days < 1 || days > LINKED_MAX_HORIZON_DAYS) return null;
-        return days;
-    }
-
-    function addDaysToDigits(digits, days) {
-        const at = _dateUtcFromDigits(digits);
-        if (at === null || !Number.isFinite(Number(days))) return '';
-        const shifted = new Date(at + Number(days) * DAY_MS);
-        return `${shifted.getUTCFullYear()}${String(shifted.getUTCMonth() + 1).padStart(2, '0')}`
-            + `${String(shifted.getUTCDate()).padStart(2, '0')}`;
-    }
-
-    /** sqrt(reference / remaining days), never above 1, never below a day. */
-    function tenorDampingFactor(remainingDays, referenceDays) {
-        const remaining = Math.max(1, Number(remainingDays));
-        const reference = Number(referenceDays);
-        if (!Number.isFinite(remaining) || !Number.isFinite(reference) || reference <= 0) return 1;
-        return Math.min(1, Math.sqrt(reference / remaining));
-    }
-
-    function normalizeLinkedIvMode(value) {
-        const mode = String(value || 'none').trim().toLowerCase();
-        return LINKED_IV_MODES.includes(mode) ? mode : null;
-    }
-
-    function normalizeLinkedIvBeta(value) {
-        if (value === null || value === undefined || value === '') return LINKED_IV_DEFAULT_BETA;
-        const beta = Number(value);
-        if (!Number.isFinite(beta) || beta < 0 || beta > LINKED_IV_MAX_BETA) return null;
-        return beta;
-    }
-
-    /**
-     * Vol points to add to the linked contracts' IV at one scan point.
-     * 'beta' lifts IV only while the mapped price is below today's: the
-     * basis point and every rally get zero, so nothing on the upside is
-     * invented.
-     */
-    function linkedIvShockPointsAt(mode, linkedChangePct, fixedPoints, beta) {
-        if (mode === 'fixed') return Number(fixedPoints) || 0;
-        if (mode === 'beta') {
-            const drop = Number(linkedChangePct);
-            if (!Number.isFinite(drop) || drop >= 0) return 0;
-            return (Number(beta) || 0) * (-drop);
-        }
-        return 0;
-    }
-
-    function normalizeLinkedRatio(value) {
-        const ratio = Number(value);
-        if (!Number.isFinite(ratio) || Math.abs(ratio) < LINKED_HEDGE_MIN_ABS_RATIO) {
-            return null;
-        }
-        return ratio;
-    }
-
-    const LINKED_MAPPINGS = Object.freeze(['compound', 'linear']);
-
-    function normalizeLinkedMapping(value) {
-        const mapping = String(value || 'compound').trim().toLowerCase();
-        return LINKED_MAPPINGS.includes(mapping) ? mapping : null;
-    }
-
-    function normalizeLinkedSigma(value) {
-        if (value === null || value === undefined || value === '') return null;
-        const sigma = Number(value);
-        if (!Number.isFinite(sigma) || sigma < 0 || sigma > 5) return undefined;
-        return sigma;
-    }
-
-    /**
-     * Volatility drag of a daily-rebalanced leveraged fund over `timeYears`,
-     * as a log-return: (ratio² − ratio) / 2 × σ² × T. Zero for an instant
-     * move, for an unlevered ratio, or without a path volatility.
-     */
-    function leveragedDragLog(ratio, sigma, timeYears) {
-        const beta = Number(ratio);
-        const vol = Number(sigma);
-        const years = Number(timeYears);
-        if (![beta, vol, years].every(Number.isFinite) || vol <= 0 || years <= 0) return 0;
-        return ((beta * beta) - beta) / 2 * vol * vol * years;
-    }
-
-    /**
-     * Map a scan point of the leveraged book onto the price of the index it
-     * tracks. The index is the driver, so the book's move is inverted:
-     *
-     *   compound (default): (1 + ΔT) = (1 + R)^ratio × exp(−drag)
-     *                       ⇒ 1 + R = ((1 + ΔT) × exp(drag))^(1 / ratio)
-     *   linear:             R = ΔT / ratio
-     *
-     * A daily-rebalanced 3× fund really does compound, so at −30% the index
-     * is down 11.2%, not 10%; the drag term is the multi-day volatility cost
-     * and is zero for an instantaneous move. The ratio is signed so an
-     * inverse fund (SQQQ = −3) maps a rally onto a decline. A price can never
-     * go below zero.
-     */
-    function mapLinkedUnderlyingPrice(basePrice, changePct, ratio, options) {
-        const opts = options || {};
-        const base = Number(basePrice);
-        const change = Number(changePct);
-        const normalizedRatio = normalizeLinkedRatio(ratio);
-        if (!Number.isFinite(base) || base <= 0 || !Number.isFinite(change)
-            || normalizedRatio === null) return null;
-        const mapping = normalizeLinkedMapping(opts.mapping) || 'compound';
-        if (mapping === 'linear') {
-            return Math.max(0, base * (1 + change / 100 / normalizedRatio));
-        }
-        const gross = 1 + change / 100;
-        if (gross <= 0) return 0;
-        const drag = leveragedDragLog(normalizedRatio, opts.sigma, opts.timeYears);
-        const indexGross = Math.pow(gross * Math.exp(drag), 1 / normalizedRatio);
-        if (!Number.isFinite(indexGross)) return null;
-        return Math.max(0, base * indexGross);
-    }
-
-    // A proxy further than this from the spot is still used, but flagged:
-    // a deep wing's IV is a poor stand-in for realised index volatility.
-    const PATH_SIGMA_PROXY_FAR_PCT = 10;
-
-    /**
-     * Market proxy for the path volatility of the drag term: the IV of the
-     * quoted contract nearest the money among those alive after the stress
-     * date. Never the lowest IV (that is whichever wing the ledger happens to
-     * hold). Returns null when nothing qualifies; the caller decides whether
-     * that is fatal (it is whenever a positive horizon needs a drag).
-     */
-    /** TWS marketDataType per quote row → one honest word for the chip. */
-    function marketDataTypeLabel(rows) {
-        const names = { 1: '实时', 2: '冻结', 3: '延时', 4: '延时冻结' };
-        const kinds = Array.from(new Set((Array.isArray(rows) ? rows : [])
-            .map((row) => Number(row && row.marketDataType))
-            .filter((kind) => Number.isFinite(kind) && names[kind])));
-        if (!kinds.length) return '';
-        return kinds.length === 1 ? names[kinds[0]] : `混合：${kinds.map((k) => names[k]).join('/')}`;
-    }
-
-    function _proxyPathSigma(marketInputs, throughExpiry) {
-        const quotes = marketInputs && Array.isArray(marketInputs.options) ? marketInputs.options : [];
-        const spot = Number(marketInputs && marketInputs.underlyingPrice);
-        const alive = quotes.filter((quote) => (
-            String(quote && quote.expiry || '').replace(/\D/g, '').slice(0, 8) > throughExpiry
-            && Number(quote && quote.impliedVolatility) > 0
-            && Number(quote && quote.strike) > 0));
-        if (!alive.length) return null;
-        const distance = (quote) => (Number.isFinite(spot) && spot > 0
-            ? Math.abs(Number(quote.strike) - spot) / spot * 100 : Infinity);
-        const nearest = alive.reduce((best, quote) => (
-            distance(quote) < distance(best) ? quote : best), alive[0]);
-        const distancePct = distance(nearest);
-        return {
-            sigma: Number(nearest.impliedVolatility),
-            strike: Number(nearest.strike),
-            expiry: String(nearest.expiry || '').replace(/\D/g, '').slice(0, 8),
-            distancePct: Number.isFinite(distancePct) ? distancePct : null,
-            far: !Number.isFinite(distancePct) || distancePct > PATH_SIGMA_PROXY_FAR_PCT,
-        };
-    }
-
-    function _emptyLinkedEstimate(available, reason, count) {
-        return {
-            available, reason: reason || '', count: count || 0, contracts: 0,
-            callContracts: 0, putContracts: 0,
-            settledContracts: 0, deferredContracts: 0, expiredContracts: 0,
-            marketValue: available ? 0 : null,
-            referenceValue: available ? 0 : null,
-            pnl: available ? 0 : null,
-            premiumPnl: available ? 0 : null,
-            ivMin: null, ivMax: null, rateMin: null, rateMax: null, details: [],
-        };
-    }
-
-    /**
-     * Value the linked book's Long Calls / Puts at the mapped price on the
-     * stress date and report the CHANGE against what they are worth today.
-     *
-     * The premium already paid is sunk: it does not move with the scenario,
-     * so subtracting it would push the whole protection curve down by a
-     * constant and hide the very effect this overlay exists to show. Today's
-     * value is the TWS mark from the same one-shot snapshot that supplied the
-     * IV; the scenario value is BSM at that IV for contracts still alive after
-     * the stress date and intrinsic value for contracts that expire on or
-     * before it. `premiumPnl` (mark + openPremium) is kept for reference
-     * only. Short legs and shares of the linked book are ignored: this
-     * answers "how much more are those long options worth", not "merge two
-     * books". Contracts already expired on the valuation date protect
-     * nothing and are counted, not valued.
-     */
-    function estimateLinkedLongOptions(openOptions, linkedPrice, options) {
-        const opts = options || {};
-        const throughExpiry = String(opts.throughExpiry || '').replace(/\D/g, '').slice(0, 8);
-        // One scenario date for the whole modal: the linked book is valued
-        // on the same day this book settles, so the stacked total is one
-        // portfolio at one moment and every rate is resolved from that day.
-        const scenarioAt = _dateUtcFromDigits(throughExpiry);
-        const asOfAt = _dateUtcFromDigits(opts.asOf);
-        const marketInputs = opts.marketInputs && typeof opts.marketInputs === 'object'
-            ? opts.marketInputs : null;
-        const optionInputs = marketInputs && Array.isArray(marketInputs.options)
-            ? marketInputs.options : [];
-        const price = Number(linkedPrice);
-        const eligible = (Array.isArray(openOptions) ? openOptions : []).filter(
-            (position) => Number(position.contracts) > 0
-                && ['C', 'P'].includes(
-                    String(position.right || '').toUpperCase().slice(0, 1)));
-        if (!eligible.length) return _emptyLinkedEstimate(true, '', 0);
-        if (scenarioAt === null) {
-            return _emptyLinkedEstimate(false, 'missing_linked_market_inputs', eligible.length);
-        }
-        if (!Number.isFinite(price) || price < 0) {
-            return _emptyLinkedEstimate(false, 'invalid_linked_underlying_price', eligible.length);
-        }
-        const alive = [];
-        let expiredContracts = 0;
-        for (const position of eligible) {
-            const expiryAt = _dateUtcFromDigits(position.expiry);
-            if (expiryAt === null) {
-                return _emptyLinkedEstimate(false, 'incomplete_linked_option', eligible.length);
-            }
-            if (asOfAt !== null && expiryAt <= asOfAt) {
-                expiredContracts += Number(position.contracts);
-                continue;
-            }
-            alive.push({ position, expiryAt });
-        }
-        if (!alive.length) {
-            return Object.assign(_emptyLinkedEstimate(true, '', 0), { expiredContracts });
-        }
-        if (!marketInputs || String(marketInputs.throughExpiry || '') !== throughExpiry) {
-            return _emptyLinkedEstimate(false, 'missing_linked_market_inputs', eligible.length);
-        }
-        const deferred = alive.filter((entry) => entry.expiryAt > scenarioAt)
-            .map((entry) => entry.position);
-        // An IV shock is a scenario assumption: it moves the scenario value
-        // of contracts still alive after the stress date and nothing else.
-        // Today's marks stay what TWS says they are. Tenor damping shrinks a
-        // quote's lift with its remaining life.
-        const ivShock = Number(opts.ivShock || 0);
-        if (!Number.isFinite(ivShock)) {
-            return _emptyLinkedEstimate(false, 'invalid_linked_iv_shock', eligible.length);
-        }
-        const shocked = _applyIvShock(marketInputs, ivShock, opts.ivShockTenorDays, scenarioAt);
-        if (shocked.breaksIv && deferred.length) {
-            return _emptyLinkedEstimate(false, 'invalid_linked_iv_shock', eligible.length);
-        }
-        const scenarioInputs = shocked.inputs;
-        const liquidation = normalizeLiquidation(opts.liquidation) || 'mid';
-        let deferredResult = null;
-        if (deferred.length) {
-            deferredResult = estimateDeferredLongOptions(deferred, price, {
-                throughExpiry, marketInputs: scenarioInputs, liquidation,
-                pricingModel: opts.pricingModel, dividendYield: opts.dividendYield,
-            });
-            if (!deferredResult.available) {
-                return _emptyLinkedEstimate(false,
-                    LINKED_REASON_BY_DEFERRED_REASON[deferredResult.reason]
-                        || 'incomplete_linked_option', eligible.length);
-            }
-        }
-        const details = [];
-        let deferredIndex = 0;
-        for (const { position, expiryAt } of alive) {
-            const right = String(position.right || '').toUpperCase().slice(0, 1);
-            const strike = Number(position.strike);
-            const contracts = Number(position.contracts);
-            const multiplier = Math.abs(Number(position.sharesPerContract));
-            const openPremium = Number(position.openPremium);
-            if (!Number.isFinite(strike) || strike <= 0 || !Number.isFinite(contracts)
-                || contracts <= 0 || !Number.isFinite(multiplier) || multiplier <= 0
-                || !Number.isFinite(openPremium) || position.identityConflict) {
-                return _emptyLinkedEstimate(false, 'incomplete_linked_option', eligible.length);
-            }
-            const quote = _findOptionQuote(optionInputs, position);
-            if (!quote && _optionQuoteIdentityConflict(optionInputs, position)) {
-                return _emptyLinkedEstimate(false, 'linked_option_identity_mismatch', eligible.length);
-            }
-            // A null mark is "no quote", never a free option worth zero.
-            const rawMark = quote ? quote.mark : null;
-            const midMarkPerShare = Number(rawMark);
-            if (!quote || rawMark === null || rawMark === undefined || rawMark === ''
-                || !Number.isFinite(midMarkPerShare) || midMarkPerShare < 0) {
-                return _emptyLinkedEstimate(false, 'missing_linked_mark', eligible.length);
-            }
-            // Under the bid/ask lens today's value is what the bid pays and
-            // the scenario mark is scaled by the same bid/mark ratio.
-            const haircut = liquidationHaircut(quote, 'long', liquidation);
-            if (haircut === null) {
-                return _emptyLinkedEstimate(false, bidAskProblem(quote) === 'crossed'
-                    ? 'invalid_linked_bid_ask' : 'missing_linked_quote_sides', eligible.length);
-            }
-            const referenceMarkPerShare = liquidation === 'bidask'
-                ? Number(quote.bid) : midMarkPerShare;
-            const referenceValue = referenceMarkPerShare * contracts * multiplier;
-            let scenario;
-            if (expiryAt > scenarioAt) {
-                const deferredDetail = deferredResult.details[deferredIndex];
-                deferredIndex += 1;
-                const shockedQuote = ivShock === 0 ? null
-                    : _findOptionQuote(scenarioInputs.options, position);
-                scenario = {
-                    timeYears: deferredDetail.timeYears,
-                    markPerShare: deferredDetail.markPerShare,
-                    modelPerShare: deferredDetail.modelPerShare,
-                    pricingModel: deferredDetail.pricingModel,
-                    dividendYield: deferredDetail.dividendYield,
-                    marketValue: deferredDetail.marketValue,
-                    impliedVolatility: deferredDetail.impliedVolatility,
-                    ivShockPoints: shockedQuote ? Number(shockedQuote.ivShockPoints) || 0 : 0,
-                    ivSource: deferredDetail.ivSource,
-                    zeroRate: deferredDetail.zeroRate,
-                    rateSource: deferredDetail.rateSource,
-                    settled: false,
-                };
-            } else {
-                // Settlement value needs no haircut: it is exercised, not sold.
-                const intrinsic = right === 'C'
-                    ? Math.max(price - strike, 0) : Math.max(strike - price, 0);
-                scenario = {
-                    timeYears: 0, markPerShare: intrinsic,
-                    marketValue: intrinsic * contracts * multiplier,
-                    impliedVolatility: null, ivShockPoints: 0, ivSource: 'intrinsic',
-                    zeroRate: null, rateSource: '', settled: true,
-                };
-            }
-            details.push(Object.assign({
-                expiry: String(position.expiry), right, strike, contracts, multiplier,
-            }, scenario, {
-                referenceMarkPerShare, referenceValue, haircut,
-                markSource: String(quote.markSource || ''),
-                openPremium,
-                pnl: scenario.marketValue - referenceValue,
-                premiumPnl: scenario.marketValue + openPremium,
-            }));
-        }
-        const result = details.reduce((total, detail) => ({
-            available: true,
-            reason: '',
-            count: total.count + 1,
-            contracts: total.contracts + detail.contracts,
-            callContracts: total.callContracts
-                + (detail.right === 'C' ? detail.contracts : 0),
-            putContracts: total.putContracts
-                + (detail.right === 'P' ? detail.contracts : 0),
-            settledContracts: total.settledContracts
-                + (detail.settled ? detail.contracts : 0),
-            deferredContracts: total.deferredContracts
-                + (detail.settled ? 0 : detail.contracts),
-            expiredContracts,
-            marketValue: total.marketValue + detail.marketValue,
-            referenceValue: total.referenceValue + detail.referenceValue,
-            pnl: total.pnl + detail.pnl,
-            premiumPnl: total.premiumPnl + detail.premiumPnl,
-            details: total.details.concat([detail]),
-        }), {
-            available: true, reason: '', count: 0, contracts: 0,
-            callContracts: 0, putContracts: 0,
-            settledContracts: 0, deferredContracts: 0, expiredContracts,
-            marketValue: 0, referenceValue: 0, pnl: 0, premiumPnl: 0, details: [],
-        });
-        result.ivShockPointsMin = details.reduce((best, detail) => (
-            detail.settled ? best : Math.min(best, detail.ivShockPoints)), Infinity);
-        result.ivShockPointsMax = details.reduce((best, detail) => (
-            detail.settled ? best : Math.max(best, detail.ivShockPoints)), -Infinity);
-        if (!Number.isFinite(result.ivShockPointsMin)) result.ivShockPointsMin = null;
-        if (!Number.isFinite(result.ivShockPointsMax)) result.ivShockPointsMax = null;
-        result.ivMin = deferredResult && Number.isFinite(deferredResult.ivMin)
-            ? deferredResult.ivMin : null;
-        result.ivMax = deferredResult && Number.isFinite(deferredResult.ivMax)
-            ? deferredResult.ivMax : null;
-        result.rateMin = deferredResult && Number.isFinite(deferredResult.rateMin)
-            ? deferredResult.rateMin : null;
-        result.rateMax = deferredResult && Number.isFinite(deferredResult.rateMax)
-            ? deferredResult.rateMax : null;
-        return result;
-    }
-
-    /**
-     * Decide which sibling book the stress test should borrow protection
-     * from. A remembered choice wins when that book still exists; otherwise
-     * the seeded default (TQQQ -> QQQ) is preselected but left switched off,
-     * so nothing is ever overlaid without the user opting in.
-     */
-    function chooseLinkedBook(book, candidates, remembered) {
-        const pool = Array.isArray(candidates) ? candidates : [];
-        const hasCandidate = (bookId) => pool.some(
-            (candidate) => String(candidate.bookId) === String(bookId));
-        const rememberedBookId = remembered && remembered.linkedBookId
-            ? String(remembered.linkedBookId) : '';
-        if (rememberedBookId && hasCandidate(rememberedBookId)) {
-            const ratio = normalizeLinkedRatio(remembered.ratio);
-            const ivMode = normalizeLinkedIvMode(remembered.ivMode);
-            const ivShockPoints = normalizeIvShockPoints(remembered.ivShockPoints);
-            const ivBeta = normalizeLinkedIvBeta(remembered.ivBeta);
-            const ivTenorDays = normalizeLinkedTenorDays(remembered.ivTenorDays);
-            const mapping = normalizeLinkedMapping(remembered.mapping);
-            const sigma = normalizeLinkedSigma(remembered.sigma);
-            const rememberedYield = remembered.dividendYield === null
-                || remembered.dividendYield === undefined
-                ? null : normalizeDividendYield(remembered.dividendYield);
-            return {
-                mapping: mapping === null ? 'compound' : mapping,
-                sigma: sigma === undefined ? null : sigma,
-                dividendYield: rememberedYield,
-                bookId: rememberedBookId,
-                ratio: ratio === null ? LINKED_HEDGE_DEFAULT_RATIO : ratio,
-                ivMode: ivMode === null ? 'none' : ivMode,
-                ivShockPoints: ivShockPoints === null ? 0 : ivShockPoints,
-                ivBeta: ivBeta === null ? LINKED_IV_DEFAULT_BETA : ivBeta,
-                ivTenorDamping: remembered.ivTenorDamping !== false,
-                ivTenorDays: ivTenorDays === null ? LINKED_IV_DEFAULT_TENOR_DAYS : ivTenorDays,
-                // The overlay is never on when the modal opens: the fourth
-                // curve appears only after a deliberate tick this session.
-                enabled: false,
-            };
-        }
-        const seed = book && LINKED_HEDGE_DEFAULTS[
-            String(book.symbol || '').toUpperCase()];
-        const seeded = seed ? pool.find((candidate) => (
-            String(candidate.symbol || '').toUpperCase() === seed.symbol)) : null;
-        return {
-            bookId: seeded ? String(seeded.bookId) : '',
-            ratio: seed ? seed.ratio : LINKED_HEDGE_DEFAULT_RATIO,
-            ivMode: 'none',
-            ivShockPoints: 0,
-            ivBeta: LINKED_IV_DEFAULT_BETA,
-            ivTenorDamping: true,
-            ivTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
-            mapping: 'compound',
-            sigma: null,
-            dividendYield: null,
-            enabled: false,
-        };
-    }
-
-    /**
-     * Validate the linked-hedge request once per sweep. Returns either the
-     * inputs the per-point valuation needs or the reason nothing can be
-     * valued; a null request means the overlay is simply off.
-     */
-    function _prepareLinkedHedge(linkedHedge, bookCurrency) {
-        if (!linkedHedge || typeof linkedHedge !== 'object') return null;
-        // Two books add up only in one currency; there is no FX here.
-        const ownCurrency = String(bookCurrency || '').trim().toUpperCase();
-        const linkedCurrency = String(linkedHedge.currency || '').trim().toUpperCase();
-        if (ownCurrency && linkedCurrency && ownCurrency !== linkedCurrency) {
-            return { reason: 'linked_currency_mismatch' };
-        }
-        const ratio = normalizeLinkedRatio(linkedHedge.ratio);
-        if (ratio === null) return { reason: 'invalid_linked_ratio' };
-        if (!Array.isArray(linkedHedge.openOptions)) return { reason: 'missing_linked_book' };
-        const marketInputs = linkedHedge.marketInputs
-            && typeof linkedHedge.marketInputs === 'object' ? linkedHedge.marketInputs : null;
-        if (!marketInputs) return { reason: 'missing_linked_market_inputs' };
-        const basePrice = Number(linkedHedge.basePrice);
-        if (!Number.isFinite(basePrice) || basePrice <= 0) {
-            return { reason: 'invalid_linked_underlying_price' };
-        }
-        const ivMode = normalizeLinkedIvMode(linkedHedge.ivMode);
-        if (ivMode === null) return { reason: 'invalid_linked_iv_mode' };
-        const ivShockPoints = ivMode === 'fixed'
-            ? normalizeIvShockPoints(linkedHedge.ivShockPoints) : 0;
-        if (ivShockPoints === null) return { reason: 'invalid_linked_iv_shock' };
-        const ivBeta = ivMode === 'beta'
-            ? normalizeLinkedIvBeta(linkedHedge.ivBeta) : LINKED_IV_DEFAULT_BETA;
-        if (ivBeta === null) return { reason: 'invalid_linked_iv_beta' };
-        const mapping = normalizeLinkedMapping(linkedHedge.mapping);
-        if (mapping === null) return { reason: 'invalid_linked_mapping' };
-        const dividendYield = normalizeDividendYield(linkedHedge.dividendYield);
-        if (dividendYield === null) return { reason: 'invalid_linked_dividend_yield' };
-        const sigma = normalizeLinkedSigma(linkedHedge.sigma);
-        if (sigma === undefined) return { reason: 'invalid_linked_sigma' };
-        const ivTenorDamping = ivMode === 'beta' && linkedHedge.ivTenorDamping === true;
-        const ivTenorDays = ivTenorDamping
-            ? normalizeLinkedTenorDays(linkedHedge.ivTenorDays) : LINKED_IV_DEFAULT_TENOR_DAYS;
-        if (ivTenorDays === null) return { reason: 'invalid_linked_tenor_days' };
-        return {
-            reason: '',
-            ratio,
-            basePrice,
-            ivMode,
-            ivShockPoints,
-            ivBeta,
-            ivTenorDamping,
-            ivTenorDays,
-            mapping,
-            sigma,
-            dividendYield,
-            symbol: String(linkedHedge.symbol || ''),
-            bookId: String(linkedHedge.bookId || ''),
-            openOptions: linkedHedge.openOptions,
-            marketInputs,
-            asOf: String(linkedHedge.asOf || '').replace(/\D/g, '').slice(0, 8),
-        };
-    }
-
-    /**
-     * Sweep one expiry-settlement scenario across a symmetric underlying
-     * range. This is deliberately pure and read-only: every point is a fresh
-     * replay with synthetic settlement rows that are never persisted.
-     */
     function buildStressTestSeries(events, options) {
-        const opts = options || {};
-        const centerPrice = Number(opts.centerPrice);
-        const rawRange = Number(opts.rangePct);
-        const rangePct = Number.isFinite(rawRange)
-            ? Math.min(90, Math.max(1, Math.abs(rawRange))) : 30;
-        const rawPointCount = Number(opts.pointCount);
-        const pointCount = Number.isInteger(rawPointCount)
-            ? Math.min(121, Math.max(11, rawPointCount)) : 61;
-        const throughExpiry = String(opts.throughExpiry || '').replace(/\D/g, '').slice(0, 8);
-        const basisMode = core.BASIS_MODES.includes(opts.basisMode)
-            ? opts.basisMode : 'net_cash';
-        const includeDeferredLongOptions = opts.includeDeferredLongOptions === true;
-        const longOptionInputs = opts.longOptionInputs || null;
-        const liquidation = normalizeLiquidation(opts.liquidation);
-        const pricingModel = normalizePricingModel(opts.pricingModel);
-        const dividendYield = normalizeDividendYield(opts.dividendYield);
-        const linkedHedge = _prepareLinkedHedge(opts.linkedHedge, opts.currency);
-        // Path volatility for the leveraged drag: an explicit assumption, else
-        // the IV of the linked book's quoted contract nearest the money among
-        // those alive after the stress date, else none (fatal for a positive
-        // horizon, see below). Time is today → scenario date.
-        const linkedScenarioAt = _dateUtcFromDigits(throughExpiry);
-        const linkedAsOfAt = linkedHedge && !linkedHedge.reason
-            ? _dateUtcFromDigits(linkedHedge.asOf) : null;
-        const linkedTimeYears = linkedScenarioAt !== null && linkedAsOfAt !== null
-            ? Math.max(0, (linkedScenarioAt - linkedAsOfAt) / (365 * DAY_MS)) : 0;
-        const linkedProxy = linkedHedge && !linkedHedge.reason && linkedHedge.sigma === null
-            ? _proxyPathSigma(linkedHedge.marketInputs, throughExpiry) : null;
-        const linkedSigma = linkedHedge && !linkedHedge.reason
-            ? (linkedHedge.sigma !== null ? linkedHedge.sigma
-                : (linkedProxy ? linkedProxy.sigma : null)) : null;
-        let linkedSigmaSource = '';
-        if (linkedHedge && !linkedHedge.reason) {
-            if (linkedTimeYears <= 0) linkedSigmaSource = 'instant';
-            else if (linkedHedge.sigma !== null) linkedSigmaSource = 'assumption';
-            else if (linkedProxy) linkedSigmaSource = linkedProxy.far ? 'proxy_far' : 'proxy';
-            else linkedSigmaSource = 'none';
-            // A positive horizon under the compound mapping needs a path
-            // volatility; a missing one must not quietly become "no drag".
-            // When the book still holds contracts alive after the date, the
-            // per-contract valuation names their missing IV or mark itself;
-            // only a book whose contracts all settle has nothing to proxy with.
-            const aliveOptions = (Array.isArray(linkedHedge.openOptions)
-                ? linkedHedge.openOptions : []).filter((position) => (
-                Number(position && position.contracts) > 0
-                && String(position && position.expiry || '').replace(/\D/g, '').slice(0, 8)
-                    > throughExpiry));
-            if (linkedHedge.mapping !== 'linear' && linkedSigmaSource === 'none'
-                && !aliveOptions.length) {
-                linkedHedge.reason = 'missing_linked_sigma';
-            }
-        }
-        if (!Number.isFinite(centerPrice) || centerPrice <= 0 || !throughExpiry
-            || liquidation === null || pricingModel === null || dividendYield === null) {
-            return {
-                available: false,
-                reason: !throughExpiry ? 'missing_expiry'
-                    : (liquidation === null ? 'invalid_liquidation'
-                        : (pricingModel === null ? 'invalid_pricing_model'
-                            : (dividendYield === null ? 'invalid_dividend_yield'
-                                : 'invalid_center_price'))),
-                centerPrice: Number.isFinite(centerPrice) ? centerPrice : null,
-                rangePct,
-                throughExpiry,
-                basisMode,
-                includeDeferredLongOptions,
-                points: [],
-            };
-        }
+        return globalScope.OptionComboCostBasisStressCore.buildStressTestSeries(events, options);
+    }
 
-        const low = Math.max(0, centerPrice * (1 - rangePct / 100));
-        const high = centerPrice * (1 + rangePct / 100);
-        const points = [];
-        for (let index = 0; index < pointCount; index += 1) {
-            const ratio = pointCount === 1 ? 0 : index / (pointCount - 1);
-            const price = low + (high - low) * ratio;
-            const scenario = core.computeOptionSettlementScenario(events, price, {
-                secType: opts.secType || 'STK',
-                throughExpiry,
-            });
-            const summary = scenario.ledger && scenario.ledger.combined;
-            const rendered = summary ? core.summarizeCost(summary, basisMode) : null;
-            const cost = rendered && rendered.available ? Number(rendered.value) : null;
-            const shares = summary ? Number(summary.shares) : null;
-            let basePnl = cost !== null && Number.isFinite(shares)
-                ? (price - cost) * shares : null;
-            // If the selected expiry closes the entire position, cumulative
-            // net cash is the locked-in result. Do not use that shortcut while
-            // a later option remains open because its mark is intentionally
-            // absent from this expiry-only model.
-            if (basePnl === null && rendered && rendered.state === 'no_shares'
-                && scenario.ledger && !(scenario.ledger.openOptions || []).length) {
-                basePnl = Number(summary.lifetimeNetCash);
+    const stressJob = { generation: 0, key: '', worker: null, series: null, status: '', sliceIndex: null,
+        unavailable: new Map() };
+    // Off-hours stock snapshots from TWS sometimes deliver no price inside the
+    // server's window while every option line is fine. One automatic retry
+    // covers that without asking the user to click refresh.
+    const STRESS_UNDERLYING_RETRY_LIMIT = 1;
+    const STRESS_UNDERLYING_RETRY_MS = 1500;
+    // Series failures that only mean "no usable quotes yet": the settlement-
+    // only curve (what the page shows with deferred options unticked) is still
+    // valid and is drawn as a clearly labelled fallback.
+    const STRESS_FALLBACK_REASONS = Object.freeze([
+        'missing_long_option_market_inputs', 'missing_short_option_market_inputs',
+        'missing_option_mark', 'missing_long_option_iv', 'missing_short_option_iv',
+        'missing_option_quote_sides']);
+    // The linked overlay failing to quote is not a reason to hide the own
+    // book: drop the overlay first, and only then fall back further.
+    const STRESS_LINKED_FALLBACK_REASONS = Object.freeze([
+        'missing_linked_market_inputs', 'missing_linked_mark']);
+    const stressRefreshJob = { generation: 0, pending: false };
+    function _cancelStressJob() {
+        stressJob.generation += 1;
+        if (stressJob.worker) stressJob.worker.terminate();
+        Object.assign(stressJob, { worker: null, key: '', series: null, status: '', sliceIndex: null });
+    }
+    function _stressSeries(events, options, { skipBand = false } = {}) {
+        const key = JSON.stringify([state.bookId, state.stressInputsGeneration,
+            state.stressLinkedInputsGeneration, events, options, state.stressBandEnabled, state.stressBandFlatIv, state.stressIvRangePct]);
+        if (key === stressJob.key) return stressJob.series;
+        // An unavailable primary series is rebuilt on every render while its
+        // fallback is on screen; remember the verdict instead of recomputing.
+        if (stressJob.unavailable.has(key)) return stressJob.unavailable.get(key);
+        _cancelStressJob();
+        const series = buildStressTestSeries(events, options);
+        if (!series.available) {
+            stressJob.unavailable.set(key, series);
+            while (stressJob.unavailable.size > 4) {
+                stressJob.unavailable.delete(stressJob.unavailable.keys().next().value);
             }
-            const changePct = ((price / centerPrice) - 1) * 100;
-            // Steps 2-3: the linked index price and the IV shock are derived
-            // first, because this book's own open options follow them - its IV
-            // moves |ratio| times as much as the index's.
-            const linkedPrice = linkedHedge && !linkedHedge.reason
-                ? mapLinkedUnderlyingPrice(linkedHedge.basePrice, changePct, linkedHedge.ratio, {
-                    mapping: linkedHedge.mapping, sigma: linkedSigma, timeYears: linkedTimeYears,
-                }) : null;
-            const linkedChangePct = Number.isFinite(linkedPrice) && linkedHedge && linkedHedge.basePrice
-                ? ((linkedPrice / linkedHedge.basePrice) - 1) * 100 : null;
-            const linkedIvShockPoints = linkedHedge && !linkedHedge.reason ? linkedIvShockPointsAt(
-                linkedHedge.ivMode, linkedChangePct,
-                linkedHedge.ivShockPoints, linkedHedge.ivBeta) : 0;
-            const ownIvShockPoints = linkedHedge && !linkedHedge.reason
-                ? Math.abs(linkedHedge.ratio) * linkedIvShockPoints : 0;
-            const ownShockOptions = {
-                throughExpiry, marketInputs: longOptionInputs,
-                liquidation, pricingModel, dividendYield,
-                ivShock: ownIvShockPoints / 100,
-                ivShockTenorDays: linkedHedge && !linkedHedge.reason && linkedHedge.ivTenorDamping
-                    ? linkedHedge.ivTenorDays : null,
-            };
-            const convexity = includeDeferredLongOptions
-                ? estimateDeferredLongOptions(scenario.deferredOptions, price, ownShockOptions)
-                : _emptyDeferredEstimate(true, '', 0);
-            const shorts = includeDeferredLongOptions
-                ? estimateDeferredShortOptions(scenario.deferredOptions, price, ownShockOptions)
-                : _emptyDeferredEstimate(true, '', 0);
-            const pnl = basePnl !== null && convexity.available && shorts.available
-                ? basePnl + convexity.pnl + shorts.pnl : basePnl;
-            const point = {
-                price,
-                changePct,
-                ownIvShockPoints,
-                cost: Number.isFinite(cost) ? cost : null,
-                basePnl: Number.isFinite(basePnl) ? basePnl : null,
-                pnl: Number.isFinite(pnl) ? pnl : null,
-                longOptionMarketValue: Number.isFinite(convexity.marketValue)
-                    ? convexity.marketValue : null,
-                longOptionPnl: Number.isFinite(convexity.pnl) ? convexity.pnl : null,
-                longOptionCount: Number(convexity.count || 0),
-                longOptionContracts: Number(convexity.contracts || 0),
-                longCallContracts: Number(convexity.callContracts || 0),
-                longPutContracts: Number(convexity.putContracts || 0),
-                longOptionIvMin: Number.isFinite(convexity.ivMin)
-                    ? convexity.ivMin : null,
-                longOptionIvMax: Number.isFinite(convexity.ivMax)
-                    ? convexity.ivMax : null,
-                longOptionRateMin: Number.isFinite(convexity.rateMin)
-                    ? convexity.rateMin : null,
-                longOptionRateMax: Number.isFinite(convexity.rateMax)
-                    ? convexity.rateMax : null,
-                longOptionIvShockMin: Number.isFinite(convexity.ivShockPointsMin)
-                    ? convexity.ivShockPointsMin : null,
-                longOptionIvShockMax: Number.isFinite(convexity.ivShockPointsMax)
-                    ? convexity.ivShockPointsMax : null,
-                shortOptionIvShockMin: Number.isFinite(shorts.ivShockPointsMin)
-                    ? shorts.ivShockPointsMin : null,
-                shortOptionIvShockMax: Number.isFinite(shorts.ivShockPointsMax)
-                    ? shorts.ivShockPointsMax : null,
-                convexityReason: String(convexity.reason || ''),
-                convexityAvailable: convexity.available,
-                shortOptionLiability: Number.isFinite(shorts.liability) ? shorts.liability : null,
-                shortOptionPnl: Number.isFinite(shorts.pnl) ? shorts.pnl : null,
-                shortOptionCount: Number(shorts.count || 0),
-                shortOptionContracts: Number(shorts.contracts || 0),
-                shortCallContracts: Number(shorts.callContracts || 0),
-                shortPutContracts: Number(shorts.putContracts || 0),
-                shortOptionIvMin: Number.isFinite(shorts.ivMin) ? shorts.ivMin : null,
-                shortOptionIvMax: Number.isFinite(shorts.ivMax) ? shorts.ivMax : null,
-                shortOptionRateMin: Number.isFinite(shorts.rateMin) ? shorts.rateMin : null,
-                shortOptionRateMax: Number.isFinite(shorts.rateMax) ? shorts.rateMax : null,
-                shortReason: String(shorts.reason || ''),
-                shortAvailable: shorts.available,
-                shares: Number.isFinite(shares) ? shares : null,
-                assignedContracts: Number(scenario.assignedContracts || 0),
-                exercisedContracts: Number(scenario.exercisedContracts || 0),
-                expiredContracts: Number(scenario.expiredContracts || 0),
-                unresolvedCount: (scenario.unresolvedOptions || []).length,
-            };
-            if (linkedHedge) {
-                // Same stress date, other underlying: the linked book's long
-                // options are marked at the mapped price and added on top of
-                // this book's own result. `pnl` keeps its meaning above.
-                const ivShockPoints = linkedIvShockPoints;
-                const linked = linkedHedge.reason
-                    ? _emptyLinkedEstimate(false, linkedHedge.reason, 0)
-                    : estimateLinkedLongOptions(linkedHedge.openOptions, linkedPrice, {
-                        throughExpiry, marketInputs: linkedHedge.marketInputs,
-                        asOf: linkedHedge.asOf,
-                        liquidation, pricingModel, dividendYield: linkedHedge.dividendYield,
-                        ivShock: ivShockPoints / 100,
-                        ivShockTenorDays: linkedHedge.ivTenorDamping ? linkedHedge.ivTenorDays : null,
-                    });
-                Object.assign(point, {
-                    linkedPrice: Number.isFinite(linkedPrice) ? linkedPrice : null,
-                    linkedChangePct,
-                    linkedIvShockPoints: ivShockPoints,
-                    linkedIvShockPointsMin: Number.isFinite(linked.ivShockPointsMin)
-                        ? linked.ivShockPointsMin : null,
-                    linkedIvShockPointsMax: Number.isFinite(linked.ivShockPointsMax)
-                        ? linked.ivShockPointsMax : null,
-                    linkedMarketValue: Number.isFinite(linked.marketValue)
-                        ? linked.marketValue : null,
-                    linkedReferenceValue: Number.isFinite(linked.referenceValue)
-                        ? linked.referenceValue : null,
-                    linkedPnl: Number.isFinite(linked.pnl) ? linked.pnl : null,
-                    linkedPremiumPnl: Number.isFinite(linked.premiumPnl)
-                        ? linked.premiumPnl : null,
-                    linkedExpiredContracts: Number(linked.expiredContracts || 0),
-                    linkedCount: Number(linked.count || 0),
-                    linkedContracts: Number(linked.contracts || 0),
-                    linkedCallContracts: Number(linked.callContracts || 0),
-                    linkedPutContracts: Number(linked.putContracts || 0),
-                    linkedSettledContracts: Number(linked.settledContracts || 0),
-                    linkedDeferredContracts: Number(linked.deferredContracts || 0),
-                    linkedIvMin: Number.isFinite(linked.ivMin) ? linked.ivMin : null,
-                    linkedIvMax: Number.isFinite(linked.ivMax) ? linked.ivMax : null,
-                    linkedRateMin: Number.isFinite(linked.rateMin) ? linked.rateMin : null,
-                    linkedRateMax: Number.isFinite(linked.rateMax) ? linked.rateMax : null,
-                    linkedAvailable: linked.available === true,
-                    linkedReason: String(linked.reason || ''),
-                    totalPnl: pnl !== null && linked.available && Number.isFinite(linked.pnl)
-                        ? pnl + linked.pnl : null,
-                });
-            }
-            points.push(point);
+            return series;
         }
-        const hasUnresolved = points.some((point) => point.unresolvedCount);
-        const hasInvalidConvexity = includeDeferredLongOptions
-            && points.some((point) => !point.convexityAvailable);
-        const convexityFailure = points.find((point) => !point.convexityAvailable);
-        const hasInvalidShorts = includeDeferredLongOptions
-            && points.some((point) => !point.shortAvailable);
-        const shortFailure = points.find((point) => !point.shortAvailable);
-        const hasInvalidLinked = Boolean(linkedHedge)
-            && points.some((point) => !point.linkedAvailable);
-        const linkedFailure = points.find((point) => !point.linkedAvailable);
-        const series = {
-            symbol: String(opts.symbol || ''),
-            liquidation,
-            pricingModel,
-            dividendYield,
-            available: !hasUnresolved && !hasInvalidConvexity && !hasInvalidShorts
-                && !hasInvalidLinked
-                && points.some((point) => point.pnl !== null || point.cost !== null),
-            reason: hasUnresolved ? 'unresolved_options'
-                : (hasInvalidConvexity
-                    ? convexityFailure.convexityReason || 'invalid_long_option_inputs'
-                    : (hasInvalidShorts
-                        ? shortFailure.shortReason || 'invalid_short_option_inputs'
-                        : (hasInvalidLinked
-                            ? linkedFailure.linkedReason || 'missing_linked_book' : ''))),
-            centerPrice,
-            rangePct,
-            throughExpiry,
-            basisMode,
-            includeDeferredLongOptions,
-            longOptionCount: points.length ? points[0].longOptionCount : 0,
-            longOptionContracts: points.length ? points[0].longOptionContracts : 0,
-            longCallContracts: points.length ? points[0].longCallContracts : 0,
-            longPutContracts: points.length ? points[0].longPutContracts : 0,
-            longOptionIvMin: points.length ? points[0].longOptionIvMin : null,
-            longOptionIvMax: points.length ? points[0].longOptionIvMax : null,
-            longOptionRateMin: points.length ? points[0].longOptionRateMin : null,
-            longOptionRateMax: points.length ? points[0].longOptionRateMax : null,
-            shortOptionCount: points.length ? points[0].shortOptionCount : 0,
-            shortOptionContracts: points.length ? points[0].shortOptionContracts : 0,
-            shortCallContracts: points.length ? points[0].shortCallContracts : 0,
-            shortPutContracts: points.length ? points[0].shortPutContracts : 0,
-            shortOptionIvMin: points.length ? points[0].shortOptionIvMin : null,
-            shortOptionIvMax: points.length ? points[0].shortOptionIvMax : null,
-            shortOptionRateMin: points.length ? points[0].shortOptionRateMin : null,
-            shortOptionRateMax: points.length ? points[0].shortOptionRateMax : null,
-            inputsFetchedAt: String(longOptionInputs && longOptionInputs.fetchedAt || ''),
-            curveAsOf: String(longOptionInputs && (
-                longOptionInputs.curveEffectiveDate || longOptionInputs.curveAsOf) || ''),
-            low,
-            high,
-            points,
-        };
-        if (linkedHedge) {
-            const first = points.length ? points[0] : null;
-            // IV ranges are quoted at the basis point: with a beta shock the
-            // extremes of the scan carry their own, larger, lift.
-            const centerIndex = points.reduce((best, point, index) => (
-                Math.abs(point.changePct) < Math.abs(points[best].changePct) ? index : best
-            ), 0);
-            const center = points.length ? points[centerIndex] : null;
-            Object.assign(series, {
-                linkedHedgeEnabled: true,
-                linkedSymbol: linkedHedge.symbol || '',
-                linkedBookId: linkedHedge.bookId || '',
-                linkedRatio: linkedHedge.ratio === undefined ? null : linkedHedge.ratio,
-                linkedIvMode: linkedHedge.ivMode || 'none',
-                linkedIvShockPoints: linkedHedge.ivShockPoints === undefined
-                    ? null : linkedHedge.ivShockPoints,
-                linkedIvBeta: linkedHedge.ivBeta === undefined ? null : linkedHedge.ivBeta,
-                linkedIvTenorDamping: linkedHedge.ivTenorDamping === true,
-                linkedIvTenorDays: linkedHedge.ivTenorDays === undefined
-                    ? null : linkedHedge.ivTenorDays,
-                linkedMapping: linkedHedge.mapping || 'compound',
-                linkedDividendYield: linkedHedge.dividendYield === undefined
-                    ? null : linkedHedge.dividendYield,
-                linkedSigma: linkedSigma === undefined ? null : linkedSigma,
-                linkedSigmaSource,
-                linkedSigmaProxyStrike: linkedProxy ? linkedProxy.strike : null,
-                linkedSigmaProxyExpiry: linkedProxy ? linkedProxy.expiry : null,
-                linkedSigmaProxyDistancePct: linkedProxy ? linkedProxy.distancePct : null,
-                linkedTimeYears,
-                linkedDragLog: linkedHedge.reason ? 0
-                    : leveragedDragLog(linkedHedge.ratio, linkedSigma, linkedTimeYears),
-                centerIndex,
-                linkedBasePrice: linkedHedge.basePrice === undefined ? null : linkedHedge.basePrice,
-                linkedCount: first ? first.linkedCount : 0,
-                linkedContracts: first ? first.linkedContracts : 0,
-                linkedCallContracts: first ? first.linkedCallContracts : 0,
-                linkedPutContracts: first ? first.linkedPutContracts : 0,
-                linkedSettledContracts: first ? first.linkedSettledContracts : 0,
-                linkedDeferredContracts: first ? first.linkedDeferredContracts : 0,
-                linkedExpiredContracts: first ? first.linkedExpiredContracts : 0,
-                linkedReferenceValue: first ? first.linkedReferenceValue : null,
-                linkedIvMin: center ? center.linkedIvMin : null,
-                linkedIvMax: center ? center.linkedIvMax : null,
-                linkedRateMin: first ? first.linkedRateMin : null,
-                linkedRateMax: first ? first.linkedRateMax : null,
-                linkedInputsFetchedAt: String(linkedHedge.marketInputs
-                    && linkedHedge.marketInputs.fetchedAt || ''),
+        Object.assign(stressJob, { key, series });
+        if (series.quantitiesChanged) {
+            const original = buildStressTestSeries(events, { ...options, quantityOverrides: null });
+            if (original.available) series.points.forEach((p, i) => {
+                p.currentHoldingsPnl = original.points[i].headlinePnl;
+                p.quantityEffect = p.headlinePnl - p.currentHoldingsPnl;
             });
         }
+        if (skipBand) {
+            stressJob.status = '仅到期结算曲线，不生成区间。';
+            return series;
+        }
+        if (!state.stressBandEnabled) return series;
+        if (!globalScope.Worker || !globalScope.document.querySelectorAll) {
+            stressJob.status = '当前环境不支持后台计算，区间未生成；中线仍可用。';
+            return series;
+        }
+        const scripts = [...globalScope.document.querySelectorAll('script[src]')];
+        const source = scripts.find(s => /\/cost_basis_stress_worker\.js(?:\?|$)/.test(s.src));
+        const dependencies = scripts.filter(s => /\/(cost_basis_core|american_binomial|market_curves|cost_basis_stress_models|cost_basis_stress_core|cost_basis_stress_band)\.js(?:\?|$)/.test(s.src)).map(s => s.src);
+        const generation = stressJob.generation;
+        try {
+            if (!source) throw new Error('worker_source_missing');
+            const worker = new globalScope.Worker(source.src);
+            stressJob.worker = worker;
+            stressJob.status = '正在计算 IV 与价外折扣假设范围；中线仅作参考…';
+            worker.onmessage = event => {
+                if (generation !== stressJob.generation || key !== stressJob.key || !state.stressOpen) return;
+                if (event.data.generation !== generation) return;
+                series.band = event.data.band;
+                const hasWidth = series.band?.available && series.band.points.some(p => Math.abs(p.upper - p.lower) > 0.005);
+                stressJob.status = series.band && series.band.available
+                    ? `估值范围：${series.band.members.length} 个完整组合情景；中线是参考假设，非确定预测。`
+                        + (hasWidth ? '非置信区间，不保证连续参数极值。' : '当前采样结果重合，不表示实际结果没有不确定性。')
+                    : `区间不可用：${series.band && series.band.reason || '计算失败'}；保留中线。`;
+                worker.terminate(); stressJob.worker = null;
+                _renderStressTest();
+            };
+            worker.onerror = () => {
+                if (generation !== stressJob.generation) return;
+                stressJob.status = '后台区间计算失败；保留中线。';
+                worker.terminate(); stressJob.worker = null;
+                _renderStressTest();
+            };
+            worker.postMessage({ generation, dependencies, events, options,
+                bandOptions: { includeFlatIv: state.stressBandFlatIv, ivRangePct: state.stressIvRangePct } });
+        } catch (error) { stressJob.status = `区间不可用：${error.message}；保留中线。`; }
         return series;
     }
 
@@ -1761,6 +644,8 @@
             _invalidatePositions();
             _invalidateManagedAccounts();
             _setConnection('disconnected');
+            _invalidateStressScenarioInputs();
+            _renderStressTest();
             _scheduleReconnect();
         };
         socket.onerror = () => {
@@ -1870,6 +755,7 @@
             // an empty array into a trusted zero-position snapshot.
             state.positionsConnected = data.ibConnected === true
                 && data.positionsReady === true;
+            if (data.ibConnected === false) _invalidateStressScenarioInputs();
             // The server stamps this in TWS's configured timezone. Browser
             // local time must never be compared with broker-local CSV rows.
             state.positionsTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/
@@ -1982,6 +868,12 @@
         _refreshControls();
     }
 
+    // A book's IB account is permanent and is the key that matches TWS
+    // positions, executions and AvgCost, so the dropdown offers whatever this
+    // TWS reports. Accounts traded on another machine never appear there while
+    // their ledgers still belong here, so manual entry stays available even
+    // while connected: it only gives up the local position matching, and the
+    // underlying's quotes still come from this same local connection.
     function _renderManagedAccounts(preferredAccount) {
         const select = $('new-book-account');
         if (!select) return;
@@ -2002,11 +894,11 @@
         }
 
         let selected = accounts.includes(preferred) ? preferred : '';
-        if (!hasLiveAccounts && preferred === MANUAL_ACCOUNT_VALUE) {
+        if (preferred === MANUAL_ACCOUNT_VALUE) {
             selected = MANUAL_ACCOUNT_VALUE;
         } else if (!selected && accounts.length === 1) {
             selected = accounts[0];
-        } else if (!selected && !hasLiveAccounts && accounts.length === 0) {
+        } else if (!selected && accounts.length === 0) {
             selected = MANUAL_ACCOUNT_VALUE;
         }
 
@@ -2015,7 +907,8 @@
             const placeholder = globalScope.document.createElement('option');
             placeholder.value = '';
             placeholder.textContent = hasLiveAccounts
-                ? '选择 TWS 账户' : '选择已有 IB 账户或手动输入';
+                ? '选择 TWS 账户或手动输入'
+                : '选择已有 IB 账户或手动输入';
             placeholder.selected = true;
             placeholder.disabled = true;
             select.appendChild(placeholder);
@@ -2027,13 +920,11 @@
             option.selected = account === selected;
             select.appendChild(option);
         });
-        if (!hasLiveAccounts) {
-            const manualOption = globalScope.document.createElement('option');
-            manualOption.value = MANUAL_ACCOUNT_VALUE;
-            manualOption.textContent = '手动输入其他 IB 账号…';
-            manualOption.selected = selected === MANUAL_ACCOUNT_VALUE;
-            select.appendChild(manualOption);
-        }
+        const manualOption = globalScope.document.createElement('option');
+        manualOption.value = MANUAL_ACCOUNT_VALUE;
+        manualOption.textContent = '手动输入其他 IB 账号…';
+        manualOption.selected = selected === MANUAL_ACCOUNT_VALUE;
+        select.appendChild(manualOption);
         select.value = selected;
         select.disabled = state.connection !== 'connected'
             || !(state.status && state.status.available);
@@ -2042,18 +933,54 @@
         manualInput.hidden = !manualSelected;
         manualInput.required = manualSelected;
         manualInput.disabled = !manualSelected || select.disabled;
+        _renderNewBookAccountHint();
+    }
 
-        if (hasLiveAccounts && !selected) {
-            _text($('new-book-account-hint'), '请选择这个账本所属的 TWS 账户。');
-        } else if (hasLiveAccounts) {
-            _text($('new-book-account-hint'), `新账本将固定归属于 ${selected}。`);
+    // '' when this TWS reports the account, or reports none at all and so
+    // cannot judge it; otherwise the plain consequence of keeping a ledger
+    // for an account this machine does not see.
+    function newBookAccountNotice(account, liveAccounts) {
+        const wanted = String(account || '').trim().toUpperCase();
+        const live = (liveAccounts || [])
+            .map((item) => String(item || '').trim().toUpperCase())
+            .filter(Boolean);
+        if (!wanted || !live.length || live.includes(wanted)) return '';
+        return `${wanted} 不在本机 TWS 的账户列表中：`
+            + '账本照常记账，标的行情仍走当前本地连接，'
+            + '但不会自动匹配本机持仓、成交和 AvgCost。';
+    }
+
+    function _renderNewBookAccountHint() {
+        const select = $('new-book-account');
+        const hint = $('new-book-account-hint');
+        if (!select || !hint) return;
+        const manualInput = $('new-book-account-manual');
+        const hasLiveAccounts = state.managedAccounts.length > 0;
+        const manualSelected = select.value === MANUAL_ACCOUNT_VALUE;
+        const account = manualSelected
+            ? String((manualInput && manualInput.value) || '').trim().toUpperCase()
+            : String(select.value || '').trim();
+        const notice = newBookAccountNotice(account, state.managedAccounts);
+        let message;
+        if (notice) {
+            message = notice;
+        } else if (account) {
+            message = `新账本将固定归属于 ${account}。`;
+        } else if (manualSelected && hasLiveAccounts) {
+            message = '输入在其他机器上运行的 IB 账号；'
+                + '账本留在本地，行情仍走当前 TWS 连接。';
         } else if (manualSelected) {
-            _text($('new-book-account-hint'),
-                'IB API 未连接：请手动输入准确的 IB 账号；连接后会改用 TWS 账户列表。');
+            message = 'IB API 未连接：请手动输入准确的 IB '
+                + '账号；连接后会改用 TWS 账户列表。';
+        } else if (hasLiveAccounts) {
+            message = '请选择这个账本所属的 TWS 账户，'
+                + '或选择“手动输入其他 IB 账号”。';
         } else {
-            _text($('new-book-account-hint'),
-                'IB API 未连接：可选择已有账本账户，或选择“手动输入其他 IB 账号”。');
+            message = 'IB API 未连接：可选择已有账本账户，'
+                + '或选择“手动输入其他 IB 账号”。';
         }
+        _text(hint, message);
+        hint.classList.toggle('warn', Boolean(notice));
     }
 
     function _selectedNewBookAccount() {
@@ -2143,20 +1070,27 @@
     }
 
     function _showView(view) {
-        const next = view === 'settings' ? 'settings' : 'ledger';
+        const next = view === 'settings' || view === 'stress' ? view : 'ledger';
+        // The stress test lives in its own view. Leaving that view for any
+        // reason (sidebar, settings, form fill, book switch) tears it down so
+        // no worker or snapshot batch keeps running behind another view.
+        if (next !== 'stress' && state.stressOpen) _teardownStressTest();
         state.activeView = next;
         $('ledger-view').hidden = next !== 'ledger';
         $('settings-view').hidden = next !== 'settings';
+        $('stress-view').hidden = next !== 'stress';
         $('btn-open-settings').classList.toggle('active', next === 'settings');
+        $('btn-open-stress-view').classList.toggle('active', next === 'stress');
         Array.from($('book-sidebar-list').querySelectorAll('[data-book-id]'))
             .forEach((button) => button.classList.toggle(
                 'active', next === 'ledger' && button.dataset.bookId === state.bookId));
         const book = _currentBook();
+        const bookTitle = book ? `${book.account || '旧版账户'} / ${book.symbol}` : '请选择账本';
         _text($('page-eyebrow'), next === 'settings'
-            ? '系统管理' : '综合成本账本');
+            ? '系统管理' : (next === 'stress' ? 'What If · 多价格情景' : '综合成本账本'));
         _text($('page-title'), next === 'settings'
             ? '设置与新建账本'
-            : (book ? `${book.account || '旧版账户'} / ${book.symbol}` : '请选择账本'));
+            : (next === 'stress' ? `${bookTitle} · 到期压力测试` : bookTitle));
         globalScope.document.body.classList.remove('sidebar-open');
     }
 
@@ -2377,10 +1311,16 @@
             stressLinkedIvShockPoints: 0,
             stressLinkedIvBeta: LINKED_IV_DEFAULT_BETA,
             stressHorizonDays: null,
+            stressWeeklyPremium: 0,
             stressLiquidation: 'mid',
             stressDividendYield: null,
             stressLinkedIvTenorDamping: true,
             stressLinkedIvTenorDays: LINKED_IV_DEFAULT_TENOR_DAYS,
+            stressLinkedIvTenorExponent: LINKED_IV_DEFAULT_TENOR_EXPONENT,
+            stressIvResearchReviewedVersion: IV_RESEARCH_PROFILE.version,
+            stressLinkedIvBetaAuto: true,
+            stressLinkedIvOtmDiscount: true,
+            stressLinkedSigmaCrashScale: true,
             stressLinkedMapping: 'compound',
             stressLinkedSigma: null,
             stressLinkedDividendYield: null,
@@ -2393,6 +1333,13 @@
             stressLinkedInputsError: '',
             importResult: null,
             importText: '',
+            importMeta: null,
+            importReading: false,
+            importCommitTokens: null,
+            importFilter: 'all',
+            ledgerVersion: null,
+            importBatches: [],
+            bookResets: [],
             resetPlan: null,
             allEvents: [],
             eventsTotal: 0,
@@ -2402,12 +1349,20 @@
     }
 
     function _beginBookSelection(bookId) {
+        // A stress view still open belongs to the previous book.
+        if (state.stressOpen) {
+            _teardownStressTest();
+            _showView('ledger');
+        }
+        _cancelStressJob();
+        _invalidateStressScenarioInputs();
         state.whatIfEditGeneration += 1;
         // Snapshots and linked-book loads in flight belong to the previous book.
         state.stressInputsGeneration += 1;
         state.stressLinkedLoadGeneration += 1;
         state.stressLinkedInputsGeneration += 1;
         state.bookId = String(bookId || '');
+        state.importGeneration += 1;
         $('book-select').value = state.bookId;
         Object.assign(state,
             bookScopedStateReset(state.bookId, state.referencePriceByBook));
@@ -2428,6 +1383,7 @@
     }
 
     async function _selectBook(bookId) {
+        if (state.importCommitPending) return;
         const requestedBookId = String(bookId || '');
         _beginBookSelection(requestedBookId);
         return loadSelectedBookSafely(
@@ -2437,6 +1393,8 @@
                 await _refreshResetPlan();
                 _renderImportPreview();
                 _renderSidebarBooks();
+                _loadImportBatches();
+                _loadResets();
             },
             (error) => {
                 if (state.bookId !== requestedBookId) return;
@@ -2461,6 +1419,7 @@
         state.eventLoadGeneration += 1;
         const generation = state.eventLoadGeneration;
         const collected = [];
+        let loadedVersion = null;
         let offset = 0;
         let total = 0;
         for (;;) {
@@ -2474,6 +1433,13 @@
                 state.bookId, bookId, state.eventLoadGeneration, generation)) {
                 return false;
             }
+            if (!response.ledgerVersion?.digest || (loadedVersion
+                && loadedVersion.digest !== response.ledgerVersion.digest)) {
+                state.importResult = null;
+                state.ledgerVersion = null;
+                throw new Error('账本在分页读取期间发生变化，请刷新后重新预览；本次读取未被采用。');
+            }
+            loadedVersion = response.ledgerVersion;
             const batch = Array.isArray(response.events) ? response.events : [];
             batch.forEach((event) => {
                 const timestamp = _exactBrokerTimestamp(event);
@@ -2484,22 +1450,42 @@
             offset += batch.length;
             if (!batch.length || collected.length >= total) break;
             if (offset > MAX_LEDGER_EVENTS) {
-                globalScope.alert(
-                    `账本超过 ${MAX_LEDGER_EVENTS} 条，只载入了前 ${offset} 条；`
-                    + '总览数字将不完整，请先归档或拆分账本。');
-                break;
+                state.ledgerVersion = null;
+                state.importResult = null;
+                throw new Error(`账本超过 ${MAX_LEDGER_EVENTS} 条，未采用不完整数据；请先拆分账本。`);
             }
         }
         if (!isCurrentEventLoad(
             state.bookId, bookId, state.eventLoadGeneration, generation)) {
             return false;
         }
+        if (collected.length !== total) {
+            state.ledgerVersion = null;
+            state.importResult = null;
+            throw new Error('账本分页不完整，请重新读取后再导入。');
+        }
+        // A same-book refresh is reachable from the stress view's topbar.
+        // Its old worker and quotes describe the previous event stream.
+        if (state.stressOpen) _invalidateStressScenarioInputs();
+        state.ledgerVersion = loadedVersion;
         state.allEvents = collected;
         state.eventsTotal = total;
         state.flowPage = 1;
         _syncBookMode();
         _renderBookMeta();
         _recompute();
+        if (state.stressOpen) {
+            const expiries = _renderStressExpiryOptions();
+            if (expiries.length && state.eventsTotal <= state.allEvents.length
+                && (state.stressIncludeLongOptions || state.stressIncludeLinkedHedge
+                    || state.stressPnlBasis === 'change')) {
+                // Reload the linked ledger too, then quote the new contract sets
+                // as one pair. Do not reinitialize the user's scenario controls.
+                void _refreshStressScenarioInputs(false, true);
+            } else {
+                _renderStressTest();
+            }
+        }
         // A preview is a calculation over the ledger state at that moment.
         // Manual entries, voids, or a refresh can change the opening-position
         // arithmetic after the file was selected, so never leave an old
@@ -2601,6 +1587,7 @@
     }
 
     function _invalidatePositions() {
+        _cancelStressJob();
         if (state.positionsTimer) {
             globalScope.clearTimeout(state.positionsTimer);
             state.positionsTimer = null;
@@ -2949,6 +1936,7 @@
         const followInput = $('what-if-follow-reference');
         followInput.checked = state.whatIfPriceSource !== 'custom';
         const stressButton = $('btn-open-stress-test');
+        const stressNavButton = $('btn-open-stress-view');
         const resultNode = $('what-if-result');
         const totalCostNode = $('what-if-total-cost');
         const finalSharesNode = $('what-if-final-shares');
@@ -2968,6 +1956,7 @@
             currentButton.disabled = true;
             followInput.disabled = true;
             stressButton.disabled = true;
+            stressNavButton.disabled = true;
             _text($('what-if-price-label'), '假设标的到期结算价');
             _text($('what-if-context'), '选择账本后，可模拟所有未平期权结算后的持股与综合成本。');
             _text($('what-if-result-caption'), '按上方选中的成本口径');
@@ -2983,6 +1972,7 @@
         currentButton.disabled = futures || !expiries.length
             || state.marketPriceRefreshPending || state.connection !== 'connected';
         stressButton.disabled = futures || !expiries.length;
+        stressNavButton.disabled = stressButton.disabled;
         _text($('what-if-price-label'), `${book.symbol} 假设到期结算价`);
         if (futures) {
             input.value = '';
@@ -3113,11 +2103,98 @@
         return null;
     }
 
+    function _scheduleStressDraft() {
+        _cancelStressJob(); _clearStressChart(); _clear($('stress-key-points'));
+        globalScope.clearTimeout(state.stressDraftTimer);
+        _text($('stress-status'), '正在按模拟数量重新计算净值变化…');
+        state.stressDraftTimer = globalScope.setTimeout(() => {
+            state.stressDraftTimer = null;
+            if (state.stressOpen) _renderStressTest();
+        }, 180);
+    }
+
+    function _renderStressQuantities(book) {
+        const box = $('stress-quantity-rows');
+        if (!box) return;
+        const ownKey = JSON.stringify([book.bookId, state.allEvents]);
+        const linkedKey = JSON.stringify([state.stressLinkedBookId, state.stressLinkedEvents]);
+        if (state.stressQuantityOwnKey !== ownKey) {
+            state.stressQuantityDraft.own = {}; delete state.stressQuantityDraft.shares;
+            state.stressNavBase = null;
+            state.stressQuantityOwnKey = ownKey;
+        }
+        if (state.stressQuantityLinkedKey !== linkedKey) {
+            state.stressQuantityDraft.linked = {}; state.stressQuantityLinkedKey = linkedKey;
+        }
+        const nav = $('stress-nav-base');
+        if (globalScope.document.activeElement !== nav) nav.value = state.stressNavBase === null ? '' : String(state.stressNavBase);
+        // Preserve the actively edited input while the chart refreshes.
+        if (globalScope.document.activeElement?.dataset?.stressQuantity) return;
+        _clear(box);
+        const K = globalScope.OptionComboCostBasisStressCore;
+        const add = (label, current, value, set, isShares) => {
+            const row = globalScope.document.createElement('label'); row.className = 'stress-quantity-row';
+            const name = globalScope.document.createElement('span'); name.textContent = `${label} · 当前 ${_quantity(current)}`;
+            const input = globalScope.document.createElement('input');
+            input.type = 'number'; input.step = isShares ? 'any' : '1';
+            if (!isShares) input.min = '0';
+            input.value = String(value); input.dataset.stressQuantity = '1';
+            input.setAttribute('aria-label', `${label} 模拟${isShares ? '股数' : '张数'}`);
+            input.addEventListener('input', () => {
+                set(input.value.trim() === '' ? NaN : Number(input.value));
+                if (state.stressPnlBasis !== 'change') {
+                    state.stressPnlBasis = 'change'; _writeStressLinkedMemory();
+                }
+                _scheduleStressDraft();
+            });
+            row.appendChild(name); row.appendChild(input); box.appendChild(row);
+        };
+        const draft = state.stressQuantityDraft;
+        const shares = Number(state.ledger.combined.shares);
+        add(`${book.symbol} 股票`, shares, draft.shares ?? shares, v => { draft.shares = v; }, true);
+        for (const [scope, positions, symbol] of [
+            ['own', state.ledger.openOptions || [], book.symbol],
+            ['linked', state.stressIncludeLinkedHedge ? (state.stressLinkedLedger?.openOptions || []).filter(p => p.contracts > 0) : [], _stressLinkedBook()?.symbol || '联动'],
+        ]) for (const p of positions) {
+            const key = K.quantityKey(p), current = Math.abs(Number(p.contracts));
+            const label = `${symbol} ${p.expiry} ${p.contracts > 0 ? 'Long' : 'Short'} ${p.right === 'P' ? 'Put' : 'Call'} ${p.strike}`;
+            add(label, current, draft[scope][key] ?? current, v => { draft[scope][key] = v; }, false);
+        }
+        _text($('stress-quantity-scope'), state.stressIncludeLinkedHedge
+            ? '当前账本全部持仓 + 选中联动账本的多头期权；填 0 排除某腿，数量只用于本次模拟。'
+            : '当前账本全部持仓；开启联动保护后可逐腿调整保护张数。数量只用于本次模拟。');
+    }
+
+    function _stressNavText(series, point, range) {
+        const nav = state.stressNavBase;
+        if (series.pnlBasis !== 'change' || !Number.isFinite(nav) || nav <= 0) return '';
+        const amount = value => _currencyAmount(series.currency || 'USD', value, 2);
+        const delta = point.headlinePnl;
+        return range ? `情景净值 ${amount(nav + range.lower)} ～ ${amount(nav + range.upper)}`
+            + `（${_money(range.lower / nav * 100, 1)}% ～ ${_money(range.upper / nav * 100, 1)}%）`
+            : `参考净值 ${amount(nav + delta)}（变化 ${_money(delta / nav * 100, 1)}%）`;
+    }
+
     /**
      * The one date every stress component is valued on. A horizon overrides
      * the selected expiry: today + N days, with N days of theta for every
      * open option and every contract inside the window settled.
      */
+    function _stressFrozenSnapshotBatch() {
+        if (stressRefreshJob.pending || state.stressInputsPending || state.stressLinkedInputsPending) return null;
+        const snapshots = [state.stressLongOptionInputs];
+        if (state.stressIncludeLinkedHedge) snapshots.push(state.stressLinkedInputs);
+        const core = globalScope.OptionComboCostBasisStressCore;
+        if (snapshots.some(s => !s || !(s.snapshotVersion >= 2) || !s.snapshotId
+            || !(Number(s.underlyingPrice) > 0) || core.instant(s.fetchedAt) === null
+            || !/^\d{8}$/.test(s.throughExpiry || '')
+            || !Array.isArray(s.discountCurve?.points) || !s.discountCurve.points.length)) return null;
+        const first = snapshots[0];
+        if (snapshots.some(s => s.throughExpiry !== first.throughExpiry
+            || Math.abs(core.instant(s.fetchedAt) - core.instant(first.fetchedAt)) > 60000)) return null;
+        return { throughExpiry: first.throughExpiry, asOfInstant: first.fetchedAt };
+    }
+
     function _stressScenarioDate() {
         const horizon = state.stressHorizonDays;
         if (horizon === null || horizon === undefined) {
@@ -3127,15 +2204,69 @@
         if (days === undefined || days === null) {
             return { date: '', horizonDays: horizon, error: 'invalid_horizon' };
         }
-        const date = addDaysToDigits(_todayDigits(), days);
+        const core = globalScope.OptionComboCostBasisStressCore;
+        const frozen = _stressFrozenSnapshotBatch();
+        const date = addDaysToDigits(core.exchangeDate(frozen ? core.instant(frozen.asOfInstant) : undefined), days);
         return { date, horizonDays: days, error: date ? '' : 'invalid_horizon' };
+    }
+
+    function _syncStressHorizonControls() {
+        const input = $('stress-horizon-days'), slider = $('stress-horizon-slider');
+        if (!slider) return;
+        const raw = state.stressHorizonDays;
+        const automatic = raw === null || raw === undefined;
+        const core = globalScope.OptionComboCostBasisStressCore;
+        const frozen = _stressFrozenSnapshotBatch();
+        const start = frozen ? core.instant(frozen.asOfInstant) : Date.now();
+        const days = automatic ? Math.max(0, (core.exchangeTime(state.stressExpiry) - start) / 86400000)
+            : normalizeStressHorizonDays(raw);
+        const valid = Number.isFinite(days);
+        const maximum = valid ? Math.min(LINKED_MAX_HORIZON_DAYS, Math.max(365, Math.ceil(days / 365) * 365)) : 365;
+        slider.max = String(maximum);
+        slider.value = String(valid ? Math.min(maximum, Math.max(0, Math.round(days))) : 0);
+        const label = !valid ? '天数无效' : automatic ? `同到期范围 · ${_money(days, 1)} 天`
+            : days === 0 ? '现在 · 0 天' : `${days} 天后`;
+        slider.setAttribute('aria-valuetext', label);
+        _text($('stress-horizon-value'), label);
+        _text($('stress-horizon-max'), `${maximum} 天`);
+        if (globalScope.document.activeElement !== input) input.value = automatic ? '' : String(raw);
+    }
+
+    function _applyStressHorizon() {
+        globalScope.clearTimeout(state.stressHorizonTimer);
+        state.stressHorizonTimer = null;
+        if (!state.stressOpen) return;
+        _renderStressTest();
+        if (_stressScenarioDate().error || _stressFrozenSnapshotBatch()) return;
+        if (state.stressIncludeLongOptions || state.stressIncludeLinkedHedge || state.stressPnlBasis === 'change') {
+            void _refreshStressScenarioInputs(false);
+        }
+    }
+
+    function _setStressHorizon(rawValue, fromSlider = false) {
+        const raw = String(rawValue ?? '').trim();
+        state.stressHorizonDays = raw === '' ? null : (_numberOrNull(raw) === null ? NaN : _numberOrNull(raw));
+        const frozen = _stressFrozenSnapshotBatch();
+        // A complete batch contains today's marks for all requested holdings
+        // and the full curve. Scrubbing changes valuation time, not market time.
+        if (frozen) _cancelStressJob();
+        else _invalidateStressScenarioInputs();
+        globalScope.clearTimeout(state.stressHorizonTimer);
+        _syncStressHorizonControls();
+        _clearStressChart();
+        _clear($('stress-key-points'));
+        if ($('stress-slice')) $('stress-slice').hidden = true;
+        _text($('stress-status'), '情景时间已改变，正在更新估值范围…');
+        _text($('stress-band-status'), '更新中；不沿用上一情景的区间。');
+        state.stressHorizonTimer = globalScope.setTimeout(_applyStressHorizon,
+            fromSlider && frozen ? 100 : STRESS_HORIZON_DEBOUNCE_MS);
     }
 
     function _stressLongOptionRequests() {
         // This book marks BOTH sides after the scenario date, so every open
         // contract alive on it is quoted; the linked book stays long-only.
         return _deferredLongOptionRequests(
-            state.ledger && state.ledger.openOptions, _stressScenarioDate().date,
+            state.ledger && state.ledger.openOptions, globalScope.OptionComboCostBasisStressCore.exchangeDate(),
             { includeShorts: true });
     }
 
@@ -3145,7 +2276,7 @@
             (includeShorts ? Number(option.contracts) !== 0 : Number(option.contracts) > 0)
             && ['C', 'P'].includes(String(option.right || '').toUpperCase().slice(0, 1))
             && String(option.expiry || '').replace(/\D/g, '').slice(0, 8)
-                > throughExpiry
+                >= throughExpiry
         )).map((option) => ({
             conId: option.conId || null,
             localSymbol: option.localSymbol || '',
@@ -3244,7 +2375,8 @@
         const showShorts = Boolean(series.includeDeferredLongOptions
             && series.shortOptionCount);
         const showLinked = series.linkedHedgeEnabled === true && series.linkedCount > 0;
-        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked);
+        const showPremium = series.premiumIncomeEnabled === true;
+        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked, showPremium);
         const symbol = String(series.symbol || '');
         const linkedSymbol = String(series.linkedSymbol || '');
         const amount = (value) => (value === null || value === undefined
@@ -3267,33 +2399,113 @@
                     : '');
             card.appendChild(heading);
             // The headline is the sum of every component switched on.
-            const headline = showLinked ? point.totalPnl : point.pnl;
+            const headline = point.headlinePnl;
+            const bandPoint = series.band && series.band.available ? series.band.points.find(p => p.price === point.price) : null;
             const total = globalScope.document.createElement('strong');
-            const anyPart = showConvexity || showShorts || showLinked;
-            total.textContent = `${anyPart ? '合计' : '到期结算盈亏'}`
-                + ` ${amount(headline)}`;
-            if (headline > 0) total.className = 'metric-positive';
-            else if (headline < 0) total.className = 'metric-negative';
+            const anyPart = showConvexity || showShorts || showLinked || showPremium;
+            total.textContent = bandPoint ? `${series.pnlBasis === 'change' ? '净值变化范围' : '估值范围'} ${amount(bandPoint.lower)} ～ ${amount(bandPoint.upper)}`
+                : `参考情景 ${amount(headline)}`;
+            if ((bandPoint ? bandPoint.lower : headline) > 0) total.className = 'metric-positive';
+            else if ((bandPoint ? bandPoint.upper : headline) < 0) total.className = 'metric-negative';
             card.appendChild(total);
+            const navText = _stressNavText(series, point, bandPoint);
+            if (navText) line(card, navText, 'stress-nav-result');
+            if (Number.isFinite(point.currentHoldingsPnl)) {
+                line(card, `当前数量同情景 ${amount(point.currentHoldingsPnl)}；调整数量后改善 ${amount(point.quantityEffect)}`);
+            }
+            line(card, bandPoint ? `参考情景合计 ${amount(headline)} · 范围是模型假设，非置信区间`
+                : `范围${state.stressBandEnabled ? '尚未生成' : '已关闭'}；此数值仅代表当前假设`);
             if (anyPart) {
-                line(card, `① ${symbol} 到期结算 ${amount(point.basePnl)}`, 'stress-card-part');
+                line(card, `① ${symbol} 股票与现金 ${amount(point.basePnl)}`, 'stress-card-part');
             }
             if (showConvexity) {
-                line(card, `${numbers.own} ${symbol} 未到期多头期权 ${amount(point.longOptionPnl)}`,
+                line(card, `${numbers.own} ${symbol} 多头期权（含交割） ${amount(point.longOptionPnl)}`,
                     'stress-card-part');
             }
             if (showShorts) {
-                line(card, `${numbers.shorts} ${symbol} 未到期空头期权 ${amount(point.shortOptionPnl)}`,
+                line(card, `${numbers.shorts} ${symbol} 空头期权（含交割） ${amount(point.shortOptionPnl)}`,
                     'stress-card-part');
             }
             if (showLinked) {
                 line(card, `${numbers.linked} ${linkedSymbol} 多头期权较今日 ${amount(point.linkedPnl)}`,
                     'stress-card-part');
             }
-            line(card, `综合成本 ${point.cost === null ? '—' : _money(point.cost, 4)}`
+            if (showPremium) {
+                line(card, `${numbers.premium} 假设权利金 ${_money(series.scenarioDays / 7, 1)} 周 `
+                    + `${amount(point.premiumIncome)}`, 'stress-card-part');
+            }
+            if (bandPoint && Math.abs(bandPoint.upper - bandPoint.lower) < 0.005) {
+                line(card, '采样结果重合，不代表实际估值没有不确定性。');
+            }
+            line(card, `${series.quantitiesChanged ? '模拟数量，历史每股成本不适用' : `情景结算后每股成本 ${point.cost === null ? '—' : _money(point.cost, 4)}`}`
                 + ` · ${point.shares === null ? '—' : _quantity(point.shares)} 股`);
             wrap.appendChild(card);
         });
+    }
+
+    function _stressBandMemberLabel(series, member) {
+        if (member.ivScale !== undefined) {
+            const rest = { ...member }; delete rest.ivScale;
+            return `${_stressBandMemberLabel(series, rest)}；情景 IV 水平 × ${_money(member.ivScale, 2)}（敏感性假设）`;
+        }
+        if (member.flatIv) return 'IV 保持不变；价格、日期及其他假设相同';
+        const d = series.ivAssumptions || {};
+        if (d.ivMode === 'none' || !d.ivMode) return 'IV 保持不变';
+        if (d.ivMode === 'fixed') return `固定 IV 冲击 ${_money(d.ivShockPoints || 0, 2)} 点`;
+        const beta = d.ivBetaAuto ? '当前自适应 β' : `手填 β ${_money(d.ivBeta ?? 1.5, 2)}`;
+        return `${beta} × ${_money(member.betaScale ?? 1, 2)}`
+            + (d.ivTenorDamping ? `；期限 ${d.ivTenorDays} 天 / 指数 ${member.tenorExponent ?? d.ivTenorExponent}` : '；期限衰减关闭')
+            + (d.ivOtmDiscount ? `；价外 Put 折扣底值 ${_money(member.otmFloor ?? 0.5, 2)}` : '；价外 Put 折扣关闭');
+    }
+
+    function _renderStressSlice(series, index, book) {
+        const panel = $('stress-slice');
+        if (!panel) return;
+        panel.hidden = !series || !series.available || !book;
+        if (panel.hidden) return;
+        index = Math.max(0, Math.min(series.points.length - 1, Math.round(Number(index) || 0)));
+        stressJob.sliceIndex = index;
+        const p = series.points[index], currency = book.currency || 'USD';
+        const amount = value => Number.isFinite(value) ? _currencyAmount(currency, value, 2, true) : '不可用';
+        const fill = (id, value) => {
+            const node = $(id);
+            node.className = Number.isFinite(value) ? (value > 0 ? 'metric-positive' : value < 0 ? 'metric-negative' : '') : '';
+            _text(node, amount(value));
+        };
+        const range = series.band?.available ? series.band.points[index] : null;
+        _text($('stress-slice-nav'), _stressNavText(series, p, range));
+        _text($('stress-slice-quantity-comparison'), Number.isFinite(p.currentHoldingsPnl)
+            ? `当前数量同情景：${amount(p.currentHoldingsPnl)}；模拟数量相对改善：${amount(p.quantityEffect)}` : '当前使用账本实际数量。');
+        _text($('stress-slice-range'), range
+            ? `${amount(range.lower)} ～ ${amount(range.upper)}` : '范围未生成');
+        _text($('stress-slice-range-note'), range
+            ? 'IV 与价外折扣等假设的组合范围；以下分项按参考情景展示，不保证实际结果落在范围内。'
+            : '以下仅为参考情景；尚无可用范围，不代表结果确定。');
+        $('stress-slice-index').max = String(series.points.length - 1);
+        $('stress-slice-index').value = String(index);
+        _text($('stress-slice-price'), `${book.symbol} ${_currencyAmount(currency, p.price, 2)}（${p.changePct >= 0 ? '+' : ''}${_money(p.changePct, 1)}%）`);
+        _text($('stress-slice-cost-label'), series.linkedHedgeEnabled ? '本账本成本盈亏 + 联动变化' : '本账本现金流成本盈亏');
+        fill('stress-slice-cost-pnl', p.cashflowPnl);
+        fill('stress-slice-change-pnl', p.snapshotChangePnl);
+        _text($('stress-slice-scope'), `仅纳入本次开启的持仓${series.linkedHedgeEnabled ? '；联动账本仅多头期权，不含其股票及空头' : ''}，不是完整账户损益。`);
+        _text($('stress-slice-reference-note'), series.referenceChangeReason
+            ? '较快照变化不可用：缺少有效的当前标的/期权报价；未按零补齐。可刷新 TWS 参数，现有到期成本结果仍保留。'
+            : (series.quantitiesChanged ? '当前为模拟数量，不套用原持仓历史成本；主结果为较当前快照的净值变化。'
+                : (!series.costComplete ? '历史成本不完整，成本盈亏不可用；较快照变化不依赖历史成本。' : '两种口径使用同一份快照和同一组情景估值。')));
+        fill('stress-slice-flat-pnl', p.flatIvPnl);
+        fill('stress-slice-iv-contribution', p.ivContribution);
+        _text($('stress-slice-iv-note'), series.ivExplanationReason
+            ? `IV 对照不可用（${series.ivExplanationReason}）；不影响有效中线。`
+            : `沿用图中${series.pnlBasis === 'change' ? '较快照变化' : '成本盈亏'}口径；仅关闭 IV 冲击，保留价格、日期、交割及变现假设。两项相加等于图中合计减去假设收入。`);
+        _text($('stress-slice-cash-gross'), `${_currencyAmount(currency, p.settlementCashPaid, 2)} / ${_currencyAmount(currency, p.settlementCashReceived, 2)}`);
+        fill('stress-slice-cash-net', p.settlementCashNet);
+        _text($('stress-slice-shares'), `${_quantity(p.shares)} 股`);
+        const band = series.band, bp = band && band.available && band.points[index];
+        for (const edge of ['lower', 'upper']) {
+            _text($(`stress-slice-band-${edge}`), bp
+                ? `${edge === 'lower' ? '下沿' : '上沿'} ${amount(bp[edge])}：${_stressBandMemberLabel(series, band.members[bp[`${edge}Member`]])}`
+                : (stressJob.status || '采样范围未生成；可开启上方“显示采样情景范围”。'));
+        }
     }
 
     function _renderStressChart(series, book) {
@@ -3312,18 +2524,26 @@
         const showShorts = series.includeDeferredLongOptions && series.shortOptionCount > 0;
         const showLinked = series.linkedHedgeEnabled === true && series.linkedCount > 0;
         const linkedSymbol = series.linkedSymbol || '联动账本';
-        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked);
-        // The headline curve is the outermost overlay that is switched on.
-        const headlineKey = showLinked ? 'totalPnl' : 'pnl';
+        const showPremium = series.premiumIncomeEnabled === true;
+        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked, showPremium);
+        // The headline curve is the outermost overlay that is switched on,
+        // plus the assumed premium income when one is set.
+        const headlineKey = 'headlinePnl';
         const pnlValues = series.points.map((point) => point.pnl);
+        series.points.forEach(p => { if (Number.isFinite(p.currentHoldingsPnl)) pnlValues.push(p.currentHoldingsPnl); });
         if (showConvexity || showShorts) {
             series.points.forEach((point) => pnlValues.push(point.basePnl));
         }
         if (showLinked) {
             series.points.forEach((point) => pnlValues.push(point.totalPnl));
         }
+        series.points.forEach((point) => pnlValues.push(point.headlinePnl));
+        if (series.band && series.band.available) {
+            series.band.points.forEach(point => pnlValues.push(point.lower, point.upper));
+        }
         const pnlExtent = _stressExtent(pnlValues, true);
         const costExtent = _stressExtent(series.points.map((point) => point.cost), false);
+        const showCost = !series.quantitiesChanged;
         const x = (price) => margin.left
             + ((price - series.low) / (series.high - series.low)) * plotWidth;
         const yPnl = (value) => margin.top
@@ -3343,7 +2563,7 @@
             grid.appendChild(_svgNode('text', {
                 x: margin.left - 12, y: y + 4, 'text-anchor': 'end', class: 'axis-pnl',
             }, _compactAxisNumber(pnlValue)));
-            grid.appendChild(_svgNode('text', {
+            if (showCost) grid.appendChild(_svgNode('text', {
                 x: width - margin.right + 12, y: y + 4,
                 'text-anchor': 'start', class: 'axis-cost',
             }, _money(costValue, 2)));
@@ -3424,22 +2644,35 @@
                 return `${command}${x(point.price).toFixed(2)},${scale(value).toFixed(2)}`;
             }).filter(Boolean).join(' ');
         }
+        if (series.band && series.band.available) {
+            const envelope = series.band.points;
+            const path = envelope.map((p, i) => `${i ? 'L' : 'M'}${x(p.price)},${yPnl(p.upper)}`)
+                .concat([...envelope].reverse().map(p => `L${x(p.price)},${yPnl(p.lower)}`)).join(' ') + ' Z';
+            svg.appendChild(_svgNode('path', { d: path, fill: '#7c83ff', 'fill-opacity': '0.26',
+                stroke: 'none', class: 'stress-sensitivity-band', 'pointer-events': 'none' }));
+        }
+        // Whichever curve is outermost carries the assumed premium income.
+        const showOwnCurve = showConvexity || showShorts;
+        const referenceClass = series.band?.available ? ' stress-reference-line' : '';
         svg.appendChild(_svgNode('path', {
-            d: pathFor(showConvexity || showShorts ? 'basePnl' : 'pnl', yPnl),
-            class: `stress-pnl-line${showConvexity || showShorts || showLinked ? ' with-protection' : ''}`,
+            d: pathFor(showOwnCurve ? 'basePnl' : (showLinked ? 'pnl' : 'headlinePnl'), yPnl),
+            class: `stress-pnl-line${showOwnCurve || showLinked ? ' with-protection' : referenceClass}`,
         }));
-        if (showConvexity || showShorts) {
+        if (showOwnCurve) {
             svg.appendChild(_svgNode('path', {
-                d: pathFor('pnl', yPnl),
-                class: `stress-protected-pnl-line${showLinked ? ' with-linked' : ''}`,
+                d: pathFor(showLinked ? 'pnl' : 'headlinePnl', yPnl),
+                class: `stress-protected-pnl-line${showLinked ? ' with-linked' : referenceClass}`,
             }));
         }
         if (showLinked) {
             svg.appendChild(_svgNode('path', {
-                d: pathFor('totalPnl', yPnl), class: 'stress-linked-pnl-line',
+                d: pathFor('headlinePnl', yPnl), class: `stress-linked-pnl-line${referenceClass}`,
             }));
         }
-        svg.appendChild(_svgNode('path', {
+        if (series.quantitiesChanged) svg.appendChild(_svgNode('path', {
+            d: pathFor('currentHoldingsPnl', yPnl), class: 'stress-current-quantity-line',
+        }));
+        if (showCost) svg.appendChild(_svgNode('path', {
             d: pathFor('cost', yCost), class: 'stress-cost-line',
         }));
 
@@ -3514,11 +2747,12 @@
             const pointIndex = Math.max(0, Math.min(series.points.length - 1,
                 Math.round(ratio * (series.points.length - 1))));
             const point = series.points[pointIndex];
+            _renderStressSlice(series, pointIndex, book);
             const pointX = x(point.price);
             guide.style.display = '';
             guideLine.setAttribute('x1', pointX);
             guideLine.setAttribute('x2', pointX);
-            const headline = showLinked ? point.totalPnl : point.pnl;
+            const headline = point.headlinePnl;
             if (headline === null || headline === undefined) {
                 pnlMarker.style.display = 'none';
             } else {
@@ -3567,7 +2801,10 @@
                 _text($('stress-tooltip-linked-price-label'), `${linkedSymbol} 映射价`);
                 _text($('stress-tooltip-linked-price'), point.linkedPrice === null ? '—'
                     : `${_money(point.linkedPrice, 2)}（${point.linkedChangePct > 0 ? '+' : ''}`
-                        + `${_money(point.linkedChangePct, 1)}%）`);
+                        + `${_money(point.linkedChangePct, 1)}%）`
+                        + (point.linkedIvBetaApplied ? ` · β ${_money(point.linkedIvBetaApplied, 2)}` : '')
+                        + (point.linkedSigmaScale && point.linkedSigmaScale > 1.001
+                            ? ` · σ ×${_money(point.linkedSigmaScale, 2)}` : ''));
             }
             const signClass = (value) => (value > 0
                 ? 'metric-positive' : (value < 0 ? 'metric-negative' : ''));
@@ -3578,7 +2815,7 @@
                     ? '—' : _currencyAmount(book.currency, value, digits === undefined
                         ? 2 : digits, true));
             };
-            const anyOverlay = showConvexity || showShorts || showLinked;
+            const anyOverlay = showConvexity || showShorts || showLinked || showPremium;
             // ① is always there; ② and ③ appear with their overlays; the
             // total row exists only when there is something to add up.
             _text($('stress-tooltip-base-label'), anyOverlay
@@ -3609,7 +2846,7 @@
                 _text($('stress-tooltip-long-option-value'), _currencyAmount(
                     book.currency, point.longOptionMarketValue, 2));
                 _text($('stress-tooltip-long-option-iv-label'),
-                    `${numbers.own} TWS IV${point.ownIvShockPoints ? '（本点含冲击）' : '（保持不变）'}`);
+                    `${numbers.own} 本地 IV${point.ownIvShockPoints ? '（本点含冲击）' : '（保持不变）'}`);
                 _text($('stress-tooltip-long-option-iv'), _stressPercentRange(
                     point.longOptionIvMin, point.longOptionIvMax) + ownShock);
                 _text($('stress-tooltip-long-option-rate'), _stressPercentRange(
@@ -3620,11 +2857,11 @@
                     `${numbers.shorts} ${book.symbol} 未到期空头期权（已收权利金 − 负债）`);
                 fill('stress-tooltip-short-option-pnl', point.shortOptionPnl);
                 _text($('stress-tooltip-short-option-liability-label'),
-                    `${numbers.shorts} 负债市值`);
+                    `${numbers.shorts} 期权／交割净负债（已计入盈亏）`);
                 _text($('stress-tooltip-short-option-liability'), _currencyAmount(
                     book.currency, point.shortOptionLiability, 2));
                 _text($('stress-tooltip-short-option-iv-label'),
-                    `${numbers.shorts} TWS IV`);
+                    `${numbers.shorts} 本地 IV`);
                 _text($('stress-tooltip-short-option-iv'), _stressPercentRange(
                     point.shortOptionIvMin, point.shortOptionIvMax) + ownShortShock);
             }
@@ -3632,6 +2869,12 @@
             $('stress-tooltip-linked-value-row').hidden = !showLinked;
             $('stress-tooltip-linked-iv-row').hidden = !showLinked;
             $('stress-tooltip-linked-premium-row').hidden = !showLinked;
+            $('stress-tooltip-premium-row').hidden = !showPremium;
+            if (showPremium) {
+                _text($('stress-tooltip-premium-label'),
+                    `${numbers.premium} 假设权利金 ${_money(series.scenarioDays / 7, 1)} 周`);
+                fill('stress-tooltip-premium', point.premiumIncome);
+            }
 
             if (showLinked) {
                 _text($('stress-tooltip-linked-pnl-label'),
@@ -3664,7 +2907,7 @@
             }
             $('stress-tooltip-total-row').hidden = !anyOverlay;
             if (anyOverlay) {
-                _text($('stress-tooltip-pnl-label'), `合计 ${numbers.total}`);
+                _text($('stress-tooltip-pnl-label'), `参考情景合计 ${numbers.total}`);
                 fill('stress-tooltip-pnl', headline === undefined ? null : headline);
             }
             _text($('stress-tooltip-cost'), point.cost === null
@@ -3676,15 +2919,27 @@
                 + `${_quantity(point.exercisedContracts)} 张行权 · `
                 + `${_quantity(point.expiredContracts)} 张归零`);
 
+            _text($('stress-tooltip-base-label'), series.pnlBasis === 'change' ? '① 股票较快照变动' : '① 股票与历史现金（未平权利金另列）');
+            _text($('stress-tooltip-long-option-pnl-label'), `${numbers.own || ''} 本账本多头期权（含已交割）`);
+            _text($('stress-tooltip-short-option-pnl-label'), `${numbers.shorts || ''} 本账本空头期权（含已交割）`);
+            const bandPoint = series.band && series.band.available
+                ? series.band.points.find(p => p.price === point.price) : null;
+            $('stress-tooltip-band-row').hidden = !bandPoint;
+            _text($('stress-tooltip-band'), bandPoint
+                ? `${_currencyAmount(book.currency, bandPoint.lower, 2)} ～ ${_currencyAmount(book.currency, bandPoint.upper, 2)}` : '—');
             tooltip.hidden = false;
             const wrap = tooltip.parentElement;
             const wrapRect = wrap.getBoundingClientRect();
             const pointerLeft = pointerEvent.clientX - wrapRect.left + wrap.scrollLeft;
             const visibleLeft = wrap.scrollLeft;
+            // Measure rather than assume: the card is sized by its content
+            // (CSS caps it at 620px / the wrap width), so a hard-coded width
+            // would let it hang off the right edge and add a scrollbar.
+            const tipWidth = tooltip.offsetWidth;
             let left = pointerLeft + 16;
-            if (left + 318 > visibleLeft + wrap.clientWidth) left = pointerLeft - 326;
+            if (left + tipWidth + 8 > visibleLeft + wrap.clientWidth) left = pointerLeft - tipWidth - 16;
             left = Math.max(visibleLeft + 8,
-                Math.min(left, visibleLeft + wrap.clientWidth - 318));
+                Math.min(left, visibleLeft + wrap.clientWidth - tipWidth - 8));
             const pointerTop = pointerEvent.clientY - wrapRect.top + wrap.scrollTop;
             const visibleTop = wrap.scrollTop;
             const top = Math.max(visibleTop + 8,
@@ -3694,32 +2949,92 @@
             tooltip.style.top = `${top}px`;
         };
         svg.onpointerleave = hideTooltip;
+        _renderStressSlice(series, stressJob.sliceIndex ?? series.centerIndex, book);
         svg.appendChild(_svgNode('text', {
             x: 18, y: margin.top + plotHeight / 2,
             transform: `rotate(-90 18 ${margin.top + plotHeight / 2})`,
             'text-anchor': 'middle', class: 'stress-axis-title axis-pnl',
-        }, `到期后盈亏（${_currencySymbol(book.currency)}）`));
-        svg.appendChild(_svgNode('text', {
+        }, `${series.pnlBasis === 'change' ? '较快照市值变化' : (showLinked ? '成本盈亏 + 联动变化' : '现金流成本盈亏')}（${_currencySymbol(book.currency)}）`));
+        if (showCost) svg.appendChild(_svgNode('text', {
             x: width - 18, y: margin.top + plotHeight / 2,
             transform: `rotate(90 ${width - 18} ${margin.top + plotHeight / 2})`,
             'text-anchor': 'middle', class: 'stress-axis-title axis-cost',
-        }, `综合成本 / 股（${_currencySymbol(book.currency)}）`));
+        }, `情景结算后成本 / 股（${_currencySymbol(book.currency)}）`));
+    }
+
+    /**
+     * When the only thing wrong is that usable TWS quotes have not arrived,
+     * draw something true instead of nothing, in two steps: first the own
+     * book without the linked overlay, then the settlement-only curve
+     * (deferred options, the linked book and IV shocks excluded). The caller
+     * labels the result as degraded; nothing is drawn while a fetch is
+     * pending or for change-since-snapshot, which has no baseline.
+     */
+    function _stressDegradedSeries(series, options) {
+        if (state.stressInputsPending || state.stressLinkedInputsPending
+            || options.pnlBasis === 'change') return null;
+        let failure = series;
+        const linkedQuoteMissing = STRESS_LINKED_FALLBACK_REASONS.includes(failure.reason)
+            || (failure.reason === 'missing_option_quote_sides' && failure.contract?.linked === true);
+        if (linkedQuoteMissing && options.linkedHedge) {
+            const ownOnly = _stressSeries(state.allEvents, { ...options, linkedHedge: null }, { skipBand: true });
+            if (ownOnly.available) return { level: 'linked', series: ownOnly };
+            failure = ownOnly;
+        }
+        // Missing evidence can remove a clearly labelled layer, never a
+        // conflicting identity, crossed quote or failed calibration. Recheck
+        // the remaining portfolio instead of assigning zero to the bad leg.
+        if (STRESS_FALLBACK_REASONS.includes(failure.reason) && failure.contract?.linked !== true
+            && options.includeDeferredLongOptions === true) {
+            const settlement = _stressSeries(state.allEvents, {
+                ...options, includeDeferredLongOptions: false, longOptionInputs: null,
+                linkedHedge: null, ivDriver: null,
+            }, { skipBand: true });
+            if (settlement.available) return { level: 'settlement', series: settlement };
+        }
+        return null;
+    }
+
+    /**
+     * Empty the chart and detach its pointer handlers: they close over the
+     * series they drew, and without this a hover over the emptied chart
+     * brings that series' tooltip back.
+     */
+    function _clearStressChart() {
+        const svg = $('stress-chart');
+        _clear(svg);
+        if (svg) {
+            svg.onpointermove = null;
+            svg.onpointerleave = null;
+        }
+        $('stress-tooltip').hidden = true;
     }
 
     function _renderStressTest() {
         if (!state.stressOpen) return;
+        $('stress-tooltip').hidden = true;
+        $('stress-tooltip-band-row').hidden = true;
+        if ($('stress-slice')) $('stress-slice').hidden = true;
         const book = _currentBook();
         const expiries = _renderStressExpiryOptions();
         const baseInput = $('stress-base-price');
         const refreshButton = $('btn-stress-refresh-price');
-        refreshButton.disabled = state.stressInputsPending
+        refreshButton.disabled = stressRefreshJob.pending || state.stressInputsPending
             || state.connection !== 'connected';
-        refreshButton.textContent = state.stressInputsPending
-            ? '拉取中…' : '刷新 TWS 现价与期权参数';
+        refreshButton.textContent = stressRefreshJob.pending || state.stressInputsPending
+            ? '拉取中…' : '刷新 TWS 行情';
         if (!book || !state.ledger || !expiries.length) {
+            _cancelStressJob();
             _text($('stress-status'), '当前账本没有可用于压力测试的未平股票期权。');
-            _clear($('stress-chart'));
+            _clearStressChart();
             _clear($('stress-key-points'));
+            return;
+        }
+        if (state.eventsTotal > state.allEvents.length) {
+            _cancelStressJob();
+            _text($('stress-status'), '账本事件尚未完整载入，压力测试已停止；不能用截断头寸生成范围。');
+            _text($('stress-band-status'), '账本不完整，区间不生成。');
+            _clearStressChart(); _clear($('stress-key-points'));
             return;
         }
         if (globalScope.document.activeElement !== baseInput) {
@@ -3733,13 +3048,14 @@
         protectionInputs.hidden = !state.stressIncludeLongOptions;
         const liveInputs = state.stressLongOptionInputs;
         _text($('stress-option-iv-source'), state.stressInputsPending
-            ? '逐合约 TWS IV：正在拉取…'
+            ? '期权行情：正在拉取…'
             : (liveInputs
-                ? `逐合约 TWS IV：${_quantity((liveInputs.options || []).filter(
-                    (item) => Number(item.impliedVolatility) > 0).length)} 张已取得`
+                ? `TWS 原始 IV：${_quantity((liveInputs.options || []).filter(
+                    (item) => Number(item.impliedVolatility) > 0).length)} 个合约有返回值`
                     + (marketDataTypeLabel(liveInputs.options)
                         ? `（${marketDataTypeLabel(liveInputs.options)}）` : '')
-                : `逐合约 TWS IV：${state.stressInputsError || '尚未拉取'}`));
+                    + '；未到期期权估值使用有效报价反解的本地 IV，此数量不代表纳入估值的持仓张数。'
+                : `期权行情：${state.stressInputsError || '尚未拉取'}`));
         const liveRates = liveInputs && Array.isArray(liveInputs.ratesByExpiry)
             ? liveInputs.ratesByExpiry : [];
         _text($('stress-option-rate-source'), state.stressInputsPending
@@ -3752,12 +3068,14 @@
                         || liveInputs.curveStatus || '最近曲线无法覆盖该期限'}`
                     : `期限无风险利率：${state.stressInputsError
                         || '尚未读取'}`)));
-        _text($('stress-title'), `${book.symbol} · 到期压力测试`);
-        const horizonInput = $('stress-horizon-days');
-        if (globalScope.document.activeElement !== horizonInput) {
-            horizonInput.value = state.stressHorizonDays === null
-                || state.stressHorizonDays === undefined
-                ? '' : String(state.stressHorizonDays);
+        _text($('stress-title'), `${book.symbol} · 组合净值压力测试`);
+        _renderStressQuantities(book);
+        _syncStressHorizonControls();
+        const premiumInput = $('stress-weekly-premium');
+        if (globalScope.document.activeElement !== premiumInput) {
+            premiumInput.value = state.stressWeeklyPremium === null
+                || state.stressWeeklyPremium === undefined || state.stressWeeklyPremium === 0
+                ? '' : String(state.stressWeeklyPremium);
         }
         const scenario = _stressScenarioDate();
         $('stress-liquidation').value = state.stressLiquidation;
@@ -3774,13 +3092,34 @@
         const linkedBook = _stressLinkedBook();
         const linkedSymbol = linkedBook ? linkedBook.symbol : '联动账本';
         if (scenario.error) {
-            _text($('stress-status'), '跌到位天数无效：请留空（在所选到期日结算）'
+            _cancelStressJob();
+            _text($('stress-status'), '情景天数无效：请留空（在所选到期日结算）'
                 + `或输入 0 到 ${LINKED_MAX_HORIZON_DAYS} 的整数天。`);
-            _clear($('stress-chart'));
+            _clearStressChart();
             _clear($('stress-key-points'));
             return;
         }
-        const series = buildStressTestSeries(state.allEvents, {
+        $('stress-pnl-basis').value = state.stressPnlBasis;
+        $('stress-path').value = state.stressPath;
+        $('stress-conservative-short-put').checked = state.stressConservativeShortPutAssignment;
+        $('stress-band-enabled').checked = state.stressBandEnabled;
+        $('stress-band-flat-iv').checked = state.stressBandFlatIv;
+        $('stress-own-iv-beta').checked = state.stressOwnIvBeta;
+        $('stress-include-income').checked = state.stressIncludeIncome;
+        $('stress-iv-range').value = String(state.stressIvRangePct);
+        _text($('stress-iv-range-value'), `±${state.stressIvRangePct}%（相对 IV 水平）`);
+        if (stressRefreshJob.pending) {
+            _cancelStressJob();
+            _text($('stress-status'), state.stressLinkedEventsPending
+                ? `正在读取 ${linkedSymbol} 账本，随后同步刷新两边行情…`
+                : state.stressIncludeLinkedHedge ? '正在同步刷新本账本与联动账本行情，完成后生成叠加曲线…'
+                    : '正在刷新本账本行情…');
+            _text($('stress-band-status'), '行情刷新中，完成后重新计算范围。');
+            _clearStressChart(); _clear($('stress-key-points'));
+            return;
+        }
+        const frozenSnapshot = _stressFrozenSnapshotBatch();
+        const seriesOptions = {
             symbol: book.symbol,
             currency: book.currency || 'USD',
             centerPrice: state.stressBasePrice,
@@ -3792,12 +3131,30 @@
             includeDeferredLongOptions: state.stressIncludeLongOptions,
             longOptionInputs: state.stressLongOptionInputs,
             linkedHedge: _stressLinkedHedgeRequest(),
+            weeklyPremium: state.stressIncludeIncome ? state.stressWeeklyPremium : 0,
+            quantityOverrides: { ...state.stressQuantityDraft,
+                linked: state.stressIncludeLinkedHedge ? state.stressQuantityDraft.linked : {} },
+            asOf: globalScope.OptionComboCostBasisStressCore.exchangeDate(),
+            ...(frozenSnapshot ? { asOfInstant: frozenSnapshot.asOfInstant,
+                snapshotThroughExpiry: frozenSnapshot.throughExpiry } : {}),
+            horizonDays: scenario.horizonDays,
+            requireSnapshotVersion: 2,
+            pnlBasis: state.stressPnlBasis,
+            path: state.stressPath,
+            conservativeShortPutAssignment: state.stressConservativeShortPutAssignment,
+            ivDriver: state.stressOwnIvBeta ? { ivMode: 'beta', ivBeta: 1.5,
+                ivBetaAuto: false, ivTenorDamping: true, ivTenorDays: 30,
+                ivTenorExponent: 0.65, ivOtmDiscount: true } : null,
             liquidation: state.stressLiquidation,
             pricingModel: state.stressPricingModel,
             dividendYield: _effectiveDividendYield(state.stressDividendYield, book.symbol),
-        });
+        };
+        let series = _stressSeries(state.allEvents, seriesOptions);
         series.horizonDays = scenario.horizonDays;
+        let degraded = null;
         if (!series.available) {
+            $('stress-legend-linked-pnl').hidden = true;
+            $('stress-legend-protected-pnl').hidden = true;
             let failure = '当前期权资料不完整，无法生成压力测试。';
             if (series.reason === 'invalid_center_price') {
                 failure = '请输入大于 0 的基准现价，或连接 TWS 后刷新现价。';
@@ -3827,8 +3184,8 @@
             } else if (series.reason === 'invalid_linked_mapping') {
                 failure = '映射方式无效，请重新选择。';
             } else if (series.reason === 'missing_linked_sigma') {
-                failure = `复利映射在情景日晚于今天时需要路径波动率，但 ${linkedSymbol} 快照里没有`
-                    + '情景日之后仍存续、可作代理的合约。请在「路径 σ」填入年化波动率，或改用线性映射。';
+                failure = `多日映射需要路径波动率，但 ${linkedSymbol} 当前存续合约既无有效 TWS IV，`
+                    + '也无法从报价反解可用的 IV 代理。请刷新行情，在「路径 σ」填入假设，或改用线性映射。';
             } else if (series.reason === 'missing_long_option_quote_sides'
                 || series.reason === 'missing_short_option_quote_sides') {
                 failure = '买卖价口径需要每张本账本合约都有 TWS 买价与卖价，至少一张缺失，已停止叠加。改回中间价或刷新。';
@@ -3888,6 +3245,10 @@
             } else if (series.reason === 'linked_option_identity_mismatch') {
                 failure = `${linkedSymbol} 账本至少一张多头期权的 conId / localSymbol 与 TWS 快照不一致`
                     + '（快照里只有同条款的另一张合约），已停止叠加，请核对账本合约身份。';
+            } else if (series.reason === 'invalid_weekly_premium') {
+                failure = '每周权利金无效：请留空或输入不小于 0 的金额。';
+            } else if (series.reason === 'invalid_linked_tenor_exponent') {
+                failure = '衰减指数无效：请输入 0.05 到 1 之间的数字（0.65 = 价外 Put 历史拟合，0.5 = 平方根 / ATM 口径）。';
             } else if (series.reason === 'invalid_linked_tenor_days') {
                 failure = `参考期限无效：请输入 1 到 ${LINKED_MAX_HORIZON_DAYS} 天（β 所描述的 IV 期限，通常 30）。`;
             } else if (series.reason === 'invalid_linked_iv_shock') {
@@ -3897,10 +3258,41 @@
                 failure = `${linkedSymbol} 账本至少一张多头期权没有取得 TWS 当前标记价，`
                     + '无法计算相对今日的变动，已停止叠加。';
             }
-            _text($('stress-status'), failure);
-            _clear($('stress-chart'));
-            _clear($('stress-key-points'));
-            return;
+            const reasons = {
+                snapshot_upgrade_required: '快照版本过旧，请重启更新后的后端并刷新；新内核需要原始利率曲线和时刻元数据。',
+                invalid_snapshot_time: '快照缺少有效的带时区时间戳，请刷新。',
+                unsupported_stress_currency: '压力测试目前仅支持 USD 股票/ETF；不会把美元利率套用于其它币种。',
+                scenario_before_snapshot: '情景时刻早于快照，请选择未来日期或刷新。',
+                expired_open_position_reconcile: '账本有已过交易截止时间但尚未处理的期权，请先对账/记录到期结果。',
+                snapshot_time_mismatch: '两本账本或各报价的接收时刻相差超过 60 秒，请同时刷新后重试。',
+                stale_scenario_snapshot: '快照属于旧情景日期，请刷新。',
+                quote_outside_model_bounds: '至少一张报价不在所选模型可定价范围内，不能反解 IV；请核对报价、股息率和定价模型。',
+                calibration_failed: '当前报价的本地 IV 反解未收敛，已停止。',
+                missing_option_mark: '缺少期权当前标记价，无法建立一致的估值基线。',
+                quote_identity_conflict: '合约身份与条款/乘数冲突，请先核对。',
+                invalid_option_bid_ask: '存在交叉/不合理买卖报价，已停止。',
+                missing_option_quote_sides: '点差口径缺少双边报价，请刷新或选中间价。',
+                incomplete_cost_basis: '成本资料不完整；请补齐账本后使用成本盈亏。',
+                invalid_simulated_quantity: '模拟数量无效：期权张数须为非负整数，股票股数须为有效数字。',
+                stale_quantity_override: '持仓已变化，请恢复账本数量后重新模拟。',
+                quantity_requires_change_basis: '调整模拟数量时请使用“全部相对当前快照变化”口径。',
+                missing_reference_quotes: '调整数量需要完整的当前报价，请刷新行情。',
+            };
+            const identity = series.contract;
+            const contractNote = identity ? ` · ${identity.linked ? linkedSymbol : book.symbol} ${identity.localSymbol
+                || `${identity.expiry} ${identity.right}${identity.strike}`}${identity.conId ? ` (#${identity.conId})` : ''}` : '';
+            const message = (reasons[series.reason] || `${failure} [${series.reason}]`) + contractNote;
+            const fallback = state.stressPnlBasis === 'change' ? null : _stressDegradedSeries(series, seriesOptions);
+            if (!fallback) {
+                _text($('stress-status'), message);
+                _text($('stress-band-status'), '中线不可用，区间不生成。');
+                _clearStressChart();
+                _clear($('stress-key-points'));
+                return;
+            }
+            series = fallback.series;
+            series.horizonDays = scenario.horizonDays;
+            degraded = { level: fallback.level, message };
         }
         const currency = book.currency || 'USD';
         const showConvexity = Boolean(series.includeDeferredLongOptions
@@ -3908,113 +3300,57 @@
         const showShorts = Boolean(series.includeDeferredLongOptions
             && series.shortOptionCount);
         const showOwn = showConvexity || showShorts;
+        $('stress-legend-quantities').hidden = !series.quantitiesChanged;
+        $('stress-legend-cost').hidden = series.quantitiesChanged;
         const showLinked = series.linkedHedgeEnabled === true && series.linkedCount > 0;
         // Every curve is named by the numbered components it adds up, and
         // every surface takes its numbers from the same mapping.
-        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked);
+        const showPremium = series.premiumIncomeEnabled === true;
+        const numbers = stressComponentNumbers(showConvexity, showShorts, showLinked, showPremium);
         const ownParts = [numbers.own, numbers.shorts].filter(Boolean).join('+');
+        const premiumTag = showPremium ? `+${numbers.premium}` : '';
+        // The outermost curve carries the assumed premium income, so its
+        // legend names that component too.
         $('stress-legend-base-pnl').textContent = showOwn || showLinked
-            ? `① ${book.symbol} 到期结算盈亏（左轴）` : '到期结算盈亏（左轴）';
+            ? `① ${book.symbol} 股票与现金（左轴）`
+            : (showPremium ? `①${premiumTag} 股票现金 + 假设净收入（左轴）` : '股票与现金盈亏（左轴）');
         $('stress-legend-protected-pnl').hidden = !showOwn;
         _text($('stress-legend-protected-pnl'),
-            `①+${ownParts} 计入 ${book.symbol} 未到期期权（左轴）`);
+            `①+${ownParts}${showLinked ? '' : premiumTag} 计入 ${book.symbol} 期权（含交割）`
+            + `${showLinked || !showPremium ? '' : ' + 假设净收入'}（左轴）`);
         $('stress-legend-linked-pnl').hidden = !showLinked;
         _text($('stress-legend-linked-pnl'),
             `${numbers.total} 计入 ${series.linkedSymbol || linkedSymbol}`
-            + ' 多头期权较今日变动（左轴）');
-        const ownShockNote = showLinked && series.linkedIvMode !== 'none' && showOwn
-            ? `，IV 冲击随 ${series.linkedSymbol} β 按 ${_money(Math.abs(series.linkedRatio), 2)}× 放大`
-            : '';
-        const sigmaNote = (() => {
-            if (series.linkedSigmaSource === 'instant') return '，情景日为今日，无路径损耗';
-            if (series.linkedSigmaSource === 'none') return '';
-            const origin = series.linkedSigmaSource === 'assumption' ? '（假设）'
-                : `（快照代理：最近 ATM 合约 K${_quantity(series.linkedSigmaProxyStrike)}`
-                    + `，距现价 ${_money(series.linkedSigmaProxyDistancePct, 1)}%`
-                    + `${series.linkedSigmaSource === 'proxy_far' ? '，⚠ 离 ATM 较远' : ''}）`;
-            return `，路径 σ ${_money((series.linkedSigma || 0) * 100, 1)}%${origin}`
-                + `，${_money(series.linkedTimeYears * 365, 0)} 天损耗 ${_money(
-                    series.linkedDragLog * 100, 2)}%`;
-        })();
-        const mappingNote = series.linkedMapping === 'linear' ? '线性' : `复利${sigmaNote}`;
-        const linkedParts = [];
-        if (showLinked && series.linkedCallContracts) {
-            linkedParts.push(`${_quantity(series.linkedCallContracts)} 张 Long Call`);
+            + ` 多头期权较今日变动${showPremium ? ' + 假设权利金' : ''}（左轴）`);
+        if (degraded && degraded.level === 'settlement') {
+            $('stress-legend-base-pnl').textContent = '到期结算盈亏（未到期期权未计入，左轴）';
+            $('stress-legend-protected-pnl').hidden = true;
+            $('stress-legend-linked-pnl').hidden = true;
         }
-        if (showLinked && series.linkedPutContracts) {
-            linkedParts.push(`${_quantity(series.linkedPutContracts)} 张 Long Put`);
-        }
-        const linkedSummary = !series.linkedHedgeEnabled ? ''
-            : (showLinked
-                ? ` · ${numbers.linked} 已叠加 ${series.linkedSymbol} 账本 ${linkedParts.join(' + ')}`
-                    + `（映射 1 : ${_money(series.linkedRatio, 2)} ${mappingNote}`
-                    + ` · ${series.linkedSymbol} 基准 ${_currencyAmount(
-                        linkedBook && linkedBook.currency || 'USD', series.linkedBasePrice, 2)}`
-                    + ` · 今日标记市值 ${_currencyAmount(
-                        linkedBook && linkedBook.currency || 'USD', series.linkedReferenceValue, 0)}`
-                    + (series.linkedDeferredContracts
-                        ? ` · TWS IV ${_stressPercentRange(series.linkedIvMin, series.linkedIvMax)}`
-                            + (series.linkedIvMode === 'fixed' && series.linkedIvShockPoints
-                                ? `（已含固定 IV 冲击 ${series.linkedIvShockPoints > 0 ? '+' : ''}`
-                                    + `${_money(series.linkedIvShockPoints, 0)} 点）`
-                                : (series.linkedIvMode === 'beta'
-                                    ? `（基准点；每跌 1% IV +${_money(series.linkedIvBeta, 2)} 点`
-                                        + (series.linkedIvTenorDamping
-                                            ? `，按期限衰减 √(${_money(series.linkedIvTenorDays, 0)}/剩余天)`
-                                            : '')
-                                        + '，上涨侧不变）'
-                                    : ''))
-                        : ' · 全部按内在价值结算')
-                    + '）'
-                : ` · ${series.linkedSymbol || linkedSymbol} 账本没有未平多头期权可叠加`);
-        const longOptionParts = [];
-        if (series.longCallContracts) {
-            longOptionParts.push(`${_quantity(series.longCallContracts)} 张 Long Call`);
-        }
-        if (series.longPutContracts) {
-            longOptionParts.push(`${_quantity(series.longPutContracts)} 张 Long Put`);
-        }
-        const shortOptionParts = [];
-        if (series.shortCallContracts) {
-            shortOptionParts.push(`${_quantity(series.shortCallContracts)} 张 Short Call`);
-        }
-        if (series.shortPutContracts) {
-            shortOptionParts.push(`${_quantity(series.shortPutContracts)} 张 Short Put`);
-        }
-        const dateLead = scenario.horizonDays === null
-            ? `${_stressDateLabel(series.throughExpiry)} 到期后`
-            : `${_stressDateLabel(series.throughExpiry)} 情景日`
-                + `（今天 +${_money(scenario.horizonDays, 0)} 天，含 Theta，覆盖到期范围；`
-                + '三项同日估值）';
-        _text($('stress-status'), dateLead
-            + ` · 基准 ${_currencyAmount(currency, series.centerPrice, 4)}`
-            + ` · 扫描 ±${_money(series.rangePct, 0)}%`
-            + ` · ${BASIS_LABELS[series.basisMode] || series.basisMode}口径`
-            + ` · ${series.pricingModel === 'american' ? '美式二叉树' : '欧式 BSM'}`
-            + `（${book.symbol} 股息率 ${_money((series.dividendYield || 0) * 100, 2)}%`
-            + (series.linkedHedgeEnabled && series.linkedDividendYield !== null
-                ? `，${series.linkedSymbol} ${_money((series.linkedDividendYield || 0) * 100, 2)}%` : '')
-            + '）'
-            + (series.liquidation === 'bidask' ? ' · 变现口径：买卖价（多头按买价、空头按卖价折算）' : '')
-            + (showOwn || showLinked ? ` · ① ${book.symbol} 到期结算` : '')
-            + (series.includeDeferredLongOptions
-                ? (series.longOptionCount
-                    ? ` · ${numbers.own} 已计入 ${longOptionParts.join(' + ')}`
-                        + `（逐合约 TWS IV ${_stressPercentRange(
-                            series.longOptionIvMin, series.longOptionIvMax)}`
-                        + `，曲线 r(T) ${_stressPercentRange(
-                            series.longOptionRateMin, series.longOptionRateMax)}${ownShockNote}）`
-                    : '')
-                    + (series.shortOptionCount
-                        ? ` · ${numbers.shorts} 已盯市 ${shortOptionParts.join(' + ')} 的负债`
-                            + `（逐合约 TWS IV ${_stressPercentRange(
-                                series.shortOptionIvMin, series.shortOptionIvMax)}`
-                            + `，已收权利金已计入${ownShockNote}）`
-                        : '')
-                    + (!series.longOptionCount && !series.shortOptionCount
-                        ? ' · 情景日之后没有仍未到期的期权' : '')
-                : '')
-            + linkedSummary);
+        _text($('stress-band-status'), degraded
+            ? (degraded.level === 'settlement' ? '中线降级为到期结算曲线，区间不生成。' : '中线降级为本账本曲线（联动未计入），区间不生成。')
+            : (state.stressBandEnabled ? stressJob.status : '区间已关闭。'));
+        _text($('stress-status'), (degraded
+            ? `⚠ ${degraded.level === 'settlement'
+                ? '仅显示到期结算曲线：未到期期权、联动账本与 IV 冲击都未计入'
+                : `${linkedSymbol} 联动账本未计入，本账本期权仍按快照估值`} · ${degraded.message} · `
+            : '') + `${book.symbol} · ${series.pnlBasis === 'change' ? '所选组合较当前快照的净值变化' : (showLinked ? '本账本现金流成本盈亏 + 联动多头较快照变化（混合口径，非账户 ΔNAV）' : '本账本现金流成本盈亏')}`
+            + (series.quantitiesChanged ? ` · 模拟数量；按当前估值调整需净投入 ${_currencyAmount(currency, series.fundingChange, 2, true)}（负数为释放资金，未计交易成本）` : ' · 当前账本数量')
+            + ` · 参考 ${series.asOfInstant} → 情景 ${series.targetInstant}`
+            + ` · ${series.path === 'gradual' ? '线性渐变路径' : '立即冲击并保持'}`
+            + (series.conservativeShortPutAssignment ? ' · 保守交割：期间到期的 Short Put，目标价低于执行价也按指派处理' : '')
+            + (series.warnings.length ? ` · 注意：${series.warnings.map(w => ({
+                expiry_close_assumption: '缺少精确截止时间的合约按纽约 16:00 假设',
+                reference_time_assumption: '参考时刻为假设', non_live_or_unknown_quotes: '含冻结、延时报价或未知类型',
+                quote_receipt_time_missing: '部分报价缺少接收时刻，无法证明同步性',
+                partial_portfolio_excludes_deferred: '部分组合：已排除更晚到期的期权及其开仓权利金',
+                path_sigma_local_iv_proxy: `路径 σ 使用本地反解 IV 代理 ${_money(series.linkedSigma * 100, 2)}%（非实现波动率预测）`,
+            }[w] || w)).join('；')}` : ''));
+        _text($('stress-note'), '盈亏直接从现金、股票和期权计算，不从每股成本反推。成本口径含历史现金流，未平期权的权利金只在对应腿计一次；市值变化口径以同一快照为基线。'
+            + '本账本到期交割按路径价格决定'
+            + (series.conservativeShortPutAssignment ? '，并对期间到期且目标价低于执行价的 Short Put 应用保守指派假设' : '')
+            + '，交割后的股票持有到情景时点；联动多头在到期变现、现金不计息。现金利息、融资成本、未来股票分红、提前指派时机、费用和成交滑点未模拟。'
+            + '橙线是按所选账本成本口径计算的情景结算后每股成本：随交割结果变化，结果相同的价格区间可保持水平；无持股时无每股成本。未到期期权市值、联动保护和每周假设净收入只进入盈亏，不混入本账本成本。每周输入不是卖出新期权的保证利润。区间是完整组合的参数采样范围，非概率或保证边界。');
         _renderStressChart(series, book);
         _renderStressCards(series, currency);
     }
@@ -4022,29 +3358,69 @@
     function _openStressTest() {
         const book = _currentBook();
         if (!book || !state.ledger) return;
+        if (state.stressOpen) {
+            // Navigating to the current view is not a new scenario or refresh.
+            _showView('stress');
+            return;
+        }
         state.stressOpen = true;
         state.stressExpiry = state.whatIfExpiry;
-        state.stressHorizonDays = null;
+        state.stressHorizonDays = 45;
+        state.stressIncludeLongOptions = true;
         state.stressBasePrice = _stressReferencePrice();
         _restoreStressLinkedChoice(book);
-        $('stress-modal').hidden = false;
-        globalScope.document.body.classList.add('stress-modal-open');
+        _showView('stress');
+        _setStressGroupOpen('stress-own-group', state.stressIncludeLongOptions, true);
+        _setStressGroupOpen('stress-linked-group', state.stressIncludeLinkedHedge, true);
         _renderStressTest();
-        $('stress-expiry').focus();
-        if (state.stressIncludeLongOptions) {
-            _refreshStressMarketInputs(false);
+        // In the stacked layout parameters follow the results. Focus the view
+        // heading, not an input below the chart, and enter at the results top.
+        $('stress-title').focus({ preventScroll: true });
+        $('stress-view').scrollIntoView({ block: 'start' });
+        if (state.stressIncludeLongOptions || state.stressIncludeLinkedHedge || state.stressPnlBasis === 'change') {
+            void _refreshStressScenarioInputs(false);
         }
-        _ensureStressLinkedData(false);
+    }
+
+    /**
+     * Stop everything the stress view owns without touching which view is
+     * shown. Late worker results and snapshot responses are dropped by the
+     * stressOpen gate once this has run.
+     */
+    function _teardownStressTest() {
+        globalScope.clearTimeout(state.stressDraftTimer); state.stressDraftTimer = null;
+        if (!state.stressOpen) return;
+        state.stressOpen = false;
+        _cancelStressJob();
+        _invalidateStressScenarioInputs();
+        globalScope.clearTimeout(state.stressHorizonTimer);
+        state.stressHorizonTimer = null;
     }
 
     function _closeStressTest() {
         if (!state.stressOpen) return;
-        state.stressOpen = false;
-        globalScope.clearTimeout(state.stressHorizonTimer);
-        state.stressHorizonTimer = null;
-        $('stress-modal').hidden = true;
-        globalScope.document.body.classList.remove('stress-modal-open');
+        _teardownStressTest();
+        _showView('ledger');
         $('btn-open-stress-test').focus();
+    }
+
+    /**
+     * Parameter groups in the stress view follow their master checkbox:
+     * ticking opens the group, unticking closes it, unless the user has
+     * toggled the group by hand since the view opened (`force` resets that).
+     */
+    function _setStressGroupOpen(groupId, open, force = false) {
+        const group = $(groupId);
+        if (!group) return;
+        if (force) delete group.dataset.manual;
+        if (!open && group.dataset.manual === '1') return;
+        group.dataset.expected = open ? '1' : '0';
+        group.open = Boolean(open);
+    }
+
+    function _noteStressGroupToggle(toggleEvent) {
+        const group = toggleEvent.target;
+        if ((group.open ? '1' : '0') !== group.dataset.expected) group.dataset.manual = '1';
     }
 
     /**
@@ -4080,15 +3456,27 @@
             && state.stressInputsGeneration === generation
             && _stressScenarioDate().date === throughExpiry;
         try {
-            const response = await request('request_cost_basis_option_scenario_inputs', {
-                bookId,
-                throughExpiry,
-                contracts,
-            });
-            if (!isCurrent()) return;
-            const price = Number(response.underlyingPrice);
-            if (!Number.isFinite(price) || price <= 0) {
-                throw new Error('TWS 返回的标的现价无效');
+            let response = null;
+            let price = NaN;
+            for (let attempt = 0; ; attempt += 1) {
+                response = await request('request_cost_basis_option_scenario_inputs', {
+                    bookId,
+                    throughExpiry,
+                    contracts,
+                });
+                if (!isCurrent()) return;
+                price = Number(response.underlyingPrice);
+                if (Number.isFinite(price) && price > 0) {
+                    state.stressInputsError = '';
+                    break;
+                }
+                if (attempt >= STRESS_UNDERLYING_RETRY_LIMIT) {
+                    throw new Error('TWS 返回的标的现价无效');
+                }
+                state.stressInputsError = '标的现价暂缺，正在自动重试…';
+                _renderStressTest();
+                await new Promise((resolve) => globalScope.setTimeout(resolve, STRESS_UNDERLYING_RETRY_MS));
+                if (!isCurrent()) return;
             }
             state.stressLongOptionInputs = response;
             state.marketPrice = price;
@@ -4100,6 +3488,8 @@
             state.stressLongOptionInputs = null;
             if (error.code === 'broker_option_scenario_inputs_unavailable') {
                 state.stressInputsError = '当前后端不支持 TWS 期权参数快照。';
+            } else if (error.code === 'broker_option_scenario_inputs_busy') {
+                state.stressInputsError = '行情请求繁忙；旧请求尚未结束，请稍后点击刷新重试。';
             } else if (error.code === 'broker_option_scenario_inputs_timeout') {
                 state.stressInputsError = 'TWS 期权参数在 15 秒内未完成，'
                     + '服务器已终止请求，没有继续后台等待。';
@@ -4118,11 +3508,44 @@
         }
     }
 
-    async function _refreshStressPrice() {
-        await _refreshStressMarketInputs(true);
-        if (state.stressIncludeLinkedHedge && state.stressLinkedBookId) {
-            await _loadStressLinkedEvents(true);
+    // One refresh owns BOTH snapshots. Resolve the linked ledger first, then
+    // start both quote requests together; never combine a new linked quote
+    // with the old main-book baseline (including re-enabling a cached overlay).
+    async function _refreshStressScenarioInputs(showAlert, reloadLinkedEvents = false) {
+        const bookId = state.bookId;
+        const throughExpiry = _stressScenarioDate().date;
+        if (!bookId || !throughExpiry) return;
+        const linked = state.stressIncludeLinkedHedge;
+        const linkedBookId = state.stressLinkedBookId;
+        const socket = state.ws;
+        _invalidateStressScenarioInputs();
+        const generation = stressRefreshJob.generation;
+        const isCurrent = () => stressRefreshJob.generation === generation
+            && state.bookId === bookId && state.ws === socket
+            && _stressScenarioDate().date === throughExpiry
+            && state.stressIncludeLinkedHedge === linked
+            && state.stressLinkedBookId === linkedBookId;
+        stressRefreshJob.pending = true;
+        _renderStressTest();
+        try {
+            if (linked && linkedBookId && (reloadLinkedEvents || !state.stressLinkedLedger)) {
+                await _loadStressLinkedEvents(showAlert, false);
+            }
+            if (!isCurrent()) return;
+            await Promise.all([
+                _refreshStressMarketInputs(showAlert),
+                linked && linkedBookId ? _refreshStressLinkedInputs(showAlert) : Promise.resolve(),
+            ]);
+        } finally {
+            if (isCurrent()) {
+                stressRefreshJob.pending = false;
+                _renderStressTest();
+            }
         }
+    }
+
+    async function _refreshStressPrice() {
+        await _refreshStressScenarioInputs(true, true);
     }
 
     // ------------------------------------------------------------------
@@ -4140,8 +3563,8 @@
         const lens = state.stressLiquidation === 'bidask'
             ? '按今日点差折算：多头理论价 × 今日买价/中间价，空头理论价 × 今日卖价/中间价；交叉或单边报价拒绝'
             : '中间价：理论价按 TWS 中间价口径计';
-        return `${model} · 每张合约用它当前的 TWS IV · 无风险利率按情景日到到期日的期限从共享 USD 折现曲线解析`
-            + ` · ACT/365 · ${dividend} · ${lens}。这是情景估值，不是对情景日报价的预测。`;
+        return `${model} · 从当前标记价用所选模型反解逐合约本地 IV（不是直接套用 TWS IV） · 无风险利率按当前与情景剩余期限从同一共享 USD 折现曲线解析`
+            + ` · 沿用今日期限曲线形状（静态滚动假设，非未来利率预测） · ACT/365 · ${dividend} · ${lens}。这是情景估值，不是对情景日报价的预测。`;
     }
 
     function _stressLinkedBookCandidates(book) {
@@ -4176,7 +3599,13 @@
         try {
             globalScope.localStorage.setItem(
                 STRESS_LINKED_STORAGE_PREFIX + state.bookId, JSON.stringify({
+                    kernel: { pnlBasis: state.stressPnlBasis, path: state.stressPath,
+                        workflowVersion: 2,
+                        conservativeShortPutAssignment: state.stressConservativeShortPutAssignment,
+                        band: state.stressBandEnabled, flatIv: state.stressBandFlatIv,
+                        ownBeta: state.stressOwnIvBeta },
                     enabled: state.stressIncludeLinkedHedge,
+                    weeklyPremium: state.stressWeeklyPremium,
                     linkedBookId: state.stressLinkedBookId,
                     ratio: state.stressLinkedRatio,
                     ivMode: state.stressLinkedIvMode,
@@ -4184,6 +3613,11 @@
                     ivBeta: state.stressLinkedIvBeta,
                     ivTenorDamping: state.stressLinkedIvTenorDamping,
                     ivTenorDays: state.stressLinkedIvTenorDays,
+                    ivTenorExponent: state.stressLinkedIvTenorExponent,
+                    ivResearchReviewedVersion: state.stressIvResearchReviewedVersion,
+                    ivBetaAuto: state.stressLinkedIvBetaAuto,
+                    ivOtmDiscount: state.stressLinkedIvOtmDiscount,
+                    sigmaCrashScale: state.stressLinkedSigmaCrashScale,
                     mapping: state.stressLinkedMapping,
                     sigma: state.stressLinkedSigma,
                     dividendYield: state.stressLinkedDividendYield,
@@ -4195,6 +3629,11 @@
 
     /** Drop every snapshot that was keyed to the previous scenario date. */
     function _invalidateStressScenarioInputs() {
+        _cancelStressJob();
+        stressRefreshJob.generation += 1;
+        stressRefreshJob.pending = false;
+        state.stressLinkedLoadGeneration += 1;
+        state.stressLinkedEventsPending = false;
         state.stressInputsGeneration += 1;
         state.stressLongOptionInputs = null;
         state.stressInputsPending = false;
@@ -4219,8 +3658,20 @@
     }
 
     function _restoreStressLinkedChoice(book) {
-        const choice = chooseLinkedBook(book, _stressLinkedBookCandidates(book),
-            _readStressLinkedMemory(book.bookId));
+        const remembered = _readStressLinkedMemory(book.bookId);
+        state.stressIvResearchReviewedVersion = remembered
+            ? (remembered.ivResearchReviewedVersion || null) : IV_RESEARCH_PROFILE.version;
+        const kernel = remembered && remembered.kernel || {};
+        state.stressPnlBasis = kernel.workflowVersion === 2 && kernel.pnlBasis === 'cost' ? 'cost' : 'change';
+        state.stressIncludeIncome = false;
+        state.stressPath = kernel.path === 'gradual' ? 'gradual' : 'immediate';
+        state.stressConservativeShortPutAssignment = kernel.conservativeShortPutAssignment !== false;
+        state.stressBandEnabled = kernel.band !== false;
+        state.stressBandFlatIv = kernel.flatIv !== false;
+        state.stressOwnIvBeta = kernel.ownBeta === true;
+        const rememberedPremium = normalizeWeeklyPremium(remembered && remembered.weeklyPremium);
+        state.stressWeeklyPremium = rememberedPremium === null ? 0 : rememberedPremium;
+        const choice = chooseLinkedBook(book, _stressLinkedBookCandidates(book), remembered);
         if (choice.bookId !== state.stressLinkedBookId) _clearStressLinkedData();
         state.stressLinkedBookId = choice.bookId;
         state.stressLinkedRatio = choice.ratio;
@@ -4229,6 +3680,10 @@
         state.stressLinkedIvBeta = choice.ivBeta;
         state.stressLinkedIvTenorDamping = choice.ivTenorDamping;
         state.stressLinkedIvTenorDays = choice.ivTenorDays;
+        state.stressLinkedIvTenorExponent = choice.ivTenorExponent;
+        state.stressLinkedIvBetaAuto = choice.ivBetaAuto;
+        state.stressLinkedIvOtmDiscount = choice.ivOtmDiscount;
+        state.stressLinkedSigmaCrashScale = choice.sigmaCrashScale;
         state.stressLinkedMapping = choice.mapping;
         state.stressLinkedSigma = choice.sigma;
         state.stressLinkedDividendYield = choice.dividendYield;
@@ -4240,13 +3695,14 @@
      * on the side. Nothing here touches state.allEvents or state.ledger; the
      * current book keeps its own view while the sibling is read.
      */
-    async function _loadStressLinkedEvents(showAlert) {
+    async function _loadStressLinkedEvents(showAlert, refreshInputs = true) {
         const linkedBookId = state.stressLinkedBookId;
         const mainBookId = state.bookId;
         if (!linkedBookId || !mainBookId) return;
         state.stressLinkedLoadGeneration += 1;
         state.stressLinkedInputsGeneration += 1;
         const generation = state.stressLinkedLoadGeneration;
+        const socket = state.ws;
         state.stressLinkedEventsPending = true;
         state.stressLinkedEventsError = '';
         state.stressLinkedEvents = [];
@@ -4256,6 +3712,7 @@
         state.stressLinkedInputsError = '';
         _renderStressTest();
         const isCurrent = () => state.bookId === mainBookId
+            && state.ws === socket
             && state.stressLinkedBookId === linkedBookId
             && state.stressLinkedLoadGeneration === generation;
         try {
@@ -4295,8 +3752,8 @@
                 _renderStressTest();
             }
         }
-        if (isCurrent() && state.stressLinkedLedger && state.stressIncludeLinkedHedge) {
-            await _refreshStressLinkedInputs(showAlert);
+        if (refreshInputs && isCurrent() && state.stressLinkedLedger && state.stressIncludeLinkedHedge) {
+            await _refreshStressScenarioInputs(showAlert);
         }
     }
 
@@ -4322,17 +3779,20 @@
         }
         state.stressLinkedInputsGeneration += 1;
         const generation = state.stressLinkedInputsGeneration;
+        const socket = state.ws;
         // Every long contract still alive today needs a quote: the mark is
         // the reference value, and contracts that expire between today and
         // the stress date still settle at intrinsic against it. Resolve the
         // list now, before any render can normalise the selected expiry.
         const contracts = _deferredLongOptionRequests(
-            state.stressLinkedLedger.openOptions, _todayDigits());
+            state.stressLinkedLedger.openOptions, globalScope.OptionComboCostBasisStressCore.exchangeDate());
         state.stressLinkedInputsPending = true;
         state.stressLinkedInputsError = '';
         state.stressLinkedInputs = null;
         _renderStressTest();
         const isCurrent = () => state.bookId === mainBookId
+            && state.ws === socket
+            && state.stressIncludeLinkedHedge
             && state.stressLinkedBookId === linkedBookId
             && _stressScenarioDate().date === throughExpiry
             && state.stressLinkedInputsGeneration === generation;
@@ -4353,6 +3813,8 @@
             state.stressLinkedInputs = null;
             if (error.code === 'broker_option_scenario_inputs_unavailable') {
                 state.stressLinkedInputsError = '当前后端不支持 TWS 期权参数快照。';
+            } else if (error.code === 'broker_option_scenario_inputs_busy') {
+                state.stressLinkedInputsError = '行情请求繁忙；旧请求尚未结束，请稍后点击刷新重试。';
             } else if (error.code === 'broker_option_scenario_inputs_timeout') {
                 state.stressLinkedInputsError = 'TWS 期权参数在 15 秒内未完成，'
                     + '服务器已终止请求，没有继续后台等待。';
@@ -4368,16 +3830,10 @@
         }
     }
 
-    /** Load whatever the linked overlay still lacks, in order, once. */
+    /** Enabling even a previously cached overlay needs a fresh matched pair. */
     function _ensureStressLinkedData(showAlert) {
         if (!state.stressIncludeLinkedHedge || !state.stressLinkedBookId) return;
-        if (!state.stressLinkedLedger) {
-            if (!state.stressLinkedEventsPending) void _loadStressLinkedEvents(showAlert);
-            return;
-        }
-        if (!state.stressLinkedInputs && !state.stressLinkedInputsPending) {
-            void _refreshStressLinkedInputs(showAlert);
-        }
+        return _refreshStressScenarioInputs(showAlert);
     }
 
     function _countLongOptions(openOptions) {
@@ -4406,6 +3862,10 @@
             ivBeta: state.stressLinkedIvBeta,
             ivTenorDamping: state.stressLinkedIvTenorDamping,
             ivTenorDays: state.stressLinkedIvTenorDays,
+            ivTenorExponent: state.stressLinkedIvTenorExponent,
+            ivBetaAuto: state.stressLinkedIvBetaAuto,
+            ivOtmDiscount: state.stressLinkedIvOtmDiscount,
+            sigmaCrashScale: state.stressLinkedSigmaCrashScale,
             mapping: state.stressLinkedMapping,
             sigma: state.stressLinkedSigma,
             dividendYield: _effectiveDividendYield(
@@ -4414,7 +3874,7 @@
             basePrice: state.stressLinkedInputs
                 ? state.stressLinkedInputs.underlyingPrice : null,
             marketInputs: state.stressLinkedInputs,
-            asOf: _todayDigits(),
+            asOf: globalScope.OptionComboCostBasisStressCore.exchangeDate(),
         };
     }
 
@@ -4430,12 +3890,40 @@
         return _todayIso().replace(/\D/g, '').slice(0, 8);
     }
 
+    function _reviewStressIvSettings(restoreBaseline) {
+        if (restoreBaseline) {
+            for (const [key, value] of Object.entries(IV_RESEARCH_PROFILE.settings)) {
+                state[`stressLinked${key[0].toUpperCase()}${key.slice(1)}`] = value;
+            }
+        }
+        state.stressIvResearchReviewedVersion = IV_RESEARCH_PROFILE.version;
+        _writeStressLinkedMemory();
+        _renderStressTest();
+    }
+
+    function _renderStressIvProfile() {
+        const settings = Object.fromEntries(Object.keys(IV_RESEARCH_PROFILE.settings).map(key =>
+            [key, state[`stressLinked${key[0].toUpperCase()}${key.slice(1)}`]]));
+        const profile = globalScope.OptionComboCostBasisStressModels.ivResearchProfileStatus(settings, state.stressIvResearchReviewedVersion);
+        const symbol = (_stressLinkedBook() || {}).symbol;
+        _text($('stress-iv-profile-label'), profile.kind === 'none' ? 'IV 冲击未开启'
+            : profile.baseline ? 'QQQ IV 研究基准' : '自定义 IV 参数');
+        const note = $('stress-iv-profile-note');
+        note.className = profile.needsReview ? 'needs-review' : '';
+        _text(note, profile.needsReview
+            ? '已有配置尚未确认当前研究版（2026-09-05）；参数原样保留，请选择保留或恢复。'
+            : `已确认研究版 2026-09-05${symbol && symbol !== 'QQQ' ? '；用于本联动标的是额外假设' : ''}；非预测保证。`);
+        $('btn-stress-iv-keep').hidden = !profile.needsReview;
+        $('btn-stress-iv-baseline').disabled = profile.baseline && !profile.needsReview;
+    }
+
     function _renderStressLinkedControls(book) {
         const toggle = $('stress-include-linked-hedge');
         const wrap = $('stress-linked-inputs');
         const select = $('stress-linked-book');
         const ratioInput = $('stress-linked-ratio');
         const candidates = _stressLinkedBookCandidates(book);
+        _renderStressIvProfile();
         toggle.checked = state.stressIncludeLinkedHedge;
         toggle.disabled = !candidates.length;
         wrap.hidden = !state.stressIncludeLinkedHedge;
@@ -4504,6 +3992,18 @@
             tenorDaysInput.value = state.stressLinkedIvTenorDays === null
                 ? '' : String(state.stressLinkedIvTenorDays);
         }
+        const betaAutoToggle = $('stress-linked-iv-beta-auto');
+        betaAutoToggle.checked = state.stressLinkedIvBetaAuto;
+        betaInput.disabled = state.stressLinkedIvBetaAuto;
+        $('stress-linked-iv-otm').checked = state.stressLinkedIvOtmDiscount;
+        $('stress-linked-iv-otm-field').hidden = state.stressLinkedIvMode !== 'beta';
+        $('stress-linked-sigma-crash').checked = state.stressLinkedSigmaCrashScale;
+        const tenorExponentInput = $('stress-linked-iv-tenor-exponent');
+        tenorExponentInput.disabled = !state.stressLinkedIvTenorDamping;
+        if (globalScope.document.activeElement !== tenorExponentInput) {
+            tenorExponentInput.value = state.stressLinkedIvTenorExponent === null
+                ? '' : String(state.stressLinkedIvTenorExponent);
+        }
         const linkedBook = _stressLinkedBook();
         const symbol = linkedBook ? linkedBook.symbol : '联动账本';
         let bookStatus = '联动账本：尚未选择';
@@ -4522,16 +4022,17 @@
             }
         }
         _text($('stress-linked-book-status'), bookStatus);
-        let inputsStatus = `逐合约 TWS IV：${state.stressLinkedInputsError || '尚未拉取'}`;
+        let inputsStatus = `期权行情：${state.stressLinkedInputsError || '尚未拉取'}`;
         if (state.stressLinkedInputsPending) {
-            inputsStatus = `逐合约 TWS IV：正在拉取 ${symbol}…`;
+            inputsStatus = `期权行情：正在拉取 ${symbol}…`;
         } else if (state.stressLinkedInputs) {
             const quoted = (state.stressLinkedInputs.options || []).filter(
                 (item) => Number(item.impliedVolatility) > 0).length;
             const price = Number(state.stressLinkedInputs.underlyingPrice);
-            inputsStatus = `逐合约 TWS IV：${_quantity(quoted)} 张已取得`
+            inputsStatus = `TWS 原始 IV：${_quantity(quoted)} 个合约有返回值`
                 + (marketDataTypeLabel(state.stressLinkedInputs.options)
                     ? `（${marketDataTypeLabel(state.stressLinkedInputs.options)}）` : '')
+                + '；未到期期权估值使用有效报价反解的本地 IV，此数量不代表纳入估值的持仓张数。'
                 + ` · ${symbol} 基准 ${_currencyAmount(
                     linkedBook && linkedBook.currency || 'USD', price, 2)}`;
         }
@@ -5253,14 +4754,15 @@
                     const button = globalScope.document.createElement('button');
                     button.type = 'button';
                     button.className = 'draft delete-event';
-                    button.textContent = '删除';
-                    button.title = '从有效流水和成本计算中移除，同时保留可审计的冲销记录';
+                    button.textContent = '冲销';
+                    button.title = '冲销：从有效流水和成本计算中移除，原行与券商引用保留可审计；'
+                        + '重新导入同一行不会自动恢复，需用整本重建或恢复存档';
                     button.addEventListener('click', () => _voidEvent(event));
                     actionCell.appendChild(button);
                 } else {
                     const deleted = globalScope.document.createElement('span');
                     deleted.className = 'deleted-label';
-                    deleted.textContent = '已删除';
+                    deleted.textContent = '已冲销';
                     actionCell.appendChild(deleted);
                 }
                 row.appendChild(actionCell);
@@ -5288,7 +4790,7 @@
         const hasBook = connected && Boolean(state.bookId);
         const canCreateBook = connected && Boolean(state.status && state.status.available);
         const selectedNewBookAccount = _selectedNewBookAccount();
-        $('book-select').disabled = !connected || !state.books.length;
+        $('book-select').disabled = !connected || !state.books.length || state.importCommitPending;
         $('btn-new-book').disabled = !canCreateBook;
         $('new-book-account').disabled = !canCreateBook;
         $('new-book-account-manual').disabled = !canCreateBook
@@ -5301,6 +4803,15 @@
         $('btn-refresh-positions').disabled = !connected;
         $('btn-submit-event').disabled = !hasBook || state.eventSubmitPending;
         $('btn-export-csv').disabled = !hasBook;
+        if ($('btn-export-backup')) $('btn-export-backup').disabled = !hasBook || state.importCommitPending;
+        if ($('restore-backup-file')) {
+            $('restore-backup-file').disabled = !hasBook || state.importCommitPending;
+            const label = globalScope.document.querySelector('label[for="restore-backup-file"]');
+            if (label) {
+                label.classList.toggle('is-disabled', !hasBook || state.importCommitPending);
+                label.setAttribute('aria-disabled', String(!hasBook || state.importCommitPending));
+            }
+        }
         $('btn-save-snapshot').disabled = !hasBook;
         $('btn-fetch-executions').disabled = !hasBook || !state.positionsConnected
             || state.executionFetchPending || Boolean(state.importResult);
@@ -5308,7 +4819,7 @@
         // a label bound to a disabled input does nothing at all. Without
         // this the label stays a live-looking primary button that silently
         // swallows the click.
-        const importDisabled = !hasBook || !importer;
+        const importDisabled = !hasBook || !importer || state.importCommitPending;
         $('import-file').disabled = importDisabled;
         const importLabel = globalScope.document
             .querySelector('label[for="import-file"]');
@@ -5328,13 +4839,29 @@
         // looks imported but is missing a delivery - the worst outcome
         // available, because nothing on the page would say so afterwards.
         const blocked = Boolean(state.importResult
-            && state.importResult.problems.length);
+            && (state.importResult.problems.length
+                || _importRows(state.importResult).length > IMPORT_ROW_LIMIT));
         const apiImport = Boolean(state.importResult
             && state.importResult.format === 'tws_api');
-        $('import-replace').disabled = !hasBook || apiImport;
+        const registersOnly = Boolean(state.importResult && !apiImport
+            && state.importResult.format !== 'unknown'
+            && state.importResult.statementPeriod
+            && state.importResult.statementPeriod.source === 'period');
+        const stale = Boolean(state.importResult && _importBindingProblem());
+        $('import-replace').disabled = !hasBook || apiImport || state.importCommitPending
+            || Boolean(state.importReading);
         $('btn-import-commit').disabled = !hasBook || !state.importResult
-            || !_importRows(state.importResult).length || !resetPlanReady || blocked;
-        $('btn-import-clear').disabled = !state.importResult;
+            || Boolean(state.importReading) || state.importCommitPending || stale
+            || (!_importRows(state.importResult).length && !registersOnly)
+            || !resetPlanReady || blocked;
+        $('btn-import-commit').textContent = state.importCommitPending
+            ? '提交中…' : (state.importCommitTokens ? '重试提交' : '确认导入');
+        $('btn-import-clear').disabled = !state.importResult && !state.importReading;
+        const stateNote = $('import-state-note');
+        if (stateNote) {
+            _text(stateNote, stale ? `预览已失效：${_importBindingProblem()}，请重新选择文件。` : '');
+            stateNote.hidden = !stale;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -5406,6 +4933,18 @@
         if (visible.indexOf('price') >= 0) event.price = _numberOrNull($('field-price').value);
         if (visible.indexOf('splitRatio') >= 0) {
             event.splitRatio = _numberOrNull($('field-ratio').value);
+        }
+        // A chosen action fixes the sign, so a buy typed as "5" cannot be
+        // booked as a sale because the minus was forgotten.
+        const actionNode = $('field-action');
+        const action = actionNode && typeof actionNode.value === 'string' ? actionNode.value : '';
+        if (action === 'buy' || action === 'sell') {
+            const sign = action === 'buy' ? 1 : -1;
+            ['contracts', 'shares', 'futureContracts'].forEach((field) => {
+                if (event[field] !== null && event[field] !== undefined) {
+                    event[field] = sign * Math.abs(event[field]);
+                }
+            });
         }
         const cash = _numberOrNull($('field-cash').value);
         event.cashAmount = cash === null ? core.deriveCashAmount(event) : cash;
@@ -5580,9 +5119,10 @@
 
     async function _voidEvent(event) {
         const reason = globalScope.prompt(
-            `删除这条账本记录（${event.tradeDate} ${KIND_LABELS[event.kind] || event.kind}）？\n\n`
-            + '删除后它会立即从有效流水和成本计算中移除，'
-            + '但会保留一条可审计的冲销记录。\n\n请填写删除原因：');
+            `冲销这条账本记录（${event.tradeDate} ${KIND_LABELS[event.kind] || event.kind}）？\n\n`
+            + '冲销后它立即从有效流水和成本计算中移除，原行保留为可审计记录。\n'
+            + '注意：它的券商引用仍被占用，重新导入同一份报表不会把它加回来；'
+            + '误冲销请用设置页的重建存档恢复，或整本重建。\n\n请填写冲销原因：');
         if (!reason || !reason.trim()) return;
         try {
             await request('void_cost_basis_event', {
@@ -5593,7 +5133,7 @@
             });
             await _loadBooks();
         } catch (error) {
-            globalScope.alert(`删除失败：${error.message}`);
+            globalScope.alert(`冲销失败：${error.message}`);
         }
     }
 
@@ -5683,6 +5223,10 @@
                     // SQLite deliberately retains their unique reference.
                     voidedAtUtc: event.voidedAtUtc || null,
                     includeInCost: event.includeInCost !== false,
+                    // Quantities let the importer notice a re-derived
+                    // opening stub that disagrees with the stored one.
+                    contracts: event.contracts === undefined ? null : event.contracts,
+                    shares: event.shares === undefined ? null : event.shares,
                 })),
         };
     }
@@ -5821,26 +5365,36 @@
 
     function _tradeQuantity(event) {
         if (!event) return null;
-        if (event.kind === 'option_trade') return Number(event.contracts);
+        if (['option_trade', 'option_assignment', 'option_exercise', 'option_expiry'].includes(event.kind)) return Number(event.contracts);
         if (event.kind === 'share_trade') return Number(event.shares);
-        if (event.kind === 'futures_trade') return Number(event.futureContracts);
+        if (event.kind === 'futures_trade' || event.kind === 'futures_roll') return Number(event.futureContracts);
         return null;
     }
 
     function _sameExecutionContract(left, right) {
         if (!left || !right || left.kind !== right.kind
             || left.account !== right.account) return false;
-        if (left.kind === 'option_trade') {
+        if (['option_trade', 'option_assignment', 'option_exercise', 'option_expiry'].includes(left.kind)) {
             if (core.contractKey(left) !== core.contractKey(right)) return false;
             return !(left.conId && right.conId
                 && String(left.conId) !== String(right.conId));
         }
-        if (left.kind === 'futures_trade') {
+        if (left.kind === 'futures_trade' || left.kind === 'futures_roll') {
             if (core.futureKey(left) !== core.futureKey(right)) return false;
+            if (left.kind === 'futures_roll' && (core.futureKey(left, true) !== core.futureKey(right, true)
+                || (left.rollToConId && right.rollToConId && String(left.rollToConId) !== String(right.rollToConId)))) return false;
             return !(left.futureConId && right.futureConId
                 && String(left.futureConId) !== String(right.futureConId));
         }
         return left.kind === 'share_trade';
+    }
+
+    function _isAdjacentTradeDate(left, right) {
+        const a = Date.parse(`${left}T00:00:00Z`);
+        const b = Date.parse(`${right}T00:00:00Z`);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+        const days = Math.abs(a - b) / 86400000;
+        return days > 0 && days <= 1;
     }
 
     function _sameExecutionIdentity(left, right) {
@@ -5849,83 +5403,622 @@
     }
 
     /**
-     * Map authoritative next-day CSV rows onto already-imported TWS fills.
-     * A match needs the exact account/contract/second plus signed quantity,
-     * price, and net cash. Ambiguous economic overlap blocks the batch.
+     * Net cash a stored TWS fill contributed, including a separately booked
+     * exchange rebate (a negative broker commission).
+     */
+    function _executionNetCash(event, rebates) {
+        return Number(event.cashAmount || 0)
+            + Number(rebates.get(`${event.externalRef}-rebate`) || 0);
+    }
+
+    /**
+     * Half a unit of the last decimal the statement printed for a price,
+     * read from the printed text so trailing zeros still count.
+     *
+     * An Order row prints ONE price for the whole order: the size-weighted
+     * average of its fills, rounded to the statement's display precision.
+     * The exact average of the stored fills is therefore allowed to differ
+     * from it by rounding only. Net cash is compared separately and is the
+     * strict economic check.
+     */
+    function _priceRoundingTolerance(priceText, price) {
+        const text = String(priceText || '').trim() || String(price);
+        const decimals = text.indexOf('.') < 0 ? 0 : text.length - text.indexOf('.') - 1;
+        return Math.max(1e-8, 0.5 * (10 ** -decimals)) + 1e-9;
+    }
+
+    /** The TWS order id a stored fill recorded, when its note carries one. */
+    function _executionPermId(event) {
+        if (!event || event.source !== 'execution_report') return '';
+        const match = /permId (\d+)/.exec(String(event.note || ''));
+        return match ? match[1] : '';
+    }
+
+    function _fillEconomicsMatch(fill, execution, rebates) {
+        return Math.abs(_tradeQuantity(execution) - Number(fill.quantity)) < 1e-6
+            && Math.abs(Number(execution.price) - Number(fill.price)) < 1e-8
+            && Math.abs(_executionNetCash(execution, rebates) - Number(fill.cashAmount)) < 0.011;
+    }
+
+    /**
+     * Find the group of stored fills that one statement Order row aggregates.
+     *
+     * TWS reports every partial fill with its own execId, so the ledger
+     * holds one row per fill; an Activity Statement Order row (or a Flex
+     * export at order granularity) prints the whole order as one line at
+     * one second with the summed quantity.
+     *
+     * When the stored fills carry their TWS order id, the group is the set
+     * of fills with one order id that sums exactly to the order quantity and
+     * contains a fill at the printed second. Without order ids the group is
+     * a consecutive stretch of same-direction fills in broker time order
+     * with the same two properties. Two candidate groups are ambiguous and
+     * block the batch; the caller never picks one.
+     */
+    function _aggregatedFillRun(candidates, csvEvent) {
+        const wanted = _tradeQuantity(csvEvent);
+        const second = _exactBrokerTimestamp(csvEvent);
+        if (!wanted || !second) return { run: null, ambiguous: false };
+        const direction = wanted > 0 ? 1 : -1;
+        const fills = candidates.filter((event) => {
+            const quantity = _tradeQuantity(event);
+            return quantity !== null && quantity * direction > 0;
+        }).sort((left, right) => (
+            String(_exactBrokerTimestamp(left)).localeCompare(
+                String(_exactBrokerTimestamp(right)))
+            || String(left.externalRef).localeCompare(String(right.externalRef))));
+        const runs = [];
+        const permIds = fills.map(_executionPermId);
+        if (fills.length && permIds.every(Boolean)) {
+            const byOrder = new Map();
+            fills.forEach((fill, index) => {
+                const list = byOrder.get(permIds[index]) || [];
+                list.push(fill);
+                byOrder.set(permIds[index], list);
+            });
+            byOrder.forEach((group) => {
+                const total = group.reduce((sum, fill) => sum + _tradeQuantity(fill), 0);
+                if (Math.abs(total - wanted) < 1e-6
+                    && group.some((fill) => _exactBrokerTimestamp(fill) === second)) {
+                    runs.push(group);
+                }
+            });
+        } else {
+            for (let start = 0; start < fills.length; start += 1) {
+                let total = 0;
+                let touchesSecond = false;
+                for (let end = start; end < fills.length; end += 1) {
+                    total += _tradeQuantity(fills[end]);
+                    if (_exactBrokerTimestamp(fills[end]) === second) touchesSecond = true;
+                    if (Math.abs(total - wanted) < 1e-6) {
+                        if (touchesSecond && end > start) runs.push(fills.slice(start, end + 1));
+                        break;
+                    }
+                    if (Math.abs(total) > Math.abs(wanted) + 1e-6) break;
+                }
+            }
+        }
+        if (!runs.length) return { run: null, ambiguous: false };
+        const distinct = new Set(runs.map((run) => run.map(
+            (event) => event.externalRef).join('\u0000')));
+        return distinct.size === 1
+            ? { run: runs[0], ambiguous: false }
+            : { run: null, ambiguous: true };
+    }
+
+    function _describeRow(event) {
+        return `${event.account} ${_describeContract(event) || event.kind}`;
+    }
+
+    /**
+     * Map authoritative statement rows onto rows the ledger already holds
+     * from another source, before the batch is committed.
+     *
+     * Targets are stored TWS fills (per execId) and stored statement rows
+     * from the other export format. A statement row is proven to be a
+     * duplicate only by exact economics: for a single fill the same
+     * account/contract/second plus signed quantity, price and net cash; for
+     * an Order row that TWS delivered in pieces, either every printed fill
+     * row matches a stored fill one-to-one, or the unique group of stored
+     * fills that sums exactly to the order agrees on net cash and average
+     * price. A row whose fills are only partly stored is split: the stored
+     * fills are reported as duplicates and the rest are imported per fill.
+     *
+     * Everything that looks related but cannot be proven blocks the batch
+     * with a reason naming both sides. Rows whose own reference is already
+     * in the ledger are a replay of an earlier import and are left to the
+     * store's own de-duplication.
      */
     function planExecutionReportAliases(importResult, allEvents) {
         const result = importResult || {};
-        if (result.format !== 'activity' && result.format !== 'flex') {
-            return { aliases: {}, matched: [], problems: [] };
-        }
-        const active = (allEvents || []).filter((event) => (
-            event.eventId && !event.voidedAtUtc && event.includeInCost !== false
+        const empty = { aliases: {}, fillSplits: {}, matched: [], problems: [],
+            unmatchedExecutions: [] };
+        if (result.format !== 'activity' && result.format !== 'flex') return empty;
+        const ledger = (allEvents || []).filter((event) => event && event.eventId);
+        const knownRefs = new Set(ledger.filter((event) => event.externalRef).map(
+            (event) => `${event.account}\u0000${event.externalRef}`));
+        const active = ledger.filter((event) => (
+            !event.voidedAtUtc && event.includeInCost !== false
             && event.source === 'execution_report'
             && (event.tag === 'ibkr_exec' || event.tag === 'ibkr_close')
             && ['option_trade', 'share_trade', 'futures_trade'].includes(event.kind)));
+        const storedStatementRows = ledger.filter((event) => (
+            !event.voidedAtUtc && event.includeInCost !== false
+            && event.source === 'csv_import' && event.externalRef
+            && !/^prior-/.test(String(event.externalRef))
+            && ['option_trade', 'share_trade', 'futures_trade'].includes(event.kind)));
         const rebates = new Map();
-        (allEvents || []).forEach((event) => {
+        ledger.forEach((event) => {
             if (!event.voidedAtUtc && event.includeInCost !== false
                 && event.source === 'execution_report' && event.tag === 'ibkr_rebate') {
                 rebates.set(event.externalRef, Number(event.cashAmount || 0));
             }
         });
         const remaining = new Set(active);
+        const remainingStatements = new Set(storedStatementRows);
         const aliases = {};
+        const fillSplits = {};
         const matched = [];
         const problems = [];
-        (result.events || []).filter((event) => (
+
+        function adopt(csvEvent, executions, sourceRef) {
+            executions.forEach((execution) => remaining.delete(execution));
+            aliases[`${csvEvent.account}\u0000${sourceRef || csvEvent.sourceRef || csvEvent.externalRef}`]
+                = executions[0].externalRef;
+            matched.push({ csvEvent, execution: executions[0], executions });
+        }
+
+        // Existing source references claim no other fill. The revision
+        // planner checks their economics before they may be called replays.
+        const rows = (result.events || []).filter((event) => (
             event.source === 'csv_import'
-            && ['option_trade', 'share_trade', 'futures_trade'].includes(event.kind)
-            && Boolean(_exactBrokerTimestamp(event)))).forEach((csvEvent) => {
-            const directRef = String(csvEvent.externalRef || '').startsWith('ibkr-exec-')
-                ? String(csvEvent.externalRef)
-                : `ibkr-exec-${String(csvEvent.externalRef || '')}`;
-            const sameDayContract = active.filter((event) => (
+            && ['option_trade', 'share_trade', 'futures_trade', 'futures_roll'].includes(event.kind)
+            && !knownRefs.has(`${event.account}\u0000${event.sourceRef || event.externalRef}`)));
+        // Earlier orders claim their fills first, so a later order on the
+        // same contract cannot steal a fill out of an earlier group.
+        const timed = rows.filter((event) => Boolean(_exactBrokerTimestamp(event))
+            && event.kind !== 'futures_roll').sort((left, right) => (
+            String(_exactBrokerTimestamp(left)).localeCompare(
+                String(_exactBrokerTimestamp(right)))
+            || (left.lineNumber || 0) - (right.lineNumber || 0)));
+        const unresolved = new Set(timed);
+        rows.filter((event) => event.kind !== 'futures_roll' && !_exactBrokerTimestamp(event)).forEach((event) => {
+            if (active.some((prior) => _sameExecutionContract(event, prior) && prior.tradeDate === event.tradeDate)) {
+                problems.push({ lineNumber: event.lineNumber || 0,
+                    reason: 'CSV row may overlap stored TWS executions but has no exact broker timestamp; import is blocked for review', raw: _describeRow(event) });
+            }
+        });
+
+        function sameDayCandidates(csvEvent) {
+            return active.filter((event) => (
                 remaining.has(event) && _sameExecutionContract(csvEvent, event)
                 && event.tradeDate === csvEvent.tradeDate));
-            const direct = sameDayContract.filter((event) => (
-                event.externalRef === directRef));
-            const related = direct.length ? direct : active.filter((event) => (
-                remaining.has(event) && _sameExecutionIdentity(csvEvent, event)));
-            if (!related.length) {
-                if (sameDayContract.length) {
+        }
+
+        // Pass 1: direct references and exact single fills, statement
+        // format first so a Flex re-export of an Activity month is caught.
+        timed.forEach((csvEvent) => {
+            const sourceRef = String(csvEvent.sourceRef || csvEvent.externalRef || '');
+            const directRef = sourceRef.startsWith('ibkr-exec-')
+                ? sourceRef : `ibkr-exec-${sourceRef}`;
+            const direct = active.filter((event) => event.account === csvEvent.account
+                && event.externalRef === directRef);
+            if (direct.length) {
+                const prior = direct[0];
+                const differences = _importEconomicsDifferences(csvEvent,
+                    Object.assign({}, prior, { cashAmount: _executionNetCash(prior, rebates),
+                        fees: Math.abs(Number(prior.fees || 0) - Number(rebates.get(`${prior.externalRef}-rebate`) || 0)) }));
+                if (differences.length || !remaining.has(prior)) {
+                    problems.push({ lineNumber: csvEvent.lineNumber || 0,
+                        reason: `Broker execution ${directRef} has revised or already claimed economics (${differences.join(', ')}); review the corrected statement before importing`,
+                        raw: _describeRow(csvEvent) });
+                    unresolved.delete(csvEvent);
+                    return;
+                }
+                adopt(csvEvent, [prior]);
+                unresolved.delete(csvEvent);
+                return;
+            }
+            const quantity = _tradeQuantity(csvEvent);
+            const exact = active.filter((event) => (
+                remaining.has(event) && _sameExecutionIdentity(csvEvent, event)
+                && Math.abs(_tradeQuantity(event) - quantity) < 1e-6
+                && Math.abs(Number(event.price) - Number(csvEvent.price)) < 1e-8
+                && Math.abs(_executionNetCash(event, rebates) - Number(csvEvent.cashAmount)) < 0.011
+            )).sort((left, right) => String(left.externalRef).localeCompare(
+                String(right.externalRef)));
+            if (exact.length) {
+                adopt(csvEvent, [exact[0]]);
+                unresolved.delete(csvEvent);
+                return;
+            }
+            const storedTwin = storedStatementRows.find((event) => (
+                remainingStatements.has(event) && _sameExecutionIdentity(csvEvent, event)
+                && !_importEconomicsDifferences(csvEvent, event).length
+                && Math.abs(_tradeQuantity(event) - quantity) < 1e-6
+                && Math.abs(Number(event.price) - Number(csvEvent.price)) < 1e-8
+                && Math.abs(Number(event.cashAmount) - Number(csvEvent.cashAmount)) < 0.011));
+            if (storedTwin) {
+                remainingStatements.delete(storedTwin);
+                // The same trade already imported from the other export
+                // format; its reference differs only because the formats
+                // name rows differently.
+                aliases[`${csvEvent.account}\u0000${sourceRef}`] = storedTwin.externalRef;
+                matched.push({ csvEvent, execution: storedTwin, executions: [storedTwin],
+                    crossFormat: true });
+                unresolved.delete(csvEvent);
+            }
+        });
+
+        // Pass 2: the statement's own fill rows against stored fills, one to
+        // one. This is the only path that can prove a PARTIAL overlap.
+        Array.from(unresolved).forEach((csvEvent) => {
+            const fills = Array.isArray(csvEvent.fills) ? csvEvent.fills : [];
+            if (!fills.length) return;
+            const claimed = new Set();
+            const matches = fills.map((fill) => {
+                const execution = active.find((event) => (
+                    remaining.has(event) && !claimed.has(event)
+                    && _sameExecutionContract(csvEvent, event)
+                    && _exactBrokerTimestamp(event) === fill.brokerTimestamp
+                    && _fillEconomicsMatch(fill, event, rebates)));
+                if (execution) claimed.add(execution);
+                return execution || null;
+            });
+            const found = matches.filter(Boolean);
+            if (!found.length) return;
+            if (found.length === fills.length) {
+                adopt(csvEvent, found);
+                unresolved.delete(csvEvent);
+                return;
+            }
+            found.forEach((execution) => remaining.delete(execution));
+            const keep = [];
+            const matchedFills = [];
+            matches.forEach((execution, index) => {
+                if (execution) matchedFills.push({ index, externalRef: execution.externalRef });
+                else keep.push(index);
+            });
+            fillSplits[`${csvEvent.account}\u0000${csvEvent.sourceRef || csvEvent.externalRef}`]
+                = { keep, matched: matchedFills };
+            matched.push({ csvEvent, execution: found[0], executions: found, partial: true,
+                remainingFills: keep.length });
+            unresolved.delete(csvEvent);
+        });
+
+        // Pass 3: an Order row against the unique group of stored fills it
+        // aggregates, for exports that print no fill rows.
+        Array.from(unresolved).forEach((csvEvent) => {
+            const candidates = sameDayCandidates(csvEvent);
+            if (!candidates.length) return;
+            const aggregated = _aggregatedFillRun(candidates, csvEvent);
+            if (aggregated.ambiguous) {
+                problems.push({
+                    lineNumber: csvEvent.lineNumber || 0,
+                    reason: 'CSV order row could be assembled from more than one group of '
+                        + 'stored TWS fills; import is blocked to avoid double counting',
+                    raw: _describeRow(csvEvent),
+                });
+                unresolved.delete(csvEvent);
+                return;
+            }
+            if (!aggregated.run) return;
+            const run = aggregated.run;
+            const runCash = run.reduce(
+                (sum, event) => sum + _executionNetCash(event, rebates), 0);
+            const runSize = run.reduce(
+                (sum, event) => sum + Math.abs(_tradeQuantity(event)), 0);
+            const runAverage = run.reduce(
+                (sum, event) => sum + Number(event.price) * Math.abs(_tradeQuantity(event)),
+                0) / runSize;
+            const csvPrice = Number(csvEvent.price);
+            if (Math.abs(runCash - Number(csvEvent.cashAmount)) < 0.011 * run.length
+                && Math.abs(runAverage - csvPrice)
+                    <= _priceRoundingTolerance(csvEvent.priceText, csvPrice)) {
+                adopt(csvEvent, run);
+            } else {
+                problems.push({
+                    lineNumber: csvEvent.lineNumber || 0,
+                    reason: `CSV order row spans ${run.length} stored TWS fills with the same `
+                        + `total quantity, but average price or net cash differs `
+                        + `(statement ${csvPrice} / ${Number(csvEvent.cashAmount).toFixed(2)}, `
+                        + `TWS ${runAverage.toFixed(6)} / ${runCash.toFixed(2)}); import is `
+                        + 'blocked to avoid double counting',
+                    raw: _describeRow(csvEvent),
+                });
+            }
+            unresolved.delete(csvEvent);
+        });
+
+        // Roll legs: each broker leg of a derived FUT roll against a stored
+        // TWS futures fill, so a roll TWS already delivered is not booked twice.
+        rows.filter((event) => event.kind === 'futures_roll').forEach((roll) => {
+            (roll.sourceLegs || []).forEach((leg) => {
+                if (knownRefs.has(`${leg.account}\u0000${leg.sourceRef}`)) return;
+                const legEvent = Object.assign({ kind: 'futures_trade' }, leg);
+                const execution = active.find((event) => (
+                    remaining.has(event) && _sameExecutionIdentity(legEvent, event)
+                    && Math.abs(_tradeQuantity(event) - Number(leg.futureContracts)) < 1e-6
+                    && Math.abs(Number(event.price) - Number(leg.price)) < 1e-8
+                    && Math.abs(_executionNetCash(event, rebates) - Number(leg.cashAmount)) < 0.011));
+                if (execution) {
+                    remaining.delete(execution);
+                    aliases[`${leg.account}\u0000${leg.sourceRef}`] = execution.externalRef;
+                    matched.push({ csvEvent: roll, execution, executions: [execution], leg });
+                }
+            });
+        });
+
+        // Pass 4: whatever is still unresolved and still looks related is a
+        // conflict, named with both sides so the operator can decide.
+        unresolved.forEach((csvEvent) => {
+            const sameDay = sameDayCandidates(csvEvent);
+            if (sameDay.length) {
+                const sameSecond = sameDay.filter(
+                    (event) => _exactBrokerTimestamp(event) === _exactBrokerTimestamp(csvEvent));
+                const sample = sameSecond[0] || sameDay[0];
+                problems.push({
+                    lineNumber: csvEvent.lineNumber || 0,
+                    reason: (sameSecond.length
+                        ? 'CSV row overlaps a stored TWS execution at the same second, but '
+                            + 'quantity, price, or net cash differs'
+                        : 'CSV row may overlap a stored TWS execution for the same contract '
+                            + 'and day, but the broker timestamp differs')
+                        + ` (statement ${_exactBrokerTimestamp(csvEvent)} qty ${_tradeQuantity(csvEvent)} `
+                        + `@ ${csvEvent.price} cash ${Number(csvEvent.cashAmount).toFixed(2)}; `
+                        + `TWS ${_exactBrokerTimestamp(sample)} qty ${_tradeQuantity(sample)} `
+                        + `@ ${sample.price} cash ${_executionNetCash(sample, rebates).toFixed(2)}, `
+                        + `${sample.externalRef}); import is blocked for review`,
+                    raw: _describeRow(csvEvent),
+                });
+                return;
+            }
+            const adjacent = active.find((event) => (
+                remaining.has(event) && _sameExecutionContract(csvEvent, event)
+                && _isAdjacentTradeDate(event.tradeDate, csvEvent.tradeDate)
+                && Math.abs(_tradeQuantity(event) - _tradeQuantity(csvEvent)) < 1e-6));
+            if (adjacent) {
+                // A stored fill for the same contract and quantity sits one
+                // calendar day away. That is the signature of a TWS clock
+                // decoded in the wrong timezone: an afternoon New York fill
+                // stamped in an Asian zone lands on the next date, so it is
+                // never a same-day candidate and the CSV row would be booked
+                // a second time without any warning.
+                problems.push({
+                    lineNumber: csvEvent.lineNumber || 0,
+                    reason: 'a stored TWS execution for the same contract and quantity is '
+                        + `dated one day away from this CSV row (statement ${_exactBrokerTimestamp(csvEvent)}, `
+                        + `TWS ${_exactBrokerTimestamp(adjacent) || adjacent.tradeDate} ${adjacent.externalRef}); `
+                        + 'check that [tws] timezone matches the statement clock before '
+                        + 'importing, import is blocked to avoid double counting',
+                    raw: _describeRow(csvEvent),
+                });
+            }
+        });
+
+        return {
+            aliases,
+            fillSplits,
+            matched,
+            problems,
+            unmatchedExecutions: active.filter((event) => remaining.has(event)),
+        };
+    }
+
+    /**
+     * Rows in this batch that are probably the same trade as a row the
+     * ledger already holds under a different identity: a statement row
+     * re-exported after the broker corrected price, fees or codes (a new
+     * fingerprint), or a hand-entered row for the same trade or cash item.
+     * Neither is skipped nor booked; both are named and block the batch.
+     */
+    function _importEconomicsDifferences(left, right) {
+        const differences = [];
+        ['kind', 'tradeDate', 'account', 'right', 'expiry', 'futureExpiry', 'rollToExpiry'].forEach((key) => {
+            if (String(left[key] || '') !== String(right[key] || '')) differences.push(key);
+        });
+        ['conId', 'localSymbol', 'optionSecType', 'futureConId', 'futureLocalSymbol',
+            'rollToConId', 'rollToLocalSymbol', 'brokerTimestamp'].forEach((key) => {
+            if (left[key] && right[key] && String(left[key]) !== String(right[key])) differences.push(key);
+        });
+        ['strike', 'sharesPerContract', 'contracts', 'shares', 'futureContracts',
+            'rollToPrice', 'splitRatio', 'price', 'fees', 'cashAmount'].forEach((key) => {
+            const tolerance = key === 'cashAmount' || key === 'fees' ? 0.011 : 1e-8;
+            if (Math.abs(Number(left[key] || 0) - Number(right[key] || 0)) > tolerance) differences.push(key);
+        });
+        return differences;
+    }
+
+    function planStatementRevisionConflicts(importResult, allEvents, aliases) {
+        const result = importResult || {};
+        const aliasKeys = aliases || {};
+        const problems = [];
+        const ledger = (allEvents || []).filter((event) => (
+            event && event.eventId && !event.voidedAtUtc));
+        const knownRefs = new Set(ledger.filter((event) => event.externalRef).map(
+            (event) => `${event.account}\u0000${event.externalRef}`));
+        (result.events || []).forEach((csvEvent) => {
+            const sourceKey = `${csvEvent.account}\u0000${csvEvent.sourceRef || csvEvent.externalRef}`;
+            if (Object.prototype.hasOwnProperty.call(aliasKeys, sourceKey)) return;
+            if (knownRefs.has(sourceKey)) {
+                const previous = ledger.find((event) => `${event.account}\u0000${event.externalRef}` === sourceKey);
+                const changed = _importEconomicsDifferences(csvEvent, previous);
+                if (changed.length) problems.push({ lineNumber: csvEvent.lineNumber || 0,
+                    reason: `Stored source reference ${csvEvent.sourceRef || csvEvent.externalRef} has revised economics (${changed.join(', ')}); rebuild from the corrected complete statement. Voiding does not release a source reference.`,
+                    raw: _describeRow(csvEvent) });
+                return;
+            }
+            if (/^prior-/.test(String(csvEvent.externalRef || ''))) return;
+            const quantity = _tradeQuantity(csvEvent);
+            if (quantity !== null) {
+                const second = _exactBrokerTimestamp(csvEvent);
+                const revised = ledger.find((event) => (
+                    event.source === 'csv_import' && _sameExecutionContract(csvEvent, event)
+                    && event.tradeDate === csvEvent.tradeDate
+                    && (!second || !_exactBrokerTimestamp(event) || _exactBrokerTimestamp(event) === second)));
+                if (revised) {
                     problems.push({
                         lineNumber: csvEvent.lineNumber || 0,
-                        reason: 'CSV row may overlap a stored TWS execution for the same '
-                            + 'contract and day, but the broker timestamp differs; import is blocked for review',
-                        raw: `${csvEvent.account} ${_describeContract(csvEvent)}`,
+                        reason: 'CSV row has the same account, contract and overlapping time as '
+                            + `a stored statement row but a different identity (stored price ${revised.price} `
+                            + `cash ${Number(revised.cashAmount).toFixed(2)} fees ${revised.fees}; this file `
+                            + `price ${csvEvent.price} cash ${Number(csvEvent.cashAmount).toFixed(2)} fees `
+                            + `${csvEvent.fees}); a broker revision must replace the stored row, not be `
+                            + 'added beside it - rebuild from the corrected complete statement (voiding does not release its source reference)',
+                        raw: _describeRow(csvEvent),
+                    });
+                    return;
+                }
+                const manual = ledger.find((event) => (
+                    event.source === 'manual' && _sameExecutionContract(csvEvent, event)
+                    && event.tradeDate === csvEvent.tradeDate
+                    && Math.abs(_tradeQuantity(event) - quantity) < 1e-6));
+                if (manual) {
+                    problems.push({
+                        lineNumber: csvEvent.lineNumber || 0,
+                        reason: 'CSV row matches a hand-entered ledger row on account, contract, '
+                            + `date and quantity (manual row ${manual.tradeDate} price ${manual.price} `
+                            + `cash ${Number(manual.cashAmount).toFixed(2)}); void the manual row so the `
+                            + 'statement row replaces it; otherwise review the source records before importing',
+                        raw: _describeRow(csvEvent),
                     });
                 }
                 return;
             }
-            const csvQuantity = _tradeQuantity(csvEvent);
-            const csvPrice = Number(csvEvent.price);
-            const csvCash = Number(csvEvent.cashAmount);
-            const exact = related.filter((event) => {
-                const apiCash = Number(event.cashAmount || 0)
-                    + Number(rebates.get(`${event.externalRef}-rebate`) || 0);
-                return Math.abs(_tradeQuantity(event) - csvQuantity) < 1e-6
-                    && Math.abs(Number(event.price) - csvPrice) < 1e-8
-                    && Math.abs(apiCash - csvCash) < 0.011;
-            }).sort((left, right) => String(left.externalRef).localeCompare(
-                String(right.externalRef)));
-            if (!exact.length) {
-                problems.push({
-                    lineNumber: csvEvent.lineNumber || 0,
-                    reason: 'CSV row overlaps a stored TWS execution at the same second, '
-                        + 'but quantity, price, or net cash differs; import is blocked to avoid double counting',
-                    raw: `${csvEvent.account} ${_describeContract(csvEvent)}`,
-                });
+            if (csvEvent.kind === 'dividend' || csvEvent.kind === 'fee') {
+                const priorCash = ledger.find((event) => event.source === 'csv_import'
+                    && event.kind === csvEvent.kind && event.account === csvEvent.account
+                    && event.tradeDate === csvEvent.tradeDate);
+                if (priorCash) {
+                    problems.push({ lineNumber: csvEvent.lineNumber || 0,
+                        reason: `CSV ${csvEvent.kind} overlaps a stored statement cash row on the same date under a different reference; review the possible revision and rebuild from the corrected complete statement`,
+                        raw: `${csvEvent.account} ${csvEvent.tradeDate}` });
+                    return;
+                }
+                const manual = ledger.find((event) => (
+                    event.source === 'manual' && event.kind === csvEvent.kind
+                    && event.account === csvEvent.account
+                    && event.tradeDate === csvEvent.tradeDate
+                    && Math.abs(Number(event.cashAmount) - Number(csvEvent.cashAmount)) < 0.011));
+                if (manual) {
+                    problems.push({
+                        lineNumber: csvEvent.lineNumber || 0,
+                        reason: `CSV ${csvEvent.kind} matches a hand-entered ${csvEvent.kind} on the `
+                            + `same date and amount (${Number(manual.cashAmount).toFixed(2)}); void the `
+                            + 'manual row so the statement row replaces it',
+                        raw: `${csvEvent.account}\u0000${csvEvent.kind} ${csvEvent.tradeDate}`,
+                    });
+                }
+            }
+        });
+        return { problems };
+    }
+
+    /**
+     * Stored TWS fills the statement should have covered but did not.
+     *
+     * An Activity Statement is complete for its account and period. A fill
+     * the ledger holds inside that period that no statement row claimed is
+     * therefore either mis-stamped (timezone) or a fill the account never
+     * had; both mean the ledger carries something the authoritative record
+     * does not, and the batch stops until the operator resolves it.
+     */
+    function planStatementCoverageGaps(importResult, unmatchedExecutions) {
+        const result = importResult || {};
+        const period = result.statementPeriod || {};
+        const problems = [];
+        if (result.format !== 'activity' || !result.checks
+            || period.source !== 'period' || !period.from || !period.through) {
+            return { problems, checked: false };
+        }
+        (unmatchedExecutions || []).forEach((execution) => {
+            if (String(execution.account || '') !== String(result.account || '')) return;
+            const date = String(execution.tradeDate || '');
+            if (date < period.from || date > period.through) return;
+            problems.push({
+                lineNumber: 0,
+                reason: `the ledger holds TWS execution ${execution.externalRef} `
+                    + `(${date} qty ${_tradeQuantity(execution)} @ ${execution.price}) inside the `
+                    + `statement period ${period.from} to ${period.through}, but no statement row `
+                    + 'matches it; the statement is complete for its period, so this fill is '
+                    + 'either mis-stamped or not the account\'s - resolve it before importing',
+                raw: _describeRow(execution),
+            });
+        });
+        return { problems, checked: true };
+    }
+
+    /**
+     * Zero-premium and Basis-reconstructed opening stubs that this batch's
+     * real broker history now replaces.
+     *
+     * A stub was drafted because an earlier statement showed a position it
+     * did not open. When the statement that DID open it is imported, the
+     * real rows for that contract must sum exactly to the stub; then the
+     * stub is voided in the same transaction that writes the rows. A
+     * partial match blocks: adding real openings beside a stub would hold
+     * the contract twice.
+     */
+    function planPriorStubSupersession(importResult, allEvents) {
+        const result = importResult || {};
+        const account = String(result.account || '');
+        const eventIds = [];
+        const problems = [];
+        if (result.format !== 'activity' && result.format !== 'flex') {
+            return { eventIds, problems };
+        }
+        const stubs = (allEvents || []).filter((event) => (
+            event && event.eventId && !event.voidedAtUtc && event.includeInCost !== false
+            && event.source === 'csv_import'
+            && (event.tag === 'prior_open' || event.tag === 'prior_basis')
+            && event.account === account
+            && (event.kind === 'option_trade' || event.kind === 'opening_balance')));
+        stubs.forEach((stub) => {
+            if (stub.kind === 'option_trade') {
+                const key = core.contractKey(stub);
+                const real = (result.events || []).filter((event) => (
+                    event.source === 'csv_import' && ['option_trade', 'option_assignment', 'option_exercise', 'option_expiry'].includes(event.kind)
+                    && event.tag !== 'prior_open' && event.tag !== 'prior_basis'
+                    && event.account === account && core.contractKey(event) === key
+                    && (!(stub.conId && event.conId) || String(stub.conId) === String(event.conId))
+                    && !(allEvents || []).some((prior) => prior.externalRef === event.externalRef && prior.account === event.account)
+                    && String(event.tradeDate || '') <= String(stub.tradeDate || '')));
+                if (!real.length) return;
+                const total = real.reduce((sum, event) => sum + Number(event.contracts || 0), 0);
+                if (Math.abs(total - Number(stub.contracts || 0)) < 1e-6) {
+                    eventIds.push(stub.eventId);
+                } else {
+                    problems.push({
+                        lineNumber: real[0].lineNumber || 0,
+                        reason: `this file opens ${total} contract(s) of a contract the ledger `
+                            + `holds as an opening stub of ${stub.contracts}; the real history does `
+                            + 'not exactly replace the stub, so the batch is blocked instead of '
+                            + 'holding the contract twice - import the complete covering statement',
+                        raw: _describeRow(stub),
+                    });
+                }
                 return;
             }
-            const execution = exact[0];
-            remaining.delete(execution);
-            aliases[`${csvEvent.account}\u0000${csvEvent.externalRef}`]
-                = execution.externalRef;
-            matched.push({ csvEvent, execution });
+            const real = (result.events || []).filter((event) => (
+                event.source === 'csv_import' && event.kind === 'share_trade'
+                && event.account === account
+                && !(allEvents || []).some((prior) => prior.externalRef === event.externalRef && prior.account === event.account)
+                && String(event.tradeDate || '') <= String(stub.tradeDate || '')));
+            if (!real.length) return;
+            const total = real.reduce((sum, event) => sum + Number(event.shares || 0), 0);
+            if (Math.abs(total - Number(stub.shares || 0)) < 1e-6) {
+                eventIds.push(stub.eventId);
+            } else {
+                problems.push({
+                    lineNumber: real[0].lineNumber || 0,
+                    reason: `this file buys ${total} share(s) but the ledger holds an opening `
+                        + `balance stub of ${stub.shares}; the real history does not exactly replace `
+                        + 'the stub, import the complete covering statement',
+                    raw: `${account} shares`,
+                });
+            }
         });
-        return { aliases, matched, problems };
+        return { eventIds, problems };
     }
 
     /**
@@ -5936,7 +6029,7 @@
      */
     function planImportExecutionAliases(replacing, importResult, allEvents) {
         return replacing
-            ? { aliases: {}, matched: [], problems: [] }
+            ? { aliases: {}, fillSplits: {}, matched: [], problems: [], unmatchedExecutions: [] }
             : planExecutionReportAliases(importResult, allEvents);
     }
 
@@ -6127,6 +6220,46 @@
         };
     }
 
+    const IMPORT_ROW_LIMIT = 5000;
+
+    const CHECK_LABELS = Object.freeze({
+        period: '报表区间',
+        account: '账户段',
+        instruments: '合约表',
+        trades: '成交段',
+        openPositions: '期末持仓核对',
+        dividends: '股息段',
+        withholdingTax: '预扣税段',
+        twsCoverage: 'TWS 成交覆盖核对',
+        revision: '修订 / 手工重复核对',
+    });
+
+    /** What the store will do with one preview row. */
+    function _importRowStatus(event, result) {
+        if (event.tag === 'prior_open') return { key: 'stub', label: '期初存根 · 权利金未知' };
+        if (event.tag === 'prior_basis') return { key: 'stub', label: '期初存根 · Basis 还原' };
+        if (event.unpaired) return { key: 'conflict', label: '未配对' };
+        const known = result && result.knownRefs
+            && result.knownRefs.has(`${event.account || ''}\u0000${event.externalRef || ''}`);
+        if (known) return { key: 'existing', label: '已存在 · 跳过' };
+        if (event.fillOf) return { key: 'new', label: '新增 · 补余量成交' };
+        return { key: 'new', label: '新增' };
+    }
+
+    function _importCounts(result) {
+        const rows = _importRows(result);
+        const counts = { new: 0, existing: 0, stub: 0, conflict: 0, confirmed: 0, newCash: 0 };
+        rows.forEach((event) => {
+            const status = _importRowStatus(event, result);
+            counts[status.key] += 1;
+            if (status.key === 'new' || status.key === 'stub') {
+                counts.newCash += Number(event.cashAmount || 0);
+            }
+        });
+        counts.confirmed = (result.confirmedDuplicates || []).length;
+        return counts;
+    }
+
     function _renderImportPreview() {
         const summaryNode = $('import-summary');
         const wrap = $('import-preview-wrap');
@@ -6137,14 +6270,21 @@
         _clear(problemBody);
 
         if (!state.importResult) {
-            _text(summaryNode, '未选择文件。');
+            _text(summaryNode, state.importReading
+                ? `正在读取 ${state.importReading}…` : '未选择文件。');
             _text($('import-preview-title'), '导入预览');
             _text($('import-source-note'), '支持 TWS API 近期成交、Flex Query 与 Activity Statement。'
-                + '导入前逐行预览，execId 或报表成交号会自动去重。');
+                + '导入前逐行预览：每行标明将新增、已存在跳过、已核对为 TWS 重复，或是期初存根。');
+            _text($('import-binding'), '');
+            _text($('import-checks'), '');
+            _text($('import-counts'), '');
+            _text($('import-ledger-warnings'), '');
+            $('import-ledger-warnings').hidden = true;
+            $('import-position-wrap').hidden = true;
             wrap.hidden = true;
             problemWrap.hidden = true;
             $('import-blocked').hidden = true;
-            $('import-workspace').hidden = !state.importText;
+            $('import-workspace').hidden = !state.importText && !state.importReading;
             _refreshControls();
             return;
         }
@@ -6153,11 +6293,32 @@
 
         const result = state.importResult;
         const apiImport = result.format === 'tws_api';
+        const binding = result.binding || {};
         _text($('import-preview-title'), apiImport ? 'TWS 成交预览' : 'CSV 导入预览');
         _text($('import-source-note'), apiImport
             ? (result.coverageNote || 'TWS API 只是近期成交窗口，不能代替完整历史报表。')
             : '支持 Flex Query 与 Activity Statement。导入前逐行预览，'
-                + '重叠时间段会自动去重。');
+                + '重叠时间段会自动去重；与已存 TWS 成交的对应关系在下方逐行标明。');
+        const period = result.statementPeriod || {};
+        _text($('import-binding'), [
+            binding.fileName ? `文件 ${binding.fileName}` : '',
+            binding.fileDigest ? `摘要 ${binding.fileDigest}` : '',
+            `账本 ${binding.account || '?'} · ${binding.symbol || '?'} · ${binding.currency || 'USD'}`,
+            period.from || period.through
+                ? `报表区间 ${period.from || '?'} 至 ${period.through || '?'}`
+                    + (period.source === 'events' ? '（未读到 Period 行，按最晚成交推断）' : '')
+                : '',
+            `模式 ${binding.mode === 'rebuild' ? '整本重建' : '追加'}`,
+            binding.ledgerVersion ? `账本版本 ${String(binding.ledgerVersion).slice(0, 12)}` : '',
+        ].filter(Boolean).join(' · '));
+        const checks = result.checks || {};
+        const checkText = Object.keys(CHECK_LABELS).filter((key) => key in checks).map((key) => (
+            `${CHECK_LABELS[key]}${checks[key] ? '：已检查' : '：未检查'}`));
+        _text($('import-checks'), checkText.length
+            ? `检查项 · ${checkText.join(' · ')}`
+            : '');
+
+        const counts = _importCounts(result);
         const kinds = Object.keys(result.summary.byKind)
             .map((kind) => `${KIND_LABELS[kind] || kind} ${result.summary.byKind[kind]}`)
             .join(' · ');
@@ -6169,16 +6330,38 @@
             + (result.supersedeTwsEventIds && result.supersedeTwsEventIds.length
                 ? ` · ${apiImport ? '真实成交' : 'CSV'}将取代 TWS 临时基线 ${result.supersedeTwsEventIds.length} 条`
                 : '')
-            + (result.confirmedExecutionCount
-                ? ` · 已核对并跳过 TWS 重复成交 ${result.confirmedExecutionCount} 条`
+            + (result.supersedePriorStubEventIds && result.supersedePriorStubEventIds.length
+                ? ` · 真实开仓将取代期初存根 ${result.supersedePriorStubEventIds.length} 条`
                 : '')
             + (kinds ? ` · ${kinds}` : ''));
+        _text($('import-counts'), `将新增 ${counts.new} 条 · 已存在跳过 ${counts.existing} 条`
+            + ` · 已核对为 TWS / 另一格式重复 ${counts.confirmed} 条`
+            + ` · 期初存根 ${counts.stub} 条`
+            + (counts.conflict ? ` · 冲突 ${counts.conflict} 条` : '')
+            + ` · 新增行净现金 ${_signedMoney(counts.newCash)}`
+            + (result.unmappedColumns && result.unmappedColumns.length
+                ? ` · 未映射列：${result.unmappedColumns.join('、')}` : ''));
         _renderOpenings(result);
+        _renderImportPositions(result);
 
-        const rows = _importRows(result);
+        const warnings = $('import-ledger-warnings');
+        if (result.ledgerPreview && result.ledgerPreview.warnings.length) {
+            _text(warnings, `导入后账本回放警告：${result.ledgerPreview.warnings.join('；')}`);
+            warnings.hidden = false;
+        } else {
+            _text(warnings, '');
+            warnings.hidden = true;
+        }
+
+        const filter = state.importFilter || 'all';
+        const rows = _importRows(result).filter((event) => {
+            if (filter === 'all') return true;
+            return _importRowStatus(event, result).key === filter;
+        });
         wrap.hidden = !rows.length;
         rows.forEach((event) => {
             const row = globalScope.document.createElement('tr');
+            const status = _importRowStatus(event, result);
             _cell(row, event.tradeDate);
             _cell(row, event.account || '—');
             _cell(row, _eventKindLabel(event));
@@ -6190,20 +6373,39 @@
             _cell(row, event.price === null || event.price === undefined
                 ? '—' : _money(event.price, 4), 'numeric');
             _cell(row, _money(event.cashAmount), 'numeric');
-            _cell(row,
-                event.tag === 'prior_open' ? '期初补录 · 权利金未知'
-                    : (event.unpaired ? `第 ${event.lineNumber} 行 · 未配对`
-                        : `第 ${event.lineNumber} 行`),
-                (event.unpaired || event.tag === 'prior_open') ? 'mismatch-flag' : '');
+            _cell(row, status.label,
+                status.key === 'conflict' || status.key === 'stub' ? 'mismatch-flag' : '');
+            _cell(row, event.unpaired ? `第 ${event.lineNumber} 行 · 未配对`
+                : (event.lineNumber ? `第 ${event.lineNumber} 行` : '推导'));
             body.appendChild(row);
         });
+        (result.confirmedDuplicates || []).filter(() => filter === 'all' || filter === 'confirmed')
+            .forEach((item) => {
+                const row = globalScope.document.createElement('tr');
+                _cell(row, item.tradeDate || '');
+                _cell(row, item.account || '—');
+                _cell(row, KIND_LABELS[item.kind] || item.kind);
+                _cell(row, '');
+                _cell(row, _quantity(item.contracts !== undefined ? item.contracts : item.shares), 'numeric');
+                _cell(row, '—', 'numeric');
+                _cell(row, _money(item.cashAmount), 'numeric');
+                _cell(row, `已核对 · 对应 ${item.externalRef}`);
+                _cell(row, item.lineNumber ? `第 ${item.lineNumber} 行` : '');
+                body.appendChild(row);
+                wrap.hidden = false;
+            });
 
         if (result.problems.length) {
             _text($('import-blocked'),
                 `有 ${result.problems.length} 条阻断问题，导入已被禁用。`
                 + '请查看下方逐条原因；可能是缺少配对腿、合约身份歧义、'
-                + '期初信息不足或与 TWS 临时基线部分重叠。'
+                + '期初信息不足、与 TWS 成交或已存记录的对应关系无法证明。'
                 + '程序不会在原因未解决时写入部分账本。');
+            $('import-blocked').hidden = false;
+        } else if (_importRows(result).length > IMPORT_ROW_LIMIT) {
+            _text($('import-blocked'),
+                `本文件会写入 ${_importRows(result).length} 条事件，超过单批上限 ${IMPORT_ROW_LIMIT} 条。`
+                + '请按更短的区间分别导出报表。');
             $('import-blocked').hidden = false;
         } else {
             $('import-blocked').hidden = true;
@@ -6226,6 +6428,14 @@
         return openings.concat(shareOpenings, result.events);
     }
 
+    /** Rows the store will actually insert: not already known, not blocked. */
+    function _importNewRows(result) {
+        return _importRows(result).filter((event) => {
+            const status = _importRowStatus(event, result);
+            return status.key === 'new' || status.key === 'stub';
+        });
+    }
+
     /**
      * What the account already held when the period opened.
      *
@@ -6233,8 +6443,8 @@
      * the whole time, so importing it alone leaves the ledger short of real
      * positions. The opening is arithmetic - closing minus the batch's own
      * movement - so the contracts are exact even though their premium is
-     * not in the file. The share opening is only reported: its cost basis is
-     * genuinely unknown here and inventing one would corrupt the headline.
+     * not in the file. A share opening with no cost evidence blocks the
+     * batch instead of being reported and then committed as a short lot.
      */
     function _renderOpenings(result) {
         const node = $('import-openings');
@@ -6260,14 +6470,13 @@
             if (unknown) {
                 parts.push(`期初已持有 ${unknown} 个合约，报表期内没有它们的开仓成本。`
                     + '已按「期末持仓 − 本批净变动」补出张数，权利金记为 0 '
-                    + '并打上 prior_open 标签——导入更早报表或手工补价之前，'
-                    + '页面会持续标记“非完整实际综合成本”。');
+                    + '并打上 prior_open 标签——导入开仓那份更早的报表时，存根会被真实开仓自动取代；'
+                    + '在此之前页面会持续标记“非完整实际综合成本”。');
             }
         }
         if (Math.abs(openings.openingShares) > 1e-6) {
-            parts.push(`期初还持有 ${_quantity(openings.openingShares)} 股，`
-                + '本页不会替你猜它的成本价。请在上方「录入事件」里手工添加一条'
-                + '期初余额，否则综合成本不准。');
+            parts.push(`期初还持有 ${_quantity(openings.openingShares)} 股，本文件没有它们的成本；`
+                + '导入已阻断。请先导入覆盖买入的更早报表，或在「手工补录」里记录一条已核实的期初余额后再追加。');
         }
         if (shareDrafts.length) {
             parts.push('期初股票持仓的现金已由 IBKR 完整卖出行的 Basis 还原。');
@@ -6280,7 +6489,142 @@
         node.textContent = parts.join(' ');
     }
 
-    function _parseImportText(text) {
+    /**
+     * Ledger now → ledger after this batch → statement period end, per
+     * contract, so an extra or missing position is visible before commit.
+     */
+    function _renderImportPositions(result) {
+        const wrap = $('import-position-wrap');
+        const body = $('import-position-table').querySelector('tbody');
+        _clear(body);
+        const preview = result.ledgerPreview;
+        if (!preview || !preview.positions || !preview.positions.length) {
+            wrap.hidden = true;
+            return;
+        }
+        wrap.hidden = false;
+        preview.positions.forEach((item) => {
+            const row = globalScope.document.createElement('tr');
+            _cell(row, item.label);
+            _cell(row, _quantity(item.before), 'numeric');
+            _cell(row, _quantity(item.after), 'numeric');
+            _cell(row, item.statement === null ? '—' : _quantity(item.statement), 'numeric');
+            _cell(row, item.statement === null ? '报表无期末数据'
+                : (Math.abs(item.after - item.statement) < 1e-6 ? '一致' : '不一致'),
+            item.statement !== null && Math.abs(item.after - item.statement) >= 1e-6
+                ? 'mismatch-flag' : '');
+            body.appendChild(row);
+        });
+    }
+
+    /**
+     * Replay the ledger with this batch applied, the way the store and the
+     * engine will, and compare the resulting positions with the statement's
+     * own period-end inventory.
+     */
+    function _computeLedgerPreview(result, replacing, ignoredEventIds) {
+        const book = _currentBook();
+        const secType = book && book.secType === 'FUT' ? 'FUT' : 'STK';
+        const ignored = new Set(ignoredEventIds || []);
+        const baselineEvents = replacing ? [] : state.allEvents.filter(
+            (event) => !event.voidedAtUtc && !ignored.has(event.eventId));
+        const newRows = _importNewRows(result).map((event) => Object.assign({}, event, {
+            eventId: event.eventId || `preview-${event.externalRef || event.lineNumber || ''}`,
+        }));
+        const cutoff = String(result.statementThrough || '');
+        const through = (events) => (cutoff
+            ? events.filter((event) => {
+                const stamp = _eventTimestamp(event);
+                return !stamp || stamp <= cutoff;
+            })
+            : events);
+        let before;
+        let after;
+        try {
+            before = core.computeLedger(through(baselineEvents), { secType });
+            after = core.computeLedger(through(baselineEvents.concat(newRows)), { secType });
+        } catch (error) {
+            return { warnings: [`回放失败：${error.message}`], positions: [] };
+        }
+        const statement = new Map();
+        const closing = result.openings && Array.isArray(result.openings.closingOptions)
+            ? result.openings.closingOptions : null;
+        if (closing) {
+            closing.forEach((item) => {
+                statement.set(core.contractKey(item), Number(item.quantity || 0));
+            });
+        }
+        const keys = new Map();
+        const collect = (ledger, field) => {
+            (ledger.openOptions || []).forEach((item) => {
+                const key = core.contractKey(item);
+                const entry = keys.get(key) || { label: _describeContract(item), before: 0, after: 0 };
+                entry[field] += Number(item.contracts || 0);
+                keys.set(key, entry);
+            });
+        };
+        collect(before, 'before');
+        collect(after, 'after');
+        statement.forEach((quantity, key) => {
+            if (!keys.has(key)) {
+                const sample = closing.find((item) => core.contractKey(item) === key);
+                keys.set(key, { label: _describeContract(sample), before: 0, after: 0 });
+            }
+        });
+        const positions = Array.from(keys.entries()).map(([key, entry]) => ({
+            key,
+            label: entry.label,
+            before: entry.before,
+            after: entry.after,
+            statement: closing ? (statement.get(key) || 0) : null,
+        })).sort((left, right) => left.label.localeCompare(right.label));
+        const shareBefore = Number((before.combined && before.combined.shares) || 0);
+        const shareAfter = Number((after.combined && after.combined.shares) || 0);
+        const statementShares = result.openings && result.openings.closingShares !== undefined
+            && closing ? Number(result.openings.closingShares || 0) : null;
+        if (shareBefore || shareAfter || statementShares) {
+            positions.unshift({ key: 'shares', label: '股票', before: shareBefore,
+                after: shareAfter, statement: statementShares });
+        }
+        if (secType === 'FUT') {
+            const futures = new Map();
+            const collectFutures = (items, field) => (items || []).forEach((item) => {
+                const key = core.futureKey(Object.assign({}, item, { futureExpiry: item.futureExpiry || item.expiry }));
+                const entry = futures.get(key) || { key: `future-${key}`, label: `期货 ${item.futureExpiry || item.expiry || ''}`, before: 0, after: 0, statement: null };
+                entry[field] = Number(item.futureContracts ?? item.contracts ?? item.quantity ?? 0);
+                futures.set(key, entry);
+            });
+            collectFutures(before.openFutures, 'before');
+            collectFutures(after.openFutures, 'after');
+            const closingFutures = result.openings?.closingFutures;
+            collectFutures(closingFutures, 'statement');
+            if (closingFutures) futures.forEach((item) => { if (item.statement === null) item.statement = 0; });
+            positions.push(...futures.values());
+        }
+        const warnings = Array.from(new Set((after.combined && after.combined.warnings) || []));
+        return { warnings, positions };
+    }
+
+    function _bindImportResult(result, meta) {
+        const book = _currentBook();
+        result.binding = {
+            bookId: state.bookId,
+            account: book ? (book.account || '') : '',
+            symbol: book ? book.symbol : '',
+            secType: book ? (book.secType || 'STK') : 'STK',
+            currency: book ? (book.currency || 'USD') : 'USD',
+            ledgerVersion: state.ledgerVersion ? state.ledgerVersion.digest : '',
+            generation: state.importGeneration,
+            fileName: meta && meta.fileName ? meta.fileName : '',
+            fileDigest: meta && meta.fileDigest ? meta.fileDigest : '',
+            mode: $('import-replace').checked === true ? 'rebuild' : 'append',
+        };
+        result.knownRefs = new Set(state.allEvents.filter((event) => event.externalRef).map(
+            (event) => `${event.account || ''}\u0000${event.externalRef}`));
+        return result;
+    }
+
+    function _parseImportText(text, meta) {
         const book = _currentBook();
         try {
             const parseOptions = {
@@ -6288,6 +6632,8 @@
                 defaultSharesPerContract: book ? book.defaultSharesPerContract : 100,
                 secType: book ? (book.secType || 'STK') : 'STK',
                 targetAccount: book ? (book.account || '') : '',
+                accountFallback: book ? (book.account || '') : '',
+                currency: book ? (book.currency || '') : '',
             };
             // First discover the statement's own cutoff without letting the
             // latest ledger state influence any opening-position arithmetic.
@@ -6298,54 +6644,111 @@
             const supersession = replacing
                 ? { eventIds: [], events: [], problems: [] }
                 : planTwsBaselineSupersession(discovery, state.allEvents);
+            const stubSupersession = replacing
+                ? { eventIds: [], problems: [] }
+                : planPriorStubSupersession(discovery, state.allEvents);
+            const ignoredEventIds = supersession.eventIds.concat(stubSupersession.eventIds);
             const baseline = buildImportBaseline(
                 replacing, state.ledger, state.allEvents,
-                discovery.statementThrough, supersession.eventIds);
-            const first = importer.parse(text, Object.assign({}, parseOptions, baseline, {
+                discovery.statementThrough, ignoredEventIds);
+            const crossSource = {
                 externalRefAliases: executionAliases.aliases,
-            }));
+                fillSplits: executionAliases.fillSplits,
+            };
+            const first = importer.parse(text, Object.assign({}, parseOptions, baseline, crossSource));
             // Opening stubs must sort before every real row, so they are
             // dated the day before the earliest trade in the file.
             const earliest = first.events.reduce(
                 (found, event) => (!found || event.tradeDate < found
-                    ? event.tradeDate : found), '');
-            state.importResult = earliest
+                    ? event.tradeDate : found), '') || discovery.statementPeriod?.from;
+            const result = earliest
                 ? importer.parse(text, Object.assign({}, parseOptions, {
                     openingDate: _shiftDays(earliest, -1),
-                }, baseline, { externalRefAliases: executionAliases.aliases }))
+                }, baseline, crossSource))
                 : first;
-            state.importResult.supersedeTwsEventIds = supersession.eventIds;
-            state.importResult.confirmedExecutionCount = executionAliases.matched.length;
-            if (supersession.problems.length) {
-                state.importResult.problems.push(...supersession.problems);
-                state.importResult.summary.problems += supersession.problems.length;
+            result.supersedeTwsEventIds = supersession.eventIds;
+            result.supersedePriorStubEventIds = stubSupersession.eventIds;
+            result.confirmedExecutionCount = executionAliases.matched.reduce(
+                (total, item) => total + (item.executions ? item.executions.length : 1), 0);
+            result.crossSourceMatches = executionAliases.matched;
+            const revision = replacing
+                ? { problems: [] }
+                : planStatementRevisionConflicts(result, state.allEvents, executionAliases.aliases);
+            const coverage = replacing
+                ? { problems: [], checked: false }
+                : planStatementCoverageGaps(result, executionAliases.unmatchedExecutions);
+            result.checks = Object.assign({}, result.checks, {
+                twsCoverage: coverage.checked,
+                revision: !replacing,
+            });
+            [supersession, executionAliases, stubSupersession, revision, coverage].forEach((plan) => {
+                if (plan.problems && plan.problems.length) {
+                    result.problems.push(...plan.problems);
+                    result.summary.problems += plan.problems.length;
+                }
+            });
+            if (_importRows(result).some((event) => !event.tradeDate)) {
+                result.problems.push({ lineNumber: 0, reason: '无法确定期初记录日期；请导出包含明确报表区间的文件。', raw: '' });
             }
-            if (executionAliases.problems.length) {
-                state.importResult.problems.push(...executionAliases.problems);
-                state.importResult.summary.problems += executionAliases.problems.length;
-            }
+            _bindImportResult(result, meta);
+            result.ledgerPreview = _computeLedgerPreview(result, replacing, ignoredEventIds);
+            state.importResult = result;
         } catch (error) {
-            state.importResult = {
+            state.importResult = _bindImportResult({
                 format: 'unknown',
                 events: [],
                 problems: [{ lineNumber: 0, reason: error.message, raw: '' }],
                 summary: { total: 0, drafted: 0, problems: 1, skipped: 0, byKind: {} },
                 unmappedColumns: [],
-            };
+                confirmedDuplicates: [],
+                checks: {},
+            }, meta);
         }
+    }
+
+    /** A short content digest so the preview names exactly which bytes it read. */
+    function _fileDigest(text) {
+        return _stableHash16(text);
     }
 
     function _handleImportFile(changeEvent) {
         const file = changeEvent.target.files && changeEvent.target.files[0];
         if (!file || !importer) return;
+        // A new file invalidates whatever was previewed: the old result is
+        // gone before the first byte is read, so nothing stale can be
+        // committed while the read is in flight, and a slow read that
+        // finishes after a newer one (or after a book switch) is dropped.
+        state.importGeneration += 1;
+        const generation = state.importGeneration;
+        const bookId = state.bookId;
+        state.importResult = null;
+        state.importText = '';
+        state.importCommitTokens = null;
+        state.importReading = file.name;
         $('import-workspace').hidden = false;
-        _text($('import-summary'), `正在读取 ${file.name}…`);
+        _renderImportPreview();
         const reader = new globalScope.FileReader();
-        reader.onload = () => {
-            state.importText = String(reader.result || '');
-            _parseImportText(state.importText);
+        const finish = (text, error) => {
+            if (generation !== state.importGeneration || bookId !== state.bookId) return;
+            state.importReading = false;
+            if (error) {
+                state.importResult = _bindImportResult({
+                    format: 'unknown', events: [],
+                    problems: [{ lineNumber: 0, reason: `文件读取失败：${error}`, raw: '' }],
+                    summary: { total: 0, drafted: 0, problems: 1, skipped: 0, byKind: {} },
+                    unmappedColumns: [], confirmedDuplicates: [], checks: {},
+                }, { fileName: file.name });
+                _renderImportPreview();
+                return;
+            }
+            state.importText = text;
+            state.importMeta = { fileName: file.name, fileDigest: _fileDigest(text) };
+            _parseImportText(text, state.importMeta);
             _renderImportPreview();
         };
+        reader.onload = () => finish(String(reader.result || ''), null);
+        reader.onerror = () => finish('', (reader.error && reader.error.message) || 'read error');
+        reader.onabort = () => finish('', 'aborted');
         reader.readAsText(file);
     }
 
@@ -6353,17 +6756,18 @@
         // Switching mode changes which ledger will exist at commit time. The
         // retained file must be parsed again before the confirmation gate can
         // be satisfied; a preview produced for append is invalid for rebuild.
+        state.importCommitTokens = null;
         if (state.importText) {
-            _parseImportText(state.importText);
+            _parseImportText(state.importText, state.importMeta);
             _renderImportPreview();
         }
         await _refreshResetPlan();
     }
 
     /**
-     * Ask the server what wiping this book would destroy. The returned reset
-     * token carries the live event count and is rechecked transactionally;
-     * the UI presents that count in a normal confirmation dialog.
+     * Ask the server what wiping this book would destroy. The plan carries
+     * the ledger's digest; the rebuild presents that digest back and the
+     * server refuses if the ledger is no longer the one that was planned.
      */
     async function _refreshResetPlan() {
         const note = $('import-replace-note');
@@ -6375,11 +6779,30 @@
             return;
         }
         note.hidden = false;
+        const bookId = state.bookId;
+        const generation = state.importGeneration;
         try {
-            state.resetPlan = await request('request_cost_basis_reset_plan',
-                { bookId: state.bookId });
-            _text(note, `将存档并替换当前 ${state.resetPlan.eventCount} 条事件。`
-                + '点击「确认导入」后会再弹窗确认；账本若在此期间发生变化，后台会自动取消。');
+            const response = await request('request_cost_basis_reset_plan', { bookId });
+            if (state.bookId !== bookId || generation !== state.importGeneration) return;
+            if (response.ledgerVersion?.digest !== state.ledgerVersion?.digest) {
+                throw new Error('账本已变化，请刷新后重新预览');
+            }
+            state.resetPlan = response;
+            const plan = state.resetPlan;
+            const period = state.importResult && state.importResult.statementPeriod
+                ? state.importResult.statementPeriod : {};
+            const ledgerRange = plan.firstTradeDate
+                ? `${plan.firstTradeDate} 至 ${plan.lastTradeDate}` : '（空）';
+            const fileRange = period.from || period.through
+                ? `${period.from || '?'} 至 ${period.through || '?'}` : '（未知）';
+            const missingEarlier = plan.firstTradeDate && period.from && period.from > plan.firstTradeDate;
+            const missingLater = plan.lastTradeDate && period.through && period.through < plan.lastTradeDate;
+            _text(note, `整本重建：将存档并移除当前账本全部 ${plan.eventCount} 条事件`
+                + `（账本历史 ${ledgerRange}），再用本文件（报表区间 ${fileRange}）重建。`
+                + (missingEarlier ? ` 注意：${plan.firstTradeDate} 至 ${_shiftDays(period.from, -1)} 的较早历史将只保留在重建存档中。` : '')
+                + (missingLater ? ` 注意：${_shiftDays(period.through, 1)} 至 ${plan.lastTradeDate} 的较晚历史将只保留在重建存档中。` : '')
+                + ' 没有“只重建某个月”的操作；覆盖必须用覆盖全部历史的累计报表。'
+                + ' 点击「确认导入」后会再弹窗确认；账本若在此期间发生变化，后台会拒绝并保持原样。');
         } catch (error) {
             state.resetPlan = null;
             note.hidden = true;
@@ -6389,29 +6812,102 @@
         _refreshControls();
     }
 
+    function _importBindingProblem() {
+        const result = state.importResult;
+        if (!result || !result.binding) return '预览不存在';
+        const binding = result.binding;
+        const book = _currentBook();
+        if (binding.bookId !== state.bookId || !book) return '预览属于另一本账本';
+        if (binding.generation !== state.importGeneration) return '预览已过期';
+        const mode = $('import-replace').checked === true ? 'rebuild' : 'append';
+        if (binding.mode !== mode) return '预览的导入模式已改变';
+        const current = state.ledgerVersion ? state.ledgerVersion.digest : '';
+        if (binding.ledgerVersion !== current) return '账本在预览后发生了变化';
+        return '';
+    }
+
+    function _statementRegistration(result) {
+        const binding = result.binding || {};
+        const period = result.statementPeriod || {};
+        return {
+            format: result.format,
+            fileName: binding.fileName || '',
+            fileSha256: binding.fileDigest || '',
+            account: result.account || binding.account || '',
+            periodFrom: period.source === 'period' ? (period.from || '') : '',
+            periodThrough: period.source === 'period' ? (period.through || '') : '',
+            checks: result.checks || {},
+            confirmedDuplicates: (result.confirmedDuplicates || []).length,
+        };
+    }
+
     async function _commitImport() {
-        if (!state.importResult || !state.bookId) return;
-        const events = _importRows(state.importResult).map((event) => {
+        if (!state.importResult || !state.bookId || state.importCommitPending) return;
+        const bindingProblem = _importBindingProblem();
+        if (bindingProblem) {
+            globalScope.alert(`无法提交：${bindingProblem}。请重新载入账本并再次预览文件。`);
+            return;
+        }
+        const result = state.importResult;
+        if (result.problems?.length || state.importReading || _importRows(result).length > IMPORT_ROW_LIMIT) return;
+        const events = _importNewRows(result).map((event) => {
             const copy = Object.assign({}, event);
-            delete copy.lineNumber;
-            delete copy.unpaired;
+            ['lineNumber', 'unpaired', 'fills', 'priceText', 'cashDerived', 'sourceRef',
+                'sourceLegs', 'fillOf', 'currency', 'eventId'].forEach((key) => {
+                delete copy[key];
+            });
             return copy;
         });
         const replacing = $('import-replace').checked === true;
-        const apiImport = state.importResult.format === 'tws_api';
-        const supersedeTwsEventIds = replacing ? []
-            : (state.importResult.supersedeTwsEventIds || []);
+        const apiImport = result.format === 'tws_api';
+        const supersedeTwsEventIds = replacing ? [] : (result.supersedeTwsEventIds || []);
+        const supersedePriorStubEventIds = replacing ? []
+            : (result.supersedePriorStubEventIds || []);
+        const counts = _importCounts(result);
+        const book = _currentBook();
+        if (!events.length && (apiImport || replacing)) {
+            globalScope.alert('没有可写入的新事件。');
+            return;
+        }
         const confirmed = globalScope.confirm(replacing
-            ? `危险操作：将存档并清空 ${_currentBook().symbol} 账本当前 ${state.resetPlan
-                ? state.resetPlan.eventCount : '?'} 条事件，`
-                + `再用本文件的 ${events.length} 条事件完整重建。\n\n`
-                + '旧数据会保留在重建存档中。确定继续吗？'
-            : `将向 ${_currentBook().symbol} 账本写入 ${events.length} 条${apiImport ? ' TWS 成交' : '事件'}。`
+            ? `危险操作：整本重建。将存档并移除 ${book.symbol} 账本当前 ${state.resetPlan
+                ? state.resetPlan.eventCount : '?'} 条事件（全部历史，不限本文件区间），`
+                + `再用本文件的 ${events.length} 条事件重建。\n\n`
+                + '旧数据会保留在重建存档中，可在设置页恢复。确定继续吗？'
+            : `将向 ${book.symbol} 账本新增 ${events.length} 条${apiImport ? ' TWS 成交' : '事件'}`
+                + `（其中期初存根 ${counts.stub} 条）；已存在 ${counts.existing} 条与已核对重复 ${counts.confirmed} 条不会写入。`
                 + (supersedeTwsEventIds.length
-                    ? `${apiImport ? 'TWS 真实成交' : 'CSV'}已完整重建对应历史，将同时冲销 ${supersedeTwsEventIds.length} 条 TWS 临时基线。`
+                    ? `\n${apiImport ? 'TWS 真实成交' : 'CSV'}已完整重建对应历史，将同时冲销 ${supersedeTwsEventIds.length} 条 TWS 临时基线。`
                     : '')
-                + `已存在的${apiImport ? ' execId' : ' CSV 成交'}会自动跳过。确认导入？`);
+                + (supersedePriorStubEventIds.length
+                    ? `\n真实开仓将取代 ${supersedePriorStubEventIds.length} 条期初存根。`
+                    : '')
+                + (!events.length
+                    ? '\n本文件没有新事件；将只登记该报表区间已核对。'
+                    : '')
+                + '\n确认导入？');
         if (!confirmed) return;
+        // One logical commit keeps one set of tokens: a retry after a lost
+        // response replays the same batch and the store answers with the
+        // outcome of the first attempt instead of writing it twice.
+        if (!state.importCommitTokens) {
+            state.importCommitTokens = {
+                batchId: _token('cbb-'),
+                tokenPrefix: _token('cbi-'),
+                clientToken: _token('cbr-'),
+            };
+        }
+        const tokens = state.importCommitTokens;
+        const submittedBookId = state.bookId;
+        const submittedGeneration = state.importGeneration;
+        const bookIdentity = {
+            account: book.account || '',
+            symbol: book.symbol,
+            secType: book.secType || 'STK',
+            currency: book.currency || 'USD',
+        };
+        state.importCommitPending = true;
+        _refreshControls();
         try {
             // One request either way. The rebuild archives, wipes and
             // refills inside a single database transaction, so a failure
@@ -6421,44 +6917,75 @@
                 ? await request('rebuild_cost_basis_book', {
                     bookId: state.bookId,
                     events,
-                    // The server still rechecks this count-bearing value in
-                    // the write transaction. No typing is required, and a
-                    // stale plan cannot wipe a ledger that changed meanwhile.
                     confirmation: state.resetPlan.phrase,
-                    clientToken: _token('cbr-'),
-                    importBatchId: _token('cbb-'),
-                    reason: '覆盖式重建：按新导入的报表重建账本',
+                    expectedLedgerVersion: state.resetPlan.ledgerVersion,
+                    bookIdentity,
+                    statement: apiImport ? undefined : _statementRegistration(result),
+                    clientToken: tokens.clientToken,
+                    importBatchId: tokens.batchId,
+                    reason: '覆盖式整本重建：按新导入的报表重建账本',
                 })
                 : await request('import_cost_basis_events', {
                     bookId: state.bookId,
                     events,
                     supersedeTwsEventIds,
+                    supersedePriorStubEventIds,
                     twsReconciliation: apiImport
                         ? state.importResult.twsReconciliation : undefined,
-                    importBatchId: _token('cbb-'),
-                    clientTokenPrefix: _token('cbi-'),
+                    expectedLedgerVersion: state.ledgerVersion,
+                    bookIdentity,
+                    statement: apiImport ? undefined : _statementRegistration(result),
+                    importBatchId: tokens.batchId,
+                    clientTokenPrefix: tokens.tokenPrefix,
                 });
+            if (state.bookId !== submittedBookId || state.importGeneration !== submittedGeneration) return;
             globalScope.alert(replacing
-                ? `重建完成：归档并清空 ${response.removedEvents} 条，写入 ${response.inserted} 条。`
+                ? `重建完成：归档并移除 ${response.removedEvents} 条，写入 ${response.inserted} 条。`
                 : `${apiImport ? 'TWS 成交' : ''}导入完成：新增 ${response.inserted} 条，跳过 ${response.skipped} 条`
                     + (response.supersededTwsBaselines
                         ? `，已用${apiImport ? '真实成交' : ' CSV'}取代 ${response.supersededTwsBaselines} 条 TWS 临时基线`
-                        : '') + '。');
+                        : '')
+                    + (response.supersededPriorStubs
+                        ? `，真实开仓取代了 ${response.supersededPriorStubs} 条期初存根`
+                        : '')
+                    + (response.idempotentReplay ? '（这是此前已提交批次的重放结果）' : '')
+                    + '。');
+            state.importCommitTokens = null;
+            state.importGeneration += 1;
             state.importResult = null;
             state.importText = '';
+            state.importMeta = null;
             $('import-file').value = '';
             $('import-replace').checked = false;
             await _refreshResetPlan();
             _renderImportPreview();
             await _loadBooks();
         } catch (error) {
-            if (error.code === 'reset_confirmation_mismatch') {
-                globalScope.alert('账本在预览确认后发生了变化，已自动取消重建。'
-                    + '账本未被清空，也没有写入任何数据；请重新确认预览。');
+            if (error.code === 'reset_confirmation_mismatch' || error.code === 'ledger_changed') {
+                globalScope.alert('账本在预览确认后发生了变化，后台已拒绝本次写入。'
+                    + '账本未被清空，也没有写入任何数据；请刷新账本后重新预览。');
+                state.importCommitTokens = null;
+                await _loadEvents();
+                if (state.importText) _parseImportText(state.importText, state.importMeta);
                 await _refreshResetPlan();
+                _renderImportPreview();
+                return;
+            }
+            if (error.code === 'import_revision_conflict') {
+                globalScope.alert(`导入被拒绝：${error.message}`);
+                return;
+            }
+            if (String(error.message || '').indexOf('超时') >= 0
+                || String(error.message || '').indexOf('未连接') >= 0) {
+                globalScope.alert(`结果未知：${error.message}。`
+                    + '本次提交的批次标识已保留；连接恢复后再次点击「确认导入」会以同一标识重试，'
+                    + '后台对同一标识只写入一次。');
                 return;
             }
             globalScope.alert(`导入失败：${_explainWriteError(error)}`);
+        } finally {
+            state.importCommitPending = false;
+            _refreshControls();
         }
     }
 
@@ -6521,15 +7048,24 @@
         }
         const book = _currentBook();
         const sinceTimestamp = _latestCsvCutoff();
+        // The reply describes THIS book. If the operator switches books
+        // while it is in flight, the rows must never be previewed under -
+        // or committed to - the book that is selected when it lands.
+        const requestedBookId = state.bookId;
+        state.importGeneration += 1;
+        const generation = state.importGeneration;
         state.executionFetchPending = true;
         $('btn-fetch-executions').textContent = '正在拉取…';
         _refreshControls();
         _renderReconciliation();
         try {
             const response = await request('request_cost_basis_executions', {
-                bookId: state.bookId,
+                bookId: requestedBookId,
                 sinceTimestamp,
             });
+            if (state.bookId !== requestedBookId || generation !== state.importGeneration) {
+                return;
+            }
             const existingExternalRefs = state.allEvents
                 .filter((event) => Boolean(event.externalRef))
                 .map((event) => ({
@@ -6540,6 +7076,7 @@
                 account: book.account,
                 symbol: book.symbol,
                 secType: book.secType,
+                currency: book.currency || 'USD',
                 defaultSharesPerContract: book.defaultSharesPerContract,
                 existingOpen: state.ledger ? state.ledger.openOptions : [],
                 existingExternalRefs,
@@ -6639,9 +7176,14 @@
                 result.problems.push(...supersession.problems);
                 result.summary.problems += supersession.problems.length;
             }
+            $('import-replace').checked = false;
+            _bindImportResult(result, { fileName: `TWS API ${result.fetchedAt || ''}`.trim() });
+            result.ledgerPreview = _computeLedgerPreview(
+                result, false, result.supersedeTwsEventIds || []);
             state.importResult = result;
             state.importText = '';
-            $('import-replace').checked = false;
+            state.importMeta = null;
+            state.importCommitTokens = null;
             _renderImportPreview();
             _renderReconciliation();
             if (executionTarget) {
@@ -6674,19 +7216,26 @@
 
     function _exportCsv() {
         if (!state.ledger) return;
-        const header = ['tradeDate', 'account', 'kind', 'right', 'strike', 'expiry',
+        const header = ['tradeDate', 'brokerTimestamp', 'account', 'kind', 'right', 'strike',
+            'expiry', 'sharesPerContract', 'conId', 'localSymbol', 'optionSecType',
             'contracts', 'shares', 'futureExpiry', 'futureContracts', 'rollToExpiry',
             'rollToPrice', 'rollGroup', 'price', 'cashAmount', 'fees', 'runningShares',
             'runningFuturesContracts',
-            'runningCostPerShare', 'source', 'externalRef', 'note', 'voidedAtUtc'];
+            'runningCostPerShare', 'source', 'tag', 'includeInCost', 'externalRef', 'note',
+            'voidedAtUtc'];
         const lines = [header.join(',')];
         // The export is an audit artefact: it carries every row, not the
         // slice that happens to be on screen.
         state.ledger.rows.forEach((entry) => {
             const event = entry.event;
             lines.push([
-                event.tradeDate, event.account, event.kind, event.right || '',
+                event.tradeDate, event.brokerTimestamp || '', event.account, event.kind,
+                event.right || '',
                 event.strike === null ? '' : event.strike, event.expiry || '',
+                event.sharesPerContract === null || event.sharesPerContract === undefined
+                    ? '' : event.sharesPerContract,
+                event.conId === null || event.conId === undefined ? '' : event.conId,
+                event.localSymbol || '', event.optionSecType || '',
                 event.contracts === null ? '' : event.contracts,
                 event.shares === null ? '' : event.shares,
                 event.futureExpiry || '',
@@ -6700,7 +7249,8 @@
                     || entry.runningFuturesContracts === undefined
                     ? '' : entry.runningFuturesContracts,
                 entry.runningCostPerShare === null ? '' : entry.runningCostPerShare,
-                event.source || '', event.externalRef || '',
+                event.source || '', event.tag || '',
+                event.includeInCost === false ? '0' : '1', event.externalRef || '',
                 `"${String(event.note || '').replace(/"/g, '""')}"`,
                 event.voidedAtUtc || '',
             ].join(','));
@@ -6713,9 +7263,76 @@
         anchor.href = url;
         const identity = book
             ? `${book.account ? `${book.account}-` : ''}${book.symbol}` : 'ledger';
-        anchor.download = `${identity}-cost-basis-${_todayIso()}.csv`;
+        anchor.download = `${identity}-cost-basis-audit-${_todayIso()}.csv`;
         anchor.click();
         globalScope.URL.revokeObjectURL(url);
+    }
+
+    /**
+     * Every stored row, verbatim, as JSON. Unlike the audit CSV this keeps
+     * every field the store holds (identity, batch, void state), so it is
+     * the file to keep as a backup of the ledger itself.
+     */
+    async function _exportBackupJson() {
+        if (!state.bookId) return;
+        const book = _currentBook();
+        let payload;
+        try {
+            payload = await request('export_cost_basis_backup', { bookId: state.bookId });
+        } catch (error) {
+            globalScope.alert(`备份导出失败：${error.message}`);
+            return;
+        }
+        const blob = new globalScope.Blob([JSON.stringify(payload, null, 1)],
+            { type: 'application/json;charset=utf-8' });
+        const url = globalScope.URL.createObjectURL(blob);
+        const anchor = globalScope.document.createElement('a');
+        anchor.href = url;
+        const identity = book
+            ? `${book.account ? `${book.account}-` : ''}${book.symbol}` : 'ledger';
+        anchor.download = `${identity}-cost-basis-backup-${_todayIso()}.json`;
+        anchor.click();
+        globalScope.URL.revokeObjectURL(url);
+    }
+
+    async function _restoreBackupFile(event) {
+        const file = event.target.files && event.target.files[0];
+        if (!file || !state.bookId || state.importCommitPending) return;
+        const bookId = state.bookId;
+        const generation = state.importGeneration;
+        try {
+            if (file.size > 7 * 1024 * 1024) throw new Error('文件超过当前恢复入口的 7 MiB 上限，请保留原文件并使用 SQLite 一致性备份恢复流程');
+            const backup = JSON.parse(await file.text());
+            if (backup.format !== 'cost-basis-backup' || backup.version !== 1
+                || !Array.isArray(backup.payload?.events)) throw new Error('不是受支持的账本备份；请使用当前版本导出的 JSON');
+            const book = _currentBook();
+            if (state.bookId !== bookId || state.importGeneration !== generation) return;
+            if (['account', 'symbol', 'secType', 'currency'].some((key) => backup.payload.book?.[key] !== book[key])) {
+                throw new Error('备份的账户、标的、类型或币种与当前账本不符');
+            }
+            const plan = await request('request_cost_basis_reset_plan', { bookId });
+            if (state.bookId !== bookId || state.importGeneration !== generation) return;
+            if (plan.ledgerVersion?.digest !== state.ledgerVersion?.digest) throw new Error('账本已变化，请刷新后重新选择备份');
+            const rows = backup.payload.events;
+            const live = rows.filter((row) => !row.voidedAtUtc);
+            const dates = live.map((row) => row.tradeDate).sort();
+            if (!globalScope.confirm(`从 ${file.name} 恢复 ${book.account} · ${book.symbol}？\n`
+                + `备份含 ${rows.length} 条事件，其中有效 ${live.length} 条，日期 ${dates[0] || '空'} 至 ${dates.at(-1) || '空'}。\n`
+                + `将替换当前全部 ${plan.eventCount} 条事件，替换前会自动存档。文件恢复后须重新导入报表核对覆盖区间。`)) return;
+            state.importCommitPending = true;
+            _refreshControls();
+            const response = await request('restore_cost_basis_backup', { bookId, backup,
+                confirmation: plan.phrase, expectedLedgerVersion: plan.ledgerVersion,
+                bookIdentity: book, clientToken: _token('cbf-') });
+            globalScope.alert(`已从备份恢复 ${response.restoredEvents} 条事件；替换前的历史保存在重建存档中。`);
+            await _loadBooks();
+        } catch (error) {
+            globalScope.alert(`备份恢复未完成：${error.message}`);
+        } finally {
+            state.importCommitPending = false;
+            event.target.value = '';
+            _refreshControls();
+        }
     }
 
     async function _saveSnapshot() {
@@ -6732,11 +7349,149 @@
                     : null,
                 reconciled: Boolean(state.reconciliation && state.reconciliation.balanced),
             });
-            globalScope.alert(`已生成对账快照：覆盖 ${response.snapshot.eventCount} 条事件，`
-                + `指纹 ${response.snapshot.eventsSha256.slice(0, 12)}…`);
+            globalScope.alert(`已生成对账快照：记录了此刻的计算结果，覆盖 ${response.snapshot.eventCount} 条事件，`
+                + `指纹 ${response.snapshot.eventsSha256.slice(0, 12)}…。`
+                + '快照不是账本备份；备份请用「备份账本 JSON」。');
         } catch (error) {
             globalScope.alert(`生成快照失败：${error.message}`);
         }
+    }
+
+    /** Rebuild archives of the current book, for the settings page. */
+    async function _loadResets() {
+        const node = $('reset-archive-list');
+        if (!node || !state.bookId || state.connection !== 'connected') return;
+        const bookId = state.bookId;
+        try {
+            const response = await request('list_cost_basis_resets', { bookId, limit: 20 });
+            if (state.bookId !== bookId) return;
+            state.bookResets = Array.isArray(response.resets) ? response.resets : [];
+        } catch (error) {
+            state.bookResets = [];
+            _text(node, `无法读取重建存档：${error.message}`);
+            return;
+        }
+        _renderResets();
+    }
+
+    function _renderResets() {
+        const node = $('reset-archive-list');
+        if (!node) return;
+        _clear(node);
+        if (!state.bookResets.length) {
+            _text(node, '当前账本没有重建存档。');
+            return;
+        }
+        state.bookResets.forEach((reset) => {
+            const row = globalScope.document.createElement('div');
+            row.className = 'reset-archive-row';
+            const label = globalScope.document.createElement('span');
+            label.textContent = `${reset.resetAtUtc} · ${reset.eventCount} 条事件 · ${reset.reason || ''}`
+                + ` · 指纹 ${String(reset.eventsSha256 || '').slice(0, 12)}`;
+            const button = globalScope.document.createElement('button');
+            button.type = 'button';
+            button.textContent = '恢复此存档';
+            button.title = '把这份存档写回为活动账本；当前账本会先存档，可再次恢复';
+            button.addEventListener('click', () => _restoreReset(reset));
+            row.appendChild(label);
+            row.appendChild(button);
+            node.appendChild(row);
+        });
+    }
+
+    async function _restoreReset(reset) {
+        if (!state.bookId || !reset) return;
+        const bookId = state.bookId;
+        let plan;
+        try {
+            plan = await request('request_cost_basis_reset_plan', { bookId });
+        } catch (error) {
+            globalScope.alert(`无法读取当前账本状态：${error.message}`);
+            return;
+        }
+        if (state.bookId !== bookId) return;
+        const confirmed = globalScope.confirm(
+            `恢复 ${reset.resetAtUtc} 的存档（${reset.eventCount} 条事件）？\n\n`
+            + `当前账本的 ${plan.eventCount} 条事件会先存档再被替换；`
+            + '恢复后可以再从存档切回。确定继续吗？');
+        if (!confirmed) return;
+        try {
+            const response = await request('restore_cost_basis_reset', {
+                bookId,
+                resetId: reset.resetId,
+                confirmation: plan.phrase,
+                expectedLedgerVersion: plan.ledgerVersion,
+                bookIdentity: _currentBook(),
+                clientToken: _token('cbr-'),
+            });
+            globalScope.alert(`已恢复存档：写回 ${response.restoredEvents} 条事件，`
+                + `替换前的 ${response.removedEvents} 条已另存为新存档。`);
+            await _loadBooks();
+            await _loadResets();
+        } catch (error) {
+            if (error.code === 'reset_confirmation_mismatch') {
+                globalScope.alert('账本在确认期间发生了变化，恢复已取消，账本未改动。');
+                return;
+            }
+            globalScope.alert(`恢复失败：${error.message}`);
+        }
+    }
+
+    /** Statement periods this book has accepted, for the coverage line. */
+    async function _loadImportBatches() {
+        if (!state.bookId || state.connection !== 'connected') return;
+        const bookId = state.bookId;
+        try {
+            const response = await request('list_cost_basis_import_batches', { bookId, limit: 500 });
+            if (state.bookId !== bookId) return;
+            state.importBatches = Array.isArray(response.batches) ? response.batches : [];
+        } catch (_) {
+            state.importBatches = [];
+        }
+        _renderCoverage();
+    }
+
+    /**
+     * Which statement periods have been imported, and where the gaps are.
+     * Coverage is read from the batch registry, not from the rows: a month
+     * with no trades leaves no rows but was still checked.
+     */
+    function describeStatementCoverage(batches) {
+        const periods = (batches || [])
+            .filter((batch) => batch.periodFrom && batch.periodThrough
+                && batch.checks?.coverageCurrent !== false
+                && ['period', 'account', 'openPositions'].every((key) => batch.checks?.[key] === true)
+                && (batch.mode === 'rebuild' || ['revision', 'twsCoverage'].every((key) => batch.checks?.[key] === true)))
+            .map((batch) => ({ from: batch.periodFrom, through: batch.periodThrough }))
+            .sort((left, right) => left.from.localeCompare(right.from));
+        if (!periods.length) return { covered: [], gaps: [], text: '' };
+        const covered = [];
+        periods.forEach((period) => {
+            const last = covered[covered.length - 1];
+            if (last && _shiftDays(last.through, 1) >= period.from) {
+                if (period.through > last.through) last.through = period.through;
+            } else {
+                covered.push({ from: period.from, through: period.through });
+            }
+        });
+        const gaps = [];
+        for (let index = 1; index < covered.length; index += 1) {
+            gaps.push({ from: _shiftDays(covered[index - 1].through, 1),
+                through: _shiftDays(covered[index].from, -1) });
+        }
+        const text = `报表覆盖 ${covered.map((span) => `${span.from} 至 ${span.through}`).join('、')}`
+            + (gaps.length
+                ? `；缺口 ${gaps.map((span) => `${span.from} 至 ${span.through}`).join('、')}`
+                : '');
+        return { covered, gaps, text };
+    }
+
+    function _renderCoverage() {
+        const node = $('book-coverage');
+        if (!node) return;
+        const coverage = describeStatementCoverage(state.importBatches);
+        _text(node, coverage.text || '尚无完整核对的报表区间；导入记录仍保留，缺少必要检查或历史已变化的月份需要重新核对。');
+        node.classList.toggle('has-gaps', coverage.gaps.length > 0);
     }
 
     async function _deleteBook(targetBookId, triggerButton) {
@@ -6836,9 +7591,9 @@
             globalScope.alert('请选择或输入 IB 账户。');
             return;
         }
-        if (state.managedAccounts.length > 0
-            && !state.managedAccounts.includes(account)) {
-            globalScope.alert('请选择当前 TWS 返回的 IB 账户。');
+        const accountNotice = newBookAccountNotice(account, state.managedAccounts);
+        if (accountNotice && !globalScope.confirm(
+            `${accountNotice}\n\n确认用 ${account.toUpperCase()} 创建账本？`)) {
             return;
         }
         const multiplier = Number($('new-book-spc').value);
@@ -6922,7 +7677,10 @@
             _renderManagedAccounts($('new-book-account').value);
             _refreshControls();
         });
-        $('new-book-account-manual').addEventListener('input', _refreshControls);
+        $('new-book-account-manual').addEventListener('input', () => {
+            _renderNewBookAccountHint();
+            _refreshControls();
+        });
         $('new-book-form').addEventListener('submit', _createBook);
         $('new-book-type').addEventListener('change', () => {
             const futures = $('new-book-type').value === 'FUT';
@@ -6982,28 +7740,65 @@
             }
         });
         $('btn-open-stress-test').addEventListener('click', _openStressTest);
-        $('btn-close-stress-test').addEventListener('click', _closeStressTest);
-        $('stress-modal').addEventListener('click', (clickEvent) => {
-            if (clickEvent.target === $('stress-modal')) _closeStressTest();
+        $('stress-reset-quantities').addEventListener('click', () => {
+            state.stressQuantityDraft = { own: {}, linked: {} };
+            _cancelStressJob(); _renderStressTest();
         });
+        $('stress-iv-range').addEventListener('input', event => {
+            state.stressIvRangePct = Number(event.target.value);
+            _text($('stress-iv-range-value'), `±${state.stressIvRangePct}%（相对 IV 水平）`);
+            _scheduleStressDraft();
+        });
+        $('stress-nav-base').addEventListener('input', event => {
+            const raw = event.target.value.trim();
+            state.stressNavBase = raw === '' ? null : Number(raw);
+            _text($('stress-nav-note'), raw && !(Number.isFinite(state.stressNavBase) && state.stressNavBase > 0)
+                ? '请输入大于 0 的当前净值；未使用无效基数计算情景净值。'
+                : '情景净值 = 当前组合净值 + 净值变化；模拟调仓从现金支付，未计交易成本。');
+            _renderStressTest();
+        });
+        $('btn-stress-iv-baseline').addEventListener('click', () => _reviewStressIvSettings(true));
+        $('btn-stress-iv-keep').addEventListener('click', () => _reviewStressIvSettings(false));
+        $('stress-slice-index').addEventListener('input', event => {
+            _renderStressSlice(stressJob.series, event.target.value, _currentBook());
+        });
+        for (const [id, field, checkbox] of [
+            ['stress-pnl-basis', 'stressPnlBasis', false], ['stress-path', 'stressPath', false],
+            ['stress-conservative-short-put', 'stressConservativeShortPutAssignment', true],
+            ['stress-band-enabled', 'stressBandEnabled', true], ['stress-band-flat-iv', 'stressBandFlatIv', true],
+            ['stress-own-iv-beta', 'stressOwnIvBeta', true],
+            ['stress-include-income', 'stressIncludeIncome', true],
+        ]) $(id).addEventListener('change', event => {
+            state[field] = checkbox ? event.target.checked : event.target.value;
+            _writeStressLinkedMemory();
+            _renderStressTest();
+            if (field === 'stressPnlBasis') void _refreshStressScenarioInputs(false);
+        });
+        $('btn-close-stress-test').addEventListener('click', _closeStressTest);
+        $('btn-open-stress-view').addEventListener('click', _openStressTest);
+        $('stress-own-group').addEventListener('toggle', _noteStressGroupToggle);
+        $('stress-linked-group').addEventListener('toggle', _noteStressGroupToggle);
         $('stress-expiry').addEventListener('change', (changeEvent) => {
             state.stressExpiry = changeEvent.target.value;
             // Picking an expiry is an explicit choice of the scenario date.
             state.stressHorizonDays = null;
             _invalidateStressScenarioInputs();
             _renderStressTest();
-            if (state.stressIncludeLongOptions) {
-                _refreshStressMarketInputs(false);
+            if (state.stressIncludeLongOptions || state.stressIncludeLinkedHedge || state.stressPnlBasis === 'change') {
+                void _refreshStressScenarioInputs(false);
             }
-            _ensureStressLinkedData(false);
         });
         $('stress-include-linked-hedge').addEventListener('change', (changeEvent) => {
             state.stressIncludeLinkedHedge = changeEvent.target.checked;
+            _setStressGroupOpen('stress-linked-group', state.stressIncludeLinkedHedge);
+            _invalidateStressScenarioInputs();
             _writeStressLinkedMemory();
             _renderStressTest();
-            _ensureStressLinkedData(false);
+            if (state.stressIncludeLinkedHedge) _ensureStressLinkedData(false);
+            else if (state.stressIncludeLongOptions || state.stressPnlBasis === 'change') void _refreshStressScenarioInputs(false);
         });
         $('stress-linked-book').addEventListener('change', (changeEvent) => {
+            _invalidateStressScenarioInputs();
             state.stressLinkedBookId = String(changeEvent.target.value || '');
             _clearStressLinkedData();
             _writeStressLinkedMemory();
@@ -7015,23 +7810,19 @@
             _writeStressLinkedMemory();
             _renderStressTest();
         });
-        $('stress-horizon-days').addEventListener('input', (inputEvent) => {
+        $('stress-weekly-premium').addEventListener('input', (inputEvent) => {
             const raw = String(inputEvent.target.value || '').trim();
-            // Blank = settle on the selected expiry. A bad entry is kept so
-            // the modal can say so instead of silently using the expiry.
-            state.stressHorizonDays = raw === '' ? null : (_numberOrNull(raw) === null
+            state.stressWeeklyPremium = raw === '' ? 0 : (_numberOrNull(raw) === null
                 ? NaN : _numberOrNull(raw));
-            // The scenario date moved: every snapshot keyed to it is stale.
-            _invalidateStressScenarioInputs();
+            _writeStressLinkedMemory();
             _renderStressTest();
-            // Refetch only once the value has settled, not per keystroke.
-            globalScope.clearTimeout(state.stressHorizonTimer);
-            state.stressHorizonTimer = globalScope.setTimeout(() => {
-                state.stressHorizonTimer = null;
-                if (!state.stressOpen || _stressScenarioDate().error) return;
-                if (state.stressIncludeLongOptions) _refreshStressMarketInputs(false);
-                _ensureStressLinkedData(false);
-            }, STRESS_HORIZON_DEBOUNCE_MS);
+        });
+        $('stress-horizon-days').addEventListener('input', (inputEvent) => {
+            _setStressHorizon(inputEvent.target.value);
+        });
+        $('stress-horizon-slider').addEventListener('input', event => _setStressHorizon(event.target.value, true));
+        for (const id of ['stress-horizon-days', 'stress-horizon-slider']) $(id).addEventListener('change', () => {
+            if (state.stressHorizonTimer !== null) _applyStressHorizon();
         });
         $('stress-linked-iv-tenor').addEventListener('change', (changeEvent) => {
             state.stressLinkedIvTenorDamping = changeEvent.target.checked;
@@ -7042,6 +7833,28 @@
             const raw = String(inputEvent.target.value || '').trim();
             state.stressLinkedIvTenorDays = raw === ''
                 ? LINKED_IV_DEFAULT_TENOR_DAYS : _numberOrNull(raw);
+            _writeStressLinkedMemory();
+            _renderStressTest();
+        });
+        $('stress-linked-iv-beta-auto').addEventListener('change', (changeEvent) => {
+            state.stressLinkedIvBetaAuto = changeEvent.target.checked;
+            _writeStressLinkedMemory();
+            _renderStressTest();
+        });
+        $('stress-linked-iv-otm').addEventListener('change', (changeEvent) => {
+            state.stressLinkedIvOtmDiscount = changeEvent.target.checked;
+            _writeStressLinkedMemory();
+            _renderStressTest();
+        });
+        $('stress-linked-sigma-crash').addEventListener('change', (changeEvent) => {
+            state.stressLinkedSigmaCrashScale = changeEvent.target.checked;
+            _writeStressLinkedMemory();
+            _renderStressTest();
+        });
+        $('stress-linked-iv-tenor-exponent').addEventListener('input', (inputEvent) => {
+            const raw = String(inputEvent.target.value || '').trim();
+            state.stressLinkedIvTenorExponent = raw === ''
+                ? LINKED_IV_DEFAULT_TENOR_EXPONENT : _numberOrNull(raw);
             _writeStressLinkedMemory();
             _renderStressTest();
         });
@@ -7110,9 +7923,10 @@
         });
         $('stress-include-long-options').addEventListener('change', (changeEvent) => {
             state.stressIncludeLongOptions = changeEvent.target.checked;
+            _setStressGroupOpen('stress-own-group', state.stressIncludeLongOptions);
             _renderStressTest();
             if (state.stressIncludeLongOptions && !state.stressLongOptionInputs) {
-                _refreshStressMarketInputs(false);
+                void _refreshStressScenarioInputs(false);
             }
         });
         $('btn-stress-refresh-price').addEventListener('click', _refreshStressPrice);
@@ -7155,6 +7969,13 @@
         });
         $('btn-export-csv').addEventListener('click', _exportCsv);
         $('btn-save-snapshot').addEventListener('click', _saveSnapshot);
+        if ($('restore-backup-file')) $('restore-backup-file').addEventListener('change', _restoreBackupFile);
+        if ($('btn-export-backup')) {
+            $('btn-export-backup').addEventListener('click', _exportBackupJson);
+        }
+        if ($('btn-refresh-resets')) {
+            $('btn-refresh-resets').addEventListener('click', _loadResets);
+        }
         $('btn-fetch-executions').addEventListener('click', _fetchTwsExecutions);
 
         if (importer) {
@@ -7162,11 +7983,22 @@
             $('import-file').addEventListener('change', _handleImportFile);
             $('btn-import-commit').addEventListener('click', _commitImport);
             $('btn-import-clear').addEventListener('click', () => {
+                state.importGeneration += 1;
                 state.importResult = null;
                 state.importText = '';
+                state.importMeta = null;
+                state.importReading = false;
+                state.importCommitTokens = null;
                 $('import-file').value = '';
                 _renderImportPreview();
             });
+            const importFilter = $('import-filter');
+            if (importFilter && typeof importFilter.addEventListener === 'function') {
+                importFilter.addEventListener('change', () => {
+                    state.importFilter = importFilter.value || 'all';
+                    _renderImportPreview();
+                });
+            }
         }
 
         const kindFilter = $('filter-kind');
@@ -7206,8 +8038,6 @@
         computeMarketMetrics,
         calculateBsmOptionPrice,
         calculateBsmPutPrice,
-        estimateDeferredLongOptions,
-        estimateDeferredShortOptions,
         priceScenarioOption,
         liquidationHaircut,
         bidAskProblem,
@@ -7216,7 +8046,6 @@
         normalizeLiquidation,
         normalizeDividendYield,
         DIVIDEND_YIELD_DEFAULTS,
-        estimateLinkedLongOptions,
         leveragedDragLog,
         normalizeLinkedMapping,
         normalizeLinkedSigma,
@@ -7227,7 +8056,13 @@
         normalizeLinkedIvBeta,
         normalizeStressHorizonDays,
         normalizeLinkedTenorDays,
+        normalizeLinkedTenorExponent,
+        autoBetaForDrop,
+        otmShockFactor,
+        crashSigmaScale,
         stressComponentNumbers,
+        normalizeWeeklyPremium,
+        premiumIncomeOver,
         findOptionQuote: _findOptionQuote,
         optionQuoteIdentityConflict: _optionQuoteIdentityConflict,
         addDaysToDigits,
@@ -7248,8 +8083,13 @@
         planTwsBaselineSupersession,
         planExecutionReportAliases,
         planImportExecutionAliases,
+        planStatementRevisionConflicts,
+        planStatementCoverageGaps,
+        planPriorStubSupersession,
+        describeStatementCoverage,
         isCurrentEventLoad,
         loadSelectedBookSafely,
         chooseManualSubmitToken,
+        newBookAccountNotice,
     };
 })(typeof window !== 'undefined' ? window : globalThis);

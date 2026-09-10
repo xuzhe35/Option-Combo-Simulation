@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>综合成本账本 — Option Combo Simulator</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="cost_basis.css?v=dde1244f0bb5">
+    <link rel="stylesheet" href="cost_basis.css?v=7e140c77fe86">
 </head>
 <body data-option-combo-page="cost-basis">
     <div class="app-shell">
@@ -14,6 +14,8 @@
             <nav class="sidebar-nav">
                 <p class="nav-label">账本</p>
                 <div id="book-sidebar-list" class="book-sidebar-list"><p class="sidebar-empty">正在读取账本…</p></div>
+                <p class="nav-label nav-label-system">情景</p>
+                <button id="btn-open-stress-view" class="nav-item nav-item-stress" type="button" disabled><span class="nav-icon" aria-hidden="true">⚡</span><span><strong>到期压力测试</strong><small>当前账本 · 多价格情景</small></span></button>
                 <p class="nav-label nav-label-system">系统</p>
                 <button id="btn-open-settings" class="nav-item nav-item-settings" type="button"><span class="nav-icon" aria-hidden="true">⚙</span><span><strong>设置与新建账本</strong><small>服务器、连接、账本管理</small></span></button>
             </nav>
@@ -37,15 +39,16 @@
 
                 <div id="ledger-view" class="page-view">
                     <section class="workflow-strip" aria-label="每日对账流程">
-                        <div class="workflow-intro"><span class="workflow-kicker">建议流程</span><strong>TWS 当日采信，CSV 次日确认</strong></div>
+                        <div class="workflow-intro"><span class="workflow-kicker">建议流程</span><strong>报表是真相，TWS 成交只是提前记账</strong></div>
                         <ol>
-                            <li><span>1</span><div><strong>连接 TWS</strong><small>只读持仓快照</small></div></li>
-                            <li><span>2</span><div><strong>核对并采信</strong><small>完整数量和均价时建立基线</small></div></li>
-                            <li><span>3</span><div><strong>次日导入 CSV</strong><small>用 IBKR 报表确认流水</small></div></li>
+                            <li><span>1</span><div><strong>先导入历史报表</strong><small>Activity Statement，按自然月追加</small></div></li>
+                            <li><span>2</span><div><strong>盘中拉取真实成交</strong><small>佣金到齐后确认；TWS 持仓只用于差异检测</small></div></li>
+                            <li><span>3</span><div><strong>次日 / 月末报表核对</strong><small>逐行对应，AvgCost 基线只是后备</small></div></li>
                         </ol>
                         <button id="btn-refresh-positions" class="primary" type="button" disabled>拉取 TWS 持仓</button>
                     </section>
                     <p id="book-meta" class="book-meta">未选择账本。</p>
+                    <p id="book-coverage" class="book-meta book-coverage"></p>
 
                     <section class="hero-grid" aria-labelledby="summary-title">
                         <article class="panel cost-hero">
@@ -114,20 +117,27 @@
                     </section>
 
                     <section class="panel flow-section" aria-labelledby="flow-title">
-                        <div class="panel-heading flow-heading"><div><span class="eyebrow">可审计记录</span><h2 id="flow-title">事件流水</h2></div><div class="flow-primary-actions"><button id="btn-fetch-executions" class="primary" type="button" disabled>↓ 拉取 TWS 成交</button><label for="import-file" class="file-button is-disabled" aria-disabled="true" title="请先选择账本">↑ 导入 IBKR CSV</label><input id="import-file" class="visually-hidden" type="file" accept=".csv,text/csv" disabled><button id="btn-export-csv" type="button" disabled>导出 CSV</button><button id="btn-save-snapshot" type="button" disabled>生成对账快照</button></div></div>
+                        <div class="panel-heading flow-heading"><div><span class="eyebrow">可审计记录</span><h2 id="flow-title">事件流水</h2></div><div class="flow-primary-actions"><button id="btn-fetch-executions" class="primary" type="button" disabled>↓ 拉取 TWS 成交</button><label for="import-file" class="file-button is-disabled" aria-disabled="true" title="请先选择账本">↑ 导入 IBKR CSV</label><input id="import-file" class="visually-hidden" type="file" accept=".csv,text/csv" disabled><button id="btn-export-csv" type="button" disabled title="审计展示文件，不是可恢复备份">审计导出 CSV</button><label for="restore-backup-file" class="file-button">恢复 JSON 备份</label><input id="restore-backup-file" class="visually-hidden" type="file" accept=".json,application/json"><button id="btn-export-backup" type="button" disabled title="全部字段的账本备份">备份账本 JSON</button><button id="btn-save-snapshot" type="button" disabled>生成对账快照</button></div></div>
                         <details id="flow-details" class="inline-details">
                             <summary><span id="flow-summary-label">事件流水</span></summary>
-                        <div class="controls flow-filters"><label for="filter-account">账户</label><select id="filter-account"><option value="">全部</option></select><label for="filter-kind">类型</label><select id="filter-kind"><option value="">全部</option></select><label for="filter-start">起</label><input id="filter-start" type="date"><label for="filter-end">止</label><input id="filter-end" type="date"><label class="checkbox"><input id="filter-voided" type="checkbox"> 显示已删除记录</label></div>
+                        <div class="controls flow-filters"><label for="filter-account">账户</label><select id="filter-account"><option value="">全部</option></select><label for="filter-kind">类型</label><select id="filter-kind"><option value="">全部</option></select><label for="filter-start">起</label><input id="filter-start" type="date"><label for="filter-end">止</label><input id="filter-end" type="date"><label class="checkbox"><input id="filter-voided" type="checkbox"> 显示已冲销记录</label></div>
                         <div class="table-wrap flow-table-wrap"><table id="flow-table" aria-label="事件流水"><thead><tr><th>日期</th><th>账户</th><th>类型</th><th>合约</th><th>数量</th><th>价格</th><th>现金</th><th id="flow-position-heading">累计股数</th><th title="包含所有现金流；与上方可排除长期 Long Option 的综合成本口径不同">全现金累计成本</th><th>来源</th><th>操作</th></tr></thead><tbody><tr><td colspan="11" class="empty">未选择账本</td></tr></tbody></table></div>
                         <div class="flow-pagination"><span id="flow-page-label"></span><div><button id="flow-prev" type="button">上一页</button><button id="flow-next" type="button">下一页</button></div></div>
                         </details>
                         <div id="import-workspace" class="import-workspace" hidden>
                             <div class="import-heading"><div><h3 id="import-preview-title">导入预览</h3><p id="import-summary">未选择文件。</p></div><div><button id="btn-import-clear" type="button" disabled>取消</button><button id="btn-import-commit" class="primary" type="button" disabled>确认导入</button></div></div>
-                            <p id="import-source-note" class="section-note">支持 TWS API 近期成交、Flex Query 与 Activity Statement。导入前逐行预览，execId 或报表成交号会自动去重。</p>
-                            <label class="checkbox rebuild-option" for="import-replace"><input id="import-replace" type="checkbox" disabled> 覆盖式重建：存档当前流水后，用此文件重建账本</label>
+                            <p id="import-source-note" class="section-note">支持 TWS API 近期成交、Flex Query 与 Activity Statement。导入前逐行预览：每行标明将新增、已存在跳过、已核对为 TWS 重复，或是期初存根。</p>
+                            <p id="import-binding" class="section-note import-binding"></p>
+                            <p id="import-checks" class="section-note import-checks"></p>
+                            <p id="import-counts" class="section-note import-counts"></p>
+                            <p id="import-state-note" class="warnings" hidden></p>
+                            <label class="checkbox rebuild-option" for="import-replace"><input id="import-replace" type="checkbox" disabled> 覆盖式整本重建：存档当前全部流水后，用此文件重建整本账本（不是只重建本文件区间）</label>
                             <p id="import-replace-note" class="section-note" hidden>执行前会把全部事件存档到数据库；点击「确认导入」后会再弹窗确认。</p>
                             <p id="import-openings" class="warnings" hidden></p><p id="import-blocked" class="warnings" hidden></p>
-                            <div class="table-wrap" id="import-preview-wrap" hidden><table id="import-table" aria-label="导入预览"><thead><tr><th>日期</th><th>账户</th><th>类型</th><th>合约</th><th>数量</th><th>价格</th><th>现金</th><th>来源行</th></tr></thead><tbody></tbody></table></div>
+                            <p id="import-ledger-warnings" class="warnings" hidden></p>
+                            <div class="table-wrap" id="import-position-wrap" hidden><h3>持仓核对 · 账本当前 → 导入后 → 报表期末</h3><table id="import-position-table" aria-label="导入后持仓核对"><thead><tr><th>合约</th><th>账本当前</th><th>导入后</th><th>报表期末</th><th>状态</th></tr></thead><tbody></tbody></table></div>
+                            <div class="controls import-filter-row"><label for="import-filter">只看</label><select id="import-filter"><option value="all">全部</option><option value="new">新增</option><option value="existing">已存在</option><option value="confirmed">已核对重复</option><option value="stub">期初存根</option><option value="conflict">冲突</option></select></div>
+                            <div class="table-wrap" id="import-preview-wrap" hidden><table id="import-table" aria-label="导入预览"><thead><tr><th>日期</th><th>账户</th><th>类型</th><th>合约</th><th>数量</th><th>价格</th><th>现金</th><th>将执行</th><th>来源行</th></tr></thead><tbody></tbody></table></div>
                             <div class="table-wrap" id="import-problem-wrap" hidden><h3>待人工处理</h3><table id="import-problem-table" aria-label="待人工处理"><thead><tr><th>行</th><th>原因</th><th>原始内容</th></tr></thead><tbody></tbody></table></div>
                         </div>
                     </section>
@@ -148,9 +158,9 @@
                                 <div class="field"><label for="field-kind">类型</label><select id="field-kind"><option value="option_trade">期权开平仓 option_trade</option><option value="option_assignment">被指派 option_assignment</option><option value="option_exercise">自行行权 option_exercise</option><option value="option_expiry">到期作废 option_expiry</option><option value="share_trade">股票买卖 share_trade</option><option value="futures_trade">期货买卖 futures_trade</option><option value="futures_roll">期货换月 futures_roll</option><option value="opening_balance">期初余额 opening_balance</option><option value="dividend">股息 dividend</option><option value="fee">费用 fee</option><option value="split">拆股 split</option><option value="manual_adjust">手工调整 manual_adjust</option></select></div>
                                 <div class="field"><label for="field-date">交易日</label><input id="field-date" type="date"></div><div class="field"><label for="field-account">IB 账户（随账本）</label><input id="field-account" type="text" maxlength="32" autocomplete="off" spellcheck="false"></div>
                                 <div class="field" data-field="right"><label for="field-right">方向</label><select id="field-right"><option value="P">Put</option><option value="C">Call</option></select></div><div class="field" data-field="strike"><label for="field-strike">行权价</label><input id="field-strike" type="number" step="0.01" min="0"></div><div class="field" data-field="expiry"><label for="field-expiry">到期日</label><input id="field-expiry" type="date"></div>
-                                <div class="field" data-field="contracts"><label for="field-contracts">张数</label><input id="field-contracts" type="number" step="1"><span class="hint">+ 增多头 / 减空头，− 增空头 / 减多头</span></div><div class="field" data-field="sharesPerContract"><label for="field-spc" id="field-spc-label">每张股数</label><input id="field-spc" type="number" min="1" step="1" value="100"></div><div class="field" data-field="shares"><label for="field-shares">股数</label><input id="field-shares" type="number" step="1"><span class="hint">+ 买入 / − 卖出</span></div>
+                                <div class="field" data-field="contracts"><label for="field-action">动作</label><select id="field-action"><option value="">按张数 / 股数正负</option><option value="buy">买入（系统记为正数）</option><option value="sell">卖出（系统记为负数）</option></select><span class="hint">选买入 / 卖出后只需填绝对数量</span></div><div class="field" data-field="contracts"><label for="field-contracts">张数</label><input id="field-contracts" type="number" step="1"><span class="hint">+ 增多头 / 减空头，− 增空头 / 减多头</span></div><div class="field" data-field="sharesPerContract"><label for="field-spc" id="field-spc-label">每张股数</label><input id="field-spc" type="number" min="1" step="1" value="100"></div><div class="field" data-field="shares"><label for="field-shares">股数</label><input id="field-shares" type="number" step="1"><span class="hint">+ 买入 / − 卖出</span></div>
                                 <div class="field" data-field="futureExpiry"><label for="field-future-expiry">FUT 合约月</label><input id="field-future-expiry" type="month"></div><div class="field" data-field="futureContracts"><label for="field-future-contracts">FUT 张数</label><input id="field-future-contracts" type="number" step="1"><span class="hint">买入/持有多头为正，卖出/持有空头为负</span></div><div class="field" data-field="rollToExpiry"><label for="field-roll-to-expiry">换入合约月</label><input id="field-roll-to-expiry" type="month"></div><div class="field" data-field="rollToPrice"><label for="field-roll-to-price">换入价格</label><input id="field-roll-to-price" type="number" step="0.0001" min="0"></div><div class="field" data-field="rollGroup"><label for="field-roll-group">ROLL 标识</label><input id="field-roll-group" type="text" maxlength="128"></div>
-                                <div class="field" data-field="price"><label for="field-price">价格</label><input id="field-price" type="number" step="0.0001" min="0"></div><div class="field" data-field="splitRatio"><label for="field-ratio">拆股比例</label><input id="field-ratio" type="number" step="0.0001" min="0"></div><div class="field"><label for="field-fees">费用</label><input id="field-fees" type="number" step="0.01" min="0" value="0"></div><div class="field"><label for="field-cash">现金（收正付负）</label><input id="field-cash" type="number" step="0.01"><span class="hint" id="cash-hint"></span></div><div class="field"><label for="field-tag">标签</label><input id="field-tag" type="text" maxlength="64" autocomplete="off"></div><div class="field wide"><label for="field-note">备注</label><input id="field-note" type="text" maxlength="500" autocomplete="off"></div><div class="field checkbox"><label for="field-include"><input id="field-include" type="checkbox" checked> 计入综合成本</label></div>
+                                <div class="field" data-field="price"><label for="field-price">价格</label><input id="field-price" type="number" step="0.0001" min="0"></div><div class="field" data-field="splitRatio"><label for="field-ratio">拆股比例</label><input id="field-ratio" type="number" step="0.0001" min="0"></div><div class="field"><label for="field-fees">费用</label><input id="field-fees" type="number" step="0.01" min="0" value="0"></div><div class="field"><label for="field-cash">现金（收正付负）</label><input id="field-cash" type="number" step="0.01"><span class="hint" id="cash-hint"></span></div><div class="field"><label for="field-tag">标签</label><input id="field-tag" type="text" maxlength="64" autocomplete="off"><span class="hint">费用退回请填 fee_refund；股息撤回请填 dividend_reversal</span></div><div class="field wide"><label for="field-note">备注</label><input id="field-note" type="text" maxlength="500" autocomplete="off"></div><div class="field checkbox"><label for="field-include" title="取消勾选 = 这条事件整体不参与账本：持仓和现金都不计入，后端校验也不把它当作开仓依据"><input id="field-include" type="checkbox" checked> 参与账本（持仓与现金）</label></div>
                                 <div class="form-actions"><button id="btn-submit-event" class="primary" type="submit" disabled>写入账本</button><button id="btn-reset-event" type="button">清空</button><span id="entry-message" class="entry-message"></span></div>
                             </form>
                         </div>
@@ -176,8 +186,132 @@
                                 <div class="form-actions"><button id="btn-create-book" class="primary" type="submit">创建账本</button><button id="btn-cancel-book" type="button">返回当前账本</button></div>
                             </form>
                         </section>
+                        <section class="panel settings-card" aria-labelledby="reset-archive-title"><div class="panel-heading"><div><span class="eyebrow">恢复</span><h2 id="reset-archive-title">重建存档</h2></div><button id="btn-refresh-resets" type="button">刷新</button></div><p class="section-note">每次整本重建或恢复前，当前流水都会先存档。恢复会把存档写回为活动账本，当前账本再存一份。</p><div id="reset-archive-list" class="reset-archive-list">未选择账本。</div></section>
                         <section class="panel settings-card danger-zone"><div class="panel-heading"><div><span class="eyebrow">维护</span><h2>当前账本</h2></div></div><p>删除会永久移除当前账本的事件、快照和重建存档，且无法撤销。</p><button id="btn-delete-book" class="danger" type="button" disabled>永久删除当前账本</button></section>
                     </div>
+                </div>
+                <div id="stress-view" class="page-view stress-view" aria-labelledby="stress-title" hidden>
+                    <header class="stress-view-header">
+                        <div><span class="eyebrow">What If · 多价格情景</span><h2 id="stress-title" tabindex="-1">到期压力测试</h2></div>
+                        <button id="btn-close-stress-test" class="stress-back" type="button">← 返回账本</button>
+                    </header>
+                    <aside class="stress-params" aria-label="压力测试参数">
+                        <details class="stress-param-group" open><summary>模拟持仓数量</summary>
+                            <p id="stress-quantity-scope" class="stress-slice-note"></p>
+                            <div id="stress-quantity-rows" class="stress-quantity-rows"></div>
+                            <button id="stress-reset-quantities" type="button">恢复账本实际数量</button>
+                            <p class="stress-slice-note">增减数量按当前估值从现金中支付或释放资金，不视为新利润，不写入账本。仅调整已列出的合约，方向保持不变；输入 0 可去除某腿。</p>
+                            <label class="stress-nav-input" for="stress-nav-base">当前组合净值（含现金，USD，可选）<input id="stress-nav-base" type="number" min="0.01" step="any" placeholder="填写后显示情景净值和涨跌比例"></label>
+                            <p id="stress-nav-note" class="stress-slice-note">留空显示净值变化金额；填写的基数应与所选组合范围一致。模拟调仓从该净值中的现金支付，不自动增加净值。</p>
+                        </details>
+                        <details class="stress-param-group" open><summary>情景</summary>
+                            <div class="stress-controls">
+                                <details><summary>快捷选择到期日（替代天数）</summary><label for="stress-expiry">到期日<select id="stress-expiry"><option value="">等待未平期权</option></select></label></details>
+                                <label class="half" for="stress-base-price">基准现价<input id="stress-base-price" type="number" step="0.01" min="0" autocomplete="off" placeholder="输入现价"></label>
+                                <button id="btn-stress-refresh-price" class="half" type="button" title="重新拉取 TWS 现价、逐合约期权参数和利率曲线；联动开启时两边一起刷新">刷新 TWS 行情</button>
+                                <div class="stress-horizon-control">
+                                    <div class="stress-horizon-heading"><label for="stress-horizon-slider">多少天后到达目标价</label><output id="stress-horizon-value" for="stress-horizon-slider stress-horizon-days">同到期范围</output></div>
+                                    <input id="stress-horizon-slider" type="range" min="0" max="365" step="1" value="0" aria-label="多少天后到达目标价" aria-describedby="stress-horizon-note">
+                                    <div class="stress-horizon-scale"><span>现在 · 0 天</span><span id="stress-horizon-max">365 天</span></div>
+                                    <label class="stress-horizon-exact" for="stress-horizon-days">精确天数<input id="stress-horizon-days" type="number" step="1" min="0" max="3650" autocomplete="off" placeholder="同到期范围" title="留空为所选日期纽约收盘假设；N 表示快照时刻后 N×24 小时，0 为现在。支持 0–3650 天，超过一年时滑块自动扩展。"></label>
+                                    <small id="stress-horizon-note">拖动观察估值范围随时间变化；0 为现在，留空沿用所选到期日。有效行情与完整曲线会保持冻结，手动刷新可更新市场基线。</small>
+                                </div>
+                                <label class="half" for="stress-range">价格扫描范围<select id="stress-range"><option value="10">上下 10%</option><option value="20">上下 20%</option><option value="30" selected>上下 30%</option><option value="50">上下 50%</option></select></label>
+                                <div class="stress-path-controls">
+                                    <label for="stress-path">到位路径<select id="stress-path"><option value="immediate">立即冲击并保持</option><option value="gradual">逐日渐变至终值</option></select></label>
+                                    <label class="stress-assignment-toggle" for="stress-conservative-short-put"><input id="stress-conservative-short-put" type="checkbox" checked aria-describedby="stress-assignment-note"><span>保守假设：Short Put 按目标价交割</span></label>
+                                    <small id="stress-assignment-note">仅限本账本在情景日或之前到期的 Short Put：目标价低于其执行价时，按被指派接股并持有至情景日处理；其他情况沿用路径规则。取消勾选则全部沿用路径规则。这是交割压力假设，不代表整个组合的最坏结果。</small>
+                                </div>
+                            </div>
+                        </details>
+                        <details class="stress-param-group"><summary>高级估值与历史成本参考</summary>
+                            <div class="stress-controls">
+                                <label class="half" for="stress-pricing-model">定价模型<select id="stress-pricing-model" title="美式：CRR 二叉树近似，计提前行权价值但不预测实际指派；欧式：BSM 闭式解。两者均从当前 mark 反解本地 IV"><option value="american" selected>美式二叉树</option><option value="european">欧式 BSM</option></select></label>
+                                <label class="half" for="stress-dividend-yield">股息率（%）<input id="stress-dividend-yield" type="number" step="0.1" min="0" autocomplete="off" placeholder="0" title="本账本标的的连续股息率，留空用默认值（QQQ 0.6%、TQQQ 1%，其它 0）"></label>
+                                <label for="stress-liquidation">变现口径<select id="stress-liquidation" title="中间价：理论价按中间价计。按今日点差折算：把今日买价/中间价（多头）或卖价/中间价（空头）的比例外推到情景理论价，联动账本的今日市值直接取买价；这是今日点差的外推，不是对情景日买卖价的预测。交叉或单边报价整体拒绝"><option value="mid" selected>中间价</option><option value="bidask">按今日点差折算（买价/卖价）</option></select></label>
+                                <label for="stress-pnl-basis">盈亏口径<select id="stress-pnl-basis"><option value="change" selected>全部相对当前快照变化</option><option value="cost">历史现金流成本盈亏（非净值变化）</option></select></label>
+                                <label><input id="stress-include-income" type="checkbox">额外加入未来净收入假设（默认不计入）</label>
+                                <label class="half" for="stress-weekly-premium">每周额外净收入（假设）<input id="stress-weekly-premium" type="number" step="1" min="0" autocomplete="off" placeholder="0" title="额外净收入假设，按情景经过天数除以 7 计算；不模拟新增期权的负债或保证卖方利润，留空为零"></label>
+                            </div>
+                        </details>
+                        <details class="stress-param-group"><summary>估值范围 · IV 与价外折扣</summary>
+                            <div class="stress-controls">
+                                <label><input id="stress-band-enabled" type="checkbox" checked>显示估值范围（模型假设）</label>
+                                <label for="stress-iv-range">情景 IV 水平不确定性 <output id="stress-iv-range-value">±20%（相对 IV 水平）</output><input id="stress-iv-range" type="range" min="0" max="50" step="5" value="20"></label>
+                                <label><input id="stress-band-flat-iv" type="checkbox" checked>范围纳入 IV 不变情景</label>
+                                <label title="不启用联动账本时使用本标的每跌 1% 抬升 1.5 IV 点的假设；不是该标的的历史拟合。联动开启后由联动配置接管。"><input id="stress-own-iv-beta" type="checkbox">独立本标的 β 假设（1.5）</label>
+                            </div>
+                            <p class="stress-range-explanation">阴影展示 IV 水平、下跌抬升、期限衰减与价外 Put 折扣的不同假设。默认 IV 水平 ±20% 是可调敏感性假设，例如 30% IV 对应 24%–36%，未经历史覆盖率校准。中线仅作参考，区间不保证覆盖所有 Skew、流动性或价格路径风险；0 天且价格不变时仍收敛于当前快照。</p>
+                            <p id="stress-band-status" class="stress-status" role="status">采样情景范围：非置信区间。</p>
+                        </details>
+                        <details class="stress-param-group" id="stress-own-group"><summary>本账本未到期期权</summary>
+                            <div class="stress-protection-panel">
+                                <label class="stress-protection-toggle" for="stress-include-long-options"><input id="stress-include-long-options" type="checkbox"><span><strong>计入情景日仍未到期的期权（默认开启）</strong><small>从快照 mark 反解逐合约本地 IV，统一重估多头价值和空头负债；关闭时同时排除更晚期权及其未平权利金，曲线不代表完整组合</small></span></label>
+                                <div id="stress-protection-inputs" class="stress-protection-inputs" hidden>
+                                    <span id="stress-option-iv-source">期权行情：等待拉取</span>
+                                    <span id="stress-option-rate-source">期限无风险利率：尚未读取</span>
+                                    <details class="stress-help"><summary>估值说明</summary><p id="stress-own-note">按当前控件生成。</p></details>
+                                </div>
+                            </div>
+                        </details>
+                        <details class="stress-param-group" id="stress-linked-group"><summary>联动账本</summary>
+                            <div class="stress-protection-panel stress-linked-panel">
+                                <label class="stress-protection-toggle" for="stress-include-linked-hedge"><input id="stress-include-linked-hedge" type="checkbox"><span><strong>叠加同账户其它账本的多头期权（TQQQ ↔ QQQ 跨标的保护）</strong><small id="stress-linked-toggle-hint">可选；把同账户联动账本里全部未平 Long Call / Put 按映射后的联动标的价估值，叠加为第四条曲线</small></span></label>
+                                <div id="stress-linked-inputs" class="stress-protection-inputs" hidden>
+                                    <label for="stress-linked-book">联动账本<select id="stress-linked-book"><option value="">请选择联动账本</option></select></label>
+                                    <label class="half" for="stress-linked-ratio">杠杆倍数<input id="stress-linked-ratio" type="number" step="0.01" autocomplete="off" placeholder="3" title="本账本相对联动标的的日内杠杆倍数；反向杠杆填负数"></label>
+                                    <label class="half" for="stress-linked-dividend-yield">股息率（%）<input id="stress-linked-dividend-yield" type="number" step="0.1" min="0" autocomplete="off" placeholder="0.6" title="联动标的的连续股息率，留空用默认值（QQQ 0.6%）"></label>
+                                    <label for="stress-linked-mapping">映射<select id="stress-linked-mapping" title="日内/一天内用简单收益近似；多日为给定路径方差的连续再平衡近似。线性模式始终使用指数涨跌=本账本涨跌/倍数"><option value="compound" selected>多日连续近似（日内线性）</option><option value="linear">线性</option></select></label>
+                                    <label for="stress-linked-iv-mode">IV 模式<select id="stress-linked-iv-mode" title="联动合约在情景中的 IV 如何变化；只影响测试日后仍存续合约的情景市值，不改今日标记价"><option value="none" selected>无（IV 保持不变）</option><option value="fixed">固定点数（全扫描线统一抬升）</option><option value="beta">按跌幅 β（只在下跌侧抬升）</option></select></label>
+                                    <label class="half" id="stress-linked-sigma-field" for="stress-linked-sigma">路径 σ（年化 %）<input id="stress-linked-sigma" type="number" step="1" min="0" autocomplete="off" placeholder="快照代理" title="多日连续近似的指数年化路径波动率假设；留空取当前存续、距现价最近的合约的有效 IV 代理；TWS 未提供 IV 时尝试从 mark 本地反解。没有代理时停止，不按零损耗计算；日内/一天内不用方差损耗"></label>
+                                    <label class="half" id="stress-linked-iv-shock-field" for="stress-linked-iv-shock" hidden>IV 冲击（点）<input id="stress-linked-iv-shock" type="number" step="1" autocomplete="off" placeholder="0" title="每张存续合约的 IV 统一抬升多少个百分点，例如 10 表示 30% 变 40%；上涨侧同样抬升，读图只看下跌侧"></label>
+                                    <label class="half" id="stress-linked-iv-beta-field" for="stress-linked-iv-beta" hidden>β（点 / 每跌 1%）<input id="stress-linked-iv-beta" type="number" step="0.1" min="0" autocomplete="off" placeholder="1.5" title="手填 β：联动标的每下跌 1%，30 天期 IV 抬升多少个百分点；基准点与上涨侧为 0。勾选「β 按跌幅自适应」时不用此值。QQQ 2012–2026 日频回归（scripts/stress_model_validation.py A1b）：跌 2–5% 约 0.90，5–10% 0.95，10–20% 1.00，>20% 1.65；持有天数影响很小"></label>
+                                    <span id="stress-linked-iv-calib-field" class="stress-linked-inline"><label class="checkbox" for="stress-linked-iv-beta-auto" title="β 随每个扫描点的联动跌幅取历史回归值（A1b，持有 5–40 天合并）：跌 ≤3.5% 0.90，7.5% 0.95，15% 1.00，≥25% 1.65，线性插值"><input id="stress-linked-iv-beta-auto" type="checkbox" checked>β 按跌幅自适应</label><label id="stress-linked-iv-otm-field" class="checkbox" for="stress-linked-iv-otm" title="七次暴跌里价外 10–20% Put 的 IV 抬升只有 ATM 的约 0.50 倍（B1，中位，n=33）。勾选后只对价外 Put 打折：距现货 ≤5% 取 1，≥10% 取 0.50，中间线性；价内 Put 与 Call 未做验证，保持全额"><input id="stress-linked-iv-otm" type="checkbox" checked>价外 Put 折扣</label><label class="checkbox" for="stress-linked-sigma-crash" title="跌幅 ≥8% 的 20 日窗口里实现波动率是起始 ATM IV 的 1.43 倍（A2）。勾选后复利损耗用的路径 σ 随该点指数跌幅从 ×1 线性放大到 ×1.4（≥8%）"><input id="stress-linked-sigma-crash" type="checkbox" checked>暴跌 σ 放大</label></span>
+                                    <span id="stress-linked-iv-tenor-field" class="stress-linked-inline" hidden><label class="checkbox" for="stress-linked-iv-tenor" title="β 描述的是约 30 天 IV 的反应；越远期的 IV 抬升越少。勾选后每张合约的冲击 × (参考期限 ÷ 剩余天数)^指数，封顶 1。2015–2025 七次 QQQ 暴跌里价外 Put 的实测：相对各事件前端合约，60 天约 0.74、120 天 0.44、240 天 0.21、400 天 0.15；按实际到期天数拟合，最小二乘指数 0.76、逐合约中位 0.64，默认取 0.65；ATM 抬升的衰减更接近平方根（0.5）"><input id="stress-linked-iv-tenor" type="checkbox" checked>按期限衰减</label><label class="half" for="stress-linked-iv-tenor-days">参考期限（天）<input id="stress-linked-iv-tenor-days" type="number" step="1" min="1" autocomplete="off" placeholder="30" title="β 所描述的 IV 期限；剩余天数不超过它的合约拿满额冲击"></label><label class="half" for="stress-linked-iv-tenor-exponent">衰减指数<input id="stress-linked-iv-tenor-exponent" type="number" step="0.05" min="0.05" max="1" autocomplete="off" placeholder="0.65" title="(参考期限 ÷ 剩余天数) 的指数。0.65 取自七次 QQQ 暴跌中逐合约隐含指数的中位数约 0.64；对数最小二乘为 0.76（一年期约拿 30 天冲击的 0.15–0.2）；0.5 = 平方根规则，接近 ATM 抬升的衰减；1 = 与剩余天数成反比"></label></span>
+                                    <div class="stress-iv-profile">
+                                        <strong id="stress-iv-profile-label">IV 参数来源</strong>
+                                        <span id="stress-iv-profile-note"></span>
+                                        <button id="btn-stress-iv-baseline" type="button">恢复研究基准</button>
+                                        <button id="btn-stress-iv-keep" type="button" hidden>保留当前参数</button>
+                                        <small>研究基准：β 自适应、参考期限 30 天、指数 0.65、价外 Put 折扣开启。只恢复这些 IV 控件，不改价格映射或三倍联动。</small>
+                                    </div>
+                                    <span id="stress-linked-book-status">联动账本：尚未选择</span>
+                                    <span id="stress-linked-inputs-status">期权行情：尚未拉取</span>
+                                    <details class="stress-help"><summary>映射与 IV 说明</summary><p id="stress-linked-note">联动只计同账户、同币种另一账本的多头期权，相对其当前快照市值计算变化；不是合并两个账户组合。到期前从当前 mark 反解本地 IV 后重估，到期按路径上的价格变现并持有现金。日内/不超过一天采用简单收益近似 R=ΔT/k；多日复利模式是给定路径 σ 的连续再平衡近似，不能从终值唯一反推指数路径。路径 σ 可手填，或取当前仍存续的最近 ATM 合约的有效 IV 作为代理（TWS IV 缺失时使用本地反解 IV），不是实现波动率预测。β 仅在真实指数下跌侧生效，并可乘期限衰减和价外 Put 折扣；固定冲击不使用这些因子。本账本冲击按 |杠杆倍数| 放大，此规则并未用 TQQQ 期权历史链验证。当前点差比例外推并非未来可执行价格；IV 不变也不一定是净组合盈亏下限。范围是完整组合参数采样，非置信区间，不覆盖全部价格路径。详见仓库压力测试维护说明。</p></details>
+                                </div>
+                            </div>
+                        </details>
+                        <details class="stress-help stress-note-details"><summary>分项口径与假设说明</summary><p id="stress-note" class="stress-note">盈亏由现金和头寸价值计算，权利金只计一次。成本口径与相对当前快照变化分别列示；账本每股成本是独立参考。立即冲击/渐变路径决定途中交割。本账本交割股票持有到情景时点，联动多头到期变现持有现金。范围是参数采样，非置信区间；未来分红现金、融资利息、实际提前指派和成交滑点未模拟。所有结果只读，不写入账本。</p></details>
+                    </aside>
+                    <section class="stress-results" aria-label="压力测试结果">
+                        <p id="stress-status" class="stress-status">等待压力测试参数。</p>
+                        <div class="stress-legend" aria-hidden="true"><span id="stress-legend-base-pnl" class="legend-pnl">到期结算盈亏（左轴）</span><span id="stress-legend-protected-pnl" class="legend-protected-pnl" hidden>①+② 计入未到期多头期权（左轴）</span><span id="stress-legend-linked-pnl" class="legend-linked-pnl" hidden>①+②+③ 计入联动账本多头期权较今日变动（左轴）</span><span id="stress-legend-cost" class="legend-cost">情景结算后成本 / 股（右轴）</span><span id="stress-legend-quantities" hidden>灰色虚线：当前数量；彩色曲线：模拟数量</span><span class="legend-strike">期权执行价</span></div>
+                        <div class="stress-chart-wrap"><svg id="stress-chart" role="img" aria-label="标的价格变化与到期后盈亏、综合成本的压力测试图"></svg><div id="stress-tooltip" class="stress-tooltip" hidden><strong id="stress-tooltip-price">—</strong><p id="stress-tooltip-horizon-row" class="stress-tooltip-sub" hidden><span>情景日</span><span id="stress-tooltip-horizon">—</span></p><p id="stress-tooltip-linked-price-row" class="stress-tooltip-sub" hidden><span id="stress-tooltip-linked-price-label">联动标的映射价</span><span id="stress-tooltip-linked-price">—</span></p><div id="stress-tooltip-band-row" hidden>采样范围（非置信区间）：<span id="stress-tooltip-band">—</span></div><dl class="stress-tooltip-components"><div><dt id="stress-tooltip-base-label">到期结算盈亏</dt><dd id="stress-tooltip-base-pnl">—</dd></div><div id="stress-tooltip-long-option-pnl-row" hidden><dt id="stress-tooltip-long-option-pnl-label">② 未到期多头期权浮动盈亏</dt><dd id="stress-tooltip-long-option-pnl">—</dd></div><div id="stress-tooltip-short-option-pnl-row" hidden><dt id="stress-tooltip-short-option-pnl-label">未到期空头期权</dt><dd id="stress-tooltip-short-option-pnl">—</dd></div><div id="stress-tooltip-linked-pnl-row" hidden><dt id="stress-tooltip-linked-pnl-label">③ 联动多头期权较今日变动</dt><dd id="stress-tooltip-linked-pnl">—</dd></div><div id="stress-tooltip-premium-row" hidden><dt id="stress-tooltip-premium-label">假设权利金</dt><dd id="stress-tooltip-premium">—</dd></div><div id="stress-tooltip-total-row" class="stress-tooltip-total" hidden><dt id="stress-tooltip-pnl-label">合计</dt><dd id="stress-tooltip-pnl">—</dd></div></dl><dl class="stress-tooltip-details"><div id="stress-tooltip-long-option-value-row" hidden><dt>② 期权/交割净值</dt><dd id="stress-tooltip-long-option-value">—</dd></div><div id="stress-tooltip-long-option-iv-row" hidden><dt id="stress-tooltip-long-option-iv-label">② 本地 IV（保持不变）</dt><dd id="stress-tooltip-long-option-iv">—</dd></div><div id="stress-tooltip-long-option-rate-row" hidden><dt>② 无风险利率 r(T)</dt><dd id="stress-tooltip-long-option-rate">—</dd></div><div id="stress-tooltip-short-option-liability-row" hidden><dt id="stress-tooltip-short-option-liability-label">空头期权/交割净负债</dt><dd id="stress-tooltip-short-option-liability">—</dd></div><div id="stress-tooltip-short-option-iv-row" hidden><dt id="stress-tooltip-short-option-iv-label">空头本地 IV</dt><dd id="stress-tooltip-short-option-iv">—</dd></div><div id="stress-tooltip-linked-value-row" hidden><dt id="stress-tooltip-linked-value-label">联动多头期权 情景市值 / 今日市值</dt><dd id="stress-tooltip-linked-value">—</dd></div><div id="stress-tooltip-linked-iv-row" hidden><dt id="stress-tooltip-linked-iv-label">联动多头期权 IV</dt><dd id="stress-tooltip-linked-iv">—</dd></div><div id="stress-tooltip-linked-premium-row" hidden><dt id="stress-tooltip-linked-premium-label">联动多头期权较买入权利金（参考）</dt><dd id="stress-tooltip-linked-premium">—</dd></div><div><dt>情景结算后成本 / 股</dt><dd id="stress-tooltip-cost">—</dd></div><div><dt>结算后持股</dt><dd id="stress-tooltip-shares">—</dd></div><div><dt>结算结果</dt><dd id="stress-tooltip-outcome">—</dd></div></dl></div></div>
+                        <div id="stress-key-points" class="stress-key-points"></div>
+                        <section id="stress-slice" class="stress-slice" aria-label="压力切片核对" hidden>
+                            <div class="stress-slice-heading"><strong>切片核对 · <span id="stress-slice-price">—</span></strong><label for="stress-slice-index">选择切片 <input id="stress-slice-index" type="range" min="0" max="60" value="30"></label></div>
+                            <div class="stress-slice-range"><span>估值范围（当前图表口径）</span><strong id="stress-slice-range">—</strong><small id="stress-slice-range-note"></small></div>
+                            <p id="stress-slice-nav" class="stress-nav-result"></p>
+                            <p id="stress-slice-quantity-comparison" class="stress-slice-note"></p>
+                            <p class="stress-slice-note">随图上悬停更新，移开后保留；也可用滑块选择。上方范围与图表口径一致；下方损益分项不含每周假设收入，不重复加到图中合计。</p>
+                            <div class="stress-slice-grid">
+                                <section><h4>损益口径</h4><dl>
+                                    <div><dt id="stress-slice-cost-label">成本盈亏</dt><dd id="stress-slice-cost-pnl">—</dd></div>
+                                    <div><dt>较当前快照变化</dt><dd id="stress-slice-change-pnl">—</dd></div>
+                                </dl><p id="stress-slice-scope" class="stress-slice-note"></p><p id="stress-slice-reference-note" class="stress-slice-note"></p></section>
+                                <section><h4>IV 假设贡献</h4><dl>
+                                    <div><dt>同价格 / 同日期，IV 不变</dt><dd id="stress-slice-flat-pnl">—</dd></div>
+                                    <div><dt>IV 冲击额外贡献</dt><dd id="stress-slice-iv-contribution">—</dd></div>
+                                </dl><p id="stress-slice-iv-note" class="stress-slice-note"></p></section>
+                                <section><h4>本账本交割本金</h4><dl>
+                                    <div><dt>付款 / 收款</dt><dd id="stress-slice-cash-gross">—</dd></div>
+                                    <div><dt>净现金流（收正付负）</dt><dd id="stress-slice-cash-net">—</dd></div>
+                                    <div><dt>结算后持股</dt><dd id="stress-slice-shares">—</dd></div>
+                                </dl><p class="stress-slice-note">不含期权权利金、未来费用或保证金；多日期收付款合计不代表峰值资金需求。联动未到期期权估值不是到账现金。</p></section>
+                            </div>
+                            <details class="stress-slice-band"><summary>查看采样上下沿的参数（非置信区间）</summary><p id="stress-slice-band-lower">—</p><p id="stress-slice-band-upper">—</p><p class="stress-slice-note">上下沿可能来自不同参数组合；只解释已采样成员，不承诺连续极值或发生概率。金额与图中范围一致，包含已设置的假设收入。</p></details>
+                        </section>
+                    </section>
                 </div>
             </main>
         </div>
@@ -194,57 +328,14 @@
         <p id="premium-expiry-note" class="premium-expiry-note">这是已收取权利金的到期分布，不是到期日再收款，也不是最终盈亏。金额为未平 Short Call / Put 分摊的开仓净收入（含已记开仓费用）；部分平仓后只保留未平部分，不含 Long Option 支出。分摊可能产生不足一美分的金额，明细保留 4 位小数，顶部合计按 2 位小数显示。是否已结算以账本流水为准，过期但尚无结算记录的仓位仍列在这里。</p>
     </dialog>
 
-    <div id="stress-modal" class="stress-modal" hidden>
-        <section class="stress-dialog" role="dialog" aria-modal="true" aria-labelledby="stress-title" aria-describedby="stress-note">
-            <header class="stress-header">
-                <div><span class="eyebrow">What If · 多价格情景</span><h2 id="stress-title">到期压力测试</h2></div>
-                <button id="btn-close-stress-test" class="stress-close" type="button" aria-label="关闭压力测试">×</button>
-            </header>
-            <div class="stress-controls">
-                <label for="stress-expiry">到期范围<select id="stress-expiry"><option value="">等待未平期权</option></select></label>
-                <label for="stress-base-price">基准现价<input id="stress-base-price" type="number" step="0.01" min="0" autocomplete="off" placeholder="输入现价"></label>
-                <label for="stress-horizon-days">跌到位需要天数<input id="stress-horizon-days" type="number" step="1" min="0" autocomplete="off" placeholder="同到期范围" title="留空 = 在所选到期日结算。填 N 表示情景在今天 +N 天发生：本账本 N 天内到期的期权按情景价结算，本账本与联动账本仍存续的多头期权都在同一天估值，剩余期限缩短带来的 Theta 计入；三项永远同一天"></label>
-                <label for="stress-pricing-model">定价模型<select id="stress-pricing-model" title="美式：CRR 二叉树，与 TWS 对美股期权报 IV 的模型一致，含提前行权价值；欧式：BSM 闭式解"><option value="american" selected>美式二叉树</option><option value="european">欧式 BSM</option></select></label>
-                <label for="stress-dividend-yield">股息率（%）<input id="stress-dividend-yield" type="number" step="0.1" min="0" autocomplete="off" placeholder="0" title="本账本标的的连续股息率，留空用默认值（QQQ 0.6%、TQQQ 1%，其它 0）"></label>
-                <label for="stress-liquidation">变现口径<select id="stress-liquidation" title="中间价：理论价按中间价计。按今日点差折算：把今日买价/中间价（多头）或卖价/中间价（空头）的比例外推到情景理论价，联动账本的今日市值直接取买价；这是今日点差的外推，不是对情景日买卖价的预测。交叉或单边报价整体拒绝"><option value="mid" selected>中间价</option><option value="bidask">按今日点差折算（买价/卖价）</option></select></label>
-                <label for="stress-range">价格扫描范围<select id="stress-range"><option value="10">上下 10%</option><option value="20">上下 20%</option><option value="30" selected>上下 30%</option><option value="50">上下 50%</option></select></label>
-                <button id="btn-stress-refresh-price" type="button">刷新 TWS 现价</button>
-            </div>
-            <div class="stress-protection-panel">
-                <label class="stress-protection-toggle" for="stress-include-long-options"><input id="stress-include-long-options" type="checkbox"><span><strong>计入情景日仍未到期的期权（多头浮动盈亏 + 空头负债盯市）</strong><small>可选；多头按理论市值相对买入权利金计浮动盈亏，空头按已收权利金减去理论负债，两者都用逐合约 TWS IV。不勾选时情景日后到期的期权一律不计</small></span></label>
-                <div id="stress-protection-inputs" class="stress-protection-inputs" hidden>
-                    <span id="stress-option-iv-source">逐合约 TWS IV：等待拉取</span>
-                    <span id="stress-option-rate-source">期限无风险利率：尚未读取</span>
-                    <details class="stress-help"><summary>估值说明</summary><p id="stress-own-note">按当前控件生成。</p></details>
-                </div>
-            </div>
-            <div class="stress-protection-panel stress-linked-panel">
-                <label class="stress-protection-toggle" for="stress-include-linked-hedge"><input id="stress-include-linked-hedge" type="checkbox"><span><strong>叠加同账户其它账本的多头期权（TQQQ ↔ QQQ 跨标的保护）</strong><small id="stress-linked-toggle-hint">可选；把同账户联动账本里全部未平 Long Call / Put 按映射后的联动标的价估值，叠加为第四条曲线</small></span></label>
-                <div id="stress-linked-inputs" class="stress-protection-inputs" hidden>
-                    <label for="stress-linked-book">联动账本<select id="stress-linked-book"><option value="">请选择联动账本</option></select></label>
-                    <label for="stress-linked-ratio">杠杆倍数<input id="stress-linked-ratio" type="number" step="0.01" autocomplete="off" placeholder="3" title="本账本相对联动标的的日内杠杆倍数；反向杠杆填负数"></label>
-                    <label for="stress-linked-mapping">映射<select id="stress-linked-mapping" title="复利：(1+本账本涨跌) = (1+指数涨跌)^倍数 × exp(−损耗)，按指数反推；线性：指数涨跌 = 本账本涨跌 ÷ 倍数"><option value="compound" selected>复利（按日再平衡）</option><option value="linear">线性</option></select></label>
-                    <label for="stress-linked-dividend-yield">股息率（%）<input id="stress-linked-dividend-yield" type="number" step="0.1" min="0" autocomplete="off" placeholder="0.6" title="联动标的的连续股息率，留空用默认值（QQQ 0.6%）"></label>
-                    <label id="stress-linked-sigma-field" for="stress-linked-sigma">路径 σ（年化 %）<input id="stress-linked-sigma" type="number" step="1" min="0" autocomplete="off" placeholder="快照代理" title="多日波动损耗用的指数年化波动率；留空取情景日之后仍存续、距现价最近的联动合约 IV 作代理（离 ATM 超过 10% 会标 ⚠）；没有可用代理时整体停止，不按零损耗计算。损耗 = (倍数² − 倍数)/2 × σ² × T，情景日就是今天时为 0"></label>
-                    <label for="stress-linked-iv-mode">IV 模式<select id="stress-linked-iv-mode" title="联动合约在情景中的 IV 如何变化；只影响测试日后仍存续合约的情景市值，不改今日标记价"><option value="none" selected>无（IV 保持不变）</option><option value="fixed">固定点数（全扫描线统一抬升）</option><option value="beta">按跌幅 β（只在下跌侧抬升）</option></select></label>
-                    <label id="stress-linked-iv-shock-field" for="stress-linked-iv-shock" hidden>IV 冲击（点）<input id="stress-linked-iv-shock" type="number" step="1" autocomplete="off" placeholder="0" title="每张存续合约的 IV 统一抬升多少个百分点，例如 10 表示 30% 变 40%；上涨侧同样抬升，读图只看下跌侧"></label>
-                    <label id="stress-linked-iv-beta-field" for="stress-linked-iv-beta" hidden>β（点 / 每跌 1%）<input id="stress-linked-iv-beta" type="number" step="0.1" min="0" autocomplete="off" placeholder="1.5" title="联动标的每下跌 1%，存续合约 IV 抬升多少个百分点；基准点与上涨侧为 0。NDX/VXN 历史回归量级约 1 到 1.5，连续暴跌中更陡；这是起点值，不是预测"></label>
-                    <span id="stress-linked-iv-tenor-field" class="stress-linked-inline" hidden><label class="checkbox" for="stress-linked-iv-tenor" title="β 描述的是约 30 天 IV 的反应；越远期的 IV 抬升越少。勾选后每张合约的冲击 × √(参考期限 ÷ 剩余天数)，封顶 1"><input id="stress-linked-iv-tenor" type="checkbox" checked>按期限衰减</label><label for="stress-linked-iv-tenor-days">参考期限（天）<input id="stress-linked-iv-tenor-days" type="number" step="1" min="1" autocomplete="off" placeholder="30" title="β 所描述的 IV 期限；剩余天数不超过它的合约拿满额冲击"></label></span>
-                    <span id="stress-linked-book-status">联动账本：尚未选择</span>
-                    <span id="stress-linked-inputs-status">逐合约 TWS IV：尚未拉取</span>
-                    <details class="stress-help"><summary>映射与 IV 说明</summary><p id="stress-linked-note">叠加值 = 联动多头期权在情景日的理论市值 − 今日 TWS 标记价市值，即「相对今天多值多少」；已付权利金是沉没成本，不再扣除（悬停另给相对买入权利金的参考盈亏）。映射以指数为驱动变量：复利模式下本账本涨跌 ΔT 反推指数涨跌 R，满足 (1+ΔT) = (1+R)^倍数 × exp(−(倍数²−倍数)/2·σ²·T)，3 倍杠杆跌 30% 对应指数跌 11.2% 而非 10%；线性模式为 R = ΔT ÷ 倍数，仅供对照。本账本仍未到期期权的 IV 冲击随联动 β 按 |倍数| 放大。定价模型默认美式二叉树并计股息率；「按今日点差折算」口径把今日买价/中间价（多头）或卖价/中间价（空头）的比例外推到情景理论价，联动账本的今日市值直接取买价，结算价（内在价值）不折算；它是今日点差的外推，不是对情景日报价的预测。复利映射的路径 σ 留空时取快照里情景日之后最近 ATM 合约的 IV 作代理并注明距现价的距离，没有可用代理时整体停止而不是按零损耗计算。测试日之后仍未到期的联动合约按上方所选定价模型与其自身 TWS IV 估值，IV 沿扫描线固定，因此下跌情景的 Put 保护偏保守；「IV 模式」决定情景中的 IV：无 = 每张合约保持今天的 IV（sticky-strike，保守下限）；固定点数 = 全扫描线统一抬升 N 点，上涨侧也会被抬高，只适合回答「IV 整体变成 X 会怎样」；按跌幅 β = 每个扫描点抬升 β × 联动标的跌幅%，基准点与上涨侧为 0，对应现货与 IV 的负相关（本工程 VRP 备忘 E17：SPY/QQQ corr(ret, ΔIV) ≈ −0.7），β 只是历史量级，不是预测；「按期限衰减」把每张合约的冲击乘以 √(参考期限 ÷ 剩余天数)、封顶 1，因为 β 描述的是短期 IV，一年期 IV 在暴跌里只抬前端的三分之一到一半。任何模式都不改今日标记市值；联动账本只能选同账户、同币种的 STK 账本，两本账本的盈亏不做汇率换算；测试日或之前到期的按内在价值结算。只计联动账本的多头 Call / Put，空头腿与股票不计入。</p></details>
-                </div>
-            </div>
-            <p id="stress-status" class="stress-status">等待压力测试参数。</p>
-            <div class="stress-legend" aria-hidden="true"><span id="stress-legend-base-pnl" class="legend-pnl">到期结算盈亏（左轴）</span><span id="stress-legend-protected-pnl" class="legend-protected-pnl" hidden>①+② 计入未到期多头期权（左轴）</span><span id="stress-legend-linked-pnl" class="legend-linked-pnl" hidden>①+②+③ 计入联动账本多头期权较今日变动（左轴）</span><span class="legend-cost">综合成本 / 股（右轴）</span><span class="legend-strike">期权执行价</span></div>
-            <div class="stress-chart-wrap"><svg id="stress-chart" role="img" aria-label="标的价格变化与到期后盈亏、综合成本的压力测试图"></svg><div id="stress-tooltip" class="stress-tooltip" hidden><strong id="stress-tooltip-price">—</strong><p id="stress-tooltip-horizon-row" class="stress-tooltip-sub" hidden><span>情景日</span><span id="stress-tooltip-horizon">—</span></p><p id="stress-tooltip-linked-price-row" class="stress-tooltip-sub" hidden><span id="stress-tooltip-linked-price-label">联动标的映射价</span><span id="stress-tooltip-linked-price">—</span></p><dl class="stress-tooltip-components"><div><dt id="stress-tooltip-base-label">到期结算盈亏</dt><dd id="stress-tooltip-base-pnl">—</dd></div><div id="stress-tooltip-long-option-pnl-row" hidden><dt id="stress-tooltip-long-option-pnl-label">② 未到期多头期权浮动盈亏</dt><dd id="stress-tooltip-long-option-pnl">—</dd></div><div id="stress-tooltip-short-option-pnl-row" hidden><dt id="stress-tooltip-short-option-pnl-label">未到期空头期权</dt><dd id="stress-tooltip-short-option-pnl">—</dd></div><div id="stress-tooltip-linked-pnl-row" hidden><dt id="stress-tooltip-linked-pnl-label">③ 联动多头期权较今日变动</dt><dd id="stress-tooltip-linked-pnl">—</dd></div><div id="stress-tooltip-total-row" class="stress-tooltip-total" hidden><dt id="stress-tooltip-pnl-label">合计</dt><dd id="stress-tooltip-pnl">—</dd></div></dl><dl class="stress-tooltip-details"><div id="stress-tooltip-long-option-value-row" hidden><dt>② 理论市值</dt><dd id="stress-tooltip-long-option-value">—</dd></div><div id="stress-tooltip-long-option-iv-row" hidden><dt id="stress-tooltip-long-option-iv-label">② TWS IV（保持不变）</dt><dd id="stress-tooltip-long-option-iv">—</dd></div><div id="stress-tooltip-long-option-rate-row" hidden><dt>② 无风险利率 r(T)</dt><dd id="stress-tooltip-long-option-rate">—</dd></div><div id="stress-tooltip-short-option-liability-row" hidden><dt id="stress-tooltip-short-option-liability-label">空头负债市值</dt><dd id="stress-tooltip-short-option-liability">—</dd></div><div id="stress-tooltip-short-option-iv-row" hidden><dt id="stress-tooltip-short-option-iv-label">空头 TWS IV</dt><dd id="stress-tooltip-short-option-iv">—</dd></div><div id="stress-tooltip-linked-value-row" hidden><dt id="stress-tooltip-linked-value-label">联动多头期权 情景市值 / 今日市值</dt><dd id="stress-tooltip-linked-value">—</dd></div><div id="stress-tooltip-linked-iv-row" hidden><dt id="stress-tooltip-linked-iv-label">联动多头期权 IV</dt><dd id="stress-tooltip-linked-iv">—</dd></div><div id="stress-tooltip-linked-premium-row" hidden><dt id="stress-tooltip-linked-premium-label">联动多头期权较买入权利金（参考）</dt><dd id="stress-tooltip-linked-premium">—</dd></div><div><dt>综合成本 / 股</dt><dd id="stress-tooltip-cost">—</dd></div><div><dt>结算后持股</dt><dd id="stress-tooltip-shares">—</dd></div><div><dt>结算结果</dt><dd id="stress-tooltip-outcome">—</dd></div></dl></div></div>
-            <div id="stress-key-points" class="stress-key-points"></div>
-            <details class="stress-help stress-note-details"><summary>分项口径与假设说明</summary><p id="stress-note" class="stress-note">盈亏按编号分项再加总：① 本账本到期结算盈亏（股票按情景价，情景日及以前的期权按指派 / 行权 / 归零结算）；本账本情景日仍未到期的期权分两项：多头按理论市值相对买入权利金的浮动盈亏，空头按已收权利金减去理论负债（综合成本口径本就不抵扣仍未到期的卖方权利金，所以这里计全额）；最后一项是联动账本多头期权相对今日标记价的变动。编号按实际开启的项顺序分配。三项永远在同一个情景日估值：默认是所选到期日，填了「跌到位需要天数」则是今天 +N 天，TWS 折现利率也按该日的剩余期限解析。只结算情景日及以前的期权；更晚到期的仓位继续保留。默认不估计更晚期权的时间价值；勾选后，测试日仍未到期的所有多头 Call 与 Put 都会按情景价估值，并把理论市值和相对买入权利金的浮动盈亏叠加到图上。跨账本叠加只读取同账户另一本账本的多头期权并按映射价估值，不合并两本账本，也不读取 TWS 持仓作为兜底。所有结果只在浏览器内测算，不写入账本。</p></details>
-        </section>
-    </div>
-    <script src="js/cost_basis_core.js?v=94b986d85e5a"></script>
+    <script src="js/cost_basis_core.js?v=7a15bfbde61a"></script>
     <script src="js/american_binomial.js?v=a49313f2567b"></script>
-    <script src="js/cost_basis_import.js?v=1b0728076d84"></script>
-    <script src="js/cost_basis.js?v=5c17f4270a1a"></script>
+    <script src="js/cost_basis_import.js?v=24ed30fe29b5"></script>
+    <script src="js/market_curves.js?v=f15898beaf0c"></script>
+    <script src="js/cost_basis_stress_models.js?v=60480547960f"></script>
+    <script src="js/cost_basis_stress_core.js?v=76e942b27d9d"></script>
+    <script src="js/cost_basis_stress_band.js?v=6f716f8dc838"></script>
+    <script src="js/cost_basis_stress_worker.js?v=3d63d7e54061"></script>
+    <script src="js/cost_basis.js?v=fd1bb3f34840"></script>
 </body>
 </html>

@@ -34,18 +34,37 @@ function loadReconciliationHarness() {
     vm.runInContext(readScript().replace('globalScope.OptionComboCostBasisPage = {', `
         globalScope.pageHarness = {
             state, render: _renderReconciliationTable, fetch: _fetchTwsExecutions,
+            handleImportFile: _handleImportFile, commitImport: _commitImport,
+            parseImport: _parseImportText, bindingProblem: _importBindingProblem,
+            beginBook: _beginBookSelection,
             message: _handleMessage, renderWhatIf: _renderWhatIf,
             editPrice: _editWhatIfPrice, followPrice: _setWhatIfFollowReference,
             refreshPrice: _refreshWhatIfMarketPrice, invalidate: _invalidatePositions,
-            selectPriceBook: _beginBookSelection,
+            selectPriceBook: _beginBookSelection, loadEvents: _loadEvents,
+            configureEventLoad() { _syncBookMode = () => {}; },
             renderStress: _renderStressTest,
+            stressSeries: _stressSeries, stressJob, cancelStressJob: _cancelStressJob,
+            silenceStressRender() { _renderStressTest = () => {}; },
             refreshStressInputs: _refreshStressMarketInputs,
+            refreshStressPair: _refreshStressScenarioInputs, stressRefreshJob,
             invalidateScenario: _invalidateStressScenarioInputs,
             scenarioDate: _stressScenarioDate,
+            setHorizon: _setStressHorizon, applyHorizon: _applyStressHorizon,
+            syncHorizon: _syncStressHorizonControls, frozenBatch: _stressFrozenSnapshotBatch,
+            renderStressCards: _renderStressCards,
+            navText: _stressNavText,
             restoreLinked: _restoreStressLinkedChoice,
+            reviewIv: _reviewStressIvSettings, renderIvProfile: _renderStressIvProfile,
+            writeLinked: _writeStressLinkedMemory, renderSlice: _renderStressSlice,
+            bandMemberLabel: _stressBandMemberLabel,
             loadLinked: _loadStressLinkedEvents,
             ensureLinked: _ensureStressLinkedData,
             linkedRequest: _stressLinkedHedgeRequest,
+            renderAccounts: _renderManagedAccounts,
+            accountHint: _renderNewBookAccountHint,
+            showView: _showView, openStress: _openStressTest, closeStress: _closeStressTest,
+            teardownStress: _teardownStressTest, setStressGroup: _setStressGroupOpen,
+            noteStressGroupToggle: _noteStressGroupToggle,
             configurePrice() {
                 _renderAll = _renderWhatIf;
                 _renderPositionsStatus = () => {};
@@ -53,8 +72,18 @@ function loadReconciliationHarness() {
             },
             configure(handlers) {
                 if (handlers.adopt) _adoptTwsPosition = handlers.adopt;
-                if (handlers.request) request = handlers.request;
-                if (handlers.today) _todayIso = handlers.today;
+                if (handlers.request) request = async (action, payload) => {
+                    const response = await handlers.request(action, payload);
+                    return action === 'list_cost_basis_events' && response && !response.ledgerVersion
+                        ? { ...response, ledgerVersion: { digest: 'test-reviewed-history' } } : response;
+                };
+                if (handlers.today) {
+                    _todayIso = handlers.today;
+                    globalScope.OptionComboCostBasisStressCore = {
+                        ...globalScope.OptionComboCostBasisStressCore,
+                        exchangeDate: () => handlers.today().replace(/-/g, ''),
+                    };
+                }
                 _refreshControls = () => {};
                 _renderReconciliation = _renderReconciliationTable;
                 _renderImportPreview = () => {};
@@ -62,13 +91,28 @@ function loadReconciliationHarness() {
         };
         globalScope.OptionComboCostBasisPage = {`), context);
     function node() {
+        const classes = new Set();
         return {
-            children: [], handlers: {}, textContent: '',
+            children: [], handlers: {}, textContent: '', dataset: {},
+            classList: {
+                add(...names) { names.forEach((name) => classes.add(name)); },
+                remove(...names) { names.forEach((name) => classes.delete(name)); },
+                contains(name) { return classes.has(name); },
+                toggle(name, force) {
+                    const on = force === undefined ? !classes.has(name) : Boolean(force);
+                    if (on) classes.add(name); else classes.delete(name);
+                    return on;
+                },
+            },
             appendChild(child) { this.children.push(child); return child; },
             removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
             get firstChild() { return this.children[0]; },
             addEventListener(name, callback) { this.handlers[name] = callback; },
+            setAttribute(name, value) { this[name] = String(value); },
+            focus(options) { this.focusOptions = options; context.document.activeElement = this; },
+            scrollIntoView(options) { this.scrollOptions = options; },
             querySelector() { return this.body || (this.body = node()); },
+            querySelectorAll() { return []; },
         };
     }
     const nodes = new Map();
@@ -79,6 +123,7 @@ function loadReconciliationHarness() {
             if (!nodes.has(id)) nodes.set(id, node());
             return nodes.get(id);
         },
+        body: node(),
     };
     context.alert = (message) => alerts.push(message);
     const harness = context.pageHarness;
@@ -96,6 +141,9 @@ function loadReconciliationHarness() {
 function loadPriceHarness() {
     const h = loadReconciliationHarness();
     h.configurePrice();
+    // Existing ledger/fallback cases explicitly exercise the historical lens.
+    // Portfolio workflow tests opt into the change lens below.
+    h.state.stressPnlBasis = 'cost';
     h.state.connection = 'connected';
     h.state.allEvents = [
         {kind:'share_trade',account:'U1',tradeDate:'2026-09-01',shares:200,
@@ -118,9 +166,224 @@ function loadPriceHarness() {
     return h;
 }
 
+function loadStressPairHarness() {
+    const h = loadPriceHarness();
+    const pending = [];
+    h.state.books.push({ bookId: 'book-qqq', account: 'U1', symbol: 'QQQ', secType: 'STK' });
+    h.restoreLinked(h.state.books[0]);
+    Object.assign(h.state, { stressIncludeLinkedHedge: true, stressExpiry: '20260904',
+        stressPnlBasis: 'cost',
+        stressIncludeLongOptions: false, stressBasePrice: 70, stressLinkedMapping: 'linear',
+        status: { features: { optionScenarioInputs: true } } });
+    const events = [{ kind: 'option_trade', tradeDate: '2026-08-01', account: 'U1',
+        right: 'P', strike: 480, expiry: '20270115', contracts: 1,
+        sharesPerContract: 100, price: 25, cashAmount: -2500 }];
+    h.state.stressLinkedLedger = h.context.OptionComboCostBasisCore.computeLedger(events);
+    h.configure({ today: () => '2026-09-03', request: (action, fields) => new Promise((resolve, reject) => {
+        pending.push({ action, fields, resolve, reject });
+    }) });
+    const quote = (bookId, fetchedAt = '2026-09-03T14:00:00Z') => ({
+        underlyingPrice: bookId === 'book-qqq' ? 500 : 70, currency: 'USD', snapshotVersion: 2,
+        fetchedAt, underlyingObservedAt: fetchedAt, throughExpiry: '20260904',
+        discountCurve: { schemaVersion: 2, currency: 'USD', effectiveDate: '2026-09-03',
+            points: [{ tenorDays: 1, zeroRate: 0.035 }, { tenorDays: 365, zeroRate: 0.035 }] },
+        options: bookId === 'book-qqq' ? [{ right: 'P', strike: 480, expiry: '20270115',
+            mark: 21.5, impliedVolatility: 0.22, marketDataType: 1, observedAt: fetchedAt }] : [],
+    });
+    const compile = () => h.context.OptionComboCostBasisStressCore.compile(h.state.allEvents, {
+        centerPrice: 70, throughExpiry: '20260904', pricingModel: 'european',
+        includeDeferredLongOptions: false, longOptionInputs: h.state.stressLongOptionInputs,
+        linkedHedge: h.linkedRequest(), requireSnapshotVersion: 2,
+    });
+    return { h, pending, quote, compile, events };
+}
+
+function enableStressChartDom(h) {
+    const doc = h.context.document;
+    doc.createElementNS = () => ({ children: [], attributes: {}, style: {},
+        appendChild(child) { this.children.push(child); return child; },
+        setAttribute(name, value) { this.attributes[name] = value; },
+    });
+    const byId = doc.getElementById;
+    doc.getElementById = (id) => {
+        const node = byId(id);
+        node.style ||= {};
+        node.setAttribute ||= function set(name, value) { this[name] = value; };
+        return node;
+    };
+}
+
 module.exports = {
     name: 'cost_basis page',
     tests: [
+        {
+            name: 'portfolio workflow migrates old mixed-basis settings and leaves hypothetical future income out',
+            run() {
+                const h = loadPriceHarness();
+                h.context.localStorage = { getItem: () => JSON.stringify({ weeklyPremium: 3500,
+                    kernel: { pnlBasis: 'cost' } }) };
+                h.restoreLinked(h.state.books[0]);
+                assert.equal(h.state.stressPnlBasis, 'change');
+                assert.equal(h.state.stressIncludeIncome, false);
+                assert.equal(h.state.stressWeeklyPremium, 3500, 'retained as an explicit optional assumption');
+                assert.equal(h.state.stressIvRangePct, 20);
+            },
+        },
+        {
+            name: 'quantity editing compares against current holdings, keeps quotes and clears stale drafts on ledger change',
+            run() {
+                const h = loadPriceHarness(); enableStressChartDom(h);
+                h.configure({ today: () => '2026-09-03' });
+                h.context.setTimeout = () => 1; h.context.clearTimeout = () => {};
+                const snapshot = { snapshotVersion: 2, fetchedAt: '2026-09-03T14:00:00Z',
+                    underlyingObservedAt: '2026-09-03T14:00:00Z', underlyingPrice: 70,
+                    throughExpiry: '20260904', currency: 'USD',
+                    discountCurve: { schemaVersion: 2, effectiveDate: '2026-09-03', currency: 'USD',
+                        points: [{tenorDays:1,zeroRate:0.03},{tenorDays:365,zeroRate:0.03}] },
+                    options: [{right:'P', strike:71, expiry:'20260904', multiplier:100, mark:2,
+                        marketDataType:1, observedAt:'2026-09-03T14:00:00Z'}] };
+                Object.assign(h.state, { stressOpen:true, stressExpiry:'20260904', stressBasePrice:70,
+                    stressPnlBasis:'change', stressIncludeLongOptions:true, stressLongOptionInputs:snapshot,
+                    stressBandEnabled:false, stressWeeklyPremium:3500, stressIncludeIncome:false });
+                h.renderStress();
+                const original = h.stressJob.series;
+                assert.equal(original.available, true);
+                assert.equal(original.premiumIncome, 0);
+                const input = h.node('stress-quantity-rows').children[1].children[1];
+                input.value = '1'; h.context.document.activeElement = input; input.handlers.input();
+                h.renderStress();
+                const draft = h.stressJob.series;
+                assert.equal(draft.quantitiesChanged, true);
+                assert.equal(draft.points[0].currentHoldingsPnl, original.points[0].headlinePnl);
+                assert.ok(draft.points[0].quantityEffect > 0);
+                assert.equal(h.state.stressLongOptionInputs, snapshot);
+                assert.equal(h.state.ledger.openOptions[0].contracts, -2);
+                assert.equal(h.node('stress-legend-cost').hidden, true);
+                h.state.stressNavBase = 100000;
+                const text = h.navText(draft, draft.points[0], {lower:-10000,upper:-5000});
+                assert.match(text, /90,000.*95,000/);
+                assert.match(text, /-10.0%.*-5.0%/);
+                h.state.stressNavBase = -1; assert.equal(h.navText(draft, draft.points[0], null), '');
+                h.context.document.activeElement = null;
+                h.state.allEvents = h.state.allEvents.concat({ kind:'share_trade', account:'U1', tradeDate:'2026-09-02', shares:100, price:70, cashAmount:-7000 });
+                h.state.ledger = h.context.OptionComboCostBasisCore.computeLedger(h.state.allEvents);
+                h.renderStress();
+                assert.equal(Object.keys(h.state.stressQuantityDraft.own).length, 0);
+                assert.equal(h.state.stressNavBase, null);
+            },
+        },
+        {
+            name: 'conservative short-put delivery defaults on, reaches valuation and remembers explicit opt-out per book',
+            run() {
+                const h = loadPriceHarness(); enableStressChartDom(h);
+                h.configure({ today: () => '2026-09-03' });
+                const memory = {};
+                h.context.localStorage = { getItem: key => memory[key] || null,
+                    setItem: (key, value) => { memory[key] = value; } };
+                h.restoreLinked(h.state.books[0]);
+                assert.equal(h.state.stressConservativeShortPutAssignment, true);
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904',
+                    stressBasePrice: 70, stressIncludeLongOptions: false, stressBandEnabled: false, stressPnlBasis: 'cost' });
+                h.renderStress();
+                assert.equal(h.node('stress-conservative-short-put').checked, true);
+                assert.equal(h.stressJob.series.conservativeShortPutAssignment, true);
+                const oldSeries = h.stressJob.series;
+                h.state.stressConservativeShortPutAssignment = false;
+                h.writeLinked(); h.restoreLinked(h.state.books[0]); h.renderStress();
+                assert.equal(h.node('stress-conservative-short-put').checked, false);
+                assert.equal(h.stressJob.series.conservativeShortPutAssignment, false);
+                assert.notEqual(h.stressJob.series, oldSeries);
+                h.restoreLinked({ ...h.state.books[0], bookId: 'another-book' });
+                assert.equal(h.state.stressConservativeShortPutAssignment, true);
+            },
+        },
+        {
+            name: 'legacy IV settings are retained until explicitly kept or restored, without touching threefold assumptions',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                h.state.books.push({bookId:'book-qqq',account:'U1',symbol:'QQQ',secType:'STK'});
+                const key = 'optionComboStressLinkedHedge:book-test';
+                const old = {linkedBookId:'book-qqq',ivMode:'beta',ivTenorDays:40,ivTenorExponent:0.25,
+                    ivBetaAuto:true,ivOtmDiscount:true,ivTenorDamping:true,ratio:3,mapping:'linear',sigma:0.3,
+                    dividendYield:0.007,sigmaCrashScale:false};
+                const memory = {[key]:JSON.stringify(old)};
+                h.context.localStorage = {getItem:k=>memory[k] || null,setItem:(k,v)=>{memory[k]=v;}};
+                h.restoreLinked(h.state.books[0]); h.renderIvProfile();
+                assert.equal(h.state.stressLinkedIvTenorExponent,0.25);
+                assert.equal(h.node('stress-iv-profile-label').textContent,'自定义 IV 参数');
+                assert.equal(h.node('btn-stress-iv-keep').hidden,false);
+                // An unrelated setting save must not silently acknowledge old research.
+                h.state.stressWeeklyPremium=10; h.writeLinked(); h.restoreLinked(h.state.books[0]); h.renderIvProfile();
+                assert.equal(h.node('btn-stress-iv-keep').hidden,false);
+                h.reviewIv(false); h.restoreLinked(h.state.books[0]); h.renderIvProfile();
+                assert.equal(h.state.stressLinkedIvTenorExponent,0.25);
+                assert.equal(h.node('btn-stress-iv-keep').hidden,true);
+                h.reviewIv(true); h.restoreLinked(h.state.books[0]); h.renderIvProfile();
+                assert.equal(h.state.stressLinkedIvTenorDays,30);
+                assert.equal(h.state.stressLinkedIvTenorExponent,0.65);
+                assert.equal(h.node('stress-iv-profile-label').textContent,'QQQ IV 研究基准');
+                for (const [stateKey,key] of [['stressLinkedRatio','ratio'],['stressLinkedMapping','mapping'],
+                    ['stressLinkedSigma','sigma'],['stressLinkedDividendYield','dividendYield'],['stressLinkedSigmaCrashScale','sigmaCrashScale']]) {
+                    assert.equal(h.state[stateKey],old[key]);
+                }
+                assert.equal(h.state.stressWeeklyPremium,10);
+                h.restoreLinked({...h.state.books[0],bookId:'another-book'}); h.renderIvProfile();
+                assert.equal(h.node('btn-stress-iv-keep').hidden,true,'fresh books do not inherit old-profile warning');
+            },
+        },
+        {
+            name: 'slice panel shows both lenses, IV contribution, gross delivery cash and the actual bound members',
+            run() {
+                const h = loadPriceHarness();
+                const p = {price:43.218,changePct:-40,cashflowPnl:-10321.59,snapshotChangePnl:-12648.23,
+                    flatIvPnl:-32084.80,ivContribution:21763.21,settlementCashPaid:135600,
+                    settlementCashReceived:9000,settlementCashNet:-126600,shares:2700};
+                const series = {available:true,points:[p],costComplete:true,linkedHedgeEnabled:true,pnlBasis:'cost',
+                    ivAssumptions:{ivMode:'beta',ivBetaAuto:true,ivTenorDamping:true,ivTenorDays:40,ivTenorExponent:0.25,ivOtmDiscount:true},
+                    band:{available:true,members:[{}, {flatIv:true}, {betaScale:1.25,tenorExponent:0.5,otmFloor:0.65}],
+                        points:[{lower:-32084.8,upper:-9961.13,lowerMember:1,upperMember:2}]}};
+                h.renderSlice(series,0,h.state.books[0]);
+                assert.equal(h.node('stress-slice').hidden,false);
+                assert.match(h.node('stress-slice-change-pnl').textContent,/12,648.23/);
+                assert.match(h.node('stress-slice-iv-contribution').textContent,/21,763.21/);
+                assert.match(h.node('stress-slice-cash-gross').textContent,/135,600.00.*9,000.00/);
+                assert.match(h.node('stress-slice-band-lower').textContent,/IV 保持不变/);
+                assert.match(h.node('stress-slice-band-upper').textContent,/× 1.25.*指数 0.5.*0.65/);
+                assert.match(h.node('stress-slice-scope').textContent,/不是完整账户/);
+                assert.equal(h.stressJob.sliceIndex,0);
+                series.referenceChangeReason='missing_reference_quotes'; p.snapshotChangePnl=null;
+                series.band=null; h.stressJob.status='区间已关闭'; h.renderSlice(series,0,h.state.books[0]);
+                assert.equal(h.node('stress-slice-change-pnl').textContent,'不可用');
+                assert.match(h.node('stress-slice-reference-note').textContent,/未按零补齐/);
+                assert.match(h.node('stress-slice-flat-pnl').textContent,/32,084.80/);
+                assert.equal(h.node('stress-slice-band-upper').textContent,'区间已关闭');
+                h.renderSlice({available:false},0,h.state.books[0]);
+                assert.equal(h.node('stress-slice').hidden,true);
+            },
+        },
+        {
+            name: 'band parameter descriptions honor disabled factors and fixed-IV mode',
+            run() {
+                const h=loadPriceHarness();
+                const label=h.bandMemberLabel({ivAssumptions:{ivMode:'beta',ivBeta:1.2}}, {betaScale:0.8});
+                assert.match(label,/手填 β 1.20 × 0.80/);
+                assert.match(label,/期限衰减关闭.*价外 Put 折扣关闭/);
+                assert.equal(h.bandMemberLabel({ivAssumptions:{ivMode:'fixed',ivShockPoints:8}},{}),'固定 IV 冲击 8.00 点');
+                assert.equal(h.bandMemberLabel({ivAssumptions:{ivMode:'none'}},{}),'IV 保持不变');
+            },
+        },
+        {
+            name: 'slice controls are accessible and do not add broker or ledger write actions',
+            run() {
+                const html=readPage(), source=readScript();
+                for(const id of ['stress-slice-index','stress-slice-band-lower','stress-slice-band-upper',
+                    'btn-stress-iv-baseline','btn-stress-iv-keep','stress-iv-profile-note']) assert.ok(html.includes(`id="${id}"`));
+                assert.match(source, /_renderStressSlice\(series, pointIndex, book\)/);
+                assert.match(source, /_renderStressSlice\(series, stressJob.sliceIndex \?\? series.centerIndex, book\)/);
+                assert.match(html, /多日期收付款合计不代表峰值资金需求/);
+                assert.match(html, /只恢复这些 IV 控件，不改价格映射或三倍联动/);
+            },
+        },
         {
             name: 'selecting a book primes its reference from the existing portfolio cache once',
             run() {
@@ -510,6 +773,11 @@ module.exports = {
                     'js/cost_basis_core.js',
                     'js/american_binomial.js',
                     'js/cost_basis_import.js',
+                    'js/market_curves.js',
+                    'js/cost_basis_stress_models.js',
+                    'js/cost_basis_stress_core.js',
+                    'js/cost_basis_stress_band.js',
+                    'js/cost_basis_stress_worker.js',
                     'js/cost_basis.js',
                 ]);
                 ['js/ws_client.js', 'js/app.js', 'js/valuation.js', 'js/pricing_core.js',
@@ -559,7 +827,7 @@ module.exports = {
                 assert.ok(html.includes('id="new-book-account-manual"'));
                 assert.match(source, /data\.action === 'managed_accounts_update'/);
                 assert.match(source, /_sendOneWay\('request_managed_accounts_snapshot'\)/);
-                assert.match(source, /state\.managedAccounts\.includes\(account\)/);
+                assert.match(source, /newBookAccountNotice\(account, state\.managedAccounts\)/);
                 assert.match(source, /knownBookAccounts/);
                 assert.match(source, /MANUAL_ACCOUNT_VALUE/);
                 assert.match(source, /account:\s*account\.toUpperCase\(\)/);
@@ -570,6 +838,67 @@ module.exports = {
                     /positions:\s*_positionsForBook\(book\)/);
                 assert.match(source,
                     /field-account'\)\.readOnly = Boolean\(book && book\.account\)/);
+            },
+        },
+        {
+            name: 'the account dropdown offers manual entry while TWS is connected',
+            run() {
+                const h = loadReconciliationHarness();
+                const node = (id) => h.context.document.getElementById(id);
+                h.state.connection = 'connected';
+                h.state.status = { available: true };
+                h.state.managedAccounts = ['U17775528'];
+                h.state.managedAccountsConnected = true;
+                h.renderAccounts('');
+                const select = node('new-book-account');
+                const values = select.children.map((option) => option.value);
+                // The single live account is still chosen for the common case.
+                assert.equal(select.value, 'U17775528');
+                assert.ok(values.includes('U17775528'));
+                assert.ok(values.includes('__manual_account__'));
+                assert.equal(node('new-book-account-manual').hidden, true);
+
+                // Choosing manual entry opens the field even while connected.
+                h.renderAccounts('__manual_account__');
+                const manual = node('new-book-account-manual');
+                assert.equal(manual.hidden, false);
+                assert.equal(manual.disabled, false);
+                const hint = node('new-book-account-hint');
+                assert.equal(hint.classList.contains('warn'), false);
+
+                // A remote account is allowed, and says what it gives up.
+                manual.value = 'u9999999';
+                h.accountHint();
+                assert.match(hint.textContent, /U9999999/);
+                assert.equal(hint.classList.contains('warn'), true);
+
+                // Typing a live account back is not a mismatch.
+                manual.value = 'U17775528';
+                h.accountHint();
+                assert.equal(hint.classList.contains('warn'), false);
+            },
+        },
+        {
+            name: 'a book can be kept for an account this TWS does not report',
+            run() {
+                const context = loadPage();
+                const page = context.OptionComboCostBasisPage;
+                const source = readScript();
+                const live = ['U1777552'];
+                // Accounts traded on another machine are booked here anyway;
+                // only the local position matching is given up.
+                const notice = page.newBookAccountNotice('u9999999', live);
+                assert.match(notice, /U9999999/);
+                assert.match(notice, /行情/);
+                assert.equal(page.newBookAccountNotice('u1777552', live), '');
+                assert.equal(page.newBookAccountNotice('', live), '');
+                // Nothing to check against is not a mismatch.
+                assert.equal(page.newBookAccountNotice('U9999999', []), '');
+                // The manual option is offered whether or not TWS answered,
+                // and a mismatch only asks for a confirmation.
+                assert.doesNotMatch(source,
+                    /if \(!hasLiveAccounts\) \{\s*const manualOption/);
+                assert.match(source, /accountNotice && !globalScope\.confirm/);
             },
         },
         {
@@ -1343,6 +1672,167 @@ module.exports = {
             },
         },
         {
+            name: 'a CSV order row aliases the run of TWS partial fills it aggregates',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const base = {
+                    kind: 'option_trade', tradeDate: '2026-09-08', account: 'U1',
+                    right: 'P', strike: 72, expiry: '20260918', sharesPerContract: 100,
+                    conId: 123, source: 'execution_report', tag: 'ibkr_exec',
+                };
+                const fills = [
+                    Object.assign({}, base, { eventId: 'f1', externalRef: 'ibkr-exec-E1',
+                        brokerTimestamp: '2026-09-08T10:00:00', contracts: -3,
+                        price: 1.01, fees: 1.95, cashAmount: 301.05 }),
+                    Object.assign({}, base, { eventId: 'f2', externalRef: 'ibkr-exec-E2',
+                        brokerTimestamp: '2026-09-08T10:00:07', contracts: -5,
+                        price: 1.02, fees: 3.25, cashAmount: 506.75 }),
+                    Object.assign({}, base, { eventId: 'f3', externalRef: 'ibkr-exec-E3',
+                        brokerTimestamp: '2026-09-08T10:01:30', contracts: -2,
+                        price: 1.03, fees: 1.30, cashAmount: 204.70 }),
+                ];
+                // The statement prints one Order line: 10 contracts at the
+                // size-weighted average (1.021) rounded to its display
+                // precision, with the summed commission, at the first fill's second.
+                const orderRow = Object.assign({}, base, {
+                    source: 'csv_import', tag: 'ibkr_open', externalRef: 'stmt-order',
+                    brokerTimestamp: '2026-09-08T10:00:00', contracts: -10,
+                    price: 1.02, fees: 6.5, cashAmount: 1012.5, lineNumber: 9,
+                });
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [orderRow],
+                }, fills);
+                assert.equal(plan.problems.length, 0);
+                assert.equal(plan.matched.length, 1);
+                assert.equal(plan.matched[0].executions.length, 3);
+                assert.equal(plan.aliases['U1\u0000stmt-order'], 'ibkr-exec-E1');
+
+                // The Order line may also print the last fill's second.
+                const lastSecond = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, orderRow, {
+                        brokerTimestamp: '2026-09-08T10:01:30',
+                    })],
+                }, fills);
+                assert.equal(lastSecond.problems.length, 0);
+                assert.equal(lastSecond.matched[0].executions.length, 3);
+
+                // Same quantity but the summed cash disagrees: blocked, not guessed.
+                const cashOff = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, orderRow, {
+                        cashAmount: 1012.0,
+                    })],
+                }, fills);
+                assert.equal(cashOff.matched.length, 0);
+                assert.equal(cashOff.problems.length, 1);
+                assert.match(cashOff.problems[0].reason, /spans 3 stored TWS fills/);
+
+                // A quantity no run of fills reaches keeps the old exact-second blocker.
+                const noRun = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, orderRow, {
+                        contracts: -9, cashAmount: 911.25,
+                    })],
+                }, fills);
+                assert.equal(noRun.matched.length, 0);
+                assert.match(noRun.problems[0].reason, /quantity, price, or net cash differs/);
+            },
+        },
+        {
+            name: 'two orders on one contract each claim their own fills in time order',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const base = {
+                    kind: 'share_trade', tradeDate: '2026-09-08', account: 'U1',
+                    source: 'execution_report', tag: 'ibkr_exec',
+                };
+                const fills = [
+                    Object.assign({}, base, { eventId: 'a1', externalRef: 'ibkr-exec-A1',
+                        brokerTimestamp: '2026-09-08T09:35:00', shares: 100,
+                        price: 45, fees: 0.5, cashAmount: -4500.5 }),
+                    Object.assign({}, base, { eventId: 'a2', externalRef: 'ibkr-exec-A2',
+                        brokerTimestamp: '2026-09-08T09:35:02', shares: 200,
+                        price: 45, fees: 0.5, cashAmount: -9000.5 }),
+                    Object.assign({}, base, { eventId: 'b1', externalRef: 'ibkr-exec-B1',
+                        brokerTimestamp: '2026-09-08T14:10:00', shares: 300,
+                        price: 44, fees: 1, cashAmount: -13201 }),
+                ];
+                const orderA = Object.assign({}, base, {
+                    source: 'csv_import', tag: 'ibkr_open', externalRef: 'stmt-a',
+                    brokerTimestamp: '2026-09-08T09:35:00', shares: 300,
+                    price: 45, fees: 1, cashAmount: -13501, lineNumber: 3,
+                });
+                const orderB = Object.assign({}, base, {
+                    source: 'csv_import', tag: 'ibkr_open', externalRef: 'stmt-b',
+                    brokerTimestamp: '2026-09-08T14:10:00', shares: 300,
+                    price: 44, fees: 1, cashAmount: -13201, lineNumber: 4,
+                });
+                // Later order listed first in the file: time order still wins.
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [orderB, orderA],
+                }, fills);
+                assert.equal(plan.problems.length, 0);
+                assert.equal(plan.aliases['U1\u0000stmt-a'], 'ibkr-exec-A1');
+                assert.equal(plan.aliases['U1\u0000stmt-b'], 'ibkr-exec-B1');
+                assert.equal(plan.matched.map(
+                    (item) => item.executions.length).sort().join(','), '1,2');
+
+                // Two different runs of equal size that both touch the order's
+                // second are ambiguous and block instead of picking one.
+                const twin = fills.concat([
+                    Object.assign({}, base, { eventId: 'a0', externalRef: 'ibkr-exec-A0',
+                        brokerTimestamp: '2026-09-08T09:34:58', shares: 200,
+                        price: 45, fees: 0.5, cashAmount: -9000.5 }),
+                ]);
+                const ambiguous = page.planExecutionReportAliases({
+                    format: 'activity', events: [orderA],
+                }, twin);
+                assert.equal(ambiguous.matched.length, 0);
+                assert.match(ambiguous.problems[0].reason, /more than one group/);
+            },
+        },
+        {
+            name: 'a TWS fill dated one day away from the CSV row blocks with a timezone hint',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const stored = {
+                    eventId: 'api-fill-1', kind: 'option_trade',
+                    tradeDate: '2026-09-09', brokerTimestamp: '2026-09-09T03:30:00',
+                    account: 'U1', right: 'P', strike: 72, expiry: '20260918',
+                    contracts: -1, sharesPerContract: 100, conId: 123,
+                    price: 1.01, cashAmount: 100.44, fees: 0.56,
+                    source: 'execution_report', tag: 'ibkr_exec',
+                    externalRef: 'ibkr-exec-E1',
+                };
+                // The statement prints the same fill in New York time, on the
+                // previous calendar day.
+                const csvEvent = Object.assign({}, stored, {
+                    eventId: undefined, source: 'csv_import', tag: 'ibkr_open',
+                    tradeDate: '2026-09-08', brokerTimestamp: '2026-09-08T15:30:00',
+                    externalRef: 'stmt-shifted', lineNumber: 4,
+                });
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [csvEvent],
+                }, [stored]);
+                assert.equal(plan.matched.length, 0);
+                assert.equal(plan.problems.length, 1);
+                assert.match(plan.problems[0].reason, /one day away/);
+                assert.match(plan.problems[0].reason, /\[tws\] timezone/);
+
+                // Two days apart is a different trade, not a clock skew.
+                const farApart = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, csvEvent, {
+                        tradeDate: '2026-09-07', brokerTimestamp: '2026-09-07T15:30:00',
+                    })],
+                }, [stored]);
+                assert.equal(farApart.problems.length, 0);
+
+                // A different contract on the adjacent day is not a candidate either.
+                const otherContract = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, csvEvent, { strike: 70 })],
+                }, [stored]);
+                assert.equal(otherContract.problems.length, 0);
+            },
+        },
+        {
             name: 'replacement rebuild ignores overlap checks against rows it will remove',
             run() {
                 const page = loadPage().OptionComboCostBasisPage;
@@ -1492,907 +1982,171 @@ module.exports = {
             },
         },
         {
-            name: 'the stress-test modal sweeps expiry outcomes across option strikes',
+            name: 'stress valuation is delegated to the independent canonical kernel',
             run() {
-                const page = loadPage().OptionComboCostBasisPage;
-                const html = readPage();
                 const source = readScript();
-                const events = [{
-                    seq: 1, kind: 'opening_balance', tradeDate: '2026-06-01',
-                    account: 'U1', shares: 200, price: 73, cashAmount: -14600,
-                    fees: 0, includeInCost: true,
-                }, {
-                    seq: 2, kind: 'option_trade', tradeDate: '2026-08-01',
-                    account: 'U1', right: 'P', strike: 72, expiry: '20260831',
-                    contracts: -2, sharesPerContract: 100, price: 1,
-                    cashAmount: 200, fees: 0, includeInCost: true,
-                }, {
-                    seq: 3, kind: 'option_trade', tradeDate: '2026-08-02',
-                    account: 'U1', right: 'P', strike: 70, expiry: '20260902',
-                    contracts: -1, sharesPerContract: 100, price: 1,
-                    cashAmount: 100, fees: 0, includeInCost: true,
-                }, {
-                    seq: 4, kind: 'option_trade', tradeDate: '2026-08-03',
-                    account: 'U1', right: 'P', strike: 65, expiry: '20270115',
-                    contracts: 2, sharesPerContract: 100, price: 5,
-                    cashAmount: -1000, fees: 0, includeInCost: true,
-                }, {
-                    seq: 5, kind: 'option_trade', tradeDate: '2026-08-03',
-                    account: 'U1', right: 'C', strike: 80, expiry: '20270115',
-                    contracts: 1, sharesPerContract: 100, price: 4,
-                    cashAmount: -400, fees: 0, includeInCost: true,
-                }];
-                const series = page.buildStressTestSeries(events, {
-                    centerPrice: 70, rangePct: 10, pointCount: 11,
-                    throughExpiry: '20260831', basisMode: 'net_cash', secType: 'STK',
-                });
-                assert.equal(series.available, true);
-                assert.equal(series.points.length, 11);
-                assert.equal(series.points[0].price, 63);
-                assert.equal(series.points[0].assignedContracts, 2);
-                assert.equal(series.points[0].shares, 400);
-                assert.equal(series.points[10].price, 77);
-                assert.equal(series.points[10].assignedContracts, 0);
-                assert.equal(series.points[10].expiredContracts, 2);
-                assert.equal(series.points[10].shares, 200);
-                series.points.filter((point) => point.cost !== null).forEach((point) => {
-                    assert.ok(Math.abs(point.pnl
-                        - ((point.price - point.cost) * point.shares)) < 1e-7);
-                });
-                const liveInputs = {
-                    throughExpiry: '20260831',
-                    fetchedAt: '2026-08-30T12:00:00Z',
-                    curveEffectiveDate: '2026-08-28',
-                    options: [
-                        { right: 'C', strike: 80, expiry: '20270115',
-                            impliedVolatility: 0.45, ivSource: 'modelGreeks' },
-                        { right: 'P', strike: 65, expiry: '20270115',
-                            impliedVolatility: 0.40, ivSource: 'modelGreeks' },
-                        // The short put that is still open on 2026-08-31.
-                        { right: 'P', strike: 70, expiry: '20260902',
-                            impliedVolatility: 0.50, ivSource: 'modelGreeks' },
-                    ],
-                    ratesByExpiry: [{
-                        expiry: '20270115', zeroRate: 0.03,
-                        source: 'usd_reference_discount_curve',
-                    }, {
-                        expiry: '20260902', zeroRate: 0.03,
-                        source: 'usd_reference_discount_curve',
-                    }],
-                };
-                const protectedSeries = page.buildStressTestSeries(events, {
-                    centerPrice: 70, rangePct: 10, pointCount: 11,
-                    throughExpiry: '20260831', basisMode: 'net_cash', secType: 'STK',
-                    includeDeferredLongOptions: true,
-                    longOptionInputs: liveInputs,
-                });
-                assert.equal(protectedSeries.available, true);
-                assert.equal(protectedSeries.longOptionCount, 2);
-                assert.equal(protectedSeries.longOptionContracts, 3);
-                assert.equal(protectedSeries.longCallContracts, 1);
-                assert.equal(protectedSeries.longPutContracts, 2);
-                assert.equal(protectedSeries.longOptionIvMin, 0.4);
-                assert.equal(protectedSeries.longOptionIvMax, 0.45);
-                assert.equal(protectedSeries.longOptionRateMin, 0.03);
-                assert.ok(protectedSeries.points[0].longOptionMarketValue > 0);
-                // The still-open short put is a liability marked with its own
-                // IV; its premium (received, and excluded from the blended
-                // cost until it settles) is credited here in full.
-                assert.equal(protectedSeries.shortOptionCount, 1);
-                assert.equal(protectedSeries.shortPutContracts, 1);
-                assert.equal(protectedSeries.shortCallContracts, 0);
-                assert.equal(protectedSeries.shortOptionIvMin, 0.5);
-                protectedSeries.points.forEach((point) => {
-                    assert.ok(Math.abs(point.pnl - point.basePnl
-                        - point.longOptionPnl - point.shortOptionPnl) < 1e-7);
-                    assert.ok(point.shortOptionLiability > 0);
-                    assert.ok(Math.abs(point.shortOptionPnl
-                        - (100 - point.shortOptionLiability)) < 1e-7);
-                });
-                assert.ok(protectedSeries.points[0].shortOptionPnl < -500);
-                assert.ok(protectedSeries.points[10].shortOptionPnl > 0);
-                const shortMarks = page.estimateDeferredShortOptions([
-                    { right: 'P', strike: 70, expiry: '20260902', contracts: -1,
-                        sharesPerContract: 100, openPremium: 100 },
-                    { right: 'P', strike: 65, expiry: '20270115', contracts: 2,
-                        sharesPerContract: 100, openPremium: -1000 },
-                ], 63, { throughExpiry: '20260831', marketInputs: liveInputs });
-                assert.equal(shortMarks.count, 1);
-                assert.equal(shortMarks.contracts, 1);
-                assert.ok(shortMarks.marketValue < 0);
-                assert.ok(Math.abs(shortMarks.liability + shortMarks.marketValue) < 1e-9);
-                assert.ok(Math.abs(shortMarks.pnl - (shortMarks.marketValue + 100)) < 1e-9);
-                // A deep-ITM European put sits a hair under intrinsic (discounted strike).
-                assert.ok(shortMarks.details[0].markPerShare > 6.9);
-                // Without a quote for the short, nothing is guessed.
-                const noShortQuote = page.buildStressTestSeries(events, {
-                    centerPrice: 70, rangePct: 10, pointCount: 11,
-                    throughExpiry: '20260831', basisMode: 'net_cash', secType: 'STK',
-                    includeDeferredLongOptions: true,
-                    longOptionInputs: Object.assign({}, liveInputs, {
-                        options: liveInputs.options.slice(0, 2),
-                    }),
-                });
-                assert.equal(noShortQuote.available, false);
-                assert.equal(noShortQuote.reason, 'missing_short_option_iv');
-                assert.equal(page.estimateDeferredShortOptions([
-                    { conId: 5, right: 'P', strike: 70, expiry: '20260902', contracts: -1,
-                        sharesPerContract: 100, openPremium: 100 },
-                ], 63, { throughExpiry: '20260831', marketInputs: Object.assign({}, liveInputs, {
-                    options: [{ conId: 6, right: 'P', strike: 70, expiry: '20260902',
-                        impliedVolatility: 0.5 }],
-                }) }).reason, 'short_option_identity_mismatch');
-                const referencePut = page.calculateBsmPutPrice(100, 100, 1, 0.05, 0.2);
-                assert.ok(Math.abs(referencePut - 5.5735) < 0.001);
-                const referenceCall = page.calculateBsmOptionPrice(
-                    'C', 100, 100, 1, 0.05, 0.2);
-                assert.ok(Math.abs(referenceCall - 10.4506) < 0.001);
-                const lowMarks = page.estimateDeferredLongOptions([
-                    { right: 'C', strike: 80, expiry: '20270115', contracts: 1,
-                        sharesPerContract: 100, openPremium: -400 },
-                    { right: 'P', strike: 65, expiry: '20270115', contracts: 2,
-                        sharesPerContract: 100, openPremium: -1000 },
-                ], 63, { throughExpiry: '20260831', marketInputs: liveInputs });
-                const highMarks = page.estimateDeferredLongOptions([
-                    { right: 'C', strike: 80, expiry: '20270115', contracts: 1,
-                        sharesPerContract: 100, openPremium: -400 },
-                    { right: 'P', strike: 65, expiry: '20270115', contracts: 2,
-                        sharesPerContract: 100, openPremium: -1000 },
-                ], 77, { throughExpiry: '20260831', marketInputs: liveInputs });
-                assert.ok(highMarks.details.find((detail) => detail.right === 'C').markPerShare
-                    > lowMarks.details.find((detail) => detail.right === 'C').markPerShare);
-                assert.ok(lowMarks.details.find((detail) => detail.right === 'P').markPerShare
-                    > highMarks.details.find((detail) => detail.right === 'P').markPerShare);
-                const missingInputs = page.buildStressTestSeries(events, {
-                    centerPrice: 70, rangePct: 10, pointCount: 11,
-                    throughExpiry: '20260831', basisMode: 'net_cash', secType: 'STK',
-                    includeDeferredLongOptions: true,
-                });
-                assert.equal(missingInputs.available, false);
-                assert.equal(missingInputs.reason, 'missing_long_option_market_inputs');
-                assert.ok(html.includes('id="btn-open-stress-test"'));
-                assert.ok(html.includes('id="stress-modal"'));
-                assert.match(html, /role="dialog" aria-modal="true"/);
-                assert.ok(html.includes('id="stress-chart"'));
-                assert.ok(html.includes('id="stress-tooltip"'));
-                assert.ok(html.includes('id="stress-tooltip-pnl"'));
-                assert.ok(html.includes('id="stress-tooltip-cost"'));
-                assert.ok(html.includes('id="stress-include-long-options"'));
-                assert.ok(html.includes('id="stress-option-iv-source"'));
-                assert.ok(html.includes('id="stress-option-rate-source"'));
-                assert.equal(html.includes('id="stress-long-option-iv"'), false);
-                assert.ok(html.includes('id="stress-tooltip-long-option-value"'));
-                assert.ok(html.includes('id="stress-tooltip-long-option-pnl"'));
-                assert.ok(html.includes('id="stress-tooltip-long-option-iv"'));
-                assert.ok(html.includes('id="stress-tooltip-long-option-rate"'));
-                assert.match(html, /更晚到期的仓位继续保留/);
-                assert.ok(html.includes('id="stress-own-note"'));
-                assert.match(source, /function buildStressTestSeries/);
-                assert.match(source, /function estimateDeferredLongOptions/);
-                assert.match(source, /\['C', 'P'\]\.includes/);
-                assert.match(source,
-                    /request\('request_cost_basis_option_scenario_inputs'/);
-                assert.match(source, /missing_long_option_iv/);
-                assert.match(source, /missing_discount_rate/);
-                assert.match(source, /curveError/);
-                assert.match(source, /optionScenarioInputs/);
-                assert.match(source, /仅刷新页面无效/);
-                assert.match(source, /mark \+ openPremium/);
-                assert.match(source, /core\.computeOptionSettlementScenario\(events, price/);
-                assert.match(source, /throughExpiry/);
-                assert.match(source, /synthetic settlement rows that are never persisted/);
-                assert.match(source, /svg\.onpointermove =/);
-                assert.match(source, /svg\.onpointerleave = hideTooltip/);
-                assert.match(source, /stress-tooltip-outcome/);
+                assert.match(source, /OptionComboCostBasisStressCore.buildStressTestSeries/);
+                assert.doesNotMatch(source, /function _estimateDeferredOptions|function calculateBsmOptionPrice/);
+                const models = fs.readFileSync(path.join(PROJECT_ROOT, 'js/cost_basis_stress_models.js'), 'utf8');
+                assert.doesNotMatch(models, /computeOptionSettlementScenario|estimateDeferredLongOptions|estimateLinkedLongOptions/);
             },
         },
         {
-            name: 'the stress test overlays a linked book\'s long options through a mapped price',
+            name: 'stress range and basis controls are distinct from the ledger cost selector',
             run() {
-                const page = loadPage().OptionComboCostBasisPage;
-                const source = readScript();
-                // The index drives a daily-rebalanced 3x fund by compounding:
-                // a TQQQ -30% is a QQQ -11.2%, not -10%. Linear stays as a
-                // reference mode; the sign flips for an inverse fund; nothing
-                // ever maps below zero.
-                const cube = Math.pow(0.7, 1 / 3);
-                assert.ok(Math.abs(page.mapLinkedUnderlyingPrice(500, -30, 3) - 500 * cube) < 1e-9);
-                assert.ok(Math.abs(page.mapLinkedUnderlyingPrice(500, -30, -3) - 500 / cube) < 1e-9);
-                assert.ok(Math.abs(page.mapLinkedUnderlyingPrice(500, -30, 3, { mapping: 'linear' })
-                    - 450) < 1e-9);
-                assert.ok(Math.abs(page.mapLinkedUnderlyingPrice(500, -30, -3, { mapping: 'linear' })
-                    - 550) < 1e-9);
-                assert.equal(page.mapLinkedUnderlyingPrice(500, 0, 3), 500);
-                assert.equal(page.mapLinkedUnderlyingPrice(500, -100, 3), 0);
-                assert.equal(page.mapLinkedUnderlyingPrice(500, -30, 0), null);
-                assert.equal(page.mapLinkedUnderlyingPrice(500, -30, NaN), null);
-                assert.equal(page.mapLinkedUnderlyingPrice(500, -30, 0.001), null);
-                assert.equal(page.mapLinkedUnderlyingPrice(0, -30, 3), null);
-                assert.equal(page.mapLinkedUnderlyingPrice(500, -90, 0.5, { mapping: 'linear' }), 0);
-                // Multi-day volatility drag: (ratio² − ratio)/2 · σ² · T of
-                // log-return, zero for an instant move or an unlevered fund.
-                assert.ok(Math.abs(page.leveragedDragLog(3, 0.2, 20 / 365) - 3 * 0.04 * 20 / 365) < 1e-12);
-                assert.ok(Math.abs(page.leveragedDragLog(-3, 0.2, 1) - 6 * 0.04) < 1e-12);
-                assert.equal(page.leveragedDragLog(1, 0.2, 1), 0);
-                assert.equal(page.leveragedDragLog(3, 0, 1), 0);
-                assert.equal(page.leveragedDragLog(3, 0.2, 0), 0);
-                const dragged = page.mapLinkedUnderlyingPrice(500, -30, 3, { sigma: 0.2, timeYears: 20 / 365 });
-                assert.ok(dragged > 500 * cube);
-                assert.ok(Math.abs(dragged - 500 * Math.pow(0.7 * Math.exp(3 * 0.04 * 20 / 365), 1 / 3)) < 1e-9);
-                assert.equal(page.normalizeLinkedMapping(''), 'compound');
-                assert.equal(page.normalizeLinkedMapping('Linear'), 'linear');
-                assert.equal(page.normalizeLinkedMapping('x'), null);
-                assert.equal(page.normalizeLinkedSigma(''), null);
-                assert.equal(page.normalizeLinkedSigma(0.25), 0.25);
-                assert.equal(page.normalizeLinkedSigma(-1), undefined);
-                assert.equal(page.normalizeLinkedRatio('3'), 3);
-                assert.equal(page.normalizeLinkedRatio(-3), -3);
-                assert.equal(page.normalizeLinkedRatio(0.001), null);
-                assert.equal(page.LINKED_HEDGE_DEFAULTS.TQQQ.symbol, 'QQQ');
-                assert.equal(page.LINKED_HEDGE_DEFAULTS.TQQQ.ratio, 3);
-
-                const events = [{
-                    seq: 1, kind: 'opening_balance', tradeDate: '2026-06-01',
-                    account: 'U1', shares: 200, price: 73, cashAmount: -14600,
-                    fees: 0, includeInCost: true,
-                }, {
-                    seq: 2, kind: 'option_trade', tradeDate: '2026-08-01',
-                    account: 'U1', right: 'P', strike: 72, expiry: '20260831',
-                    contracts: -2, sharesPerContract: 100, price: 1,
-                    cashAmount: 200, fees: 0, includeInCost: true,
-                }];
-                const baseOptions = {
-                    centerPrice: 70, rangePct: 30, pointCount: 11,
-                    throughExpiry: '20260831', basisMode: 'net_cash', secType: 'STK',
-                };
-                const baseline = page.buildStressTestSeries(events, baseOptions);
-                assert.equal(baseline.available, true);
-                // Off means off: no linked keys leak into the plain series.
-                assert.deepEqual(page.buildStressTestSeries(events,
-                    Object.assign({}, baseOptions, { linkedHedge: null })), baseline);
-                assert.equal('linkedHedgeEnabled' in baseline, false);
-                assert.equal('totalPnl' in baseline.points[0], false);
-
-                const linkedOptions = [
-                    { right: 'P', strike: 480, expiry: '20270115', contracts: 10,
-                        sharesPerContract: 100, openPremium: -25000 },
-                    { right: 'C', strike: 560, expiry: '20270115', contracts: 2,
-                        sharesPerContract: 100, openPremium: -3000 },
-                    // Expires on the stress date itself: intrinsic, no IV needed.
-                    { right: 'P', strike: 470, expiry: '20260831', contracts: 4,
-                        sharesPerContract: 100, openPremium: -2000 },
-                    // Already expired on the valuation date: protects nothing.
-                    { right: 'P', strike: 460, expiry: '20260801', contracts: 7,
-                        sharesPerContract: 100, openPremium: -700 },
-                ];
-                const linkedInputs = {
-                    throughExpiry: '20260831',
-                    fetchedAt: '2026-08-30T12:00:00Z',
-                    curveEffectiveDate: '2026-08-28',
-                    underlyingPrice: 500,
-                    options: [
-                        { right: 'P', strike: 480, expiry: '20270115',
-                            impliedVolatility: 0.22, ivSource: 'modelGreeks',
-                            mark: 20, markSource: 'mid' },
-                        { right: 'C', strike: 560, expiry: '20270115',
-                            impliedVolatility: 0.18, ivSource: 'modelGreeks',
-                            mark: 8, markSource: 'mid' },
-                        { right: 'P', strike: 470, expiry: '20260831',
-                            impliedVolatility: null, ivSource: '',
-                            mark: 6, markSource: 'mid' },
-                    ],
-                    ratesByExpiry: [{
-                        expiry: '20270115', zeroRate: 0.035,
-                        source: 'usd_reference_discount_curve',
-                    }],
-                };
-                const hedge = {
-                    symbol: 'QQQ', bookId: 'qqq', openOptions: linkedOptions,
-                    ratio: 3, basePrice: 500, marketInputs: linkedInputs,
-                    asOf: '20260830',
-                };
-                const withHedge = (overrides) => page.buildStressTestSeries(events,
-                    Object.assign({}, baseOptions, {
-                        linkedHedge: Object.assign({}, hedge, overrides || {}),
-                    }));
-                const linked = withHedge();
-                assert.equal(linked.available, true);
-                assert.equal(linked.linkedHedgeEnabled, true);
-                assert.equal(linked.linkedSymbol, 'QQQ');
-                assert.equal(linked.linkedBookId, 'qqq');
-                assert.equal(linked.linkedRatio, 3);
-                assert.equal(linked.linkedBasePrice, 500);
-                assert.equal(linked.linkedCount, 3);
-                assert.equal(linked.linkedContracts, 16);
-                assert.equal(linked.linkedCallContracts, 2);
-                assert.equal(linked.linkedPutContracts, 14);
-                assert.equal(linked.linkedSettledContracts, 4);
-                assert.equal(linked.linkedDeferredContracts, 12);
-                assert.equal(linked.linkedExpiredContracts, 7);
-                // Today's value is the TWS mark: 20*10*100 + 8*2*100 + 6*4*100.
-                assert.equal(linked.linkedReferenceValue, 24000);
-                assert.equal(linked.linkedIvMin, 0.18);
-                assert.equal(linked.linkedIvMax, 0.22);
-                assert.equal(linked.linkedRateMin, 0.035);
-                assert.equal(linked.linkedInputsFetchedAt, '2026-08-30T12:00:00Z');
-                const down = linked.points[0];
-                const middle = linked.points[5];
-                const up = linked.points[10];
-                assert.ok(Math.abs(down.price - 49) < 1e-9);
-                // Compound mapping, one day of drag at the proxy sigma: the
-                // quote nearest the money alive after the date (P480 at spot
-                // 500, 4% away), not the lowest IV in the book.
-                assert.equal(linked.linkedMapping, 'compound');
-                assert.equal(linked.linkedSigmaSource, 'proxy');
-                assert.ok(Math.abs(linked.linkedSigma - 0.22) < 1e-12);
-                assert.equal(linked.linkedSigmaProxyStrike, 480);
-                assert.equal(linked.linkedSigmaProxyExpiry, '20270115');
-                assert.ok(Math.abs(linked.linkedSigmaProxyDistancePct - 4) < 1e-9);
-                assert.ok(Math.abs(linked.linkedTimeYears - 1 / 365) < 1e-12);
-                const oneDayDrag = page.leveragedDragLog(3, 0.22, 1 / 365);
-                assert.ok(Math.abs(linked.linkedDragLog - oneDayDrag) < 1e-12);
-                assert.ok(Math.abs(down.linkedPrice
-                    - 500 * Math.pow(0.7 * Math.exp(oneDayDrag), 1 / 3)) < 1e-9);
-                assert.ok(down.linkedChangePct < -11 && down.linkedChangePct > -11.3);
-                assert.ok(Math.abs(middle.linkedPrice - 500 * Math.pow(Math.exp(oneDayDrag), 1 / 3)) < 1e-9);
-                assert.ok(Math.abs(up.linkedPrice
-                    - 500 * Math.pow(1.3 * Math.exp(oneDayDrag), 1 / 3)) < 1e-9);
-                const linearSeries = withHedge({ mapping: 'linear' });
-                assert.ok(Math.abs(linearSeries.points[0].linkedPrice - 450) < 1e-9);
-                assert.equal(linearSeries.linkedMapping, 'linear');
-                const assumed = withHedge({ sigma: 0.3 });
-                assert.equal(assumed.linkedSigmaSource, 'assumption');
-                assert.ok(assumed.points[0].linkedPrice > down.linkedPrice);
-                assert.equal(withHedge({ sigma: -1 }).reason, 'invalid_linked_sigma');
-                assert.equal(withHedge({ mapping: 'nope' }).reason, 'invalid_linked_mapping');
-                // No proxy and a positive horizon: refuse, never "zero drag".
-                const settledOnly = [linkedOptions[2]];
-                const settledInputs = Object.assign({}, linkedInputs, {
-                    options: linkedInputs.options.filter((row) => row.expiry === '20260831'),
-                });
-                const noSigma = withHedge({ openOptions: settledOnly, marketInputs: settledInputs });
-                assert.equal(noSigma.available, false);
-                assert.equal(noSigma.reason, 'missing_linked_sigma');
-                assert.equal(withHedge({ openOptions: settledOnly, marketInputs: settledInputs,
-                    sigma: 0.25 }).available, true);
-                assert.equal(withHedge({ openOptions: settledOnly, marketInputs: settledInputs,
-                    mapping: 'linear' }).available, true);
-                // Same day: no path, no drag, and no sigma required.
-                const instantSeries = withHedge({ openOptions: settledOnly,
-                    marketInputs: settledInputs, asOf: '20260831' });
-                assert.equal(instantSeries.available, true);
-                assert.equal(instantSeries.linkedSigmaSource, 'instant');
-                assert.equal(instantSeries.linkedDragLog, 0);
-                assert.ok(Math.abs(instantSeries.points[0].linkedPrice - 500 * Math.pow(0.7, 1 / 3)) < 1e-9);
-                // A proxy far from the money is used but flagged.
-                const farInputs = Object.assign({}, linkedInputs, {
-                    options: linkedInputs.options.filter((row) => row.strike === 560),
-                });
-                const far = withHedge({ openOptions: [linkedOptions[1]], marketInputs: farInputs });
-                assert.equal(far.available, true);
-                assert.equal(far.linkedSigmaSource, 'proxy_far');
-                assert.ok(Math.abs(far.linkedSigma - 0.18) < 1e-12);
-                assert.ok(down.linkedMarketValue > middle.linkedMarketValue);
-                assert.ok(middle.linkedMarketValue > up.linkedMarketValue);
-                // Protection is the change against today, so a crash makes
-                // the overlay POSITIVE even though every premium was paid.
-                assert.ok(down.linkedPnl > 0);
-                assert.ok(down.linkedPnl > middle.linkedPnl);
-                assert.ok(middle.linkedPnl > up.linkedPnl);
-                assert.ok(down.totalPnl > down.pnl);
-                assert.ok(Math.abs(down.linkedPnl
-                    - (down.linkedMarketValue - down.linkedReferenceValue)) < 1e-7);
-                assert.ok(Math.abs(down.linkedPremiumPnl
-                    - (down.linkedMarketValue - 30000)) < 1e-7);
-                linked.points.forEach((point, index) => {
-                    assert.equal(point.linkedAvailable, true);
-                    assert.equal(point.linkedReason, '');
-                    assert.equal(point.linkedReferenceValue, 24000);
-                    assert.ok(Math.abs(point.totalPnl - point.pnl - point.linkedPnl) < 1e-7);
-                    // This book's own curve is untouched by the overlay.
-                    assert.equal(point.pnl, baseline.points[index].pnl);
-                    assert.equal(point.cost, baseline.points[index].cost);
-                    assert.equal(point.shares, baseline.points[index].shares);
-                });
-
-                const downMarks = page.estimateLinkedLongOptions(linkedOptions, 450, {
-                    throughExpiry: '20260831', marketInputs: linkedInputs, asOf: '20260830',
-                });
-                const upMarks = page.estimateLinkedLongOptions(linkedOptions, 550, {
-                    throughExpiry: '20260831', marketInputs: linkedInputs, asOf: '20260830',
-                });
-                assert.equal(downMarks.count, 3);
-                assert.equal(downMarks.expiredContracts, 7);
-                const settledDown = downMarks.details.find((detail) => detail.settled);
-                assert.equal(settledDown.ivSource, 'intrinsic');
-                assert.equal(settledDown.marketValue, 8000);
-                assert.equal(settledDown.referenceValue, 2400);
-                assert.equal(settledDown.markSource, 'mid');
-                assert.equal(settledDown.pnl, 5600);
-                assert.equal(settledDown.premiumPnl, 6000);
-                // Without a valuation date nothing is treated as expired and
-                // an expired contract's missing quote is a named failure.
-                assert.equal(page.estimateLinkedLongOptions(linkedOptions, 450, {
-                    throughExpiry: '20260831', marketInputs: linkedInputs,
-                }).reason, 'missing_linked_mark');
-                assert.equal(upMarks.details.find((detail) => detail.settled).marketValue, 0);
-                const deferredPut = (marks) => marks.details.find(
-                    (detail) => detail.right === 'P' && !detail.settled);
-                const deferredCall = (marks) => marks.details.find(
-                    (detail) => detail.right === 'C');
-                assert.ok(deferredPut(downMarks).markPerShare > deferredPut(upMarks).markPerShare);
-                assert.ok(deferredCall(upMarks).markPerShare > deferredCall(downMarks).markPerShare);
-                assert.equal(deferredCall(upMarks).impliedVolatility, 0.18);
-                assert.ok(Math.abs(downMarks.marketValue - downMarks.details.reduce(
-                    (total, detail) => total + detail.marketValue, 0)) < 1e-9);
-
-                // Every failure is named; nothing falls back to a guess.
-                const failures = [
-                    [{ ratio: 0 }, 'invalid_linked_ratio'],
-                    [{ openOptions: null }, 'missing_linked_book'],
-                    [{ marketInputs: null }, 'missing_linked_market_inputs'],
-                    [{ marketInputs: Object.assign({}, linkedInputs,
-                        { throughExpiry: '20260902' }) }, 'missing_linked_market_inputs'],
-                    [{ basePrice: 0 }, 'invalid_linked_underlying_price'],
-                    [{ marketInputs: Object.assign({}, linkedInputs,
-                        { options: linkedInputs.options.slice(1) }) }, 'missing_linked_option_iv'],
-                    [{ marketInputs: Object.assign({}, linkedInputs,
-                        { ratesByExpiry: [] }) }, 'missing_linked_discount_rate'],
-                    [{ marketInputs: Object.assign({}, linkedInputs, {
-                        options: linkedInputs.options.map((row, index) => (
-                            index === 2 ? Object.assign({}, row, { mark: null }) : row)),
-                    }) }, 'missing_linked_mark'],
-                    [{ openOptions: [Object.assign({}, linkedOptions[0],
-                        { identityConflict: true })] }, 'incomplete_linked_option'],
-                    [{ openOptions: [Object.assign({}, linkedOptions[2],
-                        { strike: 0 })] }, 'incomplete_linked_option'],
-                ];
-                failures.forEach(([overrides, reason]) => {
-                    const failed = withHedge(overrides);
-                    assert.equal(failed.available, false, reason);
-                    assert.equal(failed.reason, reason);
-                    assert.equal(failed.points[0].linkedAvailable, false);
-                    assert.equal(failed.points[0].totalPnl, null);
-                });
-                // An empty linked book is a valid no-op, and short legs are
-                // not protection.
-                const empty = withHedge({ openOptions: [] });
-                assert.equal(empty.available, true);
-                assert.equal(empty.linkedCount, 0);
-                assert.equal(empty.points[0].totalPnl, empty.points[0].pnl);
-                const shortsOnly = withHedge({
-                    openOptions: [Object.assign({}, linkedOptions[0], { contracts: -10 })],
-                });
-                assert.equal(shortsOnly.available, true);
-                assert.equal(shortsOnly.linkedCount, 0);
-                // An IV shock lifts only the scenario value of contracts still
-                // alive after the stress date; today's marks are untouched.
-                assert.equal(page.normalizeIvShockPoints(''), 0);
-                assert.equal(page.normalizeIvShockPoints(null), 0);
-                assert.equal(page.normalizeIvShockPoints('10'), 10);
-                assert.equal(page.normalizeIvShockPoints(-5), -5);
-                assert.equal(page.normalizeIvShockPoints('abc'), null);
-                assert.equal(page.normalizeIvShockPoints(600), null);
-                assert.equal(linked.linkedIvMode, 'none');
-                linked.points.forEach((point) => assert.equal(point.linkedIvShockPoints, 0));
-                // Points given without the 'fixed' mode are ignored, not applied.
-                assert.equal(withHedge({ ivShockPoints: 10 }).linkedIvShockPoints, 0);
-                const shocked = withHedge({ ivMode: 'fixed', ivShockPoints: 10 });
-                assert.equal(shocked.available, true);
-                assert.equal(shocked.linkedIvMode, 'fixed');
-                assert.equal(shocked.linkedIvShockPoints, 10);
-                assert.ok(Math.abs(shocked.linkedIvMin - 0.28) < 1e-9);
-                assert.ok(Math.abs(shocked.linkedIvMax - 0.32) < 1e-9);
-                assert.equal(shocked.linkedReferenceValue, 24000);
-                shocked.points.forEach((point, index) => {
-                    const plain = linked.points[index];
-                    assert.equal(point.linkedIvShockPoints, 10);
-                    assert.ok(point.linkedMarketValue > plain.linkedMarketValue);
-                    assert.ok(point.linkedPnl > plain.linkedPnl);
-                    assert.equal(point.linkedReferenceValue, plain.linkedReferenceValue);
-                    assert.ok(Math.abs(point.totalPnl - point.pnl - point.linkedPnl) < 1e-7);
-                });
-                // Spot-vol beta: IV lifts only while the mapped price is
-                // below today's, by beta points per 1% of drop.
-                assert.equal(page.linkedIvShockPointsAt('beta', -10, 0, 1.5), 15);
-                assert.equal(page.linkedIvShockPointsAt('beta', 0, 0, 1.5), 0);
-                assert.equal(page.linkedIvShockPointsAt('beta', 8, 0, 1.5), 0);
-                assert.equal(page.linkedIvShockPointsAt('fixed', -10, 7, 1.5), 7);
-                assert.equal(page.linkedIvShockPointsAt('none', -10, 7, 1.5), 0);
-                assert.equal(page.normalizeLinkedIvMode(''), 'none');
-                assert.equal(page.normalizeLinkedIvMode('BETA'), 'beta');
-                assert.equal(page.normalizeLinkedIvMode('wild'), null);
-                assert.equal(page.normalizeLinkedIvBeta(''), 1.5);
-                assert.equal(page.normalizeLinkedIvBeta('2'), 2);
-                assert.equal(page.normalizeLinkedIvBeta(-1), null);
-                assert.equal(page.normalizeLinkedIvBeta(50), null);
-                const betaSeries = withHedge({ ivMode: 'beta', ivBeta: 2 });
-                assert.equal(betaSeries.available, true);
-                assert.equal(betaSeries.linkedIvMode, 'beta');
-                assert.equal(betaSeries.linkedIvBeta, 2);
-                // Quoted IV range is the basis point's: unshocked.
-                assert.ok(Math.abs(betaSeries.linkedIvMin - 0.18) < 1e-9);
-                assert.ok(Math.abs(betaSeries.linkedIvMax - 0.22) < 1e-9);
-                betaSeries.points.forEach((point, index) => {
-                    const plain = linked.points[index];
-                    const expectedShock = Math.max(0, -point.linkedChangePct) * 2;
-                    assert.ok(Math.abs(point.linkedIvShockPoints - expectedShock) < 1e-9);
-                    if (point.linkedChangePct < -1e-9) {
-                        assert.ok(point.linkedPnl > plain.linkedPnl);
-                        assert.ok(point.linkedIvMin > plain.linkedIvMin);
-                    } else {
-                        // Basis point and rallies: byte-for-byte the unshocked value.
-                        assert.equal(point.linkedPnl, plain.linkedPnl);
-                        assert.equal(point.linkedIvMin, plain.linkedIvMin);
-                    }
-                });
-                // -30% on the fund is -11.2% on the index under compounding: 2 pts per 1%.
-                assert.ok(betaSeries.points[0].linkedIvShockPoints > 22
-                    && betaSeries.points[0].linkedIvShockPoints < 22.6);
-                // One scenario date for everything: the linked estimator has
-                // no private valuation date, and the series passes the same
-                // throughExpiry to the settlement, this book's overlay and ③.
-                assert.equal(page.normalizeStressHorizonDays(''), null);
-                assert.equal(page.normalizeStressHorizonDays(0), 0);
-                assert.equal(page.normalizeStressHorizonDays('20'), 20);
-                assert.equal(page.normalizeStressHorizonDays(2.5), undefined);
-                assert.equal(page.normalizeStressHorizonDays(-1), undefined);
-                assert.equal(page.addDaysToDigits('20260830', 20), '20260919');
-                assert.equal(page.addDaysToDigits('20261231', 1), '20270101');
-                assert.equal(page.addDaysToDigits('bad', 1), '');
-                assert.equal(withHedge({ horizonDays: 60, valuationDate: '20261029' })
-                    .points[5].linkedPnl, middle.linkedPnl);
-                assert.doesNotMatch(source, /valuationDate/);
-                // Currency: two books add up only in one currency.
-                assert.equal(withHedge({ currency: 'USD' }).available, true);
-                const foreign = page.buildStressTestSeries(events, Object.assign({}, baseOptions, {
-                    currency: 'USD',
-                    linkedHedge: Object.assign({}, hedge, { currency: 'HKD' }),
-                }));
-                assert.equal(foreign.available, false);
-                assert.equal(foreign.reason, 'linked_currency_mismatch');
-                assert.equal(page.buildStressTestSeries(events, Object.assign({}, baseOptions, {
-                    currency: 'usd', linkedHedge: Object.assign({}, hedge, { currency: 'USD ' }),
-                })).available, true);
-                // Identity: a ledger conId is matched by conId only; a quote
-                // that merely looks the same is a named conflict.
-                const byConId = [{ conId: 111, right: 'P', strike: 480, expiry: '20270115',
-                    contracts: 10, sharesPerContract: 100, openPremium: -1 }];
-                const sameTermsOtherConId = [{ conId: 222, right: 'P', strike: 480,
-                    expiry: '20270115', impliedVolatility: 0.2, mark: 5, multiplier: 100 }];
-                assert.equal(page.findOptionQuote(sameTermsOtherConId, byConId[0]), null);
-                assert.equal(page.optionQuoteIdentityConflict(sameTermsOtherConId, byConId[0]), true);
-                assert.equal(page.findOptionQuote([{ conId: 111, right: 'C', strike: 1,
-                    expiry: '20300101', mark: 9 }], byConId[0]).mark, 9);
-                assert.equal(page.findOptionQuote([{ conId: 111, mark: 9 }],
-                    { conId: 111, localSymbol: 'X', right: 'P', strike: 480, expiry: '20270115' }).mark, 9);
-                // localSymbol only: matched by localSymbol only.
-                const byLocal = { localSymbol: 'QQQ   270115P00480000', right: 'P', strike: 480,
-                    expiry: '20270115', sharesPerContract: 100 };
-                assert.equal(page.findOptionQuote(sameTermsOtherConId, byLocal), null);
-                assert.equal(page.optionQuoteIdentityConflict(sameTermsOtherConId, byLocal), true);
-                assert.equal(page.findOptionQuote([{ localSymbol: 'QQQ   270115P00480000 ',
-                    mark: 7 }], byLocal).mark, 7);
-                // No identity at all: terms, and the multiplier must agree
-                // when both sides know it.
-                const bare = { right: 'P', strike: 480, expiry: '20270115', sharesPerContract: 100 };
-                assert.equal(page.findOptionQuote(sameTermsOtherConId, bare).mark, 5);
-                assert.equal(page.findOptionQuote([Object.assign({}, sameTermsOtherConId[0],
-                    { multiplier: 10 })], bare), null);
-                assert.equal(page.optionQuoteIdentityConflict(sameTermsOtherConId, bare), false);
-                assert.equal(page.estimateDeferredLongOptions(byConId, 450, {
-                    throughExpiry: '20260831',
-                    marketInputs: Object.assign({}, linkedInputs, { options: sameTermsOtherConId }),
-                }).reason, 'long_option_identity_mismatch');
-                const conflictLinked = withHedge({
-                    openOptions: [Object.assign({}, linkedOptions[0], { conId: 111 })],
-                    marketInputs: Object.assign({}, linkedInputs, {
-                        options: linkedInputs.options.map((row, index) => (
-                            index === 0 ? Object.assign({}, row, { conId: 222 }) : row)),
-                    }),
-                });
-                assert.equal(conflictLinked.available, false);
-                assert.equal(conflictLinked.reason, 'linked_option_identity_mismatch');
-                // Missing entirely (no lookalike) stays the plain missing reason.
-                assert.equal(withHedge({
-                    openOptions: [Object.assign({}, linkedOptions[0], { conId: 111 })],
-                    marketInputs: Object.assign({}, linkedInputs, { options: [] }),
-                }).reason, 'missing_linked_option_iv');
-                                // Tenor damping: a beta describes short-dated IV, so a long
-                // contract's lift shrinks by sqrt(reference / remaining days).
-                assert.equal(page.tenorDampingFactor(30, 30), 1);
-                assert.equal(page.tenorDampingFactor(10, 30), 1);
-                assert.ok(Math.abs(page.tenorDampingFactor(120, 30) - 0.5) < 1e-9);
-                assert.equal(page.tenorDampingFactor(0, 30), 1);
-                assert.equal(page.normalizeLinkedTenorDays(''), 30);
-                assert.equal(page.normalizeLinkedTenorDays('60'), 60);
-                assert.equal(page.normalizeLinkedTenorDays(0), null);
-                const damped = withHedge({ ivMode: 'beta', ivBeta: 2, ivTenorDamping: true,
-                    ivTenorDays: 30 });
-                assert.equal(damped.available, true);
-                assert.equal(damped.linkedIvTenorDamping, true);
-                assert.equal(damped.linkedIvTenorDays, 30);
-                const dampedDown = damped.points[0];
-                const flatDown = betaSeries.points[0];
-                // 2027-01-15 is 137 days past the stress date: factor sqrt(30/137).
-                const factor = Math.sqrt(30 / 137);
-                assert.ok(Math.abs(dampedDown.linkedIvShockPointsMax - flatDown.linkedIvShockPoints * factor) < 1e-9);
-                assert.ok(Math.abs(dampedDown.linkedIvShockPointsMin - flatDown.linkedIvShockPoints * factor) < 1e-9);
-                assert.ok(dampedDown.linkedPnl < flatDown.linkedPnl);
-                assert.ok(dampedDown.linkedPnl > linked.points[0].linkedPnl);
-                assert.equal(damped.points[5].linkedPnl, linked.points[5].linkedPnl);
-                // Damping is a beta-mode option only; fixed points stay flat.
-                assert.equal(withHedge({ ivMode: 'fixed', ivShockPoints: 10, ivTenorDamping: true })
-                    .linkedIvTenorDamping, false);
-                assert.equal(withHedge({ ivMode: 'beta', ivTenorDamping: true, ivTenorDays: 0 })
-                    .reason, 'invalid_linked_tenor_days');
-                assert.equal(withHedge({ ivMode: 'beta', ivBeta: 'x' }).reason,
-                    'invalid_linked_iv_beta');
-                assert.equal(withHedge({ ivMode: 'beta', ivBeta: 99 }).reason,
-                    'invalid_linked_iv_beta');
-                assert.equal(withHedge({ ivMode: 'nope' }).reason, 'invalid_linked_iv_mode');
-                // The settled contract is intrinsic either way.
-                const shockedMarks = page.estimateLinkedLongOptions(linkedOptions, 450, {
-                    throughExpiry: '20260831', marketInputs: linkedInputs, asOf: '20260830',
-                    ivShock: 0.10,
-                });
-                assert.equal(shockedMarks.details.find((detail) => detail.settled).marketValue, 8000);
-                assert.ok(Math.abs(deferredPut(shockedMarks).impliedVolatility - 0.32) < 1e-9);
-                assert.equal(withHedge({ ivMode: 'fixed', ivShockPoints: 0 }).linkedIvShockPoints, 0);
-                assert.equal(withHedge({ ivMode: 'fixed', ivShockPoints: 'x' }).reason,
-                    'invalid_linked_iv_shock');
-                assert.equal(withHedge({ ivMode: 'fixed', ivShockPoints: -30 }).reason,
-                    'invalid_linked_iv_shock');
-                assert.equal(withHedge({ ivMode: 'fixed', ivShockPoints: -10 }).available, true);
-                assert.match(source, /function mapLinkedUnderlyingPrice/);
-                assert.match(source, /function estimateLinkedLongOptions/);
-                assert.match(source, /function _findOptionQuote/);
-                assert.match(source, /premium already paid is sunk/);
-                assert.match(source, /TQQQ-first/);
+                const html = readPage();
+                for (const id of ['stress-pnl-basis', 'stress-path', 'stress-band-enabled', 'stress-band-flat-iv',
+                    'stress-own-iv-beta', 'stress-band-status', 'stress-tooltip-band']) assert.ok(html.includes('id="' + id + '"'));
+                assert.match(readScript(), /generation !== stressJob.generation/);
+                assert.match(readScript(), /worker.terminate/);
+                assert.match(readScript(), /_setConnection\('disconnected'\);\s*_invalidateStressScenarioInputs\(\);\s*_renderStressTest\(\)/);
+                assert.match(readScript(), /if \(data.ibConnected === false\) _invalidateStressScenarioInputs\(\)/);
             },
         },
         {
-            name: 'scenario options price American with dividends and can be marked at the bid or ask',
+            name: 'stress cost axis, cards and tooltip describe scenario settlement, not a constant reference',
             run() {
-                const page = loadPage().OptionComboCostBasisPage;
                 const html = readPage();
                 const source = readScript();
-                // Dividend yield lowers a call and raises a put in the closed form.
-                const callNoDiv = page.calculateBsmOptionPrice('C', 100, 100, 1, 0.05, 0.2);
-                const callDiv = page.calculateBsmOptionPrice('C', 100, 100, 1, 0.05, 0.2, 0.03);
-                const putNoDiv = page.calculateBsmPutPrice(100, 100, 1, 0.05, 0.2);
-                const putDiv = page.calculateBsmOptionPrice('P', 100, 100, 1, 0.05, 0.2, 0.03);
-                assert.ok(Math.abs(callNoDiv - 10.4506) < 0.001);
-                assert.ok(callDiv < callNoDiv);
-                assert.ok(putDiv > putNoDiv);
-                // American ≥ European; a deep-ITM put with a positive rate
-                // carries early-exercise value; at expiry both are intrinsic.
-                const euro = (right, s) => page.priceScenarioOption(right, s, 100, 1, 0.05, 0.2,
-                    { pricingModel: 'european' });
-                const amer = (right, s) => page.priceScenarioOption(right, s, 100, 1, 0.05, 0.2,
-                    { pricingModel: 'american' });
-                assert.ok(amer('P', 100) >= euro('P', 100) - 1e-9);
-                assert.ok(amer('P', 60) > euro('P', 60) + 0.5);
-                assert.ok(amer('P', 60) >= 40);
-                // No dividend: an American call is a European call, up to
-                // the lattice's discretisation error.
-                assert.ok(Math.abs(amer('C', 100) - euro('C', 100)) < 0.1);
-                assert.equal(page.priceScenarioOption('P', 60, 100, 0, 0.05, 0.2,
-                    { pricingModel: 'american' }), 40);
-                // With a dividend the American call may be exercised early: it
-                // is worth at least the dividend-adjusted European call and
-                // less than the no-dividend call.
-                const amerDivCall = page.priceScenarioOption('C', 100, 100, 1, 0.05, 0.2,
-                    { pricingModel: 'american', dividendYield: 0.05 });
-                const euroDivCall = page.priceScenarioOption('C', 100, 100, 1, 0.05, 0.2,
-                    { pricingModel: 'european', dividendYield: 0.05 });
-                assert.ok(amerDivCall >= euroDivCall - 0.1);
-                assert.ok(amerDivCall < callNoDiv);
-                assert.equal(page.priceScenarioOption('X', 100, 100, 1, 0.05, 0.2,
-                    { pricingModel: 'american' }), null);
-                assert.equal(page.normalizePricingModel(''), 'european');
-                assert.equal(page.normalizePricingModel('American'), 'american');
-                assert.equal(page.normalizePricingModel('x'), null);
-                assert.equal(page.normalizeLiquidation(''), 'mid');
-                assert.equal(page.normalizeLiquidation('bidask'), 'bidask');
-                assert.equal(page.normalizeLiquidation('x'), null);
-                assert.equal(page.normalizeDividendYield(''), 0);
-                assert.equal(page.normalizeDividendYield(0.006), 0.006);
-                assert.equal(page.normalizeDividendYield(-0.1), null);
-                assert.equal(page.normalizeDividendYield(0.9), null);
-                assert.equal(page.DIVIDEND_YIELD_DEFAULTS.QQQ, 0.006);
-                // Liquidation haircut: a long sells at the bid, a short buys
-                // back at the ask; a missing side is a refusal, not 1.
-                const quote = { mark: 10, bid: 9, ask: 11.5 };
-                assert.equal(page.liquidationHaircut(quote, 'long', 'mid'), 1);
-                assert.ok(Math.abs(page.liquidationHaircut(quote, 'long', 'bidask') - 0.9) < 1e-12);
-                assert.ok(Math.abs(page.liquidationHaircut(quote, 'short', 'bidask') - 1.15) < 1e-12);
-                assert.equal(page.liquidationHaircut({ mark: 10, bid: null, ask: 11 }, 'long', 'bidask'), null);
-                assert.equal(page.liquidationHaircut({ mark: 10, bid: 9 }, 'short', 'bidask'), null);
-                assert.equal(page.liquidationHaircut({ mark: 0, bid: 0, ask: 0.05 }, 'long', 'bidask'), null);
-                assert.equal(page.liquidationHaircut({ mark: 10, bid: 0, ask: 11 }, 'long', 'bidask'), 0);
-                // A crossed pair is not a price: it would flatter both sides.
-                const crossed = { mark: 1.08, bid: 1.20, ask: 1.00 };
-                assert.equal(page.bidAskProblem(crossed), 'crossed');
-                assert.equal(page.liquidationHaircut(crossed, 'long', 'bidask'), null);
-                assert.equal(page.liquidationHaircut(crossed, 'short', 'bidask'), null);
-                assert.equal(page.bidAskProblem({ mark: 1, bid: 0.9, ask: 1.1, bidAskValid: false }), 'crossed');
-                assert.equal(page.liquidationHaircut({ mark: 1, bid: 0.9, ask: 1.1, bidAskValid: false },
-                    'long', 'bidask'), null);
-                assert.equal(page.bidAskProblem({ mark: 1, bid: 0.9, ask: 1.1 }), '');
-                assert.equal(page.bidAskProblem({ mark: 1, bid: 0.9 }), 'missing');
-                assert.equal(page.bidAskProblem({ mark: 1, ask: 1.1 }), 'missing');
-                assert.equal(page.bidAskProblem({ mark: 1, bid: 0, ask: 0.05 }), '');
-                assert.equal(page.bidAskProblem(null), 'missing');
-                assert.equal(page.marketDataTypeLabel([{ marketDataType: 1 }, { marketDataType: 1 }]), '实时');
-                assert.equal(page.marketDataTypeLabel([{ marketDataType: 3 }]), '延时');
-                assert.equal(page.marketDataTypeLabel([{ marketDataType: 1 }, { marketDataType: 2 }]), '混合：实时/冻结');
-                assert.equal(page.marketDataTypeLabel([]), '');
-
-                // The series: American by request, dividends per book, and
-                // bid/ask haircuts flowing through ②, ③ and the linked ④.
-                const events = [{
-                    seq: 1, kind: 'opening_balance', tradeDate: '2026-06-01',
-                    account: 'U1', shares: 200, price: 73, cashAmount: -14600,
-                    fees: 0, includeInCost: true,
-                }, {
-                    seq: 2, kind: 'option_trade', tradeDate: '2026-08-01',
-                    account: 'U1', right: 'P', strike: 65, expiry: '20270115',
-                    contracts: 2, sharesPerContract: 100, price: 5,
-                    cashAmount: -1000, fees: 0, includeInCost: true,
-                }, {
-                    seq: 3, kind: 'option_trade', tradeDate: '2026-08-01',
-                    account: 'U1', right: 'C', strike: 80, expiry: '20270115',
-                    contracts: -1, sharesPerContract: 100, price: 2,
-                    cashAmount: 200, fees: 0, includeInCost: true,
-                }];
-                const inputs = {
-                    throughExpiry: '20260904', fetchedAt: 'x', curveEffectiveDate: '2026-09-03',
-                    options: [
-                        { right: 'P', strike: 65, expiry: '20270115', impliedVolatility: 0.6,
-                            mark: 4, bid: 3.6, ask: 4.4 },
-                        { right: 'C', strike: 80, expiry: '20270115', impliedVolatility: 0.6,
-                            mark: 3, bid: 2.7, ask: 3.6 },
-                    ],
-                    ratesByExpiry: [{ expiry: '20270115', zeroRate: 0.04 }],
+                assert.match(html, /class="legend-cost">情景结算后成本 \/ 股（右轴）/);
+                assert.match(html, /<dt>情景结算后成本 \/ 股<\/dt><dd id="stress-tooltip-cost">/);
+                assert.match(source, /情景结算后每股成本 \$\{point.cost/);
+                assert.match(source, /d: pathFor\('cost', yCost\)/);
+                assert.doesNotMatch(source, /当前账本每股成本|当前成本线仅作账本参考/);
+            },
+        },
+        {
+            name: 'worker generations discard superseded and closed jobs and reuse only identical inputs',
+            run() {
+                const h = loadReconciliationHarness();
+                h.silenceStressRender();
+                const workers = [];
+                h.context.Worker = class {
+                    constructor() { workers.push(this); }
+                    postMessage(message) { this.message = message; }
+                    terminate() { this.terminated = true; }
                 };
-                const run = (extra) => page.buildStressTestSeries(events, Object.assign({
-                    centerPrice: 70, rangePct: 30, pointCount: 11, throughExpiry: '20260904',
-                    basisMode: 'net_cash', secType: 'STK', includeDeferredLongOptions: true,
-                    longOptionInputs: inputs,
-                }, extra || {}));
-                const european = run({ pricingModel: 'european' });
-                const american = run({ pricingModel: 'american' });
-                const defaults = run();
-                assert.equal(defaults.pricingModel, 'european');
-                assert.equal(defaults.liquidation, 'mid');
-                assert.equal(defaults.dividendYield, 0);
-                assert.equal(european.available, true);
-                assert.equal(american.available, true);
-                assert.equal(american.pricingModel, 'american');
-                // The long put is worth at least as much American; the short
-                // call liability too, so ③ is no better than European.
-                assert.ok(american.points[0].longOptionPnl >= european.points[0].longOptionPnl - 1e-9);
-                assert.ok(american.points[0].longOptionPnl > european.points[0].longOptionPnl);
-                assert.ok(american.points[10].shortOptionPnl <= european.points[10].shortOptionPnl + 10);
-                const withYield = run({ pricingModel: 'american', dividendYield: 0.02 });
-                assert.equal(withYield.dividendYield, 0.02);
-                assert.ok(withYield.points[5].longOptionPnl > american.points[5].longOptionPnl);
-                assert.ok(withYield.points[10].shortOptionPnl > american.points[10].shortOptionPnl);
-                assert.equal(run({ dividendYield: 2 }).reason, 'invalid_dividend_yield');
-                assert.equal(run({ pricingModel: 'x' }).reason, 'invalid_pricing_model');
-                assert.equal(run({ liquidation: 'x' }).reason, 'invalid_liquidation');
-                // Bid/ask: the long is haircut to 90%, the short liability
-                // scaled to 120%; both move ② and ③ against the holder.
-                const bidAsk = run({ liquidation: 'bidask' });
-                assert.equal(bidAsk.available, true);
-                assert.equal(bidAsk.liquidation, 'bidask');
-                bidAsk.points.forEach((point, index) => {
-                    const mid = defaults.points[index];
-                    assert.ok(Math.abs(point.longOptionMarketValue
-                        - mid.longOptionMarketValue * 0.9) < 1e-6);
-                    assert.ok(Math.abs(point.shortOptionLiability
-                        - mid.shortOptionLiability * 1.2) < 1e-6);
-                    assert.ok(point.longOptionPnl < mid.longOptionPnl);
-                    assert.ok(point.shortOptionPnl < mid.shortOptionPnl);
-                });
-                const noSides = run({ liquidation: 'bidask', longOptionInputs: Object.assign({}, inputs, {
-                    options: inputs.options.map((row) => Object.assign({}, row, { bid: null })),
-                }) });
-                assert.equal(noSides.available, false);
-                assert.equal(noSides.reason, 'missing_long_option_quote_sides');
-                const crossedOwn = run({ liquidation: 'bidask', longOptionInputs: Object.assign({}, inputs, {
-                    options: inputs.options.map((row) => Object.assign({}, row, { bid: row.ask + 0.5 })),
-                }) });
-                assert.equal(crossedOwn.available, false);
-                assert.equal(crossedOwn.reason, 'invalid_long_option_bid_ask');
-                const noAsk = run({ liquidation: 'bidask', longOptionInputs: Object.assign({}, inputs, {
-                    options: inputs.options.map((row) => (row.right === 'C'
-                        ? Object.assign({}, row, { ask: undefined }) : row)),
-                }) });
-                assert.equal(noAsk.reason, 'missing_short_option_quote_sides');
-                // Linked book under bid/ask: today's value is the bid, the
-                // scenario mark scaled by bid/mark, intrinsic untouched.
-                const linkedOptions = [
-                    { right: 'P', strike: 480, expiry: '20270115', contracts: 10,
-                        sharesPerContract: 100, openPremium: -25000 },
-                    { right: 'P', strike: 470, expiry: '20260904', contracts: 4,
-                        sharesPerContract: 100, openPremium: -2000 },
+                h.context.document.querySelectorAll = () => [
+                    { src: 'http://localhost/js/cost_basis_stress_worker.js?v=hash' },
                 ];
-                const linkedInputs = {
-                    throughExpiry: '20260904', fetchedAt: 'y', curveEffectiveDate: '2026-09-03',
-                    underlyingPrice: 500,
-                    options: [
-                        { right: 'P', strike: 480, expiry: '20270115', impliedVolatility: 0.22,
-                            mark: 20, bid: 18, ask: 22 },
-                        { right: 'P', strike: 470, expiry: '20260904', impliedVolatility: null,
-                            mark: 6, bid: 5, ask: 7 },
-                    ],
-                    ratesByExpiry: [{ expiry: '20270115', zeroRate: 0.035 }],
-                };
-                const linkedMid = page.estimateLinkedLongOptions(linkedOptions, 450, {
-                    throughExpiry: '20260904', marketInputs: linkedInputs, asOf: '20260903',
-                });
-                const linkedBid = page.estimateLinkedLongOptions(linkedOptions, 450, {
-                    throughExpiry: '20260904', marketInputs: linkedInputs, asOf: '20260903',
-                    liquidation: 'bidask',
-                });
-                assert.equal(linkedMid.referenceValue, 20 * 1000 + 6 * 400);
-                assert.equal(linkedBid.referenceValue, 18 * 1000 + 5 * 400);
-                const deferredMid = linkedMid.details.find((d) => !d.settled);
-                const deferredBid = linkedBid.details.find((d) => !d.settled);
-                assert.ok(Math.abs(deferredBid.markPerShare - deferredMid.markPerShare * 0.9) < 1e-9);
-                assert.equal(linkedBid.details.find((d) => d.settled).marketValue, 8000);
-                assert.equal(page.estimateLinkedLongOptions(linkedOptions, 450, {
-                    throughExpiry: '20260904', asOf: '20260903', liquidation: 'bidask',
-                    marketInputs: Object.assign({}, linkedInputs, {
-                        options: linkedInputs.options.map((row) => Object.assign({}, row, { bid: null })),
-                    }),
-                }).reason, 'missing_linked_quote_sides');
-                // American pricing reaches the linked book with its own yield.
-                const linkedAmerican = page.estimateLinkedLongOptions(linkedOptions, 450, {
-                    throughExpiry: '20260904', marketInputs: linkedInputs, asOf: '20260903',
-                    pricingModel: 'american', dividendYield: 0.006,
-                });
-                assert.ok(linkedAmerican.details.find((d) => !d.settled).markPerShare
-                    > deferredMid.markPerShare);
-                assert.equal(linkedAmerican.details.find((d) => !d.settled).pricingModel, 'american');
-                // This book's IV shock follows the linked beta, |ratio|-scaled,
-                // and with tenor damping a 2027 put gets far less than the
-                // headline: the per-side applied range is what the point carries.
-                const shockedOwn = run({
-                    pricingModel: 'european', linkedHedge: {
-                        symbol: 'QQQ', bookId: 'qqq', ratio: 3, basePrice: 500,
-                        openOptions: linkedOptions, marketInputs: linkedInputs, asOf: '20260903',
-                        ivMode: 'beta', ivBeta: 2, ivTenorDamping: true, ivTenorDays: 30,
-                    },
-                });
-                assert.equal(shockedOwn.available, true);
-                const downOwn = shockedOwn.points[0];
-                assert.ok(downOwn.ownIvShockPoints > 0);
-                assert.ok(Math.abs(downOwn.ownIvShockPoints - 3 * downOwn.linkedIvShockPoints) < 1e-9);
-                assert.ok(downOwn.longOptionIvShockMax > 0);
-                assert.ok(downOwn.longOptionIvShockMax < downOwn.ownIvShockPoints);
-                assert.ok(Math.abs(downOwn.longOptionIvShockMax
-                    - downOwn.ownIvShockPoints * Math.sqrt(30 / 133)) < 1e-9);
-                assert.ok(Math.abs(downOwn.shortOptionIvShockMax - downOwn.longOptionIvShockMax) < 1e-9);
-                assert.ok(downOwn.longOptionPnl > european.points[0].longOptionPnl);
-                assert.equal(shockedOwn.points[5].ownIvShockPoints, 0);
-                assert.equal(shockedOwn.points[5].longOptionIvShockMax, 0);
-                assert.ok(html.includes('id="stress-pricing-model"'));
-                assert.ok(html.includes('id="stress-dividend-yield"'));
-                assert.ok(html.includes('id="stress-own-note"'));
-                assert.equal(html.includes('股息率 0% · 不考虑提前行权'), false);
-                assert.equal(html.includes('按 BSM 与其自身'), false);
-                assert.match(html, /按今日点差折算（买价\/卖价）/);
-                assert.match(html, /没有可用代理时整体停止/);
-                assert.ok(html.includes('id="stress-liquidation"'));
-                assert.ok(html.includes('id="stress-linked-dividend-yield"'));
-                assert.match(html, /js\/american_binomial\.js\?v=/);
-                assert.match(html, /<option value="american" selected>/);
-                assert.match(source, /function priceScenarioOption/);
-                assert.match(source, /function liquidationHaircut/);
-                assert.match(source, /never claims a model that was not used/);
+                h.state.stressOpen = true;
+                const events = [{ kind: 'opening_balance', account: 'U1', tradeDate: '2026-01-01',
+                    shares: 100, cashAmount: -10000, price: 100 }];
+                const options = { centerPrice: 100, asOfInstant: '2026-09-08T16:00:00Z',
+                    targetInstant: '2026-09-08T16:00:00Z', throughExpiry: '20260908' };
+                const first = h.stressSeries(events, options);
+                assert.equal(h.stressSeries(events, options), first);
+                assert.equal(workers.length, 1);
+                const second = h.stressSeries(events, {...options, rangePct: 50});
+                assert.equal(workers[0].terminated, true);
+                workers[0].onmessage({data: {generation: workers[0].message.generation,
+                    band: {available: true, members: [], points: []}}});
+                assert.equal(second.band, undefined);
+                workers[1].onmessage({data: {generation: workers[1].message.generation,
+                    band: {available: true, members: [], points: []}}});
+                assert.equal(second.band.available, true);
+                h.cancelStressJob();
+                assert.equal(h.stressJob.series, null);
+                workers[1].onmessage({data: {generation: workers[1].message.generation, band: {available: true}}});
+                assert.equal(h.stressJob.series, null);
+            },
+        },
+        {
+            name: 'American pricing and quote side diagnostics remain public pure helpers',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                assert.ok(Math.abs(page.calculateBsmPutPrice(100, 100, 1, 0.05, 0.2) - 5.5735) < 0.001);
+                assert.equal(page.priceScenarioOption('P', 0, 100, 1, 0.05, 0.2, {pricingModel: 'american'}), 100);
+                assert.equal(page.liquidationHaircut({mark: 10, bid: 9, ask: 11}, 'long', 'bidask'), 0.9);
+                assert.equal(page.liquidationHaircut({mark: 10, bid: 9, ask: 11}, 'short', 'bidask'), 1.1);
+                assert.equal(page.bidAskProblem({bid: 12, ask: 11}), 'crossed');
+            },
+        },
+        {
+            name: 'horizon slider and exact input share frozen paired quotes and cancel stale estimates',
+            run() {
+                const { h, quote } = loadStressPairHarness();
+                h.state.stressOpen = true;
+                h.state.stressLongOptionInputs = { ...quote('book-test'), snapshotId: 'own-frozen' };
+                h.state.stressLinkedInputs = { ...quote('book-qqq'), snapshotId: 'linked-frozen' };
+                const original = JSON.stringify([h.state.stressLongOptionInputs, h.state.stressLinkedInputs]);
+                const jobs = new Map(); let next = 0, requests = 0, terminated = 0;
+                h.context.setTimeout = (fn, delay) => { jobs.set(++next, { fn, delay }); return next; };
+                h.context.clearTimeout = id => jobs.delete(id);
+                h.configure({ request: () => { requests++; return Promise.resolve({}); } });
+                h.silenceStressRender();
+                h.stressJob.worker = { terminate() { terminated++; } };
+                h.node('stress-chart').appendChild(h.context.document.createElement('path'));
+                h.node('stress-slice').hidden = false;
+                h.setHorizon('2', true);
+                h.setHorizon('20', true);
+                assert.equal(jobs.size, 1);
+                assert.equal([...jobs.values()][0].delay, 100);
+                assert.equal(terminated, 1);
+                assert.equal(h.node('stress-horizon-days').value, '20');
+                assert.equal(h.node('stress-horizon-slider').value, '20');
+                assert.equal(h.node('stress-horizon-value').textContent, '20 天后');
+                assert.equal(h.node('stress-chart').children.length, 0);
+                assert.equal(h.node('stress-slice').hidden, true);
+                h.applyHorizon();
+                assert.equal(requests, 0);
+                assert.equal(jobs.size, 0);
+                assert.equal(JSON.stringify([h.state.stressLongOptionInputs, h.state.stressLinkedInputs]), original);
+                assert.equal(h.frozenBatch().throughExpiry, '20260904');
+                h.setHorizon('730');
+                assert.equal(h.node('stress-horizon-slider').max, '730');
+                h.setHorizon('0', true);
+                assert.equal(h.node('stress-horizon-value').textContent, '现在 · 0 天');
+                h.setHorizon('1.5');
+                assert.equal(h.node('stress-horizon-value').textContent, '天数无效');
+                assert.equal(h.scenarioDate().error, 'invalid_horizon');
+                h.setHorizon('');
+                assert.equal(h.state.stressHorizonDays, null);
+                assert.match(h.node('stress-horizon-value').textContent, /同到期范围/);
+                h.teardownStress();
+                assert.equal(jobs.size, 0);
+            },
+        },
+        {
+            name: 'incomplete or mismatched quote batches cannot be reused by the horizon slider',
+            run() {
+                const { h, quote } = loadStressPairHarness();
+                h.context.setTimeout = () => 1; h.context.clearTimeout = () => {};
+                h.state.stressLongOptionInputs = { ...quote('book-test'), snapshotId: 'own' };
+                h.state.stressLinkedInputs = { ...quote('book-qqq'), snapshotId: 'linked' };
+                h.state.stressLinkedInputs.throughExpiry = '20260905';
+                assert.equal(h.frozenBatch(), null);
+                h.state.stressLinkedInputs.throughExpiry = '20260904';
+                h.state.stressLinkedInputs.discountCurve = null;
+                assert.equal(h.frozenBatch(), null);
+                h.setHorizon('10', true);
+                assert.equal(h.state.stressLongOptionInputs, null);
+                assert.equal(h.state.stressLinkedInputs, null);
+                assert.equal(h.node('stress-tooltip').hidden, true);
+            },
+        },
+        {
+            name: 'range cards put the full portfolio envelope ahead of the reference number',
+            run() {
+                const h = loadPriceHarness();
+                const p = { price: 100, changePct: 0, headlinePnl: 100, cost: null, shares: 200 };
+                const series = { symbol: 'TQQQ', centerPrice: 100, points: [p],
+                    band: { available: true, points: [{ price: 100, lower: -200, upper: 300 }] } };
+                h.renderStressCards(series, 'USD');
+                let card = h.node('stress-key-points').children[0];
+                assert.match(card.children[1].textContent, /估值范围 -\$200\.00 ～ \+\$300\.00/);
+                assert.equal(card.children[1].className, undefined, 'a range spanning zero is not styled as a gain');
+                assert.match(card.children[2].textContent, /参考情景合计 \+\$100\.00/);
+                series.band.points[0] = { price: 100, lower: 100, upper: 100 };
+                h.renderStressCards(series, 'USD');
+                card = h.node('stress-key-points').children[0];
+                assert.ok(card.children.some(n => /不代表实际估值没有不确定性/.test(n.textContent)));
+                delete series.band;
+                h.renderStressCards(series, 'USD');
+                assert.match(h.node('stress-key-points').children[0].children[1].textContent, /参考情景/);
+                const html = readPage();
+                assert.match(html, /id="stress-horizon-slider" type="range"/);
+                assert.match(html, /不保证覆盖所有 Skew/);
             },
         },
         {
@@ -2482,6 +2236,94 @@ module.exports = {
             },
         },
         {
+            name: 'enabling or re-enabling cached protection replaces the old main snapshot with a concurrent pair',
+            async run() {
+                const { h, pending, quote, compile } = loadStressPairHarness();
+                h.state.stressLongOptionInputs = quote('book-test', '2026-09-03T12:00:00Z');
+                h.state.stressLinkedInputs = quote('book-qqq');
+                assert.equal(compile().reason, 'snapshot_time_mismatch');
+                const refresh = h.ensureLinked(false);
+                assert.deepEqual(pending.map(p => p.fields.bookId), ['book-test', 'book-qqq']);
+                assert.equal(h.state.stressLongOptionInputs, null);
+                assert.equal(h.state.stressLinkedInputs, null);
+                assert.equal(h.stressRefreshJob.pending, true);
+                pending[0].resolve(quote('book-test'));
+                await new Promise(resolve => setImmediate(resolve));
+                assert.equal(h.stressRefreshJob.pending, true, 'do not publish a half-pair');
+                pending[1].resolve(quote('book-qqq', '2026-09-03T14:00:01Z'));
+                await refresh;
+                assert.equal(h.stressRefreshJob.pending, false);
+                assert.equal(compile().available, true, compile().reason);
+                const again = h.ensureLinked(false); // Both cached; still refresh both.
+                assert.equal(pending.length, 4);
+                pending[2].resolve(quote('book-test')); pending[3].resolve(quote('book-qqq'));
+                await again;
+            },
+        },
+        {
+            name: 'paired refresh resolves linked history before starting either quote and rejects superseded loads',
+            async run() {
+                const { h, pending, quote, events } = loadStressPairHarness();
+                h.state.stressLinkedLedger = null;
+                const first = h.refreshStressPair(false);
+                assert.equal(pending.length, 1);
+                assert.equal(pending[0].action, 'list_cost_basis_events');
+                const second = h.refreshStressPair(false);
+                pending[0].resolve({ events, total: events.length }); await first;
+                assert.equal(pending.length, 2, 'obsolete load must not launch old quotes');
+                assert.equal(h.stressRefreshJob.pending, true);
+                pending[1].resolve({ events, total: events.length });
+                await new Promise(resolve => setImmediate(resolve));
+                assert.deepEqual(pending.slice(2).map(p => p.fields.bookId), ['book-test', 'book-qqq']);
+                pending[2].resolve(quote('book-test')); pending[3].resolve(quote('book-qqq'));
+                await second;
+                assert.equal(h.stressRefreshJob.pending, false);
+            },
+        },
+        {
+            name: 'superseded, disabled and disconnected paired quotes cannot revive an old overlay',
+            async run() {
+                const { h, pending, quote } = loadStressPairHarness();
+                const first = h.refreshStressPair(false);
+                const second = h.refreshStressPair(false);
+                pending[0].resolve(quote('book-test', '2026-09-03T12:00:00Z'));
+                pending[1].reject(new Error('old request failed')); await first;
+                assert.equal(h.stressRefreshJob.pending, true);
+                assert.equal(h.state.stressLongOptionInputs, null);
+                assert.equal(h.state.stressLinkedInputsError, '');
+                h.state.stressIncludeLinkedHedge = false;
+                h.invalidateScenario();
+                pending[2].resolve(quote('book-test')); pending[3].resolve(quote('book-qqq')); await second;
+                assert.equal(h.stressRefreshJob.pending, false);
+                assert.equal(h.state.stressLinkedInputs, null);
+                h.state.stressIncludeLinkedHedge = true;
+                const third = h.refreshStressPair(false);
+                h.state.ws = {}; h.invalidateScenario();
+                pending[4].resolve(quote('book-test')); pending[5].resolve(quote('book-qqq')); await third;
+                assert.equal(h.state.stressLongOptionInputs, null);
+                assert.equal(h.state.stressLinkedInputs, null);
+            },
+        },
+        {
+            name: 'a failed half of a refresh never reuses old quotes or relaxes the time-skew gate',
+            async run() {
+                const { h, pending, quote, compile } = loadStressPairHarness();
+                h.state.stressLinkedInputs = quote('book-qqq');
+                const refresh = h.refreshStressPair(false);
+                pending[0].resolve(quote('book-test')); pending[1].reject(new Error('missing linked feed'));
+                await refresh;
+                assert.equal(h.state.stressLinkedInputs, null);
+                assert.equal(h.stressRefreshJob.pending, false);
+                assert.equal(compile().available, false);
+                assert.match(h.state.stressLinkedInputsError, /missing linked feed/);
+                const retry = h.refreshStressPair(false);
+                pending[2].resolve(quote('book-test'));
+                pending[3].resolve(quote('book-qqq', '2026-09-03T14:02:00Z'));
+                await retry;
+                assert.equal(compile().reason, 'snapshot_time_mismatch');
+            },
+        },
+        {
             name: 'a linked book is chosen from memory, then the TQQQ seed, and never switched on by itself',
             run() {
                 const page = loadPage().OptionComboCostBasisPage;
@@ -2498,7 +2340,16 @@ module.exports = {
                     linkedBookId: 'b-tsm', ratio: 1.5, enabled: true,
                     ivMode: 'beta', ivShockPoints: 15, ivBeta: 2.5,
                     horizonDays: 20, ivTenorDamping: false, ivTenorDays: 45,
+                    ivTenorExponent: 0.4, ivBetaAuto: false, ivOtmDiscount: false,
                 });
+                assert.equal(remembered.ivTenorExponent, 0.4);
+                assert.equal(remembered.ivBetaAuto, false);
+                assert.equal(remembered.ivOtmDiscount, false);
+                assert.equal(remembered.sigmaCrashScale, true);
+                assert.equal(seeded.ivBetaAuto, true);
+                assert.equal(seeded.ivOtmDiscount, true);
+                assert.equal(seeded.sigmaCrashScale, true);
+                assert.equal(seeded.ivTenorExponent, 0.65);
                 // A horizon is never remembered: it is a scenario, not a setting.
                 assert.equal('horizonDays' in remembered, false);
                 assert.equal(remembered.ivTenorDamping, false);
@@ -2585,7 +2436,7 @@ module.exports = {
                     right: 'C', strike: 80, expiry: '20270115', sharesPerContract: 100,
                     contracts: -1, price: 2, cashAmount: 200,
                 });
-                h.state.ledger = core.computeLedger(h.state.allEvents);
+                h.state.ledger = core.computeLedger(h.state.allEvents, { referencePrice: 70, secType: 'STK' });
                 h.state.stressOpen = true;
                 h.state.stressExpiry = '20260904';
                 h.state.stressBasePrice = 70;
@@ -2675,6 +2526,7 @@ module.exports = {
 
                 const book = h.state.books[0];
                 h.restoreLinked(book);
+                h.state.stressPnlBasis = 'cost';
                 assert.equal(h.state.stressLinkedBookId, 'book-qqq');
                 assert.equal(h.state.stressLinkedRatio, 3);
                 assert.equal(h.state.stressIncludeLinkedHedge, false);
@@ -2697,13 +2549,15 @@ module.exports = {
                 assert.deepEqual(calls.map((call) => call.action), [
                     'list_cost_basis_events',
                     'request_cost_basis_option_scenario_inputs',
+                    'request_cost_basis_option_scenario_inputs',
                 ]);
                 assert.equal(calls[0].fields.bookId, 'book-qqq');
-                assert.equal(calls[1].fields.bookId, 'book-qqq');
-                assert.equal(calls[1].fields.throughExpiry, '20260904');
+                assert.equal(calls[1].fields.bookId, 'book-test');
+                assert.equal(calls[2].fields.bookId, 'book-qqq');
+                assert.equal(calls[2].fields.throughExpiry, '20260904');
                 // Every long contract alive today is quoted: its mark is the
                 // reference the scenario value is measured against.
-                assert.equal(calls[1].fields.contracts.map((item) => (
+                assert.equal(calls[2].fields.contracts.map((item) => (
                     `${item.right}${item.strike}@${item.expiry}`)).sort().join(','),
                 'C560@20270115,P470@20260904,P480@20270115');
                 assert.equal(h.state.stressLinkedEvents.length, 4);
@@ -2721,229 +2575,37 @@ module.exports = {
                 assert.equal(request.openOptions.length, 4);
 
                 h.renderStress();
-                const status = h.node('stress-status').textContent;
-                // Without this book's own overlay the linked book is ②, and
-                // every surface says so.
-                assert.match(status, /② 已叠加 QQQ 账本 1 张 Long Call \+ 14 张 Long Put/);
-                assert.match(status, /① TQQQ 到期结算/);
-                assert.doesNotMatch(status, /③/);
-                assert.match(status, /映射 1 : 3\.00/);
-                assert.match(status, /QQQ 基准/);
-                // 21.5*10*100 + 9.25*1*100 + 1.1*4*100 = 22,865
-                assert.match(status, /今日标记市值 \$22,865/);
-                assert.match(status, /TWS IV 18\.00%–22\.00%/);
-                assert.equal(h.node('stress-legend-linked-pnl').hidden, false);
-                assert.match(h.node('stress-legend-linked-pnl').textContent,
-                    /①\+② 计入 QQQ 多头期权较今日变动/);
-                assert.match(h.node('stress-legend-base-pnl').textContent, /① TQQQ 到期结算盈亏/);
-                assert.match(h.node('stress-linked-book-status').textContent,
-                    /QQQ 账本：1 张 Long Call \+ 14 张 Long Put · 事件 4 条/);
-                assert.match(h.node('stress-linked-inputs-status').textContent,
-                    /3 张已取得 · QQQ 基准/);
-                const cards = h.node('stress-key-points').children;
-                assert.equal(cards.length, 3);
-                const cardLines = cards[0].children.map((child) => child.textContent);
-                assert.match(cardLines[0], /下行情景 · 49\.00（-30\.0%） · QQQ 44[34]\.\d\d（-11\.2%）/);
-                assert.match(cardLines[1], /^合计 /);
-                assert.match(cardLines[2], /^① TQQQ 到期结算 /);
-                assert.match(cardLines[3], /^② QQQ 多头期权较今日 \+/);
-                assert.match(cardLines[1], /^合计 /);
-                const numbering = h.context.OptionComboCostBasisPage.stressComponentNumbers;
-                assert.equal(numbering(false, false, true).total, '①+②');
-                assert.equal(numbering(true, false, true).total, '①+②+③');
-                assert.equal(numbering(true, true, true).total, '①+②+③+④');
-                assert.equal(numbering(true, false, false).total, '①+②');
-                assert.equal(numbering(false, true, false).total, '①+②');
-                assert.equal(numbering(false, false, false).total, '①');
-                assert.equal(numbering(false, false, true).linked, '②');
-                assert.equal(numbering(true, false, true).linked, '③');
-                assert.equal(numbering(true, true, true).shorts, '③');
-                assert.equal(numbering(true, true, true).linked, '④');
-                assert.match(cardLines[4], /^综合成本 /);
-                const chart = h.node('stress-chart');
-                assert.ok(chart.children.some((child) => (
-                    child.attributes && child.attributes.class === 'stress-linked-pnl-line')));
-
-                // A different expiry invalidates only the IV snapshot; the
-                // ledger read is reused.
-                calls.length = 0;
-                h.state.stressExpiry = '20270115';
-                h.state.stressLinkedInputs = null;
-                h.ensureLinked(false);
-                await new Promise((resolve) => setImmediate(resolve));
-                assert.deepEqual(calls.map((call) => call.action),
-                    ['request_cost_basis_option_scenario_inputs']);
-                assert.equal(calls[0].fields.throughExpiry, '20270115');
-                assert.equal(calls[0].fields.contracts.length, 3);
-                h.renderStress();
-                // Every linked contract settles on this date, so nothing can
-                // stand in for the path volatility: refused, not "zero drag".
-                assert.match(h.node('stress-status').textContent, /需要路径波动率/);
+                assert.match(h.node('stress-status').textContent, /快照版本过旧/);
                 assert.equal(h.node('stress-chart').children.length, 0);
-                h.state.stressLinkedSigma = 0.3;
-                h.renderStress();
-                assert.match(h.node('stress-status').textContent, /全部按内在价值结算/);
-                assert.match(h.node('stress-status').textContent, /路径 σ 30\.0%（假设）/);
-
-                // IV shock flows from state into the sweep and the caption.
-                h.state.stressExpiry = '20260904';
-                h.state.stressLinkedInputs = null;
-                h.ensureLinked(false);
-                await new Promise((resolve) => setImmediate(resolve));
-                h.renderStress();
-                const calmTotal = h.node('stress-key-points').children[0].children[1].textContent;
-                // The own-book note is generated from the controls in force,
-                // step count included, so it can never contradict them.
-                assert.match(h.node('stress-own-note').textContent,
-                    /美式 CRR 二叉树（121 步）.*TQQQ 1\.00%.*中间价/);
-                h.state.stressPricingModel = 'european';
-                h.state.stressLiquidation = 'bidask';
-                h.state.stressDividendYield = 0.0125;
-                h.renderStress();
-                assert.match(h.node('stress-own-note').textContent,
-                    /欧式 BSM.*股息率 1\.25%.*按今日点差折算.*交叉或单边报价拒绝/);
-                h.state.stressPricingModel = 'american';
-                h.state.stressLiquidation = 'mid';
-                h.state.stressDividendYield = null;
-                h.renderStress();
-                assert.equal(h.node('stress-linked-iv-mode').value, 'none');
-                assert.equal(h.node('stress-linked-iv-shock-field').hidden, true);
-                assert.equal(h.node('stress-linked-iv-beta-field').hidden, true);
-                h.state.stressLinkedIvMode = 'fixed';
-                h.state.stressLinkedIvShockPoints = 20;
-                h.renderStress();
-                assert.equal(h.node('stress-linked-iv-shock').value, '20');
-                assert.equal(h.node('stress-linked-iv-shock-field').hidden, false);
-                assert.match(h.node('stress-status').textContent,
-                    /TWS IV 38\.00%–42\.00%（已含固定 IV 冲击 \+20 点）/);
-                const shockedTotal = h.node('stress-key-points').children[0].children[1].textContent;
-                assert.notEqual(shockedTotal, calmTotal);
-                h.state.stressLinkedIvMode = 'beta';
-                h.state.stressLinkedIvBeta = 1.5;
-                h.renderStress();
-                assert.equal(h.node('stress-linked-iv-beta-field').hidden, false);
-                assert.equal(h.node('stress-linked-iv-shock-field').hidden, true);
-                assert.match(h.node('stress-status').textContent,
-                    /TWS IV 18\.00%–22\.00%（基准点；每跌 1% IV \+1\.50 点，按期限衰减 √\(30\/剩余天\)，上涨侧不变）/);
-                assert.equal(h.node('stress-linked-iv-tenor-field').hidden, false);
-                assert.equal(h.node('stress-linked-iv-tenor').checked, true);
-                h.state.stressLinkedIvTenorDamping = false;
-                h.renderStress();
-                assert.match(h.node('stress-status').textContent,
-                    /每跌 1% IV \+1\.50 点，上涨侧不变）/);
-                h.state.stressLinkedIvTenorDamping = true;
-                h.state.stressLinkedIvMode = 'none';
-                // A horizon is ONE scenario date for everything: the settlement,
-                // this book's snapshot and the linked snapshot all move to it.
-                h.state.stressHorizonDays = 20;
-                assert.equal(h.scenarioDate().date, '20260923');
-                calls.length = 0;
-                h.state.stressLongOptionInputs = null;
-                h.state.stressLinkedInputs = null;
-                h.state.stressIncludeLongOptions = true;
-                await h.refreshStressInputs(false);
-                h.ensureLinked(false);
-                await new Promise((resolve) => setImmediate(resolve));
-                assert.equal(calls.length, 2);
-                calls.forEach((call) => {
-                    assert.equal(call.action, 'request_cost_basis_option_scenario_inputs');
-                    assert.equal(call.fields.throughExpiry, '20260923');
+                // New snapshot metadata is required; old fixtures must not quietly
+                // reuse a future-tenor rate as the current calibration rate.
+                Object.assign(h.state.stressLinkedInputs, {
+                    snapshotVersion: 2,
+                    discountCurve: { schemaVersion: 2, currency: 'USD', effectiveDate: '2026-09-02',
+                        curveAsOf: '2026-09-02', points: [{tenorDays: 1, zeroRate: 0.035},
+                            {tenorDays: 180, zeroRate: 0.035}, {tenorDays: 365, zeroRate: 0.035}] },
                 });
-                // This book's short call is still open on the horizon and is
-                // quoted too (shorts are marked); every row carries a multiplier.
-                assert.equal(calls[0].fields.bookId, 'book-test');
-                assert.equal(calls[0].fields.contracts.length, 1);
-                assert.equal(calls[0].fields.contracts[0].right, 'C');
-                assert.equal(calls[0].fields.contracts[0].multiplier, 100);
-                assert.equal(calls[1].fields.bookId, 'book-qqq');
-                assert.ok(calls[1].fields.contracts.length > 0);
-                calls[1].fields.contracts.forEach((item) => assert.equal(item.multiplier, 100));
+                Object.assign(h.state.stressLongOptionInputs, {
+                    snapshotVersion: 2, discountCurve: h.state.stressLinkedInputs.discountCurve,
+                });
                 h.state.stressIncludeLongOptions = false;
                 h.renderStress();
-                assert.equal(h.node('stress-horizon-days').value, '20');
-                assert.match(h.node('stress-status').textContent,
-                    /2026-09-23 情景日（今天 \+20 天，含 Theta，覆盖到期范围；三项同日估值）/);
-                // The P71@20260904 short put is settled on the horizon date.
-                const horizonCards = h.node('stress-key-points').children;
-                assert.match(horizonCards[0].children[4].textContent, /400 股/);
-                assert.doesNotMatch(h.node('stress-status').textContent, /估值日 20/);
-                // An unusable horizon is refused, never silently the expiry.
-                h.state.stressHorizonDays = NaN;
-                h.renderStress();
-                assert.match(h.node('stress-status').textContent, /跌到位天数无效/);
-                assert.equal(h.node('stress-chart').children.length, 0);
-                h.state.stressHorizonDays = null;
-                // Back to the beta-mode scenario the next assertions expect;
-                // the snapshot keyed to the horizon date is stale by design.
-                h.state.stressLinkedIvMode = 'beta';
-                h.state.stressLinkedInputs = null;
-                h.ensureLinked(false);
-                await new Promise((resolve) => setImmediate(resolve));
-                h.renderStress();
-                assert.match(h.node('stress-status').textContent, /2026-09-04 到期后/);
-                const betaCards = h.node('stress-key-points').children;
-                // Downside card moved, basis card did not.
-                assert.notEqual(betaCards[0].children[1].textContent, calmTotal);
-                const calmMiddle = (() => {
-                    h.state.stressLinkedIvMode = 'none';
-                    h.renderStress();
-                    return h.node('stress-key-points').children[1].children[1].textContent;
-                })();
-                h.state.stressLinkedIvMode = 'beta';
-                h.renderStress();
-                assert.equal(h.node('stress-key-points').children[1].children[1].textContent,
-                    calmMiddle);
-                h.state.stressLinkedIvMode = 'none';
-                h.state.stressLinkedIvShockPoints = 0;
-
-                // A load that finishes after the user moved to another book
-                // is dropped on the floor.
-                let release;
-                h.configure({
-                    request: () => new Promise((resolve) => { release = resolve; }),
-                });
-                h.state.stressLinkedLedger = null;
-                const pending = h.loadLinked(false);
-                h.state.bookId = 'book-elsewhere';
-                release({ events: qqqEvents, total: qqqEvents.length });
-                await pending;
-                assert.equal(h.state.stressLinkedLedger, null);
-
-                assert.ok(html.includes('id="stress-include-linked-hedge"'));
-                assert.ok(html.includes('id="stress-linked-book"'));
-                assert.ok(html.includes('id="stress-linked-ratio"'));
-                assert.ok(html.includes('id="stress-linked-iv-shock"'));
-                assert.ok(html.includes('id="stress-linked-iv-mode"'));
-                assert.ok(html.includes('id="stress-linked-iv-beta"'));
-                assert.ok(html.includes('id="stress-linked-iv-tenor"'));
-                assert.ok(html.includes('id="stress-linked-iv-tenor-days"'));
-                assert.ok(html.includes('id="stress-horizon-days"'));
-                assert.ok(html.includes('id="stress-tooltip-horizon"'));
-                assert.equal(html.includes('stress-linked-horizon-days'), false);
-                assert.match(html, /三项永远在同一个情景日估值/);
-                assert.match(html, /<option value="none" selected>/);
-                assert.ok(html.includes('id="stress-tooltip-linked-iv"'));
-                assert.ok(html.includes('id="stress-linked-book-status"'));
-                assert.ok(html.includes('id="stress-linked-inputs-status"'));
-                assert.ok(html.includes('id="stress-legend-linked-pnl"'));
-                assert.ok(html.includes('id="stress-tooltip-linked-price"'));
-                assert.ok(html.includes('id="stress-tooltip-linked-value"'));
-                assert.ok(html.includes('id="stress-tooltip-linked-pnl"'));
-                assert.ok(html.includes('id="stress-tooltip-total-row"'));
-                assert.ok(html.includes('id="stress-tooltip-base-label"'));
-                assert.ok(html.includes('id="stress-tooltip-linked-premium"'));
-                assert.equal(html.includes('stress-tooltip-own-pnl'), false);
-                assert.match(html, /盈亏按编号分项再加总/);
-                assert.match(html, /已付权利金是沉没成本/);
-                assert.match(html, /TQQQ ↔ QQQ 跨标的保护/);
-                assert.match(html, /映射以指数为驱动变量/);
-                assert.match(html, /空头按已收权利金减去理论负债/);
-                assert.match(html, /不读取 TWS 持仓作为兜底/);
-                assert.match(source, /function chooseLinkedBook/);
-                assert.match(source, /function _loadStressLinkedEvents/);
-                assert.match(source, /function _refreshStressLinkedInputs/);
-                assert.doesNotMatch(source, /_stressLinkedOptionRequests/);
-                assert.match(source, /optionComboStressLinkedHedge:/);
+                assert.match(h.node('stress-status').textContent, /混合口径/);
+                assert.equal(h.node('stress-key-points').children.length, 3);
+                assert.match(h.node('stress-own-note').textContent, /反解逐合约本地 IV/);
+                h.state.stressLinkedIvMode = 'fixed'; h.renderStress();
+                assert.equal(h.node('stress-linked-iv-otm-field').hidden, true);
+                h.state.stressLinkedIvMode = 'beta'; h.renderStress();
+                assert.equal(h.node('stress-linked-iv-otm-field').hidden, false);
+                assert.equal(JSON.stringify(h.state.allEvents), mainEventsBefore);
+                assert.equal(JSON.stringify(h.state.ledger), mainLedgerBefore);
+                calls.length = 0;
+                h.state.stressExpiry = '20270115'; h.state.stressLinkedInputs = null;
+                await h.ensureLinked(false);
+                assert.deepEqual(calls.map(call => call.action), ['request_cost_basis_option_scenario_inputs',
+                    'request_cost_basis_option_scenario_inputs']);
+                assert.equal(calls[0].fields.throughExpiry, '20270115');
+                assert.equal(h.state.bookId, 'book-test');
             },
         },
         {
@@ -3142,10 +2804,13 @@ module.exports = {
                 const html = readPage();
                 const source = readScript();
                 assert.match(html, /<th>操作<\/th>/);
-                assert.match(html, /显示已删除记录/);
-                assert.match(source, /button\.textContent = '删除'/);
+                assert.match(html, /显示已冲销记录/);
+                assert.match(source, /button\.textContent = '冲销'/);
                 assert.match(source, /request\('void_cost_basis_event'/);
-                assert.match(source, /保留一条可审计的冲销记录/);
+                assert.match(source, /原行保留为可审计记录/);
+                // The wording must say what a void does NOT do: re-importing
+                // the same statement row will not bring it back.
+                assert.match(source, /重新导入同一份报表不会把它加回来/);
                 assert.doesNotMatch(source, /delete_cost_basis_event/);
             },
         },
@@ -3252,7 +2917,7 @@ module.exports = {
                 assert.match(source,
                     /state\.positionsAt && state\.positionsConnected[\s\S]{0,80}\? \{ takenAt/);
                 assert.match(source,
-                    /function _invalidatePositions\(\)[\s\S]{0,500}_renderReconciliation\(\)/);
+                    /function _invalidatePositions\(\)[\s\S]{0,700}_renderReconciliation\(\)/);
                 assert.match(source,
                     /async function _bootstrap\(socket\)[\s\S]{0,500}state\.ws !== socket/);
                 assert.doesNotMatch(source, /function _localTimestampIso/);
@@ -3270,6 +2935,939 @@ module.exports = {
                     /async function _adoptTwsPosition[\s\S]{0,1600}import_cost_basis_events/);
                 assert.match(source, /events:\s*\[copy\]/);
                 assert.match(source, /TWS 均价不可用/);
+            },
+        },
+        {
+            name: 'the stress test is a page view: showView switches the three views and the topbar',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                const doc = h.context.document;
+                h.showView('stress');
+                assert.equal(h.state.activeView, 'stress');
+                assert.equal(doc.getElementById('stress-view').hidden, false);
+                assert.equal(doc.getElementById('ledger-view').hidden, true);
+                assert.equal(doc.getElementById('settings-view').hidden, true);
+                assert.equal(doc.getElementById('page-eyebrow').textContent, 'What If · 多价格情景');
+                assert.equal(doc.getElementById('page-title').textContent, 'U1 / TQQQ · 到期压力测试');
+                assert.equal(doc.getElementById('btn-open-stress-view').classList.contains('active'), true);
+                h.showView('ledger');
+                assert.equal(h.state.activeView, 'ledger');
+                assert.equal(doc.getElementById('stress-view').hidden, true);
+                assert.equal(doc.getElementById('ledger-view').hidden, false);
+                assert.equal(doc.getElementById('page-title').textContent, 'U1 / TQQQ');
+                assert.equal(doc.getElementById('btn-open-stress-view').classList.contains('active'), false);
+                h.showView('settings');
+                assert.equal(doc.getElementById('settings-view').hidden, false);
+                assert.equal(doc.getElementById('stress-view').hidden, true);
+            },
+        },
+        {
+            name: 'opening the stress test enters the view; closing returns to the ledger and drops late worker results',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                const doc = h.context.document;
+                const workers = [];
+                h.context.Worker = class {
+                    constructor() { workers.push(this); }
+                    postMessage(message) { this.message = message; }
+                    terminate() { this.terminated = true; }
+                };
+                doc.querySelectorAll = () => [{ src: 'http://localhost/js/cost_basis_stress_worker.js?v=hash' }];
+                h.configure({ request: () => new Promise(() => {}) });
+                doc.body.classList.add('sidebar-open');
+                h.state.ledger = null;
+                h.openStress();
+                assert.equal(h.state.stressOpen, false, 'no ledger: nothing opens');
+                assert.equal(h.state.activeView, 'ledger');
+                h.state.ledger = h.context.OptionComboCostBasisCore.computeLedger(h.state.allEvents);
+                h.openStress();
+                assert.equal(h.state.stressOpen, true);
+                assert.equal(h.state.activeView, 'stress');
+                assert.equal(doc.body.classList.contains('sidebar-open'), false);
+                assert.equal(doc.activeElement, doc.getElementById('stress-title'));
+                assert.equal(doc.activeElement.focusOptions.preventScroll, true);
+                assert.equal(doc.getElementById('stress-view').scrollOptions.block, 'start');
+                assert.match(readPage(), /id="stress-title" tabindex="-1"/);
+                const css = fs.readFileSync(path.join(PROJECT_ROOT, 'cost_basis.css'), 'utf8');
+                assert.match(css, /\.stress-view \{\s*scroll-margin-top: calc\(78px \+ 1rem\)/);
+                assert.equal(h.state.stressHorizonDays, 45);
+                const events = [{ kind: 'opening_balance', account: 'U1', tradeDate: '2026-01-01',
+                    shares: 100, cashAmount: -10000, price: 100 }];
+                const options = { centerPrice: 100, asOfInstant: '2026-09-08T16:00:00Z',
+                    targetInstant: '2026-09-08T16:00:00Z', throughExpiry: '20260908' };
+                h.stressSeries(events, options);
+                assert.equal(workers.length, 1);
+                h.closeStress();
+                assert.equal(h.state.stressOpen, false);
+                assert.equal(h.state.activeView, 'ledger');
+                assert.equal(doc.getElementById('stress-view').hidden, true);
+                assert.equal(workers[0].terminated, true);
+                assert.equal(h.stressJob.series, null);
+                assert.equal(doc.activeElement, doc.getElementById('btn-open-stress-test'));
+                workers[0].onmessage({ data: { generation: workers[0].message.generation,
+                    band: { available: true, members: [], points: [] } } });
+                assert.equal(h.stressJob.series, null, 'late band result is dropped');
+                h.closeStress();
+                assert.equal(h.state.activeView, 'ledger', 'closing twice is harmless');
+            },
+        },
+        {
+            name: 'repeated stress navigation preserves the scenario, worker, snapshots and pending refresh',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                h.configure({ request: () => { throw new Error('navigation must not request quotes'); } });
+                Object.assign(h.state, { stressOpen: true, activeView: 'stress', stressBasePrice: 65,
+                    stressHorizonDays: 10, stressExpiry: '20270319', stressLinkedIvTenorExponent: 0.25 });
+                const snapshot = { underlyingPrice: 72 };
+                h.state.stressLongOptionInputs = snapshot;
+                const worker = { terminate() { throw new Error('navigation must not cancel work'); } };
+                h.stressJob.worker = worker;
+                h.stressRefreshJob.pending = true;
+                const generation = h.stressRefreshJob.generation;
+                h.node('stress-linked-group').dataset.manual = '1';
+                h.context.document.body.classList.add('sidebar-open');
+                h.openStress();
+                assert.equal(h.state.stressBasePrice, 65);
+                assert.equal(h.state.stressHorizonDays, 10);
+                assert.equal(h.state.stressExpiry, '20270319');
+                assert.equal(h.state.stressLinkedIvTenorExponent, 0.25);
+                assert.equal(h.state.stressLongOptionInputs, snapshot);
+                assert.equal(h.stressJob.worker, worker);
+                assert.equal(h.stressRefreshJob.pending, true);
+                assert.equal(h.stressRefreshJob.generation, generation);
+                assert.equal(h.node('stress-linked-group').dataset.manual, '1');
+                assert.equal(h.context.document.body.classList.contains('sidebar-open'), false);
+                assert.equal(h.node('stress-view').scrollOptions, undefined, 'no unexpected scrolling');
+            },
+        },
+        {
+            name: 'same-book event reload redraws settlement results and invalidates old quotes and workers',
+            async run() {
+                const h = loadPriceHarness(); h.configureEventLoad(); enableStressChartDom(h);
+                const events = h.state.allEvents.concat({ kind: 'share_trade', account: 'U1',
+                    tradeDate: '2026-09-02', shares: 100, price: 70, cashAmount: -7000 });
+                h.configure({ today: () => '2026-09-03', request: async action => {
+                    assert.equal(action, 'list_cost_basis_events');
+                    return { events, total: events.length };
+                } });
+                Object.assign(h.state, { stressOpen: true, activeView: 'stress', stressExpiry: '20260904',
+                    stressBasePrice: 70, stressIncludeLongOptions: false, stressBandEnabled: false });
+                h.renderStress();
+                assert.equal(h.stressJob.series.points.at(-1).shares, 200);
+                assert.equal(h.stressJob.series.points.at(-1).headlinePnl, 4400);
+                const old = h.stressJob.series;
+                const worker = { terminate() { this.terminated = true; } };
+                h.stressJob.worker = worker;
+                h.state.stressLongOptionInputs = { stale: true };
+                h.state.stressLinkedInputs = { stale: true };
+                await h.loadEvents();
+                assert.equal(worker.terminated, true);
+                assert.equal(h.state.stressLongOptionInputs, null);
+                assert.equal(h.state.stressLinkedInputs, null);
+                assert.notEqual(h.stressJob.series, old);
+                assert.equal(h.stressJob.series.points.at(-1).shares, 300);
+                assert.equal(h.stressJob.series.points.at(-1).headlinePnl, 6500);
+                assert.equal(h.state.activeView, 'stress');
+                assert.equal(h.state.stressBasePrice, 70);
+                assert.equal(h.node('stress-chart').children.length > 0, true);
+            },
+        },
+        {
+            name: 'same-book reload refreshes the linked ledger and quotes the newly loaded contracts together',
+            async run() {
+                const { h, pending, quote, events } = loadStressPairHarness(); h.configureEventLoad(); enableStressChartDom(h);
+                h.state.stressOpen = true;
+                h.state.stressLongOptionInputs = { stale: true };
+                h.state.stressLinkedInputs = { stale: true };
+                const updated = h.state.allEvents.concat({ kind: 'option_trade', account: 'U1',
+                    tradeDate: '2026-09-02', right: 'P', strike: 60, expiry: '20270319',
+                    sharesPerContract: 100, contracts: 1, price: 3, cashAmount: -300 });
+                const reload = h.loadEvents();
+                pending[0].resolve({ events: updated, total: updated.length }); await reload;
+                assert.equal(h.state.stressLongOptionInputs, null);
+                assert.equal(h.state.stressLinkedInputs, null);
+                assert.equal(h.stressRefreshJob.pending, true);
+                assert.equal(pending[1].action, 'list_cost_basis_events');
+                assert.equal(pending[1].fields.bookId, 'book-qqq');
+                pending[1].resolve({ events, total: events.length });
+                await new Promise(resolve => setImmediate(resolve));
+                assert.deepEqual(pending.slice(2).map(p => p.fields.bookId), ['book-test', 'book-qqq']);
+                assert.ok(pending[2].fields.contracts.some(p => p.strike === 60 && p.expiry === '20270319'));
+                assert.ok(pending[3].fields.contracts.some(p => p.strike === 480));
+                pending[2].resolve(quote('book-test')); pending[3].resolve(quote('book-qqq'));
+                await new Promise(resolve => setImmediate(resolve));
+                assert.equal(h.stressRefreshJob.pending, false);
+                assert.equal(h.state.stressLinkedMapping, 'linear');
+                assert.equal(h.state.stressLinkedRatio, 3);
+            },
+        },
+        {
+            name: 'obsolete event reloads cannot invalidate the latest stress results or restart quotes',
+            async run() {
+                const h = loadPriceHarness(); h.configureEventLoad(); enableStressChartDom(h);
+                const pending = [];
+                h.configure({ today: () => '2026-09-03', request: (action) => {
+                    assert.equal(action, 'list_cost_basis_events');
+                    return new Promise(resolve => pending.push(resolve));
+                } });
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904', stressBasePrice: 70,
+                    stressIncludeLongOptions: false, stressBandEnabled: false });
+                const events = h.state.allEvents;
+                const first = h.loadEvents(), second = h.loadEvents();
+                pending[1]({ events, total: events.length }); await second;
+                const latest = h.stressJob.series, generation = h.stressJob.generation;
+                pending[0]({ events: [], total: 0 });
+                assert.equal(await first, false);
+                assert.equal(h.stressJob.series, latest);
+                assert.equal(h.stressJob.generation, generation);
+                assert.equal(h.state.allEvents.length, 2);
+            },
+        },
+        {
+            name: 'event reload with no remaining options clears the stress chart without requesting quotes',
+            async run() {
+                const h = loadPriceHarness(); h.configureEventLoad(); enableStressChartDom(h);
+                h.configure({ today: () => '2026-09-03', request: async action => {
+                    assert.equal(action, 'list_cost_basis_events');
+                    return { events: [], total: 0 };
+                } });
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904', stressBasePrice: 70,
+                    stressIncludeLongOptions: false, stressBandEnabled: false });
+                h.renderStress();
+                h.state.stressIncludeLongOptions = true;
+                await h.loadEvents();
+                assert.equal(h.stressJob.series, null);
+                assert.equal(h.node('stress-chart').children.length, 0);
+                assert.equal(h.node('stress-key-points').children.length, 0);
+                assert.equal(h.node('stress-slice').hidden, true);
+                assert.match(h.node('stress-status').textContent, /没有可用于压力测试/);
+            },
+        },
+        {
+            name: 'leaving the stress view by the settings entry or a book switch tears the job down',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                const doc = h.context.document;
+                const workers = [];
+                h.context.Worker = class {
+                    constructor() { workers.push(this); }
+                    postMessage(message) { this.message = message; }
+                    terminate() { this.terminated = true; }
+                };
+                doc.querySelectorAll = () => [{ src: 'http://localhost/js/cost_basis_stress_worker.js?v=hash' }];
+                h.configure({ request: () => new Promise(() => {}) });
+                const events = [{ kind: 'opening_balance', account: 'U1', tradeDate: '2026-01-01',
+                    shares: 100, cashAmount: -10000, price: 100 }];
+                const options = { centerPrice: 100, asOfInstant: '2026-09-08T16:00:00Z',
+                    targetInstant: '2026-09-08T16:00:00Z', throughExpiry: '20260908' };
+                h.openStress();
+                h.stressSeries(events, options);
+                h.showView('settings');
+                assert.equal(h.state.stressOpen, false);
+                assert.equal(workers[0].terminated, true);
+                assert.equal(h.stressJob.series, null);
+                assert.equal(h.state.activeView, 'settings');
+                h.showView('ledger');
+                h.openStress();
+                h.stressSeries(events, options);
+                assert.equal(workers.length, 2);
+                assert.equal(workers[1].terminated, undefined);
+                h.state.books.push({ bookId: 'book-qqq', account: 'U1', symbol: 'QQQ', secType: 'STK' });
+                h.selectPriceBook('book-qqq');
+                assert.equal(h.state.stressOpen, false);
+                assert.equal(h.state.activeView, 'ledger');
+                assert.equal(doc.getElementById('stress-view').hidden, true);
+                assert.equal(workers[1].terminated, true);
+                assert.equal(h.stressJob.series, null);
+                workers[1].onmessage({ data: { generation: workers[1].message.generation,
+                    band: { available: true, members: [], points: [] } } });
+                assert.equal(h.stressJob.series, null);
+            },
+        },
+        {
+            name: 'parameter groups follow their master checkbox unless the user toggled them by hand',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                const doc = h.context.document;
+                h.configure({ request: () => new Promise(() => {}) });
+                const own = doc.getElementById('stress-own-group');
+                const linked = doc.getElementById('stress-linked-group');
+                h.state.stressIncludeLongOptions = true;
+                h.state.stressIncludeLinkedHedge = false;
+                h.openStress();
+                assert.equal(own.open, true);
+                assert.equal(linked.open, false);
+                h.setStressGroup('stress-linked-group', true);
+                assert.equal(linked.open, true);
+                h.setStressGroup('stress-linked-group', false);
+                assert.equal(linked.open, false);
+                // The user opens the group by hand: unticking no longer closes it.
+                linked.open = true;
+                h.noteStressGroupToggle({ target: linked });
+                assert.equal(linked.dataset.manual, '1');
+                h.setStressGroup('stress-linked-group', false);
+                assert.equal(linked.open, true);
+                // A programmatic change is not a manual toggle.
+                h.setStressGroup('stress-own-group', false);
+                h.noteStressGroupToggle({ target: own });
+                assert.equal(own.dataset.manual, undefined);
+                // Re-entering the view resets the manual flags to the checkboxes.
+                h.closeStress();
+                h.openStress();
+                assert.equal(linked.open, false);
+                assert.equal(linked.dataset.manual, undefined);
+                assert.equal(own.open, true);
+            },
+        },
+        {
+            name: 'the sidebar stress entry mirrors the What If button',
+            run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                const doc = h.context.document;
+                h.renderWhatIf();
+                assert.equal(doc.getElementById('btn-open-stress-test').disabled, false);
+                assert.equal(doc.getElementById('btn-open-stress-view').disabled, false);
+                h.state.ledger = null;
+                h.renderWhatIf();
+                assert.equal(doc.getElementById('btn-open-stress-test').disabled, true);
+                assert.equal(doc.getElementById('btn-open-stress-view').disabled, true);
+                const html = readPage();
+                assert.match(html, /<button id="btn-open-stress-view" class="nav-item nav-item-stress" type="button" disabled>/);
+                assert.match(html, /<p class="nav-label nav-label-system">情景<\/p>\s*<button id="btn-open-stress-view"/);
+            },
+        },
+        {
+            name: 'every stress element the page script addresses exists exactly once in the view markup',
+            run() {
+                const html = readPage();
+                const source = readScript();
+                const ids = new Set(Array.from(source.matchAll(/\$\('((?:stress-|btn-[a-z-]*stress)[a-z0-9-]*)'\)/g), (m) => m[1]));
+                assert.ok(ids.size > 60, `expected many stress ids, got ${ids.size}`);
+                const missing = [];
+                for (const id of ids) {
+                    const count = html.split(`id="${id}"`).length - 1;
+                    if (count !== 1) missing.push(`${id}×${count}`);
+                }
+                assert.deepEqual(missing, []);
+                assert.match(html, /<div id="stress-view" class="page-view stress-view" aria-labelledby="stress-title" hidden>/);
+                assert.match(html, /<aside class="stress-params"[\s\S]*?<\/aside>\s*<section class="stress-results"/);
+                const view = html.slice(html.indexOf('id="stress-view"'), html.indexOf('</main>'));
+                for (const id of ['stress-status', 'stress-chart', 'stress-key-points', 'stress-slice']) {
+                    assert.ok(view.indexOf(`id="${id}"`) > view.indexOf('class="stress-results"'), `${id} lives in the results column`);
+                }
+                assert.ok(view.indexOf('id="stress-linked-group"') < view.indexOf('</aside>'));
+                assert.doesNotMatch(html, /stress-modal|stress-dialog|stress-close|aria-modal/);
+                assert.doesNotMatch(source, /stress-modal/);
+            },
+        },
+        {
+            name: 'stress view styles: two sticky columns, stacked below 1360px, no modal shell left',
+            run() {
+                const css = fs.readFileSync(path.join(PROJECT_ROOT, 'cost_basis.css'), 'utf8');
+                assert.doesNotMatch(css, /\.stress-modal|\.stress-dialog|stress-modal-open|\.stress-header|\.stress-close/);
+                assert.match(css, /\.stress-view\s*\{[^}]*grid-template-columns:\s*minmax\(300px, 330px\) minmax\(0, 1fr\)/);
+                assert.match(css, /\.stress-params\s*\{[^}]*position:\s*sticky/);
+                assert.match(css, /\.stress-view-header\s*\{[^}]*grid-column:\s*1 \/ -1/);
+                const stacked = css.match(/@media \(max-width: 1360px\)\s*\{([\s\S]*?)\n\}/);
+                assert.ok(stacked, 'stacked breakpoint exists');
+                assert.match(stacked[1], /\.stress-view \{ grid-template-columns: 1fr; \}/);
+                assert.match(stacked[1], /\.stress-results \{ order: 1; \}/);
+                assert.match(stacked[1], /\.stress-params \{[^}]*position: static/);
+                assert.match(css, /\.stress-chart-wrap \{ position: relative; margin: 0; overflow-x: auto;/);
+                assert.match(css, /#stress-chart \{ display: block; width: 100%; min-width: 760px; min-height: 390px;/);
+                assert.match(css, /\.nav-item-settings\.active, \.nav-item-stress\.active/);
+                // A half-width cell is ~135px: the refresh label must fit or wrap,
+                // never push a horizontal scrollbar onto the parameter column.
+                assert.match(css, /\.stress-controls button \{[^}]*white-space: normal/);
+                assert.match(css, /\.stress-params\s*\{[^}]*overflow: hidden auto/);
+                const labels = Array.from(readScript().matchAll(/'拉取中…' : '([^']+)'/g), (m) => m[1]);
+                assert.deepEqual(labels, ['刷新 TWS 行情']);
+                assert.match(readPage(), /<button id="btn-stress-refresh-price" class="half" type="button" title="[^"]+">刷新 TWS 行情<\/button>/);
+            },
+        },
+        {
+            name: 'missing TWS quotes degrade to a labelled settlement-only curve instead of a blank chart',
+            run() {
+                const h = loadPriceHarness();
+                const core = h.context.OptionComboCostBasisCore;
+                const doc = h.context.document;
+                h.state.status = { features: { optionScenarioInputs: true } };
+                h.state.allEvents.push({
+                    kind: 'option_trade', account: 'U1', tradeDate: '2026-09-01',
+                    right: 'P', strike: 46, expiry: '20270319', sharesPerContract: 100,
+                    contracts: 5, price: 3, cashAmount: -1500,
+                });
+                h.state.ledger = core.computeLedger(h.state.allEvents, { referencePrice: 70, secType: 'STK' });
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904', stressBasePrice: 70,
+                    stressIncludeLongOptions: true, stressLongOptionInputs: null, stressInputsPending: false,
+                    stressInputsError: '拉取失败：TWS 返回的标的现价无效', stressPnlBasis: 'cost' });
+                const svgNode = () => ({
+                    children: [], textContent: '', style: {}, attributes: {},
+                    appendChild(child) { this.children.push(child); return child; },
+                    removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
+                    get firstChild() { return this.children[0]; },
+                    setAttribute(name, value) { this.attributes[name] = value; },
+                });
+                doc.createElementNS = svgNode;
+                const byId = doc.getElementById;
+                doc.getElementById = (id) => {
+                    const found = byId(id);
+                    if (!found.setAttribute) {
+                        found.attributes = {};
+                        found.style = {};
+                        found.setAttribute = function set(name, value) { this.attributes[name] = value; };
+                    }
+                    return found;
+                };
+                h.configure({ today: () => '2026-09-03', request: () => new Promise(() => {}) });
+                h.renderStress();
+                const status = doc.getElementById('stress-status').textContent;
+                assert.ok(status.startsWith('⚠ 仅显示到期结算曲线'), status);
+                assert.match(status, /标的现价无效/);
+                assert.match(status, /\[missing_(long|short)_option_market_inputs\]/);
+                assert.match(status, /TQQQ · 本账本现金流成本盈亏/);
+                assert.ok(doc.getElementById('stress-chart').children.length > 0, 'chart is drawn');
+                assert.equal(doc.getElementById('stress-key-points').children.length, 3);
+                assert.equal(doc.getElementById('stress-band-status').textContent, '中线降级为到期结算曲线，区间不生成。');
+                assert.equal(doc.getElementById('stress-legend-base-pnl').textContent, '到期结算盈亏（未到期期权未计入，左轴）');
+                assert.equal(doc.getElementById('stress-legend-protected-pnl').hidden, true);
+                assert.ok(h.stressJob.series.warnings.includes('partial_portfolio_excludes_deferred'));
+                assert.match(status, /已排除更晚到期的期权/);
+                // The unavailable primary verdict is memoised; a second render
+                // does not rebuild it or disturb the fallback on screen.
+                const shown = h.stressJob.series;
+                h.renderStress();
+                assert.equal(h.stressJob.series, shown);
+                assert.ok(h.stressJob.unavailable.size >= 1);
+                // While a fetch is in flight the chart waits rather than flickering.
+                h.state.stressInputsPending = true;
+                h.renderStress();
+                assert.ok(doc.getElementById('stress-status').textContent.startsWith('正在从 TWS 拉取'));
+                assert.equal(doc.getElementById('stress-chart').children.length, 0);
+                // Change-since-snapshot has no valid baseline without quotes: no fallback.
+                h.state.stressInputsPending = false;
+                h.state.stressPnlBasis = 'change';
+                h.renderStress();
+                assert.doesNotMatch(doc.getElementById('stress-status').textContent, /⚠/);
+                assert.equal(doc.getElementById('stress-chart').children.length, 0);
+                // With deferred options unticked there is nothing to degrade from.
+                h.state.stressPnlBasis = 'cost';
+                h.state.stressIncludeLongOptions = false;
+                h.renderStress();
+                assert.doesNotMatch(doc.getElementById('stress-status').textContent, /⚠/);
+                assert.ok(doc.getElementById('stress-chart').children.length > 0);
+            },
+        },
+        {
+            name: 'an off-hours snapshot without an underlying price is retried once before failing',
+            async run() {
+                const h = loadPriceHarness(); h.silenceStressRender();
+                h.state.status = { features: { optionScenarioInputs: true } };
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904',
+                    stressIncludeLongOptions: true, stressBasePrice: 70 });
+                const calls = [];
+                const replies = [];
+                h.configure({ today: () => '2026-09-03', request: async (action, fields) => {
+                    calls.push({ action, fields });
+                    return replies.shift();
+                } });
+                const waits = [];
+                h.context.setTimeout = (fn, ms) => { waits.push(ms); fn(); return 1; };
+                const snapshot = (price) => ({ underlyingPrice: price, throughExpiry: '20260904',
+                    fetchedAt: 's', options: [], ratesByExpiry: [] });
+                replies.push(snapshot(null), snapshot(72));
+                await h.refreshStressInputs(false);
+                assert.equal(calls.length, 2);
+                assert.deepEqual(waits, [1500]);
+                assert.equal(h.state.marketPrice, 72);
+                assert.equal(h.state.stressInputsError, '');
+                assert.equal(h.state.stressInputsPending, false);
+                // Two misses in a row: give up with the explicit message, no third request.
+                replies.push(snapshot(-1), snapshot(undefined));
+                await h.refreshStressInputs(false);
+                assert.equal(calls.length, 4);
+                assert.equal(h.state.stressInputsError, '拉取失败：TWS 返回的标的现价无效');
+                assert.equal(h.state.stressLongOptionInputs, null);
+                // A scenario change during the wait abandons the retry.
+                replies.push(snapshot(null), snapshot(73));
+                h.context.setTimeout = (fn) => { h.state.stressHorizonDays = 5; h.invalidateScenario(); fn(); return 1; };
+                await h.refreshStressInputs(false);
+                assert.equal(calls.length, 5);
+                assert.equal(h.state.marketPrice, 72);
+            },
+        },
+        {
+            name: 'a linked snapshot failure drops only the overlay; own quotes missing too falls back to settlement',
+            run() {
+                const { h, quote } = loadStressPairHarness(); enableStressChartDom(h);
+                const doc = h.context.document;
+                const core = h.context.OptionComboCostBasisCore;
+                Object.assign(h.state, { stressOpen: true, stressLongOptionInputs: quote('book-test'),
+                    stressLinkedInputs: null, stressLinkedInputsPending: false,
+                    stressLinkedInputsError: '拉取失败：请求超时', stressInputsPending: false });
+                h.renderStress();
+                let status = doc.getElementById('stress-status').textContent;
+                assert.ok(status.startsWith('⚠ QQQ 联动账本未计入，本账本期权仍按快照估值'), status);
+                assert.match(status, /请求超时 \[missing_linked_market_inputs\]/);
+                assert.ok(doc.getElementById('stress-chart').children.length > 0);
+                assert.equal(h.stressJob.series.linkedHedgeEnabled, false);
+                assert.equal(doc.getElementById('stress-legend-linked-pnl').hidden, true);
+                assert.equal(doc.getElementById('stress-band-status').textContent, '中线降级为本账本曲线（联动未计入），区间不生成。');
+                // The linked fetch still running: wait, do not draw a half result.
+                h.state.stressLinkedInputsPending = true;
+                h.renderStress();
+                assert.doesNotMatch(doc.getElementById('stress-status').textContent, /⚠/);
+                assert.equal(doc.getElementById('stress-chart').children.length, 0);
+                h.state.stressLinkedInputsPending = false;
+                // Own quotes gone as well, with a deferred long: two-step degrade.
+                h.state.allEvents.push({ kind: 'option_trade', account: 'U1', tradeDate: '2026-09-01',
+                    right: 'P', strike: 46, expiry: '20270319', sharesPerContract: 100,
+                    contracts: 5, price: 3, cashAmount: -1500 });
+                h.state.ledger = core.computeLedger(h.state.allEvents, { referencePrice: 70, secType: 'STK' });
+                Object.assign(h.state, { stressLongOptionInputs: null, stressIncludeLongOptions: true,
+                    stressInputsError: '拉取失败：TWS 返回的标的现价无效' });
+                h.renderStress();
+                status = doc.getElementById('stress-status').textContent;
+                assert.ok(status.startsWith('⚠ 仅显示到期结算曲线'), status);
+                assert.match(status, /\[missing_linked_market_inputs\]/);
+                assert.ok(doc.getElementById('stress-chart').children.length > 0);
+                assert.equal(doc.getElementById('stress-legend-base-pnl').textContent, '到期结算盈亏（未到期期权未计入，左轴）');
+            },
+        },
+        {
+            name: 'partial linked quotes preserve the validated own-book options instead of blanking the chart',
+            run() {
+                for (const missing of ['rows', 'mark', 'sides']) {
+                    const { h, quote } = loadStressPairHarness(); enableStressChartDom(h);
+                    const own = quote('book-test'), linked = quote('book-qqq');
+                    const extra = { kind: 'option_trade', account: 'U1', tradeDate: '2026-09-01',
+                        right: 'P', strike: 60, expiry: '20270319', sharesPerContract: 100,
+                        contracts: 1, price: 2, cashAmount: -200 };
+                    h.state.allEvents.push(extra);
+                    h.state.ledger = h.context.OptionComboCostBasisCore.computeLedger(h.state.allEvents);
+                    own.options.push({right:'P',strike:60,expiry:'20270319',mark:2,bid:1.9,ask:2.1,
+                        marketDataType:1,observedAt:own.fetchedAt});
+                    if (missing === 'rows') linked.options = [];
+                    if (missing === 'mark') linked.options[0].mark = null;
+                    Object.assign(h.state, {stressOpen:true,stressIncludeLongOptions:true,
+                        stressLongOptionInputs:own,stressLinkedInputs:linked,
+                        stressLiquidation:missing === 'sides' ? 'bidask' : 'mid'});
+                    h.renderStress();
+                    assert.match(h.node('stress-status').textContent, /^⚠ QQQ 联动账本未计入/);
+                    assert.ok(h.node('stress-chart').children.length > 0, missing);
+                    assert.equal(h.stressJob.series.linkedHedgeEnabled, false);
+                    assert.equal(h.stressJob.series.includeDeferredLongOptions, true);
+                    assert.equal(h.stressJob.series.longOptionCount, 1, 'valid own long is retained');
+                    assert.equal(h.node('stress-legend-protected-pnl').hidden, false);
+                    assert.equal(h.node('stress-legend-linked-pnl').hidden, true);
+                    assert.equal(h.stressJob.worker, null);
+                    assert.equal(h.stressJob.series.band, undefined);
+                }
+            },
+        },
+        {
+            name: 'missing own option mark can degrade to settlement but never values the missing leg at zero',
+            run() {
+                const h = loadPriceHarness(); enableStressChartDom(h);
+                h.configure({today:()=> '2026-09-03'});
+                h.state.allEvents.push({kind:'option_trade',account:'U1',tradeDate:'2026-09-01',
+                    right:'P',strike:60,expiry:'20270319',contracts:1,sharesPerContract:100,price:2,cashAmount:-200});
+                h.state.ledger = h.context.OptionComboCostBasisCore.computeLedger(h.state.allEvents);
+                const {quote} = loadStressPairHarness();
+                const own = quote('book-test');
+                own.options.push({right:'P',strike:60,expiry:'20270319',mark:null,observedAt:own.fetchedAt});
+                Object.assign(h.state,{stressOpen:true,stressExpiry:'20260904',stressBasePrice:70,
+                    stressIncludeLongOptions:true,stressLongOptionInputs:own});
+                h.renderStress();
+                assert.match(h.node('stress-status').textContent, /^⚠ 仅显示到期结算曲线/);
+                assert.equal(h.stressJob.series.longOptionCount, 0);
+                assert.ok(h.stressJob.series.warnings.includes('partial_portfolio_excludes_deferred'));
+                // At the upper end only the 200 shares and settled short premium
+                // remain. The missing long's -$200 premium is excluded too.
+                assert.equal(h.stressJob.series.points.at(-1).headlinePnl, 4400);
+            },
+        },
+        {
+            name: 'partial quote fallback remains disabled while pending or using the change lens',
+            run() {
+                for (const mode of ['own_pending','linked_pending','change']) {
+                    const {h,quote} = loadStressPairHarness(); enableStressChartDom(h);
+                    const linked=quote('book-qqq'); linked.options=[];
+                    Object.assign(h.state,{stressOpen:true,stressLongOptionInputs:quote('book-test'),
+                        stressLinkedInputs:linked,stressInputsPending:mode==='own_pending',
+                        stressLinkedInputsPending:mode==='linked_pending',stressPnlBasis:mode==='change'?'change':'cost'});
+                    h.renderStress();
+                    assert.equal(h.node('stress-chart').children.length,0,mode);
+                    assert.doesNotMatch(h.node('stress-status').textContent,/^⚠/,mode);
+                }
+            },
+        },
+        {
+            name: 'linked identity conflicts, crossed quotes and impossible marks are not masked by fallback',
+            run() {
+                for (const invalid of ['identity','crossed','arbitrage']) {
+                    const {h,quote} = loadStressPairHarness(); enableStressChartDom(h);
+                    const linked=quote('book-qqq');
+                    if(invalid==='identity') {
+                        h.state.stressLinkedLedger.openOptions[0].conId=123;
+                        Object.assign(linked.options[0],{conId:123,multiplier:10});
+                    }
+                    if(invalid==='crossed') Object.assign(linked.options[0],{bid:30,ask:20});
+                    if(invalid==='arbitrage') linked.options[0].mark=1000;
+                    Object.assign(h.state,{stressOpen:true,stressLongOptionInputs:quote('book-test'),stressLinkedInputs:linked});
+                    h.renderStress();
+                    assert.equal(h.node('stress-chart').children.length,0,invalid);
+                    assert.doesNotMatch(h.node('stress-status').textContent,/^⚠/,invalid);
+                }
+            },
+        },
+        {
+            name: 'busy paired snapshot requests finish pending state and allow a later successful retry',
+            async run() {
+                const {h,pending,quote} = loadStressPairHarness();
+                const first=h.refreshStressPair(false);
+                for(const p of pending) p.reject(Object.assign(new Error('busy'),{code:'broker_option_scenario_inputs_busy'}));
+                await first;
+                assert.equal(h.stressRefreshJob.pending,false);
+                assert.equal(h.state.stressInputsPending,false);
+                assert.equal(h.state.stressLinkedInputsPending,false);
+                assert.match(h.state.stressInputsError,/繁忙.*重试/);
+                assert.match(h.state.stressLinkedInputsError,/繁忙.*重试/);
+                const retry=h.refreshStressPair(false);
+                pending[2].resolve(quote('book-test')); pending[3].resolve(quote('book-qqq'));
+                await retry;
+                assert.equal(h.stressRefreshJob.pending,false);
+                assert.equal(h.state.stressInputsError,'');
+                assert.equal(h.state.stressLinkedInputsError,'');
+            },
+        },
+        {
+            name: 'an emptied chart drops its pointer handlers so no stale tooltip can reappear',
+            run() {
+                const h = loadPriceHarness(); enableStressChartDom(h);
+                const doc = h.context.document;
+                h.configure({ today: () => '2026-09-03', request: () => new Promise(() => {}) });
+                Object.assign(h.state, { stressOpen: true, stressExpiry: '20260904', stressBasePrice: 70,
+                    stressIncludeLongOptions: false, stressBandEnabled: false });
+                h.renderStress();
+                const svg = doc.getElementById('stress-chart');
+                assert.equal(typeof svg.onpointermove, 'function');
+                assert.equal(typeof svg.onpointerleave, 'function');
+                doc.getElementById('stress-tooltip').hidden = false;
+                h.stressRefreshJob.pending = true;
+                h.renderStress();
+                assert.equal(svg.children.length, 0);
+                assert.equal(svg.onpointermove, null);
+                assert.equal(svg.onpointerleave, null);
+                assert.equal(doc.getElementById('stress-tooltip').hidden, true);
+                assert.equal(doc.getElementById('stress-slice').hidden, true);
+            },
+        },
+        // ------------------------------------------------------------------
+        // 2026-09-10 import integrity review
+        // ------------------------------------------------------------------
+        {
+            name: 'rows already stored under their own reference are a replay, not a match',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const stored = {
+                    eventId: 'csv-1', kind: 'option_trade', tradeDate: '2026-09-01',
+                    brokerTimestamp: '2026-09-01T10:00:00', account: 'U1', right: 'P',
+                    strike: 72, expiry: '20260918', contracts: -1, sharesPerContract: 100,
+                    price: 1.01, cashAmount: 100.44, fees: 0.56, source: 'csv_import',
+                    tag: 'ibkr_open', externalRef: 'stmt-known',
+                };
+                const twsNextDay = Object.assign({}, stored, {
+                    eventId: 'api-1', tradeDate: '2026-09-02',
+                    brokerTimestamp: '2026-09-02T10:00:00', source: 'execution_report',
+                    tag: 'ibkr_exec', externalRef: 'ibkr-exec-E2',
+                });
+                const csvRow = Object.assign({}, stored, {
+                    eventId: undefined, sourceRef: 'stmt-known', lineNumber: 3,
+                });
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [csvRow],
+                }, [stored, twsNextDay]);
+                assert.equal(plan.problems.length, 0);
+                assert.equal(Object.keys(plan.aliases).length, 0);
+                assert.equal(plan.unmatchedExecutions.length, 1);
+            },
+        },
+        {
+            name: 'fill rows split an order that TWS delivered only partly',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const base = {
+                    kind: 'option_trade', tradeDate: '2026-09-08', account: 'U1',
+                    right: 'P', strike: 72, expiry: '20260918', sharesPerContract: 100,
+                    conId: 123,
+                };
+                const storedFill = Object.assign({}, base, {
+                    eventId: 'f1', source: 'execution_report', tag: 'ibkr_exec',
+                    externalRef: 'ibkr-exec-E1', brokerTimestamp: '2026-09-08T10:00:00',
+                    contracts: -3, price: 1.01, fees: 1.95, cashAmount: 301.05,
+                });
+                const orderRow = Object.assign({}, base, {
+                    source: 'csv_import', tag: 'ibkr_open', externalRef: 'stmt-order',
+                    sourceRef: 'stmt-order', brokerTimestamp: '2026-09-08T10:00:00',
+                    contracts: -10, price: 1.02, priceText: '1.02', fees: 6.5,
+                    cashAmount: 1013.5, lineNumber: 9,
+                    fills: [
+                        { brokerTimestamp: '2026-09-08T10:00:00', tradeDate: '2026-09-08',
+                          quantity: -3, price: 1.01, priceText: '1.01', cashAmount: 301.05,
+                          fees: 1.95, lineNumber: 10 },
+                        { brokerTimestamp: '2026-09-08T10:00:07', tradeDate: '2026-09-08',
+                          quantity: -7, price: 1.02, priceText: '1.02', cashAmount: 712.45,
+                          fees: 4.55, lineNumber: 11 },
+                    ],
+                });
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [orderRow],
+                }, [storedFill]);
+                assert.equal(plan.problems.length, 0);
+                assert.equal(Object.keys(plan.aliases).length, 0);
+                const split = plan.fillSplits['U1\u0000stmt-order'];
+                assert.deepEqual(Array.from(split.keep), [1]);
+                assert.deepEqual(JSON.parse(JSON.stringify(split.matched)),
+                    [{ index: 0, externalRef: 'ibkr-exec-E1' }]);
+                assert.equal(plan.matched[0].partial, true);
+                // A fill row that disagrees with the stored fill is not
+                // claimed, and the whole order is imported as usual.
+                const disagree = page.planExecutionReportAliases({
+                    format: 'activity', events: [Object.assign({}, orderRow, {
+                        fills: [Object.assign({}, orderRow.fills[0], { cashAmount: 300 }),
+                            orderRow.fills[1]],
+                    })],
+                }, [storedFill]);
+                assert.equal(Object.keys(disagree.fillSplits).length, 0);
+                assert.equal(disagree.problems.length, 1);
+            },
+        },
+        {
+            name: 'stored fills carrying an order id group by order, not by adjacency',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const base = {
+                    kind: 'share_trade', tradeDate: '2026-09-08', account: 'U1',
+                    source: 'execution_report', tag: 'ibkr_exec',
+                };
+                const fill = (id, time, shares, permId) => Object.assign({}, base, {
+                    eventId: id, externalRef: `ibkr-exec-${id}`, brokerTimestamp: time,
+                    shares, price: 45, fees: 0.5, cashAmount: -(shares * 45) - 0.5,
+                    note: `Imported from TWS API execution ${id}; permId ${permId}`,
+                });
+                const fills = [
+                    fill('A0', '2026-09-08T09:34:58', 200, 7001),
+                    fill('A1', '2026-09-08T09:35:00', 100, 7002),
+                    fill('A2', '2026-09-08T09:35:02', 200, 7002),
+                ];
+                const orderA = Object.assign({}, base, {
+                    source: 'csv_import', tag: 'ibkr_open', externalRef: 'stmt-a', sourceRef: 'stmt-a',
+                    brokerTimestamp: '2026-09-08T09:35:00', shares: 300,
+                    price: 45, priceText: '45', fees: 1, cashAmount: -13501, lineNumber: 3,
+                });
+                // Without order ids two runs of 300 touch 09:35:00; with them
+                // only order 7002 does.
+                const plan = page.planExecutionReportAliases({
+                    format: 'activity', events: [orderA],
+                }, fills);
+                assert.equal(plan.problems.length, 0);
+                assert.equal(plan.aliases['U1\u0000stmt-a'], 'ibkr-exec-A1');
+                assert.deepEqual(Array.from(plan.matched[0].executions.map((item) => item.eventId)), ['A1', 'A2']);
+            },
+        },
+        {
+            name: 'a revised statement row and a hand-entered twin block instead of doubling',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const stored = {
+                    eventId: 'csv-1', kind: 'share_trade', tradeDate: '2026-09-01',
+                    brokerTimestamp: '2026-09-01T10:00:00', account: 'U1', shares: 10,
+                    price: 50, fees: 0, cashAmount: -500, source: 'csv_import',
+                    externalRef: 'stmt-old',
+                };
+                const revised = Object.assign({}, stored, {
+                    eventId: undefined, fees: 1, cashAmount: -501,
+                    externalRef: 'stmt-new', sourceRef: 'stmt-new', lineNumber: 2,
+                });
+                const plan = page.planStatementRevisionConflicts({
+                    events: [revised],
+                }, [stored], {});
+                assert.equal(plan.problems.length, 1);
+                assert.match(plan.problems[0].reason, /different identity/);
+                assert.match(plan.problems[0].reason, /fees 0; this file .* fees 1/);
+                const manual = Object.assign({}, stored, {
+                    eventId: 'man-1', source: 'manual', externalRef: null,
+                    brokerTimestamp: null,
+                });
+                const csv = Object.assign({}, stored, {
+                    eventId: undefined, externalRef: 'stmt-x', sourceRef: 'stmt-x', lineNumber: 4,
+                });
+                const twin = page.planStatementRevisionConflicts({ events: [csv] }, [manual], {});
+                assert.match(twin.problems[0].reason, /hand-entered ledger row/);
+                const dividend = { kind: 'dividend', tradeDate: '2026-06-30', account: 'U1',
+                    cashAmount: 25, externalRef: 'stmt-div', sourceRef: 'stmt-div', lineNumber: 8 };
+                const manualDividend = Object.assign({}, dividend, {
+                    eventId: 'man-2', source: 'manual', externalRef: null });
+                const cash = page.planStatementRevisionConflicts(
+                    { events: [dividend] }, [manualDividend], {});
+                assert.match(cash.problems[0].reason, /hand-entered dividend/);
+                // An aliased or already-known row is not a revision.
+                const known = page.planStatementRevisionConflicts(
+                    { events: [Object.assign({}, csv, { sourceRef: 'stmt-old' })] }, [stored], {});
+                assert.equal(known.problems.length, 0);
+            },
+        },
+        {
+            name: 'TWS fills inside the statement period with no statement row block the batch',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const fill = {
+                    eventId: 'api-1', kind: 'option_trade', tradeDate: '2026-09-15',
+                    account: 'U1', right: 'P', strike: 72, expiry: '20260918',
+                    contracts: -1, price: 1, externalRef: 'ibkr-exec-E9',
+                    source: 'execution_report', tag: 'ibkr_exec',
+                };
+                const inside = page.planStatementCoverageGaps({
+                    format: 'activity', account: 'U1', checks: { trades: true },
+                    statementPeriod: { from: '2026-09-01', through: '2026-09-30', source: 'period' },
+                }, [fill]);
+                assert.equal(inside.checked, true);
+                assert.equal(inside.problems.length, 1);
+                assert.match(inside.problems[0].reason, /ibkr-exec-E9/);
+                const outside = page.planStatementCoverageGaps({
+                    format: 'activity', account: 'U1', checks: { trades: true },
+                    statementPeriod: { from: '2026-08-01', through: '2026-08-31', source: 'period' },
+                }, [fill]);
+                assert.equal(outside.problems.length, 0);
+                const noPeriod = page.planStatementCoverageGaps({
+                    format: 'activity', account: 'U1', checks: { trades: true },
+                    statementPeriod: { from: '2026-09-01', through: '2026-09-30', source: 'events' },
+                }, [fill]);
+                assert.equal(noPeriod.checked, false);
+            },
+        },
+        {
+            name: 'real openings supersede an opening stub only when they sum exactly',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const stub = {
+                    eventId: 'stub-1', kind: 'option_trade', tradeDate: '2026-08-31',
+                    account: 'U1', right: 'P', strike: 45, expiry: '20260717',
+                    sharesPerContract: 100, contracts: -2, price: 0, cashAmount: 0,
+                    source: 'csv_import', tag: 'prior_open', externalRef: 'prior-x',
+                };
+                const opening = (date, contracts, ref) => ({
+                    kind: 'option_trade', tradeDate: date, account: 'U1', right: 'P',
+                    strike: 45, expiry: '20260717', sharesPerContract: 100, contracts,
+                    price: 1, cashAmount: -contracts * 100, source: 'csv_import',
+                    tag: 'ibkr_open', externalRef: ref, sourceRef: ref, lineNumber: 2,
+                });
+                const exact = page.planPriorStubSupersession({
+                    format: 'activity', account: 'U1',
+                    events: [opening('2026-08-20', -1, 'a'), opening('2026-08-21', -1, 'b')],
+                }, [stub]);
+                assert.deepEqual(Array.from(exact.eventIds), ['stub-1']);
+                assert.equal(exact.problems.length, 0);
+                const partial = page.planPriorStubSupersession({
+                    format: 'activity', account: 'U1', events: [opening('2026-08-20', -1, 'a')],
+                }, [stub]);
+                assert.deepEqual(Array.from(partial.eventIds), []);
+                assert.match(partial.problems[0].reason, /does not exactly replace the stub/);
+                const unrelated = page.planPriorStubSupersession({
+                    format: 'activity', account: 'U1',
+                    events: [Object.assign(opening('2026-08-20', -2, 'c'), { strike: 50 })],
+                }, [stub]);
+                assert.deepEqual(Array.from(unrelated.eventIds), []);
+                assert.equal(unrelated.problems.length, 0);
+            },
+        },
+        {
+            name: 'a TWS reply that lands after a book switch is dropped',
+            async run() {
+                const h = loadReconciliationHarness();
+                h.state.allEvents = [];
+                h.configure({ request: async () => {
+                    // The operator switches books while the query is out.
+                    h.state.bookId = 'other-book';
+                    return { fetchedAt: '2026-09-03T11:00:00', executions: [{
+                        account: 'U1', symbol: 'TQQQ', secType: 'STK', execId: 'source-A',
+                        side: 'BOT', quantity: 10, price: 50, commission: 1,
+                        commissionAvailable: true, brokerTimestamp: '2026-09-01T10:00:00',
+                    }] };
+                } });
+                await h.fetch();
+                assert.equal(h.state.importResult, null);
+                assert.equal(h.alerts.length, 0);
+            },
+        },
+        {
+            name: 'a preview bound to an older ledger version, generation or mode cannot be committed',
+            run() {
+                const h = loadReconciliationHarness();
+                h.state.ledgerVersion = { digest: 'v1' };
+                h.state.importGeneration = 4;
+                h.state.importResult = { binding: {
+                    bookId: 'book-test', generation: 4, mode: 'append', ledgerVersion: 'v1',
+                } };
+                assert.equal(h.bindingProblem(), '');
+                h.state.ledgerVersion = { digest: 'v2' };
+                assert.match(h.bindingProblem(), /账本在预览后发生了变化/);
+                h.state.ledgerVersion = { digest: 'v1' };
+                h.state.importGeneration = 5;
+                assert.match(h.bindingProblem(), /预览已过期/);
+                h.state.importGeneration = 4;
+                h.state.importResult.binding.bookId = 'another';
+                assert.match(h.bindingProblem(), /另一本账本/);
+            },
+        },
+        {
+            name: 'reading a new file invalidates the old preview and a late read is dropped',
+            run() {
+                const h = loadReconciliationHarness();
+                const readers = [];
+                h.context.FileReader = function FakeReader() {
+                    readers.push(this);
+                    this.readAsText = () => {};
+                };
+                h.state.importResult = { binding: {}, problems: [], events: [] };
+                h.state.importText = 'old file';
+                h.handleImportFile({ target: { files: [{ name: 'new.csv' }] } });
+                assert.equal(h.state.importResult, null);
+                assert.equal(h.state.importText, '');
+                assert.equal(h.state.importReading, 'new.csv');
+                const first = readers[0];
+                // A second selection supersedes the first before it finished.
+                h.handleImportFile({ target: { files: [{ name: 'newer.csv' }] } });
+                first.result = 'stale bytes';
+                first.onload();
+                assert.equal(h.state.importText, '');
+                assert.equal(h.state.importReading, 'newer.csv');
+                const second = readers[1];
+                second.error = { message: 'disk' };
+                second.onerror();
+                assert.equal(h.state.importReading, false);
+                assert.match(h.state.importResult.problems[0].reason, /文件读取失败/);
+            },
+        },
+        {
+            name: 'statement coverage lists contiguous spans and the gaps between them',
+            run() {
+                const page = loadPage().OptionComboCostBasisPage;
+                const coverage = page.describeStatementCoverage([
+                    { checks: { period: true, account: true, openPositions: true, revision: true, twsCoverage: true }, periodFrom: '2026-08-01', periodThrough: '2026-08-31' },
+                    { checks: { period: true, account: true, openPositions: true, revision: true, twsCoverage: true }, periodFrom: '2026-09-01', periodThrough: '2026-09-30' },
+                    { checks: { period: true, account: true, openPositions: true, revision: true, twsCoverage: true }, periodFrom: '2026-11-01', periodThrough: '2026-11-30' },
+                    { checks: { period: true, account: true, openPositions: true, revision: true, twsCoverage: true }, periodFrom: '', periodThrough: '' },
+                ]);
+                assert.deepEqual(JSON.parse(JSON.stringify(coverage.covered)), [
+                    { from: '2026-08-01', through: '2026-09-30' },
+                    { from: '2026-11-01', through: '2026-11-30' },
+                ]);
+                assert.deepEqual(JSON.parse(JSON.stringify(coverage.gaps)),
+                    [{ from: '2026-10-01', through: '2026-10-31' }]);
+                assert.match(coverage.text, /缺口 2026-10-01 至 2026-10-31/);
+                assert.equal(page.describeStatementCoverage([]).text, '');
             },
         },
     ],

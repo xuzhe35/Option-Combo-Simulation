@@ -1,0 +1,19 @@
+FIXED_IDENTICAL_TWS {"inserted": 0, "activeRows": 2, "shares": 20.0, "contracts": 0, "cash": -1002.0, "supersededPriorStubs": 0}
+FIXED_CASH_SIGNS {"inserted": 2, "activeRows": 2, "shares": 0, "contracts": 0, "cash": -7.0, "supersededPriorStubs": 0}
+SAME_REF_REVISION {"inserted": 0, "activeRows": 1, "shares": 10.0, "contracts": 0, "cash": -501.0, "supersededPriorStubs": 0}
+DIRECT_EXEC_REVISION {"inserted": 0, "activeRows": 1, "shares": 10.0, "contracts": 0, "cash": -501.0, "supersededPriorStubs": 0}
+REUSED_CROSS_FORMAT_TWIN {"inserted": 0, "activeRows": 1, "shares": 10.0, "contracts": 0, "cash": -501.0, "supersededPriorStubs": 0}
+QUANTITY_REVISION {"inserted": 1, "activeRows": 2, "shares": 30.0, "contracts": 0, "cash": -1502.0, "supersededPriorStubs": 0}
+DATE_ONLY_TWIN {"inserted": 1, "activeRows": 2, "shares": 20.0, "contracts": 0, "cash": -1002.0, "supersededPriorStubs": 0}
+FLEX_PRIOR_STUB {"inserted": 1, "activeRows": 2, "shares": 0, "contracts": -2.0, "cash": 200.0, "supersededPriorStubs": 0}
+ORDER_FILL_CASH_MISMATCH {"inserted": 1, "activeRows": 2, "shares": 20.0, "contracts": 0, "cash": -1012.0, "supersededPriorStubs": 0}
+NO_TRADE_INITIAL_HOLDING {"error": "InvalidRequestError", "message": "tradeDate must be formatted YYYY-MM-DD"}
+BAD_POSITION_SYMBOL {"inserted": 0, "activeRows": 0, "shares": 0, "contracts": 0, "cash": 0, "supersededPriorStubs": 0}
+FIXED_ACTIVITY_STUB {"inserted": 1, "activeRows": 1, "shares": 0, "contracts": -1.0, "cash": 200.0, "supersededPriorStubs": 1}
+ZERO_TRADE_TWS_ROUNDTRIP {"inserted": 0, "activeRows": 2, "shares": 0.0, "contracts": 0, "cash": 8.0, "supersededPriorStubs": 0}
+MANUAL_ASSIGNMENT_TWIN {"inserted": 1, "activeRows": 3, "shares": 200.0, "contracts": 0.0, "cash": -9600.0, "supersededPriorStubs": 0}
+FIXED_SERVER_SAME_REF_CHECK blocked as expected
+FIXED_REBUILD_STALE_DIGEST blocked as expected
+COVERAGE_AFTER_REBUILD {"activeRows": 1, "periods": [["2026-08-01", "2026-08-31"], ["2026-09-01", "2026-09-30"]]}
+MISSING_REBUILD_DIGEST same-count stale phrase still accepted
+Observed-state store assertions passed; real user databases were never opened.

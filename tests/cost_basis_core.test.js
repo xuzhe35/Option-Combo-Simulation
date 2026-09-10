@@ -237,8 +237,10 @@ module.exports = {
                     'request_historical_bars', 'subscribe_iv_term_structure',
                     'place_hedge_order', 'cancel_combo_order',
                     // Compatibility/admin protocol actions have no page entry point.
+                    // (list/restore of rebuild archives DO have one: the settings
+                    // page lists archives and restores them.)
                     'archive_cost_basis_book', 'list_cost_basis_snapshots',
-                    'reset_cost_basis_book', 'list_cost_basis_resets',
+                    'reset_cost_basis_book',
                 ];
                 forbidden.forEach((action) => {
                     assert.equal(core.ALLOWED_CLIENT_ACTIONS.includes(action), false,
@@ -2517,6 +2519,33 @@ module.exports = {
                 }
                 const reconciliation = core.buildReconciliation(null);
                 assert.equal(reconciliation.balanced, true);
+            },
+        },
+        {
+            name: 'a TWS fill in another currency or with a foreign fee is blocked',
+            run() {
+                const core = loadCore();
+                const fill = {
+                    account: 'U1', symbol: 'TQQQ', secType: 'STK', execId: 'fx-1',
+                    side: 'BOT', quantity: 10, price: 50, commission: 1,
+                    commissionAvailable: true, commissionCurrency: 'USD',
+                    currency: 'USD', brokerTimestamp: '2026-09-01T10:00:00', permId: 555,
+                };
+                const ok = core.buildExecutionImport([fill], {
+                    account: 'U1', symbol: 'TQQQ', secType: 'STK', currency: 'USD',
+                });
+                assert.equal(ok.problems.length, 0);
+                assert.match(ok.events[0].note, /permId 555/);
+                const foreignContract = core.buildExecutionImport(
+                    [Object.assign({}, fill, { currency: 'EUR' })],
+                    { account: 'U1', symbol: 'TQQQ', secType: 'STK', currency: 'USD' });
+                assert.equal(foreignContract.events.length, 0);
+                assert.match(foreignContract.problems[0].reason, /合约币种 EUR/);
+                const foreignFee = core.buildExecutionImport(
+                    [Object.assign({}, fill, { commissionCurrency: 'JPY', commission: 100 })],
+                    { account: 'U1', symbol: 'TQQQ', secType: 'STK', currency: 'USD' });
+                assert.equal(foreignFee.events.length, 0);
+                assert.match(foreignFee.problems[0].reason, /手续费币种 JPY/);
             },
         },
     ],

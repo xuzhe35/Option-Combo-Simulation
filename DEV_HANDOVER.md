@@ -192,7 +192,7 @@ Persistence and ledger modules, mounted by BOTH backends:
 ### Blended-cost ledger
 
 - one active book per account + underlying + security type + currency in the
-  separate schema-v7 `cost_basis.db`
+  separate schema-v9 `cost_basis.db`
 - STK/OPT and deliverable FUT/FOP event replay, including FOP delivery and
   uniquely paired futures rolls
 - CSV/ledger-inferred holdings remain visible while TWS is offline; current
@@ -200,9 +200,26 @@ Persistence and ledger modules, mounted by BOTH backends:
 - reviewed recent TWS fills import by `execId`; same-batch duplicates block in
   preview, and a later CSV is accepted as the same fill only after strict
   cross-source economics and broker-time matching
-- expiry-bounded What If replay plus a modal multi-price pressure test; the
-  optional still-live Long Call/Put overlay uses per-contract TWS IV and the
-  shared discount curve, and never persists synthetic events
+- the stress test is a page view (`#stress-view`, `_showView('stress')`), not a
+  modal; see `CODE PLAN/STRESS_VIEW_LAYOUT_PLAN.md` for the layout contract
+- restart `ib_server.py` after updating the stress snapshot dispatcher: paired
+  reads now overlap with a two-per-connection/four-global cap, immediate busy
+  responses and per-connection cancellation on disconnect; no queue is retained
+- expiry-bounded What If replay is unchanged; stress now lives in the DOM-free
+  `cost_basis_stress_*` modules with one cash/position valuation path, local-IV
+  calibration, explicit instants/delivery paths and a worker sensitivity band
+- days have a slider plus exact input; complete synchronized v2 quotes and full
+  curves are reused across horizons with original snapshot provenance retained.
+  Scrubbing cancels old work and clears old results. Range-first cards and slices
+  label the center as a reference; coincident bounds do not imply certainty.
+- stress quantity drafts are local-only, identity-keyed and cleared when their
+  ledger changes; resized drafts compare against actual holdings at the same
+  market assumptions. Default lens is ΔNAV, future income requires opt-in, and
+  optional current NAV supplies absolute values. See `STRESS_PORTFOLIO_WORKFLOW.md`
+  under `CODE PLAN/` for funding, historical-cost and IV-range boundaries.
+- restart the backend to obtain version-2 stress snapshots (curve + receipt-time
+  metadata); old snapshots fail closed. Stress is USD STK only, not a restriction
+  on ledger/import. See `CODE PLAN/STRESS_KERNEL_REFACTOR.md` for assumptions
 - full-cash running cost intentionally includes long-option cash while the
   headline blended-cost lens excludes the complete Long Call/Put lifecycle
 - book switching is request-generation scoped, clears the old rows before the
@@ -815,3 +832,13 @@ Important nuance:
 - `ib_server.py`
 - `trade_execution/engine.py`
 - `trade_execution/adapters/ibkr.py`
+
+
+### Cost Basis import integrity follow-up (2026-09-10)
+
+The remaining V01–V12 review paths are covered by the import pipeline and async
+regressions. Use the configured Python environment for broker protocol parity
+tests. Schema v9 preserves events while invalidating unproven v8 coverage;
+older write clients without identity/version must refresh/update. File backups
+now use a checksummed v1 envelope and an explicit restore action. The original
+review artifact scripts document pre-fix behavior; run the current tests instead.

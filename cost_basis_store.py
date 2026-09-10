@@ -43,7 +43,7 @@ from pathlib import Path
 
 from portfolio_store import default_app_data_dir
 
-SCHEMA_USER_VERSION = 7
+SCHEMA_USER_VERSION = 9
 
 MAX_SYMBOL_CHARS = 32
 MAX_ACCOUNT_CHARS = 32
@@ -103,6 +103,18 @@ DELIVERY_KINDS = frozenset({
 FUTURE_KINDS = frozenset({'futures_trade', 'futures_roll'})
 
 EVENT_SOURCES = ('manual', 'reconcile', 'csv_import', 'execution_report')
+
+# A fee row normally takes cash out. The broker sometimes gives cash back
+# under the same heading - an exchange rebate on a negative commission, a
+# withholding-tax refund - and those rows carry a tag that names the refund,
+# so the sign check knows it is looking at money returned, not at a typo.
+FEE_REFUND_TAGS = frozenset({'ibkr_rebate', 'withholding_tax_refund', 'fee_refund'})
+# A dividend the broker later reversed is booked negative under this tag so
+# the income total nets to what was actually kept.
+DIVIDEND_REVERSAL_TAG = 'dividend_reversal'
+# Opening stubs an importer drafts for positions a partial statement did not
+# open; they are replaced, never kept, once the real history arrives.
+PRIOR_STUB_TAGS = frozenset({'prior_open', 'prior_basis'})
 
 _TOKEN_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$')
 _SYMBOL_RE = re.compile(r'^[A-Z0-9][A-Z0-9.\-]{0,31}$')
@@ -168,6 +180,18 @@ class DeleteConfirmationError(CostBasisStoreError):
     code = 'delete_confirmation_mismatch'
 
 
+class LedgerChangedError(CostBasisStoreError):
+    """The ledger is not the version the caller previewed against."""
+
+    code = 'ledger_changed'
+
+
+class ImportRevisionConflictError(CostBasisStoreError):
+    """A broker reference already stored carries different economics."""
+
+    code = 'import_revision_conflict'
+
+
 class DatabaseBusyError(CostBasisStoreError):
     code = 'database_busy'
 
@@ -195,6 +219,43 @@ _V2_TABLE_STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_cost_basis_book_resets_book
         ON cost_basis_book_resets(book_id, reset_at_utc DESC)
     """,
+)
+
+# Schema v8. One row per statement or execution batch the ledger accepted:
+# what file, which account and period, which checks the importer could run.
+# Coverage of a period is a fact about the ledger, not something recomputed
+# from the rows it happened to add (a month with no trades adds none).
+_V8_TABLE_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS cost_basis_import_batches (
+        batch_id           TEXT PRIMARY KEY,
+        book_id            TEXT NOT NULL,
+        mode               TEXT NOT NULL,
+        source_format      TEXT NOT NULL DEFAULT '',
+        file_name          TEXT NOT NULL DEFAULT '',
+        file_sha256        TEXT NOT NULL DEFAULT '',
+        account            TEXT NOT NULL DEFAULT '',
+        period_from        TEXT NOT NULL DEFAULT '',
+        period_through     TEXT NOT NULL DEFAULT '',
+        checks_json        TEXT NOT NULL DEFAULT '{}',
+        inserted           INTEGER NOT NULL DEFAULT 0,
+        skipped            INTEGER NOT NULL DEFAULT 0,
+        confirmed_duplicates INTEGER NOT NULL DEFAULT 0,
+        registered_at_utc  TEXT NOT NULL,
+        ledger_digest      TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_cost_basis_import_batches_book
+        ON cost_basis_import_batches(book_id, registered_at_utc DESC)
+    """,
+)
+
+_V9_TABLE_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS cost_basis_reset_coverage (
+        reset_id TEXT PRIMARY KEY, book_id TEXT NOT NULL,
+        batches_json TEXT NOT NULL, batches_sha256 TEXT NOT NULL
+    )""",
 )
 
 _SCHEMA_STATEMENTS = (
@@ -316,7 +377,7 @@ _SCHEMA_STATEMENTS = (
     CREATE INDEX idx_cost_basis_snapshots_book
         ON cost_basis_snapshots(book_id, taken_at_utc DESC)
     """,
-) + _V2_TABLE_STATEMENTS
+) + _V2_TABLE_STATEMENTS + _V8_TABLE_STATEMENTS + _V9_TABLE_STATEMENTS
 
 # Reused by the v2 -> v4 table-rebuild migration. SQLite cannot extend the
 # event-kind CHECK constraint with ALTER TABLE, so the event table is copied
@@ -969,10 +1030,15 @@ def _validate_event_shape(payload, book):
 
     if kind in ('dividend', 'fee') and abs(event['cash_amount']) < 1e-9:
         raise InvalidRequestError(f'{kind} requires a non-zero cashAmount')
-    if kind == 'dividend' and event['cash_amount'] < 0:
-        raise InvalidRequestError('dividend cashAmount must be positive; use a fee event for a charge')
-    if kind == 'fee' and event['cash_amount'] > 0:
-        raise InvalidRequestError('fee cashAmount must be negative; use a dividend event for income')
+    if kind == 'dividend' and event['cash_amount'] < 0 \
+            and event['tag'] != DIVIDEND_REVERSAL_TAG:
+        raise InvalidRequestError(
+            'dividend cashAmount must be positive; a broker reversal must carry the '
+            f'tag {DIVIDEND_REVERSAL_TAG}, and a charge is a fee event')
+    if kind == 'fee' and event['cash_amount'] > 0 and event['tag'] not in FEE_REFUND_TAGS:
+        raise InvalidRequestError(
+            'fee cashAmount must be negative unless the row is a refund tagged one of '
+            + ', '.join(sorted(FEE_REFUND_TAGS)))
 
     derived = derive_cash_amount({
         **event,
@@ -1204,6 +1270,27 @@ class CostBasisStore:
             version = 6
         if version == 6:
             self._migrate_v6_to_v7(conn)
+            version = 7
+        if version == 7:
+            self._migrate_v7_to_v8(conn)
+            version = 8
+        if version == 8:
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                for statement in _V9_TABLE_STATEMENTS:
+                    conn.execute(statement)
+                # v8 did not associate coverage with a history generation.
+                # Preserve its audit rows but require fresh verification.
+                for batch in conn.execute('SELECT batch_id, checks_json FROM cost_basis_import_batches').fetchall():
+                    checks = json.loads(batch['checks_json'])
+                    checks['coverageCurrent'] = False
+                    conn.execute('UPDATE cost_basis_import_batches SET checks_json = ? WHERE batch_id = ?',
+                                 (json.dumps(checks), batch['batch_id']))
+                conn.execute('PRAGMA user_version = 9')
+                conn.execute('COMMIT')
+            except BaseException:
+                conn.execute('ROLLBACK')
+                raise
             return
         object_count = conn.execute('SELECT count(*) FROM sqlite_master').fetchone()[0]
         if object_count > 0:
@@ -1367,6 +1454,19 @@ class CostBasisStore:
             raise
 
     @staticmethod
+    def _migrate_v7_to_v8(conn):
+        """Add the statement/batch registry. Events are untouched."""
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            for statement in _V8_TABLE_STATEMENTS:
+                conn.execute(statement)
+            conn.execute('PRAGMA user_version = 8')
+            conn.execute('COMMIT')
+        except BaseException:
+            conn.execute('ROLLBACK')
+            raise
+
+    @staticmethod
     def _migrate_v6_to_v7(conn):
         """Remove broker ordering stamps inferred from untrusted free-form notes."""
         conn.execute('BEGIN IMMEDIATE')
@@ -1520,6 +1620,209 @@ class CostBasisStore:
         finally:
             conn.close()
 
+    @staticmethod
+    def _ledger_version(conn, book_id):
+        """A digest of every row's identity and void state, in sequence order.
+
+        Two ledgers with the same digest hold the same rows in the same
+        states. A count alone cannot say that: a book whose one row was
+        replaced by a different one keeps its count.
+        """
+        rows = conn.execute(
+            'SELECT event_id, seq, voided_at_utc FROM cost_basis_events '
+            'WHERE book_id = ? ORDER BY seq ASC', (book_id,),
+        ).fetchall()
+        hasher = hashlib.sha256()
+        live = 0
+        max_seq = 0
+        for row in rows:
+            hasher.update(f"{row['event_id']}|{row['voided_at_utc'] or ''}\n".encode('utf-8'))
+            if not row['voided_at_utc']:
+                live += 1
+            max_seq = max(max_seq, int(row['seq']))
+        return {
+            'eventCount': len(rows),
+            'liveEventCount': live,
+            'maxSeq': max_seq,
+            'digest': hasher.hexdigest(),
+        }
+
+    def ledger_version(self, book_id):
+        conn = self._connect()
+        try:
+            self._get_book(conn, book_id)
+            return self._ledger_version(conn, book_id)
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    @classmethod
+    def _require_ledger_version(cls, conn, book_id, expected):
+        """Refuse a write planned against a ledger that has since changed."""
+        if expected in (None, ''):
+            raise InvalidRequestError('expectedLedgerVersion is required; refresh and preview again')
+        digest = expected.get('digest') if isinstance(expected, dict) else expected
+        if not isinstance(digest, str) or not digest.strip():
+            raise InvalidRequestError('expectedLedgerVersion must carry a digest')
+        current = cls._ledger_version(conn, book_id)
+        if current['digest'] != digest.strip():
+            raise LedgerChangedError(
+                'the ledger changed after this import was previewed; reload the '
+                'book and preview the file again')
+        return current
+
+    @staticmethod
+    def _require_book_identity(book, identity):
+        """Refuse rows prepared for another account, symbol or currency.
+
+        Share rows carry no symbol and every row is currency-less, so the
+        store cannot tell from the rows alone that a batch prepared for one
+        book was submitted to another; the browser states what it prepared
+        the batch for and the store holds it to that.
+        """
+        if identity in (None, ''):
+            raise InvalidRequestError('bookIdentity is required; refresh and preview again')
+        if not isinstance(identity, dict):
+            raise InvalidRequestError('bookIdentity must be an object')
+        checks = (
+            ('account', str(book.get('account') or '')),
+            ('symbol', str(book.get('symbol') or '')),
+            ('secType', str(book.get('secType') or 'STK')),
+            ('currency', str(book.get('currency') or 'USD')),
+        )
+        for field, actual in checks:
+            given = identity.get(field)
+            if given is None or (given == '' and actual != ''):
+                raise InvalidRequestError(f'bookIdentity.{field} is required')
+            if str(given).strip().upper() != actual.strip().upper():
+                raise InvalidRequestError(
+                    f'this batch was prepared for {field} {given}, but the ledger is '
+                    f'{actual or "(unset)"}; select the right ledger and preview again')
+
+    @staticmethod
+    def _statement_registration(statement):
+        """Validate the optional statement/batch registration payload."""
+        if statement in (None, ''):
+            return None
+        if not isinstance(statement, dict):
+            raise InvalidRequestError('statement must be an object')
+        def text(field, limit=200):
+            value = statement.get(field)
+            if value in (None, ''):
+                return ''
+            if not isinstance(value, str) or len(value) > limit:
+                raise InvalidRequestError(f'statement.{field} must be a string of at most {limit} characters')
+            return value.strip()
+        def date(field):
+            value = text(field, 10)
+            if not value:
+                return ''
+            return _require_trade_date(value, f'statement.{field}')
+        checks = statement.get('checks')
+        if checks is None:
+            checks = {}
+        if not isinstance(checks, dict):
+            raise InvalidRequestError('statement.checks must be an object')
+        return {
+            'source_format': text('format', 32),
+            'file_name': text('fileName', 200),
+            'file_sha256': text('fileSha256', 64),
+            'account': text('account', 32),
+            'period_from': date('periodFrom'),
+            'period_through': date('periodThrough'),
+            'checks_json': json.dumps(
+                {str(key): bool(value) for key, value in checks.items()},
+                sort_keys=True, separators=(',', ':')),
+            'confirmed_duplicates': int(_number(
+                statement.get('confirmedDuplicates'), 'statement.confirmedDuplicates') or 0),
+        }
+
+    def _register_batch(self, conn, book_id, batch_id, mode, registration, *,
+                        inserted, skipped):
+        if registration is None:
+            return
+        digest = self._ledger_version(conn, book_id)['digest']
+        conn.execute(
+            'INSERT OR REPLACE INTO cost_basis_import_batches (batch_id, book_id, mode, '
+            'source_format, file_name, file_sha256, account, period_from, '
+            'period_through, checks_json, inserted, skipped, confirmed_duplicates, '
+            'registered_at_utc, ledger_digest) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (batch_id, book_id, mode, registration['source_format'],
+             registration['file_name'], registration['file_sha256'],
+             registration['account'], registration['period_from'],
+             registration['period_through'], registration['checks_json'],
+             int(inserted), int(skipped), registration['confirmed_duplicates'],
+             self._utc_now_iso(), digest),
+        )
+
+    @staticmethod
+    def _archive_coverage(conn, book_id, reset_id):
+        batches = [dict(row) for row in conn.execute(
+            'SELECT * FROM cost_basis_import_batches WHERE book_id = ?', (book_id,))]
+        encoded = json.dumps(batches, sort_keys=True, separators=(',', ':'))
+        conn.execute('INSERT INTO cost_basis_reset_coverage VALUES (?, ?, ?, ?)',
+                     (reset_id, book_id, encoded, hashlib.sha256(encoded.encode()).hexdigest()))
+        conn.execute('DELETE FROM cost_basis_import_batches WHERE book_id = ?', (book_id,))
+
+    @staticmethod
+    def _restore_coverage(conn, book_id, reset_id):
+        archive = conn.execute('SELECT * FROM cost_basis_reset_coverage WHERE reset_id = ? AND book_id = ?',
+                               (reset_id, book_id)).fetchone()
+        if archive is None:
+            return
+        encoded = archive['batches_json']
+        if hashlib.sha256(encoded.encode()).hexdigest() != archive['batches_sha256']:
+            raise InvalidRequestError('coverage archive checksum mismatch')
+        for batch in json.loads(encoded):
+            columns = list(batch)
+            conn.execute(f"INSERT INTO cost_basis_import_batches ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                         tuple(batch[column] for column in columns))
+
+    @staticmethod
+    def _invalidate_coverage(conn, book_id, trade_date):
+        # Keep the audit entry, but a changed historical event invalidates
+        # prior verification at and after that date (including opening basis).
+        for batch in conn.execute('SELECT batch_id, checks_json FROM cost_basis_import_batches '
+                                  'WHERE book_id = ? AND period_through >= ?', (book_id, trade_date)).fetchall():
+            checks = json.loads(batch['checks_json'])
+            checks['coverageCurrent'] = False
+            conn.execute('UPDATE cost_basis_import_batches SET checks_json = ? WHERE batch_id = ?',
+                         (json.dumps(checks), batch['batch_id']))
+
+    def list_import_batches(self, book_id, *, limit=60):
+        """Statement periods this book has accepted, newest first."""
+        limit = max(1, min(int(limit or 60), 500))
+        conn = self._connect()
+        try:
+            self._get_book(conn, book_id)
+            rows = conn.execute(
+                'SELECT * FROM cost_basis_import_batches WHERE book_id = ? '
+                'ORDER BY registered_at_utc DESC LIMIT ?', (book_id, limit),
+            ).fetchall()
+            return [{
+                'batchId': row['batch_id'],
+                'bookId': row['book_id'],
+                'mode': row['mode'],
+                'format': row['source_format'],
+                'fileName': row['file_name'],
+                'fileSha256': row['file_sha256'],
+                'account': row['account'],
+                'periodFrom': row['period_from'],
+                'periodThrough': row['period_through'],
+                'checks': json.loads(row['checks_json'] or '{}'),
+                'inserted': int(row['inserted']),
+                'skipped': int(row['skipped']),
+                'confirmedDuplicates': int(row['confirmed_duplicates']),
+                'registeredAtUtc': row['registered_at_utc'],
+                'ledgerDigest': row['ledger_digest'],
+            } for row in rows]
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
     def _get_book(self, conn, book_id):
         _require_token('bookId', book_id)
         row = conn.execute(
@@ -1624,6 +1927,7 @@ class CostBasisStore:
                     'DELETE FROM cost_basis_book_resets WHERE book_id = ?',
                     (book_id,),
                 ).rowcount
+                conn.execute('DELETE FROM cost_basis_reset_coverage WHERE book_id = ?', (book_id,))
                 removed_books = conn.execute(
                     'DELETE FROM cost_basis_books WHERE book_id = ?',
                     (book_id,),
@@ -1686,6 +1990,7 @@ class CostBasisStore:
                     client_token=client_token,
                     allow_overdraw=allow_overdraw,
                 )
+                self._invalidate_coverage(conn, book_id, normalized['trade_date'])
                 conn.execute('COMMIT')
             except BaseException:
                 self._rollback_quietly(conn)
@@ -1794,7 +2099,7 @@ class CostBasisStore:
 
     def _insert_event(self, conn, book, normalized, *, client_token,
                       allow_overdraw, import_batch_id=None,
-                      check_share_warning=True):
+                      check_share_warning=True, validate_timeline=True):
         book_id = book['bookId']
         seq_row = conn.execute(
             'SELECT COALESCE(max(seq), 0) AS max_seq FROM cost_basis_events '
@@ -1838,9 +2143,12 @@ class CostBasisStore:
             ),
         )
 
+        # A batch that replaces stored rows (a superseded baseline or
+        # opening stub) may be valid only as a whole: the caller validates
+        # every affected timeline once all of its rows are in.
         warnings = self._validate_timeline(
             conn, book_id, normalized,
-            check_share_warning=check_share_warning)
+            check_share_warning=check_share_warning) if validate_timeline else []
 
         row = conn.execute(
             'SELECT * FROM cost_basis_events WHERE event_id = ?', (event_id,)
@@ -1862,6 +2170,7 @@ class CostBasisStore:
             'FROM cost_basis_events '
             'WHERE book_id = ? AND account = ? AND right = ? AND strike = ? '
             'AND expiry = ? AND shares_per_contract IS ? AND voided_at_utc IS NULL '
+            'AND include_in_cost = 1 '
             f'ORDER BY {_EVENT_ORDER_SQL}',
             (book_id, row['account'], row['right'], row['strike'], row['expiry'],
              row['shares_per_contract']),
@@ -1909,7 +2218,7 @@ class CostBasisStore:
         """
         rows = conn.execute(
             'SELECT * FROM cost_basis_events WHERE book_id = ? AND account = ? '
-            'AND voided_at_utc IS NULL AND ('
+            'AND voided_at_utc IS NULL AND include_in_cost = 1 AND ('
             'kind IN (\'futures_trade\', \'futures_roll\') OR '
             '(kind IN (\'option_assignment\', \'option_exercise\') '
             'AND option_sec_type = \'FOP\')) '
@@ -2013,6 +2322,10 @@ class CostBasisStore:
                 'FROM cost_basis_events '
                 'WHERE book_id = ? AND account = ? AND right = ? AND strike = ? '
                 'AND expiry = ? AND shares_per_contract IS ? AND voided_at_utc IS NULL '
+                # An excluded row is out of the ledger for the browser's
+                # engine; it must not back a close here either, or a row
+                # the store accepts is one the engine then refuses.
+                'AND include_in_cost = 1 '
                 f'ORDER BY {_EVENT_ORDER_SQL}',
                 key_fields,
             ).fetchall()
@@ -2307,6 +2620,102 @@ class CostBasisStore:
             selected.append(row)
         return selected
 
+    def _validate_prior_stub_supersessions(self, conn, book_id, event_ids,
+                                           incoming_rows):
+        """Return opening stubs that the incoming real history replaces.
+
+        The browser proposes the ids; the store proves the condition again:
+        the incoming statement rows for the stub's contract, dated at or
+        before the stub, must sum to EXACTLY the stub's quantity. Anything
+        else would leave the contract held twice or half replaced.
+        """
+        if event_ids is None:
+            return []
+        if not isinstance(event_ids, list):
+            raise InvalidRequestError('supersedePriorStubEventIds must be a list')
+        if len(set(event_ids)) != len(event_ids):
+            raise InvalidRequestError('supersedePriorStubEventIds contains duplicates')
+        incoming_rows = [item for item in incoming_rows if not conn.execute(
+            'SELECT 1 FROM cost_basis_events WHERE book_id = ? AND account = ? AND external_ref = ?',
+            (book_id, item['account'], item['external_ref'])).fetchone()]
+        selected = []
+        for event_id in event_ids:
+            if not isinstance(event_id, str):
+                raise InvalidRequestError('supersedePriorStubEventIds must contain strings')
+            _require_token('supersedePriorStubEventId', event_id)
+            row = conn.execute(
+                'SELECT * FROM cost_basis_events WHERE book_id = ? AND event_id = ?',
+                (book_id, event_id),
+            ).fetchone()
+            if row is None:
+                raise InvalidRequestError('an opening stub to supersede was not found')
+            if (row['voided_at_utc'] or not row['include_in_cost']
+                    or row['source'] != 'csv_import' or row['tag'] not in PRIOR_STUB_TAGS
+                    or row['kind'] not in ('option_trade', 'opening_balance')):
+                raise InvalidRequestError(
+                    'only an active statement opening stub may be superseded')
+            stub = _event_row_to_dict(row)
+            if row['kind'] == 'option_trade':
+                structural = contract_key(stub)
+                matching = [item for item in incoming_rows
+                            if item['source'] == 'csv_import'
+                            and item['kind'] in ('option_trade', 'option_assignment', 'option_exercise', 'option_expiry')
+                            and item['tag'] not in PRIOR_STUB_TAGS
+                            and item['account'] == row['account']
+                            and item['contracts'] is not None
+                            and contract_key(item) == structural
+                            and not (row['con_id'] not in (None, '')
+                                     and item['con_id'] not in (None, '')
+                                     and str(row['con_id']) != str(item['con_id']))
+                            and item['trade_date'] <= row['trade_date']]
+                total = sum(float(item['contracts']) for item in matching)
+                target = float(row['contracts'] or 0)
+            else:
+                matching = [item for item in incoming_rows
+                            if item['source'] == 'csv_import'
+                            and item['kind'] == 'share_trade'
+                            and item['account'] == row['account']
+                            and item['shares'] is not None
+                            and item['trade_date'] <= row['trade_date']]
+                total = sum(float(item['shares']) for item in matching)
+                target = float(row['shares'] or 0)
+            if not matching or abs(total - target) >= 1e-6:
+                raise InvalidRequestError(
+                    'the incoming statement rows do not exactly replace the opening '
+                    f'stub ({total:g} against {target:g}); import the complete covering '
+                    'statement instead')
+            selected.append(row)
+        return selected
+
+    @staticmethod
+    def _stored_row_conflicts(stored, incoming):
+        """Name the economic fields where a stored row and a new row with the
+        same broker reference disagree; empty means the same trade."""
+        differences = []
+        for field, tolerance in (
+                ('kind', None), ('trade_date', None), ('account', None),
+                ('right', None), ('expiry', None), ('strike', 1e-6),
+                ('shares_per_contract', 1e-6), ('contracts', 1e-6), ('shares', 1e-6),
+                ('future_expiry', None), ('future_contracts', 1e-6),
+                ('roll_to_expiry', None), ('roll_to_price', 1e-8), ('split_ratio', 1e-8),
+                ('price', 1e-8), ('cash_amount', 0.011), ('fees', 0.011)):
+            old = stored[field]
+            new = incoming.get(field)
+            if tolerance is None:
+                if str(old or '') != str(new or ''):
+                    differences.append(f'{field} {old!r} -> {new!r}')
+                continue
+            if old is None and new is None:
+                continue
+            if old is None or new is None or abs(float(old) - float(new)) > tolerance:
+                differences.append(f'{field} {old} -> {new}')
+        for field in ('con_id', 'local_symbol', 'option_sec_type', 'future_con_id',
+                      'future_local_symbol', 'roll_to_con_id', 'roll_to_local_symbol',
+                      'broker_timestamp'):
+            if stored[field] and incoming.get(field) and str(stored[field]) != str(incoming[field]):
+                differences.append(f'{field} differs')
+        return differences
+
     def _reject_unresolved_tws_overlap(self, conn, book_id, incoming_rows,
                                        superseded_rows):
         """Never append history already economically covered by a baseline.
@@ -2366,18 +2775,25 @@ class CostBasisStore:
 
     def import_events(self, book_id, events, *, import_batch_id, client_token_prefix,
                       allow_overdraw=False, supersede_tws_event_ids=None,
-                      tws_reconciliation=None):
+                      tws_reconciliation=None, expected_ledger_version=None,
+                      book_identity=None, supersede_prior_stub_event_ids=None,
+                      statement=None):
         """Bulk-append reviewed rows from a broker statement.
 
-        Rows whose external_ref already exists are skipped, not merged: an
-        overlapping statement re-import must be a no-op, never a duplicate
-        cost entry. The whole batch commits or none of it does.
+        Rows whose external_ref already exists with the same economics are
+        skipped, not merged: an overlapping statement re-import must be a
+        no-op, never a duplicate cost entry. The same reference with
+        different economics is a broker revision and stops the batch. The
+        whole batch commits or none of it does. With a statement registration
+        an empty batch is allowed: it records that a period with no rows for
+        this book was checked.
         """
         _require_token('importBatchId', import_batch_id)
         _require_token('clientTokenPrefix', client_token_prefix)
         if not isinstance(events, list):
             raise InvalidRequestError('events must be a list')
-        if not events:
+        registration = self._statement_registration(statement)
+        if not events and registration is None:
             raise InvalidRequestError('events must not be empty')
         if len(events) > MAX_IMPORT_EVENTS:
             raise InvalidRequestError(
@@ -2386,6 +2802,7 @@ class CostBasisStore:
         conn = self._connect()
         try:
             book = self._get_book(conn, book_id)
+            self._require_book_identity(book, book_identity)
             normalized_rows = self._normalize_event_batch(
                 conn, book_id, events, book, include_existing_history=True)
             conn.execute('BEGIN IMMEDIATE')
@@ -2395,6 +2812,12 @@ class CostBasisStore:
                     'WHERE book_id = ? AND import_batch_id = ?',
                     (book_id, import_batch_id),
                 ).fetchone()['total']
+                if not existing_batch and registration is not None:
+                    existing_batch = conn.execute(
+                        'SELECT count(*) AS total FROM cost_basis_import_batches '
+                        'WHERE book_id = ? AND batch_id = ?',
+                        (book_id, import_batch_id),
+                    ).fetchone()['total']
                 if existing_batch:
                     superseded = conn.execute(
                         'SELECT count(*) AS total FROM cost_basis_events '
@@ -2412,11 +2835,14 @@ class CostBasisStore:
                         'idempotentReplay': True,
                     }
 
+                self._require_ledger_version(conn, book_id, expected_ledger_version)
                 superseded_rows = self._validate_tws_supersessions(
                     conn, book_id, supersede_tws_event_ids, normalized_rows,
                     tws_reconciliation)
                 self._reject_unresolved_tws_overlap(
                     conn, book_id, normalized_rows, superseded_rows)
+                superseded_stubs = self._validate_prior_stub_supersessions(
+                    conn, book_id, supersede_prior_stub_event_ids, normalized_rows)
                 supersede_stamp = self._utc_now_iso()
                 supersede_token = f'{import_batch_id}-supersede'
                 for row in superseded_rows:
@@ -2427,18 +2853,38 @@ class CostBasisStore:
                          'Superseded atomically by complete broker execution history',
                          row['event_id']),
                     )
+                for row in superseded_stubs:
+                    conn.execute(
+                        'UPDATE cost_basis_events SET voided_at_utc = ?, '
+                        'voided_by_event_id = ?, void_reason = ? WHERE event_id = ?',
+                        (supersede_stamp, supersede_token,
+                         'Opening stub superseded by the statement that opened the position',
+                         row['event_id']),
+                    )
 
                 inserted = 0
                 skipped = 0
                 warnings = []
+                defer_validation = bool(superseded_rows or superseded_stubs)
+                inserted_rows = []
                 for index, normalized in enumerate(normalized_rows):
                     if normalized['external_ref']:
                         duplicate = conn.execute(
-                            'SELECT 1 FROM cost_basis_events WHERE book_id = ? '
+                            'SELECT * FROM cost_basis_events WHERE book_id = ? '
                             'AND account = ? AND external_ref = ?',
                             (book_id, normalized['account'], normalized['external_ref']),
                         ).fetchone()
                         if duplicate is not None:
+                            if duplicate['voided_at_utc'] or not duplicate['include_in_cost']:
+                                raise ImportRevisionConflictError('stored source reference is voided or excluded; use a corrected complete rebuild')
+                            differences = self._stored_row_conflicts(duplicate, normalized)
+                            if differences:
+                                raise ImportRevisionConflictError(
+                                    f"broker reference {normalized['external_ref']} is already "
+                                    'stored with different economics ('
+                                    + '; '.join(differences)
+                                    + '); a revision must replace the stored row (void it, '
+                                    'or rebuild from the corrected statement)')
                             skipped += 1
                             continue
                     result = self._insert_event(
@@ -2447,9 +2893,18 @@ class CostBasisStore:
                         allow_overdraw=allow_overdraw,
                         import_batch_id=import_batch_id,
                         check_share_warning=False,
+                        validate_timeline=not defer_validation,
                     )
                     warnings.extend(result['warnings'])
+                    inserted_rows.append(normalized)
                     inserted += 1
+                if defer_validation:
+                    # The replacement history is judged as a whole: the
+                    # stored close that the voided stub used to back is now
+                    # backed by all of the real openings together.
+                    for normalized in inserted_rows:
+                        warnings.extend(self._validate_timeline(
+                            conn, book_id, normalized, check_share_warning=False))
                 # Inserting the replacement rows normally validates these
                 # timelines already. Replaying each affected option once more
                 # also covers a future batch shape with all rows de-duplicated.
@@ -2457,10 +2912,24 @@ class CostBasisStore:
                     self._validate_contract_timeline(conn, book_id, row)
                     if row['kind'] == 'futures_trade':
                         self._validate_futures_timeline(conn, book_id, row['account'])
+                for row in superseded_stubs:
+                    if row['kind'] == 'option_trade':
+                        self._validate_contract_timeline(conn, book_id, row)
                 # Intermediate rows in an atomic import may cross zero only
                 # because same-time broker settlements need a deterministic
                 # sequence.  Surface the direction after the whole batch.
                 warnings.extend(self._net_short_share_warnings(conn, book_id))
+                changed_dates = [row['trade_date'] for row in inserted_rows + list(superseded_stubs) + list(superseded_rows)]
+                if changed_dates:
+                    self._invalidate_coverage(conn, book_id, min(changed_dates))
+                self._register_batch(
+                    conn, book_id, import_batch_id, 'append', registration,
+                    inserted=inserted, skipped=skipped)
+                if inserted or superseded_rows or superseded_stubs:
+                    conn.execute(
+                        'UPDATE cost_basis_books SET updated_at_utc = ? WHERE book_id = ?',
+                        (self._utc_now_iso(), book_id))
+                ledger_version = self._ledger_version(conn, book_id)
                 conn.execute('COMMIT')
             except BaseException:
                 self._rollback_quietly(conn)
@@ -2471,7 +2940,9 @@ class CostBasisStore:
                 'inserted': inserted,
                 'skipped': skipped,
                 'supersededTwsBaselines': len(superseded_rows),
+                'supersededPriorStubs': len(superseded_stubs),
                 'warnings': sorted(set(warnings)),
+                'ledgerVersion': ledger_version,
                 'idempotentReplay': False,
             }
         except sqlite3.IntegrityError as exc:
@@ -2519,6 +2990,7 @@ class CostBasisStore:
 
         conn = self._connect()
         try:
+            conn.execute('BEGIN')
             self._get_book(conn, book_id)
             total = conn.execute(
                 f'SELECT count(*) AS total FROM cost_basis_events WHERE {where}',
@@ -2535,6 +3007,7 @@ class CostBasisStore:
                 'limit': limit,
                 'offset': offset,
                 'events': [_event_row_to_dict(row) for row in rows],
+                'ledgerVersion': self._ledger_version(conn, book_id),
             }
         except sqlite3.Error as exc:
             raise self._map_sqlite_error(exc) from exc
@@ -2594,6 +3067,7 @@ class CostBasisStore:
                 self._validate_contract_timeline(conn, book_id, row)
                 if row['kind'] in FUTURE_KINDS or row['future_contracts'] is not None:
                     self._validate_futures_timeline(conn, book_id, row['account'])
+                self._invalidate_coverage(conn, book_id, row['trade_date'])
                 voided = conn.execute(
                     'SELECT * FROM cost_basis_events WHERE event_id = ?', (event_id,)
                 ).fetchone()
@@ -2633,6 +3107,11 @@ class CostBasisStore:
             ).fetchone()
             total = int(counts['total'] or 0)
             live = int(counts['live'] or 0)
+            dates = conn.execute(
+                'SELECT min(trade_date) AS first_date, max(trade_date) AS last_date '
+                'FROM cost_basis_events WHERE book_id = ? AND voided_at_utc IS NULL',
+                (book_id,),
+            ).fetchone()
             return {
                 'bookId': book_id,
                 'account': book['account'],
@@ -2643,14 +3122,21 @@ class CostBasisStore:
                 'eventCount': total,
                 'liveEventCount': live,
                 'voidedEventCount': total - live,
+                'firstTradeDate': dates['first_date'] or '',
+                'lastTradeDate': dates['last_date'] or '',
                 'phrase': _reset_phrase(book['account'], book['symbol'], total),
+                # The phrase is a human-readable summary; this digest is the
+                # credential. A rebuild must present the digest of the ledger
+                # it was planned against.
+                'ledgerVersion': self._ledger_version(conn, book_id),
             }
         except sqlite3.Error as exc:
             raise self._map_sqlite_error(exc) from exc
         finally:
             conn.close()
 
-    def reset_book(self, book_id, *, confirmation, client_token, reason=''):
+    def reset_book(self, book_id, *, confirmation, client_token, reason='',
+                   expected_ledger_version=None, book_identity=None):
         """Empty a book so it can be rebuilt from statements.
 
         The rows are archived into cost_basis_book_resets as JSON BEFORE they
@@ -2665,6 +3151,7 @@ class CostBasisStore:
         conn = self._connect()
         try:
             book = self._get_book(conn, book_id)
+            self._require_book_identity(book, book_identity)
             conn.execute('BEGIN IMMEDIATE')
             try:
                 replay = conn.execute(
@@ -2696,6 +3183,7 @@ class CostBasisStore:
                         f'type exactly: {expected}'
                     )
 
+                self._require_ledger_version(conn, book_id, expected_ledger_version)
                 encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True,
                                      separators=(',', ':'))
                 reset_id = uuid.uuid4().hex
@@ -2710,6 +3198,7 @@ class CostBasisStore:
                         encoded, reason,
                     ),
                 )
+                self._archive_coverage(conn, book_id, reset_id)
                 conn.execute('DELETE FROM cost_basis_events WHERE book_id = ?',
                              (book_id,))
                 conn.execute(
@@ -2731,7 +3220,9 @@ class CostBasisStore:
             conn.close()
 
     def rebuild_book(self, book_id, events, *, confirmation, client_token,
-                     import_batch_id, allow_overdraw=False, reason=''):
+                     import_batch_id, allow_overdraw=False, reason='',
+                     expected_ledger_version=None, book_identity=None,
+                     statement=None):
         """Archive, empty and refill a book inside ONE transaction.
 
         Splitting this into a reset call and an import call leaves a window
@@ -2750,9 +3241,11 @@ class CostBasisStore:
             raise InvalidRequestError(
                 f'a rebuild is limited to {MAX_IMPORT_EVENTS} rows')
 
+        registration = self._statement_registration(statement)
         conn = self._connect()
         try:
             book = self._get_book(conn, book_id)
+            self._require_book_identity(book, book_identity)
             # Validate the replacement BEFORE opening the transaction so a
             # malformed batch never even reaches the delete.
             normalized_rows = self._normalize_event_batch(
@@ -2789,6 +3282,15 @@ class CostBasisStore:
                 if str(confirmation or '').strip() != expected:
                     conn.execute('ROLLBACK')
                     raise ResetConfirmationError(f'type exactly: {expected}')
+                # The count-bearing phrase cannot tell one history from
+                # another of the same length; the digest can.
+                try:
+                    self._require_ledger_version(conn, book_id, expected_ledger_version)
+                except LedgerChangedError:
+                    conn.execute('ROLLBACK')
+                    raise ResetConfirmationError(
+                        'the ledger changed after this rebuild was planned; the '
+                        'plan is stale and nothing was removed')
 
                 encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True,
                                      separators=(',', ':'))
@@ -2804,6 +3306,7 @@ class CostBasisStore:
                         encoded, reason or 'rebuild from statement',
                     ),
                 )
+                self._archive_coverage(conn, book_id, reset_id)
                 conn.execute('DELETE FROM cost_basis_events WHERE book_id = ?',
                              (book_id,))
 
@@ -2820,9 +3323,13 @@ class CostBasisStore:
                     warnings.extend(result['warnings'])
                     inserted += 1
                 warnings.extend(self._net_short_share_warnings(conn, book_id))
+                self._register_batch(
+                    conn, book_id, import_batch_id, 'rebuild', registration,
+                    inserted=inserted, skipped=0)
                 conn.execute(
                     'UPDATE cost_basis_books SET updated_at_utc = ? WHERE book_id = ?',
                     (self._utc_now_iso(), book_id))
+                ledger_version = self._ledger_version(conn, book_id)
                 conn.execute('COMMIT')
             except BaseException:
                 self._rollback_quietly(conn)
@@ -2833,6 +3340,186 @@ class CostBasisStore:
                 'removedEvents': len(rows),
                 'inserted': inserted,
                 'warnings': sorted(set(warnings)),
+                'ledgerVersion': ledger_version,
+                'idempotentReplay': False,
+            }
+        except sqlite3.IntegrityError as exc:
+            raise self._map_integrity_error(exc) from exc
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def export_backup(self, book_id):
+        """A consistent, checksummed, complete event snapshot for file recovery."""
+        conn = self._connect()
+        try:
+            conn.execute('BEGIN')
+            book = self._get_book(conn, book_id)
+            rows = [_event_row_to_dict(row) for row in conn.execute(
+                'SELECT * FROM cost_basis_events WHERE book_id = ? ORDER BY seq', (book_id,))]
+            payload = {'book': book, 'events': rows, 'ledgerVersion': self._ledger_version(conn, book_id)}
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+            return {'format': 'cost-basis-backup', 'version': 1, 'payload': payload,
+                    'sha256': hashlib.sha256(encoded.encode()).hexdigest()}
+        finally:
+            conn.close()
+
+    def _validated_backup(self, conn, book, backup):
+        if not isinstance(backup, dict) or backup.get('format') != 'cost-basis-backup' or backup.get('version') != 1:
+            raise InvalidRequestError('unsupported backup format; use the current backup export')
+        payload = backup.get('payload')
+        if not isinstance(payload, dict):
+            raise InvalidRequestError('backup payload is missing')
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        except (ValueError, TypeError):
+            raise InvalidRequestError('backup contains invalid values')
+        if hashlib.sha256(encoded.encode()).hexdigest() != backup.get('sha256'):
+            raise InvalidRequestError('backup checksum mismatch; nothing restored')
+        self._require_book_identity(book, payload.get('book'))
+        rows = payload.get('events')
+        if not isinstance(rows, list) or len(rows) > 100000:
+            raise InvalidRequestError('backup events must be a list of at most 100000 rows')
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise InvalidRequestError('backup contains an invalid event')
+            for field in ('eventId', 'clientToken'):
+                _require_token(field, row.get(field))
+            if row['eventId'] in seen:
+                raise InvalidRequestError('backup contains duplicate event ids')
+            seen.add(row['eventId'])
+            # Validate the event's data independently of its historic void
+            # state; the restore retains the original audit fields below.
+            self._normalize_event_batch(conn, book['bookId'], [row], book, include_existing_history=False)
+            if row.get('account') != book['account']:
+                raise InvalidRequestError('backup event belongs to another account')
+        events_json = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        return {'events_json': events_json, 'events_sha256': hashlib.sha256(events_json.encode()).hexdigest()}
+
+    def restore_backup(self, book_id, backup, *, confirmation, client_token,
+                       expected_ledger_version=None, book_identity=None):
+        return self.restore_book_reset(book_id, 'file-backup', backup=backup,
+            confirmation=confirmation, client_token=client_token,
+            expected_ledger_version=expected_ledger_version, book_identity=book_identity)
+
+    def restore_book_reset(self, book_id, reset_id, *, confirmation, client_token,
+                           expected_ledger_version=None, book_identity=None, backup=None):
+        """Put an archived ledger back, archiving the current one first.
+
+        The archive holds the rows exactly as they were, voided ones
+        included, so they are written back verbatim rather than re-validated
+        as new events: the point is to return to a state that existed, not to
+        re-judge it. Inside one transaction: archive the live rows, delete
+        them, insert the archived rows.
+        """
+        _require_token('clientToken', client_token)
+        _require_token('resetId', reset_id)
+        conn = self._connect()
+        try:
+            book = self._get_book(conn, book_id)
+            self._require_book_identity(book, book_identity)
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                replay = conn.execute(
+                    'SELECT * FROM cost_basis_book_resets WHERE client_token = ?',
+                    (client_token,),
+                ).fetchone()
+                if replay is not None:
+                    if replay['book_id'] != book_id:
+                        raise InvalidRequestError('clientToken belongs to another ledger')
+                    conn.execute('ROLLBACK')
+                    return {'bookId': book_id, 'resetId': replay['reset_id'],
+                            'restoredFrom': reset_id, 'idempotentReplay': True}
+                archive = conn.execute(
+                    'SELECT * FROM cost_basis_book_resets WHERE book_id = ? AND reset_id = ?',
+                    (book_id, reset_id),
+                ).fetchone() if backup is None else self._validated_backup(conn, book, backup)
+                if archive is None:
+                    conn.execute('ROLLBACK')
+                    raise InvalidRequestError('rebuild archive not found for this ledger')
+                current = [
+                    _event_row_to_dict(row) for row in conn.execute(
+                        'SELECT * FROM cost_basis_events WHERE book_id = ? '
+                        'ORDER BY seq ASC', (book_id,))
+                ]
+                expected = _reset_phrase(book['account'], book['symbol'], len(current))
+                if str(confirmation or '').strip() != expected:
+                    conn.execute('ROLLBACK')
+                    raise ResetConfirmationError(f'type exactly: {expected}')
+                try:
+                    self._require_ledger_version(conn, book_id, expected_ledger_version)
+                except LedgerChangedError:
+                    conn.execute('ROLLBACK')
+                    raise ResetConfirmationError(
+                        'the ledger changed after this restore was planned')
+                encoded = json.dumps(current, ensure_ascii=False, sort_keys=True,
+                                     separators=(',', ':'))
+                new_reset_id = uuid.uuid4().hex
+                conn.execute(
+                    'INSERT INTO cost_basis_book_resets (reset_id, book_id, '
+                    'client_token, reset_at_utc, event_count, events_sha256, '
+                    'events_json, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    (new_reset_id, book_id, client_token, self._utc_now_iso(),
+                     len(current),
+                     hashlib.sha256(encoded.encode('utf-8')).hexdigest(),
+                     encoded, f'restore of archive {reset_id}'),
+                )
+                self._archive_coverage(conn, book_id, new_reset_id)
+                conn.execute('DELETE FROM cost_basis_events WHERE book_id = ?',
+                             (book_id,))
+                if hashlib.sha256(archive['events_json'].encode('utf-8')).hexdigest() != archive['events_sha256']:
+                    raise InvalidRequestError('archive checksum mismatch; nothing restored')
+                restored = 0
+                for item in json.loads(archive['events_json']):
+                    values = {}
+                    for column in _EVENT_COLUMNS:
+                        camel = _camel(column)
+                        value = item.get(camel)
+                        if column in ('include_in_cost', 'derived_mismatch', 'allow_overdraw'):
+                            value = 1 if value else 0
+                        if column == 'book_id':
+                            value = book_id
+                        values[column] = value
+                    if values.get('fees') is None:
+                        values['fees'] = 0.0
+                    if values.get('tag') is None:
+                        values['tag'] = ''
+                    if values.get('note') is None:
+                        values['note'] = ''
+                    if values.get('account') is None:
+                        values['account'] = ''
+                    if values.get('source') is None:
+                        values['source'] = 'manual'
+                    if values.get('created_at_utc') is None:
+                        values['created_at_utc'] = self._utc_now_iso()
+                    conn.execute(
+                        f"INSERT INTO cost_basis_events ({', '.join(_EVENT_COLUMNS)}) "
+                        f"VALUES ({', '.join('?' for _ in _EVENT_COLUMNS)})",
+                        tuple(values[column] for column in _EVENT_COLUMNS),
+                    )
+                    restored += 1
+                conn.execute(
+                    'UPDATE cost_basis_books SET updated_at_utc = ? WHERE book_id = ?',
+                    (self._utc_now_iso(), book_id))
+                if backup is None:
+                    self._restore_coverage(conn, book_id, reset_id)
+                # External backups intentionally restore events only. Their
+                # verification checks came from another file/environment;
+                # import the statements again to establish coverage here.
+                ledger_version = self._ledger_version(conn, book_id)
+                conn.execute('COMMIT')
+            except BaseException:
+                self._rollback_quietly(conn)
+                raise
+            return {
+                'bookId': book_id,
+                'resetId': new_reset_id,
+                'restoredFrom': reset_id,
+                'removedEvents': len(current),
+                'restoredEvents': restored,
+                'ledgerVersion': ledger_version,
                 'idempotentReplay': False,
             }
         except sqlite3.IntegrityError as exc:
@@ -2992,6 +3679,12 @@ class CostBasisStore:
         if 'external_ref' in message:
             return InvalidRequestError('externalRef has already been imported')
         return InvalidRequestError(message)
+
+
+def _camel(column):
+    """snake_case column name -> the camelCase key _event_row_to_dict emits."""
+    parts = column.split('_')
+    return parts[0] + ''.join(part.capitalize() for part in parts[1:])
 
 
 def _reset_phrase(account, symbol, row_count):
