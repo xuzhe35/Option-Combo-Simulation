@@ -806,8 +806,14 @@ cells show 不可用 for accounts TWS is not reporting.
 application-data directory - a separate file on purpose: the ledger is
 small, append-oriented, and must never be swept into the workspace revision
 archive. Configure under `[cost_basis]` in `config.ini`; a one-off
-override is `OPTION_COMBO_COST_BASIS_DB_PATH`. Loopback-only, like every
-other persistence surface.
+override is `OPTION_COMBO_COST_BASIS_DB_PATH`. Access is loopback-only by
+default. A managed LAN/proxy deployment can explicitly allow socket peer IPs
+or CIDRs with `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` or `[cost_basis]
+trusted_peers`. An explicitly empty environment value clears any INI list;
+invalid lists deny all remote ledger access. Forwarded headers never grant
+access. This does not relax workspace persistence or database-admin policy.
+See the [Nginx Proxy Manager deployment guide](option_combo_starter/README.md#nginx-proxy-manager-lan-deployment)
+for origin configuration, private ingress, and persistent storage.
 
 The page can export a checksummed JSON event backup and restore it after identity
 and version checks, archiving the current events first. File recovery preserves
@@ -1078,6 +1084,12 @@ connect to the local service. If the frontend is served from a LAN/Tailscale
 address or a different HTTP port, add that exact `http://host:port` (or HTTPS)
 origin. Missing origins, `null`, wildcards, paths, and unlisted origins are
 rejected; serve the frontend over HTTP rather than opening the HTML as a file.
+
+A nonblank `OPTION_COMBO_WS_ALLOWED_ORIGINS` overrides the entire INI list in
+both backends. A blank value keeps the INI/default list; malformed nonblank
+values fail startup. Docker's status monitor reads the same runtime policy
+and sends an approved Origin. Origin checks are not authentication: remote
+deployments must protect ingress and the shared trading-capable socket.
 
 ### Historical backend
 
@@ -1821,6 +1833,9 @@ It currently runs the suites wired into `tests/run.js`, including:
 
 Python tests also exist for selected backend helpers:
 
+- `tests/cost_basis_access_test.py` (trusted proxy access, revocation, default-deny boundaries)
+- `tests/websocket_security_test.py` (origin configuration and real local handshakes)
+- `tests/option_combo_supervisor_test.py` (container monitor and lifecycle)
 - `tests/ib_server_ws_test.py`
 - `tests/ib_server_order_tracking_test.py`
 - `tests/order_tracking_test.py`

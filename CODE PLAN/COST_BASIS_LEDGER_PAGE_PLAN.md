@@ -422,7 +422,15 @@ USD 折现曲线。IV 或曲线请求有服务端时限，失败时凸性覆盖�
 
 ## 8. WebSocket 协议
 
-沿用 `portfolio_store_ws.py` 的形状：loopback-only、动作白名单、请求 id、结构化错误码、绝不回传 SQL 或数据库路径。
+沿用 `portfolio_store_ws.py` 的形状：默认 loopback-only、动作白名单、请求 id、结构化错误码、绝不回传 SQL 或数据库路径。
+
+2026-09-11 LAN/Nginx Proxy Manager 部署扩展：仅账本允许通过
+`[cost_basis] trusted_peers` 或 `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS`
+显式指定可信 TCP 对端 IP/CIDR。默认仍只接收 loopback；环境变量为空可撤销 INI
+中的远程许可，非法列表整体拒绝远程访问。检查在首次建库和 broker fetcher 前执行，
+不信任 `X-Forwarded-For` / `Forwarded`。WebSocket 的精确 Origin 白名单仍独立生效，
+支持 `OPTION_COMBO_WS_ALLOWED_ORIGINS`。可信代理必须限制入口访问并阻止绕过代理；
+该变更不是用户认证，也不放宽 workspace/admin 的本地限制，不改变任何账本现金/事件语义。
 
 | client action | server action |
 | --- | --- |

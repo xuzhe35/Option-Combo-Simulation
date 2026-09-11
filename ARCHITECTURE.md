@@ -907,7 +907,8 @@ only hands snapshots in and applies load results atomically through the
 replace-mode normalizer. Both `websockets.serve` calls share an explicit
 `max_size` (`[server] max_ws_message_bytes`) because the library's 1 MiB
 default would 1009-close a socket that also carries order supervision. Both
-listeners also pass the exact `[server] allowed_origins` list to
+listeners also pass the exact `[server] allowed_origins` list (overridden by a
+nonblank `OPTION_COMBO_WS_ALLOWED_ORIGINS`) to
 `websockets.serve`; this is the browser-side boundary that prevents an
 unrelated web origin from reaching loopback persistence, ledger, admin, or
 execution actions.
@@ -932,8 +933,16 @@ uses the same atomic archive-and-restore transaction.
 
 `cost_basis_ws.py` is the shared protocol layer both `ib_server.py` and
 `historical_server.py` mount, so Live and Historical answer with identical
-response shapes and error codes. It owns loopback enforcement, request
+response shapes and error codes. It owns peer enforcement, request
 validation, and the sync-store to event-loop bridge (`asyncio.to_thread`).
+Loopback is allowed by default; `[cost_basis] trusted_peers` or
+`OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` explicitly opts in exact remote IPs/CIDRs.
+Only the transport's actual TCP peer is checked, never forwarded headers.
+The environment wins even when empty (revocation); malformed lists deny all
+remote ledger access without interrupting local ledger/IB operation. The
+access check precedes lazy DB initialization and broker fetchers. This policy
+does not change the workspace-store or admin loopback restrictions. A trusted
+proxy must protect its ingress because it represents all clients it admits.
 It never writes SQL and never leaks database paths or raw SQL errors to the
 browser, and an exception must not escape it - one bad ledger request must
 not tear down a socket that is also carrying live market data and order

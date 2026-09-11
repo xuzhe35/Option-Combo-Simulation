@@ -1,6 +1,7 @@
 services:
   option-combo:
-    image: patsiesoblast0l/option-combo-starter:20260723
+    # Release target: build/publish this tag before deploying (see README.md).
+    image: patsiesoblast0l/option-combo-starter:20260911
     container_name: option-combo
     restart: unless-stopped
     ports:
@@ -12,6 +13,12 @@ services:
       TWS_CLIENT_ID: "${TWS_CLIENT_ID:-999}"
       WS_HOST: "0.0.0.0"
       WS_PORT: "8765"
+      OPTION_COMBO_COST_BASIS_DB_PATH: "/app/state/cost_basis/cost_basis.db"
+      # Optional remote ledger access; configure both only after securing NPM.
+      # Use the frontend origin, not the WebSocket hostname or HTML path.
+      # OPTION_COMBO_WS_ALLOWED_ORIGINS: "http://localhost:8000,http://127.0.0.1:8000,http://[::1]:8000,http://app.example.test"
+      # Use NPM's verified TCP peer IP; this documentation address is a placeholder.
+      # OPTION_COMBO_COST_BASIS_TRUSTED_PEERS: "192.0.2.10"
     volumes:
       - option-combo-state:/app/state
 
@@ -30,5 +37,6 @@ volumes:
 #   -e TWS_CLIENT_ID=999 \
 #   -e WS_HOST=0.0.0.0 \
 #   -e WS_PORT=8765 \
+#   -e OPTION_COMBO_COST_BASIS_DB_PATH=/app/state/cost_basis/cost_basis.db \
 #   -v option-combo-state:/app/state \
-#   patsiesoblast0l/option-combo-starter:20260723
+#   patsiesoblast0l/option-combo-starter:20260911

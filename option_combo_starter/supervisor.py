@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import configparser
 import fcntl
+import importlib.util
 import json
 import logging
 import os
@@ -38,6 +40,7 @@ DEFAULT_REPO_DIR = Path("/app/Option-Combo-Simulation")
 DEFAULT_HTTP_PORT = 8000
 DEFAULT_WS_PORT = 8765
 DEFAULT_IB_STATUS_HOST = "127.0.0.1"
+DEFAULT_IB_STATUS_ORIGIN = "http://localhost:8000"
 DEFAULT_IB_STATUS_POLL_SECONDS = 30.0
 DEFAULT_WS_RETRY_SECONDS = 5.0
 DEFAULT_WS_RESPONSE_TIMEOUT_SECONDS = 10.0
@@ -138,6 +141,29 @@ def _ib_status_host_from_env() -> str:
     return DEFAULT_IB_STATUS_HOST
 
 
+def _ib_status_origin_from_backend(repo_dir: Path) -> str:
+    """Use the runtime backend's validated origin policy for the local monitor."""
+
+    config = configparser.ConfigParser()
+    with (repo_dir / "config.ini").open(encoding="utf-8") as source:
+        config.read_file(source)
+
+    # PID 1 is baked outside the runtime checkout. Loading this exact pure
+    # module keeps its policy aligned with the backend after runtime updates,
+    # without importing ib_server (which starts broker/data initialization).
+    spec = importlib.util.spec_from_file_location(
+        "_option_combo_runtime_websocket_security",
+        repo_dir / "websocket_security.py",
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError("Runtime WebSocket origin policy is unavailable")
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
+    # Inherited environment is identical to the child's; omitting new optional
+    # arguments also keeps the monitor compatible with older runtime checkouts.
+    return policy.read_allowed_ws_origins(config)[0]
+
+
 async def wait_for_stop(stop_event: asyncio.Event, timeout_seconds: float) -> bool:
     """Return True when stopped, or False after the timeout elapses."""
 
@@ -193,6 +219,7 @@ class SupervisorConfig:
     http_port: int = DEFAULT_HTTP_PORT
     ws_port: int = DEFAULT_WS_PORT
     ib_status_host: str = DEFAULT_IB_STATUS_HOST
+    ib_status_origin: str = DEFAULT_IB_STATUS_ORIGIN
     ib_status_poll_seconds: float = DEFAULT_IB_STATUS_POLL_SECONDS
     ws_retry_seconds: float = DEFAULT_WS_RETRY_SECONDS
     ws_response_timeout_seconds: float = DEFAULT_WS_RESPONSE_TIMEOUT_SECONDS
@@ -210,6 +237,7 @@ class SupervisorConfig:
             http_port=DEFAULT_HTTP_PORT,
             ws_port=_port_from_env("WS_PORT", DEFAULT_WS_PORT),
             ib_status_host=_ib_status_host_from_env(),
+            ib_status_origin=_ib_status_origin_from_backend(repo_dir),
             ib_status_poll_seconds=_positive_float_from_env(
                 "OPTION_COMBO_IB_STATUS_POLL_SECONDS",
                 DEFAULT_IB_STATUS_POLL_SECONDS,
@@ -831,6 +859,7 @@ class IBStatusMonitor:
             try:
                 async with self._connector(
                     self.uri,
+                    origin=self.config.ib_status_origin,
                     open_timeout=self.config.ws_response_timeout_seconds,
                     close_timeout=self.config.ws_response_timeout_seconds,
                     ping_interval=20,
@@ -1076,7 +1105,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOGGER.error("Invalid runtime repository directory: %s", repo_dir)
         return 2
 
-    config = SupervisorConfig.from_environment(repo_dir)
+    try:
+        config = SupervisorConfig.from_environment(repo_dir)
+    except (OSError, ImportError, configparser.Error, ValueError) as exc:
+        LOGGER.error("Invalid runtime supervisor configuration: %s", exc)
+        return 2
     monitor = IBStatusMonitor(config)
     scheduler = YieldCurveScheduler(config)
     supervisor = ApplicationSupervisor(config, monitor, scheduler)

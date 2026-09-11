@@ -36,8 +36,10 @@ into the image.
 | No upstream change | Keep the existing checkout and start the supervised services immediately. |
 | Remote probe/fetch unavailable | Give the network operation a finite deadline, then log a warning and start the valid local checkout instead of entering a container restart loop. |
 
-The repo checkout lives in the container layer. The yield-curve snapshot lives
-in the `option-combo-state` named volume at `/app/state/yield_curve`.
+The repo checkout lives in the container layer. With the supplied Compose
+configuration, the `option-combo-state` named volume holds the yield-curve
+snapshot at `/app/state/yield_curve` and the cost ledger at
+`/app/state/cost_basis/cost_basis.db`.
 
 Clone, remote-probe, and fetch operations each have a 60-second wall-clock
 deadline plus a five-second termination grace. Set
@@ -135,14 +137,134 @@ Changing these values requires replacing the container, not merely restarting
 the same container, because setup overrides are applied when a checkout is
 created or updated.
 
+### WebSocket access and ledger storage
+
+The backend reads the following settings directly from its inherited
+environment; they do not need to be copied into `config.ini` by the starter.
+
+| Environment variable | Fallback config key | Behavior |
+|---|---|---|
+| `OPTION_COMBO_WS_ALLOWED_ORIGINS` | `server.allowed_origins` | A nonblank value replaces the exact comma-separated browser-origin list; blank/unset falls back to config, then the localhost defaults. |
+| `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` | `cost_basis.trusted_peers` | Comma-separated peer IPs/CIDRs allowed in addition to loopback. Unset uses config; an explicitly empty value clears config back to loopback-only. |
+| `OPTION_COMBO_COST_BASIS_DB_PATH` | `cost_basis.db_path` | Nonblank environment value wins, then config, then the platform application-data directory. The supplied Compose sets a persistent path under `/app/state`. |
+
+The supervisor sends an origin selected from the same effective allow-list
+when connecting to the local backend. It does not omit or bypass the origin
+check. Changing `OPTION_COMBO_WS_ALLOWED_ORIGINS` replaces the list rather
+than appending to it; include the localhost origins if local browser access
+is needed too. An origin is the page's scheme, hostname, and nondefault port,
+without a path or trailing slash. `null`, missing origins, and wildcards are
+not allowed.
+
+Remote ledger access stays disabled unless explicitly configured. Peer
+settings use literal IPs or CIDRs, not hostnames; invalid entries deny all
+remote ledger access, and wildcards/default routes are rejected. These
+settings do not enable remote workspace persistence or database-admin access.
+They also do not bind a particular peer to a particular origin: the configured
+origins and trusted ledger peers are independent checks.
+
+A new cost database and its parent directories are created lazily on the first
+allowed ledger request, not merely when the web page or Python process starts.
+An unmounted writable path works in the container layer, but will not survive
+container replacement. To use a host directory instead, set the DB variable
+to `/data/cost_basis.db` and add a bind mount such as
+`/srv/option-combo-example/data:/data`, retaining any existing state volume.
+Use a writable directory mount, not just a single DB file: SQLite also needs
+its WAL/SHM files. Give each independent stack its own ledger storage.
+
+Before changing the path or replacing a container that already has ledger
+data, preserve it with a SQLite-consistent backup. A path change does not
+migrate the old ledger; an empty directory creates a new empty database. Do
+not copy only a live `.db` file while its WAL is active. Workspace recovery
+sets do not back up the separate cost ledger.
+
+### Nginx Proxy Manager: LAN deployment
+
+This setup preserves the current HTTP page plus `ws://` connection behavior.
+It does not add frontend `wss://` support: enabling Force SSL for the page
+alone can cause mixed-content blocking. Keep this HTTP deployment on a
+trusted LAN/VPN; do not expose it to the public Internet.
+
+1. Protect **both** the frontend and WebSocket proxy hosts with the intended
+   LAN/VPN boundary and/or NPM IP Access Lists. Restrict any published backend
+   ports so clients cannot bypass the proxy. Origin checks are not user
+   authentication, and the shared live WebSocket supports trading operations
+   even though the cost-ledger page itself does not trade. Trusting NPM means
+   trusting every client NPM admits, not just the colleague's browser.
+2. Prefer a dedicated Docker network shared by NPM and this service, with a
+   fixed NPM IP. Point NPM at the unique application service name on that
+   network. With this arrangement, host-published application ports are not
+   necessary; avoid publishing them when nothing else needs them. This follows
+   [NPM's Docker-network guidance](https://nginxproxymanager.com/advanced-config/#best-practice-use-a-docker-network).
+3. Configure two NPM Proxy Hosts. For the frontend, forward
+   `app.example.test` using scheme `http` to the application container's port
+   `8000`. For the WebSocket host, forward `ws.example.test` using scheme
+   `http` to the same container's port `8765` and enable **Websockets Support**.
+   If NPM instead reaches the Docker host's published ports, use their host-side
+   numbers, not `8000`/`8765` blindly: for a mapping `28000:8000`, the frontend
+   upstream port is `28000`; for `28765:8765`, the WS upstream port is `28765`.
+   `localhost` inside the NPM container refers to NPM itself, not the app.
+4. Preserve the browser's `Origin` header. Do not replace it with localhost,
+   remove it, or rewrite it to the WebSocket hostname. NPM's Websockets Support
+   must pass the WebSocket Upgrade/Connection headers to the backend; see
+   [nginx's WebSocket proxying requirements](https://nginx.org/en/docs/http/websocket.html).
+5. Add the exact **frontend page origin** and the backend's actual NPM TCP
+   peer IP to the existing service's `environment` block. The following is
+   an additive example, not a replacement for the rest of the stack:
+
+   ```yaml
+   environment:
+     OPTION_COMBO_WS_ALLOWED_ORIGINS: "http://localhost:8000,http://127.0.0.1:8000,http://[::1]:8000,http://app.example.test"
+     OPTION_COMBO_COST_BASIS_TRUSTED_PEERS: "192.0.2.10"
+     OPTION_COMBO_COST_BASIS_DB_PATH: "/app/state/cost_basis/cost_basis.db"
+   ```
+
+   All example domains/IPs are placeholders. On a direct shared network the
+   peer should be NPM's network IP. When NPM reaches host-published ports,
+   Docker networking may make the peer appear as a host/bridge gateway address
+   instead. Verify it from the backend's rejected-ledger-request log and
+   Portainer's network details; do not guess it from the browser address.
+   `X-Forwarded-For` and `X-Real-IP` are not used for this authorization. Prefer
+   one fixed exact IP to allowing a whole Docker subnet. Trusting a gateway
+   address also trusts any other connections Docker presents through it, so
+   blocking direct access is especially important in that arrangement.
+6. Redeploy/recreate the container with the updated image and environment.
+   A plain restart does not apply Compose environment changes; see
+   [Docker's restart documentation](https://docs.docker.com/reference/cli/docker/compose/restart/).
+   Keep each stack's own TWS settings, port mappings, origins, and storage.
+7. Open `http://app.example.test/cost_basis.html`. In its connection settings,
+   use `ws.example.test` as the server and `80` as the port, then save and
+   reconnect. Do not enter the upstream container port when the browser is
+   reaching NPM on port 80.
+
+Verification is deliberately separate from broker actions: no test trade or
+ledger write is needed. Confirm the supervisor no longer repeats its status
+monitor HTTP 403 failure, the browser's WS handshake is `101 Switching
+Protocols`, and the ledger status becomes available. TWS may still be offline
+while the database is usable. A handshake 403 points to the origin check or
+NPM access policy; `remote_access_disabled` after a successful handshake
+points to the TCP-peer allow-list. A storage initialization failure after
+those checks calls for checking the configured directory and permissions.
+
 ## Build and run
 
 The image does **not** embed the Option Combo project source. At startup it
 clones the hardcoded
 [`xuzhe35/Option-Combo-Simulation` `main` branch](https://github.com/xuzhe35/Option-Combo-Simulation).
-The reconnect implementation commit must therefore be merged into that branch
-before a container from this image is deployed; otherwise the new container
-will run the older backend from upstream.
+The implementation must therefore be merged **and published** to that remote
+branch before deployment; a local merge alone does not update remote
+containers. This includes the backend environment/peer-policy changes above.
+
+The `20260911` tag in the maintained commands is a release target, not a claim
+that an image has already been built or published. Run the release build from
+this directory (not an older standalone copy of the starter) and publish it
+before selecting that tag in Portainer. A new
+starter image is required for the supervisor's Origin-header fix because
+`/app/supervisor.py` is baked into the image; the application checkout's Git
+update cannot replace it. No additional Python packages are introduced by
+the origin/ledger-access changes. After this upgrade, changing the supported
+environment values or mounts needs container recreation, not another image
+rebuild.
 
 `sample_commands.txt` is the direct build/run replacement. `docker-compose.yml`
 contains the equivalent service definition and an equivalent `docker run`
