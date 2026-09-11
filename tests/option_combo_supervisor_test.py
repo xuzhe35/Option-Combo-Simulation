@@ -105,7 +105,7 @@ class SupervisorConfigTest(unittest.TestCase):
         self.addCleanup(self.runtime.cleanup)
         self.repo_dir = Path(self.runtime.name)
         (self.repo_dir / "config.ini").write_text("[server]\n", encoding="utf-8")
-        # Copy only the pure policy source, never project runtime config/data.
+        # Copy only the pure compatibility source, never runtime config/data.
         policy_source = Path(__file__).resolve().parents[1] / "websocket_security.py"
         (self.repo_dir / "websocket_security.py").write_bytes(policy_source.read_bytes())
 
@@ -159,7 +159,7 @@ class SupervisorConfigTest(unittest.TestCase):
         self.assertEqual(specific_config.ws_port, 8765)
         self.assertEqual(IBStatusMonitor(ipv6_config).uri, "ws://[::1]:8765")
 
-    def test_status_origin_uses_first_runtime_config_origin(self):
+    def test_status_origin_ignores_retired_runtime_config(self):
         (self.repo_dir / "config.ini").write_text(
             "[server]\nallowed_origins = https://ledger.example.test,https://other.example.test\n",
             encoding="utf-8",
@@ -167,9 +167,9 @@ class SupervisorConfigTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             config = SupervisorConfig.from_environment(self.repo_dir)
 
-        self.assertEqual(config.ib_status_origin, "https://ledger.example.test")
+        self.assertEqual(config.ib_status_origin, "http://localhost:8000")
 
-    def test_status_origin_uses_environment_override_and_blank_falls_back(self):
+    def test_status_origin_ignores_retired_environment_and_config(self):
         (self.repo_dir / "config.ini").write_text(
             "[server]\nallowed_origins = https://config.example.test\n",
             encoding="utf-8",
@@ -183,10 +183,10 @@ class SupervisorConfigTest(unittest.TestCase):
         }, clear=True):
             blank = SupervisorConfig.from_environment(self.repo_dir)
 
-        self.assertEqual(override.ib_status_origin, "https://stack.example.test")
-        self.assertEqual(blank.ib_status_origin, "https://config.example.test")
+        self.assertEqual(override.ib_status_origin, "http://localhost:8000")
+        self.assertEqual(blank.ib_status_origin, "http://localhost:8000")
 
-    def test_status_origin_uses_default_and_rejects_invalid_environment(self):
+    def test_status_origin_uses_default_even_with_malformed_retired_environment(self):
         with patch.dict(os.environ, {}, clear=True):
             config = SupervisorConfig.from_environment(self.repo_dir)
         self.assertEqual(config.ib_status_origin, "http://localhost:8000")
@@ -194,8 +194,8 @@ class SupervisorConfigTest(unittest.TestCase):
         with patch.dict(os.environ, {
             "OPTION_COMBO_WS_ALLOWED_ORIGINS": "*",
         }, clear=True):
-            with self.assertRaises(ValueError):
-                SupervisorConfig.from_environment(self.repo_dir)
+            malformed = SupervisorConfig.from_environment(self.repo_dir)
+        self.assertEqual(malformed.ib_status_origin, "http://localhost:8000")
 
     def test_status_origin_requires_runtime_config_and_policy_files(self):
         for missing_file in ("config.ini", "websocket_security.py"):

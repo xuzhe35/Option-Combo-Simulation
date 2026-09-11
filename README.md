@@ -813,7 +813,7 @@ trusted_peers`. An explicitly empty environment value clears any INI list;
 invalid lists deny all remote ledger access. Forwarded headers never grant
 access. This does not relax workspace persistence or database-admin policy.
 See the [Nginx Proxy Manager deployment guide](option_combo_starter/README.md#nginx-proxy-manager-lan-deployment)
-for origin configuration, private ingress, and persistent storage.
+for trusted-peer configuration, private ingress, and persistent storage.
 
 The page can export a checksummed JSON event backup and restore it after identity
 and version checks, archiving the current events first. File recovery preserves
@@ -996,7 +996,6 @@ client_id = 999
 [server]
 ws_host = 127.0.0.1
 ws_port = 8765
-allowed_origins = http://localhost:8000,http://127.0.0.1:8000,http://[::1]:8000
 option_contract_timing_timeout_seconds = 5
 
 [execution]
@@ -1077,19 +1076,25 @@ Important distinction:
 
 `server.ws_host` may be a comma-separated list in `ib_server.py`, so one backend can listen on loopback plus a LAN or Tailscale address at the same time.
 
-`server.allowed_origins` is an exact comma-separated browser-origin allow-list
-enforced during the WebSocket handshake. Loopback binding is not a browser
-security boundary by itself: without this check, an unrelated website could
-connect to the local service. If the frontend is served from a LAN/Tailscale
-address or a different HTTP port, add that exact `http://host:port` (or HTTPS)
-origin. Missing origins, `null`, wildcards, paths, and unlisted origins are
-rejected; serve the frontend over HTTP rather than opening the HTML as a file.
+Neither backend restricts the WebSocket handshake by `Origin`: arbitrary
+browser origins, `null`, and missing Origin headers are accepted. The strict
+localhost-origin policy introduced in commit `01292bc` on September 2 was
+rolled back after it caused HTTP 403 failures in previously working LAN/Nginx
+Proxy Manager deployments. Existing `server.allowed_origins` and
+`OPTION_COMBO_WS_ALLOWED_ORIGINS` settings are now ignored.
 
-A nonblank `OPTION_COMBO_WS_ALLOWED_ORIGINS` overrides the entire INI list in
-both backends. A blank value keeps the INI/default list; malformed nonblank
-values fail startup. Docker's status monitor reads the same runtime policy
-and sends an approved Origin. Origin checks are not authentication: remote
-deployments must protect ingress and the shared trading-capable socket.
+This restores connection compatibility, not authentication. An unrelated
+website can attempt to connect to any backend reachable by the browser,
+including localhost; loopback binding alone is not a browser security
+boundary. Protect the shared trading-capable socket with trusted network and
+proxy ingress controls. Ledger trusted-peer checks, workspace/admin loopback
+restrictions, and order-execution safety checks remain unchanged.
+
+For Docker, publish the updated application source and restart the container
+so its starter fetches the update. No additional image rebuild is needed for
+this rollback; the compatibility module also keeps the already-baked
+`20260911` supervisor working. Container recreation is still required when
+changing environment variables or mounts.
 
 ### Historical backend
 
@@ -1834,7 +1839,7 @@ It currently runs the suites wired into `tests/run.js`, including:
 Python tests also exist for selected backend helpers:
 
 - `tests/cost_basis_access_test.py` (trusted proxy access, revocation, default-deny boundaries)
-- `tests/websocket_security_test.py` (origin configuration and real local handshakes)
+- `tests/websocket_security_test.py` (Origin rollback compatibility and real local handshakes)
 - `tests/option_combo_supervisor_test.py` (container monitor and lifecycle)
 - `tests/ib_server_ws_test.py`
 - `tests/ib_server_order_tracking_test.py`

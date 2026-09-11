@@ -76,7 +76,13 @@ from trade_execution.models import (
     HedgeOrderRequest,
     HedgeSubmitResult,
 )
-import ib_server
+# Import only synthetic defaults; listener tests must not load standing config
+# or query the real chain service while constructing the backend environment.
+with patch.dict('os.environ', {}, clear=True), \
+        patch('configparser.ConfigParser.read', return_value=[]), \
+        patch('historical_data.HistoricalReplayStore.check_service',
+              return_value={'symbols': []}):
+    import ib_server
 
 
 class _DummyEvent:
@@ -4476,8 +4482,9 @@ class IbServerConnectionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(ib_server.main(), timeout=0.1)
         self.assertEqual(stopped, [True])
         self.assertEqual(len(serve_calls), 1)
+        self.assertNotIn('origins', serve_calls[0][1])
         self.assertEqual(
-            serve_calls[0][1]['origins'], ib_server.WS_ALLOWED_ORIGINS)
+            serve_calls[0][1]['max_size'], ib_server.MAX_WS_MESSAGE_BYTES)
 
 
 class IbServerSubmissionFillReplayTests(unittest.IsolatedAsyncioTestCase):

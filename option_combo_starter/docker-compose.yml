@@ -14,9 +14,7 @@ services:
       WS_HOST: "0.0.0.0"
       WS_PORT: "8765"
       OPTION_COMBO_COST_BASIS_DB_PATH: "/app/state/cost_basis/cost_basis.db"
-      # Optional remote ledger access; configure both only after securing NPM.
-      # Use the frontend origin, not the WebSocket hostname or HTML path.
-      # OPTION_COMBO_WS_ALLOWED_ORIGINS: "http://localhost:8000,http://127.0.0.1:8000,http://[::1]:8000,http://app.example.test"
+      # Optional remote ledger access; configure only after securing NPM.
       # Use NPM's verified TCP peer IP; this documentation address is a placeholder.
       # OPTION_COMBO_COST_BASIS_TRUSTED_PEERS: "192.0.2.10"
     volumes:

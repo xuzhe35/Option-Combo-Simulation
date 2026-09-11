@@ -191,13 +191,23 @@ Persistence and ledger modules, mounted by BOTH backends:
 
 ### Blended-cost ledger
 
-- LAN/proxy deployment is opt-in: `OPTION_COMBO_WS_ALLOWED_ORIGINS` sets the
-  exact browser-origin list, while `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS`
-  separately permits actual peer IPs/CIDRs for ledger actions only. No header
-  spoofing, wildcard peer, or global `allow_remote` switch is used. See the
-  starter README for Nginx Proxy Manager setup. The updated baked supervisor
-  also sends an Origin from the same runtime policy; rebuild the starter as
-  well as publishing backend changes before deployment. No new dependencies.
+- LAN/proxy ledger access remains opt-in:
+  `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` permits actual peer IPs/CIDRs for
+  ledger actions only. No forwarded-header trust, wildcard peer, or global
+  `allow_remote` switch is used. See the starter README for Nginx Proxy Manager
+  setup; network/proxy ingress must protect the trading-capable shared socket.
+- The strict WebSocket Origin policy introduced by September 2 commit
+  `01292bc` caused HTTP 403 failures in previously working LAN/NPM setups and
+  has been rolled back in both backends. Arbitrary browser origins, `null`,
+  and missing headers are accepted; `server.allowed_origins` and
+  `OPTION_COMBO_WS_ALLOWED_ORIGINS` are ignored. Origin is not authentication,
+  and an unrelated website can reach a backend through a browser that has
+  network access to it. Ledger peers, workspace/admin loopback restrictions,
+  data behavior, and execution safety are unchanged. Publish the application
+  update and restart the container; this rollback needs no additional image
+  rebuild or dependencies. The fixed compatibility return from
+  `websocket_security.read_allowed_ws_origins` keeps the already-baked
+  `20260911` supervisor working without loading an Origin authorization policy.
 - one active book per account + underlying + security type + currency in the
   separate schema-v9 `cost_basis.db`
 - STK/OPT and deliverable FUT/FOP event replay, including FOP delivery and

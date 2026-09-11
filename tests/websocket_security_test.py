@@ -1,4 +1,6 @@
+import ast
 import configparser
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -10,7 +12,7 @@ from websocket_security import (
 )
 
 
-class WebSocketOriginConfigTests(unittest.TestCase):
+class LegacySupervisorOriginCompatibilityTests(unittest.TestCase):
     def setUp(self):
         environment = mock.patch.dict('os.environ', {}, clear=True)
         environment.start()
@@ -23,39 +25,43 @@ class WebSocketOriginConfigTests(unittest.TestCase):
             config.set('server', 'allowed_origins', value)
         return config
 
-    def test_defaults_are_loopback_http_origins(self):
+    def test_helper_retains_nonempty_monitor_origin_for_shipped_images(self):
         self.assertEqual(
             read_allowed_ws_origins(self._config()), DEFAULT_ALLOWED_ORIGINS)
+        self.assertEqual(read_allowed_ws_origins(None)[0], 'http://localhost:8000')
 
-    def test_parser_normalizes_and_deduplicates_exact_origins(self):
+    def test_retired_config_is_ignored(self):
         result = read_allowed_ws_origins(self._config(
             'HTTP://LOCALHOST:8000/, http://localhost:8000, '
             'https://Example.COM:9443'))
-        self.assertEqual(result, (
-            'http://localhost:8000', 'https://example.com:9443'))
+        self.assertEqual(result, DEFAULT_ALLOWED_ORIGINS)
 
-    def test_null_wildcard_path_and_empty_lists_fail_closed(self):
+    def test_malformed_retired_config_cannot_block_supervisor_startup(self):
         for value in ('null', '*', 'http://*.example', 'http://bad host',
                       'http://localhost:8000/page', ' , '):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                read_allowed_ws_origins(self._config(value))
+            with self.subTest(value=value):
+                self.assertEqual(read_allowed_ws_origins(self._config(value)),
+                                 DEFAULT_ALLOWED_ORIGINS)
 
-    def test_environment_overrides_config_for_container_deployments(self):
+    def test_retired_environment_is_ignored(self):
         with mock.patch.dict('os.environ', {
             'OPTION_COMBO_WS_ALLOWED_ORIGINS': 'http://ledger.example,http://localhost:8000',
         }):
-            self.assertEqual(read_allowed_ws_origins(self._config()), (
-                'http://ledger.example', 'http://localhost:8000'))
+            self.assertEqual(read_allowed_ws_origins(self._config()),
+                             DEFAULT_ALLOWED_ORIGINS)
 
-    def test_blank_environment_keeps_config(self):
+    def test_blank_environment_does_not_restore_config_policy(self):
         with mock.patch.dict('os.environ', {'OPTION_COMBO_WS_ALLOWED_ORIGINS': ' '}):
             self.assertEqual(read_allowed_ws_origins(self._config('http://ledger.example')),
-                             ('http://ledger.example',))
+                             DEFAULT_ALLOWED_ORIGINS)
 
-    def test_invalid_environment_does_not_fall_back_to_config(self):
+    def test_malformed_retired_environment_cannot_block_supervisor_startup(self):
         with mock.patch.dict('os.environ', {'OPTION_COMBO_WS_ALLOWED_ORIGINS': '*'}):
-            with self.assertRaises(ValueError):
-                read_allowed_ws_origins(self._config())
+            self.assertEqual(read_allowed_ws_origins(self._config()),
+                             DEFAULT_ALLOWED_ORIGINS)
+        self.assertEqual(read_allowed_ws_origins(None, env={
+            'OPTION_COMBO_WS_ALLOWED_ORIGINS': '*',
+        }), DEFAULT_ALLOWED_ORIGINS)
 
 
 class WebSocketOriginHandshakeTests(unittest.IsolatedAsyncioTestCase):
@@ -63,12 +69,10 @@ class WebSocketOriginHandshakeTests(unittest.IsolatedAsyncioTestCase):
         async def handler(websocket):
             await websocket.send('accepted')
 
-        allowed = read_allowed_ws_origins(None, env={
-            'OPTION_COMBO_WS_ALLOWED_ORIGINS': 'http://ledger.example',
-        })
+        # Match both production listeners: omit origins entirely. The wiring
+        # tests below guard this even without importing the broker entry point.
         self.server = await websockets.serve(
             handler, '127.0.0.1', 0,
-            origins=allowed,
         )
         port = self.server.sockets[0].getsockname()[1]
         self.uri = f'ws://127.0.0.1:{port}'
@@ -77,25 +81,47 @@ class WebSocketOriginHandshakeTests(unittest.IsolatedAsyncioTestCase):
         self.server.close()
         await self.server.wait_closed()
 
-    async def test_approved_origin_completes_the_handshake(self):
+    async def test_lan_page_origin_completes_the_handshake(self):
         async with websockets.connect(
                 self.uri, origin='http://ledger.example') as websocket:
             self.assertEqual(await websocket.recv(), 'accepted')
 
-    async def test_unlisted_origin_is_rejected_before_the_handler(self):
-        with self.assertRaises(websockets.exceptions.InvalidStatus):
-            async with websockets.connect(
-                    self.uri, origin='https://attacker.example'):
-                pass
+    async def test_arbitrary_origin_completes_the_handshake(self):
+        async with websockets.connect(
+                self.uri, origin='https://unlisted.example') as websocket:
+            self.assertEqual(await websocket.recv(), 'accepted')
 
-    async def test_missing_origin_is_also_rejected(self):
-        with self.assertRaises(websockets.exceptions.InvalidStatus):
-            async with websockets.connect(self.uri):
-                pass
+    async def test_missing_origin_completes_the_handshake(self):
+        async with websockets.connect(self.uri) as websocket:
+            self.assertEqual(await websocket.recv(), 'accepted')
+
+    async def test_null_origin_completes_the_handshake(self):
+        async with websockets.connect(self.uri, origin='null') as websocket:
+            self.assertEqual(await websocket.recv(), 'accepted')
+
+
+class BackendOriginWiringTests(unittest.TestCase):
+    def test_both_listeners_restore_unfiltered_origin_handshakes(self):
+        root = Path(__file__).resolve().parents[1]
+        for filename in ('ib_server.py', 'historical_server.py'):
+            with self.subTest(backend=filename):
+                # Parse only: importing the live backend would start broker work.
+                tree = ast.parse((root / filename).read_text(encoding='utf-8'))
+                listeners = [node for node in ast.walk(tree)
+                             if isinstance(node, ast.Call)
+                             and isinstance(node.func, ast.Attribute)
+                             and isinstance(node.func.value, ast.Name)
+                             and node.func.value.id == 'websockets'
+                             and node.func.attr == 'serve']
+                self.assertEqual(len(listeners), 1)
+                keywords = {item.arg: item.value for item in listeners[0].keywords}
+                self.assertNotIn('origins', keywords)
+                self.assertIsInstance(keywords['max_size'], ast.Name)
+                self.assertEqual(keywords['max_size'].id, 'MAX_WS_MESSAGE_BYTES')
 
 
 class HistoricalServerOriginWiringTests(unittest.IsolatedAsyncioTestCase):
-    async def test_historical_listener_passes_the_same_origin_allow_list(self):
+    async def test_historical_listener_does_not_filter_origins(self):
         # Import must consume neither standing config nor a real chain service.
         with mock.patch.dict('os.environ', {}, clear=True), \
                 mock.patch('configparser.ConfigParser.read', return_value=[]), \
@@ -120,8 +146,8 @@ class HistoricalServerOriginWiringTests(unittest.IsolatedAsyncioTestCase):
         finally:
             historical_server.websockets.serve = original
         self.assertEqual(len(calls), 1)
-        self.assertEqual(
-            calls[0][1]['origins'], historical_server.WS_ALLOWED_ORIGINS)
+        self.assertNotIn('origins', calls[0][1])
+        self.assertEqual(calls[0][1]['max_size'], historical_server.MAX_WS_MESSAGE_BYTES)
 
 
 if __name__ == '__main__':

@@ -144,24 +144,27 @@ environment; they do not need to be copied into `config.ini` by the starter.
 
 | Environment variable | Fallback config key | Behavior |
 |---|---|---|
-| `OPTION_COMBO_WS_ALLOWED_ORIGINS` | `server.allowed_origins` | A nonblank value replaces the exact comma-separated browser-origin list; blank/unset falls back to config, then the localhost defaults. |
 | `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` | `cost_basis.trusted_peers` | Comma-separated peer IPs/CIDRs allowed in addition to loopback. Unset uses config; an explicitly empty value clears config back to loopback-only. |
 | `OPTION_COMBO_COST_BASIS_DB_PATH` | `cost_basis.db_path` | Nonblank environment value wins, then config, then the platform application-data directory. The supplied Compose sets a persistent path under `/app/state`. |
 
-The supervisor sends an origin selected from the same effective allow-list
-when connecting to the local backend. It does not omit or bypass the origin
-check. Changing `OPTION_COMBO_WS_ALLOWED_ORIGINS` replaces the list rather
-than appending to it; include the localhost origins if local browser access
-is needed too. An origin is the page's scheme, hostname, and nondefault port,
-without a path or trailing slash. `null`, missing origins, and wildcards are
-not allowed.
+Both backends accept arbitrary browser origins, `null`, and missing Origin
+headers during the WebSocket handshake. The strict localhost-origin policy
+introduced in September 2 commit `01292bc` was rolled back after it caused
+HTTP 403 failures in previously working LAN/Nginx Proxy Manager setups.
+Existing `OPTION_COMBO_WS_ALLOWED_ORIGINS` and `server.allowed_origins`
+settings are ignored and may be removed. The compatibility module returns a
+fixed nonempty localhost tuple so an already-baked `20260911` supervisor can
+still send its monitor header; that return value does not authorize or
+restrict backend access.
 
 Remote ledger access stays disabled unless explicitly configured. Peer
 settings use literal IPs or CIDRs, not hostnames; invalid entries deny all
 remote ledger access, and wildcards/default routes are rejected. These
 settings do not enable remote workspace persistence or database-admin access.
-They also do not bind a particular peer to a particular origin: the configured
-origins and trusted ledger peers are independent checks.
+There is no browser-origin gate or per-user authentication: a trusted proxy
+represents every client it admits. Network/proxy ingress controls must protect
+the shared trading-capable socket. An unrelated website can attempt a
+connection through any browser that can reach the backend, even on localhost.
 
 A new cost database and its parent directories are created lazily on the first
 allowed ledger request, not merely when the web page or Python process starts.
@@ -187,9 +190,9 @@ trusted LAN/VPN; do not expose it to the public Internet.
 
 1. Protect **both** the frontend and WebSocket proxy hosts with the intended
    LAN/VPN boundary and/or NPM IP Access Lists. Restrict any published backend
-   ports so clients cannot bypass the proxy. Origin checks are not user
-   authentication, and the shared live WebSocket supports trading operations
-   even though the cost-ledger page itself does not trade. Trusting NPM means
+   ports so clients cannot bypass the proxy. Origin is not user authentication
+   and no Origin restriction is enforced. The shared live WebSocket supports
+   trading operations even though the cost-ledger page itself does not trade. Trusting NPM means
    trusting every client NPM admits, not just the colleague's browser.
 2. Prefer a dedicated Docker network shared by NPM and this service, with a
    fixed NPM IP. Point NPM at the unique application service name on that
@@ -204,17 +207,15 @@ trusted LAN/VPN; do not expose it to the public Internet.
    numbers, not `8000`/`8765` blindly: for a mapping `28000:8000`, the frontend
    upstream port is `28000`; for `28765:8765`, the WS upstream port is `28765`.
    `localhost` inside the NPM container refers to NPM itself, not the app.
-4. Preserve the browser's `Origin` header. Do not replace it with localhost,
-   remove it, or rewrite it to the WebSocket hostname. NPM's Websockets Support
-   must pass the WebSocket Upgrade/Connection headers to the backend; see
+4. No Origin rewriting or allow-list configuration is needed. NPM's Websockets
+   Support must pass the WebSocket Upgrade/Connection headers to the backend; see
    [nginx's WebSocket proxying requirements](https://nginx.org/en/docs/http/websocket.html).
-5. Add the exact **frontend page origin** and the backend's actual NPM TCP
-   peer IP to the existing service's `environment` block. The following is
-   an additive example, not a replacement for the rest of the stack:
+5. Add the backend's actual NPM TCP peer IP to the existing service's
+   `environment` block. The following is an additive example, not a replacement
+   for the rest of the stack:
 
    ```yaml
    environment:
-     OPTION_COMBO_WS_ALLOWED_ORIGINS: "http://localhost:8000,http://127.0.0.1:8000,http://[::1]:8000,http://app.example.test"
      OPTION_COMBO_COST_BASIS_TRUSTED_PEERS: "192.0.2.10"
      OPTION_COMBO_COST_BASIS_DB_PATH: "/app/state/cost_basis/cost_basis.db"
    ```
@@ -228,10 +229,12 @@ trusted LAN/VPN; do not expose it to the public Internet.
    one fixed exact IP to allowing a whole Docker subnet. Trusting a gateway
    address also trusts any other connections Docker presents through it, so
    blocking direct access is especially important in that arrangement.
-6. Redeploy/recreate the container with the updated image and environment.
+6. Redeploy/recreate the container when changing its environment or mounts.
    A plain restart does not apply Compose environment changes; see
    [Docker's restart documentation](https://docs.docker.com/reference/cli/docker/compose/restart/).
-   Keep each stack's own TWS settings, port mappings, origins, and storage.
+   Keep each stack's own TWS settings, port mappings, and storage. For the
+   Origin rollback alone, a source update and container restart suffice; see
+   the build/deployment notes below.
 7. Open `http://app.example.test/cost_basis.html`. In its connection settings,
    use `ws.example.test` as the server and `80` as the port, then save and
    reconnect. Do not enter the upstream container port when the browser is
@@ -241,9 +244,10 @@ Verification is deliberately separate from broker actions: no test trade or
 ledger write is needed. Confirm the supervisor no longer repeats its status
 monitor HTTP 403 failure, the browser's WS handshake is `101 Switching
 Protocols`, and the ledger status becomes available. TWS may still be offline
-while the database is usable. A handshake 403 points to the origin check or
-NPM access policy; `remote_access_disabled` after a successful handshake
-points to the TCP-peer allow-list. A storage initialization failure after
+while the database is usable. With the updated backend, Origin no longer
+causes a handshake 403. If 403 persists, check NPM access policy and verify the
+running backend actually loaded the updated source. `remote_access_disabled`
+after a successful handshake points to the TCP-peer allow-list. A storage initialization failure after
 those checks calls for checking the configured directory and permissions.
 
 ## Build and run
@@ -258,13 +262,20 @@ containers. This includes the backend environment/peer-policy changes above.
 The `20260911` tag in the maintained commands is a release target, not a claim
 that an image has already been built or published. Run the release build from
 this directory (not an older standalone copy of the starter) and publish it
-before selecting that tag in Portainer. A new
-starter image is required for the supervisor's Origin-header fix because
-`/app/supervisor.py` is baked into the image; the application checkout's Git
-update cannot replace it. No additional Python packages are introduced by
-the origin/ledger-access changes. After this upgrade, changing the supported
-environment values or mounts needs container recreation, not another image
-rebuild.
+before selecting that tag in Portainer.
+
+The Origin-policy rollback does **not** require another starter image build.
+After the application update is published to upstream `main`, restart the
+existing container so the starter fetches the changed source and launches the
+updated backend. Verify the fetch/update succeeded: a restart that falls back
+to an old checkout will retain the old behavior. The already-baked
+`20260911` supervisor remains compatible because the updated
+`websocket_security.read_allowed_ws_origins` shim returns a fixed nonempty
+localhost tuple while ignoring legacy settings. Older monitors that omit
+Origin can also connect after the backend update. No additional Python
+packages are introduced by this rollback. Changing supported environment
+values or mounts still needs container recreation; changing baked starter
+scripts or runtime packages requires a new image build.
 
 `sample_commands.txt` is the direct build/run replacement. `docker-compose.yml`
 contains the equivalent service definition and an equivalent `docker run`

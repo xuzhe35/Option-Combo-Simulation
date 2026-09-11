@@ -19,7 +19,6 @@ from ib_connection_supervisor import (
     IbConnectionSupervisor,
 )
 from yield_curve.backend_adapter import YieldCurveBackendAdapter
-from websocket_security import read_allowed_ws_origins
 from tws_timezone import read_tws_timezone
 from yield_curve.builder import resolve_snapshot_discount
 from ib_server_order_tracking import (
@@ -134,7 +133,6 @@ TWS_TIMEZONE = read_tws_timezone(config)
 CONFIGURED_WS_HOST = config.get('server', 'ws_host', fallback='127.0.0.1').strip()
 WS_PORT = config.getint('server', 'ws_port', fallback=8765)
 MAX_WS_MESSAGE_BYTES = portfolio_store_ws.read_max_ws_message_bytes(config)
-WS_ALLOWED_ORIGINS = read_allowed_ws_origins(config)
 # Workspace persistence store: failure only disables persistence, never IB.
 portfolio_store_env = portfolio_store_ws.create_store_env(config)
 # The blended-cost ledger is a separate database with a separate
@@ -2764,7 +2762,6 @@ async def main():
                 ws_servers.append(await websockets.serve(
                     handle_ws_client, ws_host, WS_PORT,
                     max_size=MAX_WS_MESSAGE_BYTES,
-                    origins=WS_ALLOWED_ORIGINS,
                 ))
         except OSError as e:
             for ws_server in ws_servers:

@@ -428,9 +428,12 @@ USD 折现曲线。IV 或曲线请求有服务端时限，失败时凸性覆盖�
 `[cost_basis] trusted_peers` 或 `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS`
 显式指定可信 TCP 对端 IP/CIDR。默认仍只接收 loopback；环境变量为空可撤销 INI
 中的远程许可，非法列表整体拒绝远程访问。检查在首次建库和 broker fetcher 前执行，
-不信任 `X-Forwarded-For` / `Forwarded`。WebSocket 的精确 Origin 白名单仍独立生效，
-支持 `OPTION_COMBO_WS_ALLOWED_ORIGINS`。可信代理必须限制入口访问并阻止绕过代理；
-该变更不是用户认证，也不放宽 workspace/admin 的本地限制，不改变任何账本现金/事件语义。
+不信任 `X-Forwarded-For` / `Forwarded`。9 月 2 日提交 `01292bc` 新增的本机
+Origin 白名单造成原有 LAN/NPM 连接 HTTP 403，现已单独撤销：两个 WebSocket
+服务接受任意浏览器 Origin（含 `null` 和缺失头），原 `server.allowed_origins` /
+`OPTION_COMBO_WS_ALLOWED_ORIGINS` 配置不再生效。Origin 不是用户认证，浏览器
+访问无关网页时仍可能向其可达后端发起连接。可信代理必须限制入口访问并阻止绕过代理；
+账本 TCP 对端检查、workspace/admin 本地限制、交易安全和账本现金/事件语义均不改变。
 
 | client action | server action |
 | --- | --- |
@@ -626,7 +629,7 @@ schema v7（2026-09-02）清除旧版本从非权威自由备注中误推的 `br
 - 股息用完整标的边界匹配；预扣税导入为带 `withholding_tax` 标签的 fee 事件。
 - `allow_overdraw` 属于单条历史事件，不会因后来请求的开关变化而使整段时间线失效。
 - 导入和覆盖重建与单条追加共用期权乘数推断，避免其他客户端遗漏 `sharesPerContract` 时出现不同结果。
-- 两个 WebSocket 服务均校验 Origin；默认只接受本机 HTTP 页面，不支持直接以 `file://` 打开。
+- 两个 WebSocket 服务的 Origin 校验已因 LAN/NPM 403 回归撤销，接受任意 Origin（含 `null` 和缺失头）。网络/代理入口必须保护共享交易连接；账本 TCP 对端和 workspace/admin 本地限制保持不变。
 - 流水的 running cash cost 是完整现金审计口径；页面标题综合成本按既定产品口径排除仍未到期长期 Long Call/Put 的权利金支出。两者有意不同，并在页面说明中分别命名。
 - 删除账本只需一次浏览器确认；服务端删除计划凭据仍用于检查计划是否过期、账本是否在确认期间发生变化。
 - 指定持仓差异的 TWS API 成交按券商时间全量回放：保留临时基线能贴合就追加；只有冲销唯一临时基线才能贴合就在同一事务冲销后写入全部成交；其他组合阻断。该路径不比较 AvgCost/临时现金，CSV 来源仍按报表独立重建规则处理。

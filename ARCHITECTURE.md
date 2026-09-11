@@ -906,12 +906,20 @@ the document envelope, the canonical fingerprint for dirty detection, the
 only hands snapshots in and applies load results atomically through the
 replace-mode normalizer. Both `websockets.serve` calls share an explicit
 `max_size` (`[server] max_ws_message_bytes`) because the library's 1 MiB
-default would 1009-close a socket that also carries order supervision. Both
-listeners also pass the exact `[server] allowed_origins` list (overridden by a
-nonblank `OPTION_COMBO_WS_ALLOWED_ORIGINS`) to
-`websockets.serve`; this is the browser-side boundary that prevents an
-unrelated web origin from reaching loopback persistence, ledger, admin, or
-execution actions.
+default would 1009-close a socket that also carries order supervision. Neither
+listener passes an `origins` restriction to `websockets.serve`: arbitrary
+browser origins, `null`, and missing Origin headers are accepted. The strict
+localhost policy from September 2 commit `01292bc` was rolled back after it
+broke previously working LAN/Nginx Proxy Manager connections with HTTP 403.
+`[server] allowed_origins` and `OPTION_COMBO_WS_ALLOWED_ORIGINS` are ignored.
+`websocket_security.read_allowed_ws_origins` remains only as a compatibility
+shim for already-baked Docker supervisors: it returns a fixed nonempty
+localhost tuple regardless of configuration and is not an authorization
+policy. Origin is not authentication, and loopback binding does not prevent
+an unrelated website from reaching the service through a local browser.
+Deployments must protect the trading-capable socket's network/proxy ingress;
+ledger peer checks, workspace/admin loopback checks, and execution safety
+remain unchanged.
 
 ### Blended-cost ledger (shared by both backends)
 

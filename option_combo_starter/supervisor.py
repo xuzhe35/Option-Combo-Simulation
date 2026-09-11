@@ -142,25 +142,25 @@ def _ib_status_host_from_env() -> str:
 
 
 def _ib_status_origin_from_backend(repo_dir: Path) -> str:
-    """Use the runtime backend's validated origin policy for the local monitor."""
+    """Load the legacy monitor Origin helper from the runtime checkout."""
 
     config = configparser.ConfigParser()
     with (repo_dir / "config.ini").open(encoding="utf-8") as source:
         config.read_file(source)
 
     # PID 1 is baked outside the runtime checkout. Loading this exact pure
-    # module keeps its policy aligned with the backend after runtime updates,
+    # module supports older checkouts and the post-rollback compatibility shim,
     # without importing ib_server (which starts broker/data initialization).
     spec = importlib.util.spec_from_file_location(
         "_option_combo_runtime_websocket_security",
         repo_dir / "websocket_security.py",
     )
     if spec is None or spec.loader is None:
-        raise ImportError("Runtime WebSocket origin policy is unavailable")
+        raise ImportError("Runtime WebSocket origin compatibility helper is unavailable")
     policy = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(policy)
-    # Inherited environment is identical to the child's; omitting new optional
-    # arguments also keeps the monitor compatible with older runtime checkouts.
+    # The current shim ignores retired Origin settings. The one-argument call
+    # also remains compatible with pre-rollback runtime checkouts.
     return policy.read_allowed_ws_origins(config)[0]
 
 
