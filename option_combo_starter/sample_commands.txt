@@ -1,5 +1,6 @@
-# Docker Build
-docker buildx build --platform linux/amd64 --no-cache -f Dockerfile --load -t patsiesoblast0l/option-combo-starter:20260723 .
+# Docker Build (local only; does not publish the release tag)
+docker buildx build --platform linux/amd64 --no-cache -f Dockerfile --load -t patsiesoblast0l/option-combo-starter:20260911 .
+# For remote deployment, publish with docker-build.txt before using this tag.
 
 # Docker Run (drop-in runtime settings)
 docker run -d \
@@ -12,5 +13,6 @@ docker run -d \
     -e TWS_CLIENT_ID=999 \
     -e WS_HOST=0.0.0.0 \
     -e WS_PORT=8765 \
+    -e OPTION_COMBO_COST_BASIS_DB_PATH=/app/state/cost_basis/cost_basis.db \
     -v option-combo-state:/app/state \
-    patsiesoblast0l/option-combo-starter:20260723
+    patsiesoblast0l/option-combo-starter:20260911

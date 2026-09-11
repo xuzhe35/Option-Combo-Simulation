@@ -5,6 +5,7 @@ import os
 import signal
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -99,15 +100,24 @@ class YieldUpdateResultTest(unittest.TestCase):
 
 
 class SupervisorConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.runtime = tempfile.TemporaryDirectory()
+        self.addCleanup(self.runtime.cleanup)
+        self.repo_dir = Path(self.runtime.name)
+        (self.repo_dir / "config.ini").write_text("[server]\n", encoding="utf-8")
+        # Copy only the pure policy source, never project runtime config/data.
+        policy_source = Path(__file__).resolve().parents[1] / "websocket_security.py"
+        (self.repo_dir / "websocket_security.py").write_bytes(policy_source.read_bytes())
+
     def test_yield_curve_data_dir_defaults_to_persistent_state_and_is_overridable(self):
         with patch.dict(os.environ, {}, clear=True):
-            default_config = SupervisorConfig.from_environment(Path("/synthetic/repo"))
+            default_config = SupervisorConfig.from_environment(self.repo_dir)
         with patch.dict(
             os.environ,
             {"YIELD_CURVE_DATA_DIR": "/synthetic/alternate-yield-state"},
             clear=True,
         ):
-            overridden_config = SupervisorConfig.from_environment(Path("/synthetic/repo"))
+            overridden_config = SupervisorConfig.from_environment(self.repo_dir)
 
         self.assertEqual(
             default_config.yield_curve_data_dir,
@@ -120,7 +130,7 @@ class SupervisorConfigTest(unittest.TestCase):
 
     def test_daily_time_defaults_to_0930_ny_and_is_overridable(self):
         with patch.dict(os.environ, {}, clear=True):
-            default_config = SupervisorConfig.from_environment(Path("/synthetic/repo"))
+            default_config = SupervisorConfig.from_environment(self.repo_dir)
         with patch.dict(
             os.environ,
             {
@@ -129,7 +139,7 @@ class SupervisorConfigTest(unittest.TestCase):
             },
             clear=True,
         ):
-            overridden_config = SupervisorConfig.from_environment(Path("/synthetic/repo"))
+            overridden_config = SupervisorConfig.from_environment(self.repo_dir)
 
         self.assertEqual(default_config.yield_daily_hour_ny, 9)
         self.assertEqual(default_config.yield_daily_minute_ny, 30)
@@ -138,16 +148,75 @@ class SupervisorConfigTest(unittest.TestCase):
 
     def test_status_monitor_uses_backend_bind_host_without_dialing_a_wildcard(self):
         with patch.dict(os.environ, {"WS_HOST": "0.0.0.0"}, clear=True):
-            wildcard_config = SupervisorConfig.from_environment(Path("/synthetic/repo"))
+            wildcard_config = SupervisorConfig.from_environment(self.repo_dir)
         with patch.dict(os.environ, {"WS_HOST": "10.0.0.8"}, clear=True):
-            specific_config = SupervisorConfig.from_environment(Path("/synthetic/repo"))
+            specific_config = SupervisorConfig.from_environment(self.repo_dir)
         with patch.dict(os.environ, {"WS_HOST": "::"}, clear=True):
-            ipv6_config = SupervisorConfig.from_environment(Path("/synthetic/repo"))
+            ipv6_config = SupervisorConfig.from_environment(self.repo_dir)
 
         self.assertEqual(wildcard_config.ib_status_host, "127.0.0.1")
         self.assertEqual(specific_config.ib_status_host, "10.0.0.8")
         self.assertEqual(specific_config.ws_port, 8765)
         self.assertEqual(IBStatusMonitor(ipv6_config).uri, "ws://[::1]:8765")
+
+    def test_status_origin_uses_first_runtime_config_origin(self):
+        (self.repo_dir / "config.ini").write_text(
+            "[server]\nallowed_origins = https://ledger.example.test,https://other.example.test\n",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            config = SupervisorConfig.from_environment(self.repo_dir)
+
+        self.assertEqual(config.ib_status_origin, "https://ledger.example.test")
+
+    def test_status_origin_uses_environment_override_and_blank_falls_back(self):
+        (self.repo_dir / "config.ini").write_text(
+            "[server]\nallowed_origins = https://config.example.test\n",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {
+            "OPTION_COMBO_WS_ALLOWED_ORIGINS": " https://stack.example.test/ ,https://other.example.test",
+        }, clear=True):
+            override = SupervisorConfig.from_environment(self.repo_dir)
+        with patch.dict(os.environ, {
+            "OPTION_COMBO_WS_ALLOWED_ORIGINS": "  ",
+        }, clear=True):
+            blank = SupervisorConfig.from_environment(self.repo_dir)
+
+        self.assertEqual(override.ib_status_origin, "https://stack.example.test")
+        self.assertEqual(blank.ib_status_origin, "https://config.example.test")
+
+    def test_status_origin_uses_default_and_rejects_invalid_environment(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = SupervisorConfig.from_environment(self.repo_dir)
+        self.assertEqual(config.ib_status_origin, "http://localhost:8000")
+
+        with patch.dict(os.environ, {
+            "OPTION_COMBO_WS_ALLOWED_ORIGINS": "*",
+        }, clear=True):
+            with self.assertRaises(ValueError):
+                SupervisorConfig.from_environment(self.repo_dir)
+
+    def test_status_origin_requires_runtime_config_and_policy_files(self):
+        for missing_file in ("config.ini", "websocket_security.py"):
+            with self.subTest(missing_file=missing_file):
+                missing_path = self.repo_dir / missing_file
+                saved_path = self.repo_dir / (missing_file + ".fixture")
+                missing_path.rename(saved_path)
+                try:
+                    with patch.dict(os.environ, {}, clear=True):
+                        with self.assertRaises(FileNotFoundError):
+                            SupervisorConfig.from_environment(self.repo_dir)
+                finally:
+                    saved_path.rename(missing_path)
+
+    def test_status_origin_supports_pre_environment_override_backend(self):
+        (self.repo_dir / "websocket_security.py").write_text(
+            "def read_allowed_ws_origins(config):\n"
+            "    return ('http://localhost:8000',)\n", encoding="utf-8")
+        with patch.dict(os.environ, {}, clear=True):
+            config = SupervisorConfig.from_environment(self.repo_dir)
+        self.assertEqual(config.ib_status_origin, "http://localhost:8000")
 
 
 class _UpdaterProcess:
@@ -489,6 +558,83 @@ class _FakeWebSocket:
 
 
 class IBStatusMonitorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_monitor_supplies_origin_to_strict_connector(self):
+        allowed_origin = "https://ledger.example.test"
+        received = []
+        websocket = _FakeWebSocket([{
+            "action": "ib_connection_status",
+            "requestId": "origin-regression",
+            "connected": True,
+        }])
+
+        @asynccontextmanager
+        async def strict_backend(_uri, **kwargs):
+            if kwargs.get("origin") != allowed_origin:
+                raise ConnectionError("403 Forbidden: Origin not allowed")
+            received.append(kwargs["origin"])
+            yield websocket
+
+        async def stop_after_one_attempt(stop_event, _delay):
+            stop_event.set()
+            return True
+
+        monitor = IBStatusMonitor(
+            _config(ib_status_origin=allowed_origin),
+            connector=strict_backend,
+            wait_for_stop_fn=stop_after_one_attempt,
+            request_id_factory=lambda: "origin-regression",
+        )
+        await monitor.run(asyncio.Event())
+
+        self.assertEqual(received, [allowed_origin])
+        self.assertEqual(websocket.sent, [{
+            "action": "request_ib_connection_status",
+            "requestId": "origin-regression",
+        }])
+
+    async def test_monitor_handshake_uses_an_allowed_origin(self):
+        try:
+            import websockets
+        except ImportError:
+            self.skipTest("websockets is required for the local handshake integration test")
+
+        allowed_origin = "https://ledger.example.test"
+        received = []
+
+        async def backend(websocket):
+            request = json.loads(await websocket.recv())
+            received.append(request)
+            await websocket.send(json.dumps({
+                "action": "ib_connection_status",
+                "requestId": request["requestId"],
+                "connected": True,
+            }))
+
+        async def stop_after_one_attempt(stop_event, _delay):
+            stop_event.set()
+            return True
+
+        async with websockets.serve(
+            backend,
+            "127.0.0.1",
+            0,
+            origins=[allowed_origin],
+        ) as server:
+            monitor = IBStatusMonitor(
+                _config(
+                    ws_port=server.sockets[0].getsockname()[1],
+                    ib_status_origin=allowed_origin,
+                ),
+                wait_for_stop_fn=stop_after_one_attempt,
+                request_id_factory=lambda: "origin-regression",
+            )
+            await asyncio.wait_for(monitor.run(asyncio.Event()), timeout=3.0)
+
+        self.assertEqual(received, [{
+            "action": "request_ib_connection_status",
+            "requestId": "origin-regression",
+        }])
+
     async def test_disconnected_status_is_observed_without_requesting_reconnect(self):
         request_ids = iter(["poll-1", "poll-2"])
         monitor = IBStatusMonitor(

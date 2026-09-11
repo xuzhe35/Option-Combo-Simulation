@@ -191,6 +191,13 @@ Persistence and ledger modules, mounted by BOTH backends:
 
 ### Blended-cost ledger
 
+- LAN/proxy deployment is opt-in: `OPTION_COMBO_WS_ALLOWED_ORIGINS` sets the
+  exact browser-origin list, while `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS`
+  separately permits actual peer IPs/CIDRs for ledger actions only. No header
+  spoofing, wildcard peer, or global `allow_remote` switch is used. See the
+  starter README for Nginx Proxy Manager setup. The updated baked supervisor
+  also sends an Origin from the same runtime policy; rebuild the starter as
+  well as publishing backend changes before deployment. No new dependencies.
 - one active book per account + underlying + security type + currency in the
   separate schema-v9 `cost_basis.db`
 - STK/OPT and deliverable FUT/FOP event replay, including FOP delivery and

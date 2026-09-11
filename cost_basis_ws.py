@@ -2,7 +2,7 @@
 
 Both backends route the same client actions through here so Live and
 Historical answer with identical response shapes and error codes. This
-module owns loopback enforcement, request validation, and the sync-store to
+module owns trusted-peer enforcement, request validation, and the sync-store to
 event-loop bridge (asyncio.to_thread); it never writes SQL itself and never
 leaks database paths or raw SQL errors to the browser.
 
@@ -22,6 +22,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import os
 import threading
 import time
 
@@ -83,11 +84,46 @@ def build_scenario_inputs_busy_response(data):
     )
 
 
+def read_trusted_peers(config=None, env=None):
+    """Parse explicit socket peers, never forwarded headers or DNS names.
+
+    An empty environment override revokes remote access configured in INI.
+    Parse the whole list before returning so one typo cannot partially enable it.
+    """
+    env = os.environ if env is None else env
+    key = 'OPTION_COMBO_COST_BASIS_TRUSTED_PEERS'
+    if key in env:
+        raw = env[key]
+    else:
+        raw = (config.get('cost_basis', 'trusted_peers', fallback='', raw=True)
+               if config is not None else '')
+    networks = []
+    for entry in str(raw).replace('\n', ',').split(','):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if '%' in entry:
+            raise ValueError('Scoped trusted peers are not supported')
+        network = ipaddress.ip_network(entry, strict=True)
+        # Socket peers normalize IPv4-mapped IPv6; policy entries must too.
+        if isinstance(network, ipaddress.IPv6Network) and network.network_address.ipv4_mapped:
+            if network.prefixlen < 96:
+                raise ValueError('Invalid mapped IPv4 network')
+            network = ipaddress.ip_network(
+                (network.network_address.ipv4_mapped, network.prefixlen - 96))
+        if (network.prefixlen == 0 or network.network_address.is_unspecified
+                or network.is_multicast):
+            raise ValueError('Trusted peers must be specific unicast addresses or networks')
+        if network not in networks:
+            networks.append(network)
+    return tuple(networks)
+
+
 def create_store_env(config=None):
     """Describe the ledger store without touching the filesystem.
 
     Cheap enough to run at module import. The database is opened lazily on
-    the first loopback request; a failure only disables the ledger while
+    the first accepted request; a failure only disables the ledger while
     market data, replay, and IB keep running.
     """
     enabled = True
@@ -96,8 +132,17 @@ def create_store_env(config=None):
             enabled = config.getboolean('cost_basis', 'enabled', fallback=True)
         except ValueError:
             enabled = True
+    try:
+        trusted_peers = read_trusted_peers(config)
+    except ValueError:
+        # An invalid remote policy must not interrupt IB or grant partial access.
+        logger.warning(
+            'Invalid cost_basis.trusted_peers / OPTION_COMBO_COST_BASIS_TRUSTED_PEERS; '
+            'remote ledger access disabled. Use explicit IP addresses or CIDRs.')
+        trusted_peers = ()
     return {
         '_config': config,
+        '_trusted_peers': trusted_peers,
         '_enabled': enabled,
         '_init_lock': threading.Lock(),
         '_initialized': False,
@@ -140,24 +185,41 @@ def ensure_store_initialized(store_env):
         return store_env
 
 
-def is_loopback_address(remote_address):
-    """Strict loopback check; fails closed on anything unparseable."""
+def _peer_ip(remote_address):
+    """Normalize the transport's actual IP without trusting proxy headers."""
+    if not isinstance(remote_address, (tuple, list)):
+        return None
     try:
         host = remote_address[0]
     except (TypeError, IndexError, KeyError):
-        return False
+        return None
     if not isinstance(host, str) or not host:
-        return False
+        return None
     candidate = host.strip().lower()
     if '%' in candidate:  # scoped IPv6 like fe80::1%lo0
         candidate = candidate.split('%', 1)[0]
     try:
         ip = ipaddress.ip_address(candidate)
     except ValueError:
-        return False
+        return None
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
-    return ip.is_loopback
+    return ip
+
+
+def is_loopback_address(remote_address):
+    """Strict loopback check; fails closed on anything unparseable."""
+    ip = _peer_ip(remote_address)
+    return ip is not None and ip.is_loopback
+
+
+def is_trusted_peer(remote_address, trusted_peers=()):
+    """Loopback is always local; remote ledger access requires explicit opt-in."""
+    ip = _peer_ip(remote_address)
+    if ip is None:
+        return False
+    return ip.is_loopback or any(
+        ip.version == network.version and ip in network for network in trusted_peers)
 
 
 async def handle_cost_basis_action(store_env, websocket, data, *,
@@ -196,9 +258,10 @@ async def build_cost_basis_response(store_env, websocket, data, *,
     started = time.monotonic()
 
     store_env = store_env or {}
-    if not is_loopback_address(getattr(websocket, 'remote_address', None)):
+    if not is_trusted_peer(getattr(websocket, 'remote_address', None),
+                           store_env.get('_trusted_peers', ())):
         logger.warning(
-            'rejected non-loopback cost basis request %s from %s', action, client_ip)
+            'rejected untrusted cost basis request %s from %s', action, client_ip)
         if action == 'request_cost_basis_status':
             # No path, schema, or availability detail crosses the boundary.
             return {
@@ -210,7 +273,8 @@ async def build_cost_basis_response(store_env, websocket, data, *,
             }
         return _error_response(
             server_action, request_id,
-            'remote_access_disabled', 'the cost basis ledger is loopback-only',
+            'remote_access_disabled',
+            'the cost basis ledger requires loopback or an explicitly trusted peer',
         )
 
     if not store_env.get('_initialized') and store_env.get('_init_lock') is not None:
