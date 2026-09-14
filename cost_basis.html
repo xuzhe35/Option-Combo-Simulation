@@ -128,6 +128,8 @@
                             <div class="import-heading"><div><h3 id="import-preview-title">导入预览</h3><p id="import-summary">未选择文件。</p></div><div><button id="btn-import-clear" type="button" disabled>取消</button><button id="btn-import-commit" class="primary" type="button" disabled>确认导入</button></div></div>
                             <p id="import-source-note" class="section-note">支持 TWS API 近期成交、Flex Query 与 Activity Statement。导入前逐行预览：每行标明将新增、已存在跳过、已核对为 TWS 重复，或是期初存根。</p>
                             <p id="import-binding" class="section-note import-binding"></p>
+                            <label id="import-account-confirm-wrap" class="checkbox rebuild-option" hidden><input id="import-account-confirm" type="checkbox"><span id="import-account-confirm-label"></span></label>
+                            <p id="import-account-note" class="warnings" hidden></p>
                             <p id="import-checks" class="section-note import-checks"></p>
                             <p id="import-counts" class="section-note import-counts"></p>
                             <p id="import-state-note" class="warnings" hidden></p>
@@ -330,12 +332,12 @@
 
     <script src="js/cost_basis_core.js?v=7a15bfbde61a"></script>
     <script src="js/american_binomial.js?v=a49313f2567b"></script>
-    <script src="js/cost_basis_import.js?v=24ed30fe29b5"></script>
+    <script src="js/cost_basis_import.js?v=a04684afffea"></script>
     <script src="js/market_curves.js?v=f15898beaf0c"></script>
     <script src="js/cost_basis_stress_models.js?v=60480547960f"></script>
     <script src="js/cost_basis_stress_core.js?v=76e942b27d9d"></script>
     <script src="js/cost_basis_stress_band.js?v=6f716f8dc838"></script>
     <script src="js/cost_basis_stress_worker.js?v=3d63d7e54061"></script>
-    <script src="js/cost_basis.js?v=fd1bb3f34840"></script>
+    <script src="js/cost_basis.js?v=797a03ed5b76"></script>
 </body>
 </html>

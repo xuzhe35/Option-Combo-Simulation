@@ -22,7 +22,7 @@ const stored=(e,id)=>({...e,eventId:id,seq:1});
 const raw=I.parse(activity([line()],false),opt).events[0];
 const fixture={};
 function setup(events=[]){Object.assign(h.state,{bookId:'book',books:[{bookId:'book',account,symbol:'TQQQ',currency:'USD',secType:'STK',defaultSharesPerContract:100}],allEvents:events,ledger:C.computeLedger(events),ledgerVersion:{digest:'test'},importGeneration:1,importCommitTokens:null,importCommitPending:false});nodes.get('import-replace')&&(nodes.get('import-replace').checked=false);}
-function inspect(name,text,existing=[]){setup(existing);h.parse(text,{fileName:name+'.csv',fileDigest:'test'});const r=h.state.importResult;const out={problems:r.problems.map(e=>e.reason),newRows:h.newRows(r),duplicates:r.confirmedDuplicates,stubs:r.supersedePriorStubEventIds,counts:h.counts(r),warnings:r.ledgerPreview?.warnings};fixture[name]={existing,incoming:out.newRows,supersedePriorStubEventIds:out.stubs,problems:out.problems};return r;}
+function inspect(name,text,existing=[],replacing=false){setup(existing);c.document.getElementById('import-replace').checked=replacing;h.parse(text,{fileName:name+'.csv',fileDigest:'test'});const r=h.state.importResult;const out={problems:r.problems.map(e=>e.reason),newRows:h.newRows(r),duplicates:r.confirmedDuplicates,stubs:r.supersedePriorStubEventIds,counts:h.counts(r),warnings:r.ledgerPreview?.warnings};fixture[name]={existing,incoming:out.newRows,supersedePriorStubEventIds:out.stubs,problems:out.problems};return r;}
 
 // Fixed original R03: identical source rows claim two distinct TWS fills.
 const tws=(base,id)=>stored({...base,source:'execution_report',tag:'ibkr_exec',externalRef:'ibkr-exec-'+id},id);
@@ -80,10 +80,65 @@ const netHistory=activity([
 inspect('NET_PRIOR_HISTORY',netHistory,[stub]);
 const cashOld=stored(I.parse(divs,opt).events[0],'dividend-old');
 inspect('CASH_REVISION',divs.replace('reversal,-10','reversal,-12'),[cashOld]);
+const rebuildText=activity([
+ 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 11SEP26 71.5 C,"2026-09-10, 10:10:09",-3,0.35,105,-2.061933,O',
+ 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 11SEP26 71.5 C,"2026-09-11, 16:20:00",3,0,0,0,C;Ep',oh]);
+const rebuildRows=I.parse(rebuildText,opt).events.map((e,i)=>stored(e,'rebuild-old-'+i));
+const rebuildPartial=inspect('REBUILD_KNOWN_OPEN',rebuildText,[rebuildRows[0]],true);
+const rebuildAll=inspect('REBUILD_ALL_KNOWN',rebuildText,rebuildRows,true);
+const rebuildInactive=inspect('REBUILD_INACTIVE_KNOWN',rebuildText,
+ rebuildRows.map(e=>({...e,voidedAtUtc:'2026-09-12T00:00:00Z',includeInCost:false})),true);
+const appendAll=inspect('APPEND_ALL_KNOWN',rebuildText,rebuildRows);
+const sameTimeText=rebuildText.replace('2026-09-11, 16:20:00','2026-09-10, 10:10:09');
+const sameTimeOpen=stored(I.parse(sameTimeText,opt).events[0],'same-time-open');
+const sameTimeAppend=inspect('APPEND_SAME_TIME_CLOSE',sameTimeText,[sameTimeOpen]);
+// Opt-in local statement regression: no private report is required in CI or copied into fixtures.
+if(process.env.COST_BASIS_FULL_STATEMENT_CSV) {
+ const text=fs.readFileSync(process.env.COST_BASIS_FULL_STATEMENT_CSV,'utf8');
+ const discovery=I.parse(text,{symbol:'TQQQ'});
+ const sourceBook={bookId:'book',account:discovery.account,symbol:'TQQQ',currency:'USD',secType:'STK',defaultSharesPerContract:100};
+ setup();h.state.books=[sourceBook];c.document.getElementById('import-replace').checked=true;
+ h.parse(text,{fileName:'full-statement.csv',fileDigest:'local-regression'});
+ const fresh=h.state.importResult,complete=h.newRows(fresh);
+ assert.equal(fresh.problems.length,0);
+ assert.equal(fresh.ledgerPreview.warnings.length,0);
+ const existing=fresh.events.filter(e=>e.tradeDate<fresh.statementPeriod.through).map((e,i)=>({...e,eventId:'old-'+i,seq:i+1}));
+ Object.assign(h.state,{allEvents:existing,ledger:C.computeLedger(existing)});
+ h.parse(text,{fileName:'full-statement.csv',fileDigest:'local-regression'});
+ const result=h.state.importResult, incoming=h.newRows(result);
+ assert.equal(result.problems.length,0);assert.equal(result.ledgerPreview.warnings.length,0);
+ assert.equal(h.counts(result).existing,0);assert.equal(incoming.length,complete.length);
+ assert.ok(result.ledgerPreview.positions.every(p=>p.statement===null||Math.abs(p.after-p.statement)<1e-6));
+ const ledger=C.computeLedger(incoming);
+ fixture.FULL_STATEMENT_REBUILD={book:sourceBook,existing,incoming,expected:{shares:ledger.combined.shares,netCash:ledger.combined.netCash}};
+ // Re-importing the rebuilt statement in append mode must be an exact no-op.
+ Object.assign(h.state,{allEvents:incoming.map((e,i)=>({...e,eventId:'rebuilt-'+i,seq:i+1})),ledger});
+ c.document.getElementById('import-replace').checked=false;h.parse(text,{fileName:'full-statement.csv',fileDigest:'local-regression'});
+ assert.equal(h.state.importResult.problems.length,0);
+ assert.equal(h.newRows(h.state.importResult).length,0);
+ assert.equal(h.state.importResult.ledgerPreview.warnings.length,0);
+}
 const statements = [...['SAME_REF_REVISION','DIRECT_EXEC_REVISION','REUSED_CROSS_FORMAT_TWIN',
  'QUANTITY_REVISION','DATE_ONLY_TWIN','ORDER_FILL_CASH_MISMATCH','BAD_POSITION_SYMBOL',
  'ZERO_TRADE_TWS_ROUNDTRIP','MANUAL_ASSIGNMENT_TWIN','MISSING_CURRENCY','CASH_REVISION']];
 function verify() {
+ for(const result of [rebuildPartial,rebuildAll,rebuildInactive]) {
+  assert.equal(result.binding.mode,'rebuild');
+  assert.equal(result.problems.length,0);
+  assert.equal(h.counts(result).existing,0,'rebuild must retain rows that the old ledger will archive');
+  assert.equal(h.newRows(result).length,2);
+  assert.equal(result.ledgerPreview.warnings.length,0,'known opening must precede the new expiry');
+  const ledger=C.computeLedger(h.newRows(result));
+  assert.equal(ledger.openOptions.length,0);
+  assert.equal(ledger.combined.netCash,102.938067);
+ }
+ assert.equal(h.counts(appendAll).existing,2,'append still skips existing statement rows');
+ assert.equal(h.newRows(appendAll).length,0);
+ assert.equal(sameTimeAppend.problems.length,0);
+ assert.equal(h.newRows(sameTimeAppend).length,1);
+ assert.equal(sameTimeAppend.ledgerPreview.warnings.length,0,
+  'preview must use the same insertion sequence as the store for same-second trades');
+ assert.ok(sameTimeAppend.ledgerPreview.positions.every(p=>p.after===p.statement));
  setup([]);
  h.state.books[0].secType='FUT';h.state.books[0].symbol='ES';h.state.books[0].defaultSharesPerContract=50;
  const future={kind:'futures_trade',account,tradeDate:'2026-09-01',futureExpiry:'202609',futureContracts:1,sharesPerContract:50,price:5100,cashAmount:-2,fees:2,source:'csv_import',externalRef:'future-1'};

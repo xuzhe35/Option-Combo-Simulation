@@ -1365,6 +1365,26 @@
         return found;
     }
 
+    // A redacted account is evidence of a possible match, never an identity.
+    // Stars may hide more digits than their count, but visible digits must
+    // all match. The caller must obtain a file-specific user confirmation.
+    function matchStatementAccount(sourceAccount, targetAccount, confirmation) {
+        const source = _upper(sourceAccount);
+        const target = _upper(targetAccount);
+        const mask = /^([A-Z]+\d*)\*+(\d{4,})$/.exec(source);
+        const canConfirm = Boolean(mask && /^[A-Z]+\d+$/.test(target)
+            && target.startsWith(mask[1]) && target.endsWith(mask[2])
+            && target.length > mask[1].length + mask[2].length);
+        const confirmed = canConfirm && confirmation
+            && _upper(confirmation.sourceAccount) === source
+            && _upper(confirmation.targetAccount) === target;
+        const status = !source ? 'missing'
+            : (source === target && !source.includes('*') ? 'exact'
+                : (confirmed ? 'confirmed' : (canConfirm ? 'confirmation_required' : 'mismatch')));
+        return { sourceAccount: source, targetAccount: target, canConfirm,
+            status, confirmed: Boolean(confirmed) };
+    }
+
     /**
      * Contract details the Trades section omits, keyed by contract identity.
      *
@@ -2603,12 +2623,20 @@
         };
 
         let groups;
+        let accountMatch = null;
         if (format === 'activity') {
             // The account lives in its own section, and the multipliers in
             // another; both are read before any row is classified.
             const statementAccount = extractAccount(rows);
             checks.account = Boolean(statementAccount);
             opts.accountFallback = statementAccount || opts.accountFallback;
+            if (opts.targetAccount) {
+                accountMatch = matchStatementAccount(statementAccount, opts.targetAccount,
+                    opts.confirmedAccountMapping);
+                checks.account = ['exact', 'confirmed'].includes(accountMatch.status);
+                if (accountMatch.confirmed) checks.accountMaskedConfirmed = true;
+                if (checks.account) opts.accountFallback = _upper(opts.targetAccount);
+            }
             opts.instruments = extractInstruments(rows);
             checks.instruments = opts.instruments.size > 0;
             const section = extractSection(rows, 'trades');
@@ -2636,6 +2664,20 @@
                 })),
             }];
             checks.trades = true;
+        }
+
+        if (accountMatch && !checks.account) {
+            const reason = accountMatch.status === 'confirmation_required'
+                ? `报表账号 ${accountMatch.sourceAccount} 已遮罩，不能自动认定属于账本 ${accountMatch.targetAccount}。请核实后勾选本文件的账号确认，或导出显示完整账号的报表。`
+                : (accountMatch.status === 'missing'
+                    ? `报表缺少账户信息，不能验证属于账本 ${accountMatch.targetAccount}；请选择包含完整账户信息的报表。`
+                    : `statement account ${accountMatch.sourceAccount} does not match ledger account ${accountMatch.targetAccount}`);
+            const result = _emptyResult(format, [{ lineNumber: 0, reason, raw: accountMatch.sourceAccount }], {
+                account: accountMatch.sourceAccount, accountMatch, statementThrough: periodThrough,
+                statementPeriod: Object.assign({ source: 'period' }, period), checks,
+            });
+            result.summary.total = groups.reduce((count, group) => count + group.records.length, 0);
+            return result;
         }
 
         const mappedAccount = groups.some(
@@ -2874,6 +2916,7 @@
             },
             unmappedColumns: unmapped,
             account: opts.accountFallback,
+            accountMatch,
             currency: opts.currency,
             openings,
             confirmedDuplicates,
@@ -2893,6 +2936,7 @@
         detectFormat,
         extractSection,
         extractAccount,
+        matchStatementAccount,
         extractStatementThrough,
         extractStatementPeriod,
         extractInstruments,

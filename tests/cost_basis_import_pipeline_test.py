@@ -54,6 +54,7 @@ class ImportPipelineTests(unittest.TestCase):
             'NET_PRIOR_HISTORY': (0,-1,300), 'NO_TRADE_INITIAL_HOLDING': (100,0,-5000),
             'VALID_PARTIAL_FILLS': (20,0,-1002), 'UNCHANGED_SAME_REF': (10,0,-501),
             'UNCHANGED_DIRECT_EXEC': (10,0,-501),
+            'APPEND_SAME_TIME_CLOSE': (0,0,102.938067),
         }
         for name, expected in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
@@ -73,11 +74,65 @@ class ImportPipelineTests(unittest.TestCase):
                 actual=tuple(sum(row.get(field) or 0 for row in rows) for field in ('shares','contracts','cashAmount'))
                 self.assertEqual(actual,expected)
 
+    def test_rebuild_page_payload_retains_known_openings_and_round_trips_archive(self):
+        for name in ('REBUILD_KNOWN_OPEN', 'REBUILD_ALL_KNOWN'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
+                store = CostBasisStore(pathlib.Path(root)/'ledger.db').initialize()
+                book = store.create_book(account='U1111111', symbol='TQQQ', start_date='2026-01-01')
+                bid = book['bookId']
+                fixture = self.fixtures[name]
+                self.assertFalse(fixture['problems'])
+                for old in fixture['existing']:
+                    store.append_event(bid, self.event(old), client_token=self.token())
+                plan = store.reset_confirmation(bid)
+                rebuilt = store.rebuild_book(bid, [self.event(e) for e in fixture['incoming']],
+                    confirmation=plan['phrase'], client_token=self.token(), import_batch_id=self.token(),
+                    expected_ledger_version=plan['ledgerVersion'], book_identity=book,
+                    statement=self.statement(9))
+                rows = store.list_events(bid)['events']
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(sum(row['contracts'] for row in rows), 0)
+                self.assertAlmostEqual(sum(row['cashAmount'] for row in rows), 102.938067)
+                fresh = store.reset_confirmation(bid)
+                store.restore_book_reset(bid, rebuilt['resetId'], confirmation=fresh['phrase'],
+                    client_token=self.token(), expected_ledger_version=fresh['ledgerVersion'], book_identity=book)
+                self.assertEqual(store.list_events(bid)['total'], len(fixture['existing']))
+
     def test_all_blocked_previews_leave_no_write_payload_authorized(self):
         for name in ('SAME_REF_REVISION','DIRECT_EXEC_REVISION','REUSED_CROSS_FORMAT_TWIN',
                      'QUANTITY_REVISION','DATE_ONLY_TWIN','ORDER_FILL_CASH_MISMATCH',
                      'BAD_POSITION_SYMBOL','ZERO_TRADE_TWS_ROUNDTRIP','MANUAL_ASSIGNMENT_TWIN','MISSING_CURRENCY'):
             self.assertTrue(self.fixtures[name]['problems'],name)
+
+    def test_optional_full_statement_rebuild_and_repeated_import(self):
+        fixture = self.fixtures.get('FULL_STATEMENT_REBUILD')
+        if fixture is None:
+            self.skipTest('set COST_BASIS_FULL_STATEMENT_CSV to verify a local complete statement')
+        book = self.store.create_book(account=fixture['book']['account'], symbol='TQQQ', start_date='2026-01-01')
+        bid = book['bookId']
+        old = [self.event(row) for row in fixture['existing']]
+        # The pre-existing partial ledger is only the overlap input. A rebuild
+        # must not depend on its missing earlier opening balances.
+        old = [row for row in old if row['kind'] == 'option_trade' and row.get('tag') == 'ibkr_open']
+        self.store.import_events(bid, old, import_batch_id=self.token(), client_token_prefix=self.token(),
+            expected_ledger_version=self.store.ledger_version(bid), book_identity=book)
+        plan = self.store.reset_confirmation(bid)
+        incoming = [self.event(row) for row in fixture['incoming']]
+        params = dict(confirmation=plan['phrase'], client_token=self.token(), import_batch_id=self.token(),
+            expected_ledger_version=plan['ledgerVersion'], book_identity=book)
+        rebuilt = self.store.rebuild_book(bid, incoming, **params)
+        self.assertEqual(rebuilt['inserted'], len(incoming))
+        self.assertEqual(rebuilt['warnings'], [])
+        rows = self.store.list_events(bid, limit=1000)['events']
+        self.assertAlmostEqual(sum(row.get('shares') or 0 for row in rows), fixture['expected']['shares'])
+        self.assertAlmostEqual(sum(row['cashAmount'] for row in rows), fixture['expected']['netCash'], places=5)
+        replay = self.store.rebuild_book(bid, incoming, **params)
+        self.assertTrue(replay['idempotentReplay'])
+        appended = self.store.import_events(bid, incoming, import_batch_id=self.token(), client_token_prefix=self.token(),
+            expected_ledger_version=self.store.ledger_version(bid), book_identity=book)
+        self.assertEqual(appended['inserted'], 0)
+        self.assertEqual(appended['skipped'], len(incoming))
+        self.assertEqual(self.store.list_events(bid)['total'], len(incoming))
 
     def test_missing_identity_and_version_cannot_use_store_write_paths(self):
         row=self.event(self.fixtures['UNCHANGED_SAME_REF']['existing'][0])
