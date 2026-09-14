@@ -223,6 +223,7 @@
         importResult: null,
         importText: '',
         importMeta: null,
+        importAccountConfirmation: null,
         // Bumped on every file read, clear, commit and book switch: a
         // result that arrives for an older generation is dropped, and a
         // preview from an older generation cannot be committed.
@@ -236,6 +237,7 @@
         bookResets: [],
         executionFetchPending: false,
         resetPlan: null,
+        resetPlanRequestGeneration: 0,
         reconcileOpenSignature: '',
         referencePriceByBook: {},
         reconnectDelay: RECONNECT_BASE_DELAY_MS,
@@ -1334,6 +1336,7 @@
             importResult: null,
             importText: '',
             importMeta: null,
+            importAccountConfirmation: null,
             importReading: false,
             importCommitTokens: null,
             importFilter: 'all',
@@ -4850,6 +4853,10 @@
         const stale = Boolean(state.importResult && _importBindingProblem());
         $('import-replace').disabled = !hasBook || apiImport || state.importCommitPending
             || Boolean(state.importReading);
+        if ($('import-account-confirm')) {
+            $('import-account-confirm').disabled = !hasBook || state.importCommitPending
+                || Boolean(state.importReading);
+        }
         $('btn-import-commit').disabled = !hasBook || !state.importResult
             || Boolean(state.importReading) || state.importCommitPending || stale
             || (!_importRows(state.importResult).length && !registersOnly)
@@ -6268,6 +6275,22 @@
         const problemBody = $('import-problem-table').querySelector('tbody');
         _clear(body);
         _clear(problemBody);
+        const accountMatch = state.importResult && state.importResult.accountMatch;
+        const accountWrap = $('import-account-confirm-wrap');
+        if (accountWrap) {
+            accountWrap.hidden = !accountMatch?.canConfirm;
+            $('import-account-confirm').checked = accountMatch?.status === 'confirmed';
+            $('import-account-confirm').disabled = state.importCommitPending || Boolean(state.importReading);
+            _text($('import-account-confirm-label'), accountMatch?.canConfirm
+                ? `我已核实：本文件的遮罩账号 ${accountMatch.sourceAccount} 属于账本 ${accountMatch.targetAccount}（仅确认当前文件）` : '');
+        }
+        const accountNote = $('import-account-note');
+        if (accountNote) {
+            accountNote.hidden = !accountMatch || accountMatch.status === 'exact';
+            _text(accountNote, accountMatch?.status === 'confirmed'
+                ? `已由你确认 ${accountMatch.sourceAccount} 对应 ${accountMatch.targetAccount}；仍需通过持仓与成本核对。`
+                : (accountMatch && state.importResult.problems[0]?.reason) || '');
+        }
 
         if (!state.importResult) {
             _text(summaryNode, state.importReading
@@ -6528,8 +6551,14 @@
         const ignored = new Set(ignoredEventIds || []);
         const baselineEvents = replacing ? [] : state.allEvents.filter(
             (event) => !event.voidedAtUtc && !ignored.has(event.eventId));
-        const newRows = _importNewRows(result).map((event) => Object.assign({}, event, {
+        // The store appends sequence numbers after all retained rows, even
+        // voided ones. Missing preview sequences would sort as zero and put
+        // a new same-second close before its stored opening.
+        const lastSeq = replacing ? 0 : state.allEvents.reduce(
+            (max, event) => Math.max(max, Number(event.seq) || 0), 0);
+        const newRows = _importNewRows(result).map((event, index) => Object.assign({}, event, {
             eventId: event.eventId || `preview-${event.externalRef || event.lineNumber || ''}`,
+            seq: lastSeq + index + 1,
         }));
         const cutoff = String(result.statementThrough || '');
         const through = (events) => (cutoff
@@ -6619,7 +6648,11 @@
             fileDigest: meta && meta.fileDigest ? meta.fileDigest : '',
             mode: $('import-replace').checked === true ? 'rebuild' : 'append',
         };
-        result.knownRefs = new Set(state.allEvents.filter((event) => event.externalRef).map(
+        // A rebuild archives every old row. Its preview and submit payload
+        // must retain the complete statement, including previously imported
+        // openings; only append imports may skip stored source references.
+        const retainedEvents = result.binding.mode === 'rebuild' ? [] : state.allEvents;
+        result.knownRefs = new Set(retainedEvents.filter((event) => event.externalRef).map(
             (event) => `${event.account || ''}\u0000${event.externalRef}`));
         return result;
     }
@@ -6635,6 +6668,13 @@
                 accountFallback: book ? (book.account || '') : '',
                 currency: book ? (book.currency || '') : '',
             };
+            const confirmation = state.importAccountConfirmation;
+            if (confirmation && confirmation.bookId === state.bookId
+                && confirmation.generation === state.importGeneration
+                && confirmation.text === text
+                && confirmation.targetAccount === parseOptions.targetAccount) {
+                parseOptions.confirmedAccountMapping = confirmation;
+            }
             // First discover the statement's own cutoff without letting the
             // latest ledger state influence any opening-position arithmetic.
             const discovery = importer.parse(text, parseOptions);
@@ -6711,6 +6751,23 @@
         return _stableHash16(text);
     }
 
+    async function _handleImportAccountConfirmationChange() {
+        if (state.importCommitPending || state.importReading) return;
+        const match = state.importResult && state.importResult.accountMatch;
+        state.importAccountConfirmation = $('import-account-confirm').checked
+            && match?.canConfirm && state.importText ? {
+                bookId: state.bookId, generation: state.importGeneration,
+                text: state.importText, sourceAccount: match.sourceAccount,
+                targetAccount: match.targetAccount,
+            } : null;
+        state.importCommitTokens = null;
+        if (state.importText) {
+            _parseImportText(state.importText, state.importMeta);
+            _renderImportPreview();
+            await _refreshResetPlan();
+        }
+    }
+
     function _handleImportFile(changeEvent) {
         const file = changeEvent.target.files && changeEvent.target.files[0];
         if (!file || !importer) return;
@@ -6723,6 +6780,7 @@
         const bookId = state.bookId;
         state.importResult = null;
         state.importText = '';
+        state.importAccountConfirmation = null;
         state.importCommitTokens = null;
         state.importReading = file.name;
         $('import-workspace').hidden = false;
@@ -6770,6 +6828,8 @@
      * server refuses if the ledger is no longer the one that was planned.
      */
     async function _refreshResetPlan() {
+        const requestGeneration = ++state.resetPlanRequestGeneration;
+        state.resetPlan = null;
         const note = $('import-replace-note');
         const wanted = $('import-replace').checked === true;
         if (!wanted || !state.bookId) {
@@ -6781,9 +6841,14 @@
         note.hidden = false;
         const bookId = state.bookId;
         const generation = state.importGeneration;
+        const isCurrent = () => state.bookId === bookId
+            && generation === state.importGeneration
+            && requestGeneration === state.resetPlanRequestGeneration
+            && $('import-replace').checked === true;
+        _refreshControls();
         try {
             const response = await request('request_cost_basis_reset_plan', { bookId });
-            if (state.bookId !== bookId || generation !== state.importGeneration) return;
+            if (!isCurrent()) return;
             if (response.ledgerVersion?.digest !== state.ledgerVersion?.digest) {
                 throw new Error('账本已变化，请刷新后重新预览');
             }
@@ -6804,10 +6869,15 @@
                 + ' 没有“只重建某个月”的操作；覆盖必须用覆盖全部历史的累计报表。'
                 + ' 点击「确认导入」后会再弹窗确认；账本若在此期间发生变化，后台会拒绝并保持原样。');
         } catch (error) {
+            if (!isCurrent()) return;
             state.resetPlan = null;
             note.hidden = true;
             globalScope.alert(`无法读取清空计划：${error.message}`);
             $('import-replace').checked = false;
+            if (state.importText) {
+                _parseImportText(state.importText, state.importMeta);
+                _renderImportPreview();
+            }
         }
         _refreshControls();
     }
@@ -6850,6 +6920,12 @@
         }
         const result = state.importResult;
         if (result.problems?.length || state.importReading || _importRows(result).length > IMPORT_ROW_LIMIT) return;
+        const replacing = $('import-replace').checked === true;
+        if (replacing && (!state.resetPlan
+            || state.resetPlan.ledgerVersion?.digest !== state.ledgerVersion?.digest)) {
+            globalScope.alert('重建准备尚未完成或账本已变化，请重新选择整本重建并等待预览就绪。');
+            return;
+        }
         const events = _importNewRows(result).map((event) => {
             const copy = Object.assign({}, event);
             ['lineNumber', 'unpaired', 'fills', 'priceText', 'cashDerived', 'sourceRef',
@@ -6858,7 +6934,6 @@
             });
             return copy;
         });
-        const replacing = $('import-replace').checked === true;
         const apiImport = result.format === 'tws_api';
         const supersedeTwsEventIds = replacing ? [] : (result.supersedeTwsEventIds || []);
         const supersedePriorStubEventIds = replacing ? []
@@ -6955,6 +7030,7 @@
             state.importResult = null;
             state.importText = '';
             state.importMeta = null;
+            state.importAccountConfirmation = null;
             $('import-file').value = '';
             $('import-replace').checked = false;
             await _refreshResetPlan();
@@ -7979,6 +8055,9 @@
         $('btn-fetch-executions').addEventListener('click', _fetchTwsExecutions);
 
         if (importer) {
+            if ($('import-account-confirm')) {
+                $('import-account-confirm').addEventListener('change', _handleImportAccountConfirmationChange);
+            }
             $('import-replace').addEventListener('change', _handleImportReplaceChange);
             $('import-file').addEventListener('change', _handleImportFile);
             $('btn-import-commit').addEventListener('click', _commitImport);
@@ -7987,6 +8066,7 @@
                 state.importResult = null;
                 state.importText = '';
                 state.importMeta = null;
+                state.importAccountConfirmation = null;
                 state.importReading = false;
                 state.importCommitTokens = null;
                 $('import-file').value = '';

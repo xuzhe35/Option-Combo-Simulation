@@ -38,6 +38,7 @@ const suites = [
     require('./cost_basis_page.test'),
     require('./cost_basis_import_pipeline.test'),
     require('./cost_basis_import_async.test'),
+    require('./cost_basis_masked_account.test'),
     require('./cost_basis_stress.test'),
     require('./cost_basis_stress_worker.test'),
     require('./workspace_db_admin_core.test'),
