@@ -1810,6 +1810,21 @@ overlay the official snapshot wherever its coverage overlaps the archive.
 
 Tests live under `tests/`.
 
+The ledger also has a reproducible random state-machine campaign with an
+independent rational-arithmetic oracle. Run it with Python 3 and Node on PATH:
+
+```sh
+python3 scripts/verify_cost_basis_randomized.py --cases 2000 --steps 80 --store-cases 300 --report ledger-random-report.json
+```
+
+It uses temporary databases only and never connects to TWS. A failure prints a
+single-seed replay command and saves its input under the OS temporary directory;
+replay/CSV counterexamples are reduced when their trigger can be preserved.
+The normal Python suite includes a small fixed seed corpus. Relevant pull requests
+also run a 300-seed campaign in GitHub Actions. See
+[ledger random regression scope](CODE%20PLAN/COST_BASIS_RANDOMIZED_REGRESSION.md)
+for the coverage matrix and limits.
+
 The default Node runner is:
 
 ```powershell

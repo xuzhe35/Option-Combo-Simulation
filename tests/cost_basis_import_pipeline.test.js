@@ -80,6 +80,11 @@ const netHistory=activity([
 inspect('NET_PRIOR_HISTORY',netHistory,[stub]);
 const cashOld=stored(I.parse(divs,opt).events[0],'dividend-old');
 inspect('CASH_REVISION',divs.replace('reversal,-10','reversal,-12'),[cashOld]);
+const cashKnown=I.parse(divs,opt).events.map((e,i)=>({...e,eventId:'cash-old-'+i,seq:i+1}));
+const cashCumulative=inspect('CASH_SAME_DAY_ADDITION',divs+'\nDividends,Data,USD,2026-09-01,TQQQ extra dividend,5',cashKnown);
+assert.equal(cashCumulative.problems.length,0);
+assert.equal(h.newRows(cashCumulative).length,1);
+
 const rebuildText=activity([
  'Trades,Data,Order,Equity and Index Options,USD,TQQQ 11SEP26 71.5 C,"2026-09-10, 10:10:09",-3,0.35,105,-2.061933,O',
  'Trades,Data,Order,Equity and Index Options,USD,TQQQ 11SEP26 71.5 C,"2026-09-11, 16:20:00",3,0,0,0,C;Ep',oh]);
@@ -92,6 +97,15 @@ const appendAll=inspect('APPEND_ALL_KNOWN',rebuildText,rebuildRows);
 const sameTimeText=rebuildText.replace('2026-09-11, 16:20:00','2026-09-10, 10:10:09');
 const sameTimeOpen=stored(I.parse(sameTimeText,opt).events[0],'same-time-open');
 const sameTimeAppend=inspect('APPEND_SAME_TIME_CLOSE',sameTimeText,[sameTimeOpen]);
+const sameSecondFills=activity([
+ 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 11SEP26 71.5 C,"2026-09-10, 10:10:09",2,1,-200,0,O',
+ 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 11SEP26 71.5 C,"2026-09-10, 10:10:09",-1,2,200,0,C']);
+const knownSameSecond=stored(I.parse(sameSecondFills,opt).events[0],'known-same-second');
+const sameSecondAppend=inspect('APPEND_DISTINCT_SAME_SECOND',sameSecondFills,[knownSameSecond]);
+assert.equal(sameSecondAppend.problems.length,0,'the file preserves the old row and adds a distinct fill');
+assert.equal(h.newRows(sameSecondAppend).length,1);
+assert.equal(sameSecondAppend.ledgerPreview.warnings.length,0);
+
 // Portable reproduction of a buy-two / sell-four C;O;P order. Keep the
 // aggregate cash once; do not duplicate an order by splitting its source ref.
 const reversalText=activity([

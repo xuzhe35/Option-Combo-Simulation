@@ -2033,6 +2033,8 @@ class CostBasisStore:
             return event
         if len(rows) == 1:
             return {**event, 'sharesPerContract': int(rows[0][0])}
+        if len(rows) > 1:
+            raise InvalidRequestError('multiple option multipliers are known; provide sharesPerContract explicitly')
         return event
 
     @staticmethod
@@ -2047,12 +2049,12 @@ class CostBasisStore:
 
     def _normalize_event_batch(self, conn, book_id, events, book, *,
                                include_existing_history):
-        """Validate a batch while carrying known option multipliers forward.
+        """Validate a batch using unambiguous multipliers from the whole batch.
 
         A reviewed import may close an adjusted contract without repeating its
         deliverable size on every row.  Single-row append already infers that
-        size from the ledger.  Bulk import must additionally see an earlier row
-        in the same incoming batch; rebuild must use only replacement rows,
+        size from the ledger. Bulk import must also see an explicitly sized row
+        anywhere in the incoming batch; rebuild must use only replacement rows,
         because the old book is about to be archived and deleted.
         """
         known = {}
@@ -2069,6 +2071,16 @@ class CostBasisStore:
                 key = (row['account'], row['right'], row['strike'], row['expiry'])
                 known.setdefault(key, set()).add(int(row['shares_per_contract']))
 
+        # Explicit broker time, not payload order, decides which trade came
+        # first. Learn validated explicit sizes before resolving omitted ones.
+        for item in events:
+            candidate = _bind_event_to_book_account(item, book)
+            if (isinstance(candidate, dict) and candidate.get('kind') in OPTION_KINDS
+                    and candidate.get('sharesPerContract')):
+                explicit = _validate_event_shape(candidate, book)
+                key = (explicit['account'], explicit['right'], explicit['strike'], explicit['expiry'])
+                known.setdefault(key, set()).add(explicit['shares_per_contract'])
+
         normalized_rows = []
         for item in events:
             candidate = _bind_event_to_book_account(item, book)
@@ -2081,6 +2093,8 @@ class CostBasisStore:
                     # Shape validation below owns the precise user-facing error.
                     key = None
                 values = known.get(key, set()) if key is not None else set()
+                if len(values) > 1:
+                    raise InvalidRequestError('multiple option multipliers are known; provide sharesPerContract explicitly')
                 if len(values) == 1:
                     candidate = {
                         **candidate,
@@ -2369,6 +2383,31 @@ class CostBasisStore:
         if normalized['kind'] in FUTURE_KINDS \
                 or normalized['future_contracts'] is not None:
             self._validate_futures_timeline(conn, book_id, normalized['account'])
+        return warnings
+
+    def _validate_batch_timelines(self, conn, book_id, rows):
+        """Judge an atomic batch by its complete economic timeline.
+
+        Input order assigns same-time sequence ties, but is not evidence that
+        an explicitly later close happened before an earlier opening. Also a
+        backdated pair can temporarily strand an already-stored later close.
+        Nothing becomes visible until every affected timeline passes.
+        """
+        warnings = []
+        options = set()
+        futures_accounts = set()
+        for row in rows:
+            if row['kind'] in OPTION_KINDS:
+                key = (row['account'], row['right'], row['strike'], row['expiry'],
+                       row['shares_per_contract'])
+                if key not in options:
+                    options.add(key)
+                    warnings.extend(self._validate_timeline(
+                        conn, book_id, row, check_share_warning=False))
+            if row['kind'] in FUTURE_KINDS or row['future_contracts'] is not None:
+                futures_accounts.add(row['account'])
+        for account in futures_accounts:
+            self._validate_futures_timeline(conn, book_id, account)
         return warnings
 
     @staticmethod
@@ -2880,7 +2919,6 @@ class CostBasisStore:
                 inserted = 0
                 skipped = 0
                 warnings = []
-                defer_validation = bool(superseded_rows or superseded_stubs)
                 inserted_rows = []
                 for index, normalized in enumerate(normalized_rows):
                     if normalized['external_ref']:
@@ -2908,20 +2946,14 @@ class CostBasisStore:
                         allow_overdraw=allow_overdraw,
                         import_batch_id=import_batch_id,
                         check_share_warning=False,
-                        validate_timeline=not defer_validation,
+                        validate_timeline=False,
                     )
                     warnings.extend(result['warnings'])
                     inserted_rows.append(normalized)
                     inserted += 1
-                if defer_validation:
-                    # The replacement history is judged as a whole: the
-                    # stored close that the voided stub used to back is now
-                    # backed by all of the real openings together.
-                    for normalized in inserted_rows:
-                        warnings.extend(self._validate_timeline(
-                            conn, book_id, normalized, check_share_warning=False))
-                # Inserting the replacement rows normally validates these
-                # timelines already. Replaying each affected option once more
+                warnings.extend(self._validate_batch_timelines(conn, book_id, inserted_rows))
+                # Complete batch validation covers inserted timelines.
+                # Replaying each affected option once more
                 # also covers a future batch shape with all rows de-duplicated.
                 for row in superseded_rows:
                     self._validate_contract_timeline(conn, book_id, row)
@@ -3334,9 +3366,11 @@ class CostBasisStore:
                         allow_overdraw=allow_overdraw,
                         import_batch_id=import_batch_id,
                         check_share_warning=False,
+                        validate_timeline=False,
                     )
                     warnings.extend(result['warnings'])
                     inserted += 1
+                warnings.extend(self._validate_batch_timelines(conn, book_id, normalized_rows))
                 warnings.extend(self._net_short_share_warnings(conn, book_id))
                 self._register_batch(
                     conn, book_id, import_batch_id, 'rebuild', registration,

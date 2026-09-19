@@ -1,0 +1,39 @@
+name: Cost basis randomized regression
+on:
+  pull_request:
+    paths:
+      - 'cost_basis*'
+      - 'js/cost_basis*'
+      - 'tests/cost_basis*'
+      - 'tests/helpers/cost_basis_random*'
+      - 'tests/helpers/load-browser-scripts.js'
+      - 'scripts/verify_cost_basis_randomized.py'
+      - '.github/workflows/cost-basis-randomized.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  randomized-ledger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Deterministic ledger regressions
+        run: python -m unittest discover -s tests -p 'cost_basis_randomized_test.py'
+      - name: Independent model and random state machines
+        run: python scripts/verify_cost_basis_randomized.py --cases 300 --steps 80 --store-cases 60 --report random-ledger-report.json
+      - name: Preserve coverage and counterexamples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cost-basis-randomized-results
+          path: |
+            random-ledger-report.json
+            /tmp/cost-basis-counterexample-*/*.json
+          if-no-files-found: ignore

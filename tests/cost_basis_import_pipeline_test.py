@@ -55,6 +55,8 @@ class ImportPipelineTests(unittest.TestCase):
             'VALID_PARTIAL_FILLS': (20,0,-1002), 'UNCHANGED_SAME_REF': (10,0,-501),
             'UNCHANGED_DIRECT_EXEC': (10,0,-501),
             'APPEND_SAME_TIME_CLOSE': (0,0,102.938067),
+            'APPEND_DISTINCT_SAME_SECOND': (0,1,0),
+            'CASH_SAME_DAY_ADDITION': (0,0,-2),
             'MIXED_REVERSAL_FRESH': (0,-2,224.833482),
             'MIXED_REVERSAL_APPEND': (0,-2,224.833482),
             'MIXED_REVERSAL_REPEAT': (0,-2,224.833482),
