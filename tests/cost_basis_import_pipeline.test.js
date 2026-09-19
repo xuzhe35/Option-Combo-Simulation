@@ -80,6 +80,11 @@ const netHistory=activity([
 inspect('NET_PRIOR_HISTORY',netHistory,[stub]);
 const cashOld=stored(I.parse(divs,opt).events[0],'dividend-old');
 inspect('CASH_REVISION',divs.replace('reversal,-10','reversal,-12'),[cashOld]);
+const cashKnown=I.parse(divs,opt).events.map((e,i)=>({...e,eventId:'cash-old-'+i,seq:i+1}));
+const cashCumulative=inspect('CASH_SAME_DAY_ADDITION',divs+'\nDividends,Data,USD,2026-09-01,TQQQ extra dividend,5',cashKnown);
+assert.equal(cashCumulative.problems.length,0);
+assert.equal(h.newRows(cashCumulative).length,1);
+
 const rebuildText=activity([
  'Trades,Data,Order,Equity and Index Options,USD,TQQQ 11SEP26 71.5 C,"2026-09-10, 10:10:09",-3,0.35,105,-2.061933,O',
  'Trades,Data,Order,Equity and Index Options,USD,TQQQ 11SEP26 71.5 C,"2026-09-11, 16:20:00",3,0,0,0,C;Ep',oh]);
@@ -92,6 +97,36 @@ const appendAll=inspect('APPEND_ALL_KNOWN',rebuildText,rebuildRows);
 const sameTimeText=rebuildText.replace('2026-09-11, 16:20:00','2026-09-10, 10:10:09');
 const sameTimeOpen=stored(I.parse(sameTimeText,opt).events[0],'same-time-open');
 const sameTimeAppend=inspect('APPEND_SAME_TIME_CLOSE',sameTimeText,[sameTimeOpen]);
+const sameSecondFills=activity([
+ 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 11SEP26 71.5 C,"2026-09-10, 10:10:09",2,1,-200,0,O',
+ 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 11SEP26 71.5 C,"2026-09-10, 10:10:09",-1,2,200,0,C']);
+const knownSameSecond=stored(I.parse(sameSecondFills,opt).events[0],'known-same-second');
+const sameSecondAppend=inspect('APPEND_DISTINCT_SAME_SECOND',sameSecondFills,[knownSameSecond]);
+assert.equal(sameSecondAppend.problems.length,0,'the file preserves the old row and adds a distinct fill');
+assert.equal(h.newRows(sameSecondAppend).length,1);
+assert.equal(sameSecondAppend.ledgerPreview.warnings.length,0);
+
+// Portable reproduction of a buy-two / sell-four C;O;P order. Keep the
+// aggregate cash once; do not duplicate an order by splitting its source ref.
+const reversalText=activity([
+ 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 21SEP26 71 C,"2026-09-18, 14:23:30",2,1.18,-236,-1.3666,O',
+ 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 21SEP26 71 C,"2026-09-18, 14:23:59",-4,1.16,464,-1.7999184,C;O;P',
+ oh,'Open Positions,Data,Summary,Equity and Index Options,USD,TQQQ 21SEP26 71 C,-2,100,-230.6220408']);
+const reversalParsed=I.parse(reversalText,opt);
+const reversalExisting=reversalParsed.events.map((e,i)=>({...e,eventId:'reversal-'+i,seq:i+1}));
+for(const [name,existing,rebuild] of [
+ ['MIXED_REVERSAL_FRESH',[],false],
+ ['MIXED_REVERSAL_APPEND',[reversalExisting[0]],false],
+ ['MIXED_REVERSAL_REBUILD',reversalExisting,true],
+ ['MIXED_REVERSAL_REPEAT',reversalExisting,false],
+]) {
+ const result=inspect(name,reversalText,existing,rebuild);
+ assert.equal(result.problems.length,0,name);
+ assert.equal(result.ledgerPreview.warnings.length,0,name);
+ assert.ok(result.ledgerPreview.positions.every(p=>p.after===p.statement),name);
+ if(name==='MIXED_REVERSAL_REPEAT') assert.equal(h.newRows(result).length,0);
+ else assert.equal(h.newRows(result).filter(e=>e.tag==='ibkr_close_open').length,1);
+}
 // Opt-in local statement regression: no private report is required in CI or copied into fixtures.
 if(process.env.COST_BASIS_FULL_STATEMENT_CSV) {
  const text=fs.readFileSync(process.env.COST_BASIS_FULL_STATEMENT_CSV,'utf8');
@@ -110,7 +145,7 @@ if(process.env.COST_BASIS_FULL_STATEMENT_CSV) {
  assert.equal(h.counts(result).existing,0);assert.equal(incoming.length,complete.length);
  assert.ok(result.ledgerPreview.positions.every(p=>p.statement===null||Math.abs(p.after-p.statement)<1e-6));
  const ledger=C.computeLedger(incoming);
- fixture.FULL_STATEMENT_REBUILD={book:sourceBook,existing,incoming,expected:{shares:ledger.combined.shares,netCash:ledger.combined.netCash}};
+ fixture.FULL_STATEMENT_REBUILD={book:sourceBook,existing,incoming,expected:{shares:ledger.combined.shares,netCash:ledger.combined.netCash,closingOptions:result.openings.closingOptions}};
  // Re-importing the rebuilt statement in append mode must be an exact no-op.
  Object.assign(h.state,{allEvents:incoming.map((e,i)=>({...e,eventId:'rebuilt-'+i,seq:i+1})),ledger});
  c.document.getElementById('import-replace').checked=false;h.parse(text,{fileName:'full-statement.csv',fileDigest:'local-regression'});

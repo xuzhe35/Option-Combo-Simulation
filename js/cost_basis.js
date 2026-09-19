@@ -76,6 +76,9 @@
     };
 
     function _eventKindLabel(event) {
+        if (event && event.kind === 'option_trade' && event.tag === 'ibkr_close_open') {
+            return '期权平仓并反向开仓';
+        }
         if (event && event.kind === 'option_trade' && event.tag === 'ibkr_close') {
             return '期权 Close（平仓）';
         }
@@ -4348,6 +4351,10 @@
             return '存在权利金未知的期初期权；当前数字不是完整的实际'
                 + `综合成本（${warning.slice('unknown_prior_open:'.length)}）`;
         }
+        if (warning.startsWith('ibkr_close_open_invalid:')) {
+            return 'IBKR C/O 行应先平掉已有持仓，再反向开仓；当时持仓无法支持这笔成交'
+                + `（${warning.slice('ibkr_close_open_invalid:'.length)}）`;
+        }
         if (warning.startsWith('ibkr_open_opposes_existing:')) {
             return 'IBKR O 开仓行与当时已有持仓反向，已停止将它当作平仓'
                 + `（${warning.slice('ibkr_open_opposes_existing:'.length)}）`;
@@ -5844,6 +5851,17 @@
             event && event.eventId && !event.voidedAtUtc));
         const knownRefs = new Set(ledger.filter((event) => event.externalRef).map(
             (event) => `${event.account}\u0000${event.externalRef}`));
+        // A cumulative statement may retain an old fill and add a different
+        // fill in the very same second. A stored row reproduced unchanged
+        // under its own reference is already accounted for, so it cannot
+        // also be the alleged revision of another row. Cross-format aliases
+        // alone do not provide this evidence and remain one-to-one guarded.
+        const unchangedRefs = new Set();
+        (result.events || []).forEach((event) => {
+            const key = `${event.account}\u0000${event.sourceRef || event.externalRef}`;
+            const stored = ledger.find((prior) => `${prior.account}\u0000${prior.externalRef}` === key);
+            if (stored && !_importEconomicsDifferences(event, stored).length) unchangedRefs.add(key);
+        });
         (result.events || []).forEach((csvEvent) => {
             const sourceKey = `${csvEvent.account}\u0000${csvEvent.sourceRef || csvEvent.externalRef}`;
             if (Object.prototype.hasOwnProperty.call(aliasKeys, sourceKey)) return;
@@ -5860,7 +5878,9 @@
             if (quantity !== null) {
                 const second = _exactBrokerTimestamp(csvEvent);
                 const revised = ledger.find((event) => (
-                    event.source === 'csv_import' && _sameExecutionContract(csvEvent, event)
+                    event.source === 'csv_import'
+                    && !unchangedRefs.has(`${event.account}\u0000${event.externalRef}`)
+                    && _sameExecutionContract(csvEvent, event)
                     && event.tradeDate === csvEvent.tradeDate
                     && (!second || !_exactBrokerTimestamp(event) || _exactBrokerTimestamp(event) === second)));
                 if (revised) {
@@ -5894,6 +5914,7 @@
             }
             if (csvEvent.kind === 'dividend' || csvEvent.kind === 'fee') {
                 const priorCash = ledger.find((event) => event.source === 'csv_import'
+                    && !unchangedRefs.has(`${event.account}\u0000${event.externalRef}`)
                     && event.kind === csvEvent.kind && event.account === csvEvent.account
                     && event.tradeDate === csvEvent.tradeDate);
                 if (priorCash) {

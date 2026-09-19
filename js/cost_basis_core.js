@@ -90,6 +90,11 @@
             && Math.sign(current) !== Math.sign(change);
     }
 
+    function _ibkrCloseOpenInvalid(position, contracts) {
+        return !_ibkrOpenOpposes(position, contracts)
+            || Math.abs(_number(contracts)) <= Math.abs(_number(position)) + SHARE_EPSILON;
+    }
+
     const FUTURE_KINDS = Object.freeze(['futures_trade', 'futures_roll']);
 
     const BASIS_MODES = Object.freeze(['net_cash', 'stock_only', 'tax_adjusted']);
@@ -776,6 +781,11 @@
             account.warnings.push(`ibkr_open_opposes_existing:${key}`);
             return false;
         }
+        if (event.kind === 'option_trade' && event.tag === 'ibkr_close_open'
+            && _ibkrCloseOpenInvalid(contractState.contracts, event.contracts)) {
+            account.warnings.push(`ibkr_close_open_invalid:${key}`);
+            return false;
+        }
         const mandatoryClose = _isClosingOptionEvent(event);
         if (mandatoryClose && _closeOverdraws(
             contractState.contracts, _number(event.contracts))) {
@@ -1162,6 +1172,11 @@
                 return null;
             }
 
+            if (kind === 'option_trade' && event.tag === 'ibkr_close_open'
+                && _ibkrCloseOpenInvalid(contractState.contracts, contracts)) {
+                state.warnings.push(`ibkr_close_open_invalid:${key}`);
+                return null;
+            }
             const mandatoryClose = _isClosingOptionEvent(event);
             if (mandatoryClose && _closeOverdraws(contractState.contracts, contracts)) {
                 state.warnings.push(`closes_more_than_open:${key}`);

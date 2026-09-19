@@ -1,4 +1,4 @@
-/* Offline browser regression. Usage: node scripts/verify_cost_basis_import_browser.js <masked CSV>
+/* Offline browser regression. Usage: node scripts/verify_cost_basis_import_browser.js <CSV> [--full]
  * Requires Playwright and an installed Chrome. All HTTP and backend requests are
  * intercepted; no real book or broker is contacted. The share baseline is test data.
  */
@@ -8,7 +8,8 @@ const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
 const root = path.resolve(__dirname, '..');
 const csv = process.argv[2];
-if (!csv) throw new Error('Provide the local masked daily CSV to verify.');
+if (!csv) throw new Error('Provide the local CSV to verify.');
+const fullStatement = process.argv.includes('--full');
 
 (async () => {
     const browser = await chromium.launch({ headless: true, channel: 'chrome' });
@@ -33,7 +34,7 @@ if (!csv) throw new Error('Provide the local masked daily CSV to verify.');
                         request=async(action,payload)=>{
                           if(action==='request_cost_basis_reset_plan')return {phrase:'test reset',eventCount:state.allEvents.length,
                             firstTradeDate:'2026-09-10',lastTradeDate:'2026-09-10',ledgerVersion:state.ledgerVersion};
-                          if(action==='import_cost_basis_events'){
+                          if(action==='import_cost_basis_events'||action==='rebuild_cost_basis_book'){
                             globalScope.__importAudit.writes.push({action,payload});
                             return {inserted:payload.events.length,skipped:0};
                           }
@@ -47,6 +48,45 @@ if (!csv) throw new Error('Provide the local masked daily CSV to verify.');
             return route.fulfill({ body, contentType });
         });
         await page.goto('http://costbasis.test/cost_basis.html');
+        if (fullStatement) {
+            await page.evaluate(text => {
+                const h = window.__importAudit;
+                h.configure();
+                const parsed = window.OptionComboCostBasisImport.parse(text, { symbol: 'TQQQ' });
+                const book = { bookId: 'test', account: parsed.account, symbol: 'TQQQ', secType: 'STK',
+                    currency: 'USD', defaultSharesPerContract: 100, startDate: '2026-01-01' };
+                const existing = parsed.events.filter(e => e.tradeDate < parsed.statementPeriod.through)
+                    .map((e, i) => ({ ...e, seq: i + 1, eventId: 'old-' + i }));
+                Object.assign(h.state, { connection: 'connected', status: { available: true }, books: [book],
+                    bookId: 'test', allEvents: existing, ledger: window.OptionComboCostBasisCore.computeLedger(existing),
+                    ledgerVersion: { digest: 'test' } });
+                h.render();
+                h.showView('ledger');
+            }, fs.readFileSync(csv, 'utf8'));
+            await page.locator('#import-file').setInputFiles(csv);
+            await page.waitForFunction(() => !!window.__importAudit.state.importResult);
+            await page.locator('#import-replace').check();
+            await page.waitForFunction(() => window.__importAudit.state.importResult?.binding?.mode === 'rebuild'
+                && !document.getElementById('btn-import-commit').disabled);
+            const preview = await page.evaluate(() => window.__importAudit.state.importResult);
+            assert.deepEqual(preview.problems, []);
+            assert.deepEqual(preview.ledgerPreview.warnings, []);
+            assert.ok(preview.ledgerPreview.positions.every(p => p.statement === null || Math.abs(p.after - p.statement) < 1e-6));
+            assert.ok(await page.locator('#import-ledger-warnings').isHidden());
+            assert.match(await page.locator('#import-table').innerText(), /期权平仓并反向开仓/);
+            if (process.env.COST_BASIS_BROWSER_SCREENSHOT) {
+                await page.locator('#import-workspace').screenshot({ path: process.env.COST_BASIS_BROWSER_SCREENSHOT });
+            }
+            await page.locator('#btn-import-commit').click();
+            await page.waitForFunction(() => window.__importAudit.writes.length === 1);
+            const write = await page.evaluate(() => window.__importAudit.writes[0]);
+            assert.equal(write.action, 'rebuild_cost_basis_book');
+            assert.equal(write.payload.events.length, preview.events.length);
+            assert.equal(write.payload.events.filter(e => e.tag === 'ibkr_close_open').length, 1);
+            assert.deepEqual(errors, []);
+            console.log(`Offline Chrome full rebuild: ${write.payload.events.length} events, mixed reversal preserved, all reported positions match, zero preview warnings or page errors.`);
+            return;
+        }
         await page.evaluate(() => {
             const h = window.__importAudit;
             h.configure();
