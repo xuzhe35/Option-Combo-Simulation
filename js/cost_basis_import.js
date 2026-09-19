@@ -343,6 +343,13 @@
         return _upper(value).split(/[;,\s|]+/).filter(Boolean);
     }
 
+    function _tradeTag(codes) {
+        // An aggregated order can close the existing lot AND open its inverse.
+        if (codes.includes('C') && codes.includes('O')) return 'ibkr_close_open';
+        if (codes.includes('C')) return 'ibkr_close';
+        return codes.includes('O') ? 'ibkr_open' : '';
+    }
+
     function _assetKind(value) {
         const text = _normalizeHeader(value);
         if (FOP_ASSET_CLASSES.indexOf(text) >= 0) return 'fop';
@@ -791,9 +798,7 @@
                         ? _round(-(quantity * Math.abs(price)) - fees, 6)
                         : cash,
                     source: 'csv_import',
-                    tag: brokerCodes.indexOf('C') >= 0
-                        ? 'ibkr_close'
-                        : (brokerCodes.indexOf('O') >= 0 ? 'ibkr_open' : ''),
+                    tag: _tradeTag(brokerCodes),
                     brokerBasis,
                     brokerRealizedPnl,
                     brokerCodes,
@@ -892,12 +897,10 @@
                             * Math.abs(price)) - fees, 6)
                         : cash,
                     source: 'csv_import',
-                    // O/C is not decoration.  A closing row must be applied
-                    // against an existing lot and may never open the inverse
-                    // position merely because an earlier report is absent.
-                    tag: brokerCodes.indexOf('C') >= 0
-                        ? 'ibkr_close'
-                        : (brokerCodes.indexOf('O') >= 0 ? 'ibkr_open' : ''),
+                    // Preserve both O and C on reversals. A pure C row still
+                    // needs a sufficient opening lot; mixed C/O needs a
+                    // smaller opposite lot so both portions can be proved.
+                    tag: _tradeTag(brokerCodes),
                     brokerBasis,
                     brokerRealizedPnl,
                     brokerCodes,

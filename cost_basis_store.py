@@ -2183,6 +2183,7 @@ class CostBasisStore:
                     'contract identity; add conId or an exact localSymbol')
             position = positions.get(identity, 0.0)
             contracts = float(item['contracts'] or 0)
+            self._validate_mixed_option_trade(item, position, contracts)
             if (item['kind'] == 'option_trade' and item['tag'] == 'ibkr_open'
                     and abs(position) > 1e-9 and position * contracts < 0):
                 raise PositionOverdrawError(
@@ -2338,6 +2339,7 @@ class CostBasisStore:
                         'expiry and multiplier')
                 position = positions.get(identity, 0.0)
                 contracts = float(row['contracts'] or 0)
+                self._validate_mixed_option_trade(row, position, contracts)
                 if (row['kind'] == 'option_trade' and row['tag'] == 'ibkr_open'
                         and abs(position) > 1e-9 and position * contracts < 0):
                     raise PositionOverdrawError(
@@ -2368,6 +2370,19 @@ class CostBasisStore:
                 or normalized['future_contracts'] is not None:
             self._validate_futures_timeline(conn, book_id, normalized['account'])
         return warnings
+
+    @staticmethod
+    def _validate_mixed_option_trade(row, position, contracts):
+        # C/O explicitly promises both a close and a new opposite opening.
+        # Do not relax pure-C protection or let missing history create a lot.
+        if row['kind'] != 'option_trade' or row['tag'] != 'ibkr_close_open':
+            return
+        if (abs(position) <= 1e-6 or position * contracts >= 0
+                or abs(contracts) <= abs(position) + 1e-6):
+            raise PositionOverdrawError(
+                f"IBKR C/O trade on {row['trade_date']} changes {contracts:g} "
+                f'contracts but the ledger holds {position:g}; it requires '
+                'a smaller opposite position to close and reverse')
 
     @staticmethod
     def _raise_or_warn_overdraw(row, position, contracts, allow_overdraw, warnings):

@@ -8,7 +8,7 @@ import unittest
 import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from cost_basis_store import (CostBasisStore, InvalidRequestError, LedgerChangedError,
-                              ResetConfirmationError, ImportRevisionConflictError)
+                              ResetConfirmationError, ImportRevisionConflictError, PositionOverdrawError)
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 class ImportPipelineTests(unittest.TestCase):
@@ -55,6 +55,9 @@ class ImportPipelineTests(unittest.TestCase):
             'VALID_PARTIAL_FILLS': (20,0,-1002), 'UNCHANGED_SAME_REF': (10,0,-501),
             'UNCHANGED_DIRECT_EXEC': (10,0,-501),
             'APPEND_SAME_TIME_CLOSE': (0,0,102.938067),
+            'MIXED_REVERSAL_FRESH': (0,-2,224.833482),
+            'MIXED_REVERSAL_APPEND': (0,-2,224.833482),
+            'MIXED_REVERSAL_REPEAT': (0,-2,224.833482),
         }
         for name, expected in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
@@ -75,7 +78,7 @@ class ImportPipelineTests(unittest.TestCase):
                 self.assertEqual(actual,expected)
 
     def test_rebuild_page_payload_retains_known_openings_and_round_trips_archive(self):
-        for name in ('REBUILD_KNOWN_OPEN', 'REBUILD_ALL_KNOWN'):
+        for name in ('REBUILD_KNOWN_OPEN', 'REBUILD_ALL_KNOWN', 'MIXED_REVERSAL_REBUILD'):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
                 store = CostBasisStore(pathlib.Path(root)/'ledger.db').initialize()
                 book = store.create_book(account='U1111111', symbol='TQQQ', start_date='2026-01-01')
@@ -91,12 +94,27 @@ class ImportPipelineTests(unittest.TestCase):
                     statement=self.statement(9))
                 rows = store.list_events(bid)['events']
                 self.assertEqual(len(rows), 2)
-                self.assertEqual(sum(row['contracts'] for row in rows), 0)
-                self.assertAlmostEqual(sum(row['cashAmount'] for row in rows), 102.938067)
+                mixed = name == 'MIXED_REVERSAL_REBUILD'
+                self.assertEqual(sum(row['contracts'] for row in rows), -2 if mixed else 0)
+                self.assertAlmostEqual(sum(row['cashAmount'] for row in rows),
+                                       224.833482 if mixed else 102.938067)
                 fresh = store.reset_confirmation(bid)
                 store.restore_book_reset(bid, rebuilt['resetId'], confirmation=fresh['phrase'],
                     client_token=self.token(), expected_ledger_version=fresh['ledgerVersion'], book_identity=book)
                 self.assertEqual(store.list_events(bid)['total'], len(fixture['existing']))
+
+    def test_mixed_reversal_failure_rolls_back_entire_rebuild(self):
+        self.import_rows([self.event(self.fixtures['UNCHANGED_SAME_REF']['existing'][0])])
+        original = self.store.list_events(self.bid)['events']
+        rows = [self.event(e) for e in self.fixtures['MIXED_REVERSAL_REBUILD']['incoming']]
+        for invalid in ([rows[1]], [rows[0], {**rows[1], 'tag': 'ibkr_close'}]):
+            plan = self.store.reset_confirmation(self.bid)
+            with self.assertRaises(PositionOverdrawError):
+                self.store.rebuild_book(self.bid, invalid,
+                    confirmation=plan['phrase'], client_token=self.token(), import_batch_id=self.token(),
+                    expected_ledger_version=plan['ledgerVersion'], book_identity=self.book)
+            self.assertEqual(self.store.ledger_version(self.bid), plan['ledgerVersion'])
+            self.assertEqual(self.store.list_events(self.bid)['events'], original)
 
     def test_all_blocked_previews_leave_no_write_payload_authorized(self):
         for name in ('SAME_REF_REVISION','DIRECT_EXEC_REVISION','REUSED_CROSS_FORMAT_TWIN',
@@ -126,6 +144,24 @@ class ImportPipelineTests(unittest.TestCase):
         rows = self.store.list_events(bid, limit=1000)['events']
         self.assertAlmostEqual(sum(row.get('shares') or 0 for row in rows), fixture['expected']['shares'])
         self.assertAlmostEqual(sum(row['cashAmount'] for row in rows), fixture['expected']['netCash'], places=5)
+        # Read the persisted rows back through the browser engine. This catches
+        # dropped tags/identities and validates every remaining contract, not
+        # just the aggregate number (which can hide offsetting mistakes).
+        script = """
+const {loadBrowserScripts}=require('./tests/helpers/load-browser-scripts');
+const core=loadBrowserScripts(['js/cost_basis_core.js']).OptionComboCostBasisCore;
+const rows=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const ledger=core.computeLedger(rows);
+console.log(JSON.stringify({warnings:ledger.warnings,positions:ledger.openOptions}));
+"""
+        replayed = json.loads(subprocess.check_output(['node', '-e', script], cwd=ROOT,
+                                                     input=json.dumps(rows), text=True))
+        self.assertEqual(replayed['warnings'], [])
+        def position_key(row):
+            return tuple(row.get(key) for key in ('account', 'right', 'strike', 'expiry',
+                                                  'sharesPerContract')) + (str(row.get('conId') or ''),)
+        self.assertEqual({position_key(row): row['contracts'] for row in replayed['positions']},
+                         {position_key(row): row['quantity'] for row in fixture['expected']['closingOptions']})
         replay = self.store.rebuild_book(bid, incoming, **params)
         self.assertTrue(replay['idempotentReplay'])
         appended = self.store.import_events(bid, incoming, import_batch_id=self.token(), client_token_prefix=self.token(),

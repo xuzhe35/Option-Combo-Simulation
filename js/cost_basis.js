@@ -76,6 +76,9 @@
     };
 
     function _eventKindLabel(event) {
+        if (event && event.kind === 'option_trade' && event.tag === 'ibkr_close_open') {
+            return '期权平仓并反向开仓';
+        }
         if (event && event.kind === 'option_trade' && event.tag === 'ibkr_close') {
             return '期权 Close（平仓）';
         }
@@ -4347,6 +4350,10 @@
         if (warning.startsWith('unknown_prior_open:')) {
             return '存在权利金未知的期初期权；当前数字不是完整的实际'
                 + `综合成本（${warning.slice('unknown_prior_open:'.length)}）`;
+        }
+        if (warning.startsWith('ibkr_close_open_invalid:')) {
+            return 'IBKR C/O 行应先平掉已有持仓，再反向开仓；当时持仓无法支持这笔成交'
+                + `（${warning.slice('ibkr_close_open_invalid:'.length)}）`;
         }
         if (warning.startsWith('ibkr_open_opposes_existing:')) {
             return 'IBKR O 开仓行与当时已有持仓反向，已停止将它当作平仓'
