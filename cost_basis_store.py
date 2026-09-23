@@ -35,15 +35,17 @@ Contract highlights (see CODE PLAN/COST_BASIS_LEDGER_PAGE_PLAN.md):
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import uuid
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
 from portfolio_store import default_app_data_dir
 
-SCHEMA_USER_VERSION = 9
+SCHEMA_USER_VERSION = 10
 
 MAX_SYMBOL_CHARS = 32
 MAX_ACCOUNT_CHARS = 32
@@ -51,6 +53,8 @@ MAX_NOTE_CHARS = 500
 MAX_TAG_CHARS = 64
 MAX_LOCAL_SYMBOL_CHARS = 64
 MAX_EXTERNAL_REF_CHARS = 128
+MAX_SPLIT_RULE_REF_CHARS = 128
+MAX_SPLIT_RATIO = 100
 MAX_IMPORT_EVENTS = 5000
 DEFAULT_EVENT_PAGE_SIZE = 200
 MAX_EVENT_PAGE_SIZE = 2000
@@ -101,6 +105,16 @@ DELIVERY_KINDS = frozenset({
 })
 
 FUTURE_KINDS = frozenset({'futures_trade', 'futures_roll'})
+
+# Split groups (CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md §15). Schema v10
+# can store them, but no write path accepts them until the replay and the
+# group checks exist: `option_split` is deliberately absent from EVENT_KINDS
+# and any split-group field is refused by _validate_event_shape.
+STORED_ONLY_EVENT_KINDS = ('option_split',)
+SPLIT_GROUP_FIELDS = (
+    'split_group', 'split_rule_ref', 'split_rounding', 'split_to_strike',
+    'split_to_contracts', 'split_to_con_id', 'split_to_local_symbol',
+)
 
 EVENT_SOURCES = ('manual', 'reconcile', 'csv_import', 'execution_report')
 
@@ -291,7 +305,8 @@ _SCHEMA_STATEMENTS = (
                                 'opening_balance','share_trade','option_trade',
                                 'option_assignment','option_exercise',
                                 'option_expiry','dividend','fee','split',
-                                'manual_adjust','futures_trade','futures_roll')),
+                                'manual_adjust','futures_trade','futures_roll',
+                                'option_split')),
         trade_date          TEXT NOT NULL,
         broker_timestamp    TEXT,
         account             TEXT NOT NULL DEFAULT '',
@@ -318,6 +333,15 @@ _SCHEMA_STATEMENTS = (
         cash_amount         REAL NOT NULL,
         fees                REAL NOT NULL DEFAULT 0,
         split_ratio         REAL,
+        split_group         TEXT,
+        split_rule_ref      TEXT,
+        split_rounding      TEXT,
+        split_to_strike     REAL,
+        split_to_contracts  REAL,
+        split_to_con_id     INTEGER,
+        split_to_local_symbol TEXT,
+        split_standard_confirmed INTEGER NOT NULL DEFAULT 0
+                            CHECK (split_standard_confirmed IN (0, 1)),
         include_in_cost     INTEGER NOT NULL DEFAULT 1
                             CHECK (include_in_cost IN (0, 1)),
         tag                 TEXT NOT NULL DEFAULT '',
@@ -379,6 +403,17 @@ _SCHEMA_STATEMENTS = (
     """,
 ) + _V2_TABLE_STATEMENTS + _V8_TABLE_STATEMENTS + _V9_TABLE_STATEMENTS
 
+# Added by v10 after the four event indexes that _V3_EVENT_INDEX_STATEMENTS
+# slices by position, so that slice stays valid.
+_V10_EVENT_INDEX_STATEMENTS = (
+    """
+    CREATE INDEX idx_cost_basis_events_split_group
+        ON cost_basis_events(book_id, split_group)
+        WHERE split_group IS NOT NULL
+    """,
+)
+_SCHEMA_STATEMENTS = _SCHEMA_STATEMENTS + _V10_EVENT_INDEX_STATEMENTS
+
 # Reused by the v2 -> v4 table-rebuild migration. SQLite cannot extend the
 # event-kind CHECK constraint with ALTER TABLE, so the event table is copied
 # atomically into the v3 definition and all indexes are recreated.
@@ -398,12 +433,26 @@ _EVENT_COLUMNS = (
     'future_expiry', 'future_con_id', 'future_local_symbol', 'future_contracts',
     'roll_to_expiry', 'roll_to_con_id', 'roll_to_local_symbol', 'roll_to_price',
     'roll_group', 'price', 'cash_amount',
-    'fees', 'split_ratio', 'include_in_cost', 'tag', 'source', 'external_ref',
+    'fees', 'split_ratio', 'split_group', 'split_rule_ref', 'split_rounding',
+    'split_to_strike', 'split_to_contracts', 'split_to_con_id',
+    'split_to_local_symbol', 'split_standard_confirmed',
+    'include_in_cost', 'tag', 'source', 'external_ref',
     'import_batch_id', 'derived_mismatch', 'allow_overdraw', 'note', 'created_at_utc',
     'voided_at_utc', 'voided_by_event_id', 'void_reason',
 )
 
+# The economic order of ledger rows, shared with the browser's
+# compareEventOrder: trade date, then split phase (a split group applies at
+# the open, before the day's fills), broker second or end of day, then seq.
+# tests/fixtures/cost_basis_event_order_vectors.json holds the common cases.
 _EVENT_ORDER_SQL = (
+    "trade_date ASC, (split_group IS NULL) ASC, "
+    "COALESCE(NULLIF(broker_timestamp, ''), "
+    "trade_date || 'T23:59:59') ASC, seq ASC"
+)
+
+# Frozen for migrations that run before v10 created split_group.
+_V9_EVENT_ORDER_SQL = (
     "trade_date ASC, COALESCE(NULLIF(broker_timestamp, ''), "
     "trade_date || 'T23:59:59') ASC, seq ASC"
 )
@@ -633,15 +682,34 @@ def _normalized_local_symbol(value):
     return ' '.join(str(value or '').split()).upper()
 
 
-def _resolve_contract_identity_rows(rows):
+def _resolve_contract_identity_rows(rows, epoch_of=None):
     """Group one structural contract timeline by its real broker identity.
 
     A row without conId/localSymbol may join an identified contract only
     when the structural group has exactly one possible identity. With two
     concrete contracts it stays ambiguous instead of closing whichever row
     happens to sort first.
+
+    `epoch_of(row)` optionally names the row's split epoch (see
+    _split_epoch_of). Identities never span epochs: after a 2:1 split the
+    old K100 trades as K50 while the old K50 became K25, so two different
+    contracts share this structural key. A non-zero epoch is appended to
+    the identity so their running positions stay apart.
     """
     rows = list(rows)
+    if epoch_of is not None:
+        epochs = [int(epoch_of(row) or 0) for row in rows]
+        if any(epochs):
+            partitions = {}
+            for index, epoch in enumerate(epochs):
+                partitions.setdefault(epoch, []).append(index)
+            resolved = [None] * len(rows)
+            for epoch, indexes in partitions.items():
+                part = _resolve_contract_identity_rows([rows[i] for i in indexes])
+                for index, (row, identity, ambiguous) in zip(indexes, part):
+                    resolved[index] = (
+                        row, f'{identity}@s{epoch}' if epoch else identity, ambiguous)
+            return resolved
     con_ids = {
         str(row['con_id']) for row in rows
         if row['con_id'] not in (None, '')
@@ -684,6 +752,127 @@ def _resolve_contract_identity_rows(rows):
             identity = 'structural'
         resolved.append((row, identity, ambiguous))
     return resolved
+
+
+def _split_epoch_of(conn, book_id, account):
+    """Map a row of one account to its split epoch, or None without groups.
+
+    The epoch counts the applied split groups (their `split` header rows)
+    before the row. A row on a group's own trade date is post-split because
+    the group sorts first; a group's own rows sit on the pre-split side.
+    Legacy split rows carry no group and start no epoch. Mirrors the
+    browser core's splitEpochs.
+    """
+    dates = [row['trade_date'] for row in conn.execute(
+        "SELECT trade_date FROM cost_basis_events WHERE book_id = ? AND account = ? "
+        "AND kind = 'split' AND split_group IS NOT NULL AND voided_at_utc IS NULL "
+        "AND include_in_cost = 1 ORDER BY trade_date",
+        (book_id, account)).fetchall()]
+    if not dates:
+        return None
+
+    def epoch_of(row):
+        if row['split_group']:
+            return bisect_left(dates, row['trade_date'])
+        return bisect_right(dates, row['trade_date'])
+    return epoch_of
+
+
+def _upper_text(value):
+    return ' '.join(str('' if value is None else value).split()).upper()
+
+
+def _is_standard_split_ratio(ratio):
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+        return False
+    return float(ratio).is_integer() and 2 <= ratio <= MAX_SPLIT_RATIO
+
+
+def _strike_cents(value):
+    """A strike as exact integer cents, or None when it is not a whole cent.
+
+    Mirrors the browser core's strikeToCents: decimal text is read exactly,
+    a stored number at eight decimals, and nothing is rounded to a cent.
+    """
+    if value is None or value == '' or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        match = re.fullmatch(r'(\d+)(?:\.(\d+))?', value.strip())
+        if not match:
+            return None
+        whole, fraction = match.group(1), match.group(2) or ''
+    else:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or number <= 0:
+            return None
+        whole, fraction = f'{number:.8f}'.split('.')
+    if fraction[2:].strip('0'):
+        return None
+    cents = int(whole) * 100 + int(fraction[:2].ljust(2, '0'))
+    return cents if 0 < cents <= (1 << 53) - 1 else None
+
+
+def _split_strike_cents(cents, ratio):
+    """The adjusted strike of a standard n:1 split, in integer cents.
+
+    Integer division with half-up rounding of the remainder, the rule OCC
+    memo #57592 applies to all 167 of its series. Mirrors splitStrikeCents.
+    """
+    if isinstance(cents, bool) or not isinstance(cents, int) or cents <= 0:
+        return None
+    if not _is_standard_split_ratio(ratio):
+        return None
+    quotient, remainder = divmod(cents, int(ratio))
+    adjusted = quotient + 1 if 2 * remainder >= int(ratio) else quotient
+    return adjusted if adjusted > 0 else None
+
+
+def _option_root(local_symbol):
+    """The option root of an OCC or IBKR local symbol (`2TQQQ` stays itself)."""
+    text = _upper_text(local_symbol)
+    if not text:
+        return ''
+    occ = re.fullmatch(r'([A-Z0-9.]{1,6}) ?\d{6}[CP]\d{8}', text)
+    if occ:
+        return occ.group(1)
+    lead = re.match(r'[A-Z0-9][A-Z0-9.\-]*', text)
+    return lead.group(0) if lead else ''
+
+
+def _option_movements(row):
+    """The option position changes one stored row makes.
+
+    An `option_split` row moves its series out and the adjusted series in;
+    any code walking contract positions must read rows through this or it
+    sees only the outgoing half. Mirrors the browser core's optionMovements.
+    """
+    def field(name):
+        try:
+            return row[name]
+        except (KeyError, IndexError):
+            return None
+    kind = field('kind')
+    base = {
+        'kind': kind, 'account': field('account'), 'right': field('right'),
+        'strike': field('strike'), 'expiry': field('expiry'),
+        'shares_per_contract': field('shares_per_contract'),
+        'con_id': field('con_id'), 'local_symbol': field('local_symbol'),
+        'contracts': field('contracts'),
+    }
+    if kind == 'option_split':
+        return [
+            {**base, 'side': 'split_out'},
+            {**base, 'side': 'split_in', 'strike': field('split_to_strike'),
+             'con_id': field('split_to_con_id'),
+             'local_symbol': field('split_to_local_symbol'),
+             'contracts': field('split_to_contracts')},
+        ]
+    if kind in OPTION_KINDS:
+        return [{**base, 'side': 'trade'}]
+    return []
 
 
 _BROKER_TIMESTAMP_RE = re.compile(
@@ -901,6 +1090,19 @@ def _validate_event_shape(payload, book):
         'cash_amount': _number(payload.get('cashAmount'), 'cashAmount', allow_none=False),
         'fees': _number(payload.get('fees'), 'fees') or 0.0,
         'split_ratio': _number(payload.get('splitRatio'), 'splitRatio'),
+        'split_group': _optional_text(
+            payload.get('splitGroup'), 'splitGroup', MAX_EXTERNAL_REF_CHARS) or None,
+        'split_rule_ref': _optional_text(
+            payload.get('splitRuleRef'), 'splitRuleRef', MAX_SPLIT_RULE_REF_CHARS) or None,
+        'split_rounding': _optional_text(
+            payload.get('splitRounding'), 'splitRounding', MAX_TAG_CHARS) or None,
+        'split_to_strike': _number(payload.get('splitToStrike'), 'splitToStrike'),
+        'split_to_contracts': _number(payload.get('splitToContracts'), 'splitToContracts'),
+        'split_to_con_id': _positive_int(payload.get('splitToConId'), 'splitToConId'),
+        'split_to_local_symbol': _optional_text(
+            payload.get('splitToLocalSymbol'), 'splitToLocalSymbol',
+            MAX_LOCAL_SYMBOL_CHARS) or None,
+        'split_standard_confirmed': 1 if payload.get('splitStandardConfirmed') is True else 0,
         'include_in_cost': 0 if payload.get('includeInCost') is False else 1,
         'tag': _optional_text(payload.get('tag'), 'tag', MAX_TAG_CHARS),
         'source': source,
@@ -908,6 +1110,12 @@ def _validate_event_shape(payload, book):
             payload.get('externalRef'), 'externalRef', MAX_EXTERNAL_REF_CHARS) or None,
         'note': _optional_text(payload.get('note'), 'note', MAX_NOTE_CHARS),
     }
+
+    if any(event[field] is not None for field in SPLIT_GROUP_FIELDS) \
+            or event['split_standard_confirmed']:
+        raise InvalidRequestError(
+            'split groups cannot be written yet; record the split as a '
+            'plain split row')
 
     if event['price'] is not None and event['price'] < 0 \
             and kind not in FUTURE_KINDS:
@@ -1291,6 +1499,9 @@ class CostBasisStore:
             except BaseException:
                 conn.execute('ROLLBACK')
                 raise
+            version = 9
+        if version == 9:
+            self._migrate_v9_to_v10(conn)
             return
         object_count = conn.execute('SELECT count(*) FROM sqlite_master').fetchone()[0]
         if object_count > 0:
@@ -1427,7 +1638,7 @@ class CostBasisStore:
                     'FROM cost_basis_events WHERE book_id = ? AND account = ? '
                     'AND right IS ? AND strike IS ? AND expiry IS ? '
                     'AND shares_per_contract IS ? AND voided_at_utc IS NULL '
-                    f'ORDER BY {_EVENT_ORDER_SQL}',
+                    f'ORDER BY {_V9_EVENT_ORDER_SQL}',
                     tuple(group),
                 ).fetchall()
                 positions = {}
@@ -1448,6 +1659,44 @@ class CostBasisStore:
                             'WHERE event_id = ?', (row['event_id'],))
                     positions[identity] = position + contracts
             conn.execute('PRAGMA user_version = 6')
+            conn.execute('COMMIT')
+        except BaseException:
+            conn.execute('ROLLBACK')
+            raise
+
+    @staticmethod
+    def _migrate_v9_to_v10(conn):
+        """Rebuild the event table so it can hold split groups.
+
+        SQLite cannot extend the kind CHECK in place, so the table is copied
+        into the current definition. Every existing column is copied by
+        name, the row count is verified, and the version stamp commits with
+        the copy: a failure leaves the v9 database untouched. The new split
+        columns start empty, so no existing row joins a group.
+        """
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            existing = [row['name'] for row in conn.execute(
+                'PRAGMA table_info(cost_basis_events)').fetchall()]
+            before = conn.execute(
+                'SELECT count(*) FROM cost_basis_events').fetchone()[0]
+            conn.execute('ALTER TABLE cost_basis_events RENAME TO cost_basis_events_v9')
+            conn.execute(_V3_EVENT_TABLE_SQL)
+            current = {row['name'] for row in conn.execute(
+                'PRAGMA table_info(cost_basis_events)').fetchall()}
+            copied = ', '.join(column for column in existing if column in current)
+            conn.execute(
+                f'INSERT INTO cost_basis_events ({copied}) '
+                f'SELECT {copied} FROM cost_basis_events_v9')
+            after = conn.execute(
+                'SELECT count(*) FROM cost_basis_events').fetchone()[0]
+            if after != before:
+                raise StoreUnavailableError(
+                    f'v10 migration copied {after} of {before} events; nothing changed')
+            conn.execute('DROP TABLE cost_basis_events_v9')
+            for statement in _V3_EVENT_INDEX_STATEMENTS + _V10_EVENT_INDEX_STATEMENTS:
+                conn.execute(statement)
+            conn.execute('PRAGMA user_version = 10')
             conn.execute('COMMIT')
         except BaseException:
             conn.execute('ROLLBACK')
@@ -2131,11 +2380,14 @@ class CostBasisStore:
             'shares_per_contract, contracts, shares, future_expiry, future_con_id, '
             'future_local_symbol, future_contracts, roll_to_expiry, roll_to_con_id, '
             'roll_to_local_symbol, roll_to_price, roll_group, price, cash_amount, '
-            'fees, split_ratio, '
+            'fees, split_ratio, split_group, split_rule_ref, split_rounding, '
+            'split_to_strike, split_to_contracts, split_to_con_id, '
+            'split_to_local_symbol, split_standard_confirmed, '
             'include_in_cost, tag, source, external_ref, import_batch_id, '
             'derived_mismatch, allow_overdraw, note, created_at_utc'
             ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
-            '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            '?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
+            '?, ?, ?, ?, ?, ?, ?, ?)',
             (
                 event_id, book_id, seq, client_token, normalized['kind'],
                 normalized['trade_date'], normalized['broker_timestamp'],
@@ -2149,7 +2401,11 @@ class CostBasisStore:
                 normalized['roll_to_con_id'], normalized['roll_to_local_symbol'],
                 normalized['roll_to_price'], normalized['roll_group'],
                 normalized['price'], normalized['cash_amount'], normalized['fees'],
-                normalized['split_ratio'],
+                normalized['split_ratio'], normalized['split_group'],
+                normalized['split_rule_ref'], normalized['split_rounding'],
+                normalized['split_to_strike'], normalized['split_to_contracts'],
+                normalized['split_to_con_id'], normalized['split_to_local_symbol'],
+                normalized['split_standard_confirmed'],
                 normalized['include_in_cost'], normalized['tag'], normalized['source'],
                 normalized['external_ref'], import_batch_id,
                 normalized['derived_mismatch'], 1 if allow_overdraw else 0,
@@ -2180,7 +2436,7 @@ class CostBasisStore:
             return
         rows = conn.execute(
             'SELECT event_id, kind, trade_date, broker_timestamp, seq, contracts, '
-            'con_id, local_symbol, tag, allow_overdraw '
+            'con_id, local_symbol, tag, allow_overdraw, split_group '
             'FROM cost_basis_events '
             'WHERE book_id = ? AND account = ? AND right = ? AND strike = ? '
             'AND expiry = ? AND shares_per_contract IS ? AND voided_at_utc IS NULL '
@@ -2190,7 +2446,8 @@ class CostBasisStore:
              row['shares_per_contract']),
         ).fetchall()
         positions = {}
-        for item, identity, ambiguous in _resolve_contract_identity_rows(rows):
+        epoch_of = _split_epoch_of(conn, book_id, row['account'])
+        for item, identity, ambiguous in _resolve_contract_identity_rows(rows, epoch_of):
             if ambiguous:
                 raise InvalidRequestError(
                     'voiding would leave an option event with an ambiguous '
@@ -2333,7 +2590,7 @@ class CostBasisStore:
             rows = conn.execute(
                 'SELECT event_id, kind, trade_date, broker_timestamp, seq, '
                 'contracts, con_id, '
-                'local_symbol, tag, allow_overdraw '
+                'local_symbol, tag, allow_overdraw, split_group '
                 'FROM cost_basis_events '
                 'WHERE book_id = ? AND account = ? AND right = ? AND strike = ? '
                 'AND expiry = ? AND shares_per_contract IS ? AND voided_at_utc IS NULL '
@@ -2345,7 +2602,8 @@ class CostBasisStore:
                 key_fields,
             ).fetchall()
             positions = {}
-            for row, identity, ambiguous in _resolve_contract_identity_rows(rows):
+            epoch_of = _split_epoch_of(conn, book_id, normalized['account'])
+            for row, identity, ambiguous in _resolve_contract_identity_rows(rows, epoch_of):
                 if ambiguous:
                     raise InvalidRequestError(
                         'option event needs conId or an exact localSymbol because '
@@ -3597,7 +3855,8 @@ class CostBasisStore:
                     for column in _EVENT_COLUMNS:
                         camel = _camel(column)
                         value = item.get(camel)
-                        if column in ('include_in_cost', 'derived_mismatch', 'allow_overdraw'):
+                        if column in ('include_in_cost', 'derived_mismatch', 'allow_overdraw',
+                                      'split_standard_confirmed'):
                             value = 1 if value else 0
                         if column == 'book_id':
                             value = book_id
@@ -3869,6 +4128,14 @@ def _event_row_to_dict(row):
         'cashAmount': row['cash_amount'],
         'fees': row['fees'],
         'splitRatio': row['split_ratio'],
+        'splitGroup': row['split_group'],
+        'splitRuleRef': row['split_rule_ref'],
+        'splitRounding': row['split_rounding'],
+        'splitToStrike': row['split_to_strike'],
+        'splitToContracts': row['split_to_contracts'],
+        'splitToConId': row['split_to_con_id'],
+        'splitToLocalSymbol': row['split_to_local_symbol'],
+        'splitStandardConfirmed': bool(row['split_standard_confirmed']),
         'includeInCost': bool(row['include_in_cost']),
         'tag': row['tag'],
         'source': row['source'],

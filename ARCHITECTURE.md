@@ -927,14 +927,24 @@ remain unchanged.
 
 ### Blended-cost ledger (shared by both backends)
 
-`cost_basis_store.py` is the pure SQLite store (schema v9) behind
+`cost_basis_store.py` is the pure SQLite store (schema v10) behind
 `cost_basis.html`: append-oriented money events keyed per book, one derivation
 for every event's cash amount, per-kind field validation, client-token
 idempotency, external-ref import de-duplication, voiding that replays the
 contract timeline rather than deleting, and snapshot hashing. Ordering is
-`trade_date -> broker_timestamp -> seq` in both the store and the browser
-engine, so the two agree on replay. Every write runs under BEGIN IMMEDIATE
-on its own short-lived connection.
+`trade_date -> split phase -> broker_timestamp -> seq` in the store
+(`_EVENT_ORDER_SQL`), the browser engine (`compareEventOrder`) and the
+importer, checked against `tests/fixtures/cost_basis_event_order_vectors.json`,
+so all three agree on replay. Every write runs under BEGIN IMMEDIATE on its
+own short-lived connection.
+
+Schema v10 prepares standard forward splits (`CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md`
+§15): a split is to be recorded as a group of rows sharing `split_group`, whose
+`split` header applies at the open of its trade date and whose `option_split`
+rows move each open series to its adjusted strike. Option identities are
+resolved per split epoch, because a pre-split and a post-split contract can
+share a strike and an OCC symbol. No write path accepts split groups yet;
+plain `split` rows keep their end-of-day order and never start an epoch.
 
 Schema v9 ties statement coverage to reset archives, checks both archive digests
 on restoration, and invalidates prior coverage after historical changes.

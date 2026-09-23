@@ -870,6 +870,19 @@ Important nuance:
 - `trade_execution/adapters/ibkr.py`
 
 
+### Cost Basis split groups, A1 phase 1 (2026-09-23)
+
+`CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md` §15 is the current design; §15.7
+records what phase 1 delivered and which consumers phase 2 must convert. Schema
+v10 stores split groups but every write path refuses them until the replay and
+group checks land. Shared rules live in the core (`compareEventOrder`,
+`splitEpochs`, `strikeToCents`, `splitStrikeCents`, `optionRoot`,
+`optionMovements`) with Python twins in `cost_basis_store.py`; the importer
+carries a copy of the order comparator because it loads without the core.
+Fixtures: `tests/fixtures/occ_57592_tqqq_strikes.json` (all 167 published
+strikes) and `tests/fixtures/cost_basis_event_order_vectors.json`. Tests:
+`tests/cost_basis_splits.test.js`, `tests/cost_basis_splits_test.py`.
+
 ### Cost Basis import integrity follow-up (2026-09-10)
 
 The remaining V01–V12 review paths are covered by the import pipeline and async

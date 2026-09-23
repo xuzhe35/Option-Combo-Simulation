@@ -6,7 +6,7 @@
 >
 > 当前用户提供并验证过的全年报表起于 2026-01-01，晚于 TQQQ 2025-11-20 拆股，尚未确定哪份用户报表需要跨该边界。A 线用于补导更早历史及应对未来标准拆股，不能把此前 2026 年导入故障归因于该次拆股。P0 先核实实际需求和样本。
 >
-> 基线：当前 schema v9；实施前重新检查代码和未提交改动。现行约束见 [账本设计](COST_BASIS_LEDGER_PAGE_PLAN.md)、[导入完整性](COST_BASIS_IMPORT_INTEGRITY.md)、[压力测试契约](STRESS_KERNEL_REFACTOR.md) 和 [随机回归](COST_BASIS_RANDOMIZED_REGRESSION.md)。§1–12 是修订后的方案；§13 保留原审计，§14 逐项记录处理结果；§15 是第二轮审计与"先做 A1"的决定，与 §1–12 冲突时以 §15 为准。
+> 基线：schema v10（A1 第一阶段已完成，见 §15.7）；实施前重新检查代码和未提交改动。现行约束见 [账本设计](COST_BASIS_LEDGER_PAGE_PLAN.md)、[导入完整性](COST_BASIS_IMPORT_INTEGRITY.md)、[压力测试契约](STRESS_KERNEL_REFACTOR.md) 和 [随机回归](COST_BASIS_RANDOMIZED_REGRESSION.md)。§1–12 是修订后的方案；§13 保留原审计，§14 逐项记录处理结果；§15 是第二轮审计与"先做 A1"的决定，与 §1–12 冲突时以 §15 为准。
 
 ## 1. 当前实现与缺口
 
@@ -417,3 +417,41 @@ A 线完成以这些结果为准：有充分证据的标准跨拆股历史能成
 | P3 | 手工录入与预览、缺项与"未证明标准类"确认、TWS 提示 |
 | P4 | 卖方到期表、What If、压力测试使用转换后持仓，缓存绑定账本摘要 |
 | P5 | §15.5 全部通过，既有 JS 与账本 Python 全套通过；更新 README、ARCHITECTURE、DEV_HANDOVER 及账本设计文档 |
+
+### 15.7 A1 第一阶段实施记录（2026-09-23）
+
+本阶段只打基础：现有账本的计算结果不变，拆股组暂时不能写入。
+
+**数据模型定稿（取代 §4.1 表格及 §15.4 第 1 条的阶段列）。** 不建组表，沿用 `futures_roll` 的做法，用事件表的 `split_group` 列把一组行串起来：
+
+- 组表头是一条 `split` 行，带 `split_group`、`split_ratio`（整数 n）、`split_rule_ref`（如 `OCC #57592`）、`split_rounding`（A1 只有 `half_up_cent`），`trade_date` 即生效日。
+- 每个期权系列一条 `option_split` 行。源系列沿用 `right`、`strike`、`expiry`、`con_id`、`local_symbol`、`shares_per_contract` 与有符号转出 `contracts`；目的系列写在 `split_to_strike`、`split_to_contracts`、`split_to_con_id`、`split_to_local_symbol`；`split_standard_confirmed` 记录 §15.2 第 3 条的逐系列确认。
+- 不设阶段列：排序阶段由"是否属于拆股组"推出，组内行一律排在其交易日最前，客户端无从改动。根代码不设列，从 `local_symbol` 推出。
+
+**已交付：**
+
+1. schema v10：重建事件表（扩展类型约束、新增 8 列和 `idx_cost_basis_events_split_group`），按列名复制、核对行数，失败整体回滚。旧的 v5→v6 迁移改用冻结的 v9 排序语句，否则旧库升级会因缺列失败。
+2. 写入关闭：`option_split` 不在可写类型里，任何拆股组字段都被拒绝。读取、备份与恢复已带新字段，v10 之前导出的备份仍可恢复。
+3. 统一排序（交易日 → 拆股阶段 → 券商时间或日末 → seq）：核心 `compareEventOrder`、导入端副本、后端 `_EVENT_ORDER_SQL` 共用 `tests/fixtures/cost_basis_event_order_vectors.json`。页面 `_eventTimestamp` 对拆股组行返回当日 00:00:00，同日的截止时间因此包含拆股。
+4. 拆股代次：核心 `splitEpochs` 与 `_buildIdentityResolution`；导入 `_resolvePositionIdentities`（C/O 重标）；后端 `_resolve_contract_identity_rows` 与 `_split_epoch_of`（追加、冲销两条时间线校验）。代次 0 的键与原来完全相同，旧 `split` 行不开启新代次。
+5. JS 与 Python 各一份纯函数：`strikeToCents`、`splitStrikeCents`、`splitStrike`、`optionRoot`、`optionMovements`。OCC #57592 全部 167 对存为 `tests/fixtures/occ_57592_tqqq_strikes.json`。
+
+**验证：**
+
+- 新增 `tests/cost_basis_splits.test.js`（12 项）与 `tests/cost_basis_splits_test.py`（16 项）。JS 全套 1187 项通过；账本 Python 305 项通过，2 项按环境跳过；其余 Python 测试文件全部通过。
+- 变异检查：逐一拿掉排序阶段、核心／导入／后端追加／后端冲销的代次、页面截止时间、写入关闭、冻结的迁移排序语句，每一项都有测试失败。
+- §15.5：S1、S2 在核心（带组表头）和后端（直接插入组表头，模拟第二阶段写入的数据）上通过；S1b 同样由代次覆盖；S3 需要 `option_split` 行，属于第二阶段。
+- 真实账本副本迁移试验（2026-09-23）：以只读方式用 SQLite 备份接口复制本机账本（v9，5 个账本、469 条事件），只迁移副本。迁移前后数据库完整性检查通过；旧代码与新代码导出的全部事件逐行一致，新字段全为空；账本版本摘要不变；后端对全部期权时间线的校验结果不变；旧核心与新核心回放（整本及逐账户）结果完全一致，持仓键未出现代次后缀。原文件仍为 v9，副本已删除。
+
+**第二阶段必须处理的使用方**（改为经过 `optionMovements`，或明确排除 `option_split`）：
+
+| 位置 | 函数 |
+| --- | --- |
+| 核心 | `computeLedger`／`_applyEventToAccount`（整组原子应用、先出后入、权利金转移）、`_applySplit`（组表头不再发 `split_crosses_open_option`）、`deriveCashAmount`、`EVENT_KINDS`、`findUnbackedCloses`、`buildPriorOpenDrafts`、`matchReconciliationClose`、`matchReconciliationExecution`、`buildReconciliation` |
+| 导入 | `_classifySplitReversals`（时间线只按 `contracts`／`right` 过滤）、`deriveOpeningPositions` |
+| 页面 | `buildLedgerPositionPreview`、`_computeLedgerPreview`、`planTargetExecutionReconciliation`、`planPriorStubSupersession`、`planTwsBaselineSupersession`、`planBatchExecutionReconciliation`、`planExecutionReportAliases`、`_importEconomicsDifferences`、`_exportCsv`、`_renderFlow`、`_eventKindLabel`；手工录入的 `_fieldsForKind`、`_formEvent`、`_fillForm` 属第三阶段 |
+| 后端 | `_validate_timeline`、`_validate_contract_timeline`、`_validate_batch_timelines`（目的系列键也要复验，并新增组级校验）、`_normalize_event_batch`／`_resolve_shares_per_contract`、`_tws_option_replay_proves_supersession`、`_validate_tws_supersessions`、`_validate_prior_stub_supersessions`、`_reject_unresolved_tws_overlap`、`save_snapshot` 的摘要列清单、至少 3 处写死的期权类型列表、`void_event`（组内单行不得单独冲销）；`_net_short_share_warnings` 已正确处理组表头，补测试即可 |
+
+压力测试经 `computeLedger` 取持仓，无需单独改；缓存绑定账本摘要一项留到第四阶段核对。
+
+**部署注意：** 新代码首次启动时会把真实 `cost_basis.db` 迁移到 v10，旧版本代码无法打开 v10 库。启动前应按 README 做一次 SQLite 一致备份，需要回退时用备份恢复。

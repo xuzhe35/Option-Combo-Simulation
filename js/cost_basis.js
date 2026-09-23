@@ -5234,11 +5234,18 @@
         return _recordedBrokerTimestamp(event);
     }
 
+    /**
+     * When a row took economic effect, for statement and snapshot cutoffs.
+     * A split group applies at the open of its trade date (before the day's
+     * fills), so any cutoff on that date already includes it.
+     */
     function _eventTimestamp(event) {
+        const date = String((event && event.tradeDate) || '');
+        const validDate = /^\d{4}-\d{2}-\d{2}$/.test(date);
+        if (event && event.splitGroup) return validDate ? `${date}T00:00:00` : '';
         const exact = _exactBrokerTimestamp(event);
         if (exact) return exact;
-        const date = String((event && event.tradeDate) || '');
-        return /^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date}T23:59:59` : '';
+        return validDate ? `${date}T23:59:59` : '';
     }
 
     /**

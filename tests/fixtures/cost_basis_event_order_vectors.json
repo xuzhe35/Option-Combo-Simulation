@@ -1,0 +1,134 @@
+{
+  "note": "Shared ledger-order cases. JS core compareEventOrder, the importer's copy and cost_basis_store._EVENT_ORDER_SQL must all produce `expected`. Order: trade date, split phase (split-group rows first), broker second or end of day, seq.",
+  "cases": [
+    {
+      "name": "trade date decides before the broker second",
+      "events": [
+        {
+          "id": "b",
+          "tradeDate": "2025-11-21",
+          "brokerTimestamp": "2025-11-20T10:00:00",
+          "seq": 1
+        },
+        {
+          "id": "a",
+          "tradeDate": "2025-11-20",
+          "brokerTimestamp": "2025-11-21T09:00:00",
+          "seq": 2
+        }
+      ],
+      "expected": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "name": "a row without a broker second sorts at the end of its day",
+      "events": [
+        {
+          "id": "no-time",
+          "tradeDate": "2025-11-20",
+          "seq": 1
+        },
+        {
+          "id": "afternoon",
+          "tradeDate": "2025-11-20",
+          "brokerTimestamp": "2025-11-20T15:00:00",
+          "seq": 2
+        },
+        {
+          "id": "next-day",
+          "tradeDate": "2025-11-21",
+          "brokerTimestamp": "2025-11-21T09:30:00",
+          "seq": 3
+        }
+      ],
+      "expected": [
+        "afternoon",
+        "no-time",
+        "next-day"
+      ]
+    },
+    {
+      "name": "the same broker second falls back to seq",
+      "events": [
+        {
+          "id": "second",
+          "tradeDate": "2025-11-20",
+          "brokerTimestamp": "2025-11-20T10:00:00",
+          "seq": 7
+        },
+        {
+          "id": "first",
+          "tradeDate": "2025-11-20",
+          "brokerTimestamp": "2025-11-20T10:00:00",
+          "seq": 3
+        }
+      ],
+      "expected": [
+        "first",
+        "second"
+      ]
+    },
+    {
+      "name": "a split group applies before every ordinary row of its trade date",
+      "events": [
+        {
+          "id": "open-fill",
+          "tradeDate": "2025-11-20",
+          "brokerTimestamp": "2025-11-20T09:30:00",
+          "seq": 1
+        },
+        {
+          "id": "undated-fill",
+          "tradeDate": "2025-11-20",
+          "seq": 2
+        },
+        {
+          "id": "group-option",
+          "tradeDate": "2025-11-20",
+          "splitGroup": "g1",
+          "seq": 5
+        },
+        {
+          "id": "group-header",
+          "tradeDate": "2025-11-20",
+          "splitGroup": "g1",
+          "seq": 4
+        },
+        {
+          "id": "day-before",
+          "tradeDate": "2025-11-19",
+          "seq": 6
+        }
+      ],
+      "expected": [
+        "day-before",
+        "group-header",
+        "group-option",
+        "open-fill",
+        "undated-fill"
+      ]
+    },
+    {
+      "name": "a legacy split row without a group keeps the end-of-day order",
+      "events": [
+        {
+          "id": "legacy-split",
+          "tradeDate": "2025-11-20",
+          "seq": 1
+        },
+        {
+          "id": "fill",
+          "tradeDate": "2025-11-20",
+          "brokerTimestamp": "2025-11-20T10:00:00",
+          "seq": 2
+        }
+      ],
+      "expected": [
+        "fill",
+        "legacy-split"
+      ]
+    }
+  ]
+}

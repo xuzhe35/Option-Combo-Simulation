@@ -872,14 +872,18 @@ SQLite-consistent backup while the backend is stopped (or with an external
 SQLite backup tool); do not copy only the main `.db` file while its WAL is
 active. The workspace archive/backup commands do not include `cost_basis.db`.
 
-Databases created before schema v9 are migrated in place. Schema v5's account
+Databases created before schema v10 are migrated in place. Schema v5's account
 migration does not rewrite event rows; schema v6 adds the per-event
 `allow_overdraw` audit flag and marks only legacy closing rows that demonstrably
 used that explicit exception. Schema v7 clears broker timestamps that older
 builds inferred from untrusted manual free-form notes. Schema v8 added statement
 registration; v9 archives that evidence with each rebuilt history. Migration
 retains v8 audit registrations but marks coverage unverified until statements
-are checked again; it does not change event data.
+are checked again; it does not change event data. Schema v10 rebuilds the
+event table so it can hold split groups (a stock split recorded together with
+its option adjustments); every row is copied unchanged and none joins a group.
+An older build cannot open a v10 database, so keep a backup of
+`cost_basis.db` if you may need to roll back.
 Import/rebuild/reset/restore clients must provide both book identity and a ledger
 version. See `CODE PLAN/COST_BASIS_IMPORT_INTEGRITY.md` for the current checks.
 If all account-bearing rows in an old book agree on one account (apart from

@@ -181,6 +181,208 @@
         ].join('|');
     }
 
+    // ------------------------------------------------------------------
+    // Standard forward splits. See CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md
+    // §15: a split is recorded as a group of rows sharing `splitGroup`; the
+    // group's `split` row is its header and each `option_split` row moves
+    // one option series to its adjusted series.
+    // ------------------------------------------------------------------
+
+    const MAX_SPLIT_RATIO = 100;
+
+    /**
+     * A split group's rows apply before every ordinary row of their trade
+     * date: a split takes effect at the open of the ex-date, so a fill that
+     * day is already in post-split units. Ordinary rows keep their order.
+     */
+    function splitPhase(event) {
+        return event && event.splitGroup ? 0 : 1;
+    }
+
+    /**
+     * The one economic order of ledger rows: trade date, split phase,
+     * broker second (end of day when unknown), then insertion sequence.
+     * The store's _EVENT_ORDER_SQL and the importer must agree with it;
+     * tests/fixtures/cost_basis_event_order_vectors.json holds the cases.
+     */
+    function compareEventOrder(left, right) {
+        const leftDate = String((left && left.tradeDate) || '');
+        const rightDate = String((right && right.tradeDate) || '');
+        if (leftDate !== rightDate) return leftDate < rightDate ? -1 : 1;
+        const phase = splitPhase(left) - splitPhase(right);
+        if (phase) return phase;
+        const leftTimestamp = String(
+            (left && left.brokerTimestamp) || `${leftDate}T23:59:59`);
+        const rightTimestamp = String(
+            (right && right.brokerTimestamp) || `${rightDate}T23:59:59`);
+        if (leftTimestamp !== rightTimestamp) {
+            return leftTimestamp < rightTimestamp ? -1 : 1;
+        }
+        return _number(left && left.seq) - _number(right && right.seq);
+    }
+
+    function isStandardSplitRatio(ratio) {
+        return Number.isInteger(ratio) && ratio >= 2 && ratio <= MAX_SPLIT_RATIO;
+    }
+
+    /**
+     * A strike as exact integer cents, or null when it is not a whole cent.
+     *
+     * Decimal text is read exactly, so only zero digits may follow the
+     * cents. A stored number is binary, so it is read at eight decimals,
+     * far below any listed strike increment. Nothing is rounded to a cent.
+     */
+    function strikeToCents(value) {
+        if (value === null || value === undefined || value === '') return null;
+        let whole;
+        let fraction;
+        if (typeof value === 'string') {
+            const match = /^(\d+)(?:\.(\d+))?$/.exec(value.trim());
+            if (!match) return null;
+            whole = match[1];
+            fraction = match[2] || '';
+        } else {
+            const number = Number(value);
+            if (!Number.isFinite(number) || number <= 0) return null;
+            const match = /^(\d+)\.(\d{8})$/.exec(number.toFixed(8));
+            if (!match) return null;
+            whole = match[1];
+            fraction = match[2];
+        }
+        if (/[1-9]/.test(fraction.slice(2))) return null;
+        const cents = Number(whole) * 100 + Number(fraction.slice(0, 2).padEnd(2, '0'));
+        return Number.isSafeInteger(cents) && cents > 0 ? cents : null;
+    }
+
+    /**
+     * The adjusted strike of a standard n:1 split, in integer cents.
+     *
+     * Integer division with half-up rounding of the remainder. This is the
+     * rule OCC memo #57592 applies (all 167 listed series, including
+     * 99.97 -> 49.99); floating division followed by toFixed gets three of
+     * them wrong. Other memos must be checked before reusing it.
+     */
+    function splitStrikeCents(cents, ratio) {
+        if (!Number.isSafeInteger(cents) || cents <= 0) return null;
+        if (!isStandardSplitRatio(ratio)) return null;
+        const quotient = Math.floor(cents / ratio);
+        const remainder = cents - quotient * ratio;
+        const adjusted = 2 * remainder >= ratio ? quotient + 1 : quotient;
+        return adjusted > 0 ? adjusted : null;
+    }
+
+    /** { fromCents, toCents, toStrike } for one strike, or null. */
+    function splitStrike(strike, ratio) {
+        const fromCents = strikeToCents(strike);
+        const toCents = fromCents === null ? null : splitStrikeCents(fromCents, ratio);
+        if (toCents === null) return null;
+        return { fromCents, toCents, toStrike: toCents / 100 };
+    }
+
+    /**
+     * The option root a local symbol names: `TQQQ` for the OCC form
+     * `TQQQ  251219P00100000` and for IBKR's `TQQQ 19DEC25 100 P`. An
+     * adjusted class keeps its own root (`2TQQQ`), which is how it is told
+     * apart from the standard class of the same underlying.
+     */
+    function optionRoot(localSymbol) {
+        const text = _upper(localSymbol);
+        if (!text) return '';
+        const occ = /^([A-Z0-9.]{1,6}) ?\d{6}[CP]\d{8}$/.exec(text);
+        if (occ) return occ[1];
+        const lead = /^([A-Z0-9][A-Z0-9.\-]*)/.exec(text);
+        return lead ? lead[1] : '';
+    }
+
+    function _optionMovement(event, side, overrides) {
+        return Object.assign({
+            event,
+            side,
+            kind: event.kind,
+            tradeDate: event.tradeDate,
+            seq: event.seq,
+            splitGroup: event.splitGroup || null,
+            account: event.account,
+            right: event.right,
+            strike: event.strike,
+            expiry: event.expiry,
+            sharesPerContract: event.sharesPerContract,
+            conId: event.conId === undefined ? null : event.conId,
+            localSymbol: event.localSymbol || '',
+            contracts: event.contracts,
+        }, overrides || {});
+    }
+
+    /**
+     * The option position changes one stored row makes.
+     *
+     * An `option_split` row moves one series out and its adjusted series
+     * in, so anything that walks contract positions must read rows through
+     * this rather than `contracts` / `strike` directly, or it sees only the
+     * outgoing half. Every other option row moves exactly one series.
+     */
+    function optionMovements(event) {
+        if (!event || typeof event !== 'object') return [];
+        if (event.kind === 'option_split') {
+            return [
+                _optionMovement(event, 'split_out'),
+                _optionMovement(event, 'split_in', {
+                    strike: event.splitToStrike,
+                    conId: event.splitToConId === undefined ? null : event.splitToConId,
+                    localSymbol: event.splitToLocalSymbol || '',
+                    contracts: event.splitToContracts,
+                }),
+            ];
+        }
+        if (OPTION_KINDS.indexOf(event.kind) >= 0) return [_optionMovement(event, 'trade')];
+        return [];
+    }
+
+    function _isSplitGroupHeader(event) {
+        return Boolean(event && event.kind === 'split' && event.splitGroup
+            && !event.voidedAtUtc && event.includeInCost !== false);
+    }
+
+    /**
+     * How many split groups each row's account had applied before it.
+     *
+     * After a 2:1 split the old K100 series trades as K50 while the old K50
+     * becomes K25, so a pre-split and a post-split contract can share every
+     * structural field and even the OCC symbol. Resolving identities per
+     * epoch keeps them apart. A row on a group's own trade date is already
+     * post-split because the group sorts first. A legacy `split` row has no
+     * group and starts no epoch, so existing ledgers resolve as before.
+     *
+     * `orderedEvents` must already be in compareEventOrder order. The
+     * result maps each row to its epoch; a group's own rows get the epoch
+     * before the split, which is the side their `split_out` half belongs to.
+     */
+    function splitEpochs(orderedEvents) {
+        const list = Array.isArray(orderedEvents) ? orderedEvents : [];
+        const counts = new Map();
+        const groupEpochs = new Map();
+        const epochs = new Map();
+        list.forEach((event) => {
+            if (!_isSplitGroupHeader(event)) return;
+            const account = String(event.account || '');
+            const before = counts.get(account) || 0;
+            groupEpochs.set(event.splitGroup, before);
+            counts.set(account, before + 1);
+        });
+        counts.clear();
+        list.forEach((event) => {
+            if (!event || typeof event !== 'object') return;
+            const account = String(event.account || '');
+            if (event.splitGroup && groupEpochs.has(event.splitGroup)) {
+                epochs.set(event, groupEpochs.get(event.splitGroup));
+                if (_isSplitGroupHeader(event)) counts.set(account, (counts.get(account) || 0) + 1);
+                return;
+            }
+            epochs.set(event, counts.get(account) || 0);
+        });
+        return epochs;
+    }
+
     /**
      * Resolve the broker identity inside each structural contract group.
      *
@@ -189,16 +391,28 @@
      * unidentified row may join a concrete identity only when that identity
      * is unique inside the structural group; otherwise it stays in an
      * explicit ambiguous bucket and cannot silently close either contract.
+     *
+     * `epochOf(item)` optionally names the item's split epoch (see
+     * splitEpochs). Groups never span epochs, and a non-zero epoch is part
+     * of the running-position key; epoch 0 keys are unchanged.
      */
-    function _buildIdentityResolution(items) {
+    function _buildIdentityResolution(items, epochOf) {
+        const epochFor = typeof epochOf === 'function'
+            ? (item) => Number(epochOf(item)) || 0
+            : () => 0;
+        const groupKeyOf = (item) => {
+            const epoch = epochFor(item);
+            return epoch ? `${contractKey(item)}|s${epoch}` : contractKey(item);
+        };
         const groups = new Map();
         (Array.isArray(items) ? items : []).forEach((item) => {
             if (!item || (!item.right && OPTION_KINDS.indexOf(item.kind) < 0)) return;
             const structuralKey = contractKey(item);
+            const groupKey = groupKeyOf(item);
             const conId = item.conId === null || item.conId === undefined
                 || item.conId === '' ? '' : String(item.conId);
             const localSymbol = _upper(item.localSymbol);
-            const group = groups.get(structuralKey) || {
+            const group = groups.get(groupKey) || {
                 structuralKey,
                 conIds: new Set(),
                 localSymbols: new Set(),
@@ -211,14 +425,15 @@
                 mapped.add(conId);
                 group.localToConIds.set(localSymbol, mapped);
             }
-            groups.set(structuralKey, group);
+            groups.set(groupKey, group);
         });
 
         const byItem = new Map();
         (Array.isArray(items) ? items : []).forEach((item) => {
             if (!item || (!item.right && OPTION_KINDS.indexOf(item.kind) < 0)) return;
             const structuralKey = contractKey(item);
-            const group = groups.get(structuralKey);
+            const groupKey = groupKeyOf(item);
+            const group = groups.get(groupKey);
             const conId = item.conId === null || item.conId === undefined
                 || item.conId === '' ? '' : String(item.conId);
             const localSymbol = _upper(item.localSymbol);
@@ -254,8 +469,9 @@
                 || (group.conIds.size === 0 && group.localSymbols.size > 1);
             byItem.set(item, {
                 structuralKey,
+                splitEpoch: epochFor(item),
                 identity,
-                key: identity ? `${structuralKey}|#${identity}` : structuralKey,
+                key: identity ? `${groupKey}|#${identity}` : groupKey,
                 ambiguous,
                 groupConflict,
             });
@@ -510,19 +726,7 @@
     }
 
     function _sortEvents(events) {
-        return events.slice().sort((left, right) => {
-            const leftDate = String(left.tradeDate || '');
-            const rightDate = String(right.tradeDate || '');
-            if (leftDate !== rightDate) return leftDate < rightDate ? -1 : 1;
-            const leftTimestamp = String(
-                left.brokerTimestamp || `${leftDate}T23:59:59`);
-            const rightTimestamp = String(
-                right.brokerTimestamp || `${rightDate}T23:59:59`);
-            if (leftTimestamp !== rightTimestamp) {
-                return leftTimestamp < rightTimestamp ? -1 : 1;
-            }
-            return _number(left.seq) - _number(right.seq);
-        });
+        return events.slice().sort(compareEventOrder);
     }
 
     /**
@@ -553,6 +757,9 @@
         let runningNetCash = 0;
 
         const ordered = _sortEvents(Array.isArray(events) ? events : []);
+        // Epochs count every applied split group, including ones outside the
+        // account filter's rows or the date window: they still divide time.
+        const epochs = splitEpochs(ordered);
         const identityResolution = _buildIdentityResolution(ordered.filter((event) => {
             if (!event || event.voidedAtUtc || OPTION_KINDS.indexOf(event.kind) < 0) {
                 return false;
@@ -561,7 +768,7 @@
             if (accountFilter && !accountFilter.has(account)) return false;
             if (!_inWindow(event, startDate, endDate)) return false;
             return event.includeInCost !== false || includeExcluded;
-        })).byItem;
+        }), (event) => epochs.get(event)).byItem;
         ordered.forEach((event) => {
             if (!event || typeof event !== 'object') return;
             const account = String(event.account || '');
@@ -2910,6 +3117,15 @@
         BASIS_MODES,
         contractKey,
         futureKey,
+        compareEventOrder,
+        splitPhase,
+        splitEpochs,
+        isStandardSplitRatio,
+        strikeToCents,
+        splitStrikeCents,
+        splitStrike,
+        optionRoot,
+        optionMovements,
         deriveCashAmount,
         deliveredShares,
         computeLedger,

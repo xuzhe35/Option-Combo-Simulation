@@ -250,6 +250,50 @@
         return date ? `${date}T23:59:59` : '';
     }
 
+    /**
+     * The ledger's economic order: trade date, split phase (a split group
+     * applies at the open, before the day's fills), broker second, then a
+     * caller tie-breaker. This file loads without the core, so this is a
+     * copy of OptionComboCostBasisCore.compareEventOrder; both are checked
+     * against tests/fixtures/cost_basis_event_order_vectors.json.
+     */
+    function _compareEventOrder(left, right) {
+        const leftDate = String((left && left.tradeDate) || '');
+        const rightDate = String((right && right.tradeDate) || '');
+        if (leftDate !== rightDate) return leftDate < rightDate ? -1 : 1;
+        const phase = (left && left.splitGroup ? 0 : 1) - (right && right.splitGroup ? 0 : 1);
+        if (phase) return phase;
+        const leftTimestamp = _sortStamp(left);
+        const rightTimestamp = _sortStamp(right);
+        if (leftTimestamp !== rightTimestamp) return leftTimestamp < rightTimestamp ? -1 : 1;
+        return 0;
+    }
+
+    /**
+     * Split epoch of a row: how many applied split groups (their `split`
+     * header rows) its account had before it. See the core's splitEpochs;
+     * pre- and post-split contracts can share a strike and an OCC symbol,
+     * so identities are resolved within one epoch.
+     */
+    function _splitEpochOf(history) {
+        const headers = new Map();
+        (history || []).forEach((event) => {
+            if (!event || event.kind !== 'split' || !event.splitGroup
+                || event.voidedAtUtc || event.includeInCost === false) return;
+            const account = String(event.account || '');
+            const dates = headers.get(account) || [];
+            dates.push(String(event.tradeDate || ''));
+            headers.set(account, dates);
+        });
+        return (event) => {
+            if (!event) return 0;
+            const date = String(event.tradeDate || '');
+            const dates = headers.get(String(event.account || '')) || [];
+            // A group's own rows sit on its pre-split side.
+            return dates.filter((day) => (event.splitGroup ? day < date : day <= date)).length;
+        };
+    }
+
     const PERIOD_MONTHS = Object.freeze({
         january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
         july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
@@ -1468,13 +1512,15 @@
         ].join('|');
     }
 
-    function _resolvePositionIdentities(items, symbol, defaultSharesPerContract) {
+    function _resolvePositionIdentities(items, symbol, defaultSharesPerContract, epochOf) {
         const list = Array.isArray(items) ? items : [];
         const groups = new Map();
         function structuralKey(item) {
-            return _instrumentKey(
+            const key = _instrumentKey(
                 _upper(item.underlying || symbol), item.expiry, item.right,
                 item.strike, item.sharesPerContract || defaultSharesPerContract);
+            const epoch = typeof epochOf === 'function' ? Number(epochOf(item)) || 0 : 0;
+            return epoch ? `${key}|s${epoch}` : key;
         }
         list.forEach((item) => {
             const key = structuralKey(item);
@@ -2627,9 +2673,9 @@
         const timeline = history.map((event) => ({ event, seq: Number(event.seq) || 0 }))
             .concat(incoming.map((event, index) => ({ event, seq: lastSeq + index + 1 })))
             .filter(({event}) => event.contracts !== undefined && event.right)
-            .sort((a, b) => _sortStamp(a.event).localeCompare(_sortStamp(b.event)) || a.seq - b.seq);
+            .sort((a, b) => _compareEventOrder(a.event, b.event) || a.seq - b.seq);
         const identities = _resolvePositionIdentities(timeline.map(({event}) => event),
-            opts.symbol, opts.defaultSharesPerContract);
+            opts.symbol, opts.defaultSharesPerContract, _splitEpochOf(history));
         const children = new Map();
         orders.forEach(({ order, split }) => {
             const group = { order, seen: new Set(), start: null, keys: new Set() };
@@ -2992,14 +3038,8 @@
         // would therefore skip the real cash/position and must fail closed;
         // replacement rebuild is the only coherent recovery path.
         problems.push(..._blockedSuppressedRows(allEvents, opts));
-        allEvents.sort((left, right) => {
-            const leftTimestamp = _sortStamp(left);
-            const rightTimestamp = _sortStamp(right);
-            if (leftTimestamp !== rightTimestamp) {
-                return leftTimestamp < rightTimestamp ? -1 : 1;
-            }
-            return (left.lineNumber || 0) - (right.lineNumber || 0);
-        });
+        allEvents.sort((left, right) => _compareEventOrder(left, right)
+            || (left.lineNumber || 0) - (right.lineNumber || 0));
 
         _classifySplitReversals(allEvents, openings, splitReversals, opts, problems);
 
@@ -3062,5 +3102,7 @@
         parseOptionSymbol,
         resolveUnderlying,
         parse,
+        // Exposed so tests can prove it matches the core's order.
+        compareEventOrder: _compareEventOrder,
     };
 })(typeof window !== 'undefined' ? window : globalThis);
