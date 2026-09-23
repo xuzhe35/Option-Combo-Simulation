@@ -341,8 +341,11 @@ main { width: 100%; max-width: 1560px; margin: 0 auto; padding: 1.5rem 2rem 3rem
 }
 .hero-foot strong {
     min-height: 34px;
+    min-width: 0;
     display: flex;
     align-items: center;
+    /* Last resort for a very long figure: wrap inside its own cell. */
+    overflow-wrap: anywhere;
     font-size: 1.08rem;
     line-height: 1.35;
     font-variant-numeric: tabular-nums;
@@ -367,6 +370,33 @@ main { width: 100%; max-width: 1560px; margin: 0 auto; padding: 1.5rem 2rem 3rem
 }
 .hero-foot.needs-reference .hero-foot-input .hint { color: var(--accent-text); }
 .hero-foot.needs-reference [data-needs-reference] strong { color: var(--faint); }
+/* How many metrics fit on one row depends on the hero card, not the
+   viewport: its width moves with the sidebar and with the TWS card beside
+   it. Five fixed columns of minmax(0, 1fr) let a figure like $93,436.68
+   spill over its neighbour, so the row wraps instead - values never shrink
+   or overlap. The label band still keeps each row's values on one line. */
+.cost-hero { container: hero / inline-size; }
+@container hero (max-width: 759px) {
+    .hero-foot { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .hero-foot div { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .hero-foot div:nth-child(3n), .hero-foot div:last-child { border-right: 0; }
+    .hero-foot div:nth-child(n+4) { border-bottom: 0; }
+}
+@container hero (max-width: 559px) {
+    .hero-foot { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .hero-foot div:nth-child(3n) { border-right: 1px solid var(--border); }
+    .hero-foot div:nth-child(2n), .hero-foot div:last-child { border-right: 0; }
+    .hero-foot div:nth-child(n+4) { border-bottom: 1px solid var(--border); }
+    .hero-foot div:last-child { grid-column: 1 / -1; border-bottom: 0; }
+}
+/* Stacked, so there is no row of values to line up and the reserved
+   second label line would just be five gaps of dead space. */
+@container hero (max-width: 299px) {
+    .hero-foot { grid-template-columns: 1fr; }
+    .hero-foot div, .hero-foot div:nth-child(n) { border-right: 0; border-bottom: 1px solid var(--border); }
+    .hero-foot div:last-child { grid-column: auto; }
+    .hero-foot span { min-height: 0; }
+}
 
 .position-card { padding-bottom: .85rem; }
 .soft-badge { padding: .3rem .55rem; border-radius: 999px; color: #596579; background: #f0f3f8; font-size: .73rem; }
@@ -811,11 +841,6 @@ tr.row-excluded td { color: #9aa3b0; font-style: italic; }
     .workflow-strip ol { grid-template-columns: 1fr; }
     .hero-grid { display: block; }
     .position-card { margin-top: 1rem; }
-    .hero-foot { grid-template-columns: 1fr; }
-    .hero-foot div { border-right: 0; border-bottom: 1px solid var(--border); }
-    /* Stacked, so there is no row of values to line up and the reserved
-       second label line would just be five gaps of dead space. */
-    .hero-foot span { min-height: 0; }
     .cash-grid, .premium-window, .new-book-form { grid-template-columns: 1fr; }
     .cash-card-primary { grid-column: auto; }
     .premium-window > div { border-right: 0; border-bottom: 1px solid var(--border); }
