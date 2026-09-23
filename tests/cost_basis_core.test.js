@@ -262,14 +262,14 @@ module.exports = {
             run() {
                 const core = loadCore();
                 const result = core.buildExecutionImport([{
-                    execId: '0001.01', account: 'U17775528', symbol: 'TQQQ',
+                    execId: '0001.01', account: 'U7654321', symbol: 'TQQQ',
                     secType: 'OPT', conId: 42, localSymbol: 'TQQQ P71',
                     expiry: '20260902', right: 'P', strike: 71, multiplier: 100,
                     side: 'SLD', quantity: 2, price: 1.25,
                     brokerTimestamp: '2026-09-01T10:15:20',
                     commission: 1.4, commissionAvailable: true,
                 }], {
-                    account: 'U17775528', symbol: 'TQQQ', secType: 'STK',
+                    account: 'U7654321', symbol: 'TQQQ', secType: 'STK',
                     defaultSharesPerContract: 100, existingExternalRefs: [],
                 });
                 assert.equal(result.problems.length, 0);
@@ -306,12 +306,12 @@ module.exports = {
             run() {
                 const core = loadCore();
                 const existingOpen = [{
-                    account: 'U17775528', right: 'C', strike: 71,
+                    account: 'U7654321', right: 'C', strike: 71,
                     expiry: '20260902', contracts: -2, sharesPerContract: 100,
                     conId: 42, localSymbol: 'TQQQ 260902C00071000',
                 }];
                 const result = core.buildExecutionImport([{
-                    execId: 'CLOSE.01', account: 'U17775528', symbol: 'TQQQ',
+                    execId: 'CLOSE.01', account: 'U7654321', symbol: 'TQQQ',
                     secType: 'OPT', conId: 42,
                     localSymbol: 'TQQQ 260902C00071000',
                     expiry: '20260902', right: 'C', strike: 71, multiplier: 100,
@@ -319,7 +319,7 @@ module.exports = {
                     brokerTimestamp: '2026-09-02T10:15:20',
                     commission: 1, commissionAvailable: true,
                 }], {
-                    account: 'U17775528', symbol: 'TQQQ', secType: 'STK',
+                    account: 'U7654321', symbol: 'TQQQ', secType: 'STK',
                     defaultSharesPerContract: 100, existingOpen,
                     existingExternalRefs: [],
                 });
@@ -329,7 +329,7 @@ module.exports = {
                 assert.equal(result.events[0].cashAmount, -61);
 
                 const matched = core.matchReconciliationClose({
-                    kind: 'option', account: 'U17775528', right: 'C', strike: 71,
+                    kind: 'option', account: 'U7654321', right: 'C', strike: 71,
                     expiry: '20260902', sharesPerContract: 100, conId: 42,
                     ledger: -2, tws: 0, difference: 2,
                 }, result.events);
@@ -338,7 +338,7 @@ module.exports = {
 
                 const ledger = core.computeLedger([{
                     kind: 'option_trade', tradeDate: '2026-09-01',
-                    account: 'U17775528', right: 'C', strike: 71,
+                    account: 'U7654321', right: 'C', strike: 71,
                     expiry: '20260902', contracts: -2, sharesPerContract: 100,
                     conId: 42, localSymbol: 'TQQQ 260902C00071000',
                     price: 1, fees: 0, cashAmount: 200,

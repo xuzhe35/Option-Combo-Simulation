@@ -33,29 +33,32 @@ class MaskedStatementStoreTests(unittest.TestCase):
             params = dict(import_batch_id='daily-test', client_token_prefix='daily-test',
                           expected_ledger_version=store.ledger_version(bid), book_identity=book)
             result = store.import_events(bid, incoming, **params)
-            self.assertEqual(result['inserted'], 27)
+            # Every expectation comes from the local report itself; the
+            # repository keeps no quantity from any real statement.
+            self.assertEqual(result['inserted'], len(incoming))
             self.assertEqual(result['warnings'], [])
             rows = store.list_events(bid, limit=1000)['events']
-            self.assertEqual(len(rows), 28)
-            self.assertEqual(sum(row.get('shares') or 0 for row in rows), 14000)
+            self.assertEqual(len(rows), len(incoming) + 1)
+            self.assertEqual(sum(row.get('shares') or 0 for row in rows), fixture['expectedShares'])
             self.assertAlmostEqual(sum(row['cashAmount'] for row in rows), fixture['expectedCash'], places=5)
             options = {}
             for row in rows:
                 if row.get('contracts') is not None:
-                    key = (row['right'], row['strike'], row['expiry'])
+                    key = (row['right'], float(row['strike']), str(row['expiry']).replace('-', ''))
                     options[key] = options.get(key, 0) + row['contracts']
-            self.assertEqual({key: quantity for key, quantity in options.items() if quantity}, {
-                ('C', 72, '20260914'): -5, ('P', 70, '20260914'): -30,
-                ('P', 71, '20260914'): -70, ('P', 72, '20260914'): -50,
-            })
+            expected = {}
+            for item in fixture['expectedOptions']:
+                key = (item['right'], float(item['strike']), item['expiry'])
+                expected[key] = expected.get(key, 0) + item['contracts']
+            self.assertEqual({key: quantity for key, quantity in options.items() if abs(quantity) > 1e-9},
+                             {key: quantity for key, quantity in expected.items() if abs(quantity) > 1e-9})
             retry = store.import_events(bid, incoming, **params)
             self.assertTrue(retry['idempotentReplay'])
             repeated = store.import_events(bid, incoming, import_batch_id='daily-again',
                 client_token_prefix='daily-again', expected_ledger_version=store.ledger_version(bid), book_identity=book)
             self.assertEqual(repeated['inserted'], 0)
-            self.assertEqual(repeated['skipped'], 27)
-            self.assertEqual(store.list_events(bid)['total'], 28)
-
+            self.assertEqual(repeated['skipped'], len(incoming))
+            self.assertEqual(store.list_events(bid)['total'], len(incoming) + 1)
 
 if __name__ == '__main__':
     unittest.main()

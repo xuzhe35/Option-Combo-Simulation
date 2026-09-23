@@ -57,9 +57,9 @@ class ImportPipelineTests(unittest.TestCase):
             'APPEND_SAME_TIME_CLOSE': (0,0,102.938067),
             'APPEND_DISTINCT_SAME_SECOND': (0,1,0),
             'CASH_SAME_DAY_ADDITION': (0,0,-2),
-            'MIXED_REVERSAL_FRESH': (0,-2,224.833482),
-            'MIXED_REVERSAL_APPEND': (0,-2,224.833482),
-            'MIXED_REVERSAL_REPEAT': (0,-2,224.833482),
+            'MIXED_REVERSAL_FRESH': (0,-2,197.0),
+            'MIXED_REVERSAL_APPEND': (0,-2,197.0),
+            'MIXED_REVERSAL_REPEAT': (0,-2,197.0),
         }
         for name, expected in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
@@ -99,7 +99,7 @@ class ImportPipelineTests(unittest.TestCase):
                 mixed = name == 'MIXED_REVERSAL_REBUILD'
                 self.assertEqual(sum(row['contracts'] for row in rows), -2 if mixed else 0)
                 self.assertAlmostEqual(sum(row['cashAmount'] for row in rows),
-                                       224.833482 if mixed else 102.938067)
+                                       197.0 if mixed else 102.938067)
                 fresh = store.reset_confirmation(bid)
                 store.restore_book_reset(bid, rebuilt['resetId'], confirmation=fresh['phrase'],
                     client_token=self.token(), expected_ledger_version=fresh['ledgerVersion'], book_identity=book)

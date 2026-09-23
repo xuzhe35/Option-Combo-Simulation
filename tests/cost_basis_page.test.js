@@ -847,14 +847,14 @@ module.exports = {
                 const node = (id) => h.context.document.getElementById(id);
                 h.state.connection = 'connected';
                 h.state.status = { available: true };
-                h.state.managedAccounts = ['U17775528'];
+                h.state.managedAccounts = ['U7654321'];
                 h.state.managedAccountsConnected = true;
                 h.renderAccounts('');
                 const select = node('new-book-account');
                 const values = select.children.map((option) => option.value);
                 // The single live account is still chosen for the common case.
-                assert.equal(select.value, 'U17775528');
-                assert.ok(values.includes('U17775528'));
+                assert.equal(select.value, 'U7654321');
+                assert.ok(values.includes('U7654321'));
                 assert.ok(values.includes('__manual_account__'));
                 assert.equal(node('new-book-account-manual').hidden, true);
 
@@ -873,7 +873,7 @@ module.exports = {
                 assert.equal(hint.classList.contains('warn'), true);
 
                 // Typing a live account back is not a mismatch.
-                manual.value = 'U17775528';
+                manual.value = 'U7654321';
                 h.accountHint();
                 assert.equal(hint.classList.contains('warn'), false);
             },
@@ -884,13 +884,13 @@ module.exports = {
                 const context = loadPage();
                 const page = context.OptionComboCostBasisPage;
                 const source = readScript();
-                const live = ['U1777552'];
+                const live = ['U1234567'];
                 // Accounts traded on another machine are booked here anyway;
                 // only the local position matching is given up.
                 const notice = page.newBookAccountNotice('u9999999', live);
                 assert.match(notice, /U9999999/);
                 assert.match(notice, /行情/);
-                assert.equal(page.newBookAccountNotice('u1777552', live), '');
+                assert.equal(page.newBookAccountNotice('u1234567', live), '');
                 assert.equal(page.newBookAccountNotice('', live), '');
                 // Nothing to check against is not a mismatch.
                 assert.equal(page.newBookAccountNotice('U9999999', []), '');
