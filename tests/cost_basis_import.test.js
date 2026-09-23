@@ -707,6 +707,46 @@ module.exports = {
             },
         },
         {
+            name: 'corporate actions match the instrument a row names, not a substring of its text',
+            run() {
+                const parser = loadImport();
+                // IBKR Activity layout: no symbol column, instrument first in the description.
+                const header = 'Corporate Actions,Header,Asset Category,Currency,Report Date,Date/Time,'
+                    + 'Description,Quantity,Proceeds,Value,Realized P/L,Code';
+                const row = (asset, description, qty) => `Corporate Actions,Data,${asset},USD,2025-11-20,`
+                    + `"2025-11-19, 20:25:00","${description}",${qty},0,0,0,`;
+                const split = row('Stocks',
+                    'TQQQ(US74347X8314) Split 2 for 1 (TQQQ, PROSHARES ULTRAPRO QQQ, US74347X8314)', 100);
+                const option = row('Equity and Index Options', 'TQQQ 21NOV25 100 P - Split 2 for 1', 2);
+                const adjusted = row('Equity and Index Options', '2TQQQ 21NOV25 99.97 C - Split 2 for 1', 1);
+                const problemsFor = (symbol, lines) => Array.from(parser.parse(activity(...lines), { symbol })
+                    .problems).filter((problem) => /corporate action/.test(problem.reason));
+                // The issuer name says "QQQ", yet TQQQ's split is not a QQQ event.
+                assert.equal(problemsFor('QQQ', [header, split, option, adjusted]).length, 0);
+                // The TQQQ book still blocks each row, the adjusted 2TQQQ class included.
+                assert.equal(problemsFor('TQQQ', [header, split, option, adjusted]).length, 3);
+                for (const other of [
+                    'QQQM(US46138G6492) Split 2 for 1 (QQQM, INVESCO NASDAQ 100 ETF, US46138G6492)',
+                    'SQQQ(US74347G4322) Split 1 for 5 (SQQQ, PROSHARES ULTRAPRO SHORT QQQ, US74347G4322)',
+                ]) {
+                    assert.equal(problemsFor('QQQ', [header, row('Stocks', other, 0)]).length, 0, other);
+                    assert.equal(problemsFor('TQQQ', [header, row('Stocks', other, 0)]).length, 0, other);
+                }
+                // A layout naming no instrument fails closed on a whole-token mention...
+                assert.equal(problemsFor('QQQ',
+                    [header, row('Stocks', 'Split 2 for 1 of QQQ shares', 0)]).length, 1);
+                // ...and a row that never mentions the symbol belongs to another book.
+                assert.equal(problemsFor('QQQ',
+                    [header, row('Stocks', 'Split 2 for 1 of GLD shares', 0)]).length, 0);
+                // An explicit symbol column wins, including an OCC-style option symbol.
+                const columns = 'Corporate Actions,Header,Asset Category,Symbol,Description,Quantity';
+                assert.equal(problemsFor('TQQQ', [columns,
+                    'Corporate Actions,Data,Equity and Index Options,TQQQ  251121P00100000,Split 2 for 1,2']).length, 1);
+                assert.equal(problemsFor('QQQ', [columns,
+                    'Corporate Actions,Data,Stocks,TQQQ,"TQQQ split (PROSHARES ULTRAPRO QQQ)",100']).length, 0);
+            },
+        },
+        {
             name: 'the opening position is derived, not guessed',
             run() {
                 const parser = loadImport();

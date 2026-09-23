@@ -1697,16 +1697,58 @@
         return { events, problems: section.problems, present: section.present };
     }
 
+    /**
+     * The instrument identities one corporate-action row names, or [] when
+     * its layout does not say. An explicit symbol column wins. Otherwise
+     * IBKR Activity prints the affected instrument first -
+     * "TQQQ(US74347X8314) Split 2 for 1 (TQQQ, PROSHARES ULTRAPRO QQQ, ...)"
+     * or an option "TQQQ 21NOV25 100 P ..." - and the issuer name after it
+     * is not an identity: "ULTRAPRO QQQ" must not tie TQQQ's split to a QQQ
+     * book, just as a plain substring once did.
+     */
+    function _corporateActionIdentities(record, options) {
+        const columns = [record.underlyingSymbol, record.symbol].map(_upper).filter(Boolean);
+        if (columns.length) {
+            const identities = [resolveUnderlying(record, options)];
+            columns.forEach((value) => {
+                const lead = /^[A-Z0-9][A-Z0-9.\-]*/.exec(value);
+                if (lead) identities.push(lead[0]);
+            });
+            return identities.filter(Boolean);
+        }
+        const text = _upper(record.description).trim();
+        const withIsin = /^([A-Z0-9][A-Z0-9.\-]*)\s*\([A-Z]{2}[A-Z0-9]{9}\d\)/.exec(text);
+        if (withIsin) return [withIsin[1]];
+        const option = /^([A-Z0-9][A-Z0-9.\-]*)\s+\d{1,2}[A-Z]{3}\d{2,4}\s+[0-9.]+\s+[CP](?![A-Z0-9])/
+            .exec(text);
+        if (option) return [option[1]];
+        return [];
+    }
+
     function _corporateActionProblems(rows, options) {
         const section = extractSection(rows, 'corporateActions');
         if (!section) return [];
-        const wanted = _upper(options && options.symbol);
+        const opts = options || {};
+        const wanted = _upper(opts.symbol);
+        const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // OCC keeps earlier adjusted classes (e.g. 2TQQQ) beside the plain
+        // root; an action on one of them belongs to the same underlying.
+        const sameUnderlying = (value) => value === wanted
+            || new RegExp(`^\\d+${escaped}$`).test(value);
         const problems = [];
         section.groups.forEach((group) => {
             group.records.forEach((record) => {
                 const raw = record.values.join(',');
-                const upperRaw = _upper(raw);
-                if (wanted && upperRaw.indexOf(wanted) < 0) return;
+                if (wanted) {
+                    const identities = _corporateActionIdentities(
+                        _cellsToRecord(record.values, group.built.mapping), opts);
+                    // Fail closed: a layout naming no identity still blocks
+                    // whenever it mentions this symbol as a whole token.
+                    const related = identities.length
+                        ? identities.some(sameUnderlying)
+                        : _cashDescriptionMatchesSymbol(raw, wanted);
+                    if (!related) return;
+                }
                 problems.push({
                     lineNumber: record.lineNumber,
                     reason: 'statement contains a corporate action for this underlying; '
