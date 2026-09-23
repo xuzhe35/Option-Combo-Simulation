@@ -242,6 +242,10 @@
         importFilter: 'all',
         ledgerVersion: null,
         splitConfirmations: new Set(),
+        // The split records each book was last loaded with, and whether a
+        // change to them just cleared the prices typed in the old unit.
+        splitSignatureByBook: {},
+        priceClearedBySplit: false,
         importBatches: [],
         bookResets: [],
         executionFetchPending: false,
@@ -1340,6 +1344,7 @@
             flowPage: 1,
             avgCostByAccount: {},
             referencePrice: remembered === undefined ? null : remembered,
+            priceClearedBySplit: false,
             marketPrice: null,
             whatIfPrice: null,
             whatIfPriceSource: '',
@@ -1514,6 +1519,7 @@
         if (state.stressOpen) _invalidateStressScenarioInputs();
         state.ledgerVersion = loadedVersion;
         state.allEvents = collected;
+        _dropManualPricesAfterSplitChange(bookId, collected);
         state.eventsTotal = total;
         state.flowPage = 1;
         _syncBookMode();
@@ -4453,6 +4459,48 @@
      *
      * Nothing here ever writes .value: a re-render lands mid-typing.
      */
+    /**
+     * Which split records the ledger holds, as one comparable string.
+     *
+     * A price typed by hand is per share in the unit of the moment it was
+     * typed. Once a split is recorded (or a recorded one is voided) the
+     * share count is re-scaled, and the old price would double or halve
+     * market value and every What If figure.
+     */
+    function splitSignature(events) {
+        return (Array.isArray(events) ? events : [])
+            .filter((event) => event && event.kind === 'split' && !event.voidedAtUtc
+                && event.includeInCost !== false)
+            .map((event) => event.splitGroup || event.eventId
+                || `${event.account || ''}|${event.tradeDate}|${event.splitRatio}`)
+            .sort()
+            .join(',');
+    }
+
+    function _dropManualPricesAfterSplitChange(bookId, events) {
+        const signature = splitSignature(events);
+        const previous = state.splitSignatureByBook[bookId];
+        state.splitSignatureByBook[bookId] = signature;
+        if (previous === undefined || previous === signature) return;
+        const typedReference = Object.prototype.hasOwnProperty.call(
+            state.referencePriceByBook, bookId);
+        delete state.referencePriceByBook[bookId];
+        if (state.bookId !== bookId) return;
+        const typedWhatIf = state.whatIfPriceSource === 'custom';
+        const typedStress = state.stressBasePrice !== null
+            && state.stressBasePrice !== state.marketPrice;
+        state.referencePrice = null;
+        if ($('reference-price')) $('reference-price').value = '';
+        if (typedWhatIf) {
+            state.whatIfPrice = null;
+            state.whatIfPriceSource = '';
+        }
+        // The stress centre follows the live price again; TWS quotes are
+        // always in the current unit, typed ones may not be.
+        state.stressBasePrice = _stressReferencePrice();
+        state.priceClearedBySplit = typedReference || typedWhatIf || typedStress;
+    }
+
     function _renderReferenceSource() {
         const node = $('reference-source');
         const input = $('reference-price');
@@ -4471,7 +4519,9 @@
             _text(node, '来自 TWS 持仓快照');
             return;
         }
-        _text(node, '填入后可算市值与浮盈亏');
+        _text(node, state.priceClearedBySplit
+            ? '拆股后已清空，请重填'
+            : '填入后可算市值与浮盈亏');
     }
 
     async function _adoptTwsPosition(entry, event, button) {
@@ -8477,6 +8527,7 @@
         });
         $('reference-price').addEventListener('change', (changeEvent) => {
             state.whatIfEditGeneration += 1;
+            state.priceClearedBySplit = false;
             state.referencePrice = _numberOrNull(changeEvent.target.value);
             // Remembered against the book it was typed for, so coming back
             // to this underlying restores it and no other one inherits it.
@@ -8864,6 +8915,7 @@
         planTargetExecutionReconciliation,
         planBatchExecutionReconciliation,
         importReplayBlockingWarnings,
+        splitSignature,
         buildSplitGroupRequest,
         describeSplitProblem,
         suspectedSplitRatio,

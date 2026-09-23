@@ -712,5 +712,72 @@ module.exports = {
                 assert.equal(page.suspectedSplitRatio(null), null);
             },
         },
+        {
+            name: 'the seller expiry table reads the converted contracts with their full premium',
+            run() {
+                const core = loadCore();
+                sequence = 0;
+                const history = [
+                    shortPut('2025-11-04', 100, -2, 4, { localSymbol: 'TQQQ  251219P00100000' }),
+                    put({ tradeDate: '2025-11-05', right: 'C', strike: 130, expiry: '20260116',
+                        contracts: -1, price: 3, cashAmount: 300,
+                        localSymbol: 'TQQQ 16JAN26 130 C' }),
+                ];
+                const before = core.openShortPremiumByExpiry(core.computeLedger(history, {}));
+                const plan = core.planSplitGroup(history, { account: ACCOUNT, tradeDate: '2025-11-20',
+                    ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                const after = core.openShortPremiumByExpiry(
+                    core.computeLedger(history.concat(withGroup(plan, 'split-g1')), {}));
+                assert.equal(after.totalPremium, before.totalPremium);
+                assert.equal(after.totalContracts, before.totalContracts * 2);
+                assert.deepEqual(Array.from(after.rows, (row) => [row.expiry, row.putContracts,
+                    row.callContracts, row.totalPremium]), [['20251219', 4, 0, 800], ['20260116', 0, 2, 300]]);
+            },
+        },
+        {
+            name: 'What If after a split: the same economics at S/n, and the actual rounded strike',
+            run() {
+                const core = loadCore();
+                sequence = 0;
+                const history = [
+                    sharesBuy('2025-11-03', 100, 80),
+                    shortPut('2025-11-04', 100, -2, 4, { localSymbol: 'TQQQ  251219P00100000' }),
+                    put({ tradeDate: '2025-11-05', right: 'C', strike: 130, expiry: '20251219',
+                        contracts: -1, price: 3, cashAmount: 300,
+                        localSymbol: 'TQQQ  251219C00130000' }),
+                ];
+                const plan = core.planSplitGroup(history, { account: ACCOUNT, tradeDate: '2025-11-20',
+                    ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                const split = history.concat(withGroup(plan, 'split-g1'));
+                for (const price of [90, 120, 140]) {
+                    const pre = core.computeOptionSettlementScenario(history, price,
+                        { throughExpiry: '20251219' });
+                    const post = core.computeOptionSettlementScenario(split, price / 2,
+                        { throughExpiry: '20251219' });
+                    assert.equal(pre.available && post.available, true);
+                    const a = pre.ledger.perAccount[ACCOUNT];
+                    const b = post.ledger.perAccount[ACCOUNT];
+                    assert.equal(b.shares, a.shares * 2, `shares at ${price}`);
+                    assert.equal(b.netCash, a.netCash, `cash at ${price}`);
+                    assert.equal(b.shares * price / 2, a.shares * price, `value at ${price}`);
+                    assert.equal(post.assignedContracts, pre.assignedContracts * 2);
+                    assert.equal(post.settlementCash, pre.settlementCash);
+                }
+                // With a rounded strike the economics follow the real new K:
+                // one 99.97 put becomes two 49.99 puts, assigned at 49.99.
+                sequence = 0;
+                const odd = [shortPut('2025-11-05', 99.97, -1, 1, {
+                    localSymbol: 'TQQQ  251219P00099970' })];
+                const oddPlan = core.planSplitGroup(odd, { account: ACCOUNT, tradeDate: '2025-11-20',
+                    ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                const assigned = core.computeOptionSettlementScenario(
+                    odd.concat(withGroup(oddPlan, 'split-g2')), 49, { throughExpiry: '20251219' });
+                assert.equal(assigned.assignedShares, 200);
+                assert.equal(assigned.settlementCash, -9998);
+                const unsplit = core.computeOptionSettlementScenario(odd, 98,
+                    { throughExpiry: '20251219' });
+                assert.equal(unsplit.settlementCash, -9997, 'one cent of rounding, not hidden');
+            },
+        },
     ],
 };

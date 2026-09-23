@@ -427,7 +427,11 @@ can only be voided whole (**冲销整组** in the event flow); the backend re-pr
 it on every later write. When TWS holds an exact multiple of the ledger's
 shares, or an option appears at the adjusted strike with n times the size,
 the reconciliation table suggests a missing split and can open the form; it
-never records one by itself. Statements whose corporate-action rows cross a
+never records one by itself. After a split is recorded (or voided) the seller
+expiry table, What If and the stress view all work from the converted
+positions; prices you typed by hand (reference price, What If price, stress
+centre) are cleared because they were per share in the old unit, and the page
+asks you to enter them again. TWS quotes are always in the current unit. Statements whose corporate-action rows cross a
 split still block CSV import; see
 [the corporate-actions CODE PLAN](CODE%20PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md).
 

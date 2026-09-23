@@ -4345,5 +4345,58 @@ module.exports = {
                 assert.equal(node('field-ratio').value, 2);
             },
         },
+        {
+            name: 'recording or voiding a split clears prices typed in the old per-share unit',
+            async run() {
+                const h = loadReconciliationHarness();
+                initEntryForm(h);
+                const base = [{ eventId: 'e1', kind: 'share_trade', account: 'U1', seq: 1,
+                    tradeDate: '2025-11-03', shares: 100, price: 80, cashAmount: -8000 }];
+                const splitRow = { eventId: 'e2', kind: 'split', splitGroup: 'split-g1', account: 'U1',
+                    seq: 2, tradeDate: '2025-11-20', splitRatio: 2, cashAmount: 0 };
+                let events = base;
+                h.configure({ request: async (action) => {
+                    assert.equal(action, 'list_cost_basis_events');
+                    return { events, total: events.length };
+                } });
+                h.configureEventLoad();
+                h.configurePrice();
+                const typeOldPrices = () => {
+                    Object.assign(h.state, { referencePrice: 90, whatIfPrice: 95,
+                        whatIfPriceSource: 'custom', stressBasePrice: 88, marketPrice: null });
+                    h.state.referencePriceByBook['book-test'] = 90;
+                };
+                await h.loadEvents();
+                typeOldPrices();
+                await h.loadEvents();
+                assert.equal(h.state.referencePrice, 90, 'no split change, nothing cleared');
+                assert.equal(h.state.whatIfPriceSource, 'custom');
+
+                events = base.concat(splitRow);
+                await h.loadEvents();
+                assert.equal(h.state.referencePrice, null);
+                assert.equal('book-test' in h.state.referencePriceByBook, false);
+                assert.equal(h.state.whatIfPrice, null);
+                assert.equal(h.state.whatIfPriceSource, '');
+                assert.equal(h.state.stressBasePrice, null);
+                assert.equal(h.state.priceClearedBySplit, true);
+
+                // A price typed after the split survives the next reload.
+                Object.assign(h.state, { referencePrice: 45, priceClearedBySplit: false });
+                h.state.referencePriceByBook['book-test'] = 45;
+                await h.loadEvents();
+                assert.equal(h.state.referencePrice, 45);
+
+                // Voiding the split changes the unit back: cleared again.
+                events = base.concat({ ...splitRow, voidedAtUtc: '2025-11-21T00:00:00Z' });
+                await h.loadEvents();
+                assert.equal(h.state.referencePrice, null);
+
+                const page = h.context.OptionComboCostBasisPage;
+                assert.equal(page.splitSignature(base), '');
+                assert.equal(page.splitSignature(base.concat(splitRow)), 'split-g1');
+                assert.equal(page.splitSignature(base.concat({ ...splitRow, splitGroup: null })), 'e2');
+            },
+        },
     ],
 };

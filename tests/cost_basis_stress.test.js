@@ -696,4 +696,29 @@ test('research profile classification never treats old custom parameters as curr
     assert.equal(M.ivResearchProfileStatus({ ...profile.settings, ivMode: 'none' }, profile.version).kind, 'none');
 });
 
+test('a recorded 2:1 split values the converted book like the original at half the price', () => {
+    // Same economic time, IV and rate; strikes stay whole-cent, so nothing
+    // rounds and the two books must agree point by point.
+    const split = [
+        { seq: 10, kind: 'split', tradeDate: '2026-05-01', account: 'U1', splitRatio: 2,
+            splitGroup: 'split-g1', splitRuleRef: 'test memo', splitRounding: 'half_up_cent',
+            cashAmount: 0, fees: 0, includeInCost: true },
+        { seq: 11, kind: 'option_split', tradeDate: '2026-05-01', account: 'U1', splitGroup: 'split-g1',
+            splitRatio: 2, right: 'P', strike: 100, expiry, sharesPerContract: 100, contracts: -1,
+            splitToStrike: 50, splitToContracts: 2, cashAmount: 0, fees: 0, includeInCost: true },
+    ];
+    const original = setup([stock, option()]);
+    const converted = setup([stock, option(), ...split], { centerPrice: 50,
+        longOptionInputs: snapshot([option({ strike: 50, contracts: 2 })], { spot: 50 }) });
+    const before = run(original);
+    const after = run(converted);
+    assert.equal(before.available && after.available, true, `${before.reason} ${after.reason}`);
+    assert.equal(after.points.length, before.points.length);
+    before.points.forEach((point, index) => {
+        const twin = after.points[index];
+        near(twin.shares, point.shares * 2);
+        near(twin.headlinePnl, point.headlinePnl, 0.01);
+    });
+});
+
 module.exports = { name: 'cost basis stress kernel v2', tests };
