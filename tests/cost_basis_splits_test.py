@@ -677,6 +677,93 @@ class SplitGroupWriteTests(TempStoreCase):
             **_credentials(self.store, self.book_id))
         self.assertEqual(result['inserted'], 1)
 
+    def test_a_stale_preview_cannot_record_a_split(self):
+        """A14: another tab wrote after this preview was drawn."""
+        self.append(self.put('2025-11-04', 100, -2, 4))
+        seen = _credentials(self.store, self.book_id)
+        self.append(self.put('2025-11-05', 100, 1, 3))
+        with self.assertRaises(module.LedgerChangedError):
+            self.store.append_split_group(self.book_id, [self.header(), self.leg(100, 1)],
+                                          client_token=_token(), **seen)
+        self.record([self.header(), self.leg(100, 1)])
+
+    def test_voiding_a_converted_opening_is_refused_until_the_group_is_redone(self):
+        """A07: the group proves what was open; history under it cannot move."""
+        opening = self.append(self.put('2025-11-04', 100, -2, 4))['event']
+        group = self.record([self.header(), self.leg(100, 2)])
+        with self.assertRaises((InvalidRequestError, PositionOverdrawError)):
+            self.store.void_event(self.book_id, opening['eventId'], reason='wrong',
+                                  client_token=_token())
+        # The complete repair: void the group, fix the history, record again.
+        self.store.void_split_group(self.book_id, group['splitGroup'], reason='redo',
+                                    client_token=_token())
+        self.store.void_event(self.book_id, opening['eventId'], reason='wrong',
+                              client_token=_token())
+        self.append(self.put('2025-11-04', 100, -3, 4))
+        self.record([self.header(), self.leg(100, 3)])
+        live = [row for row in self.live() if row['kind'] == 'option_split']
+        self.assertEqual([(row['contracts'], row['splitToContracts']) for row in live],
+                         [(3.0, -6.0)])
+
+    def test_a_reset_archive_with_a_group_restores_and_is_proven(self):
+        """A16: clearing a book and restoring its archive keeps the group whole."""
+        self.append(self.put('2025-11-04', 100, -2, 4))
+        self.record([self.header(), self.leg(100, 2)])
+        before = self.store.list_events(self.book_id, include_voided=True)['events']
+        plan = self.store.reset_confirmation(self.book_id)
+        reset = self.store.reset_book(self.book_id, confirmation=plan['phrase'],
+                                      client_token=_token(),
+                                      **_credentials(self.store, self.book_id))
+        self.assertEqual(self.live(), [])
+        plan = self.store.reset_confirmation(self.book_id)
+        self.store.restore_book_reset(self.book_id, reset['resetId'],
+                                      confirmation=plan['phrase'], client_token=_token(),
+                                      **_credentials(self.store, self.book_id))
+        self.assertEqual(self.store.list_events(self.book_id, include_voided=True)['events'],
+                         before)
+        self.append({'kind': 'option_expiry', 'tradeDate': '2025-12-19', 'right': 'P',
+                     'strike': 50, 'expiry': '20251219', 'contracts': 4,
+                     'sharesPerContract': 100, 'cashAmount': 0})
+
+    def test_conid_kept_or_changed_by_the_broker_both_resolve(self):
+        """Whether IBKR keeps a contract number through the adjustment is
+        unknown, so both cases must work: here the old K100 keeps 1001 as the
+        new K50 while the old K50 (2002) becomes K25 with its number."""
+        occ = 'TQQQ  251219P{:08d}'
+        self.append(self.put('2025-11-04', 100, -1, 4, conId=1001,
+                             localSymbol=occ.format(100000)))
+        self.append(self.put('2025-11-05', 50, -1, 1, conId=2002,
+                             localSymbol=occ.format(50000)))
+        self.record([self.header(),
+                     self.leg(100, 1, conId=1001, localSymbol=occ.format(100000),
+                              splitToConId=1001, splitToLocalSymbol=occ.format(50000)),
+                     self.leg(50, 1, conId=2002, localSymbol=occ.format(50000),
+                              splitToConId=2002, splitToLocalSymbol=occ.format(25000))])
+        # Post-split TWS fills carry the kept numbers; a hand-typed close has none.
+        self.append(self.put('2025-11-24', 50, 1, 0.5, conId=1001,
+                             localSymbol=occ.format(50000)))
+        self.append(self.put('2025-11-25', 25, 1, 0.2, conId=2002,
+                             localSymbol=occ.format(25000)))
+        self.append({'kind': 'option_expiry', 'tradeDate': '2025-12-19', 'right': 'P',
+                     'strike': 50, 'expiry': '20251219', 'contracts': 1,
+                     'sharesPerContract': 100, 'cashAmount': 0})
+        self.append({'kind': 'option_expiry', 'tradeDate': '2025-12-19', 'right': 'P',
+                     'strike': 25, 'expiry': '20251219', 'contracts': 1,
+                     'sharesPerContract': 100, 'cashAmount': 0})
+        with self.assertRaises(PositionOverdrawError):
+            self.append({'kind': 'option_expiry', 'tradeDate': '2025-12-19', 'right': 'P',
+                         'strike': 50, 'expiry': '20251219', 'contracts': 1,
+                         'sharesPerContract': 100, 'cashAmount': 0})
+
+    def test_two_series_landing_on_one_adjusted_contract_are_refused(self):
+        """99.97 and 99.98 both become 49.99 at 2:1; merging them would net
+        two different contracts, so the group cannot be recorded."""
+        self.append(self.put('2025-11-04', 99.97, -1, 1))
+        self.append(self.put('2025-11-05', 99.98, -1, 1))
+        with self.assertRaises(InvalidRequestError) as caught:
+            self.record([self.header(), self.leg(99.97, 1), self.leg(99.98, 1)])
+        self.assertIn('two series', str(caught.exception))
+
     def test_the_browser_plan_is_what_the_store_accepts(self):
         """The core's planSplitGroup draft, recorded as-is, then replayed."""
         self.append({'kind': 'share_trade', 'tradeDate': '2025-11-03', 'shares': 100,

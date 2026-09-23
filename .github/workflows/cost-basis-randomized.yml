@@ -6,6 +6,8 @@ on:
       - 'js/cost_basis*'
       - 'tests/cost_basis*'
       - 'tests/helpers/cost_basis_random*'
+      - 'tests/helpers/cost_basis_split*'
+      - 'tests/fixtures/occ_57592_tqqq_strikes.json'
       - 'tests/helpers/load-browser-scripts.js'
       - 'scripts/verify_cost_basis_randomized.py'
       - '.github/workflows/cost-basis-randomized.yml'
@@ -28,6 +30,12 @@ jobs:
         run: python -m unittest discover -s tests -p 'cost_basis_randomized_test.py'
       - name: Independent model and random state machines
         run: python scripts/verify_cost_basis_randomized.py --cases 300 --steps 80 --store-cases 60 --report random-ledger-report.json
+      - name: Standard split groups (fixed seeds)
+        run: python -m unittest discover -s tests -p 'cost_basis_split*_test.py'
+      - name: Standard split groups (500 fresh seeds, 100 through SQLite)
+        # The start moves with every run so each run covers seeds no earlier
+        # run used; a failure prints the seed and its rerun command.
+        run: python tests/cost_basis_split_campaign_test.py --seeds 500 --start "$((100000 + ${{ github.run_number }} * 500))" --store-every 5
       - name: Preserve coverage and counterexamples
         if: always()
         uses: actions/upload-artifact@v4

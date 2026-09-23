@@ -779,5 +779,59 @@ module.exports = {
                 assert.equal(unsplit.settlementCash, -9997, 'one cent of rounding, not hidden');
             },
         },
+        {
+            name: 'A01: long, short, zero and fractional shares scale exactly with every total unchanged',
+            run() {
+                const core = loadCore();
+                const cases = [[100, 80, 200], [-100, 50, -200], [0, 0, 0], [10.5, 40, 21]];
+                cases.forEach(([shares, price, expected]) => {
+                    sequence = 0;
+                    const history = shares ? [event({ kind: 'share_trade', tradeDate: '2025-11-03',
+                        shares, price, cashAmount: -shares * price })] : [];
+                    const plan = core.planSplitGroup(history, { account: ACCOUNT, tradeDate: '2025-11-20',
+                        ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                    const before = core.computeLedger(history, {});
+                    const after = core.computeLedger(history.concat(withGroup(plan, 'split-g1')), {});
+                    const a = before.perAccount[ACCOUNT];
+                    const b = after.perAccount[ACCOUNT];
+                    assert.equal(b.shares, expected, `shares ${shares}`);
+                    if (!a) return;
+                    ['netCash', 'fees', 'shareAcquisitionCost', 'shareDisposalProceeds',
+                        'stockRealizedPnl'].forEach((key) => assert.equal(b[key], a[key], `${key} ${shares}`));
+                    assert.equal(b.stockAvgCost, a.stockAvgCost / 2, `avg ${shares}`);
+                });
+            },
+        },
+        {
+            name: 'A03: realized premium keeps its dates; a long call exercised after the split delivers n times the shares',
+            run() {
+                const core = loadCore();
+                sequence = 0;
+                const history = [
+                    shortPut('2025-11-04', 100, -2, 4, { localSymbol: 'TQQQ  251219P00100000' }),
+                    put({ tradeDate: '2025-11-10', strike: 100, contracts: 1, price: 1, cashAmount: -100,
+                        localSymbol: 'TQQQ  251219P00100000' }),
+                    event({ kind: 'option_trade', tradeDate: '2025-11-06', right: 'C', strike: 90,
+                        expiry: '20251219', contracts: 1, price: 12, sharesPerContract: 100,
+                        cashAmount: -1200, localSymbol: 'TQQQ  251219C00090000' }),
+                ];
+                const plan = core.planSplitGroup(history, { account: ACCOUNT, tradeDate: '2025-11-20',
+                    ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                const events = history.concat(withGroup(plan, 'split-g1'), [
+                    event({ kind: 'option_exercise', tradeDate: '2025-12-19', right: 'C', strike: 45,
+                        expiry: '20251219', contracts: -2, shares: 200, sharesPerContract: 100,
+                        cashAmount: -9000 }),
+                ]);
+                const ledger = core.computeLedger(events, {});
+                const account = ledger.perAccount[ACCOUNT];
+                assert.deepEqual(Array.from(account.warnings), []);
+                assert.equal(account.shares, 200);
+                // The pre-split buy-back realized on its own date; the split
+                // realized nothing; the exercise realized the call premium.
+                assert.equal(core.realizedPremiumWindow(ledger, { since: '2025-11-10', until: '2025-11-10' }), 300);
+                assert.equal(core.realizedPremiumWindow(ledger, { since: '2025-11-20', until: '2025-11-20' }), 0);
+                assert.deepEqual(openBy(ledger), { P50: { contracts: -2, openPremium: 400 } });
+            },
+        },
     ],
 };

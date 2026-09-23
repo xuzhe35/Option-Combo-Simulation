@@ -957,7 +957,9 @@ group atomically and drafts one with `planSplitGroup`; the page's split form
 previews that draft, collects per-series class confirmations
 (`buildSplitGroupRequest`) and writes the group, and the reconciliation table
 only suggests a missing split (`suspectedSplitRatio`). The page no longer
-creates plain split rows.
+creates plain split rows. Seller expiry, What If and stress all read the
+converted positions from the replay; prices typed by hand are cleared when a
+book's split records change, because they were per share in the old unit.
 
 Schema v9 ties statement coverage to reset archives, checks both archive digests
 on restoration, and invalidates prior coverage after historical changes.

@@ -870,10 +870,12 @@ Important nuance:
 - `trade_execution/adapters/ibkr.py`
 
 
-### Cost Basis split groups, A1 phases 1-3 (2026-09-23)
+### Cost Basis split groups, A1 complete (2026-09-24)
 
 `CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md` §15 is the current design;
-§15.7-§15.9 record what each phase delivered. The page's entry form turns
+§15.7-§15.11 record what each phase delivered and the A1 acceptance and
+release notes. Manual prices typed in the old per-share unit are cleared when
+a book's split records change (`splitSignature`). The page's entry form turns
 kind `split` into the group flow (`_renderSplitPreview`, `_submitSplitGroup`,
 `_voidSplitGroup`); the DOM-free pieces `buildSplitGroupRequest`,
 `describeSplitProblem` and `suspectedSplitRatio` are exported for tests. A split group is written and
@@ -884,14 +886,18 @@ strike and size, checks the option class from option symbols, and proves the
 group with `_validate_split_groups` after every write path, restore included.
 Per-contract timelines read rows through the split halves
 (`_contract_key_movements`). The core replays groups atomically
-(`_applySplitGroup`) and drafts them (`planSplitGroup`); the manual page flow
-is phase 3. Shared rules live in the core (`compareEventOrder`, `splitEpochs`,
+(`_applySplitGroup`) and drafts them (`planSplitGroup`). Shared rules live in the core (`compareEventOrder`, `splitEpochs`,
 `strikeToCents`, `splitStrikeCents`, `optionRoot`, `optionMovements`) with
 Python twins in `cost_basis_store.py`; the importer carries copies of the order
 comparator and the movement expansion because it loads without the core.
 Fixtures: `tests/fixtures/occ_57592_tqqq_strikes.json` (all 167 published
 strikes) and `tests/fixtures/cost_basis_event_order_vectors.json`. Tests:
-`tests/cost_basis_splits.test.js`, `tests/cost_basis_splits_test.py`.
+`tests/cost_basis_splits.test.js`, `tests/cost_basis_splits_test.py`, and the
+seeded campaign `tests/cost_basis_split_campaign_test.py` with its independent
+model `tests/helpers/cost_basis_split_model.py` (100 seeds in unittest, 500
+fresh seeds per CI run; see `CODE PLAN/COST_BASIS_RANDOMIZED_REGRESSION.md`).
+Not supported: statements whose corporate-action rows cross a split (A2),
+reverse or fractional splits and non-standard deliverables (B).
 
 ### Cost Basis import integrity follow-up (2026-09-10)
 

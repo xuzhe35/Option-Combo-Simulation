@@ -6,7 +6,7 @@
 > `backup_cost_basis_store.py`；当前没有该 CLI，也没有自动账本备份调度。
 > FOP/FUT 扩展见 `COST_BASIS_FOP_FUTURES_ROLL_PLAN.md`。
 > 当前导入规则见 [COST_BASIS_IMPORT_INTEGRITY.md](COST_BASIS_IMPORT_INTEGRITY.md)，随机回归见 [COST_BASIS_RANDOMIZED_REGRESSION.md](COST_BASIS_RANDOMIZED_REGRESSION.md)。
-> 拆股目前仅支持手工股票比例调整，未平期权只提示核对，CSV 公司行动仍阻断；完整处理的待实施设计见 [拆股与期权合约调整 CODE PLAN](COST_BASIS_CORPORATE_ACTIONS_PLAN.md)，不能把该计划视为已实现能力。
+> 标准整数正向拆股（n:1，n 为 2–100 的整数）已实现：在手工录入里记录为一个拆股组，股票和生效日仍在交易的每个标准期权系列一起整笔转换，后端每次写入后复验。报表里的公司行动行仍阻断 CSV 导入（A2 待真实样本），反向、非整数拆股和非标准交割（B 线）不支持。设计、实施记录与验收见 [拆股与期权合约调整 CODE PLAN](COST_BASIS_CORPORATE_ACTIONS_PLAN.md) §15。
 > 当前压力测试见 [STRESS_KERNEL_REFACTOR.md](STRESS_KERNEL_REFACTOR.md) 与 [STRESS_PORTFOLIO_WORKFLOW.md](STRESS_PORTFOLIO_WORKFLOW.md)；跨账本旧计划仅作历史追溯。
 > 2026-09-19 核对：下文带日期的实测、迁移及阶段测试数量是历史记录，不代表本次重新执行或当前测试总数。
 >
@@ -260,7 +260,9 @@ CREATE TABLE cost_basis_book_resets (
 | `option_expiry` | `right`,`strike`,`expiry`,`contracts` | `+contracts`（归零） | — | `-fees` |
 | `dividend` | `cash_amount`(+) | — | — | `+cash_amount` |
 | `fee` | `cash_amount`(−) | — | — | `cash_amount` |
-| `split` | `split_ratio` | 未平仓期权**标红待人工复核** | `shares × ratio` | `0` |
+| `split`（拆股组表头，带 `split_group`） | `split_ratio`（整数 n）、`split_rule_ref`、`split_rounding` | 由同组 `option_split` 转换 | `shares × n`，在生效日开盘前、当日成交之前 | `0` |
+| `option_split`（只随拆股组整组写入） | 源系列字段 + `split_to_strike`、`split_to_contracts` | 源系列整笔清零，新系列 `×n`，未实现权利金随仓位转移 | — | `0` |
+| `split`（旧式单行，无 `split_group`） | `split_ratio` | 未平仓期权**标红待人工复核**，同日已有股票成交时提示 | `shares × ratio`，排在当日最后 | `0` |
 | `manual_adjust` | `note` + 任意字段 | 可选 | 可选 | 可选 |
 
 **关键点**：`option_assignment` 的 `price` 是行权价 `K`，只作用于**股票腿**；期权腿以 0 权利金归零（权利金在开仓那一行早已记过）。这是最容易记重复的地方，字段语义必须写死在表单和校验里。
@@ -489,7 +491,7 @@ CSV 导出走浏览器端 Blob，不落服务端文件。
 - 账本写入永远需要用户显式确认；对账建议只是预填表单。
 - 一条坏的账本请求不得拖垮 socket（`ib_server.py` 的同一条连接同时承载行情与订单监管）——异常一律在协议层收敛为错误响应。
 - SQLite 用 WAL，后端是唯一 owner；数据库文件在 app data 目录，**不在仓库里**（仓库在 OneDrive 上，同步软件不能碰活的 WAL）。
-- 拆股跨越未平仓期权时，引擎**不猜**调整后的合约条款，标红要求人工确认。
+- 拆股组的新行权价只按“整数分除以 n、半数进位”推导，只转换能证明为标准类的系列（按期权代码根判断，调整类如 `2TQQQ` 拒绝）；后端在每次写入后重放并证明每个组。旧式单行拆股跨越未平仓期权时，引擎仍**不猜**条款，标红要求人工确认。
 
 ## 10. 测试计划
 
@@ -499,7 +501,7 @@ CSV 导出走浏览器端 Blob，不落服务端文件。
 2. 只有权利金、无股票（`sharesHeld = 0`）→ 不得输出 Infinity
 3. 成本为负（权利金累计超过投入）
 4. 短 Call 被指派导致最终净空头 → 净现金标签切换为空头回补水位；同一结算批次中曾短暂为负、最终恢复非负时不告警
-5. 拆股跨越 → 股数/单价调整正确，未平仓期权标红
+5. 拆股：拆股组整组转换股票与期权、权利金承接、拆股后平仓/指派/到期（`tests/cost_basis_splits.test.js`、`tests/cost_basis_splits_test.py`、拆股随机回归）；旧式单行拆股跨越未平仓期权时标红
 6. 非 100 交割乘数（调整后合约）
 7. 同一标的的两个账户账本互不干扰；旧版未限定账户账本仍能按账户拆分
 8. 倒序补录：同一原子批次可先传平仓、后传更早开仓；单独提交没有开仓支持的纯平仓仍拒绝。补录还必须保证已有后续历史有效
@@ -542,7 +544,7 @@ CSV 导出走浏览器端 Blob，不落服务端文件。
 | Equity and Index Options | `Ep`（Expired） | `option_expiry` |
 | Equity and Index Options | `O` / `C` / 同时 `C;O` | `option_trade`，分别保留开仓/平仓/反向开仓标签；现金结算指数产品不属于账本支持范围 |
 | — | Dividends 段 | `dividend` |
-| — | 本标的 Corporate Actions | 导入问题，要求人工核实；确认后可手工录入 `split`，不会由 CSV 静默转换 |
+| — | 本标的 Corporate Actions | 导入问题，要求人工核实；标准拆股改用手工拆股组记录，不会由 CSV 静默转换 |
 
 **指派行的配对问题**：IBKR 把一次指派记成两行——期权行（码 `A`，数量平掉空头）和股票行（码 `A`，交割股数）。导入器必须把这两行**合并成一条 `option_assignment` 事件**，配对依据是同账户、同日期、同标的、股数 = 张数 × 乘数。配不上的落单行进「待人工处理」列表，不静默丢弃、也不当成普通交易记进去——两者都会算错成本。
 
