@@ -410,12 +410,26 @@ to TWS.
 
 Open it at `http://localhost:8000/cost_basis.html`.
 
-Stock splits currently support manual share-count and per-share cost adjustment only.
-Open options crossing a split require review; their terms are not automatically
-converted, and a statement's matching corporate-action rows block CSV import.
-The proposed end-to-end workflow is documented in
-[the corporate-actions CODE PLAN](CODE%20PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md);
-it is not yet implemented.
+A standard forward split (1 share becomes n, n an integer from 2 to 100) is
+recorded by hand together with its option adjustments. In **高级：手工补录事件**
+choose **拆股 split**, enter the ex-date as the trade date, the ratio n and the
+rule source (the OCC information memo, for example `OCC #57592`). The form
+replays the ledger to the open of that day and previews the whole group:
+shares before and after, and for every option series still live on that date
+the position before and after (contracts × n), the adjusted strike (the strike
+in integer cents divided by n, rounded half up, as OCC #57592 does) and the
+open premium that moves with it. Check the adjusted strikes against the memo's
+table. A series with no option symbol on record must be ticked as the standard
+contract; an adjusted class such as `2TQQQ`, a non-standard deliverable, a
+strike that is not a whole cent, or two series landing on one new strike
+cannot be converted and blocks the write. The group is written in one step and
+can only be voided whole (**冲销整组** in the event flow); the backend re-proves
+it on every later write. When TWS holds an exact multiple of the ledger's
+shares, or an option appears at the adjusted strike with n times the size,
+the reconciliation table suggests a missing split and can open the form; it
+never records one by itself. Statements whose corporate-action rows cross a
+split still block CSV import; see
+[the corporate-actions CODE PLAN](CODE%20PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md).
 
 The cash-flow section's heading has a **卖方权利金 · 按到期日查看** control,
 outside the metric cards so they stay compact. Its read-only

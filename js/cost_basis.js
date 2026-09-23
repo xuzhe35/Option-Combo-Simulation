@@ -98,7 +98,9 @@
         option_expiry: ['right', 'strike', 'expiry', 'contracts'],
         dividend: [],
         fee: [],
-        split: ['splitRatio'],
+        // A split is recorded as a whole group: the form drafts it from the
+        // ledger (planSplitGroup) and shows the option conversions it implies.
+        split: ['splitRatio', 'splitRuleRef', 'splitPreview'],
         // Written only as part of a split group, never through this form.
         option_split: [],
         // Cash-only by design. Position corrections use typed events so a
@@ -239,6 +241,7 @@
         importCommitTokens: null,
         importFilter: 'all',
         ledgerVersion: null,
+        splitConfirmations: new Set(),
         importBatches: [],
         bookResets: [],
         executionFetchPending: false,
@@ -4544,6 +4547,33 @@
         state.reconcileOpenSignature = plan.signature;
     }
 
+    /**
+     * A reconciliation that looks like an unrecorded split. The ledger never
+     * writes one from a snapshot; the button only opens the split form.
+     */
+    function _suspectedSplitRow(hint) {
+        const doc = globalScope.document;
+        const row = doc.createElement('tr');
+        row.className = 'reconcile-hint';
+        const cell = doc.createElement('td');
+        cell.colSpan = 8;
+        const evidence = hint.basis === 'shares'
+            ? `TWS 股数 ${_quantity(hint.tws)} 是账本 ${_quantity(hint.ledger)} 的 ${hint.ratio} 倍`
+            : `账本的 ${hint.from} 在 TWS 里不见了，TWS 多出 ${hint.to}，数量是 ${hint.ratio} 倍`;
+        const text = doc.createElement('span');
+        text.textContent = `${evidence}，可能缺少一次 ${hint.ratio}:1 拆股记录。`
+            + '账本不会据此自动记账；请按 OCC 备忘录核实后手工记录拆股。';
+        cell.appendChild(text);
+        const button = doc.createElement('button');
+        button.type = 'button';
+        button.className = 'draft';
+        button.textContent = '填入拆股表单';
+        button.addEventListener('click', () => _fillForm({ kind: 'split', splitRatio: hint.ratio }));
+        cell.appendChild(button);
+        row.appendChild(cell);
+        return row;
+    }
+
     function _renderReconciliationTable() {
         const body = $('reconcile-table').querySelector('tbody');
         const badge = $('position-match-badge');
@@ -4598,6 +4628,8 @@
         badge.className = mismatches.length ? 'soft-badge warn' : 'soft-badge ok';
         _text(badge, mismatches.length
             ? `${mismatches.length} 项待核对` : '持仓数量一致');
+        const suspected = suspectedSplitRatio(state.reconciliation);
+        if (suspected) body.appendChild(_suspectedSplitRow(suspected));
 
         state.reconciliation.rows.forEach((entry) => {
             const batchPending = state.importResult && state.importResult.batchReconciliation
@@ -4836,7 +4868,7 @@
                     const button = globalScope.document.createElement('button');
                     button.type = 'button';
                     button.className = 'draft delete-event';
-                    button.textContent = '冲销';
+                    button.textContent = event.splitGroup ? '冲销整组' : '冲销';
                     button.title = '冲销：从有效流水和成本计算中移除，原行与券商引用保留可审计；'
                         + '重新导入同一行不会自动恢复，需用整本重建或恢复存档';
                     button.addEventListener('click', () => _voidEvent(event));
@@ -4997,7 +5029,275 @@
                 if (input && input.type !== 'checkbox') input.value = '';
             }
         });
+        // A split moves no cash, carries no fee and cannot be excluded.
+        Array.from(form.querySelectorAll('[data-hide-for-split]')).forEach((node) => {
+            node.hidden = kind === 'split';
+        });
+        if (kind !== 'split') state.splitConfirmations = new Set();
         _updateCashHint();
+        _renderSplitPreview();
+    }
+
+    const SPLIT_PROBLEM_TEXT = {
+        account_required: '账本没有账户',
+        date_invalid: '请填写除权日',
+        ratio_invalid: '拆股比例须为 2 到 100 的整数',
+        rule_ref_required: '请填写规则来源（如 OCC 备忘录编号）',
+        underlying_required: '账本缺少标的代码',
+        split_already_recorded: '这一天已记录过拆股（含旧式拆股行）；如要改用拆股组，请先冲销旧行',
+        identity_ambiguous: '该系列有多个合约编号或身份不明，无法确定转换哪一份',
+        non_standard_class: '期权代码属于调整过的非标准类，不能按标准拆股转换',
+        non_standard_deliverable: '每张交割股数不是标准值，不能按标准拆股转换',
+        strike_not_whole_cent: '行权价不是整分，无法按规则推导新行权价',
+        destination_collision: '两个系列会落到同一个新行权价，需人工核对',
+        expired_unrecorded: '拆股前已到期但账本未记录到期，不参与转换；请另行补录到期',
+    };
+
+    function describeSplitProblem(problem) {
+        const item = problem || {};
+        const text = SPLIT_PROBLEM_TEXT[item.code] || item.code || '未知问题';
+        const series = item.right
+            ? `${item.expiry || ''} ${item.right}${item.strike}`.trim() : '';
+        const root = item.code === 'non_standard_class' && item.root ? `（${item.root}）` : '';
+        return series ? `${series}：${text}${root}` : `${text}${root}`;
+    }
+
+    const SPLIT_LEG_STORE_FIELDS = [
+        'kind', 'tradeDate', 'account', 'right', 'strike', 'expiry', 'sharesPerContract',
+        'conId', 'localSymbol', 'contracts', 'splitRatio', 'splitToStrike',
+        'splitToContracts', 'splitToConId', 'splitToLocalSymbol', 'cashAmount', 'fees',
+    ];
+
+    /**
+     * The exact group the store receives for a planSplitGroup draft.
+     *
+     * Preview-only fields are dropped. A series with no option symbol on
+     * record converts only after the operator confirmed it is the standard
+     * class, and that confirmation travels on its row. `ready` is false
+     * while the draft has a problem or an unconfirmed series; `reasons`
+     * says why in the page's language.
+     */
+    function buildSplitGroupRequest(plan, confirmedKeys, note) {
+        const confirmed = confirmedKeys instanceof Set
+            ? confirmedKeys : new Set(confirmedKeys || []);
+        const reasons = ((plan && plan.problems) || []).map(describeSplitProblem);
+        if (!plan || !plan.header) {
+            return { ready: false, reasons: reasons.length ? reasons : ['拆股计划尚未生成'],
+                events: [] };
+        }
+        const legs = (plan.legs || []).map((leg) => {
+            const needs = leg.needsStandardConfirmation === true;
+            if (needs && !confirmed.has(leg.seriesKey)) {
+                reasons.push(`${leg.expiry} ${leg.right}${leg.strike}：账本里没有它的期权代码，`
+                    + '请勾选确认它是标准合约');
+            }
+            const row = {};
+            SPLIT_LEG_STORE_FIELDS.forEach((field) => {
+                if (leg[field] !== undefined) row[field] = leg[field];
+            });
+            row.splitStandardConfirmed = needs && confirmed.has(leg.seriesKey);
+            return row;
+        });
+        const header = Object.assign({}, plan.header);
+        if (note) header.note = note;
+        return { ready: reasons.length === 0, reasons, events: [header].concat(legs) };
+    }
+
+    /**
+     * A reconciliation that looks like a split nobody recorded: TWS holds an
+     * integer multiple of the ledger's shares, or a ledger-only option has a
+     * TWS-only twin at the adjusted strike with the multiplied size. Only a
+     * hint - the ledger never records a split from a snapshot.
+     */
+    function suspectedSplitRatio(reconciliation) {
+        const rows = (reconciliation && reconciliation.rows) || [];
+        for (const row of rows) {
+            if (row.kind !== 'shares') continue;
+            const ledger = Number(row.ledger);
+            const tws = Number(row.tws);
+            if (!(Math.abs(ledger) > 1e-6) || !(Math.abs(tws) > Math.abs(ledger))) continue;
+            const ratio = Math.round(tws / ledger);
+            if (core.isStandardSplitRatio(ratio) && Math.abs(tws - ratio * ledger) < 1e-6) {
+                return { ratio, basis: 'shares', account: row.account, ledger, tws };
+            }
+        }
+        const options = rows.filter((row) => row.kind === 'option');
+        const ledgerOnly = options.filter((row) => Math.abs(Number(row.ledger)) > 1e-6
+            && Math.abs(Number(row.tws)) <= 1e-6);
+        const twsOnly = options.filter((row) => Math.abs(Number(row.tws)) > 1e-6
+            && Math.abs(Number(row.ledger)) <= 1e-6);
+        for (const old of ledgerOnly) {
+            for (let ratio = 2; ratio <= 10; ratio += 1) {
+                const adjusted = core.splitStrike(old.strike, ratio);
+                if (!adjusted) continue;
+                const twin = twsOnly.find((row) => row.account === old.account
+                    && row.right === old.right && row.expiry === old.expiry
+                    && Math.abs(Number(row.strike) - adjusted.toStrike) < 1e-9
+                    && Math.abs(Number(row.tws) - Number(old.ledger) * ratio) < 1e-6);
+                if (twin) {
+                    return { ratio, basis: 'options', account: old.account,
+                        ledger: Number(old.ledger), tws: Number(twin.tws),
+                        from: old.label, to: twin.label };
+                }
+            }
+        }
+        return null;
+    }
+
+    function _splitPlan() {
+        const book = _currentBook();
+        return core.planSplitGroup(state.allEvents || [], {
+            account: (book && book.account) || '',
+            tradeDate: $('field-date').value,
+            ratio: _numberOrNull($('field-ratio').value),
+            ruleRef: $('field-split-rule').value,
+            underlying: book && book.symbol,
+            defaultSharesPerContract: book && book.defaultSharesPerContract,
+        });
+    }
+
+    /** The split draft, redrawn whenever its inputs or the ledger change. */
+    function _renderSplitPreview() {
+        const node = $('split-preview');
+        if (!node) return;
+        _clear(node);
+        if ($('field-kind').value !== 'split' || !state.bookId) return;
+        const doc = globalScope.document;
+        const plan = _splitPlan();
+        const request = buildSplitGroupRequest(plan, state.splitConfirmations);
+        const summary = doc.createElement('p');
+        summary.className = 'split-summary';
+        summary.textContent = plan.header
+            ? `股票 ${_quantity(plan.sharesBefore)} → ${_quantity(plan.sharesAfter)} 股；`
+                + (plan.legs.length
+                    ? `${plan.legs.length} 个期权系列随拆股调整，整组一次写入`
+                    : '拆股前没有未平仓期权，只调整股票')
+            : '填写除权日、比例和规则来源后，这里会列出整组调整';
+        node.appendChild(summary);
+        if (request.reasons.length) {
+            const list = doc.createElement('ul');
+            list.className = 'split-issues';
+            request.reasons.forEach((reason) => {
+                const item = doc.createElement('li');
+                item.textContent = reason;
+                list.appendChild(item);
+            });
+            node.appendChild(list);
+        }
+        if ((plan.notices || []).length) {
+            const list = doc.createElement('ul');
+            list.className = 'split-notes';
+            plan.notices.forEach((notice) => {
+                const item = doc.createElement('li');
+                item.textContent = describeSplitProblem(notice);
+                list.appendChild(item);
+            });
+            node.appendChild(list);
+        }
+        if (!plan.header || !plan.legs.length) return;
+        const wrap = doc.createElement('div');
+        wrap.className = 'table-wrap';
+        const table = doc.createElement('table');
+        const head = doc.createElement('tr');
+        ['合约', '持仓 前 → 后', '新行权价', '承接未实现权利金', '标准合约确认'].forEach((label) => {
+            const cell = doc.createElement('th');
+            cell.textContent = label;
+            head.appendChild(cell);
+        });
+        table.appendChild(head);
+        plan.legs.forEach((leg) => {
+            const row = doc.createElement('tr');
+            _cell(row, `${leg.expiry} ${leg.right}${leg.strike}`);
+            _cell(row, `${_quantity(-leg.contracts)} → ${_quantity(leg.splitToContracts)}`, 'numeric');
+            _cell(row, String(leg.splitToStrike), 'numeric');
+            _cell(row, _money(leg.carriedPremium), 'numeric');
+            const confirmCell = doc.createElement('td');
+            if (leg.needsStandardConfirmation) {
+                const box = doc.createElement('input');
+                box.type = 'checkbox';
+                box.checked = state.splitConfirmations.has(leg.seriesKey);
+                box.setAttribute('aria-label', `确认 ${leg.expiry} ${leg.right}${leg.strike} 是标准合约`);
+                box.addEventListener('change', () => {
+                    if (box.checked) state.splitConfirmations.add(leg.seriesKey);
+                    else state.splitConfirmations.delete(leg.seriesKey);
+                    _renderSplitPreview();
+                });
+                confirmCell.appendChild(box);
+            } else {
+                confirmCell.textContent = leg.localSymbol ? `代码 ${leg.localSymbol}` : '—';
+            }
+            row.appendChild(confirmCell);
+            table.appendChild(row);
+        });
+        wrap.appendChild(table);
+        node.appendChild(wrap);
+    }
+
+    async function _submitSplitGroup() {
+        const bookId = state.bookId;
+        const book = _currentBook();
+        const plan = _splitPlan();
+        const note = $('field-note').value.trim();
+        const request_ = buildSplitGroupRequest(plan, state.splitConfirmations, note);
+        if (!request_.ready) {
+            _message(`拆股还不能写入：${request_.reasons.join('；')}`, 'error');
+            _renderSplitPreview();
+            return;
+        }
+        const header = request_.events[0];
+        const confirmed = globalScope.confirm(
+            `记录 ${header.splitRatio}:1 拆股，生效日 ${header.tradeDate}（${header.splitRuleRef}）？\n\n`
+            + `股票 ${_quantity(plan.sharesBefore)} → ${_quantity(plan.sharesAfter)} 股；`
+            + `${plan.legs.length} 个期权系列按规则调整，未实现权利金随仓位转入新合约。\n`
+            + '整组一次写入；以后只能整组冲销。');
+        if (!confirmed) return;
+        const fingerprint = JSON.stringify([bookId, request_.events]);
+        const clientToken = chooseManualSubmitToken(
+            state.eventSubmitToken, state.eventSubmitFingerprint,
+            fingerprint, () => _token('cbs-'));
+        state.eventSubmitToken = clientToken;
+        state.eventSubmitFingerprint = fingerprint;
+        state.eventSubmitPending = true;
+        $('btn-submit-event').textContent = '写入中…';
+        _refreshControls();
+        let writeAcknowledged = false;
+        try {
+            const response = await request('append_cost_basis_split_group', {
+                bookId,
+                events: request_.events,
+                clientToken,
+                expectedLedgerVersion: state.ledgerVersion,
+                bookIdentity: {
+                    account: (book && book.account) || '',
+                    symbol: book && book.symbol,
+                    secType: (book && book.secType) || 'STK',
+                    currency: (book && book.currency) || 'USD',
+                },
+            });
+            writeAcknowledged = true;
+            state.eventSubmitToken = '';
+            state.eventSubmitFingerprint = '';
+            const legs = (response.events || []).filter((row) => row.kind === 'option_split').length;
+            _message(`拆股已写入账本（${legs} 个期权系列随之调整）。`, 'ok');
+            state.splitConfirmations = new Set();
+            _resetForm();
+            await _loadBooks();
+        } catch (error) {
+            if (writeAcknowledged) {
+                _message(`已写入账本，但刷新失败：${error.message || '未知错误'}`, 'error');
+                return;
+            }
+            if (error.code) {
+                state.eventSubmitToken = '';
+                state.eventSubmitFingerprint = '';
+            }
+            const retryNote = error.code ? '' : '；可直接重试，不会重复写入';
+            _message(`${_explainWriteError(error)}${retryNote}`, 'error');
+        } finally {
+            state.eventSubmitPending = false;
+            $('btn-submit-event').textContent = '写入账本';
+            _refreshControls();
+        }
     }
 
     function _formEvent() {
@@ -5124,12 +5424,16 @@
         $('field-price').value = draft.price === null || draft.price === undefined
             ? '' : draft.price;
         $('field-ratio').value = draft.splitRatio || '';
+        $('field-split-rule').value = draft.splitRuleRef || '';
         $('field-fees').value = draft.fees || 0;
         $('field-cash').value = draft.cashAmount === null || draft.cashAmount === undefined
             ? '' : draft.cashAmount;
         $('field-note').value = draft.note || '';
         _updateCashHint();
-        _message('草稿已填入表单，确认价格与日期后再写入。', '');
+        _renderSplitPreview();
+        _message(draft.kind === 'split'
+            ? '已切换到拆股：请填写除权日和 OCC 备忘录编号，核对下方整组调整后再写入。'
+            : '草稿已填入表单，确认价格与日期后再写入。', '');
         $('event-form').scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
@@ -5151,6 +5455,10 @@
     async function _submitEvent(submitEvent) {
         submitEvent.preventDefault();
         if (!state.bookId || state.eventSubmitPending) return;
+        if ($('field-kind').value === 'split') {
+            await _submitSplitGroup();
+            return;
+        }
         const bookId = state.bookId;
         const event = _formEvent();
         if (event.cashAmount === null || event.cashAmount === undefined) {
@@ -5211,6 +5519,7 @@
                 + '通常是开仓那一笔还没补录，或者日期填错了。';
         }
         if (error.code === 'invalid_request') return `字段有误：${error.message}`;
+        if (error.code === 'ledger_changed') return '账本在预览后发生了变化，请核对预览后重新提交';
         return error.message || '写入失败';
     }
 
@@ -5227,13 +5536,43 @@
         $('field-roll-group').value = '';
         $('field-price').value = '';
         $('field-ratio').value = '';
+        $('field-split-rule').value = '';
         $('field-cash').value = '';
         $('field-fees').value = '0';
         $('field-note').value = '';
+        state.splitConfirmations = new Set();
         _updateCashHint();
+        _renderSplitPreview();
+    }
+
+    async function _voidSplitGroup(event) {
+        const rows = (state.allEvents || []).filter((item) => item.splitGroup === event.splitGroup
+            && !item.voidedAtUtc);
+        const header = rows.find((item) => item.kind === 'split') || event;
+        const legs = rows.filter((item) => item.kind === 'option_split').length;
+        const reason = globalScope.prompt(
+            `冲销整个拆股组（${header.tradeDate} ${header.splitRatio}:1，含 ${legs} 个期权调整）？\n\n`
+            + '拆股组只能整组冲销；拆股后的交易若依赖这次调整，冲销会被拒绝，需先处理那些交易。\n\n'
+            + '请填写冲销原因：');
+        if (!reason || !reason.trim()) return;
+        try {
+            await request('void_cost_basis_split_group', {
+                bookId: state.bookId,
+                splitGroup: event.splitGroup,
+                reason: reason.trim(),
+                clientToken: _token('cbv-'),
+            });
+            await _loadBooks();
+        } catch (error) {
+            globalScope.alert(`冲销失败：${_explainWriteError(error)}`);
+        }
     }
 
     async function _voidEvent(event) {
+        if (event.splitGroup) {
+            await _voidSplitGroup(event);
+            return;
+        }
         const reason = globalScope.prompt(
             `冲销这条账本记录（${event.tradeDate} ${KIND_LABELS[event.kind] || event.kind}）？\n\n`
             + '冲销后它立即从有效流水和成本计算中移除，原行保留为可审计记录。\n'
@@ -8375,6 +8714,10 @@
         });
 
         $('field-kind').addEventListener('change', _applyKindVisibility);
+        ['field-date', 'field-ratio', 'field-split-rule'].forEach((id) => {
+            $(id).addEventListener('input', _renderSplitPreview);
+            $(id).addEventListener('change', _renderSplitPreview);
+        });
         ['field-contracts', 'field-shares', 'field-price', 'field-spc', 'field-fees',
             'field-cash', 'field-strike', 'field-future-contracts',
             'field-roll-to-price'].forEach((id) => {
@@ -8521,6 +8864,9 @@
         planTargetExecutionReconciliation,
         planBatchExecutionReconciliation,
         importReplayBlockingWarnings,
+        buildSplitGroupRequest,
+        describeSplitProblem,
+        suspectedSplitRatio,
         importReplayNotices,
         targetExecutionProblems,
         planTwsBaselineSupersession,

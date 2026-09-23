@@ -870,10 +870,13 @@ Important nuance:
 - `trade_execution/adapters/ibkr.py`
 
 
-### Cost Basis split groups, A1 phases 1-2 (2026-09-23)
+### Cost Basis split groups, A1 phases 1-3 (2026-09-23)
 
 `CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md` §15 is the current design;
-§15.7 and §15.8 record what each phase delivered. A split group is written and
+§15.7-§15.9 record what each phase delivered. The page's entry form turns
+kind `split` into the group flow (`_renderSplitPreview`, `_submitSplitGroup`,
+`_voidSplitGroup`); the DOM-free pieces `buildSplitGroupRequest`,
+`describeSplitProblem` and `suspectedSplitRatio` are exported for tests. A split group is written and
 voided only whole: `CostBasisStore.append_split_group` / `void_split_group`
 (WebSocket `append_cost_basis_split_group` / `void_cost_basis_split_group`).
 The server names the group from the client token, re-derives every adjusted

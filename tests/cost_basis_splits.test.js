@@ -641,5 +641,76 @@ module.exports = {
                 assert.equal(kept.tag, 'ibkr_close_open');
             },
         },
+        {
+            name: 'every problem planSplitGroup can report has page wording',
+            run() {
+                const page = loadPage();
+                const source = fs.readFileSync(path.resolve(__dirname, '../js/cost_basis_core.js'), 'utf8');
+                const body = source.slice(source.indexOf('function planSplitGroup'),
+                    source.indexOf('function _applySplit(targets'));
+                const codes = new Set(Array.from(body.matchAll(/code: '([a-z_]+)'/g), (m) => m[1]));
+                assert.ok(codes.size >= 12, `found ${codes.size} codes`);
+                codes.forEach((code) => {
+                    const text = page.describeSplitProblem({ code });
+                    assert.notEqual(text, code, `${code} has no wording`);
+                    assert.match(text, /[\u4e00-\u9fff]/, code);
+                });
+                assert.match(page.describeSplitProblem({ code: 'non_standard_class', root: '2TQQQ',
+                    right: 'P', strike: 50, expiry: '20251219' }), /20251219 P50：.*（2TQQQ）/);
+            },
+        },
+        {
+            name: 'the group request carries confirmations and nothing preview-only',
+            run() {
+                const core = loadCore();
+                const page = loadPage();
+                sequence = 0;
+                const plan = core.planSplitGroup([
+                    shortPut('2025-11-04', 100, -2, 4, { localSymbol: 'TQQQ  251219P00100000' }),
+                    shortPut('2025-11-05', 80, -1, 2),
+                ], { account: ACCOUNT, tradeDate: '2025-11-20', ratio: 2, ruleRef: 'OCC #57592',
+                    underlying: 'TQQQ' });
+                const bare = plan.legs.find((leg) => leg.needsStandardConfirmation);
+                const pending = page.buildSplitGroupRequest(plan, [], '');
+                assert.equal(pending.ready, false);
+                assert.equal(pending.reasons.length, 1);
+                const ready = page.buildSplitGroupRequest(plan, [bare.seriesKey], 'checked');
+                assert.equal(ready.ready, true);
+                assert.equal(ready.events[0].note, 'checked');
+                assert.deepEqual(Array.from(ready.events.slice(1), (row) => row.splitStandardConfirmed),
+                    Array.from(plan.legs, (leg) => leg === bare));
+                ready.events.slice(1).forEach((row) => {
+                    ['seriesKey', 'needsStandardConfirmation', 'carriedPremium',
+                        'carriedShortPremium'].forEach((field) => assert.equal(field in row, false));
+                });
+                const broken = page.buildSplitGroupRequest(core.planSplitGroup([], {
+                    account: ACCOUNT, tradeDate: '', ratio: 2, ruleRef: 'x', underlying: 'TQQQ' }), []);
+                assert.equal(broken.ready, false);
+                assert.deepEqual(Array.from(broken.reasons), ['请填写除权日']);
+            },
+        },
+        {
+            name: 'a missing split is suspected from shares or from an adjusted option twin only',
+            run() {
+                const page = loadPage();
+                const shares = (ledger, tws) => ({ rows: [{ kind: 'shares', account: ACCOUNT,
+                    ledger, tws }] });
+                assert.equal(page.suspectedSplitRatio(shares(100, 200)).ratio, 2);
+                assert.equal(page.suspectedSplitRatio(shares(100, 300)).ratio, 3);
+                assert.equal(page.suspectedSplitRatio(shares(100, 150)), null);
+                assert.equal(page.suspectedSplitRatio(shares(100, 100)), null);
+                assert.equal(page.suspectedSplitRatio(shares(0, 200)), null);
+                assert.equal(page.suspectedSplitRatio(shares(200, 100)), null);
+                const option = (strike, ledger, tws) => ({ kind: 'option', account: ACCOUNT,
+                    right: 'P', expiry: '20251219', strike, ledger, tws, label: `P${strike}` });
+                const twin = page.suspectedSplitRatio({ rows: [option(99.97, -2, 0),
+                    option(49.99, 0, -4)] });
+                assert.equal(twin.ratio, 2);
+                assert.equal(twin.basis, 'options');
+                assert.equal(page.suspectedSplitRatio({ rows: [option(100, -2, 0),
+                    option(50, 0, -3)] }), null);
+                assert.equal(page.suspectedSplitRatio(null), null);
+            },
+        },
     ],
 };

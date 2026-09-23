@@ -1578,6 +1578,7 @@
                 cashAmount: 0,
                 fees: 0,
                 // Preview only; the store ignores these.
+                seriesKey: option.key,
                 needsStandardConfirmation: !localSymbol,
                 carriedPremium: option.openPremium,
                 carriedShortPremium: option.openShortPremium,

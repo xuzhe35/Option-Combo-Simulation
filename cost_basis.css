@@ -702,6 +702,19 @@ body:has(#premium-expiry-modal[open]) { overflow: hidden; }
 .entry-form .form-actions, .new-book-form .form-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: .5rem; padding-top: .75rem; border-top: 1px solid var(--border); }
 .entry-message { color: var(--muted); }
 .entry-message[data-state="error"] { color: var(--bad-text); }
+.split-preview { display: grid; gap: .6rem; padding: .75rem .9rem; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-soft); }
+.split-preview:empty { display: none; }
+.split-preview .split-summary { margin: 0; color: var(--text); font-weight: 650; }
+.split-preview .split-issues, .split-preview .split-notes { margin: 0; padding-left: 1.1rem; }
+.split-preview .split-issues { color: var(--bad-text); }
+.split-preview .split-notes { color: var(--warn-text); }
+.split-preview .table-wrap { overflow-x: auto; }
+.split-preview table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.split-preview th, .split-preview td { padding: .3rem .45rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.split-preview th { color: var(--muted); font-weight: 650; }
+.split-preview td.numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.reconcile-hint td { background: var(--warn-soft); color: var(--warn-text); white-space: normal; }
+.reconcile-hint button { margin-left: .6rem; }
 .entry-message[data-state="ok"] { color: var(--teal-text); }
 
 .settings-heading { padding: .25rem .15rem .35rem; }

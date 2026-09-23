@@ -953,7 +953,11 @@ resolved per split epoch, because a pre-split and a post-split contract can
 share a strike and an OCC symbol. Plain `split` rows keep their end-of-day
 order, start no epoch, and raise a non-blocking `legacy_split_same_day` notice
 when share fills of the same day sort before them. The browser core replays a
-group atomically and drafts one with `planSplitGroup`.
+group atomically and drafts one with `planSplitGroup`; the page's split form
+previews that draft, collects per-series class confirmations
+(`buildSplitGroupRequest`) and writes the group, and the reconciliation table
+only suggests a missing split (`suspectedSplitRatio`). The page no longer
+creates plain split rows.
 
 Schema v9 ties statement coverage to reset archives, checks both archive digests
 on restoration, and invalidates prior coverage after historical changes.

@@ -38,6 +38,9 @@ function loadReconciliationHarness() {
             handleImportFile: _handleImportFile, commitImport: _commitImport,
             parseImport: _parseImportText, bindingProblem: _importBindingProblem,
             beginBook: _beginBookSelection,
+            submitEvent: _submitEvent, renderSplitPreview: _renderSplitPreview,
+            voidEvent: _voidEvent,
+            stubReload() { _loadBooks = async () => {}; },
             message: _handleMessage, renderWhatIf: _renderWhatIf,
             editPrice: _editWhatIfPrice, followPrice: _setWhatIfFollowReference,
             refreshPrice: _refreshWhatIfMarketPrice, invalidate: _invalidatePositions,
@@ -137,6 +140,19 @@ function loadReconciliationHarness() {
     return { ...harness, context, alerts,
         buttons() { return nodes.get('reconcile-table').body.children[0].children[7].children; },
     };
+}
+
+// The fake DOM creates bare nodes; give the entry form's inputs the empty
+// values a real page starts with.
+function initEntryForm(h) {
+    ['field-account', 'field-fees', 'field-tag', 'field-note', 'field-cash', 'field-right',
+        'field-strike', 'field-expiry', 'field-contracts', 'field-spc', 'field-shares',
+        'field-future-expiry', 'field-future-contracts', 'field-roll-to-expiry',
+        'field-roll-to-price', 'field-roll-group', 'field-price', 'field-ratio',
+        'field-split-rule', 'field-action', 'field-date', 'field-kind'].forEach((id) => {
+        h.context.document.getElementById(id).value = '';
+    });
+    h.context.document.getElementById('field-include').checked = true;
 }
 
 function loadPriceHarness() {
@@ -3137,8 +3153,11 @@ module.exports = {
                 const source = readScript();
                 assert.match(html, /<th>操作<\/th>/);
                 assert.match(html, /显示已冲销记录/);
-                assert.match(source, /button\.textContent = '冲销'/);
+                assert.match(source,
+                    /button\.textContent = event\.splitGroup \? '冲销整组' : '冲销'/);
                 assert.match(source, /request\('void_cost_basis_event'/);
+                // A split group is voided whole, never row by row.
+                assert.match(source, /request\('void_cost_basis_split_group'/);
                 assert.match(source, /原行保留为可审计记录/);
                 // The wording must say what a void does NOT do: re-importing
                 // the same statement row will not bring it back.
@@ -4200,6 +4219,130 @@ module.exports = {
                     [{ from: '2026-10-01', through: '2026-10-31' }]);
                 assert.match(coverage.text, /缺口 2026-10-01 至 2026-10-31/);
                 assert.equal(page.describeStatementCoverage([]).text, '');
+            },
+        },
+        {
+            name: 'the split form drafts the whole group, needs confirmation, and writes it once',
+            async run() {
+                const h = loadReconciliationHarness();
+                h.stubReload();
+                initEntryForm(h);
+                const node = (id) => h.context.document.getElementById(id);
+                h.state.allEvents = [
+                    { kind: 'share_trade', account: 'U1', tradeDate: '2025-11-03', seq: 1,
+                        shares: 100, price: 80, cashAmount: -8000 },
+                    { kind: 'option_trade', account: 'U1', tradeDate: '2025-11-04', seq: 2,
+                        right: 'P', strike: 100, expiry: '20251219', sharesPerContract: 100,
+                        contracts: -2, price: 4, cashAmount: 800, conId: 1001,
+                        localSymbol: 'TQQQ  251219P00100000' },
+                    { kind: 'option_trade', account: 'U1', tradeDate: '2025-11-05', seq: 3,
+                        right: 'C', strike: 130, expiry: '20260116', sharesPerContract: 100,
+                        contracts: 1, price: 2, cashAmount: -200 },
+                ];
+                h.state.ledgerVersion = { digest: 'reviewed-before-split' };
+                node('field-kind').value = 'split';
+                node('field-date').value = '2025-11-20';
+                node('field-ratio').value = '2';
+                node('field-split-rule').value = 'OCC #57592';
+                node('field-note').value = '按 OCC 备忘录核对';
+                h.renderSplitPreview();
+                const preview = node('split-preview');
+                assert.match(preview.children[0].textContent, /100 → 200/);
+                assert.match(preview.children[0].textContent, /2 个期权系列/);
+                // The call has no option symbol: it waits for confirmation.
+                assert.match(preview.children[1].children[0].textContent, /勾选确认/);
+
+                const sent = [];
+                h.configure({ request: async (action, payload) => {
+                    sent.push({ action, payload });
+                    return { events: [{ kind: 'split' }, { kind: 'option_split' },
+                        { kind: 'option_split' }] };
+                } });
+                h.stubReload();
+                let asked = 0;
+                h.context.confirm = () => { asked += 1; return true; };
+                await h.submitEvent({ preventDefault() {} });
+                assert.equal(sent.length, 0, 'an unconfirmed series blocks the write');
+                assert.match(node('entry-message').textContent, /还不能写入/);
+
+                const table = node('split-preview').children
+                    .find((child) => child.className === 'table-wrap').children[0];
+                const callRow = table.children.find((row) => /C130/.test(row.children[0].textContent));
+                const box = callRow.children[4].children[0];
+                box.checked = true;
+                box.handlers.change();
+                await h.submitEvent({ preventDefault() {} });
+                assert.equal(asked, 1);
+                assert.equal(sent.length, 1);
+                assert.equal(sent[0].action, 'append_cost_basis_split_group');
+                const payload = sent[0].payload;
+                assert.equal(payload.bookId, 'book-test');
+                assert.deepEqual(JSON.parse(JSON.stringify(payload.expectedLedgerVersion)),
+                    { digest: 'reviewed-before-split' });
+                assert.equal(payload.bookIdentity.symbol, 'TQQQ');
+                const [header, ...legs] = payload.events;
+                assert.equal(header.kind, 'split');
+                assert.equal(header.splitRatio, 2);
+                assert.equal(header.splitRuleRef, 'OCC #57592');
+                assert.equal(header.note, '按 OCC 备忘录核对');
+                const put = legs.find((leg) => leg.right === 'P');
+                const call = legs.find((leg) => leg.right === 'C');
+                assert.equal(put.splitToStrike, 50);
+                assert.equal(put.splitToContracts, -4);
+                assert.equal(put.splitStandardConfirmed, false);
+                assert.equal(call.splitToStrike, 65);
+                assert.equal(call.splitToContracts, 2);
+                assert.equal(call.splitStandardConfirmed, true);
+                assert.equal('seriesKey' in call, false, 'preview fields stay in the page');
+                assert.equal('carriedPremium' in call, false);
+                assert.match(node('entry-message').textContent, /拆股已写入账本/);
+            },
+        },
+        {
+            name: 'a split group row is voided as a whole group',
+            async run() {
+                const h = loadReconciliationHarness();
+                const sent = [];
+                h.configure({ request: async (action, payload) => {
+                    sent.push({ action, payload });
+                    return {};
+                } });
+                h.stubReload();
+                h.state.allEvents = [
+                    { eventId: 'e1', kind: 'split', splitGroup: 'split-t1', tradeDate: '2025-11-20',
+                        splitRatio: 2 },
+                    { eventId: 'e2', kind: 'option_split', splitGroup: 'split-t1',
+                        tradeDate: '2025-11-20' },
+                ];
+                let question = '';
+                h.context.prompt = (text) => { question = text; return '录错了'; };
+                await h.voidEvent(h.state.allEvents[1]);
+                assert.match(question, /整个拆股组/);
+                assert.match(question, /1 个期权调整/);
+                assert.equal(sent.length, 1);
+                assert.equal(sent[0].action, 'void_cost_basis_split_group');
+                assert.equal(sent[0].payload.splitGroup, 'split-t1');
+                assert.equal(sent[0].payload.reason, '录错了');
+            },
+        },
+        {
+            name: 'a TWS share count that is an exact multiple suggests a missing split, never writes one',
+            run() {
+                const h = loadReconciliationHarness();
+                h.state.reconciliation = { rows: [{
+                    kind: 'shares', key: 'shares|U1', account: 'U1', label: 'TQQQ shares',
+                    ledger: 100, tws: 200, difference: 100, status: 'quantity_mismatch',
+                }] };
+                initEntryForm(h);
+                h.render();
+                const table = h.context.document.getElementById('reconcile-table');
+                const hint = table.body.children[0];
+                assert.equal(hint.className, 'reconcile-hint');
+                assert.match(hint.children[0].children[0].textContent, /2 倍.*2:1 拆股/);
+                hint.children[0].children[1].handlers.click();
+                const node = (id) => h.context.document.getElementById(id);
+                assert.equal(node('field-kind').value, 'split');
+                assert.equal(node('field-ratio').value, 2);
             },
         },
     ],

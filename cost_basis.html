@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>综合成本账本 — Option Combo Simulator</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="cost_basis.css?v=7e140c77fe86">
+    <link rel="stylesheet" href="cost_basis.css?v=a0a2c93d74fc">
 </head>
 <body data-option-combo-page="cost-basis">
     <div class="app-shell">
@@ -163,7 +163,7 @@
                                 <div class="field" data-field="right"><label for="field-right">方向</label><select id="field-right"><option value="P">Put</option><option value="C">Call</option></select></div><div class="field" data-field="strike"><label for="field-strike">行权价</label><input id="field-strike" type="number" step="0.01" min="0"></div><div class="field" data-field="expiry"><label for="field-expiry">到期日</label><input id="field-expiry" type="date"></div>
                                 <div class="field" data-field="contracts"><label for="field-action">动作</label><select id="field-action"><option value="">按张数 / 股数正负</option><option value="buy">买入（系统记为正数）</option><option value="sell">卖出（系统记为负数）</option></select><span class="hint">选买入 / 卖出后只需填绝对数量</span></div><div class="field" data-field="contracts"><label for="field-contracts">张数</label><input id="field-contracts" type="number" step="1"><span class="hint">+ 增多头 / 减空头，− 增空头 / 减多头</span></div><div class="field" data-field="sharesPerContract"><label for="field-spc" id="field-spc-label">每张股数</label><input id="field-spc" type="number" min="1" step="1" value="100"></div><div class="field" data-field="shares"><label for="field-shares">股数</label><input id="field-shares" type="number" step="1"><span class="hint">+ 买入 / − 卖出</span></div>
                                 <div class="field" data-field="futureExpiry"><label for="field-future-expiry">FUT 合约月</label><input id="field-future-expiry" type="month"></div><div class="field" data-field="futureContracts"><label for="field-future-contracts">FUT 张数</label><input id="field-future-contracts" type="number" step="1"><span class="hint">买入/持有多头为正，卖出/持有空头为负</span></div><div class="field" data-field="rollToExpiry"><label for="field-roll-to-expiry">换入合约月</label><input id="field-roll-to-expiry" type="month"></div><div class="field" data-field="rollToPrice"><label for="field-roll-to-price">换入价格</label><input id="field-roll-to-price" type="number" step="0.0001" min="0"></div><div class="field" data-field="rollGroup"><label for="field-roll-group">ROLL 标识</label><input id="field-roll-group" type="text" maxlength="128"></div>
-                                <div class="field" data-field="price"><label for="field-price">价格</label><input id="field-price" type="number" step="0.0001" min="0"></div><div class="field" data-field="splitRatio"><label for="field-ratio">拆股比例</label><input id="field-ratio" type="number" step="0.0001" min="0"></div><div class="field"><label for="field-fees">费用</label><input id="field-fees" type="number" step="0.01" min="0" value="0"></div><div class="field"><label for="field-cash">现金（收正付负）</label><input id="field-cash" type="number" step="0.01"><span class="hint" id="cash-hint"></span></div><div class="field"><label for="field-tag">标签</label><input id="field-tag" type="text" maxlength="64" autocomplete="off"><span class="hint">费用退回请填 fee_refund；股息撤回请填 dividend_reversal；股息预扣税请填 withholding_tax（退税 withholding_tax_refund）</span></div><div class="field wide"><label for="field-note">备注</label><input id="field-note" type="text" maxlength="500" autocomplete="off"></div><div class="field checkbox"><label for="field-include" title="取消勾选 = 这条事件整体不参与账本：持仓和现金都不计入，后端校验也不把它当作开仓依据"><input id="field-include" type="checkbox" checked> 参与账本（持仓与现金）</label></div>
+                                <div class="field" data-field="price"><label for="field-price">价格</label><input id="field-price" type="number" step="0.0001" min="0"></div><div class="field" data-field="splitRatio"><label for="field-ratio">拆股比例</label><input id="field-ratio" type="number" step="1" min="2" max="100"><span class="hint">1 股变 n 股就填 n（2:1 填 2）；交易日填除权日</span></div><div class="field wide" data-field="splitRuleRef"><label for="field-split-rule">规则来源</label><input id="field-split-rule" type="text" maxlength="128" autocomplete="off" placeholder="如 OCC #57592"><span class="hint">OCC 信息备忘录编号。新行权价按整数分、半数进位推导，请与备忘录的行权价表核对</span></div><div class="field wide" data-field="splitPreview"><div id="split-preview" class="split-preview" aria-live="polite"></div></div><div class="field" data-hide-for-split><label for="field-fees">费用</label><input id="field-fees" type="number" step="0.01" min="0" value="0"></div><div class="field" data-hide-for-split><label for="field-cash">现金（收正付负）</label><input id="field-cash" type="number" step="0.01"><span class="hint" id="cash-hint"></span></div><div class="field" data-hide-for-split><label for="field-tag">标签</label><input id="field-tag" type="text" maxlength="64" autocomplete="off"><span class="hint">费用退回请填 fee_refund；股息撤回请填 dividend_reversal；股息预扣税请填 withholding_tax（退税 withholding_tax_refund）</span></div><div class="field wide"><label for="field-note">备注</label><input id="field-note" type="text" maxlength="500" autocomplete="off"></div><div class="field checkbox" data-hide-for-split><label for="field-include" title="取消勾选 = 这条事件整体不参与账本：持仓和现金都不计入，后端校验也不把它当作开仓依据"><input id="field-include" type="checkbox" checked> 参与账本（持仓与现金）</label></div>
                                 <div class="form-actions"><button id="btn-submit-event" class="primary" type="submit" disabled>写入账本</button><button id="btn-reset-event" type="button">清空</button><span id="entry-message" class="entry-message"></span></div>
                             </form>
                         </div>
@@ -331,7 +331,7 @@
         <p id="premium-expiry-note" class="premium-expiry-note">这是已收取权利金的到期分布，不是到期日再收款，也不是最终盈亏。金额为未平 Short Call / Put 分摊的开仓净收入（含已记开仓费用）；部分平仓后只保留未平部分，不含 Long Option 支出。分摊可能产生不足一美分的金额，明细保留 4 位小数，顶部合计按 2 位小数显示。是否已结算以账本流水为准，过期但尚无结算记录的仓位仍列在这里。</p>
     </dialog>
 
-    <script src="js/cost_basis_core.js?v=450596231937"></script>
+    <script src="js/cost_basis_core.js?v=d0987d837026"></script>
     <script src="js/american_binomial.js?v=a49313f2567b"></script>
     <script src="js/cost_basis_import.js?v=26be6c5acd9a"></script>
     <script src="js/market_curves.js?v=f15898beaf0c"></script>
@@ -339,6 +339,6 @@
     <script src="js/cost_basis_stress_core.js?v=76e942b27d9d"></script>
     <script src="js/cost_basis_stress_band.js?v=6f716f8dc838"></script>
     <script src="js/cost_basis_stress_worker.js?v=3d63d7e54061"></script>
-    <script src="js/cost_basis.js?v=f0f462190ada"></script>
+    <script src="js/cost_basis.js?v=2fdb9f4e56af"></script>
 </body>
 </html>
