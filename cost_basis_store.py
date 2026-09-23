@@ -85,6 +85,7 @@ EVENT_KINDS = (
     'manual_adjust',
     'futures_trade',
     'futures_roll',
+    'option_split',
 )
 
 OPTION_KINDS = frozenset({
@@ -106,11 +107,13 @@ DELIVERY_KINDS = frozenset({
 
 FUTURE_KINDS = frozenset({'futures_trade', 'futures_roll'})
 
-# Split groups (CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md §15). Schema v10
-# can store them, but no write path accepts them until the replay and the
-# group checks exist: `option_split` is deliberately absent from EVENT_KINDS
-# and any split-group field is refused by _validate_event_shape.
-STORED_ONLY_EVENT_KINDS = ('option_split',)
+# Split groups (CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md §15). One
+# standard forward split is a group of rows sharing split_group: a `split`
+# header (ratio, rule reference, rounding) and one `option_split` row per open
+# option series. Groups are written and voided only as a whole
+# (append_split_group / void_split_group) and are checked by
+# _validate_split_groups after every write that touches their account.
+SPLIT_ROUNDING_MODES = ('half_up_cent',)
 SPLIT_GROUP_FIELDS = (
     'split_group', 'split_rule_ref', 'split_rounding', 'split_to_strike',
     'split_to_contracts', 'split_to_con_id', 'split_to_local_symbol',
@@ -772,6 +775,9 @@ def _split_epoch_of(conn, book_id, account):
         return None
 
     def epoch_of(row):
+        side = row.get('side') if isinstance(row, dict) else None
+        if side == 'split_in':
+            return bisect_left(dates, row['trade_date']) + 1
         if row['split_group']:
             return bisect_left(dates, row['trade_date'])
         return bisect_right(dates, row['trade_date'])
@@ -840,6 +846,22 @@ def _option_root(local_symbol):
         return occ.group(1)
     lead = re.match(r'[A-Z0-9][A-Z0-9.\-]*', text)
     return lead.group(0) if lead else ''
+
+
+def _refuse_split_group_rows(rows):
+    """Split groups are written and voided only as a whole group."""
+    for row in rows:
+        if row['kind'] == 'option_split' or row['split_group'] is not None:
+            raise InvalidRequestError(
+                'a split with its option conversions is recorded as one split group '
+                '(append_split_group), not row by row or from a statement')
+
+
+def _row_strikes(row):
+    """The strikes one option row touches: an option_split touches two."""
+    if row['kind'] == 'option_split':
+        return [row['strike'], row['split_to_strike']]
+    return [row['strike']]
 
 
 def _option_movements(row):
@@ -1020,9 +1042,83 @@ def derive_cash_amount(event):
         return round(-(float(shares) * float(strike)) - fees, 6)
     if kind == 'option_expiry':
         return round(-fees, 6)
-    if kind == 'split':
+    if kind in ('split', 'option_split'):
         return 0.0
     return None
+
+
+def _validate_split_group_row(event, kind, book):
+    """Shape of one split-group row; the group as a whole is checked later.
+
+    Everything a standard split implies is derived and compared here rather
+    than trusted: the destination strike is the integer-cent rule applied to
+    the source strike, and the incoming contracts are the outgoing ones
+    times the ratio with the sign flipped.
+    """
+    if str(book.get('secType') or 'STK').upper() != 'STK':
+        raise InvalidRequestError('split groups apply to STK ledgers only')
+    if not event['split_group']:
+        raise InvalidRequestError(f'{kind} in a split group requires splitGroup')
+    if not event['account']:
+        raise InvalidRequestError('a split group must belong to one account')
+    if event['broker_timestamp'] is not None:
+        raise InvalidRequestError(
+            'a split group applies at the open of its trade date and carries no '
+            'broker time')
+    if abs(event['cash_amount']) > 1e-9 or event['fees']:
+        raise InvalidRequestError('a split group moves no cash and no fees')
+    if not event['include_in_cost']:
+        raise InvalidRequestError('a split group cannot be excluded row by row')
+    if event['price'] is not None or event['shares'] is not None:
+        raise InvalidRequestError('a split group row carries no price or shares')
+    ratio = event['split_ratio']
+    if not _is_standard_split_ratio(ratio):
+        raise InvalidRequestError(
+            f'a split group needs an integer forward ratio between 2 and {MAX_SPLIT_RATIO}')
+    event['split_ratio'] = float(ratio)
+    option_fields = ('right', 'strike', 'expiry', 'con_id', 'local_symbol',
+                     'option_sec_type', 'shares_per_contract', 'contracts')
+    target_fields = ('split_to_strike', 'split_to_contracts', 'split_to_con_id',
+                     'split_to_local_symbol')
+    if kind == 'split':
+        if not event['split_rule_ref']:
+            raise InvalidRequestError(
+                'a split group header requires splitRuleRef (for example the OCC memo)')
+        if event['split_rounding'] not in SPLIT_ROUNDING_MODES:
+            raise InvalidRequestError(
+                'splitRounding must be one of ' + ', '.join(SPLIT_ROUNDING_MODES))
+        if any(event[field] is not None for field in option_fields + target_fields) \
+                or event['split_standard_confirmed']:
+            raise InvalidRequestError('a split group header carries no option series')
+        return
+    if event['split_rule_ref'] is not None or event['split_rounding'] is not None:
+        raise InvalidRequestError(
+            'the rule reference and rounding live on the split group header only')
+    for field, name in (('right', 'right'), ('strike', 'strike'), ('expiry', 'expiry'),
+                        ('split_to_strike', 'splitToStrike'),
+                        ('split_to_contracts', 'splitToContracts')):
+        if event[field] is None:
+            raise InvalidRequestError(f'option_split requires {name}')
+    if (event['option_sec_type'] or 'OPT') != 'OPT':
+        raise InvalidRequestError('option_split converts equity options (OPT) only')
+    event['option_sec_type'] = 'OPT'
+    if event['shares_per_contract'] is None:
+        event['shares_per_contract'] = book['defaultSharesPerContract']
+    _require_nonzero(event['contracts'], 'contracts')
+    source_cents = _strike_cents(event['strike'])
+    if source_cents is None:
+        raise InvalidRequestError('option_split needs a whole-cent source strike')
+    target_cents = _split_strike_cents(source_cents, ratio)
+    if target_cents is None or _strike_cents(event['split_to_strike']) != target_cents:
+        raise InvalidRequestError(
+            f"splitToStrike must be {(target_cents or 0) / 100:g}: the source strike "
+            f"{event['strike']:g} divided by {ratio:g} in integer cents, rounded half up")
+    event['split_to_strike'] = target_cents / 100
+    expected = -event['contracts'] * ratio
+    if abs(event['split_to_contracts'] - expected) > 1e-9:
+        raise InvalidRequestError(
+            f"splitToContracts must be {expected:g}: the outgoing contracts times "
+            f"{ratio:g}, keeping the position's direction")
 
 
 def _validate_event_shape(payload, book):
@@ -1111,11 +1207,11 @@ def _validate_event_shape(payload, book):
         'note': _optional_text(payload.get('note'), 'note', MAX_NOTE_CHARS),
     }
 
-    if any(event[field] is not None for field in SPLIT_GROUP_FIELDS) \
+    if kind == 'option_split' or (kind == 'split' and event['split_group'] is not None):
+        _validate_split_group_row(event, kind, book)
+    elif any(event[field] is not None for field in SPLIT_GROUP_FIELDS) \
             or event['split_standard_confirmed']:
-        raise InvalidRequestError(
-            'split groups cannot be written yet; record the split as a '
-            'plain split row')
+        raise InvalidRequestError('split-group fields belong only to split group rows')
 
     if event['price'] is not None and event['price'] < 0 \
             and kind not in FUTURE_KINDS:
@@ -2216,6 +2312,7 @@ class CostBasisStore:
             event = _bind_event_to_book_account(event, book)
             event = self._resolve_shares_per_contract(conn, book_id, event)
             normalized = _validate_event_shape(event, book)
+            _refuse_split_group_rows([normalized])
             conn.execute('BEGIN IMMEDIATE')
             try:
                 replay = conn.execute(
@@ -2431,54 +2528,113 @@ class CostBasisStore:
         }
 
     def _validate_contract_timeline(self, conn, book_id, row):
-        """Replay one contract's timeline and refuse any stranded close."""
-        if row['kind'] not in OPTION_KINDS:
+        """Replay one contract's timeline and refuse any stranded close.
+
+        An option_split row touches two contracts: the series it empties and
+        the adjusted series it fills. Both timelines are replayed.
+        """
+        if row['kind'] not in OPTION_KINDS and row['kind'] != 'option_split':
             return
+        for strike in _row_strikes(row):
+            self._replay_contract_key(
+                conn, book_id, row['account'], row['right'], strike, row['expiry'],
+                row['shares_per_contract'], voiding=True)
+
+    def _contract_key_movements(self, conn, book_id, account, right, strike, expiry,
+                                shares_per_contract):
+        """Every active position change of one structural contract, in order.
+
+        An option_split row contributes its outgoing half to the source key
+        and its incoming half to the destination key (_option_movements).
+        """
         rows = conn.execute(
             'SELECT event_id, kind, trade_date, broker_timestamp, seq, contracts, '
-            'con_id, local_symbol, tag, allow_overdraw, split_group '
+            'con_id, local_symbol, tag, allow_overdraw, split_group, strike, '
+            'split_to_strike, split_to_contracts, split_to_con_id, split_to_local_symbol '
             'FROM cost_basis_events '
-            'WHERE book_id = ? AND account = ? AND right = ? AND strike = ? '
-            'AND expiry = ? AND shares_per_contract IS ? AND voided_at_utc IS NULL '
+            'WHERE book_id = ? AND account = ? AND right = ? AND expiry = ? '
+            'AND shares_per_contract IS ? AND voided_at_utc IS NULL '
+            # An excluded row is out of the ledger for the browser's engine;
+            # it must not back a close here either, or a row the store
+            # accepts is one the engine then refuses.
             'AND include_in_cost = 1 '
+            "AND (strike = ? OR (kind = 'option_split' AND split_to_strike = ?)) "
             f'ORDER BY {_EVENT_ORDER_SQL}',
-            (book_id, row['account'], row['right'], row['strike'], row['expiry'],
-             row['shares_per_contract']),
+            (book_id, account, right, expiry, shares_per_contract, strike, strike),
         ).fetchall()
+        movements = []
+        for row in rows:
+            base = {key: row[key] for key in (
+                'event_id', 'kind', 'trade_date', 'broker_timestamp', 'seq', 'tag',
+                'allow_overdraw', 'split_group')}
+            if row['kind'] != 'option_split':
+                movements.append({**base, 'side': 'trade', 'contracts': row['contracts'],
+                                  'con_id': row['con_id'], 'local_symbol': row['local_symbol']})
+                continue
+            if row['strike'] == strike:
+                movements.append({**base, 'side': 'split_out', 'contracts': row['contracts'],
+                                  'con_id': row['con_id'], 'local_symbol': row['local_symbol']})
+            if row['split_to_strike'] == strike:
+                movements.append({**base, 'side': 'split_in',
+                                  'contracts': row['split_to_contracts'],
+                                  'con_id': row['split_to_con_id'],
+                                  'local_symbol': row['split_to_local_symbol']})
+        return movements
+
+    def _replay_contract_key(self, conn, book_id, account, right, strike, expiry,
+                             shares_per_contract, *, voiding=False):
+        """Replay one contract and refuse any close that nothing backs.
+
+        Back-dating is legitimate - you record history out of order - but a
+        back-dated close can strand a *later* assignment that no longer has
+        a short position behind it, and removing an opening strands every
+        close that stood on it. The whole timeline is replayed either way.
+        The outgoing half of an option_split is a close that may never
+        overdraw: a split moves a position, it cannot create one.
+        """
+        warnings = []
+        movements = self._contract_key_movements(
+            conn, book_id, account, right, strike, expiry, shares_per_contract)
+        epoch_of = _split_epoch_of(conn, book_id, account)
         positions = {}
-        epoch_of = _split_epoch_of(conn, book_id, row['account'])
-        for item, identity, ambiguous in _resolve_contract_identity_rows(rows, epoch_of):
+        for item, identity, ambiguous in _resolve_contract_identity_rows(movements, epoch_of):
             if ambiguous:
+                if voiding:
+                    raise InvalidRequestError(
+                        'voiding would leave an option event with an ambiguous '
+                        'contract identity; add conId or an exact localSymbol')
                 raise InvalidRequestError(
-                    'voiding would leave an option event with an ambiguous '
-                    'contract identity; add conId or an exact localSymbol')
+                    'option event needs conId or an exact localSymbol because '
+                    'multiple real contracts share its account, right, strike, '
+                    'expiry and multiplier')
             position = positions.get(identity, 0.0)
             contracts = float(item['contracts'] or 0)
             self._validate_mixed_option_trade(item, position, contracts)
             if (item['kind'] == 'option_trade' and item['tag'] == 'ibkr_open'
                     and abs(position) > 1e-9 and position * contracts < 0):
+                if voiding:
+                    raise PositionOverdrawError(
+                        f"voiding would leave IBKR O trade on {item['trade_date']} "
+                        'opposite an existing position')
                 raise PositionOverdrawError(
-                    f"voiding would leave IBKR O trade on {item['trade_date']} "
-                    'opposite an existing position')
-            if item['kind'] in CLOSING_KINDS or (
-                    item['kind'] == 'option_trade'
-                    and item['tag'] == 'ibkr_close'):
-                broker_close = item['kind'] == 'option_trade' \
-                    and item['tag'] == 'ibkr_close'
-                allowed = bool(item['allow_overdraw']) and not broker_close
-                if contracts > 0 and position > -contracts + 1e-9:
-                    if not allowed:
-                        raise PositionOverdrawError(
-                            f"voiding this row would leave the {item['kind']} on "
-                            f"{item['trade_date']} without an opening behind it"
-                        )
-                if contracts < 0 and position < -contracts - 1e-9:
-                    if not allowed:
-                        raise PositionOverdrawError(
-                            f"voiding this row would leave the {item['kind']} on "
-                            f"{item['trade_date']} without an opening behind it"
-                        )
+                    f"IBKR O trade on {item['trade_date']} opposes the existing "
+                    f'{position:g} contracts; it cannot be treated as a close')
+            broker_close = item['kind'] == 'option_trade' and item['tag'] == 'ibkr_close'
+            split_out = item['side'] == 'split_out'
+            if item['kind'] in CLOSING_KINDS or broker_close or split_out:
+                # A closing event must be backed by an opposite-signed
+                # position of at least its own size.
+                allowed = bool(item['allow_overdraw']) and not broker_close and not split_out
+                overdraw = ((contracts > 0 and position > -contracts + 1e-9)
+                            or (contracts < 0 and position < -contracts - 1e-9))
+                if overdraw and voiding and not allowed:
+                    raise PositionOverdrawError(
+                        f"voiding this row would leave the {item['kind']} on "
+                        f"{item['trade_date']} without an opening behind it")
+                if overdraw and not voiding:
+                    self._raise_or_warn_overdraw(item, position, contracts, allowed, warnings)
             positions[identity] = position + contracts
+        return warnings
 
     def _validate_futures_timeline(self, conn, book_id, account):
         """Replay every FUT movement for one account and prove each roll.
@@ -2569,70 +2725,20 @@ class CostBasisStore:
             shares < -1e-9 for shares in positions.values()) else []
 
     def _validate_timeline(self, conn, book_id, normalized, *,
-                           check_share_warning=True):
+                           check_share_warning=True, check_split_groups=True):
         """Re-run the affected contract's timeline after the insert.
 
-        Back-dating is legitimate - you record history out of order - but a
-        back-dated close can strand a *later* assignment that no longer has
-        a short position behind it. Checking only the tail would let that
-        through, so the whole contract timeline is replayed and any stranded
-        closing event fails the write.
+        shares_per_contract is part of the identity: an adjusted contract
+        must not be validated against the standard one. A write in an
+        account with split groups also re-proves every group, because a
+        back-dated row can change what was open at a split.
         """
         warnings = []
-        if normalized['kind'] in OPTION_KINDS:
-            # shares_per_contract is part of the identity: an adjusted
-            # contract must not be validated against the standard one.
-            key_fields = (
-                book_id, normalized['account'], normalized['right'],
-                normalized['strike'], normalized['expiry'],
-                normalized['shares_per_contract'],
-            )
-            rows = conn.execute(
-                'SELECT event_id, kind, trade_date, broker_timestamp, seq, '
-                'contracts, con_id, '
-                'local_symbol, tag, allow_overdraw, split_group '
-                'FROM cost_basis_events '
-                'WHERE book_id = ? AND account = ? AND right = ? AND strike = ? '
-                'AND expiry = ? AND shares_per_contract IS ? AND voided_at_utc IS NULL '
-                # An excluded row is out of the ledger for the browser's
-                # engine; it must not back a close here either, or a row
-                # the store accepts is one the engine then refuses.
-                'AND include_in_cost = 1 '
-                f'ORDER BY {_EVENT_ORDER_SQL}',
-                key_fields,
-            ).fetchall()
-            positions = {}
-            epoch_of = _split_epoch_of(conn, book_id, normalized['account'])
-            for row, identity, ambiguous in _resolve_contract_identity_rows(rows, epoch_of):
-                if ambiguous:
-                    raise InvalidRequestError(
-                        'option event needs conId or an exact localSymbol because '
-                        'multiple real contracts share its account, right, strike, '
-                        'expiry and multiplier')
-                position = positions.get(identity, 0.0)
-                contracts = float(row['contracts'] or 0)
-                self._validate_mixed_option_trade(row, position, contracts)
-                if (row['kind'] == 'option_trade' and row['tag'] == 'ibkr_open'
-                        and abs(position) > 1e-9 and position * contracts < 0):
-                    raise PositionOverdrawError(
-                        f"IBKR O trade on {row['trade_date']} opposes the existing "
-                        f'{position:g} contracts; it cannot be treated as a close')
-                broker_close = row['kind'] == 'option_trade' \
-                    and row['tag'] == 'ibkr_close'
-                if row['kind'] in CLOSING_KINDS or broker_close:
-                    # A closing event must be backed by an opposite-signed
-                    # position of at least its own size.
-                    if contracts > 0 and position > -contracts + 1e-9:
-                        self._raise_or_warn_overdraw(
-                            row, position, contracts,
-                            False if broker_close else bool(row['allow_overdraw']),
-                            warnings)
-                    elif contracts < 0 and position < -contracts - 1e-9:
-                        self._raise_or_warn_overdraw(
-                            row, position, contracts,
-                            False if broker_close else bool(row['allow_overdraw']),
-                            warnings)
-                positions[identity] = position + contracts
+        if normalized['kind'] in OPTION_KINDS or normalized['kind'] == 'option_split':
+            for strike in _row_strikes(normalized):
+                warnings.extend(self._replay_contract_key(
+                    conn, book_id, normalized['account'], normalized['right'], strike,
+                    normalized['expiry'], normalized['shares_per_contract']))
 
         if check_share_warning \
                 and (normalized['shares'] is not None
@@ -2641,6 +2747,8 @@ class CostBasisStore:
         if normalized['kind'] in FUTURE_KINDS \
                 or normalized['future_contracts'] is not None:
             self._validate_futures_timeline(conn, book_id, normalized['account'])
+        if check_split_groups:
+            self._validate_split_groups(conn, book_id, normalized['account'])
         return warnings
 
     def _validate_batch_timelines(self, conn, book_id, rows):
@@ -2654,19 +2762,224 @@ class CostBasisStore:
         warnings = []
         options = set()
         futures_accounts = set()
+        accounts = set()
         for row in rows:
-            if row['kind'] in OPTION_KINDS:
-                key = (row['account'], row['right'], row['strike'], row['expiry'],
-                       row['shares_per_contract'])
-                if key not in options:
-                    options.add(key)
-                    warnings.extend(self._validate_timeline(
-                        conn, book_id, row, check_share_warning=False))
+            accounts.add(row['account'])
+            if row['kind'] in OPTION_KINDS or row['kind'] == 'option_split':
+                for strike in _row_strikes(row):
+                    key = (row['account'], row['right'], strike, row['expiry'],
+                           row['shares_per_contract'])
+                    if key not in options:
+                        options.add(key)
+                        warnings.extend(self._replay_contract_key(conn, book_id, *key))
             if row['kind'] in FUTURE_KINDS or row['future_contracts'] is not None:
                 futures_accounts.add(row['account'])
         for account in futures_accounts:
             self._validate_futures_timeline(conn, book_id, account)
+        for account in accounts:
+            self._validate_split_groups(conn, book_id, account)
         return warnings
+
+    def _validate_split_groups(self, conn, book_id, account):
+        """Prove every split group of one account against the replayed ledger.
+
+        A group is one standard n:1 split: exactly one `split` header and one
+        `option_split` row per option series that was open at the open of
+        the effective date. Replaying the account's option positions up to
+        each group, every such series (expiring on or after that date) must
+        be converted exactly once and emptied completely, and no two series
+        may land on one adjusted contract. A partial close is not a split,
+        so "not more than open" is not enough: the source must end at zero.
+        Legacy split rows are checked only for colliding with a group.
+        """
+        partial = conn.execute(
+            'SELECT split_group FROM cost_basis_events WHERE book_id = ? AND account = ? '
+            'AND split_group IS NOT NULL GROUP BY split_group '
+            'HAVING count(DISTINCT voided_at_utc IS NULL) > 1',
+            (book_id, account)).fetchone()
+        if partial is not None:
+            raise InvalidRequestError(
+                f"split group {partial['split_group']} is partly voided; void or keep "
+                'the whole group')
+        rows = conn.execute(
+            'SELECT * FROM cost_basis_events WHERE book_id = ? AND account = ? '
+            'AND voided_at_utc IS NULL AND include_in_cost = 1 AND kind IN ('
+            "'option_trade','option_assignment','option_exercise','option_expiry',"
+            "'option_split','split') "
+            f'ORDER BY {_EVENT_ORDER_SQL}',
+            (book_id, account)).fetchall()
+        groups = {}
+        for row in rows:
+            if row['split_group']:
+                group = groups.setdefault(row['split_group'], {'headers': [], 'legs': []})
+                (group['headers'] if row['kind'] == 'split' else group['legs']).append(row)
+        if not groups:
+            return
+        legacy_dates = {row['trade_date'] for row in conn.execute(
+            "SELECT trade_date FROM cost_basis_events WHERE book_id = ? AND kind = 'split' "
+            'AND split_group IS NULL AND voided_at_utc IS NULL AND include_in_cost = 1 '
+            "AND account IN (?, '')", (book_id, account)).fetchall()}
+        group_dates = {}
+        for group_id, group in groups.items():
+            if len(group['headers']) != 1:
+                raise InvalidRequestError(
+                    f'split group {group_id} needs exactly one split header row')
+            header = group['headers'][0]
+            date = header['trade_date']
+            for leg in group['legs']:
+                if leg['trade_date'] != date or leg['split_ratio'] != header['split_ratio']:
+                    raise InvalidRequestError(
+                        f'every row of split group {group_id} must share its date and ratio')
+            if date in group_dates:
+                raise InvalidRequestError(
+                    f'{account} already has a split group on {date}; one split per day')
+            if date in legacy_dates:
+                raise InvalidRequestError(
+                    f'a plain split row already records a split on {date}; void it '
+                    'before recording the split group')
+            group_dates[date] = group_id
+        dates = sorted(group_dates)
+
+        # Every option movement with its structural key and split epoch.
+        entries = []
+        by_key = {}
+        for row in rows:
+            if row['kind'] == 'split':
+                entries.append({'row': row})
+                continue
+            grouped = bool(row['split_group'])
+            for movement in _option_movements(row):
+                side = movement['side']
+                if side == 'split_in':
+                    epoch = bisect_left(dates, row['trade_date']) + 1
+                elif grouped:
+                    epoch = bisect_left(dates, row['trade_date'])
+                else:
+                    epoch = bisect_right(dates, row['trade_date'])
+                key = (movement['right'], float(movement['strike']), movement['expiry'],
+                       movement['shares_per_contract'])
+                entry = {**movement, 'row': row, 'key': key, 'epoch': epoch}
+                entries.append(entry)
+                by_key.setdefault(key, []).append(entry)
+        for key, items in by_key.items():
+            for item, identity, ambiguous in _resolve_contract_identity_rows(
+                    items, lambda entry: entry['epoch']):
+                if ambiguous:
+                    raise InvalidRequestError(
+                        'option event needs conId or an exact localSymbol because '
+                        'multiple real contracts share its account, right, strike, '
+                        'expiry and multiplier')
+                item['position_key'] = (key, identity)
+
+        def describe(key):
+            right, strike, expiry, _ = key
+            return f'{right}{strike:g} {expiry}'
+
+        positions = {}
+        epochs = {}
+        applied = set()
+        for entry in entries:
+            row = entry['row']
+            group_id = row['split_group']
+            if not group_id:
+                if 'position_key' in entry:
+                    position_key = entry['position_key']
+                    positions[position_key] = positions.get(position_key, 0.0) \
+                        + float(entry['contracts'] or 0)
+                    epochs[position_key] = entry['epoch']
+                continue
+            if group_id in applied:
+                continue
+            applied.add(group_id)
+            group = groups[group_id]
+            date = group['headers'][0]['trade_date']
+            before = bisect_left(dates, date)
+            legs = {}
+            for leg_entry in (item for item in entries
+                              if item['row']['split_group'] == group_id and 'side' in item):
+                legs.setdefault(leg_entry['row']['event_id'], {})[leg_entry['side']] = leg_entry
+            sources = {}
+            targets = set()
+            for pair in legs.values():
+                out, into = pair['split_out'], pair['split_in']
+                source, target = out['position_key'], into['position_key']
+                held = positions.get(source, 0.0)
+                moved = float(out['contracts'] or 0)
+                if source in sources:
+                    raise InvalidRequestError(
+                        f'split group on {date} converts {describe(out["key"])} twice')
+                if abs(held) <= 1e-9:
+                    raise InvalidRequestError(
+                        f'split group on {date} converts {describe(out["key"])}, '
+                        'but nothing is open there')
+                if abs(held + moved) > 1e-9:
+                    raise InvalidRequestError(
+                        f'split group on {date} moves {-moved:g} of {describe(out["key"])} '
+                        f'while {held:g} is open; a split moves the whole position')
+                if target in targets:
+                    raise InvalidRequestError(
+                        f'split group on {date} converts two series into '
+                        f'{describe(into["key"])}')
+                sources[source] = (out, into)
+                targets.add(target)
+            expiry_floor = date.replace('-', '')
+            for position_key, held in positions.items():
+                if abs(held) <= 1e-9 or epochs.get(position_key) != before:
+                    continue
+                key = position_key[0]
+                if key[2] and key[2] < expiry_floor:
+                    continue
+                if position_key not in sources:
+                    raise InvalidRequestError(
+                        f'split group on {date} leaves {held:g} of {describe(key)} '
+                        'unconverted; every option series open at the split must move')
+            for source, (out, into) in sources.items():
+                positions[source] = positions.get(source, 0.0) + float(out['contracts'])
+                target = into['position_key']
+                positions[target] = positions.get(target, 0.0) + float(into['contracts'])
+                epochs[target] = into['epoch']
+
+    def _check_standard_split_legs(self, conn, book, rows):
+        """A1 converts only the standard option class of the ledger's symbol.
+
+        The class is read from option symbols (`TQQQ` vs the adjusted
+        `2TQQQ`): the leg's own and every earlier row of the same series.
+        A series with no symbol on record needs the operator's explicit
+        confirmation, recorded on the leg; the deliverable must be the
+        ledger's standard contract size.
+        """
+        symbol = str(book['symbol']).upper()
+        for leg in rows:
+            if leg['kind'] != 'option_split':
+                continue
+            label = f"{leg['right']}{leg['strike']:g} {leg['expiry']}"
+            if leg['shares_per_contract'] != book['defaultSharesPerContract']:
+                raise InvalidRequestError(
+                    f"{label} delivers {leg['shares_per_contract']} shares per contract; "
+                    'only the standard contract can be converted by a split group')
+            history = conn.execute(
+                'SELECT DISTINCT local_symbol FROM cost_basis_events WHERE book_id = ? '
+                'AND account = ? AND right = ? AND strike = ? AND expiry = ? '
+                'AND shares_per_contract IS ? AND trade_date < ? AND voided_at_utc IS NULL '
+                'AND local_symbol IS NOT NULL',
+                (book['bookId'], leg['account'], leg['right'], leg['strike'], leg['expiry'],
+                 leg['shares_per_contract'], leg['trade_date'])).fetchall()
+            symbols = {row['local_symbol'] for row in history}
+            if leg['local_symbol']:
+                symbols.add(leg['local_symbol'])
+            foreign = sorted({_option_root(item) for item in symbols} - {symbol})
+            if foreign:
+                raise InvalidRequestError(
+                    f"{label} is recorded as option class {', '.join(foreign)}; a split group "
+                    f'converts only the standard {symbol} class')
+            if not symbols and not leg['split_standard_confirmed']:
+                raise InvalidRequestError(
+                    f'{label} has no option symbol on record; confirm it is the standard '
+                    f'{symbol} class (splitStandardConfirmed) before converting it')
+            if leg['split_to_local_symbol'] \
+                    and _option_root(leg['split_to_local_symbol']) != symbol:
+                raise InvalidRequestError(
+                    f"{label}: the adjusted contract's symbol names another option class")
 
     @staticmethod
     def _validate_mixed_option_trade(row, position, contracts):
@@ -2742,14 +3055,15 @@ class CostBasisStore:
         ).fetchall()
         current_contracts = 0.0
         for active_row in active_rows:
-            active = _event_row_to_dict(active_row)
-            if contract_key(active) != contract_key(descriptor):
-                continue
-            active_con_id = active.get('conId')
-            if (proof_con_id and active_con_id
-                    and str(proof_con_id) != str(active_con_id)):
-                continue
-            current_contracts += float(active.get('contracts') or 0)
+            # A split conversion counts on both contracts it touches.
+            for movement in _option_movements(active_row):
+                if contract_key(movement) != contract_key(descriptor):
+                    continue
+                active_con_id = movement['con_id']
+                if (proof_con_id and active_con_id
+                        and str(proof_con_id) != str(active_con_id)):
+                    continue
+                current_contracts += float(movement['contracts'] or 0)
         if abs(current_contracts - ledger_contracts) >= 1e-6:
             raise InvalidRequestError(
                 'the ledger changed after the TWS reconciliation preview')
@@ -3185,6 +3499,7 @@ class CostBasisStore:
             self._require_book_identity(book, book_identity)
             normalized_rows = self._normalize_event_batch(
                 conn, book_id, events, book, include_existing_history=True)
+            _refuse_split_group_rows(normalized_rows)
             conn.execute('BEGIN IMMEDIATE')
             try:
                 existing_batch = conn.execute(
@@ -3390,6 +3705,159 @@ class CostBasisStore:
         finally:
             conn.close()
 
+    def append_split_group(self, book_id, events, *, client_token,
+                           expected_ledger_version=None, book_identity=None):
+        """Record one standard split and its option conversions atomically.
+
+        `events` is the header `split` row plus one `option_split` row per
+        option series open at the split (see the core's planSplitGroup). The
+        server names the group from the client token, so a retry finds the
+        committed group instead of recording the split twice. Every row is
+        re-derived and every group invariant is proven against the stored
+        ledger inside the write transaction; nothing from the client is
+        trusted, and a failure writes nothing.
+        """
+        _require_token('clientToken', client_token)
+        if not isinstance(events, list) or not events:
+            raise InvalidRequestError('events must be a non-empty list')
+        if len(events) > MAX_IMPORT_EVENTS:
+            raise InvalidRequestError(
+                f'a split group is limited to {MAX_IMPORT_EVENTS} rows')
+        group_id = f'split-{client_token}'
+        conn = self._connect()
+        try:
+            book = self._get_book(conn, book_id)
+            self._require_book_identity(book, book_identity)
+            if not str(book.get('account') or '').strip():
+                raise InvalidRequestError(
+                    'split groups need a single-account ledger; this legacy ledger mixes accounts')
+            normalized = []
+            for item in events:
+                if not isinstance(item, dict) or item.get('kind') not in ('split', 'option_split'):
+                    raise InvalidRequestError(
+                        'a split group holds one split row and option_split rows only')
+                if item.get('splitGroup') not in (None, '', group_id):
+                    raise InvalidRequestError('the server names the split group')
+                normalized.append(_validate_event_shape(
+                    _bind_event_to_book_account({**item, 'splitGroup': group_id}, book), book))
+            headers = [row for row in normalized if row['kind'] == 'split']
+            if len(headers) != 1:
+                raise InvalidRequestError('a split group needs exactly one split row')
+            header = headers[0]
+            for row in normalized:
+                if row['trade_date'] != header['trade_date'] \
+                        or row['split_ratio'] != header['split_ratio']:
+                    raise InvalidRequestError(
+                        'every row of a split group shares its date and ratio')
+            ordered = [header] + [row for row in normalized if row is not header]
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                replay = conn.execute(
+                    'SELECT * FROM cost_basis_events WHERE book_id = ? AND split_group = ? '
+                    'ORDER BY seq', (book_id, group_id)).fetchall()
+                if replay:
+                    conn.execute('ROLLBACK')
+                    return {
+                        'bookId': book_id, 'splitGroup': group_id,
+                        'events': [_event_row_to_dict(row) for row in replay],
+                        'warnings': [], 'idempotentReplay': True,
+                    }
+                if conn.execute('SELECT 1 FROM cost_basis_events WHERE client_token = ?',
+                                (f'{client_token}-00000',)).fetchone() is not None:
+                    raise InvalidRequestError('clientToken has already been used')
+                self._require_ledger_version(conn, book_id, expected_ledger_version)
+                self._check_standard_split_legs(conn, book, ordered)
+                for index, row in enumerate(ordered):
+                    self._insert_event(
+                        conn, book, row, client_token=f'{client_token}-{index:05d}',
+                        allow_overdraw=False, check_share_warning=False,
+                        validate_timeline=False)
+                warnings = self._validate_batch_timelines(conn, book_id, ordered)
+                warnings.extend(self._net_short_share_warnings(conn, book_id))
+                self._invalidate_coverage(conn, book_id, header['trade_date'])
+                stored = conn.execute(
+                    'SELECT * FROM cost_basis_events WHERE book_id = ? AND split_group = ? '
+                    'ORDER BY seq', (book_id, group_id)).fetchall()
+                conn.execute('COMMIT')
+            except BaseException:
+                self._rollback_quietly(conn)
+                raise
+            return {
+                'bookId': book_id, 'splitGroup': group_id,
+                'events': [_event_row_to_dict(row) for row in stored],
+                'warnings': sorted(set(warnings)), 'idempotentReplay': False,
+            }
+        except sqlite3.IntegrityError as exc:
+            raise self._map_integrity_error(exc) from exc
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
+    def void_split_group(self, book_id, split_group, *, reason, client_token):
+        """Void every row of one split group together, or nothing.
+
+        Post-split history resolves against the group, so removing it can
+        strand later closes; the same replays that guard a write guard this.
+        """
+        _require_token('clientToken', client_token)
+        split_group = _optional_text(split_group, 'splitGroup', MAX_EXTERNAL_REF_CHARS)
+        if not split_group:
+            raise InvalidRequestError('splitGroup is required')
+        reason = _optional_text(reason, 'reason', MAX_NOTE_CHARS)
+        if not reason:
+            raise InvalidRequestError('a void requires a reason')
+        conn = self._connect()
+        try:
+            self._get_book(conn, book_id)
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                replay = conn.execute(
+                    'SELECT * FROM cost_basis_events WHERE book_id = ? '
+                    'AND voided_by_event_id = ? ORDER BY seq', (book_id, client_token),
+                ).fetchall()
+                if replay:
+                    conn.execute('ROLLBACK')
+                    return {
+                        'bookId': book_id, 'splitGroup': replay[0]['split_group'],
+                        'events': [_event_row_to_dict(row) for row in replay],
+                        'idempotentReplay': True,
+                    }
+                rows = conn.execute(
+                    'SELECT * FROM cost_basis_events WHERE book_id = ? AND split_group = ? '
+                    'ORDER BY seq', (book_id, split_group)).fetchall()
+                if not rows:
+                    conn.execute('ROLLBACK')
+                    raise EventNotFoundError('no split group with that id in this ledger')
+                if all(row['voided_at_utc'] for row in rows):
+                    conn.execute('ROLLBACK')
+                    raise EventAlreadyVoidedError('split group is already voided')
+                conn.execute(
+                    'UPDATE cost_basis_events SET voided_at_utc = ?, voided_by_event_id = ?, '
+                    'void_reason = ? WHERE book_id = ? AND split_group = ? '
+                    'AND voided_at_utc IS NULL',
+                    (self._utc_now_iso(), client_token, reason, book_id, split_group))
+                for row in rows:
+                    self._validate_contract_timeline(conn, book_id, row)
+                self._validate_split_groups(conn, book_id, rows[0]['account'])
+                self._invalidate_coverage(conn, book_id, rows[0]['trade_date'])
+                voided = conn.execute(
+                    'SELECT * FROM cost_basis_events WHERE book_id = ? AND split_group = ? '
+                    'ORDER BY seq', (book_id, split_group)).fetchall()
+                conn.execute('COMMIT')
+            except BaseException:
+                self._rollback_quietly(conn)
+                raise
+            return {
+                'bookId': book_id, 'splitGroup': split_group,
+                'events': [_event_row_to_dict(row) for row in voided],
+                'idempotentReplay': False,
+            }
+        except sqlite3.Error as exc:
+            raise self._map_sqlite_error(exc) from exc
+        finally:
+            conn.close()
+
     def void_event(self, book_id, event_id, *, reason, client_token):
         """Mark one event void. Append-only: the row stays, and the flow
         table can show it, because an audit trail that hides its own
@@ -3430,6 +3898,10 @@ class CostBasisStore:
                 if row['voided_at_utc']:
                     conn.execute('ROLLBACK')
                     raise EventAlreadyVoidedError('event is already voided')
+                if row['split_group']:
+                    conn.execute('ROLLBACK')
+                    raise InvalidRequestError(
+                        'this row belongs to a split group; void the whole group')
                 conn.execute(
                     'UPDATE cost_basis_events SET voided_at_utc = ?, '
                     'voided_by_event_id = ?, void_reason = ? WHERE event_id = ?',
@@ -3443,6 +3915,7 @@ class CostBasisStore:
                 self._validate_contract_timeline(conn, book_id, row)
                 if row['kind'] in FUTURE_KINDS or row['future_contracts'] is not None:
                     self._validate_futures_timeline(conn, book_id, row['account'])
+                self._validate_split_groups(conn, book_id, row['account'])
                 self._invalidate_coverage(conn, book_id, row['trade_date'])
                 voided = conn.execute(
                     'SELECT * FROM cost_basis_events WHERE event_id = ?', (event_id,)
@@ -3626,6 +4099,7 @@ class CostBasisStore:
             # malformed batch never even reaches the delete.
             normalized_rows = self._normalize_event_batch(
                 conn, book_id, events, book, include_existing_history=False)
+            _refuse_split_group_rows(normalized_rows)
 
             conn.execute('BEGIN IMMEDIATE')
             try:
@@ -3879,6 +4353,13 @@ class CostBasisStore:
                         tuple(values[column] for column in _EVENT_COLUMNS),
                     )
                     restored += 1
+                # Rows come back verbatim, but a split group is only meaningful
+                # as a proven whole; a hand-edited backup must not restore half
+                # of one or a conversion the positions do not support.
+                for account_row in conn.execute(
+                        'SELECT DISTINCT account FROM cost_basis_events WHERE book_id = ? '
+                        'AND split_group IS NOT NULL', (book_id,)).fetchall():
+                    self._validate_split_groups(conn, book_id, account_row['account'])
                 conn.execute(
                     'UPDATE cost_basis_books SET updated_at_utc = ? WHERE book_id = ?',
                     (self._utc_now_iso(), book_id))
@@ -3962,7 +4443,9 @@ class CostBasisStore:
                 'future_con_id, future_local_symbol, future_contracts, '
                 'roll_to_expiry, roll_to_con_id, roll_to_local_symbol, '
                 'roll_to_price, roll_group, price, cash_amount, fees, split_ratio, '
-                'include_in_cost, tag, source, external_ref, note '
+                'include_in_cost, tag, source, external_ref, note, split_group, '
+                'split_rule_ref, split_rounding, split_to_strike, split_to_contracts, '
+                'split_to_con_id, split_to_local_symbol, split_standard_confirmed '
                 'FROM cost_basis_events WHERE book_id = ? AND voided_at_utc IS NULL '
                 'ORDER BY seq ASC',
                 (book_id,),

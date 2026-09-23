@@ -70,6 +70,7 @@
         dividend: '股息',
         fee: '费用',
         split: '拆股',
+        option_split: '期权随拆股调整',
         manual_adjust: '手工调整',
         futures_trade: '期货买卖',
         futures_roll: '期货换月',
@@ -98,6 +99,8 @@
         dividend: [],
         fee: [],
         split: ['splitRatio'],
+        // Written only as part of a split group, never through this form.
+        option_split: [],
         // Cash-only by design. Position corrections use typed events so a
         // quantity cannot be accepted by the form and ignored by the core.
         manual_adjust: [],
@@ -580,10 +583,41 @@
             return `${event.expiry || ''} ${event.right || ''}${strike}`.trim()
                 + ` → ${event.futureExpiry || ''} FUT`;
         }
+        if (event.kind === 'option_split') {
+            return `${event.expiry || ''} ${event.right || ''}${event.strike} → `
+                + `${event.right || ''}${event.splitToStrike}`;
+        }
         if (!event.right) return '';
         const strike = event.strike === null || event.strike === undefined
             ? '' : event.strike;
         return `${event.expiry || ''} ${event.right}${strike}`.trim();
+    }
+
+    /**
+     * The flow table's quantity cell. A split shows its ratio; an option
+     * conversion shows the position before and after (a short -2 becomes
+     * -4), not the bookkeeping delta that empties the old series.
+     */
+    function _flowQuantity(event) {
+        if (event.kind === 'split') {
+            return event.splitRatio === null || event.splitRatio === undefined
+                ? '—' : `×${event.splitRatio}`;
+        }
+        if (event.kind === 'option_split') {
+            return `${_quantity(-_numberOrZero(event.contracts))} → `
+                + `${_quantity(event.splitToContracts)}`;
+        }
+        const quantity = event.futureContracts !== null
+            && event.futureContracts !== undefined
+            ? event.futureContracts
+            : (event.contracts !== null && event.contracts !== undefined
+                ? event.contracts : event.shares);
+        return _quantity(quantity);
+    }
+
+    function _numberOrZero(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? number : 0;
     }
 
     // ------------------------------------------------------------------
@@ -4366,6 +4400,22 @@
             return '同一视图同时有多头和空头 FUT，无法用一个综合成本表示';
         }
         if (warning === 'split_ratio_invalid') return '拆股比例无效';
+        if (warning.startsWith('legacy_split_same_day:')) {
+            return `旧式拆股记录排在当天最后，当天拆股后的股票成交会被再乘一次比例，请核对`
+                + `（${warning.split(':')[1]}）`;
+        }
+        if (warning.startsWith('split_group_invalid:')) {
+            return '拆股组结构不完整或与同日的旧式拆股记录重复，未应用'
+                + `（${warning.slice('split_group_invalid:'.length)}）`;
+        }
+        if (warning.startsWith('split_leg_mismatch:')) {
+            return '拆股转换的张数与当时持仓不符，拆股必须整笔转出'
+                + `（${warning.slice('split_leg_mismatch:'.length)}）`;
+        }
+        if (warning.startsWith('split_series_unconverted:')) {
+            return '拆股时仍有未平仓期权没有随拆股转换'
+                + `（${warning.slice('split_series_unconverted:'.length)}）`;
+        }
         if (warning.startsWith('split_crosses_open_option:')) {
             return `拆股跨越未平仓期权，合约条款需人工复核（${warning.split(':')[1]}）`;
         }
@@ -4769,12 +4819,7 @@
                 _cell(row, event.account || '—');
                 _cell(row, _eventKindLabel(event));
                 _cell(row, _describeContract(event));
-                const quantity = event.futureContracts !== null
-                    && event.futureContracts !== undefined
-                    ? event.futureContracts
-                    : (event.contracts !== null && event.contracts !== undefined
-                        ? event.contracts : event.shares);
-                _cell(row, _quantity(quantity), 'numeric');
+                _cell(row, _flowQuantity(event), 'numeric');
                 _cell(row, event.price === null || event.price === undefined
                     ? '—' : _money(event.price, 4), 'numeric');
                 _cell(row, _money(event.cashAmount), 'numeric'
@@ -4827,7 +4872,7 @@
     // Advisory notes (a split across an open option, identity notes) and
     // anything the stored history already carried are shown, never blocking:
     // the store accepted that history, so an unrelated import must not stall.
-    const REPLAY_BLOCKING_WARNING = /^(closes_more_than_open|ibkr_close_open_invalid|ibkr_open_opposes_existing|roll_closes_more_than_open|contract_identity_ambiguous|future_identity_conflict|split_ratio_invalid)(:|$)/;
+    const REPLAY_BLOCKING_WARNING = /^(closes_more_than_open|ibkr_close_open_invalid|ibkr_open_opposes_existing|roll_closes_more_than_open|contract_identity_ambiguous|future_identity_conflict|split_ratio_invalid|split_group_invalid|split_leg_mismatch|split_series_unconverted)(:|$)/;
 
     function importReplayBlockingWarnings(result) {
         const preview = (result && result.ledgerPreview) || {};
@@ -7594,12 +7639,18 @@
     // Export & snapshot
     // ------------------------------------------------------------------
 
+    function _csvValue(value) {
+        return value === null || value === undefined ? '' : value;
+    }
+
     function _exportCsv() {
         if (!state.ledger) return;
         const header = ['tradeDate', 'brokerTimestamp', 'account', 'kind', 'right', 'strike',
             'expiry', 'sharesPerContract', 'conId', 'localSymbol', 'optionSecType',
             'contracts', 'shares', 'futureExpiry', 'futureContracts', 'rollToExpiry',
-            'rollToPrice', 'rollGroup', 'price', 'cashAmount', 'fees', 'runningShares',
+            'rollToPrice', 'rollGroup', 'splitRatio', 'splitGroup', 'splitRuleRef',
+            'splitToStrike', 'splitToContracts', 'splitToConId', 'splitToLocalSymbol',
+            'price', 'cashAmount', 'fees', 'runningShares',
             'runningFuturesContracts',
             'runningCostPerShare', 'source', 'tag', 'includeInCost', 'externalRef', 'note',
             'voidedAtUtc'];
@@ -7623,6 +7674,10 @@
                 event.rollToExpiry || '',
                 event.rollToPrice === null ? '' : event.rollToPrice,
                 event.rollGroup || '',
+                _csvValue(event.splitRatio), event.splitGroup || '',
+                `"${String(event.splitRuleRef || '').replace(/"/g, '""')}"`,
+                _csvValue(event.splitToStrike), _csvValue(event.splitToContracts),
+                _csvValue(event.splitToConId), event.splitToLocalSymbol || '',
                 event.price === null ? '' : event.price,
                 event.cashAmount, event.fees, entry.runningShares,
                 entry.runningFuturesContracts === null

@@ -35,6 +35,8 @@
         'list_cost_basis_events',
         'append_cost_basis_event',
         'void_cost_basis_event',
+        'append_cost_basis_split_group',
+        'void_cost_basis_split_group',
         'import_cost_basis_events',
         'save_cost_basis_snapshot',
         'request_cost_basis_reset_plan',
@@ -57,8 +59,12 @@
     const EVENT_KINDS = Object.freeze([
         'opening_balance', 'share_trade', 'option_trade', 'option_assignment',
         'option_exercise', 'option_expiry', 'dividend', 'fee', 'split',
-        'manual_adjust', 'futures_trade', 'futures_roll',
+        'manual_adjust', 'futures_trade', 'futures_roll', 'option_split',
     ]);
+
+    // Kinds that exist only inside a split group. They are written and voided
+    // with the whole group, never through the single-row entry form.
+    const GROUP_ONLY_EVENT_KINDS = Object.freeze(['option_split']);
 
     // Tax the broker withheld from (or refunded on) this underlying's
     // dividends. Still a fee event for cash purposes; tracked separately so
@@ -511,6 +517,7 @@
             case 'option_expiry':
                 return _round(-fees, 6);
             case 'split':
+            case 'option_split':
                 return 0;
             case 'futures_trade':
             case 'futures_roll':
@@ -581,6 +588,7 @@
             structuralKey: resolved ? resolved.structuralKey : contractKey(descriptor),
             identity: resolved ? resolved.identity : '',
             identityConflict: Boolean(resolved && resolved.ambiguous),
+            splitEpoch: resolved ? resolved.splitEpoch || 0 : 0,
         };
     }
 
@@ -760,19 +768,41 @@
         // Epochs count every applied split group, including ones outside the
         // account filter's rows or the date window: they still divide time.
         const epochs = splitEpochs(ordered);
-        const identityResolution = _buildIdentityResolution(ordered.filter((event) => {
-            if (!event || event.voidedAtUtc || OPTION_KINDS.indexOf(event.kind) < 0) {
-                return false;
-            }
+        // An option_split row is resolved as its two movements: the series it
+        // empties (pre-split epoch) and the adjusted series it fills.
+        const movementsByEvent = new Map();
+        const identityItems = [];
+        ordered.forEach((event) => {
+            if (!event || event.voidedAtUtc) return;
+            if (event.kind !== 'option_split' && OPTION_KINDS.indexOf(event.kind) < 0) return;
             const account = String(event.account || '');
-            if (accountFilter && !accountFilter.has(account)) return false;
-            if (!_inWindow(event, startDate, endDate)) return false;
-            return event.includeInCost !== false || includeExcluded;
-        }), (event) => epochs.get(event)).byItem;
+            if (accountFilter && !accountFilter.has(account)) return;
+            if (!_inWindow(event, startDate, endDate)) return;
+            if (event.includeInCost === false && !includeExcluded) return;
+            if (event.kind === 'option_split') {
+                const movements = optionMovements(event);
+                movementsByEvent.set(event, movements);
+                identityItems.push(...movements);
+            } else {
+                identityItems.push(event);
+            }
+        });
+        const identityResolution = _buildIdentityResolution(identityItems, (item) => {
+            if (item && item.side && item.event) {
+                const before = epochs.get(item.event) || 0;
+                return item.side === 'split_in' ? before + 1 : before;
+            }
+            return epochs.get(item);
+        }).byItem;
+        const splitGroups = _collectSplitGroups(ordered);
+        const splitContext = { epochs, identityResolution, movementsByEvent, applied: new Set() };
+        // The last trade date on which each account moved shares, to flag a
+        // legacy split row that sorts after that day's post-split fills.
+        const lastShareDate = new Map();
         ordered.forEach((event) => {
             if (!event || typeof event !== 'object') return;
             const account = String(event.account || '');
-            const bookWideSplit = event.kind === 'split' && !account;
+            const bookWideSplit = event.kind === 'split' && !account && !event.splitGroup;
             if (accountFilter && !accountFilter.has(account) && !bookWideSplit) return;
             if (!_inWindow(event, startDate, endDate)) return;
 
@@ -805,10 +835,26 @@
             }
 
             if (!excluded) {
-                const delta = bookWideSplit
-                    ? _applySplit(Array.from(accounts.values()), event)
-                    : _applyEventToAccount(
-                        state, event, realizations, identityResolution);
+                if (event.kind === 'split' && !event.splitGroup) {
+                    const targets = bookWideSplit ? Array.from(accounts.values()) : [state];
+                    targets.forEach((target) => {
+                        const warning = `legacy_split_same_day:${event.tradeDate}`;
+                        if (lastShareDate.get(target.account) === event.tradeDate
+                            && target.warnings.indexOf(warning) < 0) {
+                            target.warnings.push(warning);
+                        }
+                    });
+                }
+                if (Math.abs(_number(event.shares)) > SHARE_EPSILON) {
+                    lastShareDate.set(account, String(event.tradeDate || ''));
+                }
+                const group = event.splitGroup ? splitGroups.get(event.splitGroup) : null;
+                const delta = group
+                    ? _applySplitGroupRow(state, event, group, splitContext)
+                    : (bookWideSplit
+                        ? _applySplit(Array.from(accounts.values()), event)
+                        : _applyEventToAccount(
+                            state, event, realizations, identityResolution));
                 if (delta !== null) {
                     runningShares = _round(runningShares + delta, 6);
                     runningNetCash = _round(
@@ -1309,6 +1355,248 @@
      * this ledger cannot guess, so it is flagged for a human rather than
      * silently carried at its old strike and multiplier.
      */
+    /**
+     * Split groups by id, each with its header, option rows and a validity
+     * verdict. Only a group with exactly one header, one account, one date
+     * and one integer forward ratio, and no plain split row recording the
+     * same split, is applied; anything else is reported, never guessed at.
+     */
+    function _collectSplitGroups(ordered) {
+        const groups = new Map();
+        const legacyDates = new Set();
+        ordered.forEach((event) => {
+            if (!event || event.voidedAtUtc) return;
+            if (event.kind === 'split' && !event.splitGroup && event.includeInCost !== false) {
+                legacyDates.add(`${String(event.account || '')}|${event.tradeDate}`);
+            }
+            if (!event.splitGroup || (event.kind !== 'split' && event.kind !== 'option_split')) return;
+            const group = groups.get(event.splitGroup)
+                || { id: event.splitGroup, headers: [], legs: [], rows: [] };
+            group.rows.push(event);
+            (event.kind === 'split' ? group.headers : group.legs).push(event);
+            groups.set(event.splitGroup, group);
+        });
+        groups.forEach((group) => {
+            const header = group.headers.length === 1 ? group.headers[0] : null;
+            group.header = header;
+            group.ratio = header ? _number(header.splitRatio) : NaN;
+            const account = header ? String(header.account || '') : '';
+            group.invalid = !header || !account || !isStandardSplitRatio(group.ratio)
+                || group.rows.some((row) => row.tradeDate !== header.tradeDate
+                    || String(row.account || '') !== account || row.includeInCost === false)
+                || group.legs.some((leg) => _number(leg.splitRatio) !== group.ratio)
+                || legacyDates.has(`${account}|${header.tradeDate}`)
+                || legacyDates.has(`|${header.tradeDate}`);
+        });
+        return groups;
+    }
+
+    /** The first row of a group applies the whole group; the rest move nothing. */
+    function _applySplitGroupRow(state, event, group, context) {
+        if (context.applied.has(group.id)) return 0;
+        context.applied.add(group.id);
+        if (group.invalid) {
+            state.warnings.push(`split_group_invalid:${group.id}`);
+            return 0;
+        }
+        return _applySplitGroup(state, group, context);
+    }
+
+    /**
+     * Apply one standard split to one account, atomically.
+     *
+     * Shares scale by the ratio with every cost total unchanged. Each option
+     * row moves its whole source position, with the premium still at risk,
+     * to the adjusted series; realized premium and its dates stay where they
+     * were. All sources are frozen before any destination is filled, so a
+     * K100 -> K50 row can never be converted again by a K50 -> K25 row of
+     * the same split. A leg that does not empty its source, or a live
+     * series the group left behind, is reported (the store refuses both).
+     */
+    function _applySplitGroup(state, group, context) {
+        const header = group.header;
+        const ratio = group.ratio;
+        const before = state.shares;
+        state.shares = _round(before * ratio, 6);
+        const preEpoch = context.epochs.get(header) || 0;
+        const expiryFloor = _dateDigits(header.tradeDate);
+        const transfers = [];
+        const sources = new Set();
+        group.legs.forEach((leg) => {
+            const movements = context.movementsByEvent.get(leg) || [];
+            const out = movements[0];
+            const into = movements[1];
+            const outResolved = out && context.identityResolution.get(out);
+            const inResolved = into && context.identityResolution.get(into);
+            if (!outResolved || !inResolved) {
+                state.warnings.push(`split_group_invalid:${group.id}`);
+                return;
+            }
+            const source = state.contracts.get(outResolved.key);
+            const outgoing = _number(leg.contracts);
+            const incoming = _number(leg.splitToContracts);
+            if (!source || sources.has(outResolved.key)
+                || Math.abs(source.contracts + outgoing) > SHARE_EPSILON
+                || Math.abs(incoming + outgoing * ratio) > SHARE_EPSILON) {
+                state.warnings.push(`split_leg_mismatch:${outResolved.key}`);
+            }
+            sources.add(outResolved.key);
+            if (source) transfers.push({ source, outgoing, incoming, into, inResolved });
+        });
+        state.contracts.forEach((contractState, key) => {
+            if (Math.abs(contractState.contracts) <= EPSILON) return;
+            if ((contractState.splitEpoch || 0) !== preEpoch) return;
+            if (contractState.expiry && contractState.expiry < expiryFloor) return;
+            if (!sources.has(key)) state.warnings.push(`split_series_unconverted:${key}`);
+        });
+        const moved = transfers.map((transfer) => {
+            const prior = transfer.source.contracts;
+            const fraction = Math.abs(prior) > EPSILON
+                ? Math.min(1, Math.abs(transfer.outgoing) / Math.abs(prior)) : 0;
+            return {
+                transfer,
+                premium: transfer.source.openPremium * fraction,
+                shortPremium: transfer.source.openShortPremium * fraction,
+            };
+        });
+        moved.forEach(({ transfer, premium, shortPremium }) => {
+            transfer.source.contracts = _round(transfer.source.contracts + transfer.outgoing, 6);
+            transfer.source.openPremium -= premium;
+            transfer.source.openShortPremium -= shortPremium;
+        });
+        moved.forEach(({ transfer, premium, shortPremium }) => {
+            const key = transfer.inResolved.key;
+            const target = state.contracts.get(key)
+                || _contractState(transfer.into, transfer.inResolved);
+            state.contracts.set(key, target);
+            _trackIdentity(target, transfer.into);
+            target.contracts = _round(target.contracts + transfer.incoming, 6);
+            target.openPremium += premium;
+            target.openShortPremium += shortPremium;
+        });
+        return _round(state.shares - before, 6);
+    }
+
+    /**
+     * Draft one standard n:1 split group for an account from its ledger.
+     *
+     * The ledger is replayed up to the open of `tradeDate` (the split
+     * applies before that day's fills). Every option series still live on
+     * that date becomes one option_split row: the whole position moves,
+     * contracts times n in the same direction, strike divided by n in
+     * integer cents rounded half up. A series whose class, deliverable,
+     * strike or identity is not provably standard is a problem, never a
+     * guessed conversion. Nothing is written: the page previews the draft
+     * and the store re-proves it.
+     *
+     * options: { account, tradeDate, ratio, ruleRef, underlying,
+     *            defaultSharesPerContract }
+     */
+    function planSplitGroup(events, options) {
+        const opts = options || {};
+        const account = String(opts.account || '');
+        const tradeDate = String(opts.tradeDate || '');
+        const ratio = Number(opts.ratio);
+        const ruleRef = String(opts.ruleRef || '').trim();
+        const underlying = _upper(opts.underlying);
+        const perContract = Number(opts.defaultSharesPerContract) || 100;
+        const problems = [];
+        const notices = [];
+        if (!account) problems.push({ code: 'account_required' });
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(tradeDate)) problems.push({ code: 'date_invalid' });
+        if (!isStandardSplitRatio(ratio)) problems.push({ code: 'ratio_invalid', ratio: opts.ratio });
+        if (!ruleRef) problems.push({ code: 'rule_ref_required' });
+        if (!underlying) problems.push({ code: 'underlying_required' });
+        if (problems.length) return { header: null, legs: [], problems, notices };
+
+        const live = (Array.isArray(events) ? events : []).filter(
+            (event) => event && !event.voidedAtUtc && event.includeInCost !== false);
+        if (live.some((event) => event.kind === 'split' && event.tradeDate === tradeDate
+            && (!event.account || String(event.account) === account))) {
+            problems.push({ code: 'split_already_recorded', tradeDate });
+        }
+        const ledger = computeLedger(
+            live.filter((event) => String(event.tradeDate || '') < tradeDate),
+            { accounts: [account] });
+        const summary = ledger.perAccount[account];
+        const sharesBefore = summary ? _number(summary.shares) : 0;
+        const expiryFloor = _dateDigits(tradeDate);
+        const targets = new Set();
+        const legs = [];
+        (ledger.openOptions || []).forEach((option) => {
+            if (String(option.account) !== account) return;
+            const series = { key: option.key, right: option.right, strike: option.strike,
+                expiry: option.expiry, contracts: option.contracts };
+            if (option.expiry && option.expiry < expiryFloor) {
+                notices.push(Object.assign({ code: 'expired_unrecorded' }, series));
+                return;
+            }
+            if (option.identityConflict || (option.identities || []).length > 1) {
+                problems.push(Object.assign({ code: 'identity_ambiguous' }, series));
+                return;
+            }
+            const localSymbol = option.localSymbol || '';
+            const root = optionRoot(localSymbol);
+            if (localSymbol && root !== underlying) {
+                problems.push(Object.assign({ code: 'non_standard_class', root }, series));
+                return;
+            }
+            if (_number(option.sharesPerContract) !== perContract) {
+                problems.push(Object.assign({ code: 'non_standard_deliverable',
+                    sharesPerContract: option.sharesPerContract }, series));
+                return;
+            }
+            const adjusted = splitStrike(option.strike, ratio);
+            if (!adjusted) {
+                problems.push(Object.assign({ code: 'strike_not_whole_cent' }, series));
+                return;
+            }
+            const target = `${option.right}|${adjusted.toCents}|${option.expiry}`;
+            if (targets.has(target)) {
+                problems.push(Object.assign({ code: 'destination_collision',
+                    toStrike: adjusted.toStrike }, series));
+                return;
+            }
+            targets.add(target);
+            legs.push({
+                kind: 'option_split',
+                tradeDate,
+                account,
+                right: option.right,
+                strike: option.strike,
+                expiry: option.expiry,
+                sharesPerContract: option.sharesPerContract,
+                conId: option.conId,
+                localSymbol: localSymbol || null,
+                contracts: _round(-option.contracts, 6),
+                splitRatio: ratio,
+                splitToStrike: adjusted.toStrike,
+                splitToContracts: _round(option.contracts * ratio, 6),
+                splitToConId: null,
+                splitToLocalSymbol: null,
+                splitStandardConfirmed: false,
+                cashAmount: 0,
+                fees: 0,
+                // Preview only; the store ignores these.
+                needsStandardConfirmation: !localSymbol,
+                carriedPremium: option.openPremium,
+                carriedShortPremium: option.openShortPremium,
+            });
+        });
+        return {
+            header: {
+                kind: 'split', tradeDate, account, splitRatio: ratio,
+                splitRuleRef: ruleRef, splitRounding: 'half_up_cent',
+                cashAmount: 0, fees: 0,
+            },
+            legs,
+            problems,
+            notices,
+            sharesBefore,
+            sharesAfter: _round(sharesBefore * ratio, 6),
+        };
+    }
+
     function _applySplit(targets, event) {
         const ratio = _number(event.splitRatio);
         if (!(ratio > 0)) {
@@ -3111,6 +3399,7 @@
     globalScope.OptionComboCostBasisCore = {
         ALLOWED_CLIENT_ACTIONS,
         EVENT_KINDS,
+        GROUP_ONLY_EVENT_KINDS,
         OPTION_KINDS,
         CLOSING_KINDS,
         FUTURE_KINDS,
@@ -3126,6 +3415,7 @@
         splitStrike,
         optionRoot,
         optionMovements,
+        planSplitGroup,
         deriveCashAmount,
         deliveredShares,
         computeLedger,

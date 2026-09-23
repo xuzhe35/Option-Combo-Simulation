@@ -1135,13 +1135,18 @@ module.exports = {
             },
         },
         {
-            name: 'the entry form offers every event kind the store accepts',
+            name: 'the entry form offers every event kind the store accepts one row at a time',
             run() {
                 const context = loadPage();
                 const html = readPage();
-                context.OptionComboCostBasisCore.EVENT_KINDS.forEach((kind) => {
-                    assert.ok(html.includes(`<option value="${kind}">`),
-                        `${kind} is missing from the entry form`);
+                const core = context.OptionComboCostBasisCore;
+                core.EVENT_KINDS.forEach((kind) => {
+                    const offered = html.includes(`<option value="${kind}">`);
+                    if (core.GROUP_ONLY_EVENT_KINDS.includes(kind)) {
+                        assert.equal(offered, false, `${kind} is written only with its split group`);
+                    } else {
+                        assert.ok(offered, `${kind} is missing from the entry form`);
+                    }
                 });
             },
         },

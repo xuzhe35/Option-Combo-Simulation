@@ -938,13 +938,22 @@ importer, checked against `tests/fixtures/cost_basis_event_order_vectors.json`,
 so all three agree on replay. Every write runs under BEGIN IMMEDIATE on its
 own short-lived connection.
 
-Schema v10 prepares standard forward splits (`CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md`
-§15): a split is to be recorded as a group of rows sharing `split_group`, whose
-`split` header applies at the open of its trade date and whose `option_split`
-rows move each open series to its adjusted strike. Option identities are
+Schema v10 records standard forward splits (`CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md`
+§15) as a group of rows sharing `split_group`: a `split` header that applies at
+the open of its trade date and one `option_split` row per open option series,
+moving the whole position (and its open premium) to the adjusted strike.
+Groups are written and voided only whole (`append_split_group`,
+`void_split_group`; WebSocket `append_cost_basis_split_group`,
+`void_cost_basis_split_group`); single-row, statement and rebuild writes refuse
+group rows. After every write that touches an account, and after a restore,
+`_validate_split_groups` replays the account and proves each group: every
+series live on the split date converted exactly once, each source emptied, no
+two sources merged, no plain split row on the same date. Option identities are
 resolved per split epoch, because a pre-split and a post-split contract can
-share a strike and an OCC symbol. No write path accepts split groups yet;
-plain `split` rows keep their end-of-day order and never start an epoch.
+share a strike and an OCC symbol. Plain `split` rows keep their end-of-day
+order, start no epoch, and raise a non-blocking `legacy_split_same_day` notice
+when share fills of the same day sort before them. The browser core replays a
+group atomically and drafts one with `planSplitGroup`.
 
 Schema v9 ties statement coverage to reset archives, checks both archive digests
 on restoration, and invalidates prior coverage after historical changes.

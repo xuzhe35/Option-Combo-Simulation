@@ -50,6 +50,8 @@ SERVER_ACTIONS = {
     'list_cost_basis_events': 'cost_basis_events_list',
     'append_cost_basis_event': 'cost_basis_event_appended',
     'void_cost_basis_event': 'cost_basis_event_voided',
+    'append_cost_basis_split_group': 'cost_basis_split_group_appended',
+    'void_cost_basis_split_group': 'cost_basis_split_group_voided',
     'import_cost_basis_events': 'cost_basis_events_imported',
     'save_cost_basis_snapshot': 'cost_basis_snapshot_saved',
     'list_cost_basis_snapshots': 'cost_basis_snapshots_list',
@@ -548,6 +550,31 @@ async def _dispatch_store_call(store, action, data):
             lambda: store.void_event(
                 _required_str(data, 'bookId'),
                 _required_str(data, 'eventId'),
+                reason=_required_str(data, 'reason'),
+                client_token=_required_str(data, 'clientToken'),
+            )
+        )
+
+    if action == 'append_cost_basis_split_group':
+        # One standard split and all of its option conversions, as a whole.
+        events = data.get('events')
+        if not isinstance(events, list):
+            raise InvalidRequestError('events must be a list')
+        return await asyncio.to_thread(
+            lambda: store.append_split_group(
+                _required_str(data, 'bookId'),
+                events,
+                client_token=_required_str(data, 'clientToken'),
+                expected_ledger_version=data.get('expectedLedgerVersion'),
+                book_identity=data.get('bookIdentity'),
+            )
+        )
+
+    if action == 'void_cost_basis_split_group':
+        return await asyncio.to_thread(
+            lambda: store.void_split_group(
+                _required_str(data, 'bookId'),
+                _required_str(data, 'splitGroup'),
                 reason=_required_str(data, 'reason'),
                 client_token=_required_str(data, 'clientToken'),
             )

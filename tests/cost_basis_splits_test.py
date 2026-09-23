@@ -1,15 +1,18 @@
-"""Split-group foundations in the store (A1 phase 1).
+"""Split groups in the store (A1 phases 1 and 2).
 
-See CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md §15. Schema v10 can hold
-split groups but no write path accepts them yet; the ordering, strike and
-identity helpers are shared with the browser core and checked against the
-same fixtures. Every database here is a temporary file.
+See CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md §15. A standard split is
+written and voided only as a whole group (append_split_group /
+void_split_group) and every group is re-proven after each write that touches
+its account. The ordering, strike and identity helpers are shared with the
+browser core and checked against the same fixtures. Every database here is
+a temporary file; all data is synthetic.
 """
 
 import hashlib
 import json
 import pathlib
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 import uuid
@@ -18,7 +21,9 @@ import cost_basis_store as module
 from cost_basis_store import (
     SCHEMA_USER_VERSION,
     CostBasisStore,
+    EventAlreadyVoidedError,
     InvalidRequestError,
+    PositionOverdrawError,
     StoreUnavailableError,
     _EVENT_ORDER_SQL,
     _option_movements,
@@ -28,6 +33,7 @@ from cost_basis_store import (
     _strike_cents,
 )
 
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURES = pathlib.Path(__file__).resolve().parent / 'fixtures'
 OCC = json.loads((FIXTURES / 'occ_57592_tqqq_strikes.json').read_text(encoding='utf-8'))
 ORDER = json.loads(
@@ -255,7 +261,7 @@ class SchemaV10Tests(TempStoreCase):
         finally:
             conn.close()
 
-    def test_no_write_path_accepts_a_split_group_yet(self):
+    def test_split_rows_are_refused_outside_a_group_write(self):
         rejected = [
             {'kind': 'option_split', 'tradeDate': '2025-11-20', 'cashAmount': 0},
             {'kind': 'split', 'tradeDate': '2025-11-20', 'splitRatio': 2, 'cashAmount': 0,
@@ -422,5 +428,293 @@ class MigrationV9ToV10Tests(TempStoreCase):
         self.assertEqual(self._v9_rows(), before)
 
 
+class SplitGroupWriteTests(TempStoreCase):
+    OCC100 = 'TQQQ  251219P00100000'
+
+    def header(self, **extra):
+        return {'kind': 'split', 'tradeDate': '2025-11-20', 'splitRatio': 2,
+                'splitRuleRef': 'OCC #57592', 'splitRounding': 'half_up_cent',
+                'cashAmount': 0, **extra}
+
+    def leg(self, strike, contracts, *, ratio=2, **extra):
+        return {'kind': 'option_split', 'tradeDate': '2025-11-20', 'right': 'P',
+                'strike': strike, 'expiry': '20251219', 'sharesPerContract': 100,
+                'contracts': contracts, 'splitRatio': ratio,
+                'splitToStrike': _split_strike_cents(_strike_cents(strike), ratio) / 100,
+                'splitToContracts': -contracts * ratio, 'cashAmount': 0,
+                'localSymbol': f'TQQQ 19DEC25 {strike:g} P', **extra}
+
+    def put(self, date, strike, contracts, price, **extra):
+        return {'kind': 'option_trade', 'tradeDate': date, 'right': 'P', 'strike': strike,
+                'expiry': '20251219', 'contracts': contracts, 'price': price,
+                'sharesPerContract': 100, 'cashAmount': round(-contracts * 100 * price, 6),
+                'localSymbol': f'TQQQ 19DEC25 {strike:g} P', **extra}
+
+    def record(self, events, token=None):
+        return self.store.append_split_group(
+            self.book_id, events, client_token=token or _token(),
+            **_credentials(self.store, self.book_id))
+
+    def live(self):
+        return self.store.list_events(self.book_id)['events']
+
+    def test_s3_a_recorded_group_backs_every_later_close(self):
+        self.append({'kind': 'share_trade', 'tradeDate': '2025-11-03', 'shares': 100,
+                     'price': 80, 'cashAmount': -8000})
+        self.append(self.put('2025-11-04', 100, -2, 4, conId=1001, localSymbol=self.OCC100))
+        result = self.record([self.header(), self.leg(100, 2, conId=1001,
+                                                       localSymbol=self.OCC100)])
+        self.assertFalse(result['idempotentReplay'])
+        self.assertTrue(result['splitGroup'].startswith('split-'))
+        kinds = [row['kind'] for row in result['events']]
+        self.assertEqual(kinds, ['split', 'option_split'])
+        self.assertEqual(result['events'][1]['splitToStrike'], 50)
+        self.assertEqual(result['events'][1]['splitToContracts'], -4)
+        # Post-split rows typed by hand close the adjusted contract.
+        self.append(self.put('2025-11-24', 50, 1, 1, localSymbol=None, fees=1,
+                             cashAmount=-101))
+        self.append({'kind': 'option_assignment', 'tradeDate': '2025-12-19', 'right': 'P',
+                     'strike': 50, 'expiry': '20251219', 'contracts': 1, 'shares': 100,
+                     'sharesPerContract': 100, 'cashAmount': -5000})
+        self.append({'kind': 'option_expiry', 'tradeDate': '2025-12-19', 'right': 'P',
+                     'strike': 50, 'expiry': '20251219', 'contracts': 2,
+                     'sharesPerContract': 100, 'cashAmount': 0})
+        with self.assertRaises(PositionOverdrawError):
+            self.append({'kind': 'option_expiry', 'tradeDate': '2025-12-19', 'right': 'P',
+                         'strike': 50, 'expiry': '20251219', 'contracts': 1,
+                         'sharesPerContract': 100, 'cashAmount': 0})
+
+    def test_every_group_invariant_is_proven_before_anything_is_written(self):
+        self.append(self.put('2025-11-04', 100, -2, 4))
+        self.append(self.put('2025-11-05', 80, -1, 2))
+        both = [self.leg(100, 2), self.leg(80, 1)]
+        cases = {
+            'partial conversion': [self.header(), self.leg(100, 1), both[1]],
+            'series left behind': [self.header(), both[0]],
+            'nothing open there': [self.header()] + both + [self.leg(60, 1)],
+            'series converted twice': [self.header(), both[0], both[0], both[1]],
+            'wrong adjusted strike': [self.header(), {**both[0], 'splitToStrike': 49.99}, both[1]],
+            'wrong adjusted size': [self.header(), {**both[0], 'splitToContracts': -2}, both[1]],
+            'non-integer ratio': [self.header(splitRatio=1.5)],
+            'no rule reference': [self.header(splitRuleRef='')] + both,
+            'unknown rounding': [self.header(splitRounding='nearest')] + both,
+            'broker time on a split': [self.header(brokerTimestamp='2025-11-20T09:30:00')] + both,
+            'cash on a split': [self.header(cashAmount=1)] + both,
+            'no header': both,
+            'two headers': [self.header(), self.header()] + both,
+            'leg ratio differs': [self.header(), self.leg(100, 2, ratio=3), both[1]],
+            'leg on another day': [self.header(), {**both[0], 'tradeDate': '2025-11-21'}, both[1]],
+        }
+        before = self.live()
+        for name, events in cases.items():
+            # A leg with nothing behind it already fails its own timeline
+            # as an overdrawn close; the rest fail the group proof.
+            with self.subTest(name), \
+                    self.assertRaises((InvalidRequestError, PositionOverdrawError)):
+                self.record(events)
+        self.assertEqual(self.live(), before)
+        self.record([self.header()] + both)
+
+    def test_only_the_standard_option_class_converts(self):
+        self.append(self.put('2025-11-04', 100, -2, 4, localSymbol='2TQQQ 251219P00100000'))
+        with self.assertRaises(InvalidRequestError) as caught:
+            self.record([self.header(), self.leg(100, 2, localSymbol=None)])
+        self.assertIn('2TQQQ', str(caught.exception))
+
+    def test_a_series_without_a_symbol_needs_explicit_confirmation(self):
+        self.append(self.put('2025-11-04', 100, -2, 4, localSymbol=None))
+        with self.assertRaises(InvalidRequestError):
+            self.record([self.header(), self.leg(100, 2, localSymbol=None)])
+        self.record([self.header(), self.leg(100, 2, localSymbol=None,
+                                             splitStandardConfirmed=True)])
+
+    def test_an_adjusted_deliverable_is_not_converted(self):
+        self.append(self.put('2025-11-04', 100, -2, 4, sharesPerContract=50,
+                             cashAmount=400))
+        with self.assertRaises(InvalidRequestError):
+            self.record([self.header(), self.leg(100, 2, sharesPerContract=50)])
+
+    def test_a_series_that_expired_before_the_split_is_not_converted(self):
+        self.append(self.put('2025-10-01', 70, -1, 1, expiry='20251031'))
+        self.append(self.put('2025-11-04', 100, -2, 4))
+        self.record([self.header(), self.leg(100, 2)])
+
+    def test_one_split_per_day_and_never_beside_a_plain_split_row(self):
+        plain = {'kind': 'split', 'tradeDate': '2025-11-20', 'splitRatio': 2, 'cashAmount': 0}
+        plain_row = self.append(plain)['event']
+        with self.assertRaises(InvalidRequestError):
+            self.record([self.header()])
+        self.store.void_event(self.book_id, plain_row['eventId'], reason='replaced',
+                              client_token=_token())
+        self.record([self.header()])
+        with self.assertRaises(InvalidRequestError):
+            self.record([self.header()])
+        with self.assertRaises(InvalidRequestError):
+            self.append(plain)
+        self.append({**plain, 'tradeDate': '2025-12-01'})
+
+    def test_a_retry_returns_the_committed_group(self):
+        self.append(self.put('2025-11-04', 100, -2, 4))
+        token = _token()
+        credentials = _credentials(self.store, self.book_id)
+        first = self.store.append_split_group(
+            self.book_id, [self.header(), self.leg(100, 2)], client_token=token, **credentials)
+        # A dropped reply is retried with the same plan and the same stale
+        # version; it finds the committed group instead of refusing.
+        again = self.store.append_split_group(
+            self.book_id, [self.header(), self.leg(100, 2)], client_token=token, **credentials)
+        self.assertTrue(again['idempotentReplay'])
+        self.assertEqual([row['eventId'] for row in again['events']],
+                         [row['eventId'] for row in first['events']])
+        self.assertEqual(len(self.live()), 3)
+
+    def test_back_dated_history_must_still_agree_with_the_split(self):
+        self.append(self.put('2025-11-04', 100, -2, 4))
+        self.record([self.header(), self.leg(100, 2)])
+        # One more pre-split contract would leave -1 behind at the split.
+        with self.assertRaises(InvalidRequestError):
+            self.append(self.put('2025-11-10', 100, -1, 4))
+        # A new series open across the split was never converted.
+        with self.assertRaises(InvalidRequestError):
+            self.append(self.put('2025-11-10', 90, -1, 3))
+        with self.assertRaises(InvalidRequestError):
+            self.store.import_events(
+                self.book_id, [{**self.put('2025-11-10', 90, -1, 3), 'externalRef': 'stmt-1'}],
+                import_batch_id=_token(), client_token_prefix=_token(),
+                **_credentials(self.store, self.book_id))
+        # A series that expired before the split does not involve it.
+        self.append(self.put('2025-11-10', 90, -1, 1, expiry='20251114'))
+        # Post-split history on the adjusted contract is ordinary history.
+        self.append(self.put('2025-11-24', 50, 1, 1))
+
+    def test_a_group_is_voided_whole_and_only_when_nothing_depends_on_it(self):
+        self.append(self.put('2025-11-04', 100, -2, 4))
+        group = self.record([self.header(), self.leg(100, 2)])
+        leg = group['events'][1]
+        with self.assertRaises(InvalidRequestError):
+            self.store.void_event(self.book_id, leg['eventId'], reason='x',
+                                  client_token=_token())
+        expiry = self.append({'kind': 'option_expiry', 'tradeDate': '2025-12-19',
+                              'right': 'P', 'strike': 50, 'expiry': '20251219',
+                              'contracts': 4, 'sharesPerContract': 100,
+                              'cashAmount': 0})['event']
+        with self.assertRaises(PositionOverdrawError):
+            self.store.void_split_group(self.book_id, group['splitGroup'], reason='mistake',
+                                        client_token=_token())
+        self.store.void_event(self.book_id, expiry['eventId'], reason='first',
+                              client_token=_token())
+        token = _token()
+        voided = self.store.void_split_group(self.book_id, group['splitGroup'],
+                                             reason='mistake', client_token=token)
+        self.assertTrue(all(row['voidedAtUtc'] for row in voided['events']))
+        self.assertEqual(len(voided['events']), 2)
+        self.assertTrue(self.store.void_split_group(
+            self.book_id, group['splitGroup'], reason='mistake',
+            client_token=token)['idempotentReplay'])
+        with self.assertRaises(EventAlreadyVoidedError):
+            self.store.void_split_group(self.book_id, group['splitGroup'], reason='again',
+                                        client_token=_token())
+        # The pre-split position stands again.
+        self.append({'kind': 'option_expiry', 'tradeDate': '2025-12-19', 'right': 'P',
+                     'strike': 100, 'expiry': '20251219', 'contracts': 2,
+                     'sharesPerContract': 100, 'cashAmount': 0})
+
+    def test_statement_and_single_row_paths_refuse_group_rows(self):
+        self.append(self.put('2025-11-04', 100, -2, 4))
+        for rows in ([self.header()], [self.leg(100, 2, splitGroup='g')]):
+            with self.subTest(rows[0]['kind']), self.assertRaises(InvalidRequestError):
+                self.store.import_events(
+                    self.book_id, [{**row, 'externalRef': f'stmt-{index}'}
+                                   for index, row in enumerate(rows)],
+                    import_batch_id=_token(), client_token_prefix=_token(),
+                    **_credentials(self.store, self.book_id))
+        with self.assertRaises(InvalidRequestError):
+            self.append(self.leg(100, 2, splitGroup='g'))
+        plan = self.store.reset_confirmation(self.book_id)
+        with self.assertRaises(InvalidRequestError):
+            self.store.rebuild_book(
+                self.book_id, [self.header(splitGroup='g')], confirmation=plan['phrase'],
+                client_token=_token(), import_batch_id=_token(),
+                **_credentials(self.store, self.book_id))
+
+    def test_a_backup_restores_a_group_but_not_a_tampered_one(self):
+        self.append(self.put('2025-11-04', 100, -2, 4))
+        self.record([self.header(), self.leg(100, 2)])
+        backup = self.store.export_backup(self.book_id)
+        plan = self.store.reset_confirmation(self.book_id)
+        self.store.restore_backup(self.book_id, backup, confirmation=plan['phrase'],
+                                  client_token=_token(),
+                                  **_credentials(self.store, self.book_id))
+        restored = self.store.list_events(self.book_id, include_voided=True)['events']
+        self.assertEqual(restored, backup['payload']['events'])
+
+        tampered = json.loads(json.dumps(backup))
+        leg = next(row for row in tampered['payload']['events'] if row['kind'] == 'option_split')
+        leg['contracts'], leg['splitToContracts'] = 1.0, -2.0
+        encoded = json.dumps(tampered['payload'], ensure_ascii=False, sort_keys=True,
+                             separators=(',', ':'), allow_nan=False)
+        tampered['sha256'] = hashlib.sha256(encoded.encode()).hexdigest()
+        plan = self.store.reset_confirmation(self.book_id)
+        with self.assertRaises(InvalidRequestError):
+            self.store.restore_backup(self.book_id, tampered, confirmation=plan['phrase'],
+                                      client_token=_token(),
+                                      **_credentials(self.store, self.book_id))
+        self.assertEqual(self.store.list_events(self.book_id, include_voided=True)['events'],
+                         restored)
+
+    def test_a_tws_reconciliation_after_a_split_counts_the_converted_position(self):
+        self.append(self.put('2025-11-04', 100, -1, 4))
+        self.record([self.header(), self.leg(100, 1)])
+        fill = {**self.put('2025-11-24', 50, -1, 1, localSymbol=None, conId=5050),
+                'source': 'execution_report', 'tag': 'ibkr_exec',
+                'externalRef': 'ibkr-exec-post-split', 'brokerTimestamp': '2025-11-24T10:00:00'}
+        proof = {'kind': 'option', 'account': ACCOUNT, 'right': 'P', 'strike': 50,
+                 'expiry': '20251219', 'sharesPerContract': 100, 'conId': 5050,
+                 'ledgerContracts': -2, 'twsContracts': -3}
+        result = self.store.import_events(
+            self.book_id, [fill], import_batch_id=_token(), client_token_prefix=_token(),
+            supersede_tws_event_ids=[], tws_reconciliation=[proof],
+            **_credentials(self.store, self.book_id))
+        self.assertEqual(result['inserted'], 1)
+
+    def test_the_browser_plan_is_what_the_store_accepts(self):
+        """The core's planSplitGroup draft, recorded as-is, then replayed."""
+        self.append({'kind': 'share_trade', 'tradeDate': '2025-11-03', 'shares': 100,
+                     'price': 80, 'cashAmount': -8000})
+        self.append(self.put('2025-11-04', 100, -2, 4, conId=1001, localSymbol=self.OCC100))
+        self.append(self.put('2025-11-05', 99.97, -1, 1, localSymbol=None))
+        self.append(self.put('2025-11-06', 50, 1, 0.5))
+        script = r"""
+const { loadBrowserScripts } = require('./tests/helpers/load-browser-scripts');
+const core = loadBrowserScripts(['js/cost_basis_core.js']).OptionComboCostBasisCore;
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const out = input.mode === 'plan'
+    ? core.planSplitGroup(input.events, input.options)
+    : core.computeLedger(input.events, {});
+process.stdout.write(JSON.stringify(input.mode === 'plan' ? out
+    : { openOptions: out.openOptions, perAccount: out.perAccount }));
+"""
+        def node(payload):
+            done = subprocess.run(['node', '-e', script], input=json.dumps(payload), cwd=ROOT,
+                                  capture_output=True, text=True, check=True)
+            return json.loads(done.stdout)
+        plan = node({'mode': 'plan', 'events': self.live(), 'options': {
+            'account': ACCOUNT, 'tradeDate': '2025-11-20', 'ratio': 2,
+            'ruleRef': 'OCC #57592', 'underlying': 'TQQQ'}})
+        self.assertEqual(plan['problems'], [])
+        self.assertEqual(sorted(leg['splitToStrike'] for leg in plan['legs']), [25, 49.99, 50])
+        legs = [{**leg, 'splitStandardConfirmed': leg['needsStandardConfirmation']}
+                for leg in plan['legs']]
+        self.record([plan['header']] + legs)
+        replay = node({'mode': 'replay', 'events': self.live()})
+        account = replay['perAccount'][ACCOUNT]
+        self.assertEqual(account['warnings'], [])
+        self.assertEqual(account['shares'], 200)
+        positions = sorted((item['strike'], item['contracts'], item['openPremium'])
+                           for item in replay['openOptions'])
+        self.assertEqual(positions, [(25, 2, -50), (49.99, -2, 100), (50, -4, 800)])
+
+
 if __name__ == '__main__':
     unittest.main()
+

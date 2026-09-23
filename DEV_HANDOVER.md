@@ -217,7 +217,7 @@ Persistence and ledger modules, mounted by BOTH backends:
   `websocket_security.read_allowed_ws_origins` keeps the already-baked
   `20260911` supervisor working without loading an Origin authorization policy.
 - one active book per account + underlying + security type + currency in the
-  separate schema-v9 `cost_basis.db`
+  separate schema-v10 `cost_basis.db`
 - STK/OPT and deliverable FUT/FOP event replay, including FOP delivery and
   uniquely paired futures rolls
 - CSV/ledger-inferred holdings remain visible while TWS is offline; current
@@ -870,15 +870,22 @@ Important nuance:
 - `trade_execution/adapters/ibkr.py`
 
 
-### Cost Basis split groups, A1 phase 1 (2026-09-23)
+### Cost Basis split groups, A1 phases 1-2 (2026-09-23)
 
-`CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md` §15 is the current design; §15.7
-records what phase 1 delivered and which consumers phase 2 must convert. Schema
-v10 stores split groups but every write path refuses them until the replay and
-group checks land. Shared rules live in the core (`compareEventOrder`,
-`splitEpochs`, `strikeToCents`, `splitStrikeCents`, `optionRoot`,
-`optionMovements`) with Python twins in `cost_basis_store.py`; the importer
-carries a copy of the order comparator because it loads without the core.
+`CODE PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md` §15 is the current design;
+§15.7 and §15.8 record what each phase delivered. A split group is written and
+voided only whole: `CostBasisStore.append_split_group` / `void_split_group`
+(WebSocket `append_cost_basis_split_group` / `void_cost_basis_split_group`).
+The server names the group from the client token, re-derives every adjusted
+strike and size, checks the option class from option symbols, and proves the
+group with `_validate_split_groups` after every write path, restore included.
+Per-contract timelines read rows through the split halves
+(`_contract_key_movements`). The core replays groups atomically
+(`_applySplitGroup`) and drafts them (`planSplitGroup`); the manual page flow
+is phase 3. Shared rules live in the core (`compareEventOrder`, `splitEpochs`,
+`strikeToCents`, `splitStrikeCents`, `optionRoot`, `optionMovements`) with
+Python twins in `cost_basis_store.py`; the importer carries copies of the order
+comparator and the movement expansion because it loads without the core.
 Fixtures: `tests/fixtures/occ_57592_tqqq_strikes.json` (all 167 published
 strikes) and `tests/fixtures/cost_basis_event_order_vectors.json`. Tests:
 `tests/cost_basis_splits.test.js`, `tests/cost_basis_splits_test.py`.

@@ -66,7 +66,8 @@ class CostBasisWsTestBase(unittest.IsolatedAsyncioTestCase):
         # Existing behavior tests represent a fresh reviewed client. Tests
         # for missing credentials call handle_cost_basis_action directly.
         if action in ('import_cost_basis_events', 'rebuild_cost_basis_book',
-                      'reset_cost_basis_book', 'restore_cost_basis_reset') and fields.get('bookId'):
+                      'reset_cost_basis_book', 'restore_cost_basis_reset',
+                      'append_cost_basis_split_group') and fields.get('bookId'):
             store = self.env.get('store')
             if store:
                 identity = next((book for book in store.list_books(include_archived=True)
@@ -490,6 +491,36 @@ class EventActionTests(CostBasisWsTestBase):
             })
         self.assertFalse(response['success'])
         self.assertEqual(response['code'], 'position_overdraw')
+
+    async def test_a_split_group_is_written_and_voided_whole(self):
+        await self.call('append_cost_basis_event', bookId=self.book_id,
+                        event=self.short_put(), clientToken=_token())
+        header = {'kind': 'split', 'tradeDate': '2026-06-10', 'splitRatio': 2,
+                  'splitRuleRef': 'OCC test memo', 'splitRounding': 'half_up_cent',
+                  'cashAmount': 0}
+        leg = {'kind': 'option_split', 'tradeDate': '2026-06-10', 'right': 'P',
+               'strike': 45.0, 'expiry': '20260717', 'sharesPerContract': 100,
+               'contracts': 5, 'splitRatio': 2, 'splitToStrike': 22.5,
+               'splitToContracts': -10, 'cashAmount': 0, 'splitStandardConfirmed': True}
+        missing = await self.call('append_cost_basis_split_group', bookId=self.book_id,
+                                  events=[header], clientToken=_token())
+        self.assertFalse(missing['success'])
+        self.assertEqual(missing['code'], 'invalid_request')
+        written = await self.call('append_cost_basis_split_group', bookId=self.book_id,
+                                  events=[header, leg], clientToken=_token())
+        self.assertTrue(written['success'], written)
+        self.assertEqual(written['action'], 'cost_basis_split_group_appended')
+        self.assertEqual([row['kind'] for row in written['events']], ['split', 'option_split'])
+        single = await self.call('void_cost_basis_event', bookId=self.book_id,
+                                 eventId=written['events'][1]['eventId'], reason='x',
+                                 clientToken=_token())
+        self.assertFalse(single['success'])
+        voided = await self.call('void_cost_basis_split_group', bookId=self.book_id,
+                                 splitGroup=written['splitGroup'], reason='mistake',
+                                 clientToken=_token())
+        self.assertTrue(voided['success'], voided)
+        self.assertEqual(voided['action'], 'cost_basis_split_group_voided')
+        self.assertTrue(all(row['voidedAtUtc'] for row in voided['events']))
 
     async def test_event_must_be_an_object(self):
         response = await self.call(

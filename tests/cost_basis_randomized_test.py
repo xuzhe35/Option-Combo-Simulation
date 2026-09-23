@@ -83,7 +83,7 @@ class Campaign:
         result=self.bridge.call(op='prefixes',rows=case['rows'],options=case['book'])
         for i,(actual,expected) in enumerate(zip(result,case['expected'])):
             check_snapshot(actual,expected,(seed,'prefix',i))
-            allowed=('net_short_shares','split_crosses_open_option:','mixed_future_directions')
+            allowed=('net_short_shares','split_crosses_open_option:','mixed_future_directions','legacy_split_same_day:')
             assert all(w.startswith(allowed) for w in actual['warnings']), (seed,i,actual['warnings'])
         self.coverage['core_prefixes'] += len(result)
         # Input array order may change; explicit broker time + stable seq is truth.

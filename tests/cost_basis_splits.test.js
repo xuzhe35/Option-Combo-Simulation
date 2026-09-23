@@ -56,8 +56,36 @@ function splitHeader(overrides) {
     }, overrides));
 }
 
+function sharesBuy(date, shares, price) {
+    return event({ kind: 'share_trade', tradeDate: date, shares, price,
+        cashAmount: -shares * price });
+}
+
+function shortPut(date, strike, contracts, price, extra) {
+    return put(Object.assign({ tradeDate: date, strike, contracts, price,
+        cashAmount: -contracts * 100 * price }, extra || {}));
+}
+
+// Record a planned group the way the store will return it.
+function withGroup(plan, group) {
+    return [plan.header].concat(plan.legs).map((row) => {
+        sequence += 1;
+        return Object.assign({}, row, { seq: sequence, splitGroup: group, includeInCost: true });
+    });
+}
+
+function openBy(ledger) {
+    const byStrike = {};
+    ledger.openOptions.forEach((option) => {
+        byStrike[`${option.right}${option.strike}`] = {
+            contracts: option.contracts, openPremium: option.openPremium,
+        };
+    });
+    return byStrike;
+}
+
 module.exports = {
-    name: 'cost_basis splits (A1 phase 1)',
+    name: 'cost_basis splits (A1)',
     tests: [
         {
             name: 'OCC #57592: every published strike is integer cents divided by 2, rounded half up',
@@ -354,6 +382,263 @@ module.exports = {
                 assert.equal(kept.tag, 'ibkr_open');
                 // Without a group the pre- and post-split K50 still collide.
                 assert.equal(coProblem(parse(splitRow)), true);
+            },
+        },
+        {
+            name: 'S3 and the §5.1 example: a 2:1 group moves shares, the short put and its open premium',
+            run() {
+                const core = loadCore();
+                sequence = 0;
+                const history = [
+                    sharesBuy('2025-11-03', 100, 80),
+                    shortPut('2025-11-04', 100, -2, 4, { conId: 1001,
+                        localSymbol: 'TQQQ  251219P00100000' }),
+                ];
+                const plan = core.planSplitGroup(history, { account: ACCOUNT,
+                    tradeDate: '2025-11-20', ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                assert.deepEqual(Array.from(plan.problems), []);
+                assert.equal(plan.legs.length, 1);
+                const leg = plan.legs[0];
+                assert.equal(leg.contracts, 2);
+                assert.equal(leg.splitToContracts, -4);
+                assert.equal(leg.splitToStrike, 50);
+                assert.equal(leg.carriedPremium, 800);
+                assert.equal(plan.sharesBefore, 100);
+                assert.equal(plan.sharesAfter, 200);
+
+                let events = history.concat(withGroup(plan, 'split-g1'));
+                let ledger = core.computeLedger(events, {});
+                let account = ledger.perAccount[ACCOUNT];
+                assert.deepEqual(Array.from(account.warnings), []);
+                assert.equal(account.shares, 200);
+                assert.equal(account.netCash, -7200);
+                assert.equal(account.realizedPremium, 0);
+                assert.deepEqual(openBy(ledger), { P50: { contracts: -4, openPremium: 800 } });
+
+                // Buy one new contract back at 1 with a 1.00 fee.
+                events = events.concat(put({ tradeDate: '2025-11-24', strike: 50, contracts: 1,
+                    price: 1, fees: 1, cashAmount: -101 }));
+                ledger = core.computeLedger(events, {});
+                account = ledger.perAccount[ACCOUNT];
+                assert.equal(account.realizedPremium, 99);
+                assert.deepEqual(openBy(ledger), { P50: { contracts: -3, openPremium: 600 } });
+
+                // One is assigned: 100 shares at 50, no premium cash again.
+                events = events.concat(put({ kind: 'option_assignment', tradeDate: '2025-12-19',
+                    strike: 50, contracts: 1, shares: 100, cashAmount: -5000 }));
+                ledger = core.computeLedger(events, {});
+                account = ledger.perAccount[ACCOUNT];
+                assert.deepEqual(Array.from(account.warnings), []);
+                assert.equal(account.shares, 300);
+                assert.equal(account.netCash, -7200 - 101 - 5000);
+                assert.deepEqual(openBy(ledger), { P50: { contracts: -2, openPremium: 400 } });
+            },
+        },
+        {
+            name: 'every source is frozen before any destination fills (K100->K50 and K50->K25 together)',
+            run() {
+                const core = loadCore();
+                sequence = 0;
+                const history = [
+                    shortPut('2025-11-04', 100, -1, 4, { conId: 1001 }),
+                    shortPut('2025-11-05', 50, -1, 1, { conId: 1002 }),
+                ];
+                const plan = core.planSplitGroup(history, { account: ACCOUNT,
+                    tradeDate: '2025-11-20', ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                assert.equal(plan.legs.length, 2);
+                assert.equal(plan.legs.every((leg) => leg.needsStandardConfirmation), true);
+                const ledger = core.computeLedger(history.concat(withGroup(plan, 'split-g1')), {});
+                assert.deepEqual(Array.from(ledger.perAccount[ACCOUNT].warnings), []);
+                assert.deepEqual(openBy(ledger), {
+                    P50: { contracts: -2, openPremium: 400 },
+                    'P25': { contracts: -2, openPremium: 100 },
+                });
+            },
+        },
+        {
+            name: 'long and short, calls and puts, a partial pre-split close and 3:1 then 2:1 splits',
+            run() {
+                const core = loadCore();
+                sequence = 0;
+                let events = [
+                    shortPut('2025-11-04', 90, -3, 2),
+                    put({ tradeDate: '2025-11-05', strike: 90, contracts: 1, price: 1, cashAmount: -100 }),
+                    event({ kind: 'option_trade', tradeDate: '2025-11-06', right: 'C', strike: 120,
+                        expiry: '20260116', contracts: 2, price: 3, sharesPerContract: 100,
+                        cashAmount: -600 }),
+                ];
+                const first = core.planSplitGroup(events, { account: ACCOUNT, tradeDate: '2025-11-20',
+                    ratio: 3, ruleRef: 'memo A', underlying: 'TQQQ' });
+                assert.deepEqual(Array.from(first.problems), []);
+                events = events.concat(withGroup(first, 'split-g1'));
+                let ledger = core.computeLedger(events, {});
+                assert.deepEqual(openBy(ledger), {
+                    P30: { contracts: -6, openPremium: 400 },
+                    C40: { contracts: 6, openPremium: -600 },
+                });
+                const second = core.planSplitGroup(events, { account: ACCOUNT, tradeDate: '2025-12-10',
+                    ratio: 2, ruleRef: 'memo B', underlying: 'TQQQ' });
+                events = events.concat(withGroup(second, 'split-g2'));
+                ledger = core.computeLedger(events, {});
+                assert.deepEqual(Array.from(ledger.perAccount[ACCOUNT].warnings), []);
+                assert.deepEqual(openBy(ledger), {
+                    P15: { contracts: -12, openPremium: 400 },
+                    C20: { contracts: 12, openPremium: -600 },
+                });
+                // Realized premium from the pre-split close stays realized.
+                assert.equal(ledger.perAccount[ACCOUNT].realizedPremium, 100);
+            },
+        },
+        {
+            name: 'a leg that does not empty its source, or a live series left behind, is reported',
+            run() {
+                const core = loadCore();
+                sequence = 0;
+                const history = [
+                    shortPut('2025-11-04', 100, -2, 4),
+                    shortPut('2025-11-05', 80, -1, 2),
+                    // Expired before the split: not part of it.
+                    put({ tradeDate: '2025-10-01', strike: 70, expiry: '20251031', contracts: -1,
+                        price: 1, cashAmount: 100 }),
+                ];
+                const plan = core.planSplitGroup(history, { account: ACCOUNT,
+                    tradeDate: '2025-11-20', ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                assert.equal(plan.legs.length, 2);
+                assert.equal(plan.notices.length, 1);
+                assert.equal(plan.notices[0].code, 'expired_unrecorded');
+                const partial = withGroup(plan, 'split-g1');
+                partial[1] = Object.assign({}, partial[1], { contracts: 1, splitToContracts: -2 });
+                const dropped = partial.filter((row) => row.strike !== 80);
+                const warnings = core.computeLedger(history.concat(dropped), {})
+                    .perAccount[ACCOUNT].warnings;
+                assert.ok(warnings.some((item) => item.startsWith('split_leg_mismatch:')));
+                assert.ok(warnings.some((item) => item.startsWith('split_series_unconverted:')));
+                assert.ok(!warnings.some((item) => item.includes('|70.0000|')));
+            },
+        },
+        {
+            name: 'a group beside a plain split row of the same day is not applied',
+            run() {
+                const core = loadCore();
+                sequence = 0;
+                const history = [sharesBuy('2025-11-03', 100, 80)];
+                const plan = core.planSplitGroup(history, { account: ACCOUNT,
+                    tradeDate: '2025-11-20', ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                const legacy = event({ kind: 'split', tradeDate: '2025-11-20', splitRatio: 2, cashAmount: 0 });
+                const ledger = core.computeLedger(history.concat(withGroup(plan, 'split-g1'), [legacy]), {});
+                const account = ledger.perAccount[ACCOUNT];
+                assert.ok(account.warnings.includes('split_group_invalid:split-g1'));
+                assert.equal(account.shares, 200, 'only the plain row applied');
+                assert.equal(core.planSplitGroup(history.concat([legacy]), { account: ACCOUNT,
+                    tradeDate: '2025-11-20', ratio: 2, ruleRef: 'x', underlying: 'TQQQ' })
+                    .problems[0].code, 'split_already_recorded');
+            },
+        },
+        {
+            name: 'a plain split row after same-day share fills is flagged, never blocked',
+            run() {
+                const core = loadCore();
+                const page = loadPage();
+                sequence = 0;
+                const events = [
+                    sharesBuy('2025-11-03', 100, 80),
+                    event({ kind: 'share_trade', tradeDate: '2025-11-20',
+                        brokerTimestamp: '2025-11-20T10:00:00', shares: 100, price: 40,
+                        cashAmount: -4000 }),
+                    event({ kind: 'split', tradeDate: '2025-11-20', splitRatio: 2, cashAmount: 0 }),
+                ];
+                const warnings = core.computeLedger(events, {}).perAccount[ACCOUNT].warnings;
+                assert.deepEqual(Array.from(warnings), ['legacy_split_same_day:2025-11-20']);
+                const result = { ledgerPreview: { warnings, newWarnings: warnings } };
+                assert.deepEqual(Array.from(page.importReplayBlockingWarnings(result)), []);
+                assert.deepEqual(Array.from(page.importReplayNotices(result)), Array.from(warnings));
+                // A split on a day without share fills is quiet.
+                const quiet = core.computeLedger([events[0], events[2]], {});
+                assert.deepEqual(Array.from(quiet.perAccount[ACCOUNT].warnings), []);
+                // Breaking a split group is something the store refuses.
+                const blocked = { ledgerPreview: { newWarnings: [
+                    'split_series_unconverted:x', 'split_leg_mismatch:y', 'split_group_invalid:z'] } };
+                assert.equal(page.importReplayBlockingWarnings(blocked).length, 3);
+            },
+        },
+        {
+            name: 'planSplitGroup refuses what it cannot prove standard',
+            run() {
+                const core = loadCore();
+                sequence = 0;
+                const plan = (history, extra) => core.planSplitGroup(history, Object.assign({
+                    account: ACCOUNT, tradeDate: '2025-11-20', ratio: 2, ruleRef: 'OCC #57592',
+                    underlying: 'TQQQ' }, extra || {}));
+                const codes = (result) => Array.from(result.problems.map((item) => item.code));
+                assert.deepEqual(codes(plan([shortPut('2025-11-04', 50, -1, 1,
+                    { localSymbol: '2TQQQ 251219P00050000' })])), ['non_standard_class']);
+                assert.deepEqual(codes(plan([shortPut('2025-11-04', 50, -1, 1,
+                    { sharesPerContract: 50 })])), ['non_standard_deliverable']);
+                assert.deepEqual(codes(plan([shortPut('2025-11-04', 33.333, -1, 1)])),
+                    ['strike_not_whole_cent']);
+                assert.deepEqual(codes(plan([shortPut('2025-11-04', 99.97, -1, 1),
+                    shortPut('2025-11-04', 99.98, -1, 1)])), ['destination_collision']);
+                // Two real contracts at one strike cannot both be the standard class.
+                const twoContracts = [shortPut('2025-11-04', 50, -1, 1, { conId: 1 }),
+                    shortPut('2025-11-05', 50, -1, 1, { conId: 2 })];
+                assert.deepEqual(codes(plan(twoContracts)), ['destination_collision']);
+                // A row that cannot say which of them it is stays unresolved.
+                assert.ok(codes(plan(twoContracts.concat(shortPut('2025-11-06', 50, -1, 1))))
+                    .includes('identity_ambiguous'));
+                assert.deepEqual(codes(plan([], { ratio: 1.5 })), ['ratio_invalid']);
+                assert.deepEqual(codes(plan([], { ruleRef: '' })), ['rule_ref_required']);
+                const ok = plan([shortPut('2025-11-04', 50, -1, 1,
+                    { localSymbol: 'TQQQ  251219P00050000' })]);
+                assert.deepEqual(codes(ok), []);
+                assert.equal(ok.legs[0].needsStandardConfirmation, false);
+                // A fill already on the ex-date is post-split and not converted.
+                const sameDay = plan([shortPut('2025-11-20', 25, -1, 1)]);
+                assert.equal(sameDay.legs.length, 0);
+            },
+        },
+        {
+            name: 'C/O child fills reclassify against the position a split group converted',
+            run() {
+                const parser = loadImport();
+                const csvSymbol = 'TQQQ 19DEC25 50 P';
+                const header = 'Trades,Header,DataDiscriminator,Asset Category,Currency,'
+                    + 'Symbol,Date/Time,Quantity,T. Price,Proceeds,Comm/Fee,Code';
+                const text = [header,
+                    `Trades,Data,Order,Equity and Index Options,USD,${csvSymbol},"2025-12-01, 10:45:00",3,0.5,-150,-1,C;O`,
+                    `Trades,Data,Trade,Equity and Index Options,USD,${csvSymbol},"2025-12-01, 10:45:00",1,0.5,-50,-0.33,C;O`,
+                    `Trades,Data,Trade,Equity and Index Options,USD,${csvSymbol},"2025-12-01, 10:45:05",2,0.5,-100,-0.67,C;O`,
+                ].join('\n');
+                const base = { symbol: 'TQQQ', accountFallback: ACCOUNT, defaultSharesPerContract: 100 };
+                const sourceRef = parser.parse(text, base).events[0].sourceRef;
+                const common = { account: ACCOUNT, right: 'P', expiry: '20251219',
+                    sharesPerContract: 100, includeInCost: true };
+                const history = [
+                    Object.assign({ eventId: 'h1', seq: 1, kind: 'option_trade', tradeDate: '2025-11-04',
+                        brokerTimestamp: '2025-11-04T10:00:00', strike: 100, contracts: -1,
+                        conId: 1001 }, common),
+                    { eventId: 'h2', seq: 2, kind: 'split', account: ACCOUNT, tradeDate: '2025-11-20',
+                        splitRatio: 2, splitGroup: 'split-g1', cashAmount: 0, includeInCost: true },
+                    Object.assign({ eventId: 'h3', seq: 3, kind: 'option_split', tradeDate: '2025-11-20',
+                        splitGroup: 'split-g1', splitRatio: 2, strike: 100, contracts: 1, conId: 1001,
+                        splitToStrike: 50, splitToContracts: -2, splitToConId: 2002, cashAmount: 0 }, common),
+                    Object.assign({ eventId: 'h4', seq: 4, kind: 'option_trade', tradeDate: '2025-12-01',
+                        brokerTimestamp: '2025-12-01T10:45:00', strike: 50, contracts: 1, conId: 2002,
+                        localSymbol: csvSymbol, externalRef: 'ibkr-exec-E1',
+                        source: 'execution_report' }, common),
+                ];
+                const result = parser.parse(text, Object.assign({}, base, {
+                    existingEvents: history,
+                    existingExternalRefs: [{ account: ACCOUNT, externalRef: 'ibkr-exec-E1' }],
+                    fillSplits: {
+                        [`${ACCOUNT}\u0000${sourceRef}`]: {
+                            keep: [1], matched: [{ index: 0, externalRef: 'ibkr-exec-E1' }],
+                        },
+                    },
+                }));
+                assert.equal(result.problems.some((item) => /拆分 C\/O 订单/.test(item.reason)), false);
+                const kept = result.events.find((item) => item.kind === 'option_trade');
+                // -2 after the split, +1 from TWS, then +2 closes one and opens one.
+                assert.equal(kept.tag, 'ibkr_close_open');
             },
         },
     ],

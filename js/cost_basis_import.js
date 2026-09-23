@@ -289,9 +289,29 @@
             if (!event) return 0;
             const date = String(event.tradeDate || '');
             const dates = headers.get(String(event.account || '')) || [];
-            // A group's own rows sit on its pre-split side.
-            return dates.filter((day) => (event.splitGroup ? day < date : day <= date)).length;
+            // A group's own rows sit on its pre-split side; the incoming
+            // half of a conversion opens the post-split side.
+            const before = dates.filter(
+                (day) => (event.splitGroup ? day < date : day <= date)).length;
+            return event.splitSide === 'split_in' ? before + 1 : before;
         };
+    }
+
+    /**
+     * A stored option_split row as its two position changes: the series it
+     * empties and the adjusted series it fills (the core's optionMovements;
+     * this file loads without the core). Other rows pass through.
+     */
+    function _positionMovements(event) {
+        if (!event || event.kind !== 'option_split') return [event];
+        return [
+            Object.assign({}, event, { splitSide: 'split_out' }),
+            Object.assign({}, event, {
+                splitSide: 'split_in', strike: event.splitToStrike,
+                contracts: event.splitToContracts, conId: event.splitToConId,
+                localSymbol: event.splitToLocalSymbol,
+            }),
+        ];
     }
 
     const PERIOD_MONTHS = Object.freeze({
@@ -2670,7 +2690,8 @@
         const incoming = ((openings || {}).drafts || []).concat(events)
             .filter((e) => !known.has(refKey(e)));
         const lastSeq = (opts.existingEvents || []).reduce((n, e) => Math.max(n, Number(e.seq) || 0), 0);
-        const timeline = history.map((event) => ({ event, seq: Number(event.seq) || 0 }))
+        const timeline = history.reduce((items, event) => items.concat(
+            _positionMovements(event).map((item) => ({ event: item, seq: Number(event.seq) || 0 }))), [])
             .concat(incoming.map((event, index) => ({ event, seq: lastSeq + index + 1 })))
             .filter(({event}) => event.contracts !== undefined && event.right)
             .sort((a, b) => _compareEventOrder(a.event, b.event) || a.seq - b.seq);
