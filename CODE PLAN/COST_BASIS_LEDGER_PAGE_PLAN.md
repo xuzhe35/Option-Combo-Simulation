@@ -6,6 +6,7 @@
 > `backup_cost_basis_store.py`；当前没有该 CLI，也没有自动账本备份调度。
 > FOP/FUT 扩展见 `COST_BASIS_FOP_FUTURES_ROLL_PLAN.md`。
 > 当前导入规则见 [COST_BASIS_IMPORT_INTEGRITY.md](COST_BASIS_IMPORT_INTEGRITY.md)，随机回归见 [COST_BASIS_RANDOMIZED_REGRESSION.md](COST_BASIS_RANDOMIZED_REGRESSION.md)。
+> 拆股目前仅支持手工股票比例调整，未平期权只提示核对，CSV 公司行动仍阻断；完整处理的待实施设计见 [拆股与期权合约调整 CODE PLAN](COST_BASIS_CORPORATE_ACTIONS_PLAN.md)，不能把该计划视为已实现能力。
 > 当前压力测试见 [STRESS_KERNEL_REFACTOR.md](STRESS_KERNEL_REFACTOR.md) 与 [STRESS_PORTFOLIO_WORKFLOW.md](STRESS_PORTFOLIO_WORKFLOW.md)；跨账本旧计划仅作历史追溯。
 > 2026-09-19 核对：下文带日期的实测、迁移及阶段测试数量是历史记录，不代表本次重新执行或当前测试总数。
 >
