@@ -32,10 +32,10 @@ jobs:
         run: python scripts/verify_cost_basis_randomized.py --cases 300 --steps 80 --store-cases 60 --report random-ledger-report.json
       - name: Standard split groups (fixed seeds)
         run: python -m unittest discover -s tests -p 'cost_basis_split*_test.py'
-      - name: Standard split groups (500 fresh seeds, 100 through SQLite)
+      - name: Standard split groups (500 fresh model seeds, 100 through SQLite, 500 identity seeds)
         # The start moves with every run so each run covers seeds no earlier
         # run used; a failure prints the seed and its rerun command.
-        run: python tests/cost_basis_split_campaign_test.py --seeds 500 --start "$((100000 + ${{ github.run_number }} * 500))" --store-every 5
+        run: python tests/cost_basis_split_campaign_test.py --seeds 500 --start "$((100000 + ${{ github.run_number }} * 500))" --store-every 5 --identity-seeds 500
       - name: Preserve coverage and counterexamples
         if: always()
         uses: actions/upload-artifact@v4

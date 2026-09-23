@@ -2636,6 +2636,32 @@ class CostBasisStore:
             positions[identity] = position + contracts
         return warnings
 
+    def _replay_account_option_keys(self, conn, book_id, account, *, voiding=False):
+        """Replay every option contract of one account; returns the warnings.
+
+        Adding or removing a split group moves the epoch boundary of every
+        contract in the account, not only of the series the group converts:
+        a pre-split and a post-split contract sharing one structural key are
+        told apart only by the group. A pure share split converts nothing
+        yet still decides which contract a later identity-less row closes,
+        so a group write or void re-proves the account's whole option book.
+        """
+        keys = set()
+        for row in conn.execute(
+                'SELECT kind, right, strike, expiry, shares_per_contract, split_to_strike '
+                'FROM cost_basis_events WHERE book_id = ? AND account = ? '
+                'AND voided_at_utc IS NULL AND include_in_cost = 1 AND kind IN ('
+                "'option_trade','option_assignment','option_exercise','option_expiry',"
+                "'option_split')", (book_id, account)).fetchall():
+            for strike in _row_strikes(row):
+                keys.add((row['right'], strike, row['expiry'], row['shares_per_contract']))
+        warnings = []
+        for key in sorted(keys, key=lambda item: tuple(
+                '' if part is None else f'{part}' for part in item)):
+            warnings.extend(self._replay_contract_key(
+                conn, book_id, account, *key, voiding=voiding))
+        return warnings
+
     def _validate_futures_timeline(self, conn, book_id, account):
         """Replay every FUT movement for one account and prove each roll.
 
@@ -2943,10 +2969,17 @@ class CostBasisStore:
         """A1 converts only the standard option class of the ledger's symbol.
 
         The class is read from option symbols (`TQQQ` vs the adjusted
-        `2TQQQ`): the leg's own and every earlier row of the same series.
-        A series with no symbol on record needs the operator's explicit
-        confirmation, recorded on the leg; the deliverable must be the
-        ledger's standard contract size.
+        `2TQQQ`) of the one contract the leg converts: the leg's own and
+        every row the replay resolves to the same broker identity in the
+        same split epoch. Another contract sharing the strike and expiry -
+        an adjusted class, or a series from before an earlier split - is
+        not this one. A contract with no symbol on record needs the
+        operator's explicit confirmation, recorded on the leg; the
+        deliverable must be the ledger's standard contract size.
+
+        `rows` are the group's stored rows: this runs inside the write
+        transaction after they are inserted, so each leg resolves exactly
+        as the replay will see it.
         """
         symbol = str(book['symbol']).upper()
         for leg in rows:
@@ -2957,16 +2990,20 @@ class CostBasisStore:
                 raise InvalidRequestError(
                     f"{label} delivers {leg['shares_per_contract']} shares per contract; "
                     'only the standard contract can be converted by a split group')
-            history = conn.execute(
-                'SELECT DISTINCT local_symbol FROM cost_basis_events WHERE book_id = ? '
-                'AND account = ? AND right = ? AND strike = ? AND expiry = ? '
-                'AND shares_per_contract IS ? AND trade_date < ? AND voided_at_utc IS NULL '
-                'AND local_symbol IS NOT NULL',
-                (book['bookId'], leg['account'], leg['right'], leg['strike'], leg['expiry'],
-                 leg['shares_per_contract'], leg['trade_date'])).fetchall()
-            symbols = {row['local_symbol'] for row in history}
-            if leg['local_symbol']:
-                symbols.add(leg['local_symbol'])
+            resolved = _resolve_contract_identity_rows(
+                self._contract_key_movements(
+                    conn, book['bookId'], leg['account'], leg['right'], leg['strike'],
+                    leg['expiry'], leg['shares_per_contract']),
+                _split_epoch_of(conn, book['bookId'], leg['account']))
+            own = [(identity, ambiguous) for item, identity, ambiguous in resolved
+                   if item['event_id'] == leg['event_id'] and item['side'] == 'split_out']
+            if not own or own[0][1]:
+                raise InvalidRequestError(
+                    'option event needs conId or an exact localSymbol because '
+                    'multiple real contracts share its account, right, strike, '
+                    'expiry and multiplier')
+            symbols = {item['local_symbol'] for item, identity, _ in resolved
+                       if identity == own[0][0] and item['local_symbol']}
             foreign = sorted({_option_root(item) for item in symbols} - {symbol})
             if foreign:
                 raise InvalidRequestError(
@@ -3053,17 +3090,25 @@ class CostBasisStore:
             'AND account = ? AND contracts IS NOT NULL',
             (book_id, descriptor['account']),
         ).fetchall()
-        current_contracts = 0.0
+        movements = []
         for active_row in active_rows:
             # A split conversion counts on both contracts it touches.
             for movement in _option_movements(active_row):
-                if contract_key(movement) != contract_key(descriptor):
-                    continue
-                active_con_id = movement['con_id']
-                if (proof_con_id and active_con_id
-                        and str(proof_con_id) != str(active_con_id)):
-                    continue
-                current_contracts += float(movement['contracts'] or 0)
+                if contract_key(movement) == contract_key(descriptor):
+                    movements.append({**movement, 'trade_date': active_row['trade_date'],
+                                      'split_group': active_row['split_group']})
+        # Rows are resolved to contracts the way the replay resolves them:
+        # a row without a conId that closed another contract - such as the
+        # K50 from before a split, which shares this key with the converted
+        # K100 - is not part of this position.
+        current_contracts = 0.0
+        for movement, identity, _ in _resolve_contract_identity_rows(
+                movements, _split_epoch_of(conn, book_id, descriptor['account'])):
+            resolved = identity.split('@', 1)[0]
+            if (proof_con_id and resolved.startswith('con:')
+                    and resolved != f'con:{proof_con_id}'):
+                continue
+            current_contracts += float(movement['contracts'] or 0)
         if abs(current_contracts - ledger_contracts) >= 1e-6:
             raise InvalidRequestError(
                 'the ledger changed after the TWS reconciliation preview')
@@ -3766,13 +3811,18 @@ class CostBasisStore:
                                 (f'{client_token}-00000',)).fetchone() is not None:
                     raise InvalidRequestError('clientToken has already been used')
                 self._require_ledger_version(conn, book_id, expected_ledger_version)
-                self._check_standard_split_legs(conn, book, ordered)
                 for index, row in enumerate(ordered):
                     self._insert_event(
                         conn, book, row, client_token=f'{client_token}-{index:05d}',
                         allow_overdraw=False, check_share_warning=False,
                         validate_timeline=False)
+                self._check_standard_split_legs(conn, book, conn.execute(
+                    'SELECT * FROM cost_basis_events WHERE book_id = ? AND split_group = ? '
+                    'ORDER BY seq', (book_id, group_id)).fetchall())
                 warnings = self._validate_batch_timelines(conn, book_id, ordered)
+                # The new epoch boundary also re-sorts contracts the group
+                # does not convert; only those raise, their old warnings stay.
+                self._replay_account_option_keys(conn, book_id, header['account'])
                 warnings.extend(self._net_short_share_warnings(conn, book_id))
                 self._invalidate_coverage(conn, book_id, header['trade_date'])
                 stored = conn.execute(
@@ -3798,7 +3848,8 @@ class CostBasisStore:
         """Void every row of one split group together, or nothing.
 
         Post-split history resolves against the group, so removing it can
-        strand later closes; the same replays that guard a write guard this.
+        strand later closes or merge two contracts' timelines; every option
+        contract of the account is replayed, as for a group write.
         """
         _require_token('clientToken', client_token)
         split_group = _optional_text(split_group, 'splitGroup', MAX_EXTERNAL_REF_CHARS)
@@ -3837,8 +3888,11 @@ class CostBasisStore:
                     'void_reason = ? WHERE book_id = ? AND split_group = ? '
                     'AND voided_at_utc IS NULL',
                     (self._utc_now_iso(), client_token, reason, book_id, split_group))
-                for row in rows:
-                    self._validate_contract_timeline(conn, book_id, row)
+                # Every contract of the account, not only the converted ones:
+                # without the group, rows on both sides of the split date
+                # resolve as one epoch (_replay_account_option_keys).
+                self._replay_account_option_keys(
+                    conn, book_id, rows[0]['account'], voiding=True)
                 self._validate_split_groups(conn, book_id, rows[0]['account'])
                 self._invalidate_coverage(conn, book_id, rows[0]['trade_date'])
                 voided = conn.execute(

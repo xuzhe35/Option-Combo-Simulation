@@ -677,6 +677,35 @@ class SplitGroupWriteTests(TempStoreCase):
             **_credentials(self.store, self.book_id))
         self.assertEqual(result['inserted'], 1)
 
+    def test_a_tws_proof_counts_only_the_contract_it_names(self):
+        """A pre-split K50 (5001), closed by a row carrying only its symbol,
+        shares its key with the converted K100 now trading as K50 (2001).
+        The proof for 2001 resolves rows as the replay does, so that close
+        is not part of the position it checks."""
+        occ = 'TQQQ  251219P{:08d}'.format
+        self.append(self.put('2025-10-10', 100, -2, 4, conId=1001, localSymbol=occ(100000)))
+        self.append(self.put('2025-11-03', 50, 1, 1, conId=5001, localSymbol=occ(50000)))
+        self.append(self.put('2025-11-13', 50, -1, 1, localSymbol=occ(50000)))
+        self.record([self.header(), self.leg(100, 2, conId=1001, localSymbol=occ(100000),
+                                             splitToConId=2001, splitToLocalSymbol=occ(50000))])
+        fill = {**self.put('2025-12-01', 50, 4, 0.1, conId=2001, localSymbol=occ(50000)),
+                'source': 'execution_report', 'tag': 'ibkr_close',
+                'externalRef': 'ibkr-exec-close-2001', 'brokerTimestamp': '2025-12-01T10:00:00'}
+        proof = {'kind': 'option', 'account': ACCOUNT, 'right': 'P', 'strike': 50,
+                 'expiry': '20251219', 'sharesPerContract': 100, 'conId': 2001,
+                 'ledgerContracts': -4, 'twsContracts': 0}
+        stale = {**proof, 'ledgerContracts': -5}
+        with self.assertRaises(InvalidRequestError):
+            self.store.import_events(
+                self.book_id, [fill], import_batch_id=_token(), client_token_prefix=_token(),
+                supersede_tws_event_ids=[], tws_reconciliation=[stale],
+                **_credentials(self.store, self.book_id))
+        result = self.store.import_events(
+            self.book_id, [fill], import_batch_id=_token(), client_token_prefix=_token(),
+            supersede_tws_event_ids=[], tws_reconciliation=[proof],
+            **_credentials(self.store, self.book_id))
+        self.assertEqual(result['inserted'], 1)
+
     def test_a_stale_preview_cannot_record_a_split(self):
         """A14: another tab wrote after this preview was drawn."""
         self.append(self.put('2025-11-04', 100, -2, 4))
@@ -763,6 +792,82 @@ class SplitGroupWriteTests(TempStoreCase):
         with self.assertRaises(InvalidRequestError) as caught:
             self.record([self.header(), self.leg(99.97, 1), self.leg(99.98, 1)])
         self.assertIn('two series', str(caught.exception))
+
+    def test_voiding_a_share_only_group_re_proves_every_contract_of_the_account(self):
+        """A pure share group converts nothing, yet it is what tells a closed
+        pre-split K50 (1001) from the post-split K50 (2002) that a hand-typed
+        expiry closes. Voiding it would merge the two timelines and strand
+        that expiry (realized premium 450 -> 200), so the void is refused."""
+        occ50 = 'TQQQ  251219P00050000'
+        self.append({'kind': 'share_trade', 'tradeDate': '2025-10-02', 'shares': 100,
+                     'price': 80, 'cashAmount': -8000})
+        self.append(self.put('2025-11-03', 50, -1, 3, conId=1001, localSymbol=occ50))
+        self.append(self.put('2025-11-10', 50, 1, 1, conId=1001, localSymbol=occ50))
+        group = self.record([self.header()])
+        self.append(self.put('2025-11-24', 50, -1, 2.5, conId=2002, localSymbol=occ50))
+        expiry = self.append({'kind': 'option_expiry', 'tradeDate': '2025-12-19',
+                              'right': 'P', 'strike': 50, 'expiry': '20251219',
+                              'contracts': 1, 'sharesPerContract': 100,
+                              'cashAmount': 0})['event']
+        before = self.store.list_events(self.book_id, include_voided=True)['events']
+        with self.assertRaises(InvalidRequestError):
+            self.store.void_split_group(self.book_id, group['splitGroup'], reason='mistake',
+                                        client_token=_token())
+        self.assertEqual(self.store.list_events(self.book_id, include_voided=True)['events'],
+                         before)
+        # Without the identity-less expiry both contracts carry a conId and
+        # stay apart, so the group can go.
+        self.store.void_event(self.book_id, expiry['eventId'], reason='redo',
+                              client_token=_token())
+        self.store.void_split_group(self.book_id, group['splitGroup'], reason='mistake',
+                                    client_token=_token())
+
+    def test_a_new_group_re_proves_contracts_it_does_not_convert(self):
+        """The group moves the epoch boundary for every contract. An expiry
+        typed with a date after the split, for a series that expired before
+        it, is not converted and would land in the post-split epoch with
+        nothing behind it."""
+        self.append(self.put('2025-11-03', 40, -1, 1, expiry='20251119'))
+        self.append({'kind': 'option_expiry', 'tradeDate': '2025-11-21', 'right': 'P',
+                     'strike': 40, 'expiry': '20251119', 'contracts': 1,
+                     'sharesPerContract': 100, 'cashAmount': 0})
+        before = self.live()
+        with self.assertRaises(PositionOverdrawError):
+            self.record([self.header()])
+        self.assertEqual(self.live(), before)
+
+    TWIN = '2TQQQ 260116P00050000'
+    STANDARD = 'TQQQ  260116P00050000'
+
+    def test_an_adjusted_twin_from_an_earlier_epoch_does_not_block_the_standard_one(self):
+        """The class check reads only the contract being converted: a closed
+        2TQQQ K50 from before an earlier split is another contract."""
+        self.append(self.put('2025-10-05', 50, -1, 1, expiry='20260116', conId=3003,
+                             localSymbol=self.TWIN))
+        self.append(self.put('2025-10-10', 50, 1, 0.5, expiry='20260116', conId=3003,
+                             localSymbol=self.TWIN))
+        self.record([self.header()])
+        self.append(self.put('2025-11-24', 50, -1, 2.5, expiry='20260116', conId=2002,
+                             localSymbol=self.STANDARD))
+        self.record([self.header(tradeDate='2025-12-01'),
+                     self.leg(50, 1, tradeDate='2025-12-01', expiry='20260116',
+                              conId=2002, localSymbol=self.STANDARD)])
+
+    def test_an_adjusted_twin_in_the_same_epoch_blocks_only_while_it_is_converted(self):
+        self.append(self.put('2025-10-05', 50, -1, 1, expiry='20260116', conId=3003,
+                             localSymbol=self.TWIN))
+        self.append(self.put('2025-10-24', 50, -1, 2.5, expiry='20260116', conId=2002,
+                             localSymbol=self.STANDARD))
+        standard = self.leg(50, 1, expiry='20260116', conId=2002, localSymbol=self.STANDARD)
+        twin = self.leg(50, 1, expiry='20260116', conId=3003, localSymbol=self.TWIN)
+        with self.assertRaises(InvalidRequestError) as caught:
+            self.record([self.header(), standard, twin])
+        self.assertIn('2TQQQ', str(caught.exception))
+        with self.assertRaises(InvalidRequestError):
+            self.record([self.header(), standard])
+        self.append(self.put('2025-10-10', 50, 1, 0.5, expiry='20260116', conId=3003,
+                             localSymbol=self.TWIN))
+        self.record([self.header(), standard])
 
     def test_the_browser_plan_is_what_the_store_accepts(self):
         """The core's planSplitGroup draft, recorded as-is, then replayed."""

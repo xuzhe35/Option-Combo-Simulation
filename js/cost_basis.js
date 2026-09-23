@@ -7723,10 +7723,16 @@
             const plan = planTargetExecutionReconciliation(target, result.events, allEvents);
             let reason = problems.map((item) => item.reason).join('；') || plan.reason;
             if (plan.complete && !reason) {
+                // The account's whole history, not only rows at this
+                // strike: a split conversion fills this series from another
+                // strike, and split epochs decide which contract each row
+                // is. Only gaps on this contract block it.
+                const targetKey = core.contractKey(target);
                 const retained = (allEvents || []).filter((event) => (
-                    !plan.supersedeEventIds.includes(event.eventId)
-                    && core.contractKey(event) === core.contractKey(target)));
-                if (core.findUnbackedCloses(retained.concat(plan.events)).length) {
+                    event && !plan.supersedeEventIds.includes(event.eventId)
+                    && String(event.account || '') === String(target.account || '')));
+                if (core.findUnbackedCloses(retained.concat(plan.events))
+                    .some((gap) => core.contractKey(gap) === targetKey)) {
                     reason = '完整历史回放存在无开仓支持的平仓，请补齐历史后重试。';
                 }
             }

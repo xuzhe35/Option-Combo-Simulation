@@ -833,5 +833,80 @@ module.exports = {
                 assert.deepEqual(openBy(ledger), { P50: { contracts: -2, openPremium: 400 } });
             },
         },
+        {
+            name: 'a close of the converted series is backed by its conversion, not by rows at its strike',
+            run() {
+                const core = loadCore();
+                sequence = 0;
+                const history = [
+                    shortPut('2025-11-04', 100, -2, 4, { conId: 1001,
+                        localSymbol: 'TQQQ  251219P00100000' }),
+                    // A closed pre-split K50 contract shares the adjusted key.
+                    shortPut('2025-11-05', 50, -1, 2, { conId: 5005,
+                        localSymbol: 'TQQQ  251219P00050000' }),
+                    put({ tradeDate: '2025-11-07', strike: 50, contracts: 1, price: 1,
+                        cashAmount: -100, conId: 5005, tag: 'ibkr_close',
+                        localSymbol: 'TQQQ  251219P00050000' }),
+                ];
+                const plan = core.planSplitGroup(history, { account: ACCOUNT, tradeDate: '2025-11-20',
+                    ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                const grouped = history.concat(withGroup(plan, 'split-g1'));
+                const buyBack = (contracts) => put({ tradeDate: '2025-12-01', strike: 50,
+                    contracts, price: 1, cashAmount: -100 * contracts, tag: 'ibkr_close',
+                    conId: 1001, localSymbol: 'TQQQ  251219P00050000' });
+                assert.deepEqual(Array.from(core.findUnbackedCloses(grouped.concat(buyBack(4)), {})), []);
+                const over = core.findUnbackedCloses(grouped.concat(buyBack(5)), {});
+                assert.equal(over.length, 1);
+                assert.equal(over[0].strike, 50);
+                assert.equal(over[0].missingContracts, -1);
+                // The conversion itself is a close: without the pre-split
+                // opening, its outgoing half is the gap.
+                const stranded = core.findUnbackedCloses(grouped.slice(1), {});
+                assert.equal(JSON.stringify(stranded.map((gap) => [gap.strike, gap.missingContracts])),
+                    '[[100,-2]]');
+            },
+        },
+        {
+            name: 'batch TWS reconciliation accepts a close of the converted series',
+            run() {
+                const context = loadBrowserScripts(['js/cost_basis_core.js',
+                    'js/american_binomial.js', 'js/cost_basis_import.js', 'js/cost_basis.js']);
+                const core = context.OptionComboCostBasisCore;
+                const page = context.OptionComboCostBasisPage;
+                sequence = 0;
+                const history = [
+                    shortPut('2025-11-04', 100, -2, 4, { eventId: 'open', conId: 1001,
+                        localSymbol: 'TQQQ  251219P00100000' }),
+                ];
+                const plan = core.planSplitGroup(history, { account: ACCOUNT, tradeDate: '2025-11-20',
+                    ratio: 2, ruleRef: 'OCC #57592', underlying: 'TQQQ' });
+                const allEvents = history.concat(withGroup(plan, 'split-g1').map(
+                    (row, index) => Object.assign(row, { eventId: `group-${index}`,
+                        splitToConId: row.kind === 'option_split' ? 2002 : null })));
+                const ledger = core.computeLedger(allEvents, {});
+                assert.deepEqual(openBy(ledger), { P50: { contracts: -4, openPremium: 800 } });
+                const fill = { account: ACCOUNT, kind: 'option_trade', right: 'P', strike: 50,
+                    expiry: '20251219', sharesPerContract: 100, contracts: 4, price: 1,
+                    cashAmount: -400, tradeDate: '2025-12-01',
+                    brokerTimestamp: '2025-12-01T10:00:00', source: 'execution_report',
+                    tag: 'ibkr_exec', externalRef: 'ibkr-exec-split-close', conId: 2002,
+                    localSymbol: 'TQQQ  251219P00050000' };
+                const target = { account: ACCOUNT, kind: 'option', right: 'P', strike: 50,
+                    expiry: '20251219', sharesPerContract: 100, conId: 2002, label: 'P50',
+                    key: core.contractKey(fill), ledger: -4, tws: 0, difference: 4 };
+                const batch = page.planBatchExecutionReconciliation(
+                    [target], { events: [fill], problems: [] }, allEvents, []);
+                assert.deepEqual(Array.from(batch.skipped), []);
+                assert.equal(batch.events.length, 1);
+                assert.equal(batch.events[0].tag, 'ibkr_close');
+                // A claimed ledger amount beyond the conversion is still refused.
+                const over = page.planBatchExecutionReconciliation(
+                    [{ ...target, ledger: -5, difference: 5 }],
+                    { events: [{ ...fill, contracts: 5, cashAmount: -500 }], problems: [] },
+                    allEvents, []);
+                assert.equal(over.events.length, 0);
+                assert.match(over.skipped[0].reason, /无开仓支持的平仓/);
+            },
+        },
     ],
 };

@@ -13,10 +13,15 @@ its result without importing production code. For every seed:
   must replay to the model, survive a backup round trip, and a group voided
   and recorded again must give the same result.
 
-Normal unittest runs 100 seeds, 20 of them through SQLite. The acceptance
-campaign runs more, for example:
+IdentityCampaign has no model. Contracts share a strike on both sides of a
+split, rows may carry no identity, groups are recorded late or voided, and a
+TWS batch closes what is left; every write the store accepts must replay in
+the core without a blocking warning.
 
-    PYTHONPATH=. python tests/cost_basis_split_campaign_test.py --seeds 500 --start 1000 --store-every 5
+Normal unittest runs 100 model seeds, 20 of them through SQLite, and 80
+identity seeds. The acceptance campaign runs more, for example:
+
+    PYTHONPATH=. python tests/cost_basis_split_campaign_test.py --seeds 500 --start 1000 --store-every 5 --identity-seeds 500
 
 A failure names the seed, the stage and the rerun command.
 """
@@ -24,6 +29,8 @@ import argparse
 import copy
 import json
 import pathlib
+import random
+import re
 import sys
 import tempfile
 import unittest
@@ -175,6 +182,255 @@ class SplitCampaign:
         self.coverage['store_seeds'] += 1
 
 
+# Mirrors REPLAY_BLOCKING_WARNING in js/cost_basis.js (the futures and
+# roll codes cannot occur here).
+BLOCKING = re.compile(
+    r'^(closes_more_than_open|ibkr_close_open_invalid|ibkr_open_opposes_existing|'
+    r'contract_identity_ambiguous|split_ratio_invalid|split_group_invalid|'
+    r'split_leg_mismatch|split_series_unconverted)(:|$)')
+IDENTITY_REQUIRED = (
+    'identity_group_timely', 'identity_group_late', 'identity_group_refused_late',
+    'identity_void_accepted', 'identity_void_refused', 'identity_row_refused',
+    'identity_bare_row_accepted', 'identity_twin_closed', 'identity_conid_kept',
+    'identity_conid_changed', 'identity_batch_closed')
+SPLIT_DATE = '2025-11-20'
+
+
+def identity_case(seed):
+    """Random rows around one 2:1 split in which contracts share strikes.
+
+    Before the split: a standard K50 (5001), an adjusted-class 2TQQQ K50
+    (5009, always closed before the split) and a standard K100 (1001). After
+    it, the converted K100 trades as K50 under a kept (1001) or new (2001)
+    conId, the converted K50 as K25. Rows carry a full identity, only a
+    symbol, or none (typed by hand). Nothing here is a model: the store
+    decides what it accepts, and the campaign checks that everything it
+    accepts replays cleanly in the browser core.
+    """
+    rng = random.Random(seed)
+    occ = 'TQQQ  251219P{:08d}'.format
+    twin = '2TQQQ 251219P{:08d}'.format
+
+    def identity(con_id, symbol, bare_ok=True):
+        style = rng.choice(('full', 'full', 'symbol', 'bare') if bare_ok else ('full',))
+        return ({'conId': con_id, 'localSymbol': symbol} if style == 'full'
+                else {'localSymbol': symbol} if style == 'symbol' else {})
+
+    def trade(day, strike, contracts, ident, tag=''):
+        price = rng.choice((0.5, 1.0, 2.0, 3.5))
+        row = {'kind': 'option_trade', 'tradeDate': day, 'right': 'P', 'strike': strike,
+               'expiry': '20251219', 'contracts': contracts, 'sharesPerContract': 100,
+               'price': price, 'cashAmount': round(-contracts * 100 * price, 2), **ident}
+        if tag:
+            row['tag'] = tag
+        return row
+
+    pre, post = [], []
+    fates = {name: rng.choice(('absent', 'closed', 'live') if name != 'T'
+                              else ('absent', 'closed')) for name in 'ATC'}
+    # Beside the 2TQQQ twin a pre-split K50 row must name its contract, or
+    # the store rightly refuses it as ambiguous.
+    twins = fates['A'] != 'absent' and fates['T'] != 'absent'
+    for name, strike, con_id, symbol in (('A', 50, 5001, occ(50000)),
+                                         ('T', 50, 5009, twin(50000)),
+                                         ('C', 100, 1001, occ(100000))):
+        if fates[name] == 'absent':
+            continue
+        size = rng.choice((-3, -2, -1, 1, 2))
+        opened = f'2025-10-{rng.randint(1, 20):02d}'
+        pre.append(trade(opened, strike, size, identity(con_id, symbol, bare_ok=False)))
+        if fates[name] == 'closed':
+            pre.append(trade(f'2025-11-{rng.randint(1, 19):02d}', strike, -size,
+                             identity(con_id, symbol, bare_ok=not (twins and strike == 50)),
+                             tag=rng.choice(('', 'ibkr_close'))))
+    kept = rng.random() < 0.5
+    post50 = (1001 if kept else 2001, occ(50000))
+    post25 = (5001 if rng.random() < 0.5 else 2501, occ(25000))
+    # Post-split K50 flow: maybe a new opening, then maybe a close or expiry.
+    if rng.random() < 0.7:
+        size = rng.choice((-2, -1, 1))
+        post.append(trade(f'2025-11-{rng.randint(21, 28):02d}', 50, size,
+                          identity(*post50, bare_ok=rng.random() < 0.5)))
+    for strike, target in ((50, post50), (25, post25)):
+        if rng.random() < 0.6:
+            post.append({'kind': 'option_expiry', 'tradeDate': '2025-12-19', 'right': 'P',
+                         'strike': strike, 'expiry': '20251219', 'sharesPerContract': 100,
+                         'contracts': rng.choice((-2, -1, 1, 2, 4)), 'cashAmount': 0,
+                         **identity(*target)})
+    return {'rng': rng, 'pre': sorted(pre, key=lambda row: row['tradeDate']),
+            'post': sorted(post, key=lambda row: row['tradeDate']), 'fates': fates,
+            'post50': post50, 'post25': post25, 'kept': kept}
+
+
+class IdentityCampaign:
+    """Every write the store accepts must replay cleanly in the browser core.
+
+    Covers what the model campaign cannot: different contracts at one
+    strike across a split, identity-less rows, a group recorded late or
+    voided after later rows, an adjusted class beside the standard one, and
+    a TWS batch reconciliation that closes the converted series.
+    """
+
+    def __init__(self, bridge):
+        self.bridge = bridge
+        self.coverage = Counter()
+
+    def verify(self, seed):
+        case = identity_case(seed)
+        rng = case['rng']
+        with tempfile.TemporaryDirectory(prefix='cost-basis-identity-') as directory:
+            store = CostBasisStore(pathlib.Path(directory) / 'ledger.db').initialize()
+            book = store.create_book(account=ACCOUNT, symbol='TQQQ', start_date='2025-09-01')
+            bid = book['bookId']
+            tokens = iter(range(1, 100000))
+
+            def token():
+                return f'identity-seed-{seed}-{next(tokens)}'
+
+            def live():
+                return store.list_events(bid, limit=2000)['events']
+
+            def clean(label):
+                warnings = [warning for warning in
+                            self.bridge.call(op='replay', rows=live())['warnings']
+                            if BLOCKING.match(warning)]
+                assert not warnings, (seed, label, 'store accepted, core blocks', warnings)
+
+            def attempt(label, action):
+                version = store.ledger_version(bid)
+                try:
+                    result = action()
+                except (InvalidRequestError, PositionOverdrawError):
+                    assert store.ledger_version(bid) == version, (seed, label, 'refusal wrote')
+                    return None
+                clean(label)
+                return result
+
+            def record_group():
+                before = [row for row in live() if row['tradeDate'] < SPLIT_DATE]
+                plan = self.bridge.call(op='plan', rows=before, options={
+                    'account': ACCOUNT, 'tradeDate': SPLIT_DATE, 'ratio': 2,
+                    'ruleRef': 'OCC #57592', 'underlying': 'TQQQ'})
+                assert plan['problems'] == [], (seed, 'plan problems', plan['problems'])
+                legs = []
+                for leg in plan['legs']:
+                    leg = {key: value for key, value in leg.items() if key not in (
+                        'seriesKey', 'needsStandardConfirmation', 'carriedPremium',
+                        'carriedShortPremium')}
+                    leg['splitStandardConfirmed'] = True
+                    to_con, to_symbol = case['post50'] if leg['strike'] == 100 else case['post25']
+                    if rng.random() < 0.8:
+                        leg.update(splitToConId=to_con, splitToLocalSymbol=to_symbol)
+                    legs.append(leg)
+                return store.append_split_group(
+                    bid, [plan['header']] + legs, client_token=token(), book_identity=book,
+                    expected_ledger_version=store.ledger_version(bid))
+
+            self.coverage['identity_conid_kept' if case['kept'] else 'identity_conid_changed'] += 1
+            if case['fates']['T'] == 'closed':
+                self.coverage['identity_twin_closed'] += 1
+            for row in case['pre']:
+                assert attempt('pre', lambda: store.append_event(
+                    bid, copy.deepcopy(row), client_token=token())) is not None, (
+                    seed, 'pre-split row refused', row)
+            late = rng.random() < 0.35
+            group = None
+            if not late:
+                group = attempt('group', record_group)
+                # On time, a draft with no problems is what the store accepts.
+                assert group is not None, (seed, 'clean timely plan refused')
+                self.coverage['identity_group_timely'] += 1
+            for row in case['post']:
+                accepted = attempt('post', lambda: store.append_event(
+                    bid, copy.deepcopy(row), client_token=token()))
+                if accepted is None:
+                    self.coverage['identity_row_refused'] += 1
+                elif 'conId' not in row:
+                    self.coverage['identity_bare_row_accepted'] += 1
+            if late:
+                group = attempt('late group', record_group)
+                self.coverage['identity_group_late' if group
+                              else 'identity_group_refused_late'] += 1
+            if group and rng.random() < 0.6:
+                voided = attempt('void group', lambda: store.void_split_group(
+                    bid, group['splitGroup'], reason='campaign', client_token=token()))
+                self.coverage['identity_void_accepted' if voided
+                              else 'identity_void_refused'] += 1
+            self.close_by_batch(store, bid, book, token, seed, clean)
+        self.coverage['identity_seeds'] += 1
+
+    def close_by_batch(self, store, bid, book, token, seed, clean):
+        """Close every open series with one TWS fill through the batch planner."""
+        rows = store.list_events(bid, limit=2000)['events']
+        ledger = self.bridge.call(op='replay', rows=rows)
+        targets, fills = [], []
+        for number, option in enumerate(ledger['options']):
+            if option['identityConflict'] or len(option['identities']) > 1:
+                continue
+            fill = {'account': ACCOUNT, 'kind': 'option_trade', 'right': option['right'],
+                    'strike': option['strike'], 'expiry': option['expiry'],
+                    'sharesPerContract': option['sharesPerContract'],
+                    'contracts': -option['contracts'], 'price': 0.1,
+                    'cashAmount': round(option['contracts'] * 10, 2),
+                    'tradeDate': '2025-12-01',
+                    'brokerTimestamp': f'2025-12-01T10:{number:02d}:00',
+                    'source': 'execution_report', 'tag': 'ibkr_exec',
+                    'externalRef': f'ibkr-exec-identity-{seed}-{number}',
+                    'conId': option['conId'], 'localSymbol': option['localSymbol'] or None}
+            fills.append(fill)
+            targets.append({'account': ACCOUNT, 'kind': 'option', 'right': option['right'],
+                            'strike': option['strike'], 'expiry': option['expiry'],
+                            'sharesPerContract': option['sharesPerContract'],
+                            'conId': option['conId'], 'localSymbol': option['localSymbol'],
+                            'key': option['structuralKey'], 'label': option['key'],
+                            'ledger': option['contracts'], 'tws': 0,
+                            'difference': -option['contracts']})
+        if not targets:
+            return
+        plan = self.bridge.call(op='batch', targets=targets,
+                                result={'events': fills, 'problems': []}, rows=rows)
+        # The page's own rule for two targets on one structural key: skip both.
+        shared = Counter(target['key'] for target in targets)
+        expected = [fill for fill, target in zip(fills, targets) if shared[target['key']] == 1]
+        assert plan['skipped'] == [] or len(expected) < len(fills), (
+            seed, 'batch skipped a clean close', plan['skipped'])
+        assert len(plan['events']) == len(expected), (seed, 'batch', plan['skipped'])
+        if not expected:
+            return
+        try:
+            store.import_events(
+                bid, plan['events'], import_batch_id=token(), client_token_prefix=token(),
+                supersede_tws_event_ids=plan['supersedeEventIds'],
+                tws_reconciliation=plan['proofs'], book_identity=book,
+                expected_ledger_version=store.ledger_version(bid))
+        except (InvalidRequestError, PositionOverdrawError) as error:
+            raise AssertionError((seed, 'store refused the batch the page planned',
+                                  str(error))) from error
+        clean('batch import')
+        self.coverage['identity_batch_closed'] += 1
+
+
+def run_identity_campaign(seeds, start=0, report=None, bridge=None):
+    own = bridge is None
+    campaign = IdentityCampaign(bridge or Bridge())
+    failures = []
+    try:
+        for seed in range(start, start + seeds):
+            try:
+                campaign.verify(seed)
+            except AssertionError as error:
+                failures.append((seed, repr(error)[:600]))
+                if report:
+                    report(f'identity seed {seed} failed: {repr(error)[:600]}\n  rerun: '
+                           'PYTHONPATH=. python tests/cost_basis_split_campaign_test.py '
+                           f'--seeds 0 --identity-seeds 1 --start {seed}')
+    finally:
+        if own:
+            campaign.bridge.close()
+    missing = [branch for branch in IDENTITY_REQUIRED if not campaign.coverage[branch]]
+    return campaign.coverage, failures, missing
+
+
 def run_campaign(seeds, start=0, store_every=5, report=None):
     campaign = SplitCampaign()
     failures = []
@@ -202,6 +458,11 @@ class SplitCampaignTests(unittest.TestCase):
         self.assertEqual(coverage['seeds'], 100)
         self.assertEqual(coverage['store_seeds'], 20)
 
+    def test_every_write_the_store_accepts_replays_cleanly(self):
+        coverage, failures, missing = run_identity_campaign(80, start=0)
+        self.assertEqual(failures, [])
+        self.assertEqual(missing, [], dict(coverage))
+
     def test_the_model_restates_the_rounding_rule(self):
         from cost_basis_split_model import half_up
         fixture = json.loads((ROOT / 'tests/fixtures/occ_57592_tqqq_strikes.json').read_text())
@@ -215,12 +476,18 @@ def main():
     parser.add_argument('--seeds', type=int, default=500)
     parser.add_argument('--start', type=int, default=1000)
     parser.add_argument('--store-every', type=int, default=5)
+    parser.add_argument('--identity-seeds', type=int, default=200)
     args = parser.parse_args()
-    coverage, failures, missing = run_campaign(args.seeds, args.start, args.store_every, print)
+    coverage, failures, missing = run_campaign(args.seeds, args.start, args.store_every, print) \
+        if args.seeds else (Counter(), [], [])
+    identity, identity_failures, identity_missing = run_identity_campaign(
+        args.identity_seeds, args.start, print) if args.identity_seeds else (Counter(), [], [])
     print(json.dumps({'seeds': coverage['seeds'], 'storeSeeds': coverage['store_seeds'],
-                      'failures': len(failures), 'missingBranches': missing,
-                      'coverage': dict(sorted(coverage.items()))}, indent=2))
-    return 1 if failures or missing else 0
+                      'identitySeeds': identity['identity_seeds'],
+                      'failures': len(failures) + len(identity_failures),
+                      'missingBranches': missing + identity_missing,
+                      'coverage': dict(sorted((coverage + identity).items()))}, indent=2))
+    return 1 if failures or missing or identity_failures or identity_missing else 0
 
 
 if __name__ == '__main__':

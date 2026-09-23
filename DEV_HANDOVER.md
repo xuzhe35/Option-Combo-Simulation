@@ -896,6 +896,12 @@ strikes) and `tests/fixtures/cost_basis_event_order_vectors.json`. Tests:
 seeded campaign `tests/cost_basis_split_campaign_test.py` with its independent
 model `tests/helpers/cost_basis_split_model.py` (100 seeds in unittest, 500
 fresh seeds per CI run; see `CODE PLAN/COST_BASIS_RANDOMIZED_REGRESSION.md`).
+The same file's model-free `IdentityCampaign` checks that every write the store
+accepts replays without a blocking warning in the core, across contracts that
+share a strike on both sides of a split. A group write or void therefore
+replays every option contract of the account (`_replay_account_option_keys`),
+and the TWS reconciliation proof and `findUnbackedCloses` resolve identities
+per split epoch (plan §15.12).
 Not supported: statements whose corporate-action rows cross a split (A2),
 reverse or fractional splits and non-standard deliverables (B).
 

@@ -3266,13 +3266,33 @@
      *
      * `existingOpen` seeds the walk with what the ledger already holds, so
      * a second statement layered onto real history reports nothing.
+     *
+     * Rows are read the way computeLedger reads them: an option_split row
+     * empties one series (a close that must be backed) and fills its
+     * adjusted series, and identities are resolved per split epoch. A
+     * close of the adjusted series is backed by the conversion, not by
+     * rows at its own strike.
      */
     function findUnbackedCloses(events, options) {
         const opts = options || {};
-        const inputEvents = Array.isArray(events) ? events : [];
         const existing = Array.isArray(opts.existingOpen) ? opts.existingOpen : [];
+        // A voided row moves nothing and lends no identity.
+        const ordered = _sortEvents((Array.isArray(events) ? events : []).filter(
+            (event) => event && typeof event === 'object' && !event.voidedAtUtc));
+        const epochs = splitEpochs(ordered);
+        const movements = [];
+        ordered.forEach((event) => {
+            if (event.kind === 'option_split') movements.push(...optionMovements(event));
+            else if (OPTION_KINDS.indexOf(event.kind) >= 0) movements.push(event);
+        });
         const identityResolution = _buildIdentityResolution(
-            existing.concat(inputEvents)).byItem;
+            existing.concat(movements), (item) => {
+                if (item && item.side && item.event) {
+                    const before = epochs.get(item.event) || 0;
+                    return item.side === 'split_in' ? before + 1 : before;
+                }
+                return epochs.has(item) ? epochs.get(item) : _number(item && item.splitEpoch);
+            }).byItem;
         const seeds = new Map();
         existing.forEach((item) => {
             const resolved = identityResolution.get(item);
@@ -3282,9 +3302,7 @@
 
         const states = new Map();
         const gaps = new Map();
-        _sortEvents(inputEvents).forEach((event) => {
-            if (!event || OPTION_KINDS.indexOf(event.kind) < 0) return;
-            if (event.voidedAtUtc) return;
+        movements.forEach((event) => {
             const resolved = identityResolution.get(event);
             const key = resolved ? resolved.key : contractKey(event);
             if (!states.has(key)) {
@@ -3293,7 +3311,7 @@
             const state = states.get(key);
             const contracts = _number(event.contracts);
 
-            if (_isClosingOptionEvent(event)) {
+            if (event.side === 'split_out' || _isClosingOptionEvent(event)) {
                 let deficit = 0;
                 if (contracts > 0 && state.position > -contracts + EPSILON) {
                     deficit = contracts + state.position;

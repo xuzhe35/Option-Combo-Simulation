@@ -26,6 +26,8 @@ function snapshot(ledger) {
 function handle(data) {
     if (data.op === 'replay') return snapshot(core.computeLedger(data.rows, data.options || {}));
     if (data.op === 'plan') return core.planSplitGroup(data.rows, data.options || {});
+    if (data.op === 'batch') return c.OptionComboCostBasisPage.planBatchExecutionReconciliation(
+        data.targets, data.result, data.rows, []);
     if (data.op === 'prefixes') return data.rows.map((_, i) =>
         snapshot(core.computeLedger(data.rows.slice(0, i + 1), data.options || {})));
     if (data.op === 'page') {
