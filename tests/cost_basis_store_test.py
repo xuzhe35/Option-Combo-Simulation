@@ -378,6 +378,52 @@ class EventValidationTests(CostBasisStoreTestBase):
 
 
 class RunningPositionTests(CostBasisStoreTestBase):
+    def test_mixed_close_open_accepts_both_reversal_directions(self):
+        for direction in (-1, 1):
+            with self.subTest(direction=direction):
+                strike = 45 if direction == 1 else 46
+                opening = self.append({**self.short_put(contracts=2 * direction, strike=strike),
+                                       'tag': 'ibkr_open'})
+                reversal = self.append({**self.short_put(date='2026-06-02', contracts=-4 * direction,
+                                                       strike=strike), 'tag': 'ibkr_close_open'})
+                # Removing the backing opening must fail atomically, including when
+                # both remaining cash and net quantity would otherwise look plausible.
+                version = self.store.ledger_version(self.book_id)
+                with self.assertRaises(PositionOverdrawError):
+                    self.store.void_event(self.book_id, opening['event']['eventId'],
+                                          reason='test missing opening', client_token=_token())
+                self.assertEqual(self.store.ledger_version(self.book_id), version)
+                rows = [r for r in self.store.list_events(self.book_id)['events'] if r['strike'] == strike]
+                self.assertEqual(sum(r['contracts'] for r in rows), -2 * direction)
+                self.assertEqual(rows[1]['tag'], 'ibkr_close_open')
+                self.store.void_event(self.book_id, reversal['event']['eventId'],
+                                      reason='test valid reversal void', client_token=_token())
+
+    def test_invalid_mixed_close_open_never_bypasses_validation(self):
+        for index, (prior, delta) in enumerate(((0, -4), (2, 4), (2, -2), (4, -2), (-2, 2))):
+            strike = 50 + index
+            if prior:
+                self.append(self.short_put(contracts=prior, strike=strike))
+            version = self.store.ledger_version(self.book_id)
+            for override in (False, True):
+                with self.subTest(prior=prior, delta=delta, override=override):
+                    with self.assertRaises(PositionOverdrawError):
+                        self.append({**self.short_put(date='2026-06-02', contracts=delta, strike=strike),
+                                     'tag': 'ibkr_close_open'}, allow_overdraw=override)
+                    self.assertEqual(self.store.ledger_version(self.book_id), version)
+
+    def test_mixed_close_open_requires_included_matching_identity_and_time(self):
+        for index, changes in enumerate(({'conId': 102}, {'includeInCost': False},
+                                         {'brokerTimestamp': '2026-06-01T12:00:00'})):
+            strike = 60 + index
+            self.append({**self.short_put(contracts=2, strike=strike), 'conId': 101,
+                         'brokerTimestamp': '2026-06-01T10:00:00', **changes})
+            version = self.store.ledger_version(self.book_id)
+            with self.assertRaises(PositionOverdrawError):
+                self.append({**self.short_put(contracts=-4, strike=strike), 'conId': 101,
+                             'brokerTimestamp': '2026-06-01T11:00:00', 'tag': 'ibkr_close_open'})
+            self.assertEqual(self.store.ledger_version(self.book_id), version)
+
     def test_broker_time_not_insert_sequence_controls_same_day_validation(self):
         self.append({**self.short_put(contracts=-1),
                      'brokerTimestamp': '2026-06-01T10:00:00'})
@@ -777,6 +823,102 @@ class ImportTests(CostBasisStoreTestBase):
         live = self.store.list_events(self.book_id)['events']
         self.assertEqual(sum(item['contracts'] for item in live), -2)
         self.assertAlmostEqual(sum(item['cashAmount'] for item in live), 201.40)
+
+    def _batch_reconciliation_fixture(self):
+        baselines, events, proofs = [], [], []
+        for index, strike in enumerate((70, 71, 72)):
+            base = {**self.short_put(date='2026-09-02', contracts=-1, price=9, fees=0),
+                    'strike': strike, 'conId': 700 + index}
+            if index != 2:
+                baselines.append(self.append({**base, 'source': 'reconcile',
+                    'tag': 'tws_snapshot', 'externalRef': f'batch-baseline-{index}'})['event'])
+            for fill in range(2):
+                events.append({**base, 'contracts': -1, 'price': 0.4 + fill * 0.1,
+                    'fees': 1, 'cashAmount': (0.4 + fill * 0.1) * 100 - 1,
+                    'source': 'execution_report', 'tag': 'ibkr_exec',
+                    'externalRef': f'ibkr-exec-batch-{index}-{fill}',
+                    'brokerTimestamp': f'2026-09-02T10:0{fill}:00'})
+            proofs.append({'kind': 'option', 'account': 'U1111111', 'right': 'P',
+                'strike': strike, 'expiry': base['expiry'], 'sharesPerContract': 100,
+                'conId': 700 + index, 'ledgerContracts': -1 if index != 2 else 0,
+                'twsContracts': -2})
+        return baselines, events, proofs
+
+    def test_batch_tws_reconciliation_replaces_multiple_baselines_atomically_and_retries(self):
+        baselines, events, proofs = self._batch_reconciliation_fixture()
+        kwargs = dict(import_batch_id=_token('batch'), client_token_prefix=_token('imp'),
+                      supersede_tws_event_ids=[e['eventId'] for e in baselines],
+                      tws_reconciliation=proofs,
+                      expected_ledger_version=self.store.ledger_version(self.book_id))
+        result = self.reviewed_import_events(self.book_id, list(reversed(events)), **kwargs)
+        self.assertEqual(result['inserted'], 6)
+        self.assertEqual(result['supersededTwsBaselines'], 2)
+        live = self.store.list_events(self.book_id)['events']
+        self.assertEqual(sum(e['contracts'] for e in live), -6)
+        self.assertAlmostEqual(sum(e['cashAmount'] for e in live), 264)
+        retry = self.reviewed_import_events(self.book_id, list(reversed(events)), **kwargs)
+        self.assertTrue(retry['idempotentReplay'])
+        self.assertEqual(len(self.store.list_events(self.book_id)['events']), 6)
+
+    def test_batch_tws_preserves_commission_rebate_and_rejects_fake_delivery(self):
+        baselines, events, proofs = self._batch_reconciliation_fixture()
+        rebate = {'kind': 'fee', 'account': 'U1111111', 'tradeDate': '2026-09-02',
+                  'brokerTimestamp': '2026-09-02T10:00:00', 'cashAmount': 0.25,
+                  'fees': 0, 'source': 'execution_report', 'tag': 'ibkr_rebate',
+                  'externalRef': events[0]['externalRef'] + '-rebate'}
+        original = self.store.ledger_version(self.book_id)
+        with self.assertRaises(InvalidRequestError):
+            self.reviewed_import_events(self.book_id, events + [{**rebate,
+                'kind': 'share_trade', 'shares': 1, 'price': 0}],
+                import_batch_id=_token('batch'), client_token_prefix=_token('imp'),
+                supersede_tws_event_ids=[e['eventId'] for e in baselines],
+                tws_reconciliation=proofs)
+        self.assertEqual(self.store.ledger_version(self.book_id), original)
+        result = self.reviewed_import_events(self.book_id, events + [rebate],
+            import_batch_id=_token('batch'), client_token_prefix=_token('imp'),
+            supersede_tws_event_ids=[e['eventId'] for e in baselines],
+            tws_reconciliation=proofs)
+        self.assertEqual(result['inserted'], 7)
+        self.assertAlmostEqual(sum(e['cashAmount'] for e in
+            self.store.list_events(self.book_id)['events']), 264.25)
+
+    def test_batch_tws_bad_final_contract_rolls_back_all_baseline_replacements(self):
+        baselines, events, proofs = self._batch_reconciliation_fixture()
+        original = self.store.ledger_version(self.book_id)
+        proofs[-1]['twsContracts'] = -3
+        with self.assertRaises(InvalidRequestError):
+            self.reviewed_import_events(self.book_id, events,
+                import_batch_id=_token('batch'), client_token_prefix=_token('imp'),
+                supersede_tws_event_ids=[e['eventId'] for e in baselines],
+                tws_reconciliation=proofs)
+        self.assertEqual(self.store.ledger_version(self.book_id), original)
+        self.assertEqual(len(self.store.list_events(self.book_id)['events']), 2)
+
+    def test_batch_tws_rejects_unproved_execution_and_wrong_conid(self):
+        baselines, events, proofs = self._batch_reconciliation_fixture()
+        for extra in ({**events[0], 'externalRef': 'ibkr-exec-unproved', 'strike': 90},
+                      {**events[0], 'externalRef': 'ibkr-exec-wrong-id', 'conId': 999}):
+            with self.subTest(extra=extra['externalRef']):
+                original = self.store.ledger_version(self.book_id)
+                with self.assertRaises(InvalidRequestError):
+                    self.reviewed_import_events(self.book_id, events + [extra],
+                        import_batch_id=_token('batch'), client_token_prefix=_token('imp'),
+                        supersede_tws_event_ids=[e['eventId'] for e in baselines],
+                        tws_reconciliation=proofs)
+                self.assertEqual(self.store.ledger_version(self.book_id), original)
+
+    def test_batch_tws_rejects_duplicate_proofs_or_changed_ledger(self):
+        baselines, events, proofs = self._batch_reconciliation_fixture()
+        for candidate in (proofs + [proofs[0]], [*proofs[:-1], {**proofs[-1], 'ledgerContracts': -1}],
+                          [], [{'kind': 'option', 'strike': 'invalid'}]):
+            with self.subTest(proofs=candidate):
+                original = self.store.ledger_version(self.book_id)
+                with self.assertRaises(InvalidRequestError):
+                    self.reviewed_import_events(self.book_id, events,
+                        import_batch_id=_token('batch'), client_token_prefix=_token('imp'),
+                        supersede_tws_event_ids=[e['eventId'] for e in baselines],
+                        tws_reconciliation=candidate)
+                self.assertEqual(self.store.ledger_version(self.book_id), original)
 
     def test_targeted_tws_replay_replaces_avgcost_baseline_without_cash_guessing(self):
         adopted = self.append({

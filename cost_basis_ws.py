@@ -2,7 +2,7 @@
 
 Both backends route the same client actions through here so Live and
 Historical answer with identical response shapes and error codes. This
-module owns loopback enforcement, request validation, and the sync-store to
+module owns ledger access enforcement, request validation, and the sync-store to
 event-loop bridge (asyncio.to_thread); it never writes SQL itself and never
 leaks database paths or raw SQL errors to the browser.
 
@@ -22,6 +22,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import os
 import threading
 import time
 
@@ -83,11 +84,11 @@ def build_scenario_inputs_busy_response(data):
     )
 
 
-def create_store_env(config=None):
+def create_store_env(config=None, *, environ=None):
     """Describe the ledger store without touching the filesystem.
 
     Cheap enough to run at module import. The database is opened lazily on
-    the first loopback request; a failure only disables the ledger while
+    the first permitted request; a failure only disables the ledger while
     market data, replay, and IB keep running.
     """
     enabled = True
@@ -96,9 +97,24 @@ def create_store_env(config=None):
             enabled = config.getboolean('cost_basis', 'enabled', fallback=True)
         except ValueError:
             enabled = True
+    # Remote access is an explicit deployment opt-in, relying on an external
+    # authenticated network (e.g. Tailscale). Docker NAT may hide the original
+    # peer, so do not infer authentication from private IPs or forwarded headers.
+    environment = os.environ if environ is None else environ
+    remote_value = environment.get('OPTION_COMBO_COST_BASIS_ALLOW_REMOTE')
+    if remote_value is None and config is not None:
+        remote_value = config.get('cost_basis', 'allow_remote', fallback='false', raw=True)
+    normalized = str(remote_value or '').strip().lower()
+    allow_remote = normalized in ('1', 'true', 'yes', 'on')
+    if normalized not in ('', '0', 'false', 'no', 'off', '1', 'true', 'yes', 'on'):
+        logger.warning('invalid cost basis allow_remote value; remote access disabled')
+    if allow_remote:
+        logger.warning('cost basis remote access enabled; restrict backend access '
+                       'to the authenticated Tailscale network or equivalent')
     return {
         '_config': config,
         '_enabled': enabled,
+        'allow_remote': allow_remote,
         '_init_lock': threading.Lock(),
         '_initialized': False,
         'store': None,
@@ -196,7 +212,8 @@ async def build_cost_basis_response(store_env, websocket, data, *,
     started = time.monotonic()
 
     store_env = store_env or {}
-    if not is_loopback_address(getattr(websocket, 'remote_address', None)):
+    if store_env.get('allow_remote') is not True and not is_loopback_address(
+            getattr(websocket, 'remote_address', None)):
         logger.warning(
             'rejected non-loopback cost basis request %s from %s', action, client_ip)
         if action == 'request_cost_basis_status':

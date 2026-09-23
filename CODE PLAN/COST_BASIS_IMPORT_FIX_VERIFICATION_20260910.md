@@ -1,5 +1,7 @@
 # Cost Basis 导入修复验收：R01–R20 覆盖情况
 
+> 历史审查记录：正文中的“当前”、问题状态和测试数量均指 2026-09-10 当轮代码，不是今天的待修清单。同日后续处理见 [修复记录](COST_BASIS_IMPORT_FIXES_20260910.md)；现行规则见 [导入完整性](COST_BASIS_IMPORT_INTEGRITY.md)，后续覆盖见 [随机回归](COST_BASIS_RANDOMIZED_REGRESSION.md)。
+
 验证日期：2026-09-10。对象：当前工作区实际代码（含未提交修复），对照 `COST_BASIS_IMPORT_INTEGRITY.md` 与首轮 `COST_BASIS_IMPORT_INTEGRITY_REVIEW_20260910.md`。
 
 **结论：修复有效，但尚未覆盖全部已知问题，不能将 R01–R20 统一标为“已修”。** 原来的重复 TWS 别名、退款符号、旧文件预览、跨账本迟到响应等路径已被阻断；修订识别、跨格式去重、存根替换、完整性登记和恢复流程仍有缺口。部分缺口是新增修法产生的分支问题。

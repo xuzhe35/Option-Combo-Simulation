@@ -82,6 +82,49 @@ module.exports = {
     name: 'cost_basis_core.js',
     tests: [
         {
+            name: 'dividend withholding nets into after-tax dividends without changing cash or cost',
+            run() {
+                const core = loadCore();
+                const history = [
+                    event({ kind: 'share_trade', tradeDate: '2026-06-01', shares: 100,
+                        price: 50, fees: 1, cashAmount: -5001 }),
+                    event({ kind: 'dividend', tradeDate: '2026-06-20', cashAmount: 50 }),
+                    event({ kind: 'fee', tradeDate: '2026-06-20', cashAmount: -5, fees: 5,
+                        tag: 'withholding_tax' }),
+                    event({ kind: 'fee', tradeDate: '2026-06-25', cashAmount: 2,
+                        tag: 'withholding_tax_refund' }),
+                    event({ kind: 'fee', tradeDate: '2026-06-26', cashAmount: -3, fees: 3 }),
+                    event({ account: 'U2222222', kind: 'dividend', tradeDate: '2026-06-20',
+                        cashAmount: 10 }),
+                    event({ account: 'U2222222', kind: 'fee', tradeDate: '2026-06-20',
+                        cashAmount: -1, fees: 1, tag: 'withholding_tax' }),
+                ];
+                const ledger = core.computeLedger(history, { referencePrice: 52 });
+                const first = ledger.perAccount.U1111111;
+                assert.equal(first.dividends, 50);
+                assert.equal(first.dividendWithholding, -3);
+                assert.equal(first.netDividends, 47);
+                assert.equal(first.withholdingFees, 5);
+                assert.equal(first.fees, 9, 'the fee total itself is unchanged');
+                assert.equal(first.netCash, -4957, 'every cash row still counts exactly once');
+                const combined = ledger.combined;
+                assert.equal(combined.dividends, 60);
+                assert.equal(combined.dividendWithholding, -4);
+                assert.equal(combined.netDividends, 56);
+                assert.equal(combined.withholdingFees, 6);
+                // A display split only: tagging the tax does not move cost.
+                const untagged = core.computeLedger(history.map((item) => (
+                    /^withholding_tax/.test(item.tag || '') ? { ...item, tag: '' } : item)),
+                { referencePrice: 52 });
+                assert.equal(untagged.combined.netDividends, 60);
+                assert.equal(untagged.combined.netCash, combined.netCash);
+                assert.equal(untagged.combined.blendedCost, combined.blendedCost);
+                const futures = core.computeLedger([], { secType: 'FUT' }).combined;
+                assert.equal(futures.netDividends, 0);
+                assert.equal(futures.withholdingFees, 0);
+            },
+        },
+        {
             name: 'expiry premium distribution groups remaining shorts and excludes long options',
             run() {
                 const core = loadCore();
@@ -755,6 +798,54 @@ module.exports = {
                 assert.equal(summary.realizedPremium, -10);
                 assert.equal(summary.openPremium, 360);
                 assert.equal(summary.optionPremiumNet, 350);
+            },
+        },
+        {
+            name: 'IBKR C/O reversals preserve cash and quantities in both option engines',
+            run() {
+                const core = loadCore();
+                for (const secType of ['STK', 'FUT']) {
+                    for (const direction of [-1, 1]) {
+                        const common = { optionSecType: secType === 'FUT' ? 'FOP' : 'OPT' };
+                        const rows = [
+                            shortPut({ ...common, contracts: 2 * direction, tag: 'ibkr_open' }),
+                            shortPut({ ...common, tradeDate: '2026-06-02',
+                                contracts: -4 * direction, price: 1.16, fees: 1.8,
+                                tag: 'ibkr_close_open' }),
+                        ];
+                        const ledger = core.computeLedger(rows, { secType });
+                        assert.equal(ledger.warnings.length, 0);
+                        assert.equal(ledger.openOptions[0].contracts, -2 * direction);
+                        const expected = rows.reduce((sum, row) => sum + row.cashAmount, 0);
+                        assert.ok(Math.abs(ledger.combined.netCash - expected) < 1e-6);
+                        assert.ok(Math.abs(ledger.combined.realizedPremium
+                            + ledger.combined.openPremium - expected) < 1e-6);
+                    }
+                }
+            },
+        },
+        {
+            name: 'IBKR C/O cannot invent a closing lot or silently become a pure close',
+            run() {
+                const core = loadCore();
+                for (const secType of ['STK', 'FUT']) {
+                    for (const [prior, delta] of [[0, -4], [2, 4], [2, -2], [4, -2], [-2, 2]]) {
+                        const common = { optionSecType: secType === 'FUT' ? 'FOP' : 'OPT' };
+                        const rows = prior ? [shortPut({ ...common, contracts: prior })] : [];
+                        const before = core.computeLedger(rows, { secType });
+                        rows.push(shortPut({ ...common, tradeDate: '2026-06-02',
+                            contracts: delta, tag: 'ibkr_close_open' }));
+                        const after = core.computeLedger(rows, { secType });
+                        assert.ok(after.warnings.some(w => w.startsWith('ibkr_close_open_invalid:')));
+                        assert.equal(after.combined.netCash, before.combined.netCash);
+                        assert.equal(after.openOptions.reduce((sum, row) => sum + row.contracts, 0), prior);
+                    }
+                }
+                for (const changed of [{ conId: 102 }, { includeInCost: false }]) {
+                    const rows = [shortPut({ contracts: 2, conId: 101, ...changed }),
+                        shortPut({ contracts: -4, conId: 101, tradeDate: '2026-06-02', tag: 'ibkr_close_open' })];
+                    assert.ok(core.computeLedger(rows).warnings.some(w => w.startsWith('ibkr_close_open_invalid:')));
+                }
             },
         },
         {

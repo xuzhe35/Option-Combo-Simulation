@@ -1,5 +1,7 @@
 # FOP / FUT / ROLL 综合成本账本实施计划
 
+> 本文保留 v3 扩展的实施记录，阶段数字指当时版本；当前账本 schema 为 v9。现行通用导入/恢复规则见 [导入完整性](COST_BASIS_IMPORT_INTEGRITY.md)，FUT/FOP 随机账本与固定 CSV 覆盖见 [随机回归](COST_BASIS_RANDOMIZED_REGRESSION.md)。真实 FOP/FUT 券商格式验收仍不能由合成测试代替。
+
 > 文件用途：这是 `cost_basis.html` 的 FOP/FUT 扩展计划，与既有
 > `COST_BASIS_LEDGER_PAGE_PLAN.md`（股票/ETF 账本）分开验收。
 >

@@ -1,15 +1,8 @@
 # 压力测试跨账本保护叠加实施计划
 
-> 文件用途：这是 `cost_basis.html` 到期压力测试的扩展计划，与既有
-> `COST_BASIS_LEDGER_PAGE_PLAN.md` §7 / §10 中的压力测试分开验收。
->
-> 状态：阶段 1–4 已实现并通过自动验收（`node tests/run.js` 1010 通过，2026-09-03）；
-> 待 TWS 连接后做 §9 浏览器手工验收  
-> 制定日期：2026-09-03  
-> 猜测、验证与反驳的全过程见根目录 `STRESS_MODEL_RESEARCH_MEMO.md`。  
-> 下一步「校准区间带」（紫线改为带子）的计划见 `STRESS_CALIBRATION_BAND_PLAN.md`。  
-> 已确认口径：叠加同账户另一本账本里的**全部未平多头期权（Long Call 与 Long Put 一起）**；
-> 价格映射先用线性收益率外推，不做路径依赖。
+> 历史设计与实施记录（2026-09-03 至 09-04）。本文旧页面估值器、弹窗、逐字段兼容要求及“下一步校准带”已被 09-05 之后的实现替代，不是当前开发契约。
+> 当前实现见 [STRESS_KERNEL_REFACTOR.md](STRESS_KERNEL_REFACTOR.md)、[STRESS_PORTFOLIO_WORKFLOW.md](STRESS_PORTFOLIO_WORKFLOW.md) 与 [STRESS_CALIBRATION_BAND_PLAN.md](STRESS_CALIBRATION_BAND_PLAN.md)。已改为独立视图、统一估值内核、本地 IV 校准、同步快照批次和采样范围；支持数量草稿及相对快照净值变化。
+> 下文保留原阶段结果和当时的待验项目。后续实际 TQQQ/QQQ 成对刷新与叠加验证记录见根目录 `COST_BASIS_LONG_PUT_STRESS_REVIEW.md`，不能把一次验证外推到所有行情故障。
 
 ## 1. 目标与不变量
 

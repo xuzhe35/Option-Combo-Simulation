@@ -2033,6 +2033,8 @@ class CostBasisStore:
             return event
         if len(rows) == 1:
             return {**event, 'sharesPerContract': int(rows[0][0])}
+        if len(rows) > 1:
+            raise InvalidRequestError('multiple option multipliers are known; provide sharesPerContract explicitly')
         return event
 
     @staticmethod
@@ -2047,12 +2049,12 @@ class CostBasisStore:
 
     def _normalize_event_batch(self, conn, book_id, events, book, *,
                                include_existing_history):
-        """Validate a batch while carrying known option multipliers forward.
+        """Validate a batch using unambiguous multipliers from the whole batch.
 
         A reviewed import may close an adjusted contract without repeating its
         deliverable size on every row.  Single-row append already infers that
-        size from the ledger.  Bulk import must additionally see an earlier row
-        in the same incoming batch; rebuild must use only replacement rows,
+        size from the ledger. Bulk import must also see an explicitly sized row
+        anywhere in the incoming batch; rebuild must use only replacement rows,
         because the old book is about to be archived and deleted.
         """
         known = {}
@@ -2069,6 +2071,16 @@ class CostBasisStore:
                 key = (row['account'], row['right'], row['strike'], row['expiry'])
                 known.setdefault(key, set()).add(int(row['shares_per_contract']))
 
+        # Explicit broker time, not payload order, decides which trade came
+        # first. Learn validated explicit sizes before resolving omitted ones.
+        for item in events:
+            candidate = _bind_event_to_book_account(item, book)
+            if (isinstance(candidate, dict) and candidate.get('kind') in OPTION_KINDS
+                    and candidate.get('sharesPerContract')):
+                explicit = _validate_event_shape(candidate, book)
+                key = (explicit['account'], explicit['right'], explicit['strike'], explicit['expiry'])
+                known.setdefault(key, set()).add(explicit['shares_per_contract'])
+
         normalized_rows = []
         for item in events:
             candidate = _bind_event_to_book_account(item, book)
@@ -2081,6 +2093,8 @@ class CostBasisStore:
                     # Shape validation below owns the precise user-facing error.
                     key = None
                 values = known.get(key, set()) if key is not None else set()
+                if len(values) > 1:
+                    raise InvalidRequestError('multiple option multipliers are known; provide sharesPerContract explicitly')
                 if len(values) == 1:
                     candidate = {
                         **candidate,
@@ -2183,6 +2197,7 @@ class CostBasisStore:
                     'contract identity; add conId or an exact localSymbol')
             position = positions.get(identity, 0.0)
             contracts = float(item['contracts'] or 0)
+            self._validate_mixed_option_trade(item, position, contracts)
             if (item['kind'] == 'option_trade' and item['tag'] == 'ibkr_open'
                     and abs(position) > 1e-9 and position * contracts < 0):
                 raise PositionOverdrawError(
@@ -2338,6 +2353,7 @@ class CostBasisStore:
                         'expiry and multiplier')
                 position = positions.get(identity, 0.0)
                 contracts = float(row['contracts'] or 0)
+                self._validate_mixed_option_trade(row, position, contracts)
                 if (row['kind'] == 'option_trade' and row['tag'] == 'ibkr_open'
                         and abs(position) > 1e-9 and position * contracts < 0):
                     raise PositionOverdrawError(
@@ -2368,6 +2384,44 @@ class CostBasisStore:
                 or normalized['future_contracts'] is not None:
             self._validate_futures_timeline(conn, book_id, normalized['account'])
         return warnings
+
+    def _validate_batch_timelines(self, conn, book_id, rows):
+        """Judge an atomic batch by its complete economic timeline.
+
+        Input order assigns same-time sequence ties, but is not evidence that
+        an explicitly later close happened before an earlier opening. Also a
+        backdated pair can temporarily strand an already-stored later close.
+        Nothing becomes visible until every affected timeline passes.
+        """
+        warnings = []
+        options = set()
+        futures_accounts = set()
+        for row in rows:
+            if row['kind'] in OPTION_KINDS:
+                key = (row['account'], row['right'], row['strike'], row['expiry'],
+                       row['shares_per_contract'])
+                if key not in options:
+                    options.add(key)
+                    warnings.extend(self._validate_timeline(
+                        conn, book_id, row, check_share_warning=False))
+            if row['kind'] in FUTURE_KINDS or row['future_contracts'] is not None:
+                futures_accounts.add(row['account'])
+        for account in futures_accounts:
+            self._validate_futures_timeline(conn, book_id, account)
+        return warnings
+
+    @staticmethod
+    def _validate_mixed_option_trade(row, position, contracts):
+        # C/O explicitly promises both a close and a new opposite opening.
+        # Do not relax pure-C protection or let missing history create a lot.
+        if row['kind'] != 'option_trade' or row['tag'] != 'ibkr_close_open':
+            return
+        if (abs(position) <= 1e-6 or position * contracts >= 0
+                or abs(contracts) <= abs(position) + 1e-6):
+            raise PositionOverdrawError(
+                f"IBKR C/O trade on {row['trade_date']} changes {contracts:g} "
+                f'contracts but the ledger holds {position:g}; it requires '
+                'a smaller opposite position to close and reverse')
 
     @staticmethod
     def _raise_or_warn_overdraw(row, position, contracts, allow_overdraw, warnings):
@@ -2476,6 +2530,68 @@ class CostBasisStore:
                 'ordered TWS executions do not reach the reconciled TWS position')
         return True
 
+    def _validate_batch_tws_reconciliations(self, conn, book_id, proofs,
+                                            event_ids, incoming_rows):
+        """Prove every selected contract within the same write transaction.
+
+        A list is the batch variant of the existing single-option proof. The
+        normal ledger-version guard and idempotent import receipt still apply.
+        No position snapshot is converted into an economic event here.
+        """
+        if not isinstance(proofs, list):
+            return
+        if not proofs or len(proofs) > MAX_IMPORT_EVENTS:
+            raise InvalidRequestError('TWS reconciliation batch must contain option proofs')
+        if event_ids is not None and (not isinstance(event_ids, list)
+                                     or any(not isinstance(x, str) for x in event_ids)):
+            raise InvalidRequestError('supersedeTwsEventIds must contain strings')
+        if len(event_ids or []) > MAX_IMPORT_EVENTS:
+            raise InvalidRequestError('too many TWS baselines to supersede')
+        selected_baselines = {}
+        for event_id in event_ids or []:
+            row = conn.execute(
+                'SELECT * FROM cost_basis_events WHERE book_id = ? AND event_id = ?',
+                (book_id, event_id),
+            ).fetchone()
+            if row is not None:
+                baseline = _event_row_to_dict(row)
+                selected_baselines.setdefault(contract_key(baseline), []).append(baseline)
+        seen = set()
+        covered = set()
+        for proof in proofs:
+            if not isinstance(proof, dict) or proof.get('kind') != 'option':
+                raise InvalidRequestError('TWS reconciliation batch must describe options')
+            try:
+                key = contract_key(proof)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise InvalidRequestError('invalid TWS reconciliation identity') from exc
+            if key in seen:
+                raise InvalidRequestError('duplicate contract in TWS reconciliation batch')
+            seen.add(key)
+            baselines = selected_baselines.get(key, [])
+            if len(baselines) > 1:
+                raise InvalidRequestError('ambiguous adopted TWS option baselines')
+            baseline = baselines[0] if baselines else {**proof, 'contracts': 0}
+            self._tws_option_replay_proves_supersession(
+                conn, book_id, baseline, incoming_rows, proof)
+            for item in incoming_rows:
+                if (item['kind'] == 'option_trade' and contract_key(item) == key
+                        and item['tag'] in ('ibkr_exec', 'ibkr_close')
+                        and not (proof.get('conId') and item.get('con_id')
+                                 and str(proof['conId']) != str(item['con_id']))):
+                    covered.add((item['account'], item['external_ref']))
+        for item in incoming_rows:
+            ref = item['external_ref'] or ''
+            rebate = (item['kind'] == 'fee' and item['tag'] == 'ibkr_rebate'
+                      and ref.endswith('-rebate'))
+            if rebate:
+                ref = ref[:-7]
+            if (not rebate and item['kind'] != 'option_trade'):
+                raise InvalidRequestError('non-option event in reconciled TWS batch')
+            if (item['source'] != 'execution_report'
+                    or (item['account'], ref) not in covered):
+                raise InvalidRequestError('execution is outside the reconciled TWS batch')
+
     def _validate_tws_supersessions(self, conn, book_id, event_ids, incoming_rows,
                                     tws_reconciliation=None):
         """Return active provisional rows that broker history can replace.
@@ -2529,8 +2645,14 @@ class CostBasisStore:
                 if len(siblings) != 1:
                     raise InvalidRequestError(
                         'ambiguous adopted TWS option baselines require manual review')
+                proof = tws_reconciliation
+                if isinstance(proof, list):
+                    proof = next((item for item in proof
+                                  if contract_key(item) == structural), None)
+                    if proof is None:
+                        raise InvalidRequestError('missing TWS proof for adopted baseline')
                 replay_proven = self._tws_option_replay_proves_supersession(
-                    conn, book_id, baseline, incoming_rows, tws_reconciliation)
+                    conn, book_id, baseline, incoming_rows, proof)
                 matching = [item for item in incoming_rows
                             if item['source'] in ('csv_import', 'execution_report')
                             and item['tag'] != 'prior_open'
@@ -2836,6 +2958,9 @@ class CostBasisStore:
                     }
 
                 self._require_ledger_version(conn, book_id, expected_ledger_version)
+                self._validate_batch_tws_reconciliations(
+                    conn, book_id, tws_reconciliation, supersede_tws_event_ids,
+                    normalized_rows)
                 superseded_rows = self._validate_tws_supersessions(
                     conn, book_id, supersede_tws_event_ids, normalized_rows,
                     tws_reconciliation)
@@ -2865,7 +2990,6 @@ class CostBasisStore:
                 inserted = 0
                 skipped = 0
                 warnings = []
-                defer_validation = bool(superseded_rows or superseded_stubs)
                 inserted_rows = []
                 for index, normalized in enumerate(normalized_rows):
                     if normalized['external_ref']:
@@ -2893,20 +3017,14 @@ class CostBasisStore:
                         allow_overdraw=allow_overdraw,
                         import_batch_id=import_batch_id,
                         check_share_warning=False,
-                        validate_timeline=not defer_validation,
+                        validate_timeline=False,
                     )
                     warnings.extend(result['warnings'])
                     inserted_rows.append(normalized)
                     inserted += 1
-                if defer_validation:
-                    # The replacement history is judged as a whole: the
-                    # stored close that the voided stub used to back is now
-                    # backed by all of the real openings together.
-                    for normalized in inserted_rows:
-                        warnings.extend(self._validate_timeline(
-                            conn, book_id, normalized, check_share_warning=False))
-                # Inserting the replacement rows normally validates these
-                # timelines already. Replaying each affected option once more
+                warnings.extend(self._validate_batch_timelines(conn, book_id, inserted_rows))
+                # Complete batch validation covers inserted timelines.
+                # Replaying each affected option once more
                 # also covers a future batch shape with all rows de-duplicated.
                 for row in superseded_rows:
                     self._validate_contract_timeline(conn, book_id, row)
@@ -3319,9 +3437,11 @@ class CostBasisStore:
                         allow_overdraw=allow_overdraw,
                         import_batch_id=import_batch_id,
                         check_share_warning=False,
+                        validate_timeline=False,
                     )
                     warnings.extend(result['warnings'])
                     inserted += 1
+                warnings.extend(self._validate_batch_timelines(conn, book_id, normalized_rows))
                 warnings.extend(self._net_short_share_warnings(conn, book_id))
                 self._register_batch(
                     conn, book_id, import_batch_id, 'rebuild', registration,
