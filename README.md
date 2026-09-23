@@ -4,12 +4,13 @@
 
 Option Combo Simulator is a local browser workspace for building, pricing, replaying, monitoring, and optionally executing multi-leg option structures.
 
-The repo currently has four frontend surfaces:
+The repo currently has five frontend surfaces:
 
 1. `index.html` - main portfolio workspace
 2. `chart_lab.html` - shared workspace plus experimental daily-bar projection
 3. `iv_term_structure.html` - standalone live ETF / futures-option IV term-structure monitor
 4. `cost_basis.html` - standalone per-account, per-underlying blended-cost ledger
+5. `workspace_db_admin.html` - standalone workspace-database and archive admin page
 
 It also has two optional Python WebSocket backends:
 
@@ -96,7 +97,7 @@ There is no frontend build step. The UI is plain HTML/CSS/JavaScript loaded in o
     it cannot place orders or subscribe to market data
   - three cost lenses off one event stream (net cash, stock only, tax
     adjusted), with a short share balance treated as supported state
-  - IBKR Activity Statement CSV import, and TWS reconciliation that only
+  - IBKR Activity Statement / Flex CSV import, and TWS reconciliation that only
     ever *detects* a gap and drafts it for a human to confirm
 
 ## Main Entry Points
@@ -261,7 +262,9 @@ adapted as a visibly degraded proxy only when no dated JSON snapshot exists.
 Current responsibilities:
 
 - `request_historical_snapshot`
+- `request_discount_curve` for the shared reference curve
 - empty `portfolio_avg_cost_update` responses for historical mode
+- shared workspace persistence, archive/admin, and cost-ledger actions
 
 The chain service must be running for replay to work; the start scripts probe
 `/health` and launch it automatically when it is down.
@@ -407,6 +410,13 @@ to TWS.
 
 Open it at `http://localhost:8000/cost_basis.html`.
 
+Stock splits currently support manual share-count and per-share cost adjustment only.
+Open options crossing a split require review; their terms are not automatically
+converted, and a statement's matching corporate-action rows block CSV import.
+The proposed end-to-end workflow is documented in
+[the corporate-actions CODE PLAN](CODE%20PLAN/COST_BASIS_CORPORATE_ACTIONS_PLAN.md);
+it is not yet implemented.
+
 The cash-flow section's heading has a **卖方权利金 · 按到期日查看** control,
 outside the metric cards so they stay compact. Its read-only
 dialog groups remaining Short Put / Call contracts and their net opening
@@ -442,8 +452,8 @@ still-open option of this book on ONE
 scenario date (the selected expiry, or today + "days to reach the drop"):
 options expiring by then settle at intrinsic value, live longs are marked as
 assets and live shorts as liabilities (premium received minus model value),
-with each contract's own TWS IV, the shared USD discount curve resolved from
-that same day, a CRR American binomial with per-symbol dividend yields by
+with IV locally calibrated from each current quote using the selected pricer,
+and the shared USD discount curve frozen with that snapshot, a CRR American binomial with per-symbol dividend yields by
 default (European BSM optional), and either the mid or a "today's spread"
 lens that extrapolates today's bid/mark (longs) or ask/mark (shorts) ratio
 onto the scenario value and rejects crossed or one-sided quotes. It can also
@@ -451,8 +461,10 @@ stack **cross-book protection**: a leveraged ETF book (seeded for `TQQQ`)
 borrows the long Calls/Puts of a same-account, same-currency sibling book
 (`QQQ`). The index is the driver: each scan point is mapped to the sibling's
 price by daily-rebalanced compounding with a volatility-drag term whose path
-sigma is an explicit assumption or the IV of the nearest-the-money sibling
-contract still alive after the date (refused, never zero, when none exists);
+sigma is an explicit assumption or a nearest-to-money currently unexpired
+sibling contract IV proxy (broker IV, or local calibration when unavailable).
+A contract expiring before the scenario can still supply today's proxy; missing
+evidence stops the multi-day mapping rather than assuming zero volatility;
 a linear ratio is kept for comparison. The sibling's contracts are valued at
 that price with their own IV, optionally lifted by a fixed shock or a
 spot-vol beta (downside only, tenor-damped by (30 / remaining days)^0.65, the
@@ -467,9 +479,10 @@ The overlay reads the sibling ledger and a bounded TWS quote request only,
 matches contracts by strict identity (conId, else localSymbol, else terms
 plus multiplier), ignores short legs, never merges the books, and refuses to
 guess when any IV, rate, mark, sigma, or price is missing. See
-`CODE PLAN/COST_BASIS_CROSS_BOOK_HEDGE_OVERLAY_PLAN.md`.
+`CODE PLAN/STRESS_KERNEL_REFACTOR.md` for the current implementation;
+`CODE PLAN/COST_BASIS_CROSS_BOOK_HEDGE_OVERLAY_PLAN.md` records its earlier design.
 
-The dialog sweeps a selectable price range and shows, at every point, the
+The stress view sweeps a selectable price range and shows, at every point, the
 numbered components (settlement, this book's live options, the sibling's) and
 their total, plus blended cost and settlement counts. Option quotes come from
 a bounded TWS request (short-lived streaming lines with the implied-volatility
@@ -520,6 +533,23 @@ broker price, commission, and signed cash. Position differences alone never
 fabricate a trade, zero-price close, or cash flow. Targeted lookups only block
 on errors that belong or might belong to that contract; clearly unrelated
 commission-pending fills are neither imported nor allowed to block it.
+When an Activity C/O Order overlaps only some stored TWS fills, remaining
+Trade children are classified from the complete chronological history as close,
+close-and-open or open. The aggregate order must still prove a true reversal.
+Structural replay errors disable confirmation before reaching the backend.
+Use **批量查找 TWS 成交** in 持仓对账 to check all option quantity gaps
+with one execution-history request. The preview lists complete matches and
+retains unmatched contracts with their reasons, including missing commission,
+insufficient history and ambiguous identity. **确认批量归账** submits every
+matched contract together after one confirmation, including any proven
+replacement of temporary baselines. A failed contract does not block unrelated
+matches, but the selected batch either commits in full or rolls back. Changes
+to the ledger or the observed TWS quantities/contract identities invalidate the
+preview; timestamp-only broadcasts preserve it. Retries reuse the batch identity.
+Unselected option fills, including flat round trips absent from the position table,
+remain listed with their net cash and a prompt to use **拉取 TWS 成交**. Stock/futures delivery differences still need
+reviewed statements or manual verification; no AvgCost event is fabricated.
+
 For a complete TWS-only position with a valid AvgCost, the same row also keeps
 an explicit **采信 TWS** fallback beside lookup, usable after lookup fails.
 It requires confirmation and creates a provisional baseline, not a historical
@@ -540,15 +570,14 @@ review batch is a blocking preview problem (the first row is retained for
 inspection), and BAG summary fills are excluded
 to avoid counting a combo twice, and a missing commission report blocks the
 batch. A negative IB commission is retained as a separate positive-cash rebate.
-When one of these executions is the real trade behind an adopted TWS baseline,
-the import replaces that baseline atomically only after contract, signed
-quantity, timestamp, and net cash (including commission/rebate) prove the
-match; ambiguous or partial overlap blocks the batch. This is useful for today's activity but does not replace a cumulative
+Baseline replacement uses the complete contract timeline and the applicable
+CSV or targeted-TWS proof described above; AvgCost cash is not used to choose
+one apparent matching fill. Ambiguous or partial overlap blocks the batch. This is useful for today's activity but does not replace a cumulative
 Activity Statement when the CSV cutoff predates TWS's available window.
 If those reviewed TWS fills were committed, a later CSV row is treated as the
 same execution only when account, contract, signed quantity, broker timestamp,
 price, and net cash all agree (or the broker execId agrees and the economics
-still verify). The CSV then reuses the stored exec identity and SQLite skips it;
+still verify). Proved duplicates enter the preview's `confirmedDuplicates` set and are not submitted;
 a suspected cross-source overlap that cannot be proved is blocked rather than
 double-booked.
 What If defaults to **自动跟随参考价**: the effective hero reference price also
@@ -649,8 +678,8 @@ your broker and the number you actually care about are not the same one:
   settlement rows.
 - **Stock only** - plain rolling average of share trades, premium listed
   separately. This is the one that should reconcile against TWS's average
-  cost column; if it does not, the ledger is missing an event and the page
-  flags the gap.
+  cost column. A difference prompts review of events, fees and the broker's
+  cost-basis conventions; it does not by itself prove a missing event.
 - **Tax adjusted** - an assigned contract's premium rolls into the share
   basis (short put assigned: basis = `K − premium/share`; short call
   assigned: proceeds = `K + premium/share`), which explains most of the
@@ -694,10 +723,12 @@ the FOP trade rows.
 
 The ledger is append-only during normal use. Corrections append a void marker
 with a required reason; individual rows are never deleted, because the audit
-trail is the point. The one explicitly destructive exception is deleting an
-entire book, described below. Closing more contracts than the ledger shows
-open at that date is refused - including when you back-date a trade that would
-strand a later assignment.
+trail is the point. Confirmed rebuild/reset/restore operations archive and replace active history;
+permanent whole-book deletion is separately confirmed and has no recovery copy.
+Pure closing or delivery rows cannot exceed the open quantity at their date.
+A broker C/O trade may cross zero only when it both closes an existing opposite
+position and opens the remainder. Full-batch timeline validation also rejects
+backdated imports that would strand a later close or assignment.
 
 ### Importing IBKR statements
 
@@ -706,8 +737,11 @@ Statement. IBKR records one assignment as two rows (the option closing at
 zero and the share delivery); the importer pairs them into a single event
 and reports anything it cannot pair rather than booking it as an ordinary
 trade. Every import runs through a preview - new / already-imported /
-needs-attention, row by row - and de-duplicates on the broker's trade id,
-so overlapping statements can be re-imported safely.
+needs-attention, row by row. Broker trade/exec IDs take priority; Activity rows
+without IDs use stable content references plus occurrence suffixes. Matching
+references still require unchanged economics, and ambiguous overlaps block the
+batch. See [current import rules](CODE%20PLAN/COST_BASIS_IMPORT_INTEGRITY.md)
+for masked accounts, Basis-backed openings, C/O reversals and atomic validation.
 
 For `FUT` books the asset classes stay distinct (`FOP` is never guessed as
 `OPT`, and `FUT` is never guessed as stock). An FOP delivery must pair uniquely
@@ -733,7 +767,7 @@ When the import logic or a cost convention changes, patching dozens of events
 by hand is worse than starting over. `覆盖式重建` (in the import panel) empties
 the book and re-imports one complete statement in a single confirmed step.
 
-Four guards make it safe to have:
+The rebuild guards are:
 
 - The full event set - voided rows included - is serialised into
   `cost_basis_book_resets` with a sha256 **before** anything is deleted. The
@@ -741,16 +775,17 @@ Four guards make it safe to have:
   but nothing is actually lost.
 - A single confirmation dialog names the symbol, current event count, and
   replacement row count. Behind that dialog the page sends a server-generated,
-  count-bearing reset token; it is re-checked inside the write transaction, so
-  a ledger that changed after the preview fails instead of deleting newer rows.
+  count-bearing reset token, complete book identity and ledger-version digest.
+  All are re-checked inside the write transaction, so even a same-count change
+  invalidates the preview instead of deleting newer history.
 - Replacement parsing ignores overlap warnings against stored TWS executions,
   because every old row is archived and removed atomically before the CSV is
   written. Append imports retain the strict cross-source duplicate checks.
 - The wipe happens only after the replacement file is parsed and previewed, so
   a bad file can never leave you with an empty ledger.
-- Apart from the separately confirmed whole-book deletion below, this is the
-  only path that deletes events. There is no bulk row delete, arbitrary SQL,
-  or delete-event-by-id.
+- Reset and archive/JSON restoration also replace active history after archiving
+  it and validating credentials. Permanent book deletion below is separate.
+  There is no arbitrary SQL or delete-event-by-id API.
 
 ### Permanently deleting a book
 
@@ -807,13 +842,23 @@ application-data directory - a separate file on purpose: the ledger is
 small, append-oriented, and must never be swept into the workspace revision
 archive. Configure under `[cost_basis]` in `config.ini`; a one-off
 override is `OPTION_COMBO_COST_BASIS_DB_PATH`. Access is loopback-only by
-default. A managed LAN/proxy deployment can explicitly allow socket peer IPs
-or CIDRs with `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` or `[cost_basis]
-trusted_peers`. An explicitly empty environment value clears any INI list;
-invalid lists deny all remote ledger access. Forwarded headers never grant
-access. This does not relax workspace persistence or database-admin policy.
-See the [Nginx Proxy Manager deployment guide](option_combo_starter/README.md#nginx-proxy-manager-lan-deployment)
-for trusted-peer configuration, private ingress, and persistent storage.
+default, with two independent, ledger-only opt-ins:
+
+- A managed LAN/proxy deployment can explicitly allow socket peer IPs or CIDRs
+  with `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` or `[cost_basis] trusted_peers`.
+  An explicitly empty environment value clears any INI list; invalid lists deny
+  all remote ledger access. See the [Nginx Proxy Manager deployment guide](option_combo_starter/README.md#nginx-proxy-manager-lan-deployment)
+  for trusted-peer configuration, private ingress, and persistent storage.
+- A deployment protected by Tailscale or an equivalent authenticated network can
+  set `OPTION_COMBO_COST_BASIS_ALLOW_REMOTE=true` on the backend (or
+  `[cost_basis] allow_remote = true`) and restart it. This admits every peer, so
+  restrict the backend ports through that network. The environment variable
+  takes precedence; false, empty, or invalid overrides keep it closed. See
+  [Docker ledger setup](option_combo_starter/README.md#remote-ledger-through-tailscale).
+
+Neither option provides an application login. Forwarded headers never grant
+access, Docker NAT peers are never treated as authenticated by address alone,
+and workspace persistence and database-admin policy are unchanged.
 
 The page can export a checksummed JSON event backup and restore it after identity
 and version checks, archiving the current events first. File recovery preserves
@@ -856,11 +901,11 @@ backend.
   ledger size, 7/30-day growth, archive shard registry, and the current
   candidate counts. Exact recount runs as a background job.
 - Archive flow: `Preview archive` computes a server-side plan; you must
-  type the exact phrase `ARCHIVE <N> REVISIONS`; Execute then copies the
-  candidates into `<app-data>/archives/portfolio-archive-<year>-<nnn>.db`,
-  verifies every payload hash byte-for-byte, takes a verified recovery
-  snapshot (`<app-data>/maintenance-backups/`), and only then removes the
-  verified copies from the active database in small chunk transactions.
+  type the exact phrase `ARCHIVE <N> REVISIONS`; Execute first takes a
+  verified recovery snapshot (`<app-data>/maintenance-backups/`), then copies
+  candidates into `<app-data>/archives/portfolio-archive-<year>-<nnn>.db`
+  and verifies every payload hash byte-for-byte. Only after those checks does
+  it remove the verified copies from the active database in small chunks.
   Anything that changed since the preview is skipped, never force-deleted.
   Cancel exists during the copy stage only.
 - Restore: an archived old revision restores as a NEW head revision of its
@@ -921,6 +966,8 @@ Open one of:
 - `http://localhost:8000/index.html?entry=historical&marketDataMode=historical&lockMarketDataMode=1`
 - `http://localhost:8000/chart_lab.html`
 - `http://localhost:8000/iv_term_structure.html`
+- `http://localhost:8000/cost_basis.html`
+- `http://localhost:8000/workspace_db_admin.html`
 
 ### Frontend + live / shared backend
 
@@ -1320,9 +1367,12 @@ Current live backend wiring includes:
   - `MES`
   - `MNQ`
   - `CL`
+  - `GC`
   - `SI`
+  - `HG`
 
-The frontend registry knows about `GC` and `HG`, but if you are touching live contract-qualification logic, note that those families still need TWS verification before adding backend defaults.
+These defaults are implemented in `SUPPORTED_LIVE_FAMILIES`; they do not replace
+broker qualification of the specific expiry, trading class or futures month.
 
 ## Historical Replay
 
@@ -1432,8 +1482,9 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
    implied-λ estimator; it is used only before a qualified implied curve is
    available. After that, the price-derived curve feeds back into TD IV and
    the curve median is visibly extrapolated for display horizons beyond the
-   last structured expiry. The simulator remains strict by date and does not
-   consume that display-only tail. Gaps between usable expiry endpoints are
+   last structured expiry. That display-only tail is not added to exported `byDate`; ordinary
+   simulator analysis can separately use a labelled median/scalar fallback,
+   while strict BBO diagnostics require complete structured coverage. Gaps between usable expiry endpoints are
    instead filled during the audited calculation: 8–31 day gaps use observed
    endpoint variance, while longer gaps use the same-surface robust median;
    those synchronized dates are visibly marked `≈`. After a frontend upgrade, hard
@@ -1451,7 +1502,8 @@ The JS core and Python service helpers are kept DOM/IB side-effect free for test
 3. In `index.html` or `chart_lab.html`, select `Weighted weekends (λ)`, keep the
    default-enabled `IVTS implied λ per weekend` checked, and verify the status says coverage is
    complete for every required non-trading date, with the expected
-   symbol/month, current live quote date, and V2 straddle source. The explicit
+   symbol/month, current live quote date, and the declared V2 source (`straddle`
+   or an explicitly audited `vendor_iv` fallback). The explicit
    Sync action updates every same-origin tab; "same origin" means the exact same scheme,
    host, and port (`localhost:8000` and `127.0.0.1:8000` are different origins).
    `Export λ` / `Load λ File` is for another origin or machine. Each export carries a `symbol[#futuresMonth]@quoteAsOf`
@@ -1538,8 +1590,9 @@ same-session path. Supporting AM contracts later requires a separately sourced
 SET/SOQ scenario variable, not a different choice of `r` or λ.
 
 FOP implied-λ identity is strict `symbol#underlyingContractMonth`. A curve for
-`ES#202609` never activates for `ES#202612`, and there is no nearest-month or
-scalar fallback while implied mode remains checked. If the still-live FOP legs
+`ES#202609` is never accepted as an `ES#202612` curve. Ordinary analysis can
+use a disclosed scalar fallback when no matching curve is usable; strict
+diagnostics require matching structured evidence. If the still-live FOP legs
 requiring λ are bound to more than one futures month, one V2 curve cannot cover
 the portfolio (`multiple_futures_months`); align the bindings or evaluate the
 month groups separately. Live option quotes are also checked against the
@@ -1567,14 +1620,15 @@ is collapsed.
 
 The probability charts use that same day-by-day clock for the terminal-price
 distribution. Full exchange holidays are treated like weekends, per-date λ
-overrides are honored, and missing/stale calendar or implied-λ coverage stops
-the simulation instead of falling back silently. A signed negative IVTS λ is
+overrides are honored. Default analysis uses disclosed clock/λ estimates when
+coverage is missing; strict diagnostics require complete structured evidence. A signed negative IVTS λ is
 preserved in the horizon total but is not passed to the Worker as an impossible
 negative-variance day: it is absorbed into the nearest positive trading
 segments, producing nonnegative simulation blocks whose weights sum exactly to
 the original signed horizon. A nonpositive aggregate horizon still fails
-closed. At each simulated terminal price, equity/ETF
-options use BSM while index and futures options use Black-76; variance time and
+closed. At each simulated terminal price, the shared pricing runtime respects the
+selected stock/ETF or FOP exercise model (including the American switches);
+cash-settled index options remain European Black-76. Variance time and
 calendar discount time remain separate.
 
 On the actual expiry date the meaning is different: while a live quote is
@@ -1640,7 +1694,9 @@ run in different origins or browser contexts.
 The optional IVTS auto-history sampler is a separate research clock: one sample
 is due after 60 elapsed minutes since the last successful sample, not at the top
 of each wall-clock hour, and reopening an overdue file appends at most one row.
-Those hourly rows do not extend the 120-second live V2 handoff lifetime.
+Hourly history sampling is independent of λ calculation and synchronization.
+A calculated/imported V2 curve has no wall-clock timeout; identity and
+anchor-date checks still apply, and its original quote timestamp is retained.
 
 The current Friday-to-Monday weekend can be identified intraday only when a
 real 0DTE straddle is present: subtracting its total variance removes the
@@ -1681,6 +1737,11 @@ first real-sample results and limitations.
 | `index.html` | main portfolio workspace |
 | `chart_lab.html` | shared workspace plus Chart Lab tab |
 | `iv_term_structure.html` | standalone IV term-structure monitor |
+| `cost_basis.html` / `js/cost_basis*.js` | standalone ledger, CSV import and read-only stress view |
+| `workspace_db_admin.html` | standalone workspace/archive administration |
+| `cost_basis_store.py` / `cost_basis_ws.py` | shared ledger storage and protocol |
+| `portfolio_store.py` / `portfolio_store_ws.py` | workspace persistence |
+| `portfolio_archive.py` / `portfolio_maintenance.py` / `portfolio_admin_ws.py` | archive, guarded maintenance and admin protocol |
 | `style.css` | shared workspace styles |
 | `chart_lab.css` | Chart Lab styling |
 | `iv_term_structure.css` | IV term-structure page styling |
@@ -1798,13 +1859,12 @@ Business Trade Date sequence (and from dates with no `open` event). Snapshots
 created by the older `has open`-only derivation are rejected by the browser and
 must be refreshed before futures IVTS suggestions are enabled.
 
-All live/forward browser date calculations resolve the product `calendarId`
-through this snapshot. There is no Easter/nth-weekday/weekend-observance rule
-fallback: missing, stale, or out-of-range official data returns calendar
-unavailable. Historical replay is the sole exception because the current
-official downloads do not cover the full archive; it uses the chain service's
-explicit observed-session list, never a holiday formula. Research backtests
-overlay the official snapshot wherever its coverage overlaps the archive.
+IVTS calendar validation and λ publication/import require official product
+`calendarId` coverage; missing, stale or out-of-range data is unavailable there.
+Ordinary live analysis can estimate weekdays/weekends outside coverage and
+labels that clock degraded; it does not reconstruct exchange holidays.
+Historical replay requires the chain service's explicit observed sessions.
+Research backtests overlay the official snapshot where it covers the archive.
 
 ## Tests
 
@@ -1831,8 +1891,9 @@ The default Node runner is:
 node .\tests\run.js
 ```
 
-The runner includes all `tests/*.test.js` suites, including forward-carry and
-pricing-context coverage.
+The runner uses an explicit suite list in `tests/run.js`, currently covering
+the top-level `tests/*.test.js` files. Register new suites there; it does not
+automatically discover files. Coverage includes forward-carry and pricing context.
 
 It currently runs the suites wired into `tests/run.js`, including:
 

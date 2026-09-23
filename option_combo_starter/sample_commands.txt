@@ -1,8 +1,11 @@
+# Run from option_combo_starter/. The dated tag below is an example.
+# See README.md for the persistent state and network prerequisites.
+
 # Docker Build (local only; does not publish the release tag)
 docker buildx build --platform linux/amd64 --no-cache -f Dockerfile --load -t patsiesoblast0l/option-combo-starter:20260911 .
 # For remote deployment, publish with docker-build.txt before using this tag.
 
-# Docker Run (drop-in runtime settings)
+# Docker Run (ports must be reachable only through the authenticated Tailscale network)
 docker run -d \
     --name option-combo \
     --restart unless-stopped \
@@ -13,6 +16,7 @@ docker run -d \
     -e TWS_CLIENT_ID=999 \
     -e WS_HOST=0.0.0.0 \
     -e WS_PORT=8765 \
+    -e OPTION_COMBO_COST_BASIS_ALLOW_REMOTE=true \
     -e OPTION_COMBO_COST_BASIS_DB_PATH=/app/state/cost_basis/cost_basis.db \
     -v option-combo-state:/app/state \
     patsiesoblast0l/option-combo-starter:20260911

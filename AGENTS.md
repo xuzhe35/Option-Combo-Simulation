@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repo is a local browser app with three frontend surfaces and two optional Python backends.
+This repo is a local browser app with five frontend surfaces and two optional Python backends.
 
 Frontend surfaces:
 
@@ -15,7 +15,7 @@ Frontend surfaces:
 Backend entry points:
 
 - `ib_server.py` for live IBKR data, live execution, Chart Lab bars, IV term-structure sync, and shared historical replay fallback paths
-- `historical_server.py` for lightweight historical replay only (chains/bars via the shared options-chain-service at http://127.0.0.1:8750; rates via sqlite_spy/rates.db)
+- `historical_server.py` for lightweight historical replay only (chains/bars via the shared options-chain-service at http://127.0.0.1:8750; rates via dated yield_curve JSON, with sqlite_spy/rates.db only as a degraded legacy fallback)
 
 Do not assume a bare `python` command will work in every shell, especially on Windows or inside sandboxed agent sessions.
 
@@ -117,7 +117,7 @@ Do not assume a bare `python` command will work in every shell, especially on Wi
   - returns empty `portfolio_avg_cost_update`
   - does not provide live subscriptions, execution, Chart Lab bars, or IV term-structure sync
 
-- Historical data access is mainly through `historical_data.py` and `historical_replay_service.py` (options-chain-service HTTP + local rates.db).
+- Historical data access is mainly through `historical_data.py` and `historical_replay_service.py` (options-chain-service HTTP + strict as-of yield_curve JSON; local rates.db is a legacy fallback).
 
 - Persistence and ledger modules are mounted by BOTH backends and must keep
   identical response shapes on each:

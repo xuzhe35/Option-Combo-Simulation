@@ -250,7 +250,9 @@ Manual `sync_underlying` also uses the pooled helper. If it opens a one-shot lin
 - Auto-submit is still frontend-supervised. Browser continuity matters.
 - Backend duplicate checks are account + hedge-id scoped across live browser sessions; the backend still does not own the full Delta decision loop.
 - There is no hedge-specific repricing loop.
-- The app assumes a local operator and local backend.
+- The app assumes an operator-supervised deployment; the live backend can bind
+  configured LAN/Tailscale addresses with an exact origin allow-list. Remote
+  ledger access does not grant or change broker execution authorization.
 - `test_submit` wording applies to combo orders; Delta Hedge has preview and submit, not combo-style `test_submit`.
 
 ## Tests

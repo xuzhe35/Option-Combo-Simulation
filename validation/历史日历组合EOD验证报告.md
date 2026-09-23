@@ -1,5 +1,7 @@
 # 历史日历组合 EOD 验证报告
 
+> 首批样本的历史验证记录，下面的损益/误差不是本次文档核对重新计算的结果。复现器读取本地 EOD SQLite 与 legacy `rates.db`，不等于运行时历史服务的数据入口；后者使用 options-chain-service 和严格 as-of 的统一曲线 JSON。复现需要支持 `node:sqlite` 的 Node（仓库 CI 使用 Node 22）及本机对应数据文件。
+
 ## 验证目标
 
 验证下列日历 Straddle 路径是否一致：

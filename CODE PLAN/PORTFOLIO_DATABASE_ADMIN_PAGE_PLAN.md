@@ -1,7 +1,7 @@
 # 仓位数据库记录管理页与归档实施计划
 
 > 状态：**已实施并合并**（phases 0-7，随 PR #24 落 main）。本文件保留为设计
-> 依据与验收口径，不再是待办清单。其中 §14 对 `Rehydrate Original` 的约束
+> 依据与验收口径，不再是待办清单。其中 §13.2 对 `Rehydrate Original` 的约束
 > 仍然生效且仍未实现——后端至今固定回 `'rehydrateOriginal': False`
 > （`portfolio_admin_ws.py`），在该语义冻结并测试前必须保持禁用。
 > 自动归档同样仍是需用户显式开启的 opt-in。
@@ -82,9 +82,9 @@ SQLite 分片仍可使用 Python 标准库、现有 WebSocket 通道、现有 lo
 - 管理按钮误用交易页面状态或授权；
 - 为一个管理页继续扩大 `app.js` 或 `ws_client.js` 的职责。
 
-## 3. 当前实现基线与需要先处理的约束
+## 3. 实施前基线与当时需要处理的约束
 
-当前 `portfolio_store.py` 的 schema v1 包含：
+归档实施前 `portfolio_store.py` 的 schema v1 包含（当前已升级 v2）：
 
 - `workspace_documents`：文档索引、当前 revision 和软删除时间；
 - `workspace_revisions`：每个 revision 的完整 JSON、SHA-256、save token 和保存时间；
@@ -217,7 +217,7 @@ flowchart LR
 
 ## 6. 活动库 schema 演进
 
-建议将活动库升级为 schema v2，并一次完成以下结构：
+活动库已升级为 schema v2。下列结构保留设计说明，实际迁移和 CHECK 约束以 `portfolio_store.py` 为准：
 
 ### 6.1 `workspace_revisions`
 
@@ -760,7 +760,7 @@ lease 到期只允许新持有者接管，不代表旧 worker 可以继续。fen
 
 ## 15. 配置、路径与备份
 
-建议新增配置：
+当前已实现的配置（默认值见 `config.ini`）：
 
 ```ini
 [portfolio_store]
@@ -776,7 +776,6 @@ archive_rollover_bytes = 2147483648
 archive_plan_ttl_seconds = 900
 archive_recovery_snapshot_keep = 5
 archive_recovery_snapshot_keep_days = 14
-archive_recovery_snapshot_reuse_seconds = 900
 maintenance_lease_ttl_seconds = 60
 maintenance_lease_heartbeat_seconds = 15
 ```
@@ -1042,7 +1041,7 @@ vacuum_max_pages = 512
 - `tests/portfolio_admin_ws_test.py`；
 - `tests/workspace_db_admin_core.test.js`；
 - `tests/workspace_db_admin_page.test.js`；
-- `tests/workspace_db_admin_e2e_test.py` 或等价本地浏览器 smoke harness。
+- 独立真实浏览器 smoke harness 为原计划项；当前不存在 `tests/workspace_db_admin_e2e_test.py`，不能把 DOM harness 当成已完成的跨平台浏览器验收。
 
 需要扩展：
 
@@ -1061,7 +1060,7 @@ node tests/run.js
 
 Windows 必须使用 `powershell_scripts/resolve_python.ps1` 或启动器解析出的解释器；macOS / POSIX 沿用项目 launcher 的解析顺序，不假设裸 `python` 可用。
 
-人工端到端矩阵：
+人工端到端验收要求矩阵（✓ 表示需要覆盖，不表示已在真实平台验收通过；Windows 路径/锁/启动器仍需真实 Windows 验证）：
 
 | 场景 | macOS | Windows | Live backend | Historical backend |
 |---|---:|---:|---:|---:|

@@ -39,7 +39,8 @@ into the image.
 The repo checkout lives in the container layer. With the supplied Compose
 configuration, the `option-combo-state` named volume holds the yield-curve
 snapshot at `/app/state/yield_curve` and the cost ledger at
-`/app/state/cost_basis/cost_basis.db`.
+`/app/state/cost_basis/cost_basis.db`. Other databases use their configured
+paths; this volume does not automatically relocate the workspace store.
 
 Clone, remote-probe, and fetch operations each have a 60-second wall-clock
 deadline plus a five-second termination grace. Set
@@ -145,6 +146,7 @@ environment; they do not need to be copied into `config.ini` by the starter.
 | Environment variable | Fallback config key | Behavior |
 |---|---|---|
 | `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` | `cost_basis.trusted_peers` | Comma-separated peer IPs/CIDRs allowed in addition to loopback. Unset uses config; an explicitly empty value clears config back to loopback-only. |
+| `OPTION_COMBO_COST_BASIS_ALLOW_REMOTE` | `cost_basis.allow_remote` | `true` admits every peer (Tailscale-protected deployments only); a request passes if this or the trusted-peer list allows it. The environment wins; false, empty, or invalid values keep it closed. |
 | `OPTION_COMBO_COST_BASIS_DB_PATH` | `cost_basis.db_path` | Nonblank environment value wins, then config, then the platform application-data directory. The supplied Compose sets a persistent path under `/app/state`. |
 
 Both backends accept arbitrary browser origins, `null`, and missing Origin
@@ -252,6 +254,57 @@ those checks calls for checking the configured directory and permissions.
 
 ## Build and run
 
+### Remote ledger through Tailscale
+
+The ledger defaults to local connections only. For a server whose HTTP and
+WebSocket ports are accessible only through your authenticated Tailscale network,
+enable remote ledger access with these container environment variables:
+
+```yaml
+environment:
+  OPTION_COMBO_COST_BASIS_ALLOW_REMOTE: "true"
+  OPTION_COMBO_COST_BASIS_DB_PATH: "/app/state/cost_basis/cost_basis.db"
+```
+
+Keep the existing `option-combo-state:/app/state` volume mount. The updated
+Compose file already supplies the database path; add
+`OPTION_COMBO_COST_BASIS_ALLOW_REMOTE=true` to the `.env` file next to it, then
+run from `option_combo_starter/`:
+
+```sh
+docker compose up -d --force-recreate option-combo
+```
+
+The updated backend code must first be available on the upstream `main` branch
+that this starter clones (see below), or in your custom deployed checkout/image.
+These two variables are read directly by the backend on every start, so an
+existing starter image can use them once it has fetched the updated backend;
+they do not depend on `config_overlay.py` or require a starter image rebuild.
+Changing container environment variables requires recreation, not just restart.
+
+No `allowed_origins` setting is needed: both backends currently accept any
+browser Origin (see [WebSocket access and ledger storage](#websocket-access-and-ledger-storage)).
+That makes the Tailscale restriction on the published ports the only access
+boundary for this setup.
+
+Open `http://<server-tailscale-host-or-ip>:8000/cost_basis.html` in the local
+browser. Under settings, set the server host to the same Tailscale host/IP and
+the WebSocket port to `8765`. The ledger status should become ready and creating
+and reading books should work even when TWS is offline (enter the account
+manually). Books are stored on the server's persistent volume.
+
+This switch trusts the deployment's network authentication; it does not perform
+a separate Tailscale login inside the app. Ensure the published ports are
+restricted to that network. Docker may present a bridge address instead of the
+original Tailscale address, which is supported without trusting forwarded headers.
+Workspace persistence/admin permissions are separate and remain loopback-only.
+
+If this container already has ledger data at the old default location, export a
+ledger JSON backup before replacing it, then restore it after switching database
+paths. Selecting a new path starts a new database; it does not move existing data.
+
+### Source and image
+
 The image does **not** embed the Option Combo project source. At startup it
 clones the hardcoded
 [`xuzhe35/Option-Combo-Simulation` `main` branch](https://github.com/xuzhe35/Option-Combo-Simulation).
@@ -276,6 +329,10 @@ Origin can also connect after the backend update. No additional Python
 packages are introduced by this rollback. Changing supported environment
 values or mounts still needs container recreation; changing baked starter
 scripts or runtime packages requires a new image build.
+
+Run the build examples from `option_combo_starter/`. The date-stamped tag in
+these files is an example/release identifier, not evidence of the latest
+published registry image; use the tag you actually build or deploy.
 
 `sample_commands.txt` is the direct build/run replacement. `docker-compose.yml`
 contains the equivalent service definition and an equivalent `docker run`

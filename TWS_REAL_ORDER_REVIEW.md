@@ -1,5 +1,9 @@
 # TWS Real Order Review
 
+Checked against the working-tree execution routes on 2026-09-19. This is an
+implementation map, not evidence that real orders were sent during this audit.
+The current authorization contract is [EXECUTION_SAFETY_CONTRACT.md](EXECUTION_SAFETY_CONTRACT.md).
+
 ## Purpose
 
 This document reviews only the parts of the codebase that can actually affect a real TWS order.
@@ -39,13 +43,13 @@ The real TWS-touching stack is:
 
 1. `js/group_order_builder.js`
 2. `js/trade_trigger_logic.js`
-3. `js/ws_client.js`
-4. `trade_execution/models.py`
-5. `trade_execution/engine.py`
-6. `trade_execution/adapters/ibkr.py`
-7. `trade_execution/adapters/ibkr_hedge.py`
-8. `ib_server_order_tracking.py`
-9. `ib_server.py`
+3. `js/order_safety.js` / `js/order_confirmation_ui.js`
+4. `js/combo_order_transport.js` / `js/delta_hedge_transport.js`
+5. `js/ws_client.js` / `ib_server_ws.py`
+6. `trade_execution/models.py` / `trade_execution/safety.py`
+7. `trade_execution/engine.py`
+8. `trade_execution/adapters/ibkr.py` / `trade_execution/adapters/ibkr_hedge.py`
+9. `ib_server_order_tracking.py` / `ib_server.py`
 
 The actual backend order adapter is:
 
@@ -73,9 +77,18 @@ Current live path:
 Current live path:
 
 1. the user clicks `Close Group`
-2. `js/ws_client.js` builds a close-intent combo payload
-3. the same backend execution stack is used
-4. the difference is the payload intent and the runtime state bucket, not a separate backend adapter
+2. `js/combo_order_transport.js` uses the shared builders to preview a close plan
+3. the staged confirmation freezes the plan behind its own short-lived Close Plan token
+4. the adapter revalidates that plan before the close flow; it may use option BAG
+   orders or staged underlying delivery handling, depending on the plan
+5. `cancel_close_plan` revokes a pending confirmation; cancellation of an already
+   working order is a separate broker action
+
+Global Auto Close has separate `preview_global_equivalent_close` /
+`submit_global_equivalent_close` routes and a one-use plan token. It handles one
+candidate expiry across included Active Groups, nets conservative ITM underlying
+requirements, and leaves normal liquid legs for the Group Close flow. A working
+net underlying order must fill before its Group adjustments are applied.
 
 ### C. Continue / Concede / Cancel on a managed live order
 
@@ -116,7 +129,7 @@ Manual submit and auto-submit both use the same hedge submit action. Auto-submit
 Important current truth:
 
 - `test_submit` is still a real broker-facing action.
-- It is safer than `submit`, but it is not broker-isolated.
+- Its guardrail price does not make it broker-isolated or guarantee no fill.
 - Delta Hedge `submit` and auto-submit are real broker-facing actions.
 - Historical replay never sends live orders to TWS, even when it uses the same runtime message shapes.
 
@@ -156,7 +169,12 @@ The backend validates:
 - leg qualification
 - combo construction viability
 
-Before a Delta Hedge submit goes out, the frontend requires broker preview. The backend validates the hedge request, qualifies the STK / FUT contract, and rejects duplicate active hedge orders for the same websocket session and hedge id.
+Open Combo validation and Hedge preview issue a one-use, 60-second
+execution-plan token bound to session, canonical payload and TWS position
+snapshot. Submission consumes it; stale or altered evidence is rejected. Close
+flows use their own Close Plan confirmation mechanism. The hedge backend also
+qualifies STK/FUT identity and rejects active duplicates by account + hedge id
+across live sessions; recovery cannot steal another live session's order.
 
 ## 6. Actual Backend Responsibilities
 
@@ -180,6 +198,9 @@ Routes only these execution actions:
 - `resume_managed_combo_order`
 - `concede_managed_combo_order`
 - `cancel_managed_combo_order`
+- `cancel_close_plan`
+- `preview_global_equivalent_close`
+- `submit_global_equivalent_close`
 - `validate_hedge_order`
 - `preview_hedge_order`
 - `submit_hedge_order`
@@ -206,7 +227,9 @@ Current real responsibilities:
 
 ### `ib_server.py`
 
-This file is now the live transport and IB event bridge, not the place where order logic lives.
+This file composes the live backend. `ib_server_ws.py` routes requests,
+`ib_server_order_tracking.py` owns tracking payloads/event consumers, and the
+execution engine/adapters own order logic.
 
 Current real responsibilities:
 
@@ -236,6 +259,10 @@ Current lifecycle:
 5. periodically recompute latest combo mid from current leg pricing
 6. re-place the order only when drift exceeds the configured threshold
 7. stop supervision on one of several terminal or safety conditions
+
+IB disconnect or market-data invalidation stops managed repricing. The broker
+order stays at its last submitted limit for manual review; reconnect does not
+automatically resume or modify it.
 
 Current stoppable states include:
 
@@ -334,15 +361,17 @@ If the page is reloaded:
 
 ### D. Delta Hedge automation is browser-supervised
 
-The backend rejects duplicate active hedge orders for a websocket session and hedge id, but the full Delta decision authority is still in the browser.
+The backend rejects duplicate active hedge orders by account + hedge id across
+live sessions, but the full Delta decision authority is still in the browser.
 
 ### E. Operator model is still local-first
 
 The app assumes:
 
-- localhost frontend
-- localhost backend
-- one user driving the workflow directly
+- one operator driving the workflow directly
+- local-first services, optionally bound to configured LAN/Tailscale addresses
+- exact allowed browser origins; the ledger's remote opt-in is separate from
+  workspace/admin access and broker order authorization
 
 ## 11. Later Cleanup / Deferred Work
 

@@ -1,6 +1,6 @@
 # VRP 研究备忘录：从周末 IV 假象到三区制位移策略
 
-**定稿日期**：2026-07-12
+**初稿日期**：2026-07-12；后续记录更新至 E19（2026-09-05）。研究数值保留各节当时的数据/代码范围，本文不证明当前实盘状态，也不代表本次重新回测。
 **数据**：SPY 期权链 2010-03 ~ 2026-06（704 个交易周）、QQQ 2011-06 ~ 2026-06（664 周），EOD 报价，来自 options-chain-service（Options DB workspace，`chain_server.py`，默认 `http://127.0.0.1:8750`）
 **工具**：`scripts/backtest_calendar_vs_iron_fly.py`（入场构建、每日路径 mark、出场规则）+ scratchpad 分析脚本（VRP 分解、再对中、反向组合、泛化检验）
 **统一口径**：除特别注明外，均为无摩擦 EOD mid 成交、每周 1 手、美元计。滑点敏感性单独列出。
@@ -256,7 +256,7 @@
 
 ## 5. 对策与路线图
 
-1. **IVTS 仪表盘**（本次动工，见 `IVTS_DASHBOARD_PLAN.md`）：每品种显示 TD slope 三区信号、|move|/EM 水位计、当周结构建议（建议级，不自动执行）。
+1. **IVTS 仪表盘**（已实现，现行门槛见 `IVTS_DASHBOARD_PLAN.md`）：每品种显示 TD slope 三区信号、|move|/EM 水位计、当周结构建议（建议级，不自动执行）。
 1b. **Regime-conditioned 概率分析（2026-07-15 实装）**：index.html/chart_lab 的 Probability Analysis 新增区选择器（off/dc/n/bw）——把所选 TD-slope 区的历史周终点位移（z=(settle−center)/EM，`js/regime_conditional_samples.generated.js`，由 `scripts/generate_regime_conditional_samples.py` 生成）按当日 anchor/EM 尺度重放，叠加 KDE 密度第三曲线 + 条件 E[P&L] 徽章（用真实组合 P&L 函数逐样本求均值）。无条件徽章与条件徽章并排 = "任意周开仓的代价" vs "剧本状态下的历史期望"。ES 等 FOP 经 distribution proxy 自动借用 ETF 样本；样本 <30 不显示（fail-closed）。
 2. **纸面跟踪**：用 sim open 按仪表盘建议模拟开仓，积累规则的样本外记录。
 3. 后续实验（未排期）：ES 直测（需 ES 期权历史链）、外围长跨式保费摊销的三账本总决算、周中 regime 翻转的转仓规则量化。
@@ -282,7 +282,7 @@
 
 - TD IV：`iv_td = iv_cal × √( (calDTE/365) / (effDTE/effYear) )`，`effDTE = tradDTE + λ(calDTE−tradDTE)`，`effYear = 252+113λ`，λ 冻结 0.3（信号用）。
 - EM（Expected Move）= 前月 ATM 跨式 mark ≈ 0.7979·S·σ·√T。
-- **MRR（位移兑现率，Move Realization Ratio）**：`ratio = |ΔS| / (EM₀·√(间隔/前月DTE))`，滚动均值（26 个观测，最少 8 个）。这就是全文所称"水位计"的正式名字；≥0.95 放行反蝶（"MRR 水位闸"），<0.95 停正挂腿，样本不足 fail-closed。命名刻意避开 realized/implied 字样以区别于 RV/IV（E12 已证两者不同：MRR 对次序敏感，RV 不敏感）。
+- **MRR（位移兑现率，Move Realization Ratio）**：`ratio = |ΔS| / (EM₀·√(间隔/前月DTE))`，滚动均值（26 个观测，最少 8 个）。这就是全文所称"水位计"的正式名字；≥0.95 放行反蝶（"MRR 水位闸"），<0.95 停正挂腿，样本不足 fail-closed。命名刻意避开 realized/implied 字样以区别于 RV/IV（E12 已证两者不同：MRR 反映终点位移，RV 反映累计平方收益；固定带符号收益的重排不改变两者）。
 - 三区：slope = TD IV(≈7DTE) / TD IV(≈14DTE)；<0.95 反蝶持有到期；0.95~1.05 空仓；>1.05 Calendar（tp50）。
 
 ## 附录 B0. 交易日历维护手册

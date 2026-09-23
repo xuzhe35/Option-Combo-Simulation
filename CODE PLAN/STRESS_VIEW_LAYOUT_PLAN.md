@@ -4,6 +4,8 @@
 > 不新建 HTML 页面，不改任何估值代码（`js/cost_basis_stress_*.js` 一行不动），不改任何 `stress-*` 元素 id。
 > 内核契约见 [STRESS_KERNEL_REFACTOR.md](STRESS_KERNEL_REFACTOR.md)，区间见 [STRESS_CALIBRATION_BAND_PLAN.md](STRESS_CALIBRATION_BAND_PLAN.md)。
 
+> 阅读范围：§1–2 保留改造前问题与锚点，所列旧选择器/行号不代表现状；§3–5 是已落地布局与行为。§6 的 tooltip 瘦身仍未实施，§7–9 是实施步骤/验收用例，不是本次已执行清单。当前 DOM 以 `cost_basis.html` 的 `#stress-view` 为准。
+
 ## 1. 为什么是页面视图，不是独立页面
 
 弹层现在装了 35 个参数控件、状态行、图、约 20 行的悬停 tooltip、三张切片核对表、关键点卡片和三段折叠说明，全部塞在 `min(1180px, 96vw)` 宽、`94vh` 高、内部滚动的对话框里。联动面板一展开，图就滚出视口：调参看不到图，看图摸不到参数。问题是布局，不是信息量。
@@ -20,7 +22,7 @@
 
 设置页已经是视图而非弹层（`_showView` 切换 `ledger`/`settings`，见 `js/cost_basis.js:972`），压力测试走同一条路。
 
-## 2. 现状清单（改动锚点）
+## 2. 改造前清单（历史改动锚点）
 
 HTML `cost_basis.html`：
 - `#stress-modal.stress-modal` > `section.stress-dialog[role=dialog]` > `header.stress-header`（`#stress-title`、`#btn-close-stress-test`）> 两个 `.stress-controls` 行 > `#stress-band-status` > 本账本面板 `.stress-protection-panel` > 联动面板 `.stress-linked-panel` > `#stress-status` > `.stress-legend` > `.stress-chart-wrap`（`#stress-chart` + `#stress-tooltip`）> `#stress-slice` > `#stress-key-points` > `.stress-note-details`。

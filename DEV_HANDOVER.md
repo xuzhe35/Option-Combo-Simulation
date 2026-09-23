@@ -1,6 +1,6 @@
 # Option Combo Simulator - Developer Handover
 
-**Updated:** 2026-09-02
+**Updated:** 2026-09-19 (documentation checked against the current working tree)
 
 ## 1. Current Product State
 
@@ -18,7 +18,7 @@ Current surfaces:
 - `ib_server_order_tracking.py` for combo/hedge tracking payloads and IB event consumers
 - `ib_server_market_data.py` for live quote fanout and historical-bars helpers
 - `ib_server_iv_term_structure.py` for IV term-structure live sync helpers
-- `historical_server.py` for historical replay snapshots only (chains/bars via the shared options-chain-service, rates via `sqlite_spy/rates.db`)
+- `historical_server.py` for historical replay snapshots only (chains/bars via the shared options-chain-service, rates via strict as-of `yield_curve` JSON, with `sqlite_spy/rates.db` only as a degraded legacy fallback)
 
 Persistence and ledger modules, mounted by BOTH backends:
 
@@ -172,7 +172,7 @@ Persistence and ledger modules, mounted by BOTH backends:
 
 ### Historical replay
 
-- replay snapshots via the options-chain-service (default http://127.0.0.1:8750) plus local `sqlite_spy/rates.db` for rates. The service is external and swappable; `chain_service_config.py` is the only place that knows where it lives, resolving `config.ini [historical]` with `OPTION_COMBO_CHAIN_SERVICE_URL` / `_DIR` env overrides. Blank `chain_service_dir` means remote/vendor-hosted, so the launchers report it unreachable instead of trying to start a local server
+- replay snapshots via the options-chain-service (default http://127.0.0.1:8750) plus strict as-of `yield_curve` JSON for rates (`sqlite_spy/rates.db` is the degraded legacy fallback). The service is external and swappable; `chain_service_config.py` is the only place that knows where it lives, resolving `config.ini [historical]` with `OPTION_COMBO_CHAIN_SERVICE_URL` / `_DIR` env overrides. Blank `chain_service_dir` means remote/vendor-hosted, so the launchers report it unreachable instead of trying to start a local server
 - historical date-range metadata
 - replay-date stepping
 - historical risk-free rate hydration
@@ -191,10 +191,18 @@ Persistence and ledger modules, mounted by BOTH backends:
 
 ### Blended-cost ledger
 
+- For Tailscale-protected remote Docker access, set
+  `OPTION_COMBO_COST_BASIS_ALLOW_REMOTE=true` and recreate the container.
+  The backend reads this directly on startup, independently of the starter
+  config overlay. It admits every peer, so the ports must be reachable only
+  through the authenticated network. The updated Compose file stores the ledger
+  at `/app/state/cost_basis/cost_basis.db` on its named volume. Remote access is
+  otherwise disabled; see the starter README for the deployment commands.
 - LAN/proxy ledger access remains opt-in:
   `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` permits actual peer IPs/CIDRs for
-  ledger actions only. No forwarded-header trust, wildcard peer, or global
-  `allow_remote` switch is used. See the starter README for Nginx Proxy Manager
+  ledger actions only. No forwarded-header trust or wildcard peer list is used;
+  the separate `allow_remote` switch above is only for Tailscale-style
+  authenticated networks. See the starter README for Nginx Proxy Manager
   setup; network/proxy ingress must protect the trading-capable shared socket.
 - The strict WebSocket Origin policy introduced by September 2 commit
   `01292bc` caused HTTP 403 failures in previously working LAN/NPM setups and
@@ -241,8 +249,13 @@ Persistence and ledger modules, mounted by BOTH backends:
   headline blended-cost lens excludes the complete Long Call/Put lifecycle
 - book switching is request-generation scoped, clears the old rows before the
   new load, and consumes socket failures at both the select and sidebar entry
-- no dedicated cost-ledger backup CLI or automatic scheduler; workspace
-  recovery sets do not include `cost_basis.db`
+- checksummed JSON event backup/restore is available in the page; no dedicated
+  cost-ledger backup CLI or automatic scheduler, and workspace recovery sets
+  do not include `cost_basis.db`
+- C/O imports preserve one original transaction and require a genuine reversal.
+  Complete-batch timeline validation, unambiguous multiplier inference and
+  cumulative same-second revision matching are covered by deterministic and
+  seeded random tests; see `CODE PLAN/COST_BASIS_RANDOMIZED_REGRESSION.md`
 
 ### IV term structure
 
@@ -310,11 +323,12 @@ Persistence and ledger modules, mounted by BOTH backends:
   evidence and spread/skew gates, but still skips crossed books and wrong-month
   futures bindings; it publishes when the retained surface yields at least one
   official-calendar interval with a finite signed estimate.
-- the main simulator accepts only validated V2 `straddle` data matching symbol,
-  futures month, and `liveQuoteDate`. Implied mode is strict-by-date: an
-  uncovered required weekend/holiday stops projection and never uses either
-  the visible scalar λ or the sample median. Portable imports preserve the real
-  quote timestamp for audit but remain usable without a wall-clock timeout.
+- the main simulator accepts validated V2 `straddle` or explicitly audited
+  `vendor_iv` fallback data matching symbol, futures month, calendar and
+  `liveQuoteDate`. Coverage is audited per date. Ordinary best-effort analysis
+  labels median/scalar fallbacks; strict BBO diagnostics require complete
+  structured coverage. Portable imports retain the real quote timestamp and
+  have no wall-clock timeout.
 - implied-λ interval dates are revalidated against the product's official
   exchange calendar at publication/import time. Full exchange holidays share
   the interval λ with weekends; exports retain `weekendDates`, `holidayDates`,
@@ -347,11 +361,12 @@ Persistence and ledger modules, mounted by BOTH backends:
   the signed aggregate horizon unchanged while ensuring every Worker variance
   block is nonnegative. Do not replace this with per-date clipping; a
   nonpositive aggregate horizon is the actual fail-closed condition.
-  Only the explicit `not_required` audit state proceeds without V2 dates.
-- production implied-λ export requires exact ContractDetails `expiryAsOf` for
-  each contributing expiry. The equation uses fractional trading/non-trading
-  interval evidence on the same exchange timezone/17:00 futures rollover clock
-  as pricing; integer DTE remains only compatibility metadata.
+  Strict diagnostics additionally require a complete V2 clock unless the
+  coverage audit returns `not_required`.
+- strict-source implied-λ calculation requires exact ContractDetails
+  `expiryAsOf`; best-effort export can retain labelled profile/date-clock
+  estimates. Exact equations use fractional trading/non-trading intervals on
+  the same exchange timezone/17:00 futures rollover clock as pricing.
 - Chart Lab's independent socket supplies daily bars and the visual price line
   only. Projection code copies the main app state and never splices the
   auxiliary price into main-socket BBO/Forward/discount timestamps.
@@ -395,17 +410,20 @@ Persistence and ledger modules, mounted by BOTH backends:
   additionally fire minutes after the previous sample whenever the UTC day
   rolled over mid-cadence (00:00 UTC is ~20:00 ET, a boundary this sampler has
   no reason to care about).
-- hourly automatic rows are retained, while MRR continues to dedupe by quote
-  date and therefore uses the last valid sample for each date
+- hourly automatic rows are retained, while MRR selects validated official
+  weekly-close observations; intraday samples do not become weekly observations
+  merely by being the last sample on a date
 - forward trading calendars come only from the generated official snapshot:
   NYSE public calendar plus CME Reference Data API product schedules
 - run `sync_exchange_calendars_mac.command`, `sync_exchange_calendars.bat`, or
   `sync_exchange_calendars.sh` weekly; products without official coverage
   remain fail-closed in IVTS
-- the browser has no computed-holiday fallback; product `calendarId` is passed
-  through date utilities, pricing, simulation controls, and IVTS. Missing or
-  stale coverage is unavailable rather than assumed open. Historical replay
-  receives observed exchange sessions from the chain service.
+- the official calendar reader has no computed-holiday fallback; IVTS treats
+  missing or stale official coverage as unavailable. Ordinary analysis pricing
+  may explicitly allow a marked weekday/weekend estimate outside that coverage;
+  this does not synthesize an official exchange schedule. Product `calendarId`
+  is passed through date utilities, pricing, simulation controls, and IVTS.
+  Historical replay receives observed exchange sessions from the chain service.
 - the cross-platform `run_market_data_maintenance_*` launchers run the
   yield-curve task first and the official-calendar task second, stopping before
   the calendar task if yield maintenance fails; the combined launcher selects
@@ -510,7 +528,7 @@ Important current nuance:
 - browser product coverage includes `MES`, `MNQ`, `GC`, `SI`, and `HG`
 - `ib_server.py`'s `SUPPORTED_LIVE_FAMILIES` currently hard-codes live-family defaults for `ES`, `NQ`, `MES`, `MNQ`, `CL`, and `SI`
 - `MES` / `MNQ` live defaults intentionally omit unverified `trading_class` values until concrete TWS contract descriptions are confirmed
-- `GC` and `HG` remain browser-pricing families until backend contract defaults are verified
+- live defaults now include `GC` and `HG` in `ib_server.py`; specific contracts still require broker qualification
 
 ### `js/pricing_context.js`
 
@@ -668,6 +686,7 @@ Current responsibilities:
 
 - historical quote snapshots
 - empty portfolio avg-cost payloads for historical mode
+- `request_discount_curve` and shared workspace persistence, archive/admin and ledger actions
 
 Not implemented there today:
 
@@ -786,7 +805,7 @@ That runner currently includes the main suites wired in `tests/run.js`, such as:
 
 Important nuance:
 
-- `tests/run.js` includes every `tests/*.test.js` suite, including forward-carry and pricing-context coverage
+- `tests/run.js` explicitly registers the top-level `tests/*.test.js` suites; new files must be added to its list
 - the full Python suite is `python -m unittest discover -s tests -p "*_test.py"` using the project-resolved interpreter
 - WebSocket routing coverage for the live backend now lives in `tests/ib_server_ws_test.py`
 - combo-order transport coverage now lives in `tests/combo_order_transport.test.js`

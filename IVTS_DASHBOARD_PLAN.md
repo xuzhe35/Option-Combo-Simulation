@@ -25,9 +25,14 @@ tracking happens through the existing sim-open workflow on the main pages.
    - `slope > 1.05` → zone **SELL CALENDAR**
 2. **Displacement watermark (|move|/EM)** — realized displacement over implied
    expected move, computed from the symbol's accumulated history samples
-   (adjacent sample pairs 3–12 calendar days apart, time-scaled
+   after selecting one verified official-close observation per completed
+   exchange week (current week only after its final session closes). Live NYSE
+   samples must fall from the official option close through 15 minutes after it;
+   validated EOD backfills retain explicit provenance. Adjacent weekly pairs
+   3–12 calendar days apart are time-scaled
    `ratio = |ΔS| / (EM₀·√(gap/frontDTE₀))`), rolling mean of the latest 26
-   observations. Needs ≥ 8 observations before it reports; until then it
+   observations, with a 14-calendar-day staleness limit. Missing calendar/close
+   evidence does not count as a valid observation. Needs ≥ 8 observations; until then it
    shows a "collecting n/8" state. Below 0.95 it vetoes the reverse-fly
    suggestion (2010-14-era displacement pricing).
 3. **Suggestion line** — zone × watermark mapped to the frozen playbook:
@@ -41,6 +46,10 @@ tracking happens through the existing sim-open workflow on the main pages.
    - SELL CALENDAR → "Calendar: sell front ATM straddle, buy ~2×DTE back.
      Exit at +50% of debit or front expiry."
    - STAND DOWN → "No options this week; delta book only."
+   The page also checks signal evidence: ATM IV floor 3%, price/IV consistency,
+   and four front/back Call/Put legs in a coherent server snapshot with at most
+   30 seconds of quote age. Official-close observations are research previews,
+   not a validated next-session execution protocol.
    Every suggestion renders with the inputs it used (slope, expiries,
    watermark, n) and a fixed "suggestion only — paper/sim first" disclaimer.
 
@@ -54,9 +63,10 @@ tracking happens through the existing sim-open workflow on the main pages.
   raw calendar IVs at λ=0.3 internally, so playing with the TD IV λ input
   never moves the signal.
 - **Data sources already on the page**: zone ← current card detail rows
-  (needs the front/back expiries subscribed — the default 10-stream limit
-  covers 5 nearest expiries, enough for 7/14 DTE); watermark ← the per-symbol
-  history document that the Sample button already accumulates. No new backend
+  (needs the front/back expiries subscribed — the current default is 20 option
+  streams, at most 10 paired expiries; actual 7/14 DTE coverage still depends on
+  the listed chain); watermark ← manual and auto history after weekly-close
+  validation, not every hourly row. No new backend
   calls, no new subscriptions.
 - **DOM-free core**: all three computations live in
   `js/iv_term_structure_core.js` so they are unit-testable and reusable later

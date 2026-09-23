@@ -13,9 +13,11 @@ services:
       TWS_CLIENT_ID: "${TWS_CLIENT_ID:-999}"
       WS_HOST: "0.0.0.0"
       WS_PORT: "8765"
+      # Enable only when access to these ports is restricted through Tailscale.
+      OPTION_COMBO_COST_BASIS_ALLOW_REMOTE: "${OPTION_COMBO_COST_BASIS_ALLOW_REMOTE:-false}"
       OPTION_COMBO_COST_BASIS_DB_PATH: "/app/state/cost_basis/cost_basis.db"
-      # Optional remote ledger access; configure only after securing NPM.
-      # Use NPM's verified TCP peer IP; this documentation address is a placeholder.
+      # Alternative: admit only NPM's verified TCP peer IP (placeholder address).
+      # Configure only after securing NPM.
       # OPTION_COMBO_COST_BASIS_TRUSTED_PEERS: "192.0.2.10"
     volumes:
       - option-combo-state:/app/state
@@ -35,6 +37,7 @@ volumes:
 #   -e TWS_CLIENT_ID=999 \
 #   -e WS_HOST=0.0.0.0 \
 #   -e WS_PORT=8765 \
+#   -e OPTION_COMBO_COST_BASIS_ALLOW_REMOTE=true \
 #   -e OPTION_COMBO_COST_BASIS_DB_PATH=/app/state/cost_basis/cost_basis.db \
 #   -v option-combo-state:/app/state \
 #   patsiesoblast0l/option-combo-starter:20260911

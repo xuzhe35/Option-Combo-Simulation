@@ -98,9 +98,9 @@ JSON 不再承担日常 Save 回写，因此不会要求浏览器长期持有文
 - 不自动扫描用户目录中的旧 JSON。
 - 不在打开工作区时恢复一次性订单授权、订单 token 或自动提交状态。
 
-## 4. 当前实现基线与必须保护的行为
+## 4. 实施前基线与必须保护的行为（历史设计）
 
-### 4.1 当前保存入口
+### 4.1 实施前保存入口
 
 js/app.js 当前通过：
 
@@ -255,6 +255,8 @@ Live Trigger 的条件配置可以保留，但默认不得处于会自动提交�
         ON workspace_documents(deleted_at_utc, updated_at_utc DESC);
 
 不在 SQL 中依赖 json_valid()，避免不同平台编译的 SQLite 缺少 JSON1。JSON 合法性由 Python 在事务开始前验证。
+
+当前活动库已是 schema v2，新增持久 save receipt、归档索引及维护元数据。上面的 v1 SQL 是设计沿革，不能作为当前数据库完整建表脚本；以 `portfolio_store.py` 与归档方案为准。
 
 ### 6.3 原子保存算法
 

@@ -1,1 +1,2 @@
+# Run from option_combo_starter/. Choose the release tag deliberately before publishing.
 docker buildx build --platform linux/amd64 --no-cache -f Dockerfile -t patsiesoblast0l/option-combo-starter:20260911 --push .

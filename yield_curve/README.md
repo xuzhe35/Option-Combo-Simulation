@@ -1,7 +1,9 @@
 # Unified USD reference discount curve
 
 This directory is the single runtime source for discounting in the portfolio,
-Chart Lab, historical replay, and IV Term Structure surfaces.
+Chart Lab, historical replay, IV Term Structure, and USD cost-basis stress valuation.
+The stress snapshot endpoint supplies the curve; it does not expose the main
+portfolio's manual-rate fallback.
 
 ## Daily use
 
@@ -23,7 +25,10 @@ and the official U.S. Treasury Daily Treasury Par Yield Curve XML feed.
 
 The two websocket backends never implement source downloads. When
 `latest.json` is missing or from an older New York market date, a backend may
-start the independent updater once with its own `sys.executable`. Failure keeps
+start the independent updater once with its own `sys.executable`, when the
+corresponding auto-update flag is enabled. Docker disables those flags and its
+PID-1 supervisor schedules the independent updater instead (see
+[Docker scheduling](../option_combo_starter/README.md#yield-curve-scheduling)). Failure keeps
 the last complete snapshot; with no snapshot, the visible manual continuous
 rate remains the final fallback.
 

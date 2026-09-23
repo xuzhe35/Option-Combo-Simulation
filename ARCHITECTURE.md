@@ -138,14 +138,15 @@ It currently:
 - keeps one active book per account + underlying + security type + currency
   over an append-oriented event stream in its own `cost_basis.db`
 - presents three lenses off the same stored cash: net cash (default), stock
-  only (the one that should reconcile against the TWS average-cost column),
+  only (rolling average, compared with TWS as corroborating evidence),
   and tax adjusted
 - reads TWS positions through the existing
   `request_portfolio_positions_snapshot` /
   `request_portfolio_avg_cost_snapshot` actions, and only ever *detects* a
   gap from them - nothing auto-writes an event
-- imports IBKR Activity Statement CSVs, de-duplicating on a content-derived
-  key because those statements carry no TradeID
+- imports Activity Statement and Flex CSVs, using broker IDs when available,
+  otherwise occurrence-aware content references; economics are checked before
+  treating a stored reference or cross-format match as a duplicate
 - reviews and explicitly imports recent TWS executions by broker `execId`;
   duplicate IDs inside one batch are blocked before storage, while later CSV
   reports remain the final historical authority through strict cross-source
@@ -161,7 +162,7 @@ It currently:
   own page view (parameters in a sticky left column, chart and cards on the right;
   any view switch or book change tears the stress job down)
   that values every still-open option of the book on one scenario date (live
-  longs as assets, live shorts as liabilities) with per-contract TWS IV, the
+  longs as assets, live shorts as liabilities) with per-contract locally calibrated IV, the
   shared discount curve, a CRR American binomial by default and a mid or
   today's-spread lens; nothing becomes a stored event
 - stacks an optional cross-book protection curve (TQQQ-first): a same-account,
@@ -214,28 +215,30 @@ Current `index.html` load order:
 15. `js/order_confirmation_ui.js`
 16. `js/delta_hedge_logic.js`
 17. `js/distribution_proxy_config.js`
-18. `js/pricing_core.js`
-19. `js/bsm.js`
-20. `js/chart.js`
-21. `js/prob_charts.js`
-22. `js/chart_controls.js`
-23. `js/amortized.js`
-24. `js/valuation.js`
-25. `js/session_logic.js`
-26. `js/session_ui.js`
-27. `js/control_panel_ui.js`
-28. `js/hedge_editor_ui.js`
-29. `js/group_editor_ui.js`
-30. `js/hedge_ui.js`
-31. `js/group_ui.js`
-32. `js/global_ui.js`
-33. `js/page_capabilities.js`
-34. `js/combo_order_transport.js`
-35. `js/delta_hedge_transport.js`
-36. `js/delta_hedge_ui.js`
-37. `js/calendar_handoff.js`
-38. `js/app.js`
-39. `js/ws_client.js`
+18. `js/american_binomial.js`
+19. `js/pricing_core.js`
+20. `js/bsm.js`
+21. `js/chart.js`
+22. `js/prob_charts.js`
+23. `js/chart_controls.js`
+24. `js/amortized.js`
+25. `js/valuation.js`
+26. `js/session_logic.js`
+27. `js/workspace_persistence.js`
+28. `js/session_ui.js`
+29. `js/control_panel_ui.js`
+30. `js/hedge_editor_ui.js`
+31. `js/group_editor_ui.js`
+32. `js/hedge_ui.js`
+33. `js/group_ui.js`
+34. `js/global_ui.js`
+35. `js/page_capabilities.js`
+36. `js/combo_order_transport.js`
+37. `js/delta_hedge_transport.js`
+38. `js/delta_hedge_ui.js`
+39. `js/calendar_handoff.js`
+40. `js/app.js`
+41. `js/ws_client.js`
 
 `chart_lab.html` keeps the same shared shell ordering where relevant, but intentionally omits the Delta Hedge panel logic/UI. Its tail order is:
 
@@ -369,8 +372,8 @@ Explicit contract rejection, incompatible adjusted equity classes, conflicting
 near-leg cutoffs, wrong/missing FOP month quotes, unknown models, and deferred
 AM settlement fixings remain hard blockers.
 
-The IVTS λ solver and simulator share the same exact timestamp clock. Export
-requires ContractDetails `expiryAsOf`, and interval evidence carries fractional
+The IVTS λ solver and simulator share the same exact timestamp clock. The strict source requires ContractDetails `expiryAsOf`; best-effort sources
+retain explicit profile/date-clock provenance. Interval evidence carries fractional
 trading/non-trading days using exchange timezone plus CME-family 17:00
 trade-date rollover. Chart Lab's auxiliary websocket is restricted to bars and
 visual overlays; all projection inputs come from the main websocket state.
@@ -400,11 +403,10 @@ Responsibilities:
 - probability leg repricing carries explicit `varianceT` and calendar
   `discountT`: equity/ETF legs use BSM and index/FOP legs use Black-76 unless
   their independent American switch selects the corresponding CRR price grid
-- live 0DTE fractional time from IB ContractDetails last-trade metadata; the
-  live safety gate requires contract-source timing for FOP/INDEX and for
-  unverified or nonstandard target/short-dated legs. Standard stock/ETF legs
-  with IB-verified conId and trading class may visibly degrade to the product
-  cutoff when only exact last-trade time is missing
+- live 0DTE fractional time prefers IB ContractDetails last-trade metadata;
+  missing timing may use a visible product-profile estimate. Explicit identity
+  rejection, incompatible adjusted equity classes, wrong FOP bindings, cutoff
+  conflicts and unsupported AM fixings remain blockers
 - price-independent `option_contract_metadata` handoff after each qualified
   subscription attach; pooled IVTS/portfolio reuse does not wait for another
   BBO tick, and the browser updates identity/timing without touching quote or
@@ -412,12 +414,9 @@ Responsibilities:
 - exact-timing cache admits only complete ContractDetails evidence (plus
   verified FOP underlying binding); partial results retry on later subscribe,
   while same-conId concurrent lookups share one in-flight request
-- defensive product-profile cutoffs remain available to historical/explicit
-  compatibility paths, longer-dated stock/ETF cases, and the controlled
-  identity-verified standard stock/ETF timing fallback. The separate manual
-  IVTS estimator may use a product-profile cutoff
-  as audited best-effort evidence when IB omits ContractDetails timing; this
-  does not weaken the simulator leg-timing gate
+- product-profile cutoffs are also used by the manual IVTS best-effort
+  estimator with explicit provenance; its strict source still requires exact
+  ContractDetails. Neither estimate proves a special settlement fixing
 - AM special-fixing contracts (standard SPX and traditional quarterly AM
   ES/NQ/MES/MNQ) fail closed after last trade because the settlement variable
   is not the contemporaneous screen underlier
@@ -524,32 +523,35 @@ Responsibilities:
 - standard equity/index trading-class filtering so adjusted deliverables such
   as `2SPY` do not leak into the normal expiry calendar
 - live call/put IV aggregation
-- calendar-day IV and trading-day IV derived through one global weekend/holiday variance weight
-- a separate implied-weekend-λ path that consumes only immutable coherent
-  whole-curve snapshots, exact two-sided straddle prices, per-expiry parity
-  forwards, and numerical total-variance inversion
+- calendar-day IV and trading-day IV using the fallback scalar until a manual
+  λ calculation is available, then per-date weights with labelled tail estimates;
+  the separate strategy signal remains fixed at λ=0.3
+- manual implied-λ calculation prefers coherent whole-curve snapshots and
+  two-sided straddle/forward evidence, then usable BBO subsets, then an audited
+  vendor-ATM-IV fallback; source and estimated intervals remain explicit
 - per-expiry discount observations from the shared Discount curve; the manual
   continuous `r` is a row-level fallback, not a substitute for carry
 - FUT underliers may provide an independent outright Forward check. ETF/index
   spot is never relabelled as `F` and `S*exp(rT)` is not assumed when `q` is unknown
-- strict V2 handoff to the main simulator, keyed by symbol, futures contract
-  month, and live quote anchor; when implied mode is enabled every required
-  non-trading date must be explicitly covered and the scalar never fills holes
+- validated V2 handoff keyed by symbol, futures month, live quote anchor and
+  official calendar. Required date coverage is audited separately: default
+  analysis discloses median/scalar fallbacks, strict BBO diagnostics block gaps
 - coherent-snapshot events update only the latest immutable estimator input.
   V2 derivation runs only when the user presses `Calculate λ`; the result is
   frozen for inspection and live ticks merely mark it as superseded. `Sync to
   Simulators` explicitly publishes that frozen curve, and `Export JSON` writes
-  the same strict document for another origin or machine
+  the same validated document, including any best-effort provenance, for another origin or machine
 - consumers coalesce repeated same-origin storage events into one animation-
   frame refresh and defer hidden-tab valuation until visibility returns.
   Calculated and explicitly imported V2 curves are frozen without a wall-clock
   timeout; their original market `quoteAsOf` remains audit evidence. Product,
-  futures-month, live anchor-date, calendar, and strict date-coverage checks
-  remain mandatory
+  futures-month, live anchor-date and publication/import calendar checks remain
+  mandatory; per-date gaps are disclosed and stop strict diagnostics
 - `js/market_holidays.js` is an official-snapshot reader only; it contains no
   holiday rule engine. `js/date_utils.js` carries each product's `calendarId`
-  through pricing and UI calculations and fails closed outside official
-  coverage. Historical replay supplies explicit observed session dates from
+  through pricing and UI calculations. IVTS requires official coverage; ordinary
+  live analysis may label weekday/weekend estimates outside it. Historical
+  replay supplies explicit observed session dates from
   the chain service for archive years that the forward snapshot cannot cover.
 - per-symbol historical sample documents
 - testable DOM-free JS and Python selection helpers
@@ -785,9 +787,9 @@ Current architecture includes:
 
 Live backend nuance:
 
-- `ib_server.py` has explicit `SUPPORTED_LIVE_FAMILIES` defaults for `ES`, `NQ`, `MES`, `MNQ`, `CL`, and `SI`.
+- `ib_server.py` has explicit `SUPPORTED_LIVE_FAMILIES` defaults for `ES`, `NQ`, `MES`, `MNQ`, `CL`, `GC`, `SI`, and `HG`.
 - `SPX` and `NDX` use index exchange fallbacks.
-- The browser registry knows about `GC` and `HG`; live contract qualification may still require extra verification for those families.
+- Family defaults do not prove a specific contract exists: expiry, trading class and underlying-month binding still require IB qualification.
 - `MES` and `MNQ` backend defaults intentionally omit unverified trading classes and rely on underConId-assisted qualification paths.
 
 ## 7. Backend WebSocket Responsibilities
@@ -866,7 +868,9 @@ The split is intentional:
 - `request_historical_snapshot`
 - `request_portfolio_avg_cost_snapshot` with an empty item list
 
-Any other message to `historical_server.py` returns a historical replay error.
+`request_discount_curve` and the shared persistence, admin and ledger action
+families below are also handled. Other messages return a historical replay error;
+live-only ledger fetchers report unavailable through the shared ledger protocol.
 
 ### Workspace persistence (shared by both backends)
 
@@ -941,26 +945,34 @@ uses the same atomic archive-and-restore transaction.
 
 `cost_basis_ws.py` is the shared protocol layer both `ib_server.py` and
 `historical_server.py` mount, so Live and Historical answer with identical
-response shapes and error codes. It owns peer enforcement, request
+response shapes and error codes. It owns ledger access enforcement, request
 validation, and the sync-store to event-loop bridge (`asyncio.to_thread`).
-Loopback is allowed by default; `[cost_basis] trusted_peers` or
-`OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` explicitly opts in exact remote IPs/CIDRs.
-Only the transport's actual TCP peer is checked, never forwarded headers.
-The environment wins even when empty (revocation); malformed lists deny all
-remote ledger access without interrupting local ledger/IB operation. The
-access check precedes lazy DB initialization and broker fetchers. This policy
-does not change the workspace-store or admin loopback restrictions. A trusted
-proxy must protect its ingress because it represents all clients it admits.
+Access defaults to loopback only. Two independent opt-ins can widen it, and a
+request passes if either allows it:
+`[cost_basis] trusted_peers` / `OPTION_COMBO_COST_BASIS_TRUSTED_PEERS` admits
+exact remote IPs/CIDRs (the environment wins even when empty; malformed lists
+deny all remote ledger access without interrupting local ledger/IB operation),
+and `[cost_basis] allow_remote` / `OPTION_COMBO_COST_BASIS_ALLOW_REMOTE` admits
+every peer for deployments behind Tailscale or another authenticated network
+(the environment takes precedence, including false/empty values; invalid values
+fail closed). Only the transport's actual TCP peer is checked, never forwarded
+headers; Docker NAT addresses and private IP ranges are never treated as proof
+of authentication. The gate precedes lazy DB initialization and broker
+fetchers, and does not change the workspace-store/admin loopback restrictions
+or broker execution authorization. A trusted proxy must protect its ingress
+because it represents all clients it admits.
 It never writes SQL and never leaks database paths or raw SQL errors to the
 browser, and an exception must not escape it - one bad ledger request must
 not tear down a socket that is also carrying live market data and order
 supervision.
 
-`rebuild_cost_basis_book` is the only normal workflow that removes active
-events: it archives the full set as JSON, validates the replacement, then wipes
-and refills inside one transaction. A server-generated count-bearing reset
-token is re-checked under the write lock, so a ledger changed after preview
-fails closed. `delete_cost_basis_book` is the separate, explicitly permanent
+`rebuild_cost_basis_book` archives the full event set and replaces it inside
+one transaction. Reset and archive/JSON restoration also archive and replace
+active history. A server-generated reset token, complete book identity and
+ledger digest are checked under the write lock; same-count changes also fail.
+Batch imports pre-resolve unambiguous multipliers, insert all rows, and validate
+the complete affected timelines before commit; any failure rolls everything back.
+C/O rows require a genuine opposite-position reversal; pure C remains a close. `delete_cost_basis_book` is the separate, explicitly permanent
 exception: after a count-bearing confirmation it removes the book, events,
 snapshots and rebuild archives atomically and is not recoverable.
 
@@ -971,8 +983,8 @@ new title with the previous book's ledger or emit an unhandled rejection.
 
 The workspace recovery-set publisher does not include `cost_basis.db`. No
 dedicated cost-ledger backup command or automatic scheduler currently exists;
-operators must use a SQLite-consistent external backup while the backend is
-stopped or otherwise quiesced.
+the page offers checksummed event JSON backup/recovery. For a full database
+copy, use a SQLite-consistent external backup; never copy a live main DB alone.
 
 ## 8. Historical Replay Architecture
 

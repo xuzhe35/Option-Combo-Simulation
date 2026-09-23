@@ -1,7 +1,7 @@
 # VRP 剧本与知识库（长期记忆版）
 
 **定稿**：2026-07-16 · **地位**：`VRP_RESEARCH_MEMO.md` 是实验室记录本（全部实验数据、E1–E18）；本文是蒸馏后的原理、剧本与经验总账。两者冲突时以 memo 的数据为准、以本文的原则为纲。
-**当前状态**：QQQ 深正挂反蝶已于 2026-07-15 进入最小仓位实盘试验；预登记停用线生效（见 §6）。
+**历史状态（记录于 2026-07-16）**：当时记载 QQQ 深正挂反蝶于 2026-07-15 进入最小仓位实盘试验及预登记停用线（见 §6）。仓库代码不能证明此试验今天仍在进行。本文是研究/操作记录，不是当前账户状态或自动执行规则。
 
 ---
 
@@ -93,12 +93,12 @@ TD slope = 前腿(~7DTE±2) ATM TD IV ÷ 后腿(~2×DTE) ATM TD IV，λ=0.3 冻�
 6. **预登记停用线**：实盘/纸面轨迹落入回测 bootstrap 下 5% 尾部 → 引擎降级停用。先写下什么叫失败，再开始数钱；
 7. **工具的测度要认清**：模拟器无条件负期望与剧本条件正期望不矛盾（积分测度不同）；用 Regime-conditioned 开关并排读两个数字。
 
-## 7. 当前在途与下一步
+## 7. 当时在途与后续设想（2026-07-16 记录）
 
 - **实盘**：QQQ 深正挂反蝶最小仓位试验中（2026-07-15 起）；正式节奏 = 周五收盘入场；每周记录五件套起始项（slope/MRR/EM/净支出/翼距）；
 - **基础设施已备**：IVTS 面板（三区 + Zones 图例 + MRR 水位 + 分时代研究基准）、EM-fit 一键构造（1.0×/1.25×）、MRR 历史回填脚本、Regime-conditioned 概率分析、$1 执行价步进修复；
 - **研究队列**：CL FOP 客群成本侧程序（skew 两翼 + 远月 tenor 的可收割截面；周度平值只留 surge 窗）；14/28 第二引擎候选（须过重叠持仓/tp50 成本/QQQ 一致性三关）；B7 仓位分级；外围长跨书三账本总决算；
-- **维护**：`sync_market_holidays.py`（年度）、`sync_official_exchange_calendars.py`、`backfill_ivts_mrr_history.py` 与 `generate_regime_conditional_samples.py`（数据库更新后重跑）。
+- **当前维护入口**：交易日历按季度使用 `sync_exchange_calendars` 各平台入口；`scripts/sync_market_holidays.py` 已是官方同步的兼容转发。研究数据更新后按需运行 `scripts/backfill_ivts_mrr_history.py` 与 `scripts/generate_regime_conditional_samples.py`；日常步骤见 `日常维护操作指南.md`。
 
 ## 8. 索引
 

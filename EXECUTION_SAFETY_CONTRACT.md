@@ -46,6 +46,10 @@ or after the account position snapshot changed.
   - confirmation sends the frozen validated payload instead of rebuilding it from mutable UI state
   - TIF, managed reprice threshold, concession ratio, routing/contract identity, multipliers, observed pricing inputs, and profile terms are covered by the backend fingerprint
   - confirmation describes the actual managed server-pricing workflow rather than an undefined client LMT
+- Global Auto Close
+  - uses separate preview/submit actions and a one-use confirmed plan digest
+  - accepts only one candidate expiry and rechecks the aggregated account position claims
+  - leaves normal liquid legs to the existing Group Close path
 - Close Plan
   - retains its richer staged-plan dialog and existing one-time Close Plan token
   - remains fail-closed and compatible with the common safety contract
