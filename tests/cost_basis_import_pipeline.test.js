@@ -106,12 +106,12 @@ assert.equal(sameSecondAppend.problems.length,0,'the file preserves the old row 
 assert.equal(h.newRows(sameSecondAppend).length,1);
 assert.equal(sameSecondAppend.ledgerPreview.warnings.length,0);
 
-// Portable reproduction of a buy-two / sell-four C;O;P order. Keep the
+// Synthetic buy-two / sell-four C;O;P order (no real statement values). Keep the
 // aggregate cash once; do not duplicate an order by splitting its source ref.
 const reversalText=activity([
- 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 21SEP26 71 C,"2026-09-18, 14:23:30",2,1.18,-236,-1.3666,O',
- 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 21SEP26 71 C,"2026-09-18, 14:23:59",-4,1.16,464,-1.7999184,C;O;P',
- oh,'Open Positions,Data,Summary,Equity and Index Options,USD,TQQQ 21SEP26 71 C,-2,100,-230.6220408']);
+ 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 16OCT26 75 C,"2026-09-16, 10:15:00",2,1.2,-240,-1.3,O',
+ 'Trades,Data,Order,Equity and Index Options,USD,TQQQ 16OCT26 75 C,"2026-09-16, 10:45:00",-4,1.1,440,-1.7,C;O;P',
+ oh,'Open Positions,Data,Summary,Equity and Index Options,USD,TQQQ 16OCT26 75 C,-2,100,-219.15']);
 const reversalParsed=I.parse(reversalText,opt);
 const reversalExisting=reversalParsed.events.map((e,i)=>({...e,eventId:'reversal-'+i,seq:i+1}));
 for(const [name,existing,rebuild] of [

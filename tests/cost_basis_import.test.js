@@ -66,15 +66,15 @@ module.exports = {
                 for (const [codes, tag] of [['C;O;P', 'ibkr_close_open'],
                     ['O;C', 'ibkr_close_open'], ['C;P', 'ibkr_close'], ['O;P', 'ibkr_open']]) {
                     const inputs = [
-                        activity(`Trades,Data,Order,Equity and Index Options,USD,TQQQ 21SEP26 71 C,"2026-09-18, 14:23:59",-4,1.16,464,-1.8,${codes}`),
-                        flex(`U1111111,TQQQ,TQQQ 21SEP26 71 C,OPT,20260918,-4,1.16,464,-1.8,C,71,20260921,100,trade-1,${codes}`),
+                        activity(`Trades,Data,Order,Equity and Index Options,USD,TQQQ 16OCT26 75 C,"2026-09-16, 10:45:00",-4,1.1,440,-1.7,${codes}`),
+                        flex(`U1111111,TQQQ,TQQQ 16OCT26 75 C,OPT,20260916,-4,1.1,440,-1.7,C,75,20261016,100,trade-1,${codes}`),
                     ];
                     for (const input of inputs) {
                         const parsed = parser.parse(input, { symbol: 'TQQQ', accountFallback: 'U1111111', defaultSharesPerContract: 100 });
                         assert.equal(parsed.events.length, 1);
                         assert.equal(parsed.events[0].tag, tag);
                         assert.equal(parsed.events[0].contracts, -4);
-                        assert.equal(parsed.events[0].cashAmount, 462.2);
+                        assert.equal(parsed.events[0].cashAmount, 438.3);
                     }
                 }
             },
