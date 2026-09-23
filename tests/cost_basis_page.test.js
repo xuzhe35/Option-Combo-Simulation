@@ -34,6 +34,7 @@ function loadReconciliationHarness() {
     vm.runInContext(readScript().replace('globalScope.OptionComboCostBasisPage = {', `
         globalScope.pageHarness = {
             state, render: _renderReconciliationTable, fetch: _fetchTwsExecutions,
+            renderSummary: _renderSummary,
             handleImportFile: _handleImportFile, commitImport: _commitImport,
             parseImport: _parseImportText, bindingProblem: _importBindingProblem,
             beginBook: _beginBookSelection,
@@ -553,6 +554,332 @@ module.exports = {
             },
         },
         {
+            name: 'batch lookup fetches once, isolates incomplete contracts and commits once after confirmation',
+            async run() {
+                const h = loadReconciliationHarness();
+                h.state.ledgerVersion = {digest:'batch-v1'};
+                const core = h.context.OptionComboCostBasisCore;
+                const openings = [70,71,72].map(strike => ({account:'U1',kind:'option_trade',
+                    right:'C',strike,expiry:'20260904',sharesPerContract:100,contracts:-2,
+                    price:1,cashAmount:200,fees:0,tradeDate:'2026-09-01'}));
+                h.state.allEvents = openings;
+                h.state.ledger = core.computeLedger(openings);
+                h.state.reconciliation = {rows:openings.map(e => ({...e,kind:'option',
+                    key:core.contractKey(e),status:'ledger_only',label:`C${e.strike}`,
+                    ledger:-2,tws:0,difference:2}))};
+                const calls=[];
+                h.configure({request: async (action,payload) => {
+                    calls.push({action,payload});
+                    if(action==='request_cost_basis_executions') return {
+                        fetchedAt:'2026-09-03T11:00:00', executions:openings.map(e => ({
+                            account:'U1',symbol:'TQQQ',secType:'OPT',execId:`batch-${e.strike}`,
+                            right:'C',strike:e.strike,expiry:e.expiry,multiplier:100,side:'BOT',
+                            quantity:2,price:0.2,commission:1,commissionAvailable:e.strike!==72,
+                            brokerTimestamp:'2026-09-03T10:00:00'}))};
+                    if(action==='import_cost_basis_events') return {inserted:2,skipped:0};
+                    if(action==='list_cost_basis_books') return {books:[]};
+                    return {};
+                }});
+                await h.fetch({batch:true});
+                assert.equal(calls.length,1,'lookup never writes');
+                const result=h.state.importResult;
+                assert.equal(result.batchReconciliation.matches.length,2);
+                assert.equal(result.batchReconciliation.skipped.length,1);
+                assert.match(result.batchReconciliation.skipped[0].reason,/佣金/);
+                assert.equal(result.twsReconciliation.length,2);
+                assert.equal(result.events.length,2);
+                assert.equal(result.events.reduce((n,e)=>n+e.cashAmount,0),-82);
+                h.context.confirm=()=>false;
+                await h.commitImport();
+                assert.equal(calls.length,1,'cancel does not write');
+                h.context.confirm=()=>true;
+                await h.commitImport();
+                const writes=calls.filter(c=>c.action==='import_cost_basis_events');
+                assert.equal(writes.length,1);
+                assert.equal(writes[0].payload.events.length,2);
+                assert.equal(writes[0].payload.twsReconciliation.length,2);
+                assert.equal(writes[0].payload.expectedLedgerVersion.digest,'batch-v1');
+            },
+        },
+        {
+            name: 'structural replay errors block commit but informational ledger warnings do not',
+            async run() {
+                const h=loadReconciliationHarness(), p=h.context.OptionComboCostBasisPage;
+                const result={binding:{bookId:'book-test',generation:h.state.importGeneration,
+                    mode:'append',ledgerVersion:'v'},events:[],problems:[],
+                    ledgerPreview:{warnings:['net_short_shares','ibkr_close_open_invalid:contract']}};
+                h.state.ledgerVersion={digest:'v'};
+                h.state.importResult=result;
+                let writes=0,confirmations=0;
+                h.configure({request:async()=>{writes++;return {};}});
+                h.context.confirm=()=>{confirmations++;return true;};
+                await h.commitImport();
+                assert.equal(writes,0);
+                assert.equal(confirmations,0);
+                assert.match(h.alerts[0],/历史回放未通过/);
+                assert.equal(p.importReplayBlockingWarnings({ledgerPreview:{warnings:['net_short_shares']}}).length,0);
+                for(const warning of ['closes_more_than_open:x','ibkr_open_opposes_existing:x',
+                    'contract_identity_ambiguous:x','roll_closes_more_than_open:x']) {
+                    assert.equal(p.importReplayBlockingWarnings({ledgerPreview:{warnings:[warning]}}).length,1);
+                    // The same error already carried by stored history is only reported.
+                    const carried={ledgerPreview:{warnings:[warning],newWarnings:[]}};
+                    assert.equal(p.importReplayBlockingWarnings(carried).length,0,warning);
+                    assert.deepEqual(Array.from(p.importReplayNotices(carried)),[warning]);
+                }
+                // Advisory notes never block, even when this batch introduces them.
+                for(const warning of ['split_crosses_open_option:x','contract_identity_conflict:x',
+                    'future_identity_or_multiplier_missing:x']) {
+                    const added={ledgerPreview:{warnings:[warning],newWarnings:[warning]}};
+                    assert.equal(p.importReplayBlockingWarnings(added).length,0,warning);
+                    assert.deepEqual(Array.from(p.importReplayNotices(added)),[warning]);
+                }
+            },
+        },
+        {
+            name: 'dividends are shown after withholding tax and the tax leaves the fee card',
+            run() {
+                const h = loadPriceHarness();
+                h.silenceStressRender();
+                h.context.document.querySelector = () => h.context.document.createElement('div');
+                h.context.document.querySelectorAll = () => [];
+                h.state.allEvents = [
+                    {kind:'share_trade',account:'U1',tradeDate:'2026-06-01',shares:100,
+                        price:50,fees:1,cashAmount:-5001,seq:1},
+                    {kind:'dividend',account:'U1',tradeDate:'2026-06-20',cashAmount:50,fees:0,seq:2},
+                    {kind:'fee',account:'U1',tradeDate:'2026-06-20',cashAmount:-5,fees:5,
+                        tag:'withholding_tax',seq:3},
+                ];
+                h.state.ledger = h.context.OptionComboCostBasisCore.computeLedger(h.state.allEvents);
+                h.renderSummary();
+                assert.match(h.node('cash-realized-label').textContent, /^税后股息/);
+                assert.match(h.node('cash-dividends').textContent, /45\.00/);
+                assert.match(h.node('cash-dividends-caption').textContent, /税前 \+?50\.00/);
+                assert.match(h.node('cash-dividends-caption').textContent, /预扣税 -5\.00/);
+                assert.match(h.node('cash-fees').textContent, /-1\.00/, 'withholding is not subtracted twice');
+                const rows = h.node('summary-table').body.children.map(
+                    (row) => row.children.map((cell) => cell.textContent));
+                const find = (label) => rows.find((cells) => cells[0] === label);
+                assert.match(find('税后股息')[1], /45\.00/);
+                assert.match(find('　其中：股息预扣税')[1], /-5\.00/);
+                assert.match(find('费用合计（不含股息预扣税）')[1], /-1\.00/);
+            },
+        },
+        {
+            name: 'replay warnings carried by stored history are shown before commit but never block',
+            async run() {
+                const h=loadReconciliationHarness(), p=h.context.OptionComboCostBasisPage;
+                const core=h.context.OptionComboCostBasisCore;
+                // The store accepts a split while a put is open; replay flags it for review.
+                const history=[
+                    {eventId:'put',seq:1,kind:'option_trade',account:'U1',tradeDate:'2026-08-01',
+                        right:'P',strike:50,expiry:'20261016',sharesPerContract:100,contracts:-1,
+                        price:2,fees:0,cashAmount:200},
+                    {eventId:'split',seq:2,kind:'split',account:'U1',tradeDate:'2026-08-15',
+                        splitRatio:2,cashAmount:0}];
+                Object.assign(h.state,{allEvents:history,ledger:core.computeLedger(history),
+                    ledgerVersion:{digest:'v'}});
+                const text=['Account Information,Header,Field Name,Field Value',
+                    'Account Information,Data,Account,U1',
+                    'Trades,Header,DataDiscriminator,Asset Category,Currency,Symbol,Date/Time,Quantity,T. Price,Proceeds,Comm/Fee,Code',
+                    'Trades,Data,Order,Stocks,USD,TQQQ,"2026-09-01, 10:00:00",10,50,-500,-1,O'].join('\n');
+                h.parseImport(text,{fileName:'unrelated.csv',fileDigest:'unrelated'});
+                const result=h.state.importResult;
+                assert.equal(result.problems.length,0);
+                assert.ok(result.ledgerPreview.warnings.some((w)=>w.startsWith('split_crosses_open_option:')));
+                assert.deepEqual(Array.from(result.ledgerPreview.newWarnings),[]);
+                assert.equal(p.importReplayBlockingWarnings(result).length,0);
+                const writes=[];let prompt='';
+                h.configure({request:async(action)=>{
+                    writes.push(action);
+                    if(action==='import_cost_basis_events') return {inserted:1,skipped:0};
+                    if(action==='list_cost_basis_books') return {books:[]};
+                    return {};
+                }});
+                h.context.confirm=(message)=>{prompt=message;return true;};
+                await h.commitImport();
+                assert.match(prompt,/不阻断提交/);
+                assert.match(prompt,/拆股跨越未平仓期权/);
+                assert.ok(writes.includes('import_cost_basis_events'),'unrelated import still commits');
+            },
+        },
+        {
+            name: 'unchanged position broadcasts preserve pending and completed batch previews',
+            async run() {
+                const h=loadReconciliationHarness();
+                h.state.ledgerVersion={digest:'v'};
+                h.state.reconciliation={rows:[]};
+                h.configure({request:async()=>{
+                    h.state.positionsTimestamp='2026-09-03T10:01:00';
+                    return {executions:[]};
+                }});
+                await h.fetch({batch:true});
+                assert.ok(h.state.importResult,'timestamp-only broadcast must not discard the reply');
+                h.state.positionsTimestamp='2026-09-03T10:02:00';
+                assert.equal(h.bindingProblem(),'','timestamp-only broadcast must not invalidate preview');
+                h.state.reconciliation.rows.push({kind:'option',ledger:0,tws:1});
+                assert.match(h.bindingProblem(),/快照已变化/);
+            },
+        },
+        {
+            name: 'batch preview reports roundtrip cash even when contract is absent from position rows',
+            run() {
+                const c=loadPage(), p=c.OptionComboCostBasisPage;
+                const fill={kind:'option_trade',source:'execution_report',tag:'ibkr_exec',
+                    account:'U1',right:'C',strike:72,expiry:'20261016',sharesPerContract:100,
+                    contracts:5,cashAmount:-501,externalRef:'ibkr-exec-round-open'};
+                const result={events:[fill,{...fill,contracts:-5,cashAmount:249,
+                    externalRef:'ibkr-exec-round-close'}],problems:[]};
+                for(const targets of [[],[{...fill,kind:'option',ledger:0,tws:0,difference:0}]]) {
+                    const plan=p.planBatchExecutionReconciliation(targets,result,[],[]);
+                    assert.equal(plan.events.length,0);
+                    assert.equal(plan.skipped.length,1);
+                    assert.match(plan.skipped[0].reason,/拉取 TWS 成交/);
+                    assert.match(plan.skipped[0].reason,/-252/);
+                }
+            },
+        },
+        {
+            name: 'batch preview lists stock round trips and unreadable executions instead of dropping them',
+            run() {
+                const c=loadPage(), p=c.OptionComboCostBasisPage;
+                const share={kind:'share_trade',source:'execution_report',tag:'ibkr_exec',account:'U1',
+                    shares:100,cashAmount:-5001,externalRef:'ibkr-exec-share-buy'};
+                const plan=p.planBatchExecutionReconciliation([],{events:[share,{...share,shares:-100,
+                    cashAmount:4899,externalRef:'ibkr-exec-share-sell'}],problems:[]},[],[]);
+                assert.equal(plan.events.length,0,'the batch never writes stock fills');
+                assert.equal(plan.skipped.length,1);
+                assert.equal(plan.skipped[0].label,'股票');
+                assert.match(plan.skipped[0].reason,/净现金 -102\.00/);
+                // A flat option round trip whose commission is still pending never
+                // became an event; it must still be named in the preview.
+                const executions=[
+                    {account:'U1',symbol:'TQQQ',secType:'OPT',execId:'rt-buy'},
+                    {account:'U1',symbol:'TQQQ',secType:'OPT',execId:'rt-sell'},
+                    {account:'U1',symbol:'QQQ',secType:'OPT',execId:'other-book'}];
+                const problems=executions.map((row,i)=>({lineNumber:i+1,
+                    reason:`成交 ${row.execId} 的佣金回报尚未到齐`,raw:row.execId}));
+                const pending=p.planBatchExecutionReconciliation([],{events:[],problems},[],executions,
+                    {account:'U1',symbol:'TQQQ'});
+                assert.deepEqual(Array.from(pending.skipped,(item)=>item.label),['rt-buy','rt-sell'],
+                    'another underlying stays out of this book');
+                assert.ok(pending.skipped.every((item)=>/本次未写入/.test(item.reason)));
+                // Problems a skipped target already names are not listed twice.
+                const target={kind:'option',key:'k',label:'C72',account:'U1',right:'C',strike:72,
+                    expiry:'20261016',sharesPerContract:100,ledger:0,tws:5,difference:5};
+                const once=p.planBatchExecutionReconciliation([target],{events:[],problems:[
+                    {lineNumber:0,reason:'unknown identity'}]},[],[],{account:'U1',symbol:'TQQQ'});
+                assert.equal(once.skipped.length,1);
+                assert.match(once.skipped[0].reason,/unknown identity/);
+            },
+        },
+        {
+            name: 'batch lookup discards replies after book, ledger, or snapshot changes',
+            async run() {
+                for(const mutation of [h=>{h.state.bookId='other';},
+                    h=>{h.state.ledgerVersion={digest:'changed'};},
+                    h=>{h.state.positionsConnected=false;},
+                    h=>{h.state.reconciliation.rows.push({kind:'option',ledger:1,tws:2});}]) {
+                    const h=loadReconciliationHarness();
+                    h.state.ledgerVersion={digest:'before'};
+                    h.state.reconciliation={rows:[]};
+                    h.configure({request:async()=>{mutation(h);return {executions:[]};}});
+                    await h.fetch({batch:true});
+                    assert.equal(h.state.importResult,null);
+                    assert.equal(h.state.executionFetchPending,false);
+                }
+                const h=loadReconciliationHarness();
+                h.state.ledgerVersion={digest:'v'};
+                h.state.importResult={binding:{bookId:'book-test',generation:h.state.importGeneration,
+                    mode:'append',ledgerVersion:'v'},batchReconciliation:{snapshotTimestamp:h.state.positionsTimestamp}};
+                assert.equal(h.bindingProblem(),'');
+                h.state.positionsTimestamp='new';
+                assert.equal(h.bindingProblem(),'');
+                h.state.positionsConnected=false;
+                assert.match(h.bindingProblem(),/快照已变化/);
+            },
+        },
+        {
+            name: 'batch planner keeps rebates and complete sequences, rejects ambiguous or unbacked histories',
+            run() {
+                const c=loadPage(), p=c.OptionComboCostBasisPage, core=c.OptionComboCostBasisCore;
+                const fill={account:'U1',kind:'option_trade',right:'P',strike:70,
+                    expiry:'20261016',sharesPerContract:100,contracts:-2,price:1,cashAmount:200,
+                    tradeDate:'2026-09-03',brokerTimestamp:'2026-09-03T10:00:00',
+                    source:'execution_report',tag:'ibkr_exec',externalRef:'ibkr-exec-one'};
+                const target={...fill,kind:'option',key:core.contractKey(fill),label:'P70',
+                    ledger:0,tws:-2,difference:-2};
+                const rebate={...fill,kind:'fee',tag:'ibkr_rebate',
+                    externalRef:'ibkr-exec-one-rebate',cashAmount:0.25};
+                const result={events:[fill,rebate],problems:[]};
+                let plan=p.planBatchExecutionReconciliation([target],result,[],[]);
+                assert.equal(plan.events.length,2);
+                assert.equal(plan.events.reduce((s,e)=>s+e.cashAmount,0),200.25);
+                plan=p.planBatchExecutionReconciliation([target,{...target,key:'alias'}],result,[],[]);
+                assert.equal(plan.events.length,0);
+                assert.equal(plan.skipped.length,2);
+                plan=p.planBatchExecutionReconciliation([target],{...result,
+                    problems:[{lineNumber:0,reason:'unknown identity'}]},[],[]);
+                assert.equal(plan.events.length,0);
+                const extra={...fill,externalRef:'ibkr-exec-extra',contracts:1};
+                plan=p.planBatchExecutionReconciliation([target],{events:[fill,extra],problems:[]},[],[]);
+                assert.equal(plan.events.length,0,'no cherry picking a matching subset');
+                plan=p.planBatchExecutionReconciliation([{...target,identityConflict:true}],result,[],[]);
+                assert.equal(plan.events.length,0);
+                const close={...fill,contracts:2};
+                plan=p.planBatchExecutionReconciliation([{...target,ledger:-2,tws:0,difference:2}],
+                    {events:[close],problems:[]},[],[]);
+                assert.equal(plan.events.length,0,'a claimed ledger amount cannot replace missing opening history');
+            },
+        },
+        {
+            name: 'seeded multi-contract batch histories preserve exact cash, baseline replacement and isolation',
+            run() {
+                const c=loadPage(), p=c.OptionComboCostBasisPage, core=c.OptionComboCostBasisCore;
+                let seed=22092026;
+                const random=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;};
+                for(let trial=0;trial<300;trial++) {
+                    const events=[],history=[],targets=[];
+                    const count=2+Math.floor(random()*12);
+                    for(let i=0;i<count;i++) {
+                        const quantity=2+Math.floor(random()*5), sign=random()<0.5?-1:1;
+                        const base={account:'U1',right:i%2?'C':'P',strike:40+i,
+                            expiry:'20261016',sharesPerContract:i%3?100:10,kind:'option_trade',
+                            tradeDate:'2026-09-03',price:1.25,fees:0.75};
+                        const useBaseline=random()<0.5;
+                        if(useBaseline) {const id=`base-${i}`;history.push({...base,
+                            eventId:id,contracts:sign,source:'reconcile',tag:'tws_snapshot',cashAmount:999});}
+                        const bad=random()<0.25;
+                        targets.push({...base,kind:'option',key:core.contractKey(base),label:`leg ${i}`,
+                            ledger:useBaseline?sign:0,tws:sign*(quantity+(bad?1:0)),
+                            difference:sign*(quantity+(bad?1:0)-(useBaseline?1:0))});
+                        for(let j=0;j<quantity;j++) {
+                            const event={...base,contracts:sign,source:'execution_report',tag:'ibkr_exec',
+                                brokerTimestamp:`2026-09-03T10:${String(j).padStart(2,'0')}:00`,
+                                cashAmount:-sign*1.25*base.sharesPerContract-0.75,
+                                externalRef:`ibkr-exec-${trial}-${i}-${j}`};
+                            events.push(event);
+                        }
+                    }
+                    // A batch must be insensitive to the source response order.
+                    events.reverse();
+                    const plan=p.planBatchExecutionReconciliation(targets,{events,problems:[]},history,[]);
+                    // A partial baseline can legitimately explain one extra unit;
+                    // calculate the independent endpoint rule for each full contract.
+                    const accepted=targets.filter(t=>{
+                        const fills=events.filter(e=>e.strike===t.strike);
+                        const net=fills.reduce((n,e)=>n+e.contracts,0);
+                        return t.ledger+net===t.tws || (t.ledger!==0 && net===t.tws);
+                    });
+                    const expectedEvents=events.filter(e=>accepted.some(t=>t.strike===e.strike));
+                    assert.equal(plan.matches.length,accepted.length,`seed trial ${trial}`);
+                    assert.equal(plan.events.length,expectedEvents.length);
+                    assert.equal(plan.events.reduce((n,e)=>n+e.cashAmount,0),
+                        expectedEvents.reduce((n,e)=>n+e.cashAmount,0));
+                    assert.equal(new Set(plan.events.map(e=>e.externalRef)).size,plan.events.length);
+                }
+            },
+        },
+        {
             name: 'targeted replay is not blocked by another contract awaiting commission',
             async run() {
                 function setup() {
@@ -989,7 +1316,7 @@ module.exports = {
                 assert.match(source, /button\.textContent = '查找 TWS 成交'/);
                 assert.match(source, /core\.matchReconciliationExecution/);
                 assert.match(source, /期权 Close（平仓）/);
-                assert.match(source, /button\.textContent = '确认导入成交'/);
+                assert.match(source, /'确认导入成交'/);
                 assert.match(source,
                     /button\.addEventListener\('click', _commitImport\)/);
                 assert.match(source,
@@ -2761,14 +3088,14 @@ module.exports = {
             },
         },
         {
-            name: 'the cash card combines dividends with realized stock P&L',
+            name: 'the cash card combines after-tax dividends with realized stock P&L',
             run() {
                 const html = readPage();
                 const source = readScript();
-                assert.match(html, /股息 \+ 股票已实现盈亏/);
+                assert.match(html, /税后股息 \+ 股票已实现盈亏/);
                 assert.match(source,
-                    /Number\(summary\.dividends \|\| 0\) \+ Number\(summary\.stockRealizedPnl \|\| 0\)/);
-                assert.match(source, /股息 \$\{_signedMoney\(summary\.dividends\)\}/);
+                    /netDividends \+ Number\(summary\.stockRealizedPnl \|\| 0\)/);
+                assert.match(source, /税后股息 \$\{_signedMoney\(netDividends\)\}/);
                 assert.match(source,
                     /股票已实现 \$\{_signedMoney\(summary\.stockRealizedPnl\)\}/);
                 assert.ok(html.includes('id="summary-details"'));

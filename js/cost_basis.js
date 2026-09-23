@@ -973,7 +973,7 @@
             message = `新账本将固定归属于 ${account}。`;
         } else if (manualSelected && hasLiveAccounts) {
             message = '输入在其他机器上运行的 IB 账号；'
-                + '账本留在本地，行情仍走当前 TWS 连接。';
+                + '账本保存在当前连接的服务器，行情仍走当前 TWS 连接。';
         } else if (manualSelected) {
             message = 'IB API 未连接：请手动输入准确的 IB '
                 + '账号；连接后会改用 TWS 账户列表。';
@@ -1008,7 +1008,9 @@
             state.status = status;
             if (!status.available) {
                 _setConnection('unavailable');
-                _text($('store-status'), `不可用（${status.reason || '未知原因'}）`);
+                _text($('store-status'), status.reason === 'remote_access_disabled'
+                    ? '服务器未开启远程账本访问；请在服务器启用远程访问后重启后端。'
+                    : `不可用（${status.reason || '未知原因'}）`);
                 return;
             }
             _text($('store-status'), `就绪 · schema v${status.storeSchemaVersion}`);
@@ -1845,13 +1847,17 @@
             (summary) => _money(futures
                 ? summary.futuresRealizedPnl : summary.stockRealizedPnl));
         if (!futures) {
-            _summaryRow(body, '股息', columns, (summary) => _money(summary.dividends));
+            _summaryRow(body, '税后股息', columns, (summary) => _money(_netDividends(summary)));
+            _summaryRow(body, '　其中：税前股息', columns, (summary) => _money(summary.dividends));
+            _summaryRow(body, '　其中：股息预扣税', columns,
+                (summary) => _signedMoney(Number(summary.dividendWithholding || 0)));
         }
         // Account view, same as the cash card above: fees are money paid
         // out, so both places show them negative. The table used to print
-        // the same figure positive under the same label.
-        _summaryRow(body, '费用合计', columns,
-            (summary) => _signedMoney(-Math.abs(Number(summary.fees) || 0)));
+        // the same figure positive under the same label. Dividend
+        // withholding is already inside after-tax dividends above.
+        _summaryRow(body, futures ? '费用合计' : '费用合计（不含股息预扣税）', columns,
+            (summary) => _signedMoney(-_feesExcludingWithholding(summary)));
 
         _sectionRow(body, '按参考价', columns.length);
         _summaryRow(body, '盈亏平衡价', columns,
@@ -4161,20 +4167,39 @@
         _text($('cash-net'), _signedMoney(summary.netCash));
         _text($('cash-realized-premium'), _signedMoney(summary.realizedShortPremium));
         _text($('cash-open-premium'), _signedMoney(summary.openShortPremium));
+        // Dividends are shown after the broker's withholding; that tax then
+        // leaves the fee card so it is subtracted exactly once.
+        const netDividends = _netDividends(summary);
+        const withholding = Number(summary.dividendWithholding || 0);
         const realizedTotal = futures
             ? summary.futuresRealizedPnl
-            : Number(summary.dividends || 0) + Number(summary.stockRealizedPnl || 0);
+            : netDividends + Number(summary.stockRealizedPnl || 0);
         _text($('cash-dividends'), _signedMoney(realizedTotal));
         _text($('cash-realized-label'), futures
             ? 'FUT 换月 / 平仓已实现盈亏'
-            : '股息 + 股票已实现盈亏');
+            : '税后股息 + 股票已实现盈亏');
         _text($('cash-dividends-caption'), futures
             ? '已实现 FUT 损益'
-            : `股息 ${_signedMoney(summary.dividends)} · `
-                + `股票已实现 ${_signedMoney(summary.stockRealizedPnl)}`);
-        _text($('cash-fees'), _signedMoney(-Math.abs(Number(summary.fees) || 0)));
+            : `税后股息 ${_signedMoney(netDividends)}`
+                + (Math.abs(withholding) > 1e-9
+                    ? `（税前 ${_signedMoney(summary.dividends)} · 预扣税 ${_signedMoney(withholding)}）`
+                    : '')
+                + ` · 股票已实现 ${_signedMoney(summary.stockRealizedPnl)}`);
+        _text($('cash-fees'), _signedMoney(-_feesExcludingWithholding(summary)));
         _renderWhatIf();
         _renderStressTest();
+    }
+
+    /** Dividends after withholding tax and its refunds (signed cash). */
+    function _netDividends(summary) {
+        const item = summary || {};
+        return Number(item.dividends || 0) + Number(item.dividendWithholding || 0);
+    }
+
+    /** Fees paid, less the dividend withholding shown with dividends. */
+    function _feesExcludingWithholding(summary) {
+        const item = summary || {};
+        return Math.abs(Number(item.fees || 0) - Number(item.withholdingFees || 0));
     }
 
     function _summaryRow(body, label, columns, render) {
@@ -4525,11 +4550,13 @@
             ? `${mismatches.length} 项待核对` : '持仓数量一致');
 
         state.reconciliation.rows.forEach((entry) => {
-            const targetedPending = state.importResult
+            const batchPending = state.importResult && state.importResult.batchReconciliation
+                && state.importResult.batchReconciliation.matches.find((item) => item.key === entry.key);
+            const targetedPending = batchPending || (state.importResult
                 && state.importResult.format === 'tws_api'
                 && state.importResult.reconciliationExecution
                 && state.importResult.reconciliationExecution.key === entry.key
-                ? state.importResult.reconciliationExecution : null;
+                ? state.importResult.reconciliationExecution : null);
             const pendingExecution = targetedPending || (state.importResult
                 && state.importResult.format === 'tws_api'
                 ? core.matchReconciliationExecution(entry, state.importResult.events)
@@ -4611,7 +4638,7 @@
                 button.type = 'button';
                 button.className = 'draft';
                 if (pendingExecution && pendingExecution.complete) {
-                    button.textContent = '确认导入成交';
+                    button.textContent = batchPending ? '确认整批归账' : '确认导入成交';
                     button.title = '再次确认后把上方预览的真实 TWS 成交写入账本';
                     button.addEventListener('click', _commitImport);
                 } else if (canFetchExecution) {
@@ -4795,6 +4822,27 @@
         $('flow-next').disabled = state.flowPage >= pageCount;
     }
 
+    // Only a replay error this batch itself introduces, of a kind the store
+    // refuses to write, stops the commit - submitting it could only fail.
+    // Advisory notes (a split across an open option, identity notes) and
+    // anything the stored history already carried are shown, never blocking:
+    // the store accepted that history, so an unrelated import must not stall.
+    const REPLAY_BLOCKING_WARNING = /^(closes_more_than_open|ibkr_close_open_invalid|ibkr_open_opposes_existing|roll_closes_more_than_open|contract_identity_ambiguous|future_identity_conflict|split_ratio_invalid)(:|$)/;
+
+    function importReplayBlockingWarnings(result) {
+        const preview = (result && result.ledgerPreview) || {};
+        const introduced = Array.isArray(preview.newWarnings)
+            ? preview.newWarnings : (preview.warnings || []);
+        return introduced.filter((warning) => REPLAY_BLOCKING_WARNING.test(warning));
+    }
+
+    /** Replay warnings the operator is told about but that never block. */
+    function importReplayNotices(result) {
+        const preview = (result && result.ledgerPreview) || {};
+        const blocking = new Set(importReplayBlockingWarnings(result));
+        return (preview.warnings || []).filter((warning) => !blocking.has(warning));
+    }
+
     function _refreshControls() {
         const connected = state.connection === 'connected';
         const hasBook = connected && Boolean(state.bookId);
@@ -4825,6 +4873,13 @@
         $('btn-save-snapshot').disabled = !hasBook;
         $('btn-fetch-executions').disabled = !hasBook || !state.positionsConnected
             || state.executionFetchPending || Boolean(state.importResult);
+        if ($('btn-batch-executions')) {
+            $('btn-batch-executions').disabled = $('btn-fetch-executions').disabled
+                || !state.reconciliation || !state.reconciliation.rows.some(
+                    (row) => core.matchReconciliationExecution(row, []).eligible);
+            $('btn-batch-executions').textContent = state.executionFetchPending
+                ? '正在查找…' : '批量查找 TWS 成交';
+        }
         // The input itself is visually hidden behind its label, and clicking
         // a label bound to a disabled input does nothing at all. Without
         // this the label stays a live-looking primary button that silently
@@ -4850,6 +4905,7 @@
         // available, because nothing on the page would say so afterwards.
         const blocked = Boolean(state.importResult
             && (state.importResult.problems.length
+                || importReplayBlockingWarnings(state.importResult).length
                 || _importRows(state.importResult).length > IMPORT_ROW_LIMIT));
         const apiImport = Boolean(state.importResult
             && state.importResult.format === 'tws_api');
@@ -4869,7 +4925,8 @@
             || (!_importRows(state.importResult).length && !registersOnly)
             || !resetPlanReady || blocked;
         $('btn-import-commit').textContent = state.importCommitPending
-            ? '提交中…' : (state.importCommitTokens ? '重试提交' : '确认导入');
+            ? '提交中…' : (state.importCommitTokens ? '重试提交'
+                : (state.importResult && state.importResult.batchReconciliation ? '确认批量归账' : '确认导入'));
         $('btn-import-clear').disabled = !state.importResult && !state.importReading;
         const stateNote = $('import-state-note');
         if (stateNote) {
@@ -5196,6 +5253,7 @@
         if (replacing) {
             return {
                 existingOpen: [],
+                existingEvents: [],
                 existingOpenFutures: [],
                 existingSharesByAccount: {},
                 existingExternalRefs: [],
@@ -5226,6 +5284,7 @@
         }
         return {
             existingOpen: baselineLedger ? baselineLedger.openOptions : [],
+            existingEvents: baselineEvents,
             existingOpenFutures: baselineLedger ? (baselineLedger.openFutures || []) : [],
             existingSharesByAccount: sharesByAccount,
             existingExternalRefs: (allEvents || [])
@@ -6362,6 +6421,16 @@
             ? `检查项 · ${checkText.join(' · ')}`
             : '');
 
+        const batchNote = $('import-batch-summary');
+        if (batchNote) {
+            const batch = result.batchReconciliation;
+            batchNote.hidden = !batch;
+            _text(batchNote, batch
+                ? `批量匹配：${batch.matches.length} 个合约可归账，${batch.skipped.length} 项保留待处理。`
+                    + (batch.matches.length ? ' 点击「确认批量归账」，一次提交下方全部已匹配成交。' : '没有可归账的成交。')
+                    + batch.skipped.map((item) => `\n${item.label}：${item.reason}`).join('')
+                : '');
+        }
         const counts = _importCounts(result);
         const kinds = Object.keys(result.summary.byKind)
             .map((kind) => `${KIND_LABELS[kind] || kind} ${result.summary.byKind[kind]}`)
@@ -6369,7 +6438,7 @@
         _text(summaryNode, `${apiImport ? 'TWS API' : `格式 ${result.format}`} · 读取 ${result.summary.total} 行`
             + (result.account ? ` · 账户 ${result.account}` : '')
             + ` · 生成草稿 ${result.summary.drafted} 条`
-            + ` · ${result.reconciliationExecution ? '非本次差额' : '其他标的'}跳过 ${result.summary.skipped} 行`
+            + ` · ${result.reconciliationExecution || result.batchReconciliation ? '非本次差额' : '其他标的'}跳过 ${result.summary.skipped} 行`
             + ` · 待人工处理 ${result.summary.problems} 行`
             + (result.supersedeTwsEventIds && result.supersedeTwsEventIds.length
                 ? ` · ${apiImport ? '真实成交' : 'CSV'}将取代 TWS 临时基线 ${result.supersedeTwsEventIds.length} 条`
@@ -6390,7 +6459,20 @@
 
         const warnings = $('import-ledger-warnings');
         if (result.ledgerPreview && result.ledgerPreview.warnings.length) {
-            _text(warnings, `导入后账本回放警告：${result.ledgerPreview.warnings.join('；')}`);
+            const preview = result.ledgerPreview;
+            const introduced = new Set(Array.isArray(preview.newWarnings)
+                ? preview.newWarnings : preview.warnings);
+            const blocking = new Set(importReplayBlockingWarnings(result));
+            const describe = (list) => list.map(_describeWarning).join('；');
+            const errors = preview.warnings.filter((warning) => blocking.has(warning));
+            const added = preview.warnings.filter((warning) => (
+                introduced.has(warning) && !blocking.has(warning)));
+            const carried = preview.warnings.filter((warning) => !introduced.has(warning));
+            _text(warnings, [
+                errors.length ? `本次导入会产生回放错误（后台会拒绝）：${describe(errors)}。` : '',
+                added.length ? `本次导入后的回放提示（不阻断提交，请核对）：${describe(added)}。` : '',
+                carried.length ? `账本原有提示（不影响本次导入）：${describe(carried)}。` : '',
+            ].filter(Boolean).join(' '));
             warnings.hidden = false;
         } else {
             _text(warnings, '');
@@ -6445,6 +6527,9 @@
                 + '请查看下方逐条原因；可能是缺少配对腿、合约身份歧义、'
                 + '期初信息不足、与 TWS 成交或已存记录的对应关系无法证明。'
                 + '程序不会在原因未解决时写入部分账本。');
+            $('import-blocked').hidden = false;
+        } else if (importReplayBlockingWarnings(result).length) {
+            _text($('import-blocked'), '本次导入会使历史回放出现开平仓或合约身份错误（后台会拒绝写入），导入已被禁用。请核对下方回放提示；账本不会写入。账本原有的提示不会阻断导入。');
             $('import-blocked').hidden = false;
         } else if (_importRows(result).length > IMPORT_ROW_LIMIT) {
             _text($('import-blocked'),
@@ -6594,7 +6679,8 @@
             before = core.computeLedger(through(baselineEvents), { secType });
             after = core.computeLedger(through(baselineEvents.concat(newRows)), { secType });
         } catch (error) {
-            return { warnings: [`回放失败：${error.message}`], positions: [] };
+            const failure = `回放失败：${error.message}`;
+            return { warnings: [failure], newWarnings: [failure], positions: [] };
         }
         const statement = new Map();
         const closing = result.openings && Array.isArray(result.openings.closingOptions)
@@ -6651,8 +6737,21 @@
             if (closingFutures) futures.forEach((item) => { if (item.statement === null) item.statement = 0; });
             positions.push(...futures.values());
         }
-        const warnings = Array.from(new Set((after.combined && after.combined.warnings) || []));
-        return { warnings, positions };
+        const afterWarnings = (after.combined && after.combined.warnings) || [];
+        // Count occurrences so a second stranded close on a contract that
+        // already carried one still counts as introduced by this batch.
+        const carried = new Map();
+        ((before.combined && before.combined.warnings) || []).forEach((warning) => {
+            carried.set(warning, (carried.get(warning) || 0) + 1);
+        });
+        const newWarnings = [];
+        afterWarnings.forEach((warning) => {
+            const remaining = carried.get(warning) || 0;
+            if (remaining > 0) carried.set(warning, remaining - 1);
+            else if (!newWarnings.includes(warning)) newWarnings.push(warning);
+        });
+        const warnings = Array.from(new Set(afterWarnings));
+        return { warnings, newWarnings, positions };
     }
 
     function _bindImportResult(result, meta) {
@@ -6906,6 +7005,12 @@
     function _importBindingProblem() {
         const result = state.importResult;
         if (!result || !result.binding) return '预览不存在';
+        if (result.batchReconciliation && (!state.positionsConnected
+            || (result.batchReconciliation.snapshotFingerprint !== undefined
+                && result.batchReconciliation.snapshotFingerprint
+                    !== reconciliationFingerprint((state.reconciliation || {}).rows)))) {
+            return 'TWS 持仓快照已变化或已断开，请重新批量查找';
+        }
         const binding = result.binding;
         const book = _currentBook();
         if (binding.bookId !== state.bookId || !book) return '预览属于另一本账本';
@@ -6941,6 +7046,11 @@
         }
         const result = state.importResult;
         if (result.problems?.length || state.importReading || _importRows(result).length > IMPORT_ROW_LIMIT) return;
+        const replayErrors = importReplayBlockingWarnings(result);
+        if (replayErrors.length) {
+            globalScope.alert(`导入后的历史回放未通过，未写入账本：${replayErrors.join('；')}`);
+            return;
+        }
         const replacing = $('import-replace').checked === true;
         if (replacing && (!state.resetPlan
             || state.resetPlan.ledgerVersion?.digest !== state.ledgerVersion?.digest)) {
@@ -6965,10 +7075,18 @@
             globalScope.alert('没有可写入的新事件。');
             return;
         }
+        // Notices never block, but the operator must see them before writing.
+        const notices = importReplayNotices(result);
+        const noticeText = notices.length
+            ? `\n\n注意：导入后回放有 ${notices.length} 条提示（不阻断提交）：`
+                + notices.slice(0, 3).map(_describeWarning).join('；')
+                + (notices.length > 3 ? ' 等，详见预览。' : '。')
+            : '';
         const confirmed = globalScope.confirm(replacing
             ? `危险操作：整本重建。将存档并移除 ${book.symbol} 账本当前 ${state.resetPlan
                 ? state.resetPlan.eventCount : '?'} 条事件（全部历史，不限本文件区间），`
-                + `再用本文件的 ${events.length} 条事件重建。\n\n`
+                + `再用本文件的 ${events.length} 条事件重建。`
+                + noticeText + '\n\n'
                 + '旧数据会保留在重建存档中，可在设置页恢复。确定继续吗？'
             : `将向 ${book.symbol} 账本新增 ${events.length} 条${apiImport ? ' TWS 成交' : '事件'}`
                 + `（其中期初存根 ${counts.stub} 条）；已存在 ${counts.existing} 条与已核对重复 ${counts.confirmed} 条不会写入。`
@@ -6981,6 +7099,10 @@
                 + (!events.length
                     ? '\n本文件没有新事件；将只登记该报表区间已核对。'
                     : '')
+                + (result.batchReconciliation
+                    ? `\n本次归账 ${result.batchReconciliation.matches.length} 个合约；`
+                        + `${result.batchReconciliation.skipped.length} 项（未匹配差异或未归账成交）保留待处理。` : '')
+                + noticeText
                 + '\n确认导入？');
         if (!confirmed) return;
         // One logical commit keeps one set of tokens: a retry after a lost
@@ -7135,11 +7257,141 @@
         });
     }
 
+    function reconciliationFingerprint(rows) {
+        return JSON.stringify((rows || []).map((row) => [row.kind, row.account,
+            row.key, row.conId, row.right, row.strike, row.expiry, row.sharesPerContract,
+            row.ledger, row.tws, row.difference, Boolean(row.identityConflict)])
+            .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+    }
+
+    // Each contract is accepted as a whole. Never cherry-pick fills to make
+    // a quantity fit, and never let an ambiguous fill serve two targets.
+    // Everything the batch leaves unbooked - other fills and unreadable
+    // executions - is listed in `skipped`; nothing is dropped silently.
+    function planBatchExecutionReconciliation(targets, importResult, allEvents, executions,
+                                              scope) {
+        const result = importResult || {};
+        const candidates = [];
+        const skipped = [];
+        const attributedProblems = new Set();
+        (targets || []).forEach((target) => {
+            if (Math.abs(Number(target.difference || 0)) <= 1e-6
+                && !target.identityConflict) return;
+            const problems = targetExecutionProblems(result.problems, executions, target);
+            problems.forEach((problem) => attributedProblems.add(problem));
+            const plan = planTargetExecutionReconciliation(target, result.events, allEvents);
+            let reason = problems.map((item) => item.reason).join('；') || plan.reason;
+            if (plan.complete && !reason) {
+                const retained = (allEvents || []).filter((event) => (
+                    !plan.supersedeEventIds.includes(event.eventId)
+                    && core.contractKey(event) === core.contractKey(target)));
+                if (core.findUnbackedCloses(retained.concat(plan.events)).length) {
+                    reason = '完整历史回放存在无开仓支持的平仓，请补齐历史后重试。';
+                }
+            }
+            if (!plan.complete || reason) {
+                skipped.push({ key: target.key, label: target.label || target.kind,
+                    reason: reason || '该差异需要 CSV 或手工核实。' });
+            } else candidates.push({ target, plan });
+        });
+        const owners = new Map();
+        const contractOwners = new Map();
+        candidates.forEach(({ target }) => {
+            const key = core.contractKey(target);
+            contractOwners.set(key, (contractOwners.get(key) || 0) + 1);
+        });
+        const refKey = (event) => `${event.account || ''}\u0000${event.externalRef || ''}`;
+        candidates.forEach(({ plan }) => plan.events.forEach((event) => {
+            const key = refKey(event);
+            owners.set(key, (owners.get(key) || 0) + 1);
+        }));
+        const events = [], matches = [], proofs = [], supersedeEventIds = [];
+        candidates.forEach(({ target, plan }) => {
+            if (contractOwners.get(core.contractKey(target)) !== 1
+                || plan.events.some((event) => !event.externalRef || owners.get(refKey(event)) !== 1)) {
+                skipped.push({ key: target.key, label: target.label || target.kind,
+                    reason: '同一成交对应多个持仓差异，合约身份不唯一，请人工核实。' });
+                return;
+            }
+            events.push(...plan.events);
+            const refs = new Set(plan.events.map(refKey));
+            events.push(...(result.events || []).filter((event) => event.tag === 'ibkr_rebate'
+                && refs.has(`${event.account || ''}\u0000${String(event.externalRef || '').replace(/-rebate$/, '')}`)));
+            supersedeEventIds.push(...plan.supersedeEventIds);
+            matches.push({ ...plan, key: target.key, label: target.label,
+                replacedBaselines: plan.supersedeEventIds.length });
+            proofs.push({ kind: 'option', account: target.account, right: target.right,
+                strike: target.strike, expiry: target.expiry,
+                sharesPerContract: target.sharesPerContract, conId: target.conId,
+                ledgerContracts: Number(target.ledger || 0), twsContracts: Number(target.tws || 0) });
+        });
+        const selectedRefs = new Set(events.map(refKey));
+        const unselected = new Map();
+        (result.events || []).filter((event) => (
+            ['option_trade', 'share_trade', 'futures_trade'].includes(event.kind)
+            && !selectedRefs.has(refKey(event)))).forEach((event) => {
+            const alreadyExplained = event.kind === 'option_trade'
+                && (targets || []).some((target) => (
+                    skipped.some((item) => item.key === target.key)
+                    && _sameExecutionContract({ ...target, kind: 'option_trade' }, event)));
+            if (alreadyExplained) return;
+            let key = `${core.contractKey(event)}|${event.conId || ''}`;
+            if (event.kind === 'share_trade') key = `shares|${event.account || ''}`;
+            if (event.kind === 'futures_trade') {
+                key = `future|${core.futureKey(event)}|${event.futureConId || ''}`;
+            }
+            if (!unselected.has(key)) unselected.set(key, []);
+            unselected.get(key).push(event);
+        });
+        unselected.forEach((fills, key) => {
+            const sample = fills[0], refs = new Set(fills.map(refKey));
+            const rebates = (result.events || []).filter((event) => event.tag === 'ibkr_rebate'
+                && refs.has(`${event.account || ''}\u0000${String(event.externalRef || '').replace(/-rebate$/, '')}`));
+            const net = fills.reduce((n, event) => n + Number(_tradeQuantity(event) || 0), 0);
+            const cash = fills.concat(rebates).reduce((n, event) => n + Number(event.cashAmount || 0), 0);
+            const summary = `${fills.length} 笔未归账成交，净数量 ${net}，净现金 ${cash.toFixed(2)}；`;
+            if (sample.kind === 'option_trade') {
+                skipped.push({ key, label: `${sample.expiry} ${sample.right}${sample.strike}`,
+                    reason: summary
+                        + '未对应可归账的持仓差异（数量不变也可能有往返现金流）。请确认或取消本次预览后使用「拉取 TWS 成交」，或导入完整报表。' });
+                return;
+            }
+            skipped.push({ key,
+                label: sample.kind === 'share_trade' ? '股票' : `期货 ${sample.futureExpiry || ''}`,
+                reason: summary + '批量归账只处理期权持仓差异，股票/期货成交不会写入。'
+                    + '请确认或取消本次预览后使用「拉取 TWS 成交」，或导入完整报表。' });
+        });
+        // An execution that could not be read never became an event. Unless a
+        // skipped target already names it, report it here: a missing
+        // commission on a flat round trip must not vanish from the preview.
+        const rows = Array.isArray(executions) ? executions : [];
+        const upper = (value) => String(value || '').trim().toUpperCase();
+        const scopeAccount = upper(scope && scope.account);
+        const scopeSymbol = upper(scope && scope.symbol);
+        (result.problems || []).filter((problem) => !attributedProblems.has(problem))
+            .forEach((problem, index) => {
+                const line = Number(problem.lineNumber);
+                const row = Number.isInteger(line) && line > 0 ? rows[line - 1] : null;
+                if (row && ((scopeAccount && row.account && upper(row.account) !== scopeAccount)
+                    || (scopeSymbol && row.symbol && upper(row.symbol) !== scopeSymbol))) return;
+                skipped.push({ key: `problem-${line > 0 ? line : `x${index}`}`,
+                    label: problem.raw || '无法读取的成交',
+                    reason: `${problem.reason}（本次未写入；解决后重新批量查找或使用「拉取 TWS 成交」）` });
+            });
+        return { events, matches, skipped, proofs, supersedeEventIds };
+    }
+
     async function _fetchTwsExecutions(targetEntry) {
-        if (!state.bookId || state.executionFetchPending) return;
+        if (!state.bookId || state.executionFetchPending || state.importCommitPending) return;
+        const batch = targetEntry && targetEntry.batch === true;
+        if (batch && (!state.positionsConnected || !state.reconciliation)) return;
+        const batchTargets = batch ? state.reconciliation.rows.map((row) => ({ ...row })) : [];
+        const snapshotTimestamp = state.positionsTimestamp;
+        const snapshotFingerprint = reconciliationFingerprint(batchTargets);
+        const ledgerDigest = (state.ledgerVersion || {}).digest;
         const executionTarget = targetEntry && targetEntry.kind === 'option'
             ? targetEntry : null;
-        if (executionTarget && state.importResult) {
+        if ((executionTarget || batch) && state.importResult) {
             globalScope.alert('请先确认或取消当前导入预览，再查找这笔成交。');
             return;
         }
@@ -7161,6 +7413,12 @@
                 sinceTimestamp,
             });
             if (state.bookId !== requestedBookId || generation !== state.importGeneration) {
+                return;
+            }
+            if (batch && (!state.positionsConnected
+                || (state.ledgerVersion || {}).digest !== ledgerDigest
+                || reconciliationFingerprint((state.reconciliation || {}).rows) !== snapshotFingerprint)) {
+                globalScope.alert('持仓或账本在查询期间发生变化，请刷新后重新批量查找。');
                 return;
             }
             const existingExternalRefs = state.allEvents
@@ -7197,7 +7455,7 @@
                 + (olderCutoff
                     ? ' 最后一份 CSV 早于今天；TWS API 只返回近期可见窗口，因此不能证明中间没有缺口，请继续用 Activity Statement 补齐长期历史。'
                     : ' 这些是真实成交回报，但 TWS API 仍不是长期历史报表。');
-            const supersession = executionTarget
+            const supersession = executionTarget || batch
                 ? { eventIds: [], events: [], problems: [] }
                 : planTwsBaselineSupersession(result, state.allEvents);
             result.supersedeTwsEventIds = supersession.eventIds;
@@ -7269,6 +7527,24 @@
                     twsContracts: Number(executionTarget.tws || 0),
                 };
             }
+            if (batch) {
+                const plan = planBatchExecutionReconciliation(
+                    batchTargets.map((row) => ({ ...row, symbol: book.symbol })),
+                    result, state.allEvents, response.executions,
+                    { account: book.account, symbol: book.symbol });
+                result.events = plan.events;
+                result.problems = [];
+                result.supersedeTwsEventIds = plan.supersedeEventIds;
+                result.twsReconciliation = plan.proofs;
+                result.batchReconciliation = { matches: plan.matches, skipped: plan.skipped,
+                    snapshotTimestamp, snapshotFingerprint };
+                const byKind = {};
+                plan.events.forEach((event) => { byKind[event.kind] = (byKind[event.kind] || 0) + 1; });
+                result.summary = { total: (response.executions || []).length,
+                    drafted: plan.events.length, problems: 0,
+                    skipped: Math.max(0, (response.executions || []).length
+                        - plan.events.filter((event) => event.kind === 'option_trade').length), byKind };
+            }
             if (supersession.problems.length) {
                 result.problems.push(...supersession.problems);
                 result.summary.problems += supersession.problems.length;
@@ -7283,13 +7559,13 @@
             state.importCommitTokens = null;
             _renderImportPreview();
             _renderReconciliation();
-            if (executionTarget) {
+            if (executionTarget || batch) {
                 const workspace = $('import-workspace');
                 if (workspace && typeof workspace.scrollIntoView === 'function') {
                     workspace.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 }
             }
-            if (!result.events.length && !result.problems.length) {
+            if (!batch && !result.events.length && !result.problems.length) {
                 globalScope.alert('未找到新的 TWS 成交。可能是今天没有成交、'
                     + '这些 execId 已在账本中，或当前 API 客户端看不到该订单来源。');
             }
@@ -8074,6 +8350,7 @@
             $('btn-refresh-resets').addEventListener('click', _loadResets);
         }
         $('btn-fetch-executions').addEventListener('click', _fetchTwsExecutions);
+        $('btn-batch-executions').addEventListener('click', () => _fetchTwsExecutions({ batch: true }));
 
         if (importer) {
             if ($('import-account-confirm')) {
@@ -8180,6 +8457,9 @@
         buildLedgerPositionPreview,
         buildImportBaseline,
         planTargetExecutionReconciliation,
+        planBatchExecutionReconciliation,
+        importReplayBlockingWarnings,
+        importReplayNotices,
         targetExecutionProblems,
         planTwsBaselineSupersession,
         planExecutionReportAliases,

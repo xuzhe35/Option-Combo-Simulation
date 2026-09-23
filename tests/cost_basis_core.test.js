@@ -82,6 +82,49 @@ module.exports = {
     name: 'cost_basis_core.js',
     tests: [
         {
+            name: 'dividend withholding nets into after-tax dividends without changing cash or cost',
+            run() {
+                const core = loadCore();
+                const history = [
+                    event({ kind: 'share_trade', tradeDate: '2026-06-01', shares: 100,
+                        price: 50, fees: 1, cashAmount: -5001 }),
+                    event({ kind: 'dividend', tradeDate: '2026-06-20', cashAmount: 50 }),
+                    event({ kind: 'fee', tradeDate: '2026-06-20', cashAmount: -5, fees: 5,
+                        tag: 'withholding_tax' }),
+                    event({ kind: 'fee', tradeDate: '2026-06-25', cashAmount: 2,
+                        tag: 'withholding_tax_refund' }),
+                    event({ kind: 'fee', tradeDate: '2026-06-26', cashAmount: -3, fees: 3 }),
+                    event({ account: 'U2222222', kind: 'dividend', tradeDate: '2026-06-20',
+                        cashAmount: 10 }),
+                    event({ account: 'U2222222', kind: 'fee', tradeDate: '2026-06-20',
+                        cashAmount: -1, fees: 1, tag: 'withholding_tax' }),
+                ];
+                const ledger = core.computeLedger(history, { referencePrice: 52 });
+                const first = ledger.perAccount.U1111111;
+                assert.equal(first.dividends, 50);
+                assert.equal(first.dividendWithholding, -3);
+                assert.equal(first.netDividends, 47);
+                assert.equal(first.withholdingFees, 5);
+                assert.equal(first.fees, 9, 'the fee total itself is unchanged');
+                assert.equal(first.netCash, -4957, 'every cash row still counts exactly once');
+                const combined = ledger.combined;
+                assert.equal(combined.dividends, 60);
+                assert.equal(combined.dividendWithholding, -4);
+                assert.equal(combined.netDividends, 56);
+                assert.equal(combined.withholdingFees, 6);
+                // A display split only: tagging the tax does not move cost.
+                const untagged = core.computeLedger(history.map((item) => (
+                    /^withholding_tax/.test(item.tag || '') ? { ...item, tag: '' } : item)),
+                { referencePrice: 52 });
+                assert.equal(untagged.combined.netDividends, 60);
+                assert.equal(untagged.combined.netCash, combined.netCash);
+                assert.equal(untagged.combined.blendedCost, combined.blendedCost);
+                const futures = core.computeLedger([], { secType: 'FUT' }).combined;
+                assert.equal(futures.netDividends, 0);
+                assert.equal(futures.withholdingFees, 0);
+            },
+        },
+        {
             name: 'expiry premium distribution groups remaining shorts and excludes long options',
             run() {
                 const core = loadCore();

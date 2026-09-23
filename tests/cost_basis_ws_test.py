@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from unittest import mock
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -58,7 +59,7 @@ class CostBasisWsTestBase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.env = create_store_env(_config(self._tmp.name))
+        self.env = create_store_env(_config(self._tmp.name), environ={})
         self.ws = FakeWebSocket()
 
     async def call(self, action, ws=None, **fields):
@@ -153,6 +154,76 @@ class LoopbackTests(CostBasisWsTestBase):
         for address in (None, (), ('not-an-ip', 1), ('', 1), 42):
             with self.subTest(address=address):
                 self.assertFalse(is_loopback_address(address))
+
+
+class RemoteAccessTests(CostBasisWsTestBase):
+    async def test_explicit_remote_mode_can_create_and_read_book(self):
+        self.env = create_store_env(
+            _config(self._tmp.name, allow_remote='true'), environ={})
+        # Includes a Tailscale peer and a Docker bridge peer after NAT.
+        for index, host in enumerate(('100.80.10.20', '172.18.0.1', 'fd7a:115c:a1e0::1234')):
+            with self.subTest(host=host):
+                remote = FakeWebSocket((host, 51000))
+                status = await self.call('request_cost_basis_status', ws=remote)
+                self.assertTrue(status['available'])
+                remote.sent.clear()
+                created = await self.call(
+                    'create_cost_basis_book', ws=remote, account=f'U111111{index}',
+                    symbol='TQQQ', startDate='2026-01-01')
+                self.assertTrue(created['success'], created)
+                remote.sent.clear()
+                books = await self.call('list_cost_basis_books', ws=remote)
+                self.assertTrue(books['success'], books)
+                self.assertIn(created['book']['bookId'],
+                              [book['bookId'] for book in books['books']])
+
+    async def test_environment_override_enables_remote_mode(self):
+        with mock.patch.dict('os.environ', {'OPTION_COMBO_COST_BASIS_ALLOW_REMOTE': 'true'}):
+            self.env = create_store_env(_config(self._tmp.name, allow_remote='false'))
+        status = await self.call('request_cost_basis_status', ws=FakeWebSocket(REMOTE))
+        self.assertTrue(status['available'])
+
+    async def test_false_empty_and_invalid_environment_override_fail_closed(self):
+        for value in ('false', '', 'treu'):
+            with self.subTest(value=value):
+                self.env = create_store_env(
+                    _config(self._tmp.name, allow_remote='true'),
+                    environ={'OPTION_COMBO_COST_BASIS_ALLOW_REMOTE': value})
+                response = await self.call(
+                    'create_cost_basis_book', ws=FakeWebSocket(REMOTE),
+                    account='U1111111', symbol='TQQQ', startDate='2026-01-01')
+                self.assertEqual(response['code'], 'remote_access_disabled')
+                self.assertIsNone(self.env['store'])
+
+    async def test_invalid_config_fails_closed(self):
+        for value in ('treu', '%(missing)s'):
+            with self.subTest(value=value):
+                self.env = create_store_env(_config(self._tmp.name, allow_remote=value), environ={})
+                response = await self.call('request_cost_basis_status', ws=FakeWebSocket(REMOTE))
+                self.assertFalse(response['available'])
+                self.assertEqual(response['reason'], 'remote_access_disabled')
+                self.assertIsNone(self.env['store'])
+
+    async def test_remote_mode_does_not_override_disabled_ledger(self):
+        self.env = create_store_env(
+            _config(self._tmp.name, enabled='false', allow_remote='true'), environ={})
+        response = await self.call('request_cost_basis_status', ws=FakeWebSocket(REMOTE))
+        self.assertFalse(response['available'])
+        self.assertEqual(response['reason'], 'disabled')
+        self.assertIsNone(self.env['store'])
+
+    async def test_remote_mode_keeps_request_validation(self):
+        self.env = create_store_env(_config(self._tmp.name, allow_remote='true'), environ={})
+        response = await self.call('create_cost_basis_book', ws=FakeWebSocket(REMOTE))
+        self.assertFalse(response['success'])
+        self.assertEqual(response['code'], 'invalid_request')
+
+    async def test_forwarded_loopback_does_not_bypass_default_restriction(self):
+        remote = FakeWebSocket(REMOTE)
+        remote.request_headers = {'X-Forwarded-For': '127.0.0.1'}
+        response = await self.call('list_cost_basis_books', ws=remote)
+        self.assertEqual(response['code'], 'remote_access_disabled')
+        self.assertIsNone(self.env['store'])
 
 
 class StatusTests(CostBasisWsTestBase):
@@ -464,6 +535,28 @@ class EventActionTests(CostBasisWsTestBase):
             ])
         self.assertTrue(response['success'], response)
         self.assertEqual(response['inserted'], 2)
+
+    async def test_import_forwards_batch_reconciliation_proofs_and_rejects_bad_endpoint(self):
+        events = [self.short_put(strike=strike, contracts=-2, price=1,
+                  cashAmount=200, fees=0, source='execution_report', tag='ibkr_exec',
+                  externalRef=f'ibkr-exec-batch-{strike}',
+                  brokerTimestamp='2026-06-01T10:00:00') for strike in (70, 71)]
+        proofs = [{'kind': 'option', 'account': event['account'], 'right': event['right'],
+                   'strike': event['strike'], 'expiry': event['expiry'],
+                   'sharesPerContract': 100, 'ledgerContracts': 0, 'twsContracts': -2}
+                  for event in events]
+        rejected = await self.call('import_cost_basis_events', bookId=self.book_id,
+            importBatchId=_token('batch'), clientTokenPrefix=_token('imp'), events=events,
+            twsReconciliation=[proofs[0], {**proofs[1], 'twsContracts': -3}])
+        self.assertFalse(rejected['success'], rejected)
+        self.assertEqual(rejected['code'], 'invalid_request')
+        listed = await self.call('list_cost_basis_events', bookId=self.book_id)
+        self.assertEqual(listed['total'], 0)
+        accepted = await self.call('import_cost_basis_events', bookId=self.book_id,
+            importBatchId=_token('batch'), clientTokenPrefix=_token('imp'), events=events,
+            twsReconciliation=proofs)
+        self.assertTrue(accepted['success'], accepted)
+        self.assertEqual(accepted['inserted'], 2)
 
     async def test_import_forwards_atomic_tws_baseline_supersession(self):
         adopted = await self.call(

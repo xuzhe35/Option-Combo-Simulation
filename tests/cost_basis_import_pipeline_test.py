@@ -124,6 +124,29 @@ class ImportPipelineTests(unittest.TestCase):
                      'BAD_POSITION_SYMBOL','ZERO_TRADE_TWS_ROUNDTRIP','MANUAL_ASSIGNMENT_TWIN','MISSING_CURRENCY'):
             self.assertTrue(self.fixtures[name]['problems'],name)
 
+    def test_mixed_order_partial_tws_overlap_commits_cash_and_positions_atomically(self):
+        for name, fixture in self.fixtures.items():
+            if not name.startswith('MIXED_PARTIAL_'):
+                continue
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                store = CostBasisStore(pathlib.Path(directory) / 'partial.db').initialize()
+                book = store.create_book(account='U1111111', symbol='TQQQ', start_date='2026-01-01')
+                bid = book['bookId']
+                def write(events, batch):
+                    return store.import_events(bid, [self.event(e) for e in events],
+                        import_batch_id=batch, client_token_prefix=batch + '-row',
+                        expected_ledger_version=store.ledger_version(bid), book_identity=book)
+                write(fixture['existing'], 'existing')
+                self.assertEqual(fixture['problems'], [])
+                result = write(fixture['incoming'], 'new-fills')
+                self.assertEqual(result['inserted'], len(fixture['incoming']))
+                live = store.list_events(bid)['events']
+                self.assertEqual(sum(e.get('contracts') or 0 for e in live), fixture['expected']['contracts'])
+                self.assertAlmostEqual(sum(e['cashAmount'] for e in live), fixture['expected']['netCash'])
+                repeated = write(fixture['incoming'], 'same-report-again')
+                self.assertEqual(repeated['inserted'], 0)
+                self.assertEqual(repeated['skipped'], len(fixture['incoming']))
+
     def test_optional_full_statement_rebuild_and_repeated_import(self):
         fixture = self.fixtures.get('FULL_STATEMENT_REBUILD')
         if fixture is None:

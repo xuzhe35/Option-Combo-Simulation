@@ -60,6 +60,13 @@
         'manual_adjust', 'futures_trade', 'futures_roll',
     ]);
 
+    // Tax the broker withheld from (or refunded on) this underlying's
+    // dividends. Still a fee event for cash purposes; tracked separately so
+    // the income view can show dividends after tax without double-counting.
+    const DIVIDEND_WITHHOLDING_TAGS = Object.freeze([
+        'withholding_tax', 'withholding_tax_refund',
+    ]);
+
     const OPTION_KINDS = Object.freeze([
         'option_trade', 'option_assignment', 'option_exercise', 'option_expiry',
     ]);
@@ -319,6 +326,8 @@
             shareAcquisitionCost: 0,
             shareDisposalProceeds: 0,
             dividends: 0,
+            dividendWithholding: 0,
+            withholdingFees: 0,
             fees: 0,
             stockBasis: 0,
             stockRealized: 0,
@@ -895,6 +904,9 @@
             taxRealizedPnl: 0,
             taxRealizedPremium: _round(realizedPremium, 6),
             dividends: 0,
+            dividendWithholding: 0,
+            netDividends: 0,
+            withholdingFees: 0,
             shareAcquisitionCost: 0,
             shareDisposalProceeds: 0,
             hasShares: false,
@@ -930,7 +942,8 @@
             futuresRealizedPnl: 0, futuresAvgCost: null, blendedCost: null,
             blendedCostIfExpired: null, stockAvgCost: null, taxAvgCost: null,
             stockRealizedPnl: 0, taxRealizedPnl: 0, taxRealizedPremium: 0,
-            dividends: 0, shareAcquisitionCost: 0, shareDisposalProceeds: 0,
+            dividends: 0, dividendWithholding: 0, netDividends: 0, withholdingFees: 0,
+            shareAcquisitionCost: 0, shareDisposalProceeds: 0,
             hasShares: false, hasFutures: false, isShort: false, warnings: [],
             costIncomplete: false,
         };
@@ -1134,6 +1147,10 @@
         if (kind === 'fee' || kind === 'manual_adjust') {
             state.netCash = _round(state.netCash + cash, 6);
             state.fees = _round(state.fees + fees, 6);
+            if (kind === 'fee' && DIVIDEND_WITHHOLDING_TAGS.indexOf(event.tag) >= 0) {
+                state.dividendWithholding = _round(state.dividendWithholding + cash, 6);
+                state.withholdingFees = _round(state.withholdingFees + fees, 6);
+            }
             return 0;
         }
 
@@ -1364,6 +1381,12 @@
             shareAcquisitionCost: _round(state.shareAcquisitionCost, 6),
             shareDisposalProceeds: _round(state.shareDisposalProceeds, 6),
             dividends: _round(state.dividends, 6),
+            // Signed cash: withholding is negative, a refund positive.
+            dividendWithholding: _round(state.dividendWithholding, 6),
+            netDividends: _round(state.dividends + state.dividendWithholding, 6),
+            // The part of `fees` that is dividend withholding, so a fee view
+            // that shows after-tax dividends does not subtract it twice.
+            withholdingFees: _round(state.withholdingFees, 6),
             fees: _round(state.fees, 6),
             stockAvgCost: null,
             stockRealizedPnl: _round(state.stockRealized, 6),
@@ -1396,6 +1419,9 @@
             shareAcquisitionCost: 0,
             shareDisposalProceeds: 0,
             dividends: 0,
+            dividendWithholding: 0,
+            netDividends: 0,
+            withholdingFees: 0,
             fees: 0,
             stockAvgCost: null,
             stockRealizedPnl: 0,
@@ -1426,6 +1452,11 @@
             combined.shareDisposalProceeds = _round(
                 combined.shareDisposalProceeds + summary.shareDisposalProceeds, 6);
             combined.dividends = _round(combined.dividends + summary.dividends, 6);
+            combined.dividendWithholding = _round(
+                combined.dividendWithholding + summary.dividendWithholding, 6);
+            combined.netDividends = _round(combined.netDividends + summary.netDividends, 6);
+            combined.withholdingFees = _round(
+                combined.withholdingFees + summary.withholdingFees, 6);
             combined.fees = _round(combined.fees + summary.fees, 6);
             combined.stockRealizedPnl = _round(
                 combined.stockRealizedPnl + summary.stockRealizedPnl, 6);

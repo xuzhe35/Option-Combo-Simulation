@@ -110,8 +110,8 @@
                             <article class="cash-card cash-card-primary"><span>累计净现金</span><strong id="cash-net">—</strong><small>全部账本事件（含 Long Option）</small></article>
                             <article class="cash-card"><span>已到期 / 已结算卖方权利金</span><strong id="cash-realized-premium">—</strong><small>Short Call / Put 净收入 · 履约义务已结束</small></article>
                             <article class="cash-card"><span>尚未到期卖方权利金</span><strong id="cash-open-premium">—</strong><small>Short Call / Put 净收入 · 不含 Long Option 支出</small></article>
-                            <article class="cash-card"><span id="cash-realized-label">股息 + 股票已实现盈亏</span><strong id="cash-dividends">—</strong><small id="cash-dividends-caption">股息 — · 股票已实现 —</small></article>
-                            <article class="cash-card"><span>费用合计</span><strong id="cash-fees">—</strong><small>所有已记账费用</small></article>
+                            <article class="cash-card"><span id="cash-realized-label">税后股息 + 股票已实现盈亏</span><strong id="cash-dividends">—</strong><small id="cash-dividends-caption">税后股息 — · 股票已实现 —</small></article>
+                            <article class="cash-card"><span>费用合计</span><strong id="cash-fees">—</strong><small>已记账费用 · 股息预扣税已从股息中扣除</small></article>
                         </div>
                         <div class="premium-window" id="premium-cards"><div><span>近 30 天已到期 / 已结算卖方权利金</span><strong id="premium-30">—</strong></div><div><span>近 90 天</span><strong id="premium-90">—</strong></div><div><span>近 365 天</span><strong id="premium-365">—</strong></div><div><span id="premium-annualized-label">相对占用资金年化</span><strong id="premium-annualized">—</strong><small id="premium-annualized-detail">按近 365 天已到期 / 已结算卖方权利金 / 当前持仓成本</small></div></div>
                     </section>
@@ -137,6 +137,7 @@
                             <p id="import-replace-note" class="section-note" hidden>执行前会把全部事件存档到数据库；点击「确认导入」后会再弹窗确认。</p>
                             <p id="import-openings" class="warnings" hidden></p><p id="import-blocked" class="warnings" hidden></p>
                             <p id="import-ledger-warnings" class="warnings" hidden></p>
+                            <p id="import-batch-summary" class="section-note" style="white-space: pre-line" hidden></p>
                             <div class="table-wrap" id="import-position-wrap" hidden><h3>持仓核对 · 账本当前 → 导入后 → 报表期末</h3><table id="import-position-table" aria-label="导入后持仓核对"><thead><tr><th>合约</th><th>账本当前</th><th>导入后</th><th>报表期末</th><th>状态</th></tr></thead><tbody></tbody></table></div>
                             <div class="controls import-filter-row"><label for="import-filter">只看</label><select id="import-filter"><option value="all">全部</option><option value="new">新增</option><option value="existing">已存在</option><option value="confirmed">已核对重复</option><option value="stub">期初存根</option><option value="conflict">冲突</option></select></div>
                             <div class="table-wrap" id="import-preview-wrap" hidden><table id="import-table" aria-label="导入预览"><thead><tr><th>日期</th><th>账户</th><th>类型</th><th>合约</th><th>数量</th><th>价格</th><th>现金</th><th>将执行</th><th>来源行</th></tr></thead><tbody></tbody></table></div>
@@ -145,10 +146,10 @@
                     </section>
 
                     <section class="panel reconcile-section" aria-labelledby="reconcile-title">
-                        <div class="panel-heading"><div><span class="eyebrow">CSV 推测 · TWS 对账</span><h2 id="reconcile-title">持仓对账</h2></div><span id="positions-status" class="section-helper">TWS 未获取</span></div>
+                        <div class="panel-heading"><div><span class="eyebrow">CSV 推测 · TWS 对账</span><h2 id="reconcile-title">持仓对账</h2></div><div class="section-heading-actions"><button id="btn-batch-executions" class="primary" type="button" disabled>批量查找 TWS 成交</button><span id="positions-status" class="section-helper">TWS 未获取</span></div></div>
                         <details id="reconcile-details" class="inline-details">
                             <summary><span id="reconcile-summary-label">持仓对账</span></summary>
-                        <p class="section-note">本表始终先显示 CSV / 账本流水回放出的推测持仓；连接 TWS 后再显示券商数量与差异。账本为空且 TWS 提供完整数量与均价时，可显式「采信 TWS」建立临时基线。</p>
+                        <p class="section-note">批量查找会一次检查所有期权持仓差异，预览后统一归账；未匹配项保留待处理。数量一致不代表成交和现金已记全；往返成交请用「拉取 TWS 成交」核对。股票、期货交割等差异仍需用报表或手工核实。本表始终先显示 CSV / 账本流水回放出的推测持仓；连接 TWS 后再显示券商数量与差异。账本为空且 TWS 提供完整数量与均价时，可显式「采信 TWS」建立临时基线。</p>
                         <div class="table-wrap"><table id="reconcile-table" aria-label="持仓对账"><thead><tr><th>账户</th><th>合约</th><th>账本</th><th>TWS</th><th>差异</th><th>状态</th><th>建议</th><th></th></tr></thead><tbody><tr><td colspan="8" class="empty">正在根据 CSV / 账本流水推导持仓…</td></tr></tbody></table></div>
                         </details>
                     </section>
@@ -162,7 +163,7 @@
                                 <div class="field" data-field="right"><label for="field-right">方向</label><select id="field-right"><option value="P">Put</option><option value="C">Call</option></select></div><div class="field" data-field="strike"><label for="field-strike">行权价</label><input id="field-strike" type="number" step="0.01" min="0"></div><div class="field" data-field="expiry"><label for="field-expiry">到期日</label><input id="field-expiry" type="date"></div>
                                 <div class="field" data-field="contracts"><label for="field-action">动作</label><select id="field-action"><option value="">按张数 / 股数正负</option><option value="buy">买入（系统记为正数）</option><option value="sell">卖出（系统记为负数）</option></select><span class="hint">选买入 / 卖出后只需填绝对数量</span></div><div class="field" data-field="contracts"><label for="field-contracts">张数</label><input id="field-contracts" type="number" step="1"><span class="hint">+ 增多头 / 减空头，− 增空头 / 减多头</span></div><div class="field" data-field="sharesPerContract"><label for="field-spc" id="field-spc-label">每张股数</label><input id="field-spc" type="number" min="1" step="1" value="100"></div><div class="field" data-field="shares"><label for="field-shares">股数</label><input id="field-shares" type="number" step="1"><span class="hint">+ 买入 / − 卖出</span></div>
                                 <div class="field" data-field="futureExpiry"><label for="field-future-expiry">FUT 合约月</label><input id="field-future-expiry" type="month"></div><div class="field" data-field="futureContracts"><label for="field-future-contracts">FUT 张数</label><input id="field-future-contracts" type="number" step="1"><span class="hint">买入/持有多头为正，卖出/持有空头为负</span></div><div class="field" data-field="rollToExpiry"><label for="field-roll-to-expiry">换入合约月</label><input id="field-roll-to-expiry" type="month"></div><div class="field" data-field="rollToPrice"><label for="field-roll-to-price">换入价格</label><input id="field-roll-to-price" type="number" step="0.0001" min="0"></div><div class="field" data-field="rollGroup"><label for="field-roll-group">ROLL 标识</label><input id="field-roll-group" type="text" maxlength="128"></div>
-                                <div class="field" data-field="price"><label for="field-price">价格</label><input id="field-price" type="number" step="0.0001" min="0"></div><div class="field" data-field="splitRatio"><label for="field-ratio">拆股比例</label><input id="field-ratio" type="number" step="0.0001" min="0"></div><div class="field"><label for="field-fees">费用</label><input id="field-fees" type="number" step="0.01" min="0" value="0"></div><div class="field"><label for="field-cash">现金（收正付负）</label><input id="field-cash" type="number" step="0.01"><span class="hint" id="cash-hint"></span></div><div class="field"><label for="field-tag">标签</label><input id="field-tag" type="text" maxlength="64" autocomplete="off"><span class="hint">费用退回请填 fee_refund；股息撤回请填 dividend_reversal</span></div><div class="field wide"><label for="field-note">备注</label><input id="field-note" type="text" maxlength="500" autocomplete="off"></div><div class="field checkbox"><label for="field-include" title="取消勾选 = 这条事件整体不参与账本：持仓和现金都不计入，后端校验也不把它当作开仓依据"><input id="field-include" type="checkbox" checked> 参与账本（持仓与现金）</label></div>
+                                <div class="field" data-field="price"><label for="field-price">价格</label><input id="field-price" type="number" step="0.0001" min="0"></div><div class="field" data-field="splitRatio"><label for="field-ratio">拆股比例</label><input id="field-ratio" type="number" step="0.0001" min="0"></div><div class="field"><label for="field-fees">费用</label><input id="field-fees" type="number" step="0.01" min="0" value="0"></div><div class="field"><label for="field-cash">现金（收正付负）</label><input id="field-cash" type="number" step="0.01"><span class="hint" id="cash-hint"></span></div><div class="field"><label for="field-tag">标签</label><input id="field-tag" type="text" maxlength="64" autocomplete="off"><span class="hint">费用退回请填 fee_refund；股息撤回请填 dividend_reversal；股息预扣税请填 withholding_tax（退税 withholding_tax_refund）</span></div><div class="field wide"><label for="field-note">备注</label><input id="field-note" type="text" maxlength="500" autocomplete="off"></div><div class="field checkbox"><label for="field-include" title="取消勾选 = 这条事件整体不参与账本：持仓和现金都不计入，后端校验也不把它当作开仓依据"><input id="field-include" type="checkbox" checked> 参与账本（持仓与现金）</label></div>
                                 <div class="form-actions"><button id="btn-submit-event" class="primary" type="submit" disabled>写入账本</button><button id="btn-reset-event" type="button">清空</button><span id="entry-message" class="entry-message"></span></div>
                             </form>
                         </div>
@@ -330,14 +331,14 @@
         <p id="premium-expiry-note" class="premium-expiry-note">这是已收取权利金的到期分布，不是到期日再收款，也不是最终盈亏。金额为未平 Short Call / Put 分摊的开仓净收入（含已记开仓费用）；部分平仓后只保留未平部分，不含 Long Option 支出。分摊可能产生不足一美分的金额，明细保留 4 位小数，顶部合计按 2 位小数显示。是否已结算以账本流水为准，过期但尚无结算记录的仓位仍列在这里。</p>
     </dialog>
 
-    <script src="js/cost_basis_core.js?v=0055b861bdd1"></script>
+    <script src="js/cost_basis_core.js?v=08c894448107"></script>
     <script src="js/american_binomial.js?v=a49313f2567b"></script>
-    <script src="js/cost_basis_import.js?v=30a8aca05295"></script>
+    <script src="js/cost_basis_import.js?v=ee36bbf9a047"></script>
     <script src="js/market_curves.js?v=f15898beaf0c"></script>
     <script src="js/cost_basis_stress_models.js?v=60480547960f"></script>
     <script src="js/cost_basis_stress_core.js?v=76e942b27d9d"></script>
     <script src="js/cost_basis_stress_band.js?v=6f716f8dc838"></script>
     <script src="js/cost_basis_stress_worker.js?v=3d63d7e54061"></script>
-    <script src="js/cost_basis.js?v=eb870f6f95e8"></script>
+    <script src="js/cost_basis.js?v=c9b89a885517"></script>
 </body>
 </html>

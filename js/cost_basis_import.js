@@ -2567,6 +2567,70 @@
         return events;
     }
 
+    // A C/O code describes the whole order, not each child fill. Replay the
+    // effective history (including already stored children) before tagging the
+    // remaining fills. Keep the aggregate reversal constraint as a separate
+    // check so splitting never makes an invalid C/O order silently acceptable.
+    function _classifySplitReversals(events, openings, orders, options, problems) {
+        if (!orders.length) return;
+        const opts = options || {};
+        const history = (opts.existingEvents || []).filter((e) => (
+            !e.voidedAtUtc && e.includeInCost !== false));
+        const refKey = (e) => `${e.account || ''}\u0000${e.externalRef || ''}`;
+        const known = new Set((opts.existingExternalRefs || []).map((e) => (
+            typeof e === 'string' ? `${opts.accountFallback || ''}\u0000${e}` : refKey(e))));
+        const incoming = ((openings || {}).drafts || []).concat(events)
+            .filter((e) => !known.has(refKey(e)));
+        const lastSeq = (opts.existingEvents || []).reduce((n, e) => Math.max(n, Number(e.seq) || 0), 0);
+        const timeline = history.map((event) => ({ event, seq: Number(event.seq) || 0 }))
+            .concat(incoming.map((event, index) => ({ event, seq: lastSeq + index + 1 })))
+            .filter(({event}) => event.contracts !== undefined && event.right)
+            .sort((a, b) => _sortStamp(a.event).localeCompare(_sortStamp(b.event)) || a.seq - b.seq);
+        const identities = _resolvePositionIdentities(timeline.map(({event}) => event),
+            opts.symbol, opts.defaultSharesPerContract);
+        const children = new Map();
+        orders.forEach(({ order, split }) => {
+            const group = { order, seen: new Set(), start: null, keys: new Set() };
+            order.fills.forEach((fill, index) => {
+                const matched = (split.matched || []).find((item) => item.index === index);
+                const ref = matched ? matched.externalRef : `${order.sourceRef}-fill-${index + 1}`;
+                children.set(`${order.account || ''}\u0000${ref}`, { group, index });
+            });
+        });
+        const positions = new Map(), groups = new Set();
+        const newEvents = new Set(incoming);
+        timeline.forEach(({event}) => {
+            const key = `${event.account || ''}\u0000${identities.get(event)}`;
+            const before = positions.get(key) || 0;
+            const quantity = Number(event.contracts) || 0;
+            const child = children.get(refKey(event));
+            if (child) {
+                const {group, index} = child;
+                groups.add(group);
+                group.keys.add(key);
+                group.seen.add(index);
+                if (group.start === null) group.start = before;
+                if (newEvents.has(event)) {
+                    const opposing = Math.abs(before) > SHARE_EPSILON && before * quantity < 0;
+                    event.tag = !opposing ? 'ibkr_open'
+                        : (Math.abs(quantity) <= Math.abs(before) + SHARE_EPSILON
+                            ? 'ibkr_close' : 'ibkr_close_open');
+                }
+            }
+            positions.set(key, _round(before + quantity, 6));
+        });
+        orders.forEach(({order}) => {
+            const group = Array.from(groups).find((g) => g.order === order);
+            if (!group || group.seen.size !== order.fills.length || group.keys.size !== 1
+                || !(group.start * Number(order.contracts) < 0
+                    && Math.abs(Number(order.contracts)) > Math.abs(group.start) + SHARE_EPSILON)) {
+                problems.push({ lineNumber: order.lineNumber,
+                    reason: '拆分 C/O 订单无法从完整历史证明先平后反向开仓；请核对开仓与已入账分笔。',
+                    raw: order.sourceRef });
+            }
+        });
+    }
+
     /**
      * Parse a statement into reviewable drafts.
      *
@@ -2591,6 +2655,7 @@
         opts.currency = _upper(opts.currency);
         const aliases = opts.externalRefAliases || {};
         const fillSplits = opts.fillSplits || {};
+        const splitReversals = [];
 
         const rows = parseCsv(text);
         if (rows.error) {
@@ -2846,6 +2911,9 @@
                         ? event.fills[entry.index].quantity : undefined,
                     cashAmount: event.fills[entry.index].cashAmount,
                 }));
+                if (event.kind === 'option_trade' && event.tag === 'ibkr_close_open') {
+                    splitReversals.push({ order: event, split });
+                }
                 events.push(..._splitOrderEvent(event, split));
                 return;
             }
@@ -2890,6 +2958,8 @@
             }
             return (left.lineNumber || 0) - (right.lineNumber || 0);
         });
+
+        _classifySplitReversals(allEvents, openings, splitReversals, opts, problems);
 
         const eventThrough = allEvents.reduce((latest, event) => {
             const timestamp = _sortStamp(event);

@@ -2530,6 +2530,68 @@ class CostBasisStore:
                 'ordered TWS executions do not reach the reconciled TWS position')
         return True
 
+    def _validate_batch_tws_reconciliations(self, conn, book_id, proofs,
+                                            event_ids, incoming_rows):
+        """Prove every selected contract within the same write transaction.
+
+        A list is the batch variant of the existing single-option proof. The
+        normal ledger-version guard and idempotent import receipt still apply.
+        No position snapshot is converted into an economic event here.
+        """
+        if not isinstance(proofs, list):
+            return
+        if not proofs or len(proofs) > MAX_IMPORT_EVENTS:
+            raise InvalidRequestError('TWS reconciliation batch must contain option proofs')
+        if event_ids is not None and (not isinstance(event_ids, list)
+                                     or any(not isinstance(x, str) for x in event_ids)):
+            raise InvalidRequestError('supersedeTwsEventIds must contain strings')
+        if len(event_ids or []) > MAX_IMPORT_EVENTS:
+            raise InvalidRequestError('too many TWS baselines to supersede')
+        selected_baselines = {}
+        for event_id in event_ids or []:
+            row = conn.execute(
+                'SELECT * FROM cost_basis_events WHERE book_id = ? AND event_id = ?',
+                (book_id, event_id),
+            ).fetchone()
+            if row is not None:
+                baseline = _event_row_to_dict(row)
+                selected_baselines.setdefault(contract_key(baseline), []).append(baseline)
+        seen = set()
+        covered = set()
+        for proof in proofs:
+            if not isinstance(proof, dict) or proof.get('kind') != 'option':
+                raise InvalidRequestError('TWS reconciliation batch must describe options')
+            try:
+                key = contract_key(proof)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise InvalidRequestError('invalid TWS reconciliation identity') from exc
+            if key in seen:
+                raise InvalidRequestError('duplicate contract in TWS reconciliation batch')
+            seen.add(key)
+            baselines = selected_baselines.get(key, [])
+            if len(baselines) > 1:
+                raise InvalidRequestError('ambiguous adopted TWS option baselines')
+            baseline = baselines[0] if baselines else {**proof, 'contracts': 0}
+            self._tws_option_replay_proves_supersession(
+                conn, book_id, baseline, incoming_rows, proof)
+            for item in incoming_rows:
+                if (item['kind'] == 'option_trade' and contract_key(item) == key
+                        and item['tag'] in ('ibkr_exec', 'ibkr_close')
+                        and not (proof.get('conId') and item.get('con_id')
+                                 and str(proof['conId']) != str(item['con_id']))):
+                    covered.add((item['account'], item['external_ref']))
+        for item in incoming_rows:
+            ref = item['external_ref'] or ''
+            rebate = (item['kind'] == 'fee' and item['tag'] == 'ibkr_rebate'
+                      and ref.endswith('-rebate'))
+            if rebate:
+                ref = ref[:-7]
+            if (not rebate and item['kind'] != 'option_trade'):
+                raise InvalidRequestError('non-option event in reconciled TWS batch')
+            if (item['source'] != 'execution_report'
+                    or (item['account'], ref) not in covered):
+                raise InvalidRequestError('execution is outside the reconciled TWS batch')
+
     def _validate_tws_supersessions(self, conn, book_id, event_ids, incoming_rows,
                                     tws_reconciliation=None):
         """Return active provisional rows that broker history can replace.
@@ -2583,8 +2645,14 @@ class CostBasisStore:
                 if len(siblings) != 1:
                     raise InvalidRequestError(
                         'ambiguous adopted TWS option baselines require manual review')
+                proof = tws_reconciliation
+                if isinstance(proof, list):
+                    proof = next((item for item in proof
+                                  if contract_key(item) == structural), None)
+                    if proof is None:
+                        raise InvalidRequestError('missing TWS proof for adopted baseline')
                 replay_proven = self._tws_option_replay_proves_supersession(
-                    conn, book_id, baseline, incoming_rows, tws_reconciliation)
+                    conn, book_id, baseline, incoming_rows, proof)
                 matching = [item for item in incoming_rows
                             if item['source'] in ('csv_import', 'execution_report')
                             and item['tag'] != 'prior_open'
@@ -2890,6 +2958,9 @@ class CostBasisStore:
                     }
 
                 self._require_ledger_version(conn, book_id, expected_ledger_version)
+                self._validate_batch_tws_reconciliations(
+                    conn, book_id, tws_reconciliation, supersede_tws_event_ids,
+                    normalized_rows)
                 superseded_rows = self._validate_tws_supersessions(
                     conn, book_id, supersede_tws_event_ids, normalized_rows,
                     tws_reconciliation)
